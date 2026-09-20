@@ -1,0 +1,33 @@
+{
+  "schema": "merlin.support_migration.v1",
+  "target": "atlas",
+  "upstream": {
+    "url": "https://github.com/ucb-bar/atlas-mlir.git",
+    "base_ref": null,
+    "base_commit": null,
+    "catalog_commit": null,
+    "root_role": null
+  },
+  "merlin_source_baseline": "6b83c05a7ea7e7eb50fc688670cfa547f16f315c",
+  "qualification": {
+    "level": "metadata_schema_checked_snapshot",
+    "schema_valid": true,
+    "schema_diagnostics": [],
+    "hardware_executed": false,
+    "candidate_certification": false
+  },
+  "files": [
+    {
+      "path": "contracts/target_contract.yaml",
+      "source": "/scratch/agustin/projects/oscar-merlin/out/build/generated/atlas/contracts/target_contract.yaml",
+      "source_revision": null,
+      "sha256": "27a2cad475eea1e7f158b4212560f959747da93abfa4fc5778fd5b2ad7d78738"
+    },
+    {
+      "path": "contracts/dialect_plan.yaml",
+      "source": "/scratch/agustin/projects/oscar-merlin/out/build/generated/atlas/contracts/dialect_plan.yaml",
+      "source_revision": null,
+      "sha256": "ba73dcd3569b44d23e7c7c3ae6ae625a17bb58cf870b017949f1cc90307bd978"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+schema: merlin.provider.v1
+id: atlas-support
+target: atlas
+role: support
+contract: contracts/target_contract.yaml

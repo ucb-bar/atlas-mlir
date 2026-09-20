@@ -1,0 +1,11 @@
+# GENERATED dialect plan for atlas (derived from compute_units).
+dialect_name: atlas
+lowering:
+- op: matmul
+  to: atlas.matmul
+ops:
+- name: matmul
+target: atlas
+tests: []
+types:
+- name: mxu_tensor
