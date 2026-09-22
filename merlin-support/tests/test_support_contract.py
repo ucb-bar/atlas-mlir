@@ -34,5 +34,10 @@ def test_snapshots_match_recorded_content_hashes():
     assert provenance["files"]
     assert not provenance["qualification"]["candidate_certification"]
     assert not provenance["qualification"]["hardware_executed"]
+    delta = json.loads((ROOT / "program_emitter_migration.json").read_text())["contract_delta"]
     for record in provenance["files"]:
-        assert hashlib.sha256((ROOT / record["path"]).read_bytes()).hexdigest() == record["sha256"]
+        expected = record["sha256"]
+        if record["path"] == delta["path"]:
+            assert expected == delta["source_sha256"]
+            expected = delta["destination_sha256"]
+        assert hashlib.sha256((ROOT / record["path"]).read_bytes()).hexdigest() == expected

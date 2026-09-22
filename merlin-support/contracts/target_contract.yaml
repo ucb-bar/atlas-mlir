@@ -179,6 +179,9 @@ runner:
   dtype: fp8_e4m3
   fourth_output_name: kernel.S
   model_ext: npu_model
+  program_emitter:
+    path: atlas_program_emit.py
+    args: [--fix-itype-rd]
   suite: atlas-capsule-bench
 runtime:
   backends:

@@ -7,7 +7,15 @@ It is not an evaluated compiler candidate and this metadata grants no trust or c
 The files recorded in `provenance.json` are byte-identical migration snapshots. Existing contracts
 retain their prototype, derived-fact, and requires-human-review qualifications. No hardware was
 executed for this migration, and no canonical Merlin source was removed. Ignored/generated source
-artifacts have content hashes but no invented source commit.
+artifacts have content hashes but no invented source commit. The subsequent program-emitter
+relocation and explicit contract delta are recorded separately in `program_emitter_migration.json`;
+the original migration record is not rewritten.
+
+`atlas_program_emit.py` is host-private Atlas support, executed only inside the selected model's
+environment. It retains both named-program assembly/golden export and tensor byte-layout modes.
+`runner.program_emitter` declares its provider-contained path and the target-owned IType encoding
+option. Neither this helper nor its model ISA belongs in candidate grants. Offline relocation
+checks do not qualify Torch, assembly, numerical outputs, simulators, or hardware.
 
 The historical candidate/schedule payload and its certificates remain unchanged outside this tree.
 Those certificates describe their original revisions, not the current branch with added support.
