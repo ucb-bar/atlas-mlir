@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Two test programs have diagnostic
+initialization, or completion/drain protocol. Three test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -86,7 +86,7 @@ ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 22/22 Python test
+selected RTL checkout. The current diagnostic run passed 24/24 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -99,7 +99,7 @@ byte. Fresh elaboration produced FIRRTL SHA-256
 equal to the FIRRTL used to extract the 78-module `AtlasCore` closure. A
 fresh ARC build from that closure produced state JSON SHA-256
 `db2d8ae3c8a4ce6a417b0c691be1d446f1c0be95efe5607a251a6946a80de9e3`.
-All 22 Python tests passed again against the rebuilt shared library. This
+All 24 Python tests passed again against the rebuilt shared library. This
 links the diagnostic standalone core to the selected Atlas source bytes; it
 does not qualify the full integrated SoC, all Chipyard dependencies, or
 physical RTL simulation.
@@ -125,7 +125,10 @@ block, 98/99 selected pattern variants with statically bounded control flow,
 explicit rejection of JALR, escaping targets, unsupported nested operations,
 and broken state/delay-slot chains. A smoke test translates the MXU example to
 LLVM IR and assembles an ELF32 RISC-V object whose disassembly contains the
-four selected words. This checks lowering and object emission only.
+four selected words. A separate hand-authored 35-word MXU0 stream also
+matched the selected assembler and LLVM object words, then executed on the
+selected-source-linked standalone core for four sparse/control input cases.
+This is a bounded MXU0 observation, not general numerical qualification.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -140,11 +143,12 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Custom RTL pattern representation | 50/50 selected custom BitPat rows have a typed parameterized MLIR operation route |
 | Scalar/control/CSR representation | 49/49 selected BitPat rows have a typed parameterized MLIR operation route |
 | Source-level word emission | 99/99 selected BitPat rows crosschecked at fixed-bit level; valid fields and integrated decode remain unqualified |
-| Exact numerical semantics | Not qualified; MXU/VPU and scale behavior need discriminating hardware checks |
+| Exact numerical semantics | Four typed MXU0 sparse/control cases executed on selected-source-linked standalone core, including ordered-rounding and weight-orientation discriminators; full MXU/VPU and scale semantics remain unqualified |
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
+| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four cases halted with expected first BF16 bits, input and guard preservation. Second BF16 pair half and general scheduling remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
