@@ -103,6 +103,11 @@ All 22 Python tests passed again against the rebuilt shared library. This
 links the diagnostic standalone core to the selected Atlas source bytes; it
 does not qualify the full integrated SoC, all Chipyard dependencies, or
 physical RTL simulation.
+The selected Atlas commit records submodule revisions `9a0cc09c` for
+`sp26-fp-units` (which supplies `E4M3FMA`) and `ab0cf6f5` for `fpex`.
+The local Chipyard dependency copies have broken Git metadata, so their
+revisions have not been matched to those pins. Numerical claims remain scoped
+to the exact rebuilt model and tested inputs.
 The optional ModeLIR driver imports NumPy; configure CTest with the Python
 environment that contains it when enabling the core-model checks.
 
