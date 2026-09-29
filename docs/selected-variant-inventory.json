@@ -1612,15 +1612,15 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_e8m0_pack_reference.py::test_selected_core_pack_unpack_and_mxu_fp8_consumer",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_numerical_domain",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [
+        "model_pack_row_layout_differs_from_selected_rtl",
         "model_scale_code_interpretation_requires_qualification"
       ],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_FP8PACK,XLU_X,MEM_X,LSU_X"
@@ -1650,15 +1650,15 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_e8m0_pack_reference.py::test_selected_core_pack_unpack_and_mxu_fp8_consumer",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_numerical_domain",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [
+        "model_unpack_row_layout_differs_from_selected_rtl",
         "model_scale_code_interpretation_requires_qualification"
       ],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_FP8UNPACK,XLU_X,MEM_X,LSU_X"

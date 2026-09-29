@@ -173,6 +173,11 @@ compares a rounded prior tile plus the second tile against reset and a
 single 64-product rounding. Six bounded standalone-core runs checked all
 1,024 output cells in both halves, input preservation, and a guard. General
 anchor alignment and temporal qualification remain open.
+The [E8M0 pack/unpack check](docs/vpu-e8m0-pack-observation.md) uses non-unit
+scale codes 128 and 126. Two selected-core runs checked packed FP8 bytes,
+unpacked BF16 halves, and downstream MXU1 output. The packed row order
+follows consecutive physical BF16 rows and differs from the inspected model's
+same-row concatenation; neither conversion mode is fully admitted.
 The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
 29-word typed stream and an independent raw-byte index reference. Three
 selected-source-linked standalone-core executions checked all 1,024 bytes
@@ -293,6 +298,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | DMA scalar pointer capture | Typed 16-word stream matched selected assembler and LLVM object bytes; selected standalone core chose A when the address register changed to B after issue and B when changed before issue, with complete 128-byte output/input/guard checks. General queueing, timing and integrated behavior remain open |
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
 | MXU1 arithmetic | Hand-authored typed 42-word reset and 57-word two-K-tile continuation programs matched selected assembler and LLVM object bytes; nine bounded MXU1 runs checked all 1,024 output cells per run, with three continuation panels also reset-mutated. A paired MXU0 tie comparison distinguished the units. General anchor precision, seeded accumulators, and scheduling remain open |
+| VPU E8M0 pack/unpack | Hand-authored typed 65-word stream matched selected assembler and LLVM object bytes at code 128, with a code-126 object mutation changing only SELI. Two selected-core runs checked 1,024 packed FP8 bytes, 2,048 unpacked BF16 bytes, and 2,048 downstream MXU1 output bytes each. Full numerical domain and timing remain open |
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
 | VPU BF16 addition | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two bounded 1,024-element panels executed with both output halves, all inputs, and guard checked. FP32-inexact sums and exceptional values remain open |
 | VPU BF16 multiply | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two finite-normal 1,024-element panels checked BF16 nearest-even ties, signs, both output halves, inputs and guard on selected standalone core. Exceptional values and general timing remain open |
