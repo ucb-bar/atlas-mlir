@@ -249,6 +249,12 @@ Two complete 32-row panels matched both broadcast result halves on the
 selected standalone core, including rows whose minimum resides in the
 second source register. Input and guard memory were preserved; general
 temporal qualification remains pending.
+The [VPU BF16 row-maximum check](docs/vpu-row-max-observation.md) uses a
+36-word typed stream and an independent raw-bit ordering reference. Two
+complete 32-row panels matched both broadcast result halves on the selected
+standalone core. Directed signed-zero, NaN, infinity, and second-half winners
+distinguish the selected RTL behavior; general temporal qualification remains
+pending.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -282,6 +288,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
+| VPU BF16 row maximum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row raw-bit panels checked both broadcast result halves, signed zeros, NaNs, infinities, input and guard on selected standalone core. Other encodings and general timing remain open |
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
 | VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |

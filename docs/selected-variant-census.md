@@ -34,11 +34,11 @@ run does not execute it.
 | DMA | 4 | 4 | 2 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 1 | 7 |
-| VPU arithmetic, reduction, pack | 25 | 25 | 11 | 25 |
+| VPU arithmetic, reduction, pack | 25 | 25 | 12 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 1 | 49 |
-| **Total** | **99** | **99** | **22** | **99** |
+| **Total** | **99** | **99** | **23** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -51,8 +51,8 @@ even when a bounded mode-specific test passed.
 
 The independently checked bounded modes are DMA load/store, MXU0 reset and
 continuation matmul, MXU1 reset matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
-VRELU, VSQUARE, VCUBE,
-row sum and row minimum, all four VLI modes, XLU transpose, and BEQ. The ledger links
+VRELU, VSQUARE, VCUBE, row sum, row minimum and row maximum, all four VLI
+modes, XLU transpose, and BEQ. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
