@@ -2523,7 +2523,9 @@
         "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "spec_two_delay_slots_vs_selected_rtl_one"
+      ],
       "rtl_decode_controls": "Y,ALU_X,BR_EQ,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
     },
     {
@@ -2655,15 +2657,16 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_two_positions_loop_reference.py::test_selected_core_observes_first_slot_skips_second_and_loops",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "spec_two_delay_slots_vs_selected_rtl_one"
+      ],
       "rtl_decode_controls": "Y,ALU_X,BR_LT,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
     },
     {
