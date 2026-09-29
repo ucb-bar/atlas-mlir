@@ -200,6 +200,12 @@ special encodings. Two complete 1,024-element panels matched the selected
 standalone core, including its NaN-to-positive-zero behavior. The selected
 funct7 `0x46` differs from the inspected model class's `0x4e`; full-domain
 arithmetic and timing remain unqualified.
+The [VPU BF16 cube check](docs/vpu-cube-observation.md) uses the same physical
+pair shape and a separate exact-power raw-bit oracle. Two complete
+1,024-element panels matched the selected standalone core, including signed
+NaN-to-signed-zero behavior. The selected funct7 `0x47` differs from the
+inspected model class's `0x4f`; normal non-power fractions and general timing
+remain unqualified.
 The separate [LLVM boot-entry check](docs/llvm-boot-entry-observation.md)
 loaded all 37 words of one LLVM-produced `atlas_program` function into the
 selected standalone core and executed it to ECALL halt. It checked the ELF
@@ -266,6 +272,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 subtraction | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two FP32-exact finite-normal 1,024-element panels checked subtraction order, signs, final BF16 bit chop, both output halves, inputs and guard on selected standalone core. FP32-inexact differences, exceptional values, and general timing remain open |
 | VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
+| VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
