@@ -31,7 +31,10 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, completion/drain protocol, or simulator execution evidence.
+initialization, or completion/drain protocol. Two test programs have diagnostic
+execution evidence on an externally supplied CIRCT ARC model of `AtlasCore`.
+The tests load the extracted instruction words through ModeLIR's existing
+TileLink driver; they do not call the void function using a C ABI.
 In particular, fixed scalar-register instructions may alter the return-address
 or other ABI registers if called as an ordinary RISC-V function. Atlas's PC
 uses an instruction index and shifts encoded branch byte displacements by one;
@@ -61,7 +64,8 @@ Use an MLIR and LLVM installation from the same build. The following commands
 were run with LLVM/MLIR 23.0.0git:
 
 ```sh
-cmake -S . -B build -G Ninja -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir \
+  -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/path/to/test-python
 cmake --build build --parallel 2
 build/bin/atlas-opt test/examples/mxu.mlir
 build/bin/atlas-emit test/examples/mxu.mlir
@@ -74,8 +78,23 @@ python -m unittest discover -s test -v
 ctest --test-dir build --output-on-failure
 ATLAS_RTL_ROOT=/path/to/atlas-npu ATLAS_MODEL_ROOT=/path/to/npu_model-atlas \
 ATLAS_LLVM_BIN=/path/to/llvm-install/bin \
+ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
   python -m unittest discover -s test -v
 ```
+
+To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
+selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
+`ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
+selected RTL checkout. The current diagnostic run passed 22/22 Python test
+methods with these paths supplied: the typed branch program executed one
+delay slot, while a changed branch target produced a different checked state;
+the typed DMA loopback performed four reads and four writes, matched 32/32
+output words, and preserved all 32 input words and three guard words. Both
+programs' object words matched the emitter and independent selected assembler.
+The external ARC model's generation provenance is not yet bound to a reviewed
+source revision, so these results do not qualify integrated pinned RTL.
+The optional ModeLIR driver imports NumPy; configure CTest with the Python
+environment that contains it when enabling the core-model checks.
 
 The source-linked test checks all 99 emitted words against the selected
 RTL BitPats and records known model/RTL encoding disagreements. The portable
@@ -106,9 +125,10 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Source-level word emission | 99/99 selected BitPat rows crosschecked at fixed-bit level; valid fields and integrated decode remain unqualified |
 | Exact numerical semantics | Not qualified; MXU/VPU and scale behavior need discriminating hardware checks |
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
-| Branch/control behavior | Source-level delay-slot structure checked; integrated branch and halt behavior not qualified |
+| Branch/control behavior | Typed branch program and changed-target mutation ran on a diagnostic `AtlasCore` ARC model; pinned integrated branch behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
-| Program binary, ABI, execution | Raw object words only; no Atlas launch ABI, constants, runtime, or hardware execution claim |
+| DMA movement | Typed loopback ran on the diagnostic core model with 32/32 output words and input/guard preservation; general DMA timing and pinned integrated behavior remain unqualified |
+| Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
 semantic and hardware tests pass. Merlin's generated dialect and this hand
