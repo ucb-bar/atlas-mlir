@@ -14,8 +14,9 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OPT = ROOT / "build/bin/atlas-opt"
-EMIT = ROOT / "build/bin/atlas-emit"
+BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
+OPT = BIN / "atlas-opt"
+EMIT = BIN / "atlas-emit"
 
 
 def llvm_tool(name: str) -> str | None:

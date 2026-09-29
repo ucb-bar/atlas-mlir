@@ -83,6 +83,10 @@ ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
   python -m unittest discover -s test -v
 ```
 
+CTest binds the Python tests to the `atlas-opt` and `atlas-emit` binaries in
+its own CMake build directory. For a direct Python invocation against another
+build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
+
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/dma_loopback.mlir"
 EXPECTED = (
     0x00100E13, 0x00000293, 0x0002807F, 0x00000313, 0x900000B7,
@@ -21,7 +22,7 @@ EXPECTED = (
 
 
 def _emitted() -> tuple[int, ...]:
-    run = subprocess.run([str(ROOT / "build/bin/atlas-emit"), str(SOURCE)],
+    run = subprocess.run([str(BIN / "atlas-emit"), str(SOURCE)],
                          text=True, capture_output=True, check=True)
     return tuple(int(line, 16) for line in run.stdout.splitlines())
 
@@ -46,7 +47,7 @@ def _object_words() -> tuple[int, ...]:
     if not root:
         raise unittest.SkipTest("set ATLAS_LLVM_BIN for RISC-V object lowering")
     bin_root = pathlib.Path(root)
-    lowered = subprocess.run([str(ROOT / "build/bin/atlas-opt"),
+    lowered = subprocess.run([str(BIN / "atlas-opt"),
                              "--convert-atlas-to-llvm", str(SOURCE)],
                              text=True, capture_output=True, check=True)
     translated = subprocess.run([str(bin_root / "mlir-translate"), "--mlir-to-llvmir"],
@@ -68,7 +69,7 @@ def _object_words() -> tuple[int, ...]:
 class DMAReferenceTest(unittest.TestCase):
     def test_typed_dma_matches_audited_words_and_llvm_lowering(self) -> None:
         self.assertEqual(_emitted(), EXPECTED)
-        run = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm",
+        run = subprocess.run([str(BIN / "atlas-opt"), "--convert-atlas-to-llvm",
                               str(SOURCE)], text=True, capture_output=True, check=False)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout.count("llvm.inline_asm"), 1)

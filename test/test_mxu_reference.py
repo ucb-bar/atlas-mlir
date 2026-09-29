@@ -12,13 +12,14 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/mxu0_full.mlir"
 PAIR_SOURCE = ROOT / "test/examples/mxu0_pair.mlir"
 ASSEMBLY = "assembly/mxu0_push_pop.S"
 
 
 def _emitted(source: pathlib.Path = SOURCE) -> tuple[int, ...]:
-    run = subprocess.run([str(ROOT / "build/bin/atlas-emit"), str(source)],
+    run = subprocess.run([str(BIN / "atlas-emit"), str(source)],
                          capture_output=True, text=True, check=True)
     return tuple(int(line, 16) for line in run.stdout.splitlines())
 
@@ -28,7 +29,7 @@ def _object_words(source: pathlib.Path = SOURCE) -> tuple[int, ...]:
     if not selected:
         raise unittest.SkipTest("set ATLAS_LLVM_BIN for LLVM object lowering")
     tools = pathlib.Path(selected)
-    lowered = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm", str(source)],
+    lowered = subprocess.run([str(BIN / "atlas-opt"), "--convert-atlas-to-llvm", str(source)],
                              capture_output=True, text=True, check=True)
     translated = subprocess.run([str(tools / "mlir-translate"), "--mlir-to-llvmir"],
                                 input=lowered.stdout, capture_output=True, text=True, check=True)

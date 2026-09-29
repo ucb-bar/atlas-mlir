@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/branch_delay.mlir"
 ASSEMBLY = ROOT / "test/examples/branch_delay.S"
 EXPECTED = (
@@ -22,7 +23,7 @@ EXPECTED = (
 
 
 def _emitted() -> tuple[int, ...]:
-    run = subprocess.run([str(ROOT / "build/bin/atlas-emit"), str(SOURCE)],
+    run = subprocess.run([str(BIN / "atlas-emit"), str(SOURCE)],
                          text=True, capture_output=True, check=False)
     if run.returncode:
         raise AssertionError(run.stderr)
@@ -37,7 +38,7 @@ def _object_words() -> tuple[int, ...]:
     for name in ("mlir-translate", "llc", "llvm-objcopy"):
         if not (tools / name).is_file():
             raise AssertionError(f"selected LLVM installation lacks {name}")
-    lowered = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm", str(SOURCE)],
+    lowered = subprocess.run([str(BIN / "atlas-opt"), "--convert-atlas-to-llvm", str(SOURCE)],
                              text=True, capture_output=True, check=True)
     translated = subprocess.run([str(tools / "mlir-translate"), "--mlir-to-llvmir"],
                                 input=lowered.stdout, text=True, capture_output=True, check=True)
@@ -58,7 +59,7 @@ def _object_words() -> tuple[int, ...]:
 class BranchReferenceTest(unittest.TestCase):
     def test_typed_branch_matches_audited_words_and_lowers_to_llvm(self) -> None:
         self.assertEqual(_emitted(), EXPECTED)
-        run = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm", str(SOURCE)],
+        run = subprocess.run([str(BIN / "atlas-opt"), "--convert-atlas-to-llvm", str(SOURCE)],
                              text=True, capture_output=True, check=False)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout.count("llvm.inline_asm"), 1)

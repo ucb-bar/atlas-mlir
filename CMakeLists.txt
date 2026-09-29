@@ -21,4 +21,6 @@ add_subdirectory(tools)
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME atlas-dialect
-  COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${PROJECT_SOURCE_DIR}/test -v)
+  COMMAND ${CMAKE_COMMAND} -E env
+    ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
+    ${Python3_EXECUTABLE} -m unittest discover -s ${PROJECT_SOURCE_DIR}/test -v)
