@@ -37,8 +37,8 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 16 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 3 | 49 |
-| **Total** | **99** | **99** | **31** | **99** |
+| Scalar, control, CSR | 49 | 49 | 22 | 49 |
+| **Total** | **99** | **99** | **50** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -63,6 +63,11 @@ programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
 transfer/CSR instructions appear in those programs but have no independent
 mode-specific reference test; they remain at zero in the semantic numerator.
+All 19 scalar register and immediate ALU modes now have a
+[bounded selected-core check](../test/test_scalar_alu_reference.py): two directed
+operand panels per mode, typed/selected-assembler/LLVM word agreement, and an
+independent RV32 arithmetic result. This does not cover their full operand,
+register, or timing domains.
 
 ## Missing qualifications and source discrepancies
 
