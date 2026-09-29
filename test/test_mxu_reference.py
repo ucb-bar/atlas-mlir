@@ -13,21 +13,22 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "test/examples/mxu0_full.mlir"
+PAIR_SOURCE = ROOT / "test/examples/mxu0_pair.mlir"
 ASSEMBLY = "assembly/mxu0_push_pop.S"
 
 
-def _emitted() -> tuple[int, ...]:
-    run = subprocess.run([str(ROOT / "build/bin/atlas-emit"), str(SOURCE)],
+def _emitted(source: pathlib.Path = SOURCE) -> tuple[int, ...]:
+    run = subprocess.run([str(ROOT / "build/bin/atlas-emit"), str(source)],
                          capture_output=True, text=True, check=True)
     return tuple(int(line, 16) for line in run.stdout.splitlines())
 
 
-def _object_words() -> tuple[int, ...]:
+def _object_words(source: pathlib.Path = SOURCE) -> tuple[int, ...]:
     selected = os.environ.get("ATLAS_LLVM_BIN")
     if not selected:
         raise unittest.SkipTest("set ATLAS_LLVM_BIN for LLVM object lowering")
     tools = pathlib.Path(selected)
-    lowered = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm", str(SOURCE)],
+    lowered = subprocess.run([str(ROOT / "build/bin/atlas-opt"), "--convert-atlas-to-llvm", str(source)],
                              capture_output=True, text=True, check=True)
     translated = subprocess.run([str(tools / "mlir-translate"), "--mlir-to-llvmir"],
                                 input=lowered.stdout, capture_output=True, text=True, check=True)
@@ -39,7 +40,7 @@ def _object_words() -> tuple[int, ...]:
         subprocess.run([str(tools / "llvm-objcopy"), "--dump-section", f".text={section}", str(obj)],
                        capture_output=True, check=True)
         data = section.read_bytes()
-    expected = _emitted()
+    expected = _emitted(source)
     if len(data) < 4 * len(expected):
         raise AssertionError("LLVM object is shorter than the typed MXU0 stream")
     return tuple(int.from_bytes(data[4 * i : 4 * i + 4], "little") for i in range(len(expected)))
@@ -67,6 +68,10 @@ class MXUReferenceTest(unittest.TestCase):
         self.assertEqual(len(emitted), 35)
         self.assertEqual(emitted, tuple(reference[:len(emitted)]))
         self.assertEqual(_object_words(), emitted)
+        pair = _emitted(PAIR_SOURCE)
+        self.assertEqual(len(pair), 42)
+        self.assertEqual(pair[:32], tuple(reference[:32]))
+        self.assertEqual(_object_words(PAIR_SOURCE), pair)
 
     def test_selected_core_executes_typed_mxu_with_sparse_orientation_and_rounding(self) -> None:
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT", "ATLAS_LLVM_BIN")
@@ -123,6 +128,25 @@ class MXUReferenceTest(unittest.TestCase):
                         if name == "sparse_kn":
                             self.assertEqual([struct.unpack_from("<H", output, 2 * i)[0] for i in (1, 2)],
                                              [0x3D80, 0x3D80])
+                pair_weights = _tile(((0, 0, one), (20, 0, one)))
+                pair_acts = _tile(((0, 0, one),))
+                pair = cosim_atlas.run_program(
+                    model, state, _object_words(PAIR_SOURCE),
+                    preload=[(0x90000000, pair_weights), (0x90000400, pair_acts),
+                             (0x90000800, b"\xA5" * 1024), (0x90001000, b"\xA5" * 1024),
+                             (0x90001400, b"\x5A" * 32)],
+                    max_cycles=5000,
+                )
+                first = pair.slave.captured(0x90000800, 1024)
+                second = pair.slave.captured(0x90001000, 1024)
+                self.assertTrue(pair.halted)
+                self.assertEqual((pair.reads, pair.writes), (64, 64))
+                self.assertEqual(struct.unpack_from("<H", first, 0)[0], 0x3F80)
+                self.assertEqual(struct.unpack_from("<H", second, 8)[0], 0x3F80)
+                self.assertEqual(struct.unpack_from("<H", second, 0)[0], 0)
+                self.assertEqual(pair.slave.captured(0x90000000, 1024), pair_weights)
+                self.assertEqual(pair.slave.captured(0x90000400, 1024), pair_acts)
+                self.assertEqual(pair.slave.captured(0x90001400, 32), b"\x5A" * 32)
             finally:
                 cosim_atlas.CosimCore = original
         finally:
