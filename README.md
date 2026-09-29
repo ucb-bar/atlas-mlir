@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Thirteen test programs have diagnostic
+initialization, or completion/drain protocol. Fourteen test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 63/63 Python test
+selected RTL checkout. The current diagnostic run passed 66/66 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -191,6 +191,12 @@ The [VPU BF16 pairwise maximum check](docs/vpu-max-observation.md) uses a
 complete 1,024-element panels matched the selected standalone core, including
 signed-zero and NaN encoding cases that a generic floating-point maximum
 cannot explain. General timing and integrated execution remain unqualified.
+The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
+uses a 16-word typed stream and a before/after-launch mutation. On the
+selected standalone core, changing the address register immediately after
+the load launch preserved the original DRAM source; changing it before launch
+selected the other source. This bounds one scalar-lifetime observation, not
+general DMA timing or overlap.
 The separate [VPU BF16 row-sum check](docs/vpu-row-sum-observation.md) uses a
 36-word typed stream and an exact-rational FP32 tree reference. Two full
 32-row panels matched the selected standalone core, including a row that
@@ -222,6 +228,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
+| DMA scalar pointer capture | Typed 16-word stream matched selected assembler and LLVM object bytes; selected standalone core chose A when the address register changed to B after issue and B when changed before issue, with complete 128-byte output/input/guard checks. General queueing, timing and integrated behavior remain open |
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
 | MXU1 arithmetic | Hand-authored typed 42-word program matched selected assembler and LLVM object bytes; three bounded finite cases checked all 1,024 output cells on the selected-source-linked standalone core, plus a paired MXU0 tie comparison. General anchor precision, accumulation, and scheduling remain open |
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
@@ -233,6 +240,15 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
+
+No row in the **99 selected RTL BitPat-row inventory** lacks a typed operation
+route or source-level emitter: the count of unrepresented BitPat rows is 0/99.
+This is not gate D. A frozen executable software configuration has not been
+qualified here, and BitPat coverage does not establish every legality,
+semantic, physical-effect, timing, or execution variant. In particular,
+FP8 scale/pack paths, VLI broadcast modes, many unary/reduction and
+scalar/control variants, and cross-family temporal effects still lack the
+independent execution and reference evidence required to close D.
 
 This package should become a golden *comparison reference* only after independent
 semantic and hardware tests pass. Merlin's generated dialect and this hand
