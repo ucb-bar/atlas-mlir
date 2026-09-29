@@ -37,8 +37,8 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 16 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 22 | 49 |
-| **Total** | **99** | **99** | **50** | **99** |
+| Scalar, control, CSR | 49 | 49 | 24 | 49 |
+| **Total** | **99** | **99** | **52** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -68,6 +68,9 @@ All 19 scalar register and immediate ALU modes now have a
 operand panels per mode, typed/selected-assembler/LLVM word agreement, and an
 independent RV32 arithmetic result. This does not cover their full operand,
 register, or timing domains.
+LUI and AUIPC also have [bounded selected-core checks](scalar-upper-pc-observation.md).
+AUIPC adds the instruction word index on the selected RTL, exposing a PC-unit
+discrepancy with the inspected software model's byte-PC formulation.
 
 ## Missing qualifications and source discrepancies
 
