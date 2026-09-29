@@ -181,6 +181,11 @@ The separate [VPU BF16 row-sum check](docs/vpu-row-sum-observation.md) uses a
 distinguishes adjacent-tree reduction from serial addition and rows that
 check final BF16 rounding. Other reductions and exceptional values remain
 unqualified.
+The [VPU BF16 row-minimum check](docs/vpu-row-min-static.md) currently has
+static evidence only: a 36-word typed stream matched the selected assembler
+and LLVM object, while an independent finite-normal oracle checked pair
+broadcast layout. Selected-core execution and temporal qualification remain
+pending; it is not counted among the nine executed diagnostic programs.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -205,6 +210,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
 | VPU BF16 addition | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two bounded 1,024-element panels executed with both output halves, all inputs, and guard checked. FP32-inexact sums and exceptional values remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
+| VPU BF16 row minimum | Static typed 36-word program matched selected assembler and LLVM object bytes; independent finite-normal row-minimum and pair-layout checks passed. Selected-core execution and temporal behavior remain pending |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
