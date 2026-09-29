@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Fourteen test programs have diagnostic
+initialization, or completion/drain protocol. Fifteen test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -197,6 +197,13 @@ selected standalone core, changing the address register immediately after
 the load launch preserved the original DRAM source; changing it before launch
 selected the other source. This bounds one scalar-lifetime observation, not
 general DMA timing or overlap.
+The [VLI.ALL raw-bit check](docs/vli-all-observation.md) uses a 36-word typed
+stream. Its selected assembler, OOT emitter, and LLVM-object words agreed.
+Four selected standalone-core runs filled both BF16 register halves with the
+raw immediate, including negative zero and a NaN encoding; all 1,024 cells
+per run matched an independent bit-repetition reference. Unrelated loaded
+input memory and a guard were preserved. Other VLI modes and availability
+bounds remain unqualified.
 The separate [VPU BF16 row-sum check](docs/vpu-row-sum-observation.md) uses a
 36-word typed stream and an exact-rational FP32 tree reference. Two full
 32-row panels matched the selected standalone core, including a row that
@@ -238,6 +245,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
+| VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. Other VLI modes and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
@@ -246,7 +254,7 @@ route or source-level emitter: the count of unrepresented BitPat rows is 0/99.
 This is not gate D. A frozen executable software configuration has not been
 qualified here, and BitPat coverage does not establish every legality,
 semantic, physical-effect, timing, or execution variant. In particular,
-FP8 scale/pack paths, VLI broadcast modes, many unary/reduction and
+FP8 scale/pack paths, the remaining VLI modes, many unary/reduction and
 scalar/control variants, and cross-family temporal effects still lack the
 independent execution and reference evidence required to close D.
 
