@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Six test programs have diagnostic
+initialization, or completion/drain protocol. Seven test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 36/36 Python test
+selected RTL checkout. The current diagnostic run passed 39/39 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -162,6 +162,13 @@ Three MXU1 standalone-core runs checked both BF16 register halves across
 1,024 output cells each. A tie case produced `0x3f81` on MXU1 and `0x3f80`
 on the separately executed MXU0 path, demonstrating a numerical-policy
 distinction on that input. Broader MXU1 ranges and state remain open.
+The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
+29-word typed stream and an independent raw-byte index reference. Three
+selected-source-linked standalone-core executions checked all 1,024 bytes
+for an all-encoding panel, a nonsymmetric finite panel, and a same-register
+source/destination variant. Each preserved the DRAM input and guard; the
+different-register runs also preserved the source matrix register. These
+cases do not establish general XLU scheduling or completion bounds.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -184,6 +191,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
 | MXU1 arithmetic | Hand-authored typed 42-word program matched selected assembler and LLVM object bytes; three bounded finite cases checked all 1,024 output cells on the selected-source-linked standalone core, plus a paired MXU0 tie comparison. General anchor precision, accumulation, and scheduling remain open |
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
+| XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
