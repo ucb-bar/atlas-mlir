@@ -57,7 +57,10 @@ The selected source files are `Instructions.scala`, `IDecode.scala`,
 `npu_model/configs/isa_definition.py` and `npu_model/isa.py`. The precise model
 revision is a later local branch than the original Merlin v2 plan's inspected
 `6c86010` and must be qualified separately. See
-[source discrepancies](docs/source-discrepancies.md).
+[source discrepancies](docs/source-discrepancies.md). The source-bound
+[selected variant census](docs/selected-variant-census.md) tracks all 99
+decoder modes and separate required, admitted, represented, emitted, bounded
+semantic, standalone execution, and blocker counts.
 
 ## Build and test
 
