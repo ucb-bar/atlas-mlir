@@ -3,16 +3,19 @@
 This is an out-of-tree ODS/C++ **machine-stage** dialect for one selected Atlas
 RTL revision. It is a reviewable reference candidate for comparing Merlin's
 generated dialect against an implementation written directly from the selected
-RTL and the `npu_model` sources. It is not a Merlin compiler, a qualified
+RTL and the `npu_model` sources. It was authored with Codex assistance and is
+not a clean-room or certified reference. It is not a Merlin compiler, a qualified
 executable target dialect, or an Atlas hardware certificate.
 
-The dialect has a typed `!atlas.state` token and 15 parameterized operation
-classes covering the **50 Atlas-specific decoder patterns**: tensor load/store,
+The dialect has a typed `!atlas.state` token and 26 parameterized operation
+classes covering the **99 selected RTL BitPat rows**: tensor load/store,
 DMA load/store/config/wait, both MXUs, VPU arithmetic/reduction/pack/immediate,
-and XLU transpose. It deliberately does not create one MLIR class per channel,
-unit, or mode. Verifiers check known physical register, pair, slot, channel,
+XLU transpose, scalar ALU/load/store, CSR, branch/jump/delay, and termination.
+It deliberately does not create one MLIR class per channel, unit, or mode.
+Verifiers check known physical register, pair, slot, channel, CSR-address,
 immediate, and mode limits. Machine operations declare conservative physical
-state read/write effects, and `atlas-emit` requires a linear state chain.
+state read/write effects. `atlas-emit` requires a linear state chain and
+checks that branches/jumps have a non-redirecting delay-slot instruction.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
@@ -53,10 +56,10 @@ ATLAS_RTL_ROOT=/path/to/atlas-npu ATLAS_MODEL_ROOT=/path/to/npu_model-atlas \
   python -m unittest discover -s test -v
 ```
 
-The source-linked test checks all 50 emitted custom words against the selected
+The source-linked test checks all 99 emitted words against the selected
 RTL BitPats and records known model/RTL encoding disagreements. The portable
-test also checks exact operand positions, parser/printer round trips, 17
-negative verifier cases, and rejection of a branched state stream. A BitPat
+test also checks exact operand positions, parser/printer round trips, 33
+negative verifier cases, and rejection of an invalid state/delay-slot stream. A BitPat
 match checks fixed encoding bits; it does not establish hardware legality or
 semantic correctness.
 
@@ -65,10 +68,11 @@ semantic correctness.
 | Obligation | Current evidence |
 | --- | --- |
 | Custom RTL pattern representation | 50/50 selected custom BitPat rows have a typed parameterized MLIR operation route |
-| Custom word emission | 50/50 selected custom BitPat rows crosschecked at fixed-bit level |
-| Scalar/control/CSR patterns | 0/49 represented here; a selected scalar lowering route remains required |
+| Scalar/control/CSR representation | 49/49 selected BitPat rows have a typed parameterized MLIR operation route |
+| Source-level word emission | 99/99 selected BitPat rows crosschecked at fixed-bit level; valid fields and integrated decode remain unqualified |
 | Exact numerical semantics | Not qualified; MXU/VPU and scale behavior need discriminating hardware checks |
-| Temporal validity, DMA completion, branches | Not qualified; the token conservatively orders issue only |
+| Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
+| Branch/control behavior | Source-level delay-slot structure checked; integrated branch and halt behavior not qualified |
 | Program binary, ABI, execution | Not implemented; no hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
