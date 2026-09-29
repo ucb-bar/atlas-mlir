@@ -20,6 +20,40 @@ static uint32_t vr(unsigned funct7, unsigned vd, unsigned vs1,
   return (funct7 << 25) | (vs2 << 19) | (vs1 << 13) | (vd << 7) | opcode;
 }
 
+static uint32_t r(unsigned funct7, unsigned rd, unsigned rs1,
+                  unsigned rs2, unsigned funct3, unsigned opcode) {
+  return (funct7 << 25) | (rs2 << 20) | (rs1 << 15) |
+         (funct3 << 12) | (rd << 7) | opcode;
+}
+
+static uint32_t i(unsigned imm, unsigned rd, unsigned rs1,
+                  unsigned funct3, unsigned opcode) {
+  return ((imm & 0xfff) << 20) | (rs1 << 15) |
+         (funct3 << 12) | (rd << 7) | opcode;
+}
+
+static uint32_t s(unsigned imm, unsigned rs1, unsigned rs2,
+                  unsigned funct3, unsigned opcode) {
+  imm &= 0xfff;
+  return ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) |
+         (funct3 << 12) | ((imm & 31) << 7) | opcode;
+}
+
+static uint32_t b(unsigned imm, unsigned rs1, unsigned rs2,
+                  unsigned funct3) {
+  imm &= 0x1fff;
+  return (((imm >> 12) & 1) << 31) | (((imm >> 5) & 63) << 25) |
+         (rs2 << 20) | (rs1 << 15) | (funct3 << 12) |
+         (((imm >> 1) & 15) << 8) | (((imm >> 11) & 1) << 7) | 0x63;
+}
+
+static uint32_t j(unsigned imm, unsigned rd) {
+  imm &= 0x1fffff;
+  return (((imm >> 20) & 1) << 31) | (((imm >> 1) & 1023) << 21) |
+         (((imm >> 11) & 1) << 20) | (((imm >> 12) & 255) << 12) |
+         (rd << 7) | 0x6f;
+}
+
 static std::optional<unsigned> valueFor(StringRef key,
                                          std::initializer_list<std::pair<StringRef, unsigned>> values) {
   for (auto [name, value] : values)
@@ -97,6 +131,66 @@ static FailureOr<uint32_t> encode(Operation *op) {
   }
   if (auto x = dyn_cast<XLUTransposeOp>(op))
     return vr(0, x.getDst(), x.getSrc(), 0, 0x6b);
+  if (auto x = dyn_cast<ALURegOp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"add", 0}, {"sub", 0},
+                                           {"sll", 1}, {"slt", 2},
+                                           {"sltu", 3}, {"xor", 4},
+                                           {"srl", 5}, {"sra", 5},
+                                           {"or", 6}, {"and", 7}});
+    if (!funct3) return failure();
+    unsigned funct7 = x.getKind() == "sub" || x.getKind() == "sra" ? 0x20 : 0;
+    return r(funct7, x.getDst(), x.getLhs(), x.getRhs(), *funct3, 0x33);
+  }
+  if (auto x = dyn_cast<ALUImmOp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"addi", 0}, {"slli", 1},
+                                           {"slti", 2}, {"sltiu", 3},
+                                           {"xori", 4}, {"srli", 5},
+                                           {"srai", 5}, {"ori", 6},
+                                           {"andi", 7}});
+    if (!funct3) return failure();
+    unsigned imm = x.getImmediate();
+    if (x.getKind() == "srai") imm |= 0x400;
+    return i(imm, x.getDst(), x.getSrc(), *funct3, 0x13);
+  }
+  if (auto x = dyn_cast<BranchOp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"beq", 0}, {"bne", 1},
+                                           {"blt", 4}, {"bge", 5},
+                                           {"bltu", 6}, {"bgeu", 7}});
+    if (!funct3) return failure();
+    return b(x.getOffsetBytes(), x.getLhs(), x.getRhs(), *funct3);
+  }
+  if (auto x = dyn_cast<JumpOp>(op)) {
+    if (x.getKind() == "jal") return j(x.getOffset(), x.getDst());
+    return i(x.getOffset(), x.getDst(), x.getBase(), 0, 0x67);
+  }
+  if (auto x = dyn_cast<DelayOp>(op))
+    return i(x.getCycles(), 0, 0, 1, 0x67);
+  if (auto x = dyn_cast<UpperOp>(op))
+    return (x.getImmediate() << 12) | (x.getDst() << 7) |
+           (x.getKind() == "lui" ? 0x37 : 0x17);
+  if (auto x = dyn_cast<CSROp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"rrw", 1}, {"rrs", 2},
+                                           {"rrc", 3}, {"rrwi", 5},
+                                           {"rrsi", 6}, {"rrci", 7}});
+    if (!funct3) return failure();
+    return i(x.getAddress(), x.getDst(), x.getSource(), *funct3, 0x73);
+  }
+  if (auto x = dyn_cast<TrapOp>(op))
+    return x.getKind() == "ecall" ? 0x00000073u : 0x00100073u;
+  if (isa<FenceOp>(op)) return 0x0000000fu;
+  if (auto x = dyn_cast<ScalarLoadOp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"lb", 0}, {"lh", 1},
+                                           {"lw", 2}, {"lbu", 4},
+                                           {"lhu", 5}, {"seld", 6},
+                                           {"seli", 7}});
+    if (!funct3) return failure();
+    return i(x.getOffset(), x.getDst(), x.getBase(), *funct3, 0x03);
+  }
+  if (auto x = dyn_cast<ScalarStoreOp>(op)) {
+    auto funct3 = valueFor(x.getKind(), {{"sb", 0}, {"sh", 1}, {"sw", 2}});
+    if (!funct3) return failure();
+    return s(x.getOffset(), x.getBase(), x.getSrc(), *funct3, 0x23);
+  }
   return failure();
 }
 
@@ -113,6 +207,7 @@ int main(int argc, char **argv) {
 
   Value previous;
   bool started = false;
+  bool needsDelaySlot = false;
   llvm::SmallVector<uint32_t> words;
   for (Operation &op : module->getBody()->getOperations()) {
     if (isa<StartOp>(op)) {
@@ -129,6 +224,12 @@ int main(int argc, char **argv) {
       op.emitError("expected a linear Atlas state chain");
       return 1;
     }
+    bool redirects = isa<BranchOp, JumpOp>(op);
+    if (needsDelaySlot && redirects) {
+      op.emitError("branch or jump in selected RTL delay slot");
+      return 1;
+    }
+    needsDelaySlot = redirects;
     auto word = encode(&op);
     if (failed(word)) {
       op.emitError("has no selected RTL encoding");
@@ -139,6 +240,10 @@ int main(int argc, char **argv) {
   }
   if (!started) {
     llvm::errs() << "module has no atlas.start\n";
+    return 1;
+  }
+  if (needsDelaySlot) {
+    llvm::errs() << "branch or jump lacks its required delay-slot instruction\n";
     return 1;
   }
   for (uint32_t word : words)

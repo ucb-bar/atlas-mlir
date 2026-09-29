@@ -93,6 +93,62 @@ def variants() -> list[tuple[str, dict[str, object], str]]:
     return cases
 
 
+def scalar_variants() -> list[tuple[str, dict[str, object], str]]:
+    cases: list[tuple[str, dict[str, object], str]] = []
+    for kind in ("add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"):
+        cases.append(("alu_reg", dict(kind=kind, dst=3, lhs=1, rhs=2), kind.upper()))
+    for kind in ("addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai"):
+        immediate = 3 if kind in ("slli", "srli", "srai") else -2
+        cases.append(("alu_imm", dict(kind=kind, dst=3, src=1, immediate=immediate), kind.upper()))
+    scalar_loads = []
+    for kind in ("lb", "lh", "lw", "lbu", "lhu", "seld", "seli"):
+        offset = 127 if kind == "seli" else -4
+        base = 0 if kind == "seli" else 2
+        scalar_loads.append(("scalar_load", dict(kind=kind, dst=1, base=base, offset=offset), kind.upper()))
+    for index, kind in enumerate(("beq", "bne", "blt", "bge", "bltu", "bgeu")):
+        cases.append(("branch", dict(kind=kind, lhs=1, rhs=2, offset_bytes=8), kind.upper()))
+        cases.append(scalar_loads[index])  # selected RTL executes one delay slot.
+    cases.extend([
+        ("jump", dict(kind="jal", dst=1, base=0, offset=8), "JAL"),
+        ("upper", dict(kind="lui", dst=2, immediate=0x12345), "LUI"),
+        ("jump", dict(kind="jalr", dst=1, base=2, offset=-2), "JALR"),
+        ("upper", dict(kind="auipc", dst=2, immediate=0x12345), "AUIPC"),
+        ("delay", dict(cycles=3), "DELAY"),
+    ])
+    for kind, pattern in (
+        ("rrw", "CSRRW"), ("rrs", "CSRRS"), ("rrc", "CSRRC"),
+        ("rrwi", "CSRRWI"), ("rrsi", "CSRRSI"), ("rrci", "CSRRCI"),
+    ):
+        cases.append(("csr", dict(kind=kind, dst=1, source=2, address=0xC10), pattern))
+    cases.extend([
+        ("trap", dict(kind="ecall"), "ECALL"),
+        ("trap", dict(kind="ebreak"), "EBREAK"),
+        ("fence", {}, "FENCE"),
+    ])
+    cases.append(scalar_loads[-1])
+    for kind in ("sb", "sh", "sw"):
+        cases.append(("scalar_store", dict(kind=kind, src=1, base=2, offset=-4), kind.upper()))
+    return cases
+
+
+def check_rtl_bitpats(words: list[int], cases: list[tuple[str, dict[str, object], str]]) -> None:
+    rtl_root = os.environ.get("ATLAS_RTL_ROOT")
+    if not rtl_root:
+        return
+    instructions = pathlib.Path(rtl_root) / "src/main/scala/atlas/scalar/Instructions.scala"
+    source_patterns = {
+        name: bits.replace("_", "") for name, bits in
+        re.findall(r'def\s+(\w+)\s*=\s*BitPat\("b([01?_]+)"\)', instructions.read_text())
+    }
+    assert len(source_patterns) == 99
+    for word, (_, _, pattern_name) in zip(words, cases, strict=True):
+        bits = source_patterns[pattern_name]
+        assert len(bits) == 32
+        for position, symbol in enumerate(bits):
+            if symbol != "?":
+                assert ((word >> (31 - position)) & 1) == int(symbol), pattern_name
+
+
 class AtlasDialectTest(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue(OPT.is_file(), "build atlas-opt first")
@@ -117,21 +173,27 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertEqual(by_pattern["VLI_ALL"], (0x3F80 << 16) | (4 << 7) | 0x5F)
         self.assertEqual(by_pattern["DMA_CONFIG_ANY"], (3 << 15) | (2 << 12) | 0x7F)
 
-        rtl_root = os.environ.get("ATLAS_RTL_ROOT")
-        if not rtl_root:
-            return
-        instructions = pathlib.Path(rtl_root) / "src/main/scala/atlas/scalar/Instructions.scala"
-        source_patterns = {
-            name: bits.replace("_", "") for name, bits in
-            re.findall(r'def\s+(\w+)\s*=\s*BitPat\("b([01?_]+)"\)', instructions.read_text())
-        }
-        self.assertEqual(len(source_patterns), 99)
-        for word, (_, _, pattern_name) in zip(words, cases, strict=True):
-            bits = source_patterns[pattern_name]
-            self.assertEqual(len(bits), 32)
-            for position, symbol in enumerate(bits):
-                if symbol != "?":
-                    self.assertEqual((word >> (31 - position)) & 1, int(symbol), pattern_name)
+        check_rtl_bitpats(words, cases)
+
+    def test_all_forty_nine_scalar_patterns(self) -> None:
+        cases = scalar_variants()
+        self.assertEqual(len(cases), 49)
+        source = program(cases)
+        parsed = run(OPT, source)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertEqual(run(OPT, parsed.stdout).returncode, 0)
+        emitted = run(EMIT, source)
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        words = [int(line, 16) for line in emitted.stdout.splitlines()]
+        self.assertEqual(len(words), 49)
+        by_pattern = {pattern: word for word, (_, _, pattern) in zip(words, cases, strict=True)}
+        self.assertEqual(by_pattern["BEQ"], 0x00208463)
+        self.assertEqual(by_pattern["JAL"], 0x008000EF)
+        self.assertEqual(by_pattern["LUI"], 0x12345137)
+        self.assertEqual(by_pattern["CSRRCI"], 0xC10170F3)
+        self.assertEqual(by_pattern["ECALL"], 0x00000073)
+        self.assertEqual(by_pattern["EBREAK"], 0x00100073)
+        check_rtl_bitpats(words, cases)
 
     def test_negative_verifiers(self) -> None:
         base = variants()
@@ -163,6 +225,31 @@ class AtlasDialectTest(unittest.TestCase):
                 self.assertIn(expected, result.stderr)
         self.assertEqual(len(base), 50)
 
+    def test_scalar_negative_verifiers(self) -> None:
+        failures = [
+            ("alu_reg", dict(kind="add", dst=32, lhs=1, rhs=2), "dst"),
+            ("alu_imm", dict(kind="addi", dst=1, src=2, immediate=2048), "signed immediate"),
+            ("alu_imm", dict(kind="srai", dst=1, src=2, immediate=32), "shift amount"),
+            ("branch", dict(kind="beq", lhs=1, rhs=2, offset_bytes=3), "even"),
+            ("branch", dict(kind="bne", lhs=1, rhs=2, offset_bytes=4096), "branch byte offset"),
+            ("jump", dict(kind="jal", dst=1, base=2, offset=8), "base"),
+            ("jump", dict(kind="jalr", dst=1, base=2, offset=2048), "jalr word offset"),
+            ("delay", dict(cycles=4096), "cycles"),
+            ("upper", dict(kind="lui", dst=1, immediate=1048576), "raw 20-bit"),
+            ("csr", dict(kind="rrci", dst=1, source=2, address=4096), "CSR address"),
+            ("csr", dict(kind="rrw", dst=1, source=2, address=0xC02), "read-only"),
+            ("csr", dict(kind="rrs", dst=1, source=1, address=0xC03), "read-only"),
+            ("trap", dict(kind="halt"), "ecall or ebreak"),
+            ("scalar_load", dict(kind="seli", dst=1, base=1, offset=127), "base"),
+            ("scalar_load", dict(kind="seli", dst=1, base=0, offset=256), "E8M0"),
+            ("scalar_store", dict(kind="sw", src=1, base=2, offset=-2049), "signed byte offset"),
+        ]
+        for op, fields, expected in failures:
+            with self.subTest(op=op, fields=fields):
+                result = run(OPT, program([(op, fields, "")]))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
     def test_emitter_rejects_non_linear_state(self) -> None:
         source = '''module {
   %s0 = "atlas.start"() : () -> !atlas.state
@@ -173,6 +260,18 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("linear Atlas state chain", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_branch_delay_slot_must_exist_and_cannot_redirect(self) -> None:
+        branch = ("branch", dict(kind="beq", lhs=1, rhs=2, offset_bytes=8), "BEQ")
+        jump = ("jump", dict(kind="jal", dst=1, base=0, offset=8), "JAL")
+        missing = run(EMIT, program([branch]))
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("lacks its required delay-slot", missing.stderr)
+        self.assertEqual(missing.stdout, "")
+        nested = run(EMIT, program([branch, jump]))
+        self.assertNotEqual(nested.returncode, 0)
+        self.assertIn("branch or jump in selected RTL delay slot", nested.stderr)
+        self.assertEqual(nested.stdout, "")
 
     def test_pinned_model_encoding_differences_are_visible(self) -> None:
         rtl_root = os.environ.get("ATLAS_RTL_ROOT")

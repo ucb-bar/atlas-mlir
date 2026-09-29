@@ -126,4 +126,90 @@ def Atlas_XLUTransposeOp : Atlas_MachineOp<"xlu_transpose"> {
   let hasVerifier = 1;
 }
 
+// Scalar/control instruction families use the same state token so issue order
+// and interactions with tensor instructions remain visible to the materializer.
+def Atlas_ALURegOp : Atlas_MachineOp<"alu_reg"> {
+  let summary = "Selected scalar register-register ALU instruction";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$lhs, I32Attr:$rhs);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_ALUImmOp : Atlas_MachineOp<"alu_imm"> {
+  let summary = "Selected scalar register-immediate ALU instruction";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$src, I32Attr:$immediate);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_BranchOp : Atlas_MachineOp<"branch"> {
+  let summary = "Conditional scalar branch; signed offset is in bytes";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$lhs, I32Attr:$rhs, I32Attr:$offset_bytes);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_JumpOp : Atlas_MachineOp<"jump"> {
+  let summary = "JAL or JALR with explicit signed encoded displacement";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$base, I32Attr:$offset);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_DelayOp : Atlas_MachineOp<"delay"> {
+  let summary = "Stall for the unsigned 12-bit cycle count";
+  let arguments = (ins Atlas_StateType:$state, I32Attr:$cycles);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_UpperOp : Atlas_MachineOp<"upper"> {
+  let summary = "LUI or AUIPC with raw 20-bit upper immediate";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$immediate);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_CSROp : Atlas_MachineOp<"csr"> {
+  let summary = "CSR read-modify-write or immediate operation";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$source, I32Attr:$address);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_TrapOp : Atlas_MachineOp<"trap"> {
+  let summary = "ECALL or EBREAK termination";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_FenceOp : Atlas_MachineOp<"fence"> {
+  let summary = "Canonical FENCE encoding";
+  let arguments = (ins Atlas_StateType:$state);
+  let results = (outs Atlas_StateType:$next);
+}
+
+def Atlas_ScalarLoadOp : Atlas_MachineOp<"scalar_load"> {
+  let summary = "Scalar or E8M0 scale-register load/immediate";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$dst, I32Attr:$base, I32Attr:$offset);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
+def Atlas_ScalarStoreOp : Atlas_MachineOp<"scalar_store"> {
+  let summary = "Scalar store to VMEM";
+  let arguments = (ins Atlas_StateType:$state, StrAttr:$kind,
+                   I32Attr:$src, I32Attr:$base, I32Attr:$offset);
+  let results = (outs Atlas_StateType:$next);
+  let hasVerifier = 1;
+}
+
 #endif
