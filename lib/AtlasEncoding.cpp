@@ -243,10 +243,12 @@ LogicalResult mlir::atlas::collectAtlasWords(
   if (llvmBlock) {
     for (auto [index, op] : llvm::enumerate(encodedOps)) {
       int64_t offsetBytes = 0;
+      // The generated I32 accessors expose raw unsigned bits. Interpret the
+      // encoded displacement as signed before validating backward targets.
       if (auto branch = dyn_cast<BranchOp>(op))
-        offsetBytes = branch.getOffsetBytes();
+        offsetBytes = branch.getOffsetBytesAttr().getValue().getSExtValue();
       else if (auto jump = dyn_cast<JumpOp>(op))
-        offsetBytes = jump.getOffset();
+        offsetBytes = jump.getOffsetAttr().getValue().getSExtValue();
       else
         continue;
       // ScalarCore.scala:269-270 applies the encoded byte displacement >> 1
