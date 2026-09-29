@@ -1,4 +1,4 @@
-"""Static hand-OOT row-min qualification; selected-core run remains pending."""
+"""Bounded row-min check through the hand OOT and selected AtlasCore."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import pathlib
 import struct
 import subprocess
+import sys
 import unittest
 
 from test_mxu_reference import _object_words
@@ -115,6 +116,64 @@ class VpuRowMinReferenceTest(unittest.TestCase):
                                      capture_output=True, text=True, check=False)
                 self.assertNotEqual(run.returncode, 0)
                 self.assertTrue(run.stderr)
+
+    def test_selected_core_matches_full_row_minimum_and_preserves_input(self) -> None:
+        keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT", "ATLAS_LLVM_BIN")
+        if not all(os.environ.get(key) for key in keys):
+            self.skipTest("set selected-source-linked ARC, ModeLIR, and LLVM paths")
+        model, state, modelir = (pathlib.Path(os.environ[key]).resolve(strict=True)
+                                 for key in keys[:3])
+        old_cwd = pathlib.Path.cwd()
+        sys.path.insert(0, str(modelir))
+        try:
+            os.chdir(modelir)
+            from mlc.backends import cosim_atlas
+
+            original = cosim_atlas.CosimCore
+
+            class SelectedCore(original):
+                def peek(self, name: str) -> int:
+                    return super().peek("scalar/halt_now" if name == "io_halted" else name)
+
+                def poke(self, name: str, value: int) -> None:
+                    if name in ("io_dmaTL_d_bits_opcode", "io_dmaTL_d_bits_size"):
+                        if name in self._S:
+                            raise AssertionError(f"unexpected live ARC input {name}")
+                        return
+                    super().poke(name, value)
+
+            cosim_atlas.CosimCore = SelectedCore
+            try:
+                for phase in (0, 2):
+                    with self.subTest(phase=phase):
+                        source, expected, minima = _panel(phase)
+                        first_only = [min(struct.unpack(
+                            "<16H", source[32 * row:32 * (row + 1)]), key=_value)
+                            for row in range(32)]
+                        wrong = b"".join(struct.pack("<H", value)
+                                         for _half in range(2) for value in first_only
+                                         for _lane in range(16))
+                        self.assertNotEqual(wrong, expected)
+                        self.assertTrue(any(a != b for a, b in zip(first_only, minima)))
+                        result = cosim_atlas.run_program(
+                            model, state, _object_words(SOURCE),
+                            preload=[(0x90000000, source),
+                                     (0x90000800, b"\xA5" * 2048),
+                                     (0x90001000, b"\x5A" * 32)],
+                            max_cycles=8000,
+                        )
+                        observed = result.slave.captured(0x90000800, 2048)
+                        self.assertTrue(result.halted)
+                        self.assertEqual((result.reads, result.writes), (64, 64))
+                        self.assertEqual(observed, expected)
+                        self.assertNotEqual(observed, wrong)
+                        self.assertEqual(result.slave.captured(0x90000000, 2048), source)
+                        self.assertEqual(result.slave.captured(0x90001000, 32), b"\x5A" * 32)
+            finally:
+                cosim_atlas.CosimCore = original
+        finally:
+            os.chdir(old_cwd)
+            sys.path.remove(str(modelir))
 
 
 if __name__ == "__main__":

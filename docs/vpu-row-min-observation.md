@@ -1,8 +1,8 @@
-# VPU BF16 row minimum: static hand OOT check
+# VPU BF16 row-minimum observation
 
-This is an ACT-independent **static** check of one already parameterized
-operation in the hand-authored Atlas OOT machine dialect. No selected-core
-execution is claimed for this variant yet.
+This is a bounded ACT-independent check of one already parameterized
+operation in the hand-authored Atlas OOT machine dialect. Its execution
+evidence is limited to the selected-source-linked standalone `AtlasCore`.
 
 The selected `atlas-npu` revision is
 `0079c0541111197741a231c002e3843fa6f545b2`.
@@ -38,9 +38,16 @@ Two deterministic 32-row panels place unique negative minima in both
 physical register halves, vary their position and magnitude by row, and
 check the expected 2,048-byte pair-broadcast representation. A first-half
 only reduction differs from the full-row reference on directed rows.
-The independent oracle, emission, and verifier checks passed **3/3**
-test methods. These are static and reference calculations: the MLIR stream
-has not yet been executed on the selected standalone core. Input/guard
-preservation, temporal validity, and actual result bits remain pending.
-Exceptional values, signed zeros, and equal minima are outside this
-bounded comparison.
+The independent oracle, emission, and verifier checks passed **3/3** static
+test methods. Two selected-core panels then checked all 1,024 BF16 result
+cells each across both register halves. The full-row expected result differs
+from a first-half-only reduction on directed rows; the observed output
+matched the full-row oracle. Each run preserved the 2,048-byte DRAM input
+and an unrelated 32-byte guard, and observed 64 DMA reads and 64 DMA writes.
+This finite execution does not establish general temporal validity or an
+integrated SoC launch path. Exceptional values, signed zeros, and equal
+minima are outside the bounded comparison.
+The direct OOT Python suite passed 51/51 tests in 111.389 seconds with
+selected ARC paths configured and no skips.
+CTest passed 1/1 outer test in 102.66 seconds; its inner Python suite passed
+51/51 in 102.415 seconds with no skips.
