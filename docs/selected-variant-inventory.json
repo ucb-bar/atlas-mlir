@@ -1,0 +1,3542 @@
+{
+  "schema": "atlas-hand-variant-inventory-v1",
+  "scope": "selected RTL decoder semantic modes; parameter domains listed but not exhaustively qualified",
+  "selected_sources": {
+    "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+    "model_revision": "5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d",
+    "rtl_patterns": "src/main/scala/atlas/scalar/Instructions.scala",
+    "rtl_decode": "src/main/scala/atlas/scalar/IDecode.scala",
+    "model_classes": "npu_model/configs/isa_definition.py"
+  },
+  "parameter_domains": {
+    "mreg_0_63": "physical tensor register index; BF16 and FP8 views alias the same file",
+    "bf16_even_pair_0_62": "even base of two adjacent physical tensor registers",
+    "scalar_gpr_0_31": "RV32 scalar register index",
+    "vls_signed_32_byte_offset": "signed 12-bit immediate in 32-byte units",
+    "dma_channel_0_7": "encoded DMA channel",
+    "mxu_unit_0_1": "distinct MXU0 systolic and MXU1 inner-product-tree units",
+    "mxu_local_slot_0_1": "local slot scoped to owning MXU",
+    "raw_imm16": "raw 16-bit immediate; VLI mode determines destination extent",
+    "e8m0_scale_reg_0_31": "scalar scale-register selector, not an admitted quantization scheme",
+    "selected_csr_addresses": "0xc00..0xc03 and 0xc10..0xc11, narrowed by verifier",
+    "signed_pc_relative_or_indirect": "branch/JAL encoded byte displacement interpreted by selected PC; JALR dynamic target",
+    "e8m0_code_0_255": "raw E8M0 byte loaded through SELI; no operand scaling scheme inferred",
+    "scalar_signed_byte_offset_12": "signed 12-bit scalar load/store byte offset",
+    "scalar_alu_signed_imm12": "signed 12-bit arithmetic immediate",
+    "scalar_shift_0_31": "five-bit RV32 shift amount",
+    "delay_cycles_0_4095": "unsigned DELAY cycle field",
+    "upper_raw_20_bit": "raw 20-bit upper immediate"
+  },
+  "variants": [
+    {
+      "id": "VLOAD",
+      "family": "memory",
+      "rtl_bitpat": "?????????????????00??????0000111",
+      "dialect_op": "atlas.vload",
+      "mode_attrs": {
+        "format": "raw"
+      },
+      "model_classes": [
+        "VLOAD"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/lsu/LSU.scala",
+        "src/main/scala/atlas/mreg/MregFile.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "scalar_gpr_0_31",
+        "vls_signed_32_byte_offset"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_VLS,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_VLOAD"
+    },
+    {
+      "id": "VSTORE",
+      "family": "memory",
+      "rtl_bitpat": "?????????????????01??????0000111",
+      "dialect_op": "atlas.vstore",
+      "mode_attrs": {
+        "format": "raw"
+      },
+      "model_classes": [
+        "VSTORE"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/lsu/LSU.scala",
+        "src/main/scala/atlas/mreg/MregFile.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "scalar_gpr_0_31",
+        "vls_signed_32_byte_offset"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_VLS,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_VSTORE"
+    },
+    {
+      "id": "DMA_LOAD_ANY",
+      "family": "dma",
+      "rtl_bitpat": "0000000??????????????????1111011",
+      "dialect_op": "atlas.dma",
+      "mode_attrs": {
+        "direction": "load"
+      },
+      "model_classes": [
+        "DMA_LOAD_CH0",
+        "DMA_LOAD_CH1",
+        "DMA_LOAD_CH2",
+        "DMA_LOAD_CH3",
+        "DMA_LOAD_CH4",
+        "DMA_LOAD_CH5",
+        "DMA_LOAD_CH6",
+        "DMA_LOAD_CH7"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala"
+      ],
+      "parameter_domains": [
+        "dma_channel_0_7",
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_dma_reference.py::test_selected_core_executes_dma_and_preserves_guards",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_LD,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "DMA_STORE_ANY",
+      "family": "dma",
+      "rtl_bitpat": "0000001??????????????????1111011",
+      "dialect_op": "atlas.dma",
+      "mode_attrs": {
+        "direction": "store"
+      },
+      "model_classes": [
+        "DMA_STORE_CH0",
+        "DMA_STORE_CH1",
+        "DMA_STORE_CH2",
+        "DMA_STORE_CH3",
+        "DMA_STORE_CH4",
+        "DMA_STORE_CH5",
+        "DMA_STORE_CH6",
+        "DMA_STORE_CH7"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala"
+      ],
+      "parameter_domains": [
+        "dma_channel_0_7",
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_dma_reference.py::test_selected_core_executes_dma_and_preserves_guards",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_ST,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "DMA_CONFIG_ANY",
+      "family": "dma",
+      "rtl_bitpat": "000000000000????????000001111111",
+      "dialect_op": "atlas.dma_config",
+      "mode_attrs": {},
+      "model_classes": [
+        "DMA_CONFIG_CH0",
+        "DMA_CONFIG_CH1",
+        "DMA_CONFIG_CH2",
+        "DMA_CONFIG_CH3",
+        "DMA_CONFIG_CH4",
+        "DMA_CONFIG_CH5",
+        "DMA_CONFIG_CH6",
+        "DMA_CONFIG_CH7"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala"
+      ],
+      "parameter_domains": [
+        "dma_channel_0_7",
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_config_funct7_overlaps_rtl_wait"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_CONFIG,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "DMA_WAIT_ANY",
+      "family": "dma",
+      "rtl_bitpat": "00000010000000000???000001111111",
+      "dialect_op": "atlas.dma_wait",
+      "mode_attrs": {},
+      "model_classes": [
+        "DMA_WAIT_CH0",
+        "DMA_WAIT_CH1",
+        "DMA_WAIT_CH2",
+        "DMA_WAIT_CH3",
+        "DMA_WAIT_CH4",
+        "DMA_WAIT_CH5",
+        "DMA_WAIT_CH6",
+        "DMA_WAIT_CH7"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala"
+      ],
+      "parameter_domains": [
+        "dma_channel_0_7",
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_WAIT,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_W_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0000000??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "weight_fp8",
+        "unit": 0
+      },
+      "model_classes": [
+        "VMATPUSH_WEIGHT_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_WEIGHT,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_AFP8_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0000010??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "acc_fp8",
+        "unit": 0
+      },
+      "model_classes": [
+        "VMATPUSH_ACC_FP8_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_ACC_FP8,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_ABF16_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0000100??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "acc_bf16",
+        "unit": 0
+      },
+      "model_classes": [
+        "VMATPUSH_ACC_BF16_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_ACC_BF16,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPOP_FP8_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0000110??????????????????1110111",
+      "dialect_op": "atlas.mxu_pop",
+      "mode_attrs": {
+        "format": "fp8",
+        "unit": 0
+      },
+      "model_classes": [
+        "VMATPOP_FP8_ACC_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "e8m0_scale_reg_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_POP_FP8,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPOP_BF16_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0001000??????????????????1110111",
+      "dialect_op": "atlas.mxu_pop",
+      "mode_attrs": {
+        "format": "bf16",
+        "unit": 0
+      },
+      "model_classes": [
+        "VMATPOP_BF16_ACC_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_POP_BF16,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATMUL_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0001010??????????????????1110111",
+      "dialect_op": "atlas.mxu_matmul",
+      "mode_attrs": {
+        "unit": 0,
+        "accumulate": false
+      },
+      "model_classes": [
+        "VMATMUL_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_mxu_numerics.py::test_seeded_finite_normal_vectors_on_selected_core",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_MATMUL,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATMUL_ACC_MXU0",
+      "family": "mxu0",
+      "rtl_bitpat": "0001100??????????????????1110111",
+      "dialect_op": "atlas.mxu_matmul",
+      "mode_attrs": {
+        "unit": 0,
+        "accumulate": true
+      },
+      "model_classes": [
+        "VMATMUL_ACC_MXU0"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/sa/SystolicArrayTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_mxu_k2_reference.py::test_selected_core_matches_full_ordered_bf16_result_and_reset_mutation",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_MATMUL_ACC,MXUSEL_0,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_W_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0000001??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "weight_fp8",
+        "unit": 1
+      },
+      "model_classes": [
+        "VMATPUSH_WEIGHT_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_WEIGHT,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_AFP8_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0000011??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "acc_fp8",
+        "unit": 1
+      },
+      "model_classes": [
+        "VMATPUSH_ACC_FP8_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_ACC_FP8,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPUSH_ABF16_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0000101??????????????????1110111",
+      "dialect_op": "atlas.mxu_push",
+      "mode_attrs": {
+        "kind": "acc_bf16",
+        "unit": 1
+      },
+      "model_classes": [
+        "VMATPUSH_ACC_BF16_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_PUSH_ACC_BF16,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPOP_FP8_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0000111??????????????????1110111",
+      "dialect_op": "atlas.mxu_pop",
+      "mode_attrs": {
+        "format": "fp8",
+        "unit": 1
+      },
+      "model_classes": [
+        "VMATPOP_FP8_ACC_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "e8m0_scale_reg_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_POP_FP8,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATPOP_BF16_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0001001??????????????????1110111",
+      "dialect_op": "atlas.mxu_pop",
+      "mode_attrs": {
+        "format": "bf16",
+        "unit": 1
+      },
+      "model_classes": [
+        "VMATPOP_BF16_ACC_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_POP_BF16,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATMUL_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0001011??????????????????1110111",
+      "dialect_op": "atlas.mxu_matmul",
+      "mode_attrs": {
+        "unit": 1,
+        "accumulate": false
+      },
+      "model_classes": [
+        "VMATMUL_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_mxu1_reference.py::test_selected_core_executes_mxu1_and_distinguishes_mxu0",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_MATMUL,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMATMUL_ACC_MXU1",
+      "family": "mxu1",
+      "rtl_bitpat": "0001101??????????????????1110111",
+      "dialect_op": "atlas.mxu_matmul",
+      "mode_attrs": {
+        "unit": 1,
+        "accumulate": true
+      },
+      "model_classes": [
+        "VMATMUL_ACC_MXU1"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesTop.scala"
+      ],
+      "parameter_domains": [
+        "mxu_unit_0_1",
+        "mxu_local_slot_0_1",
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_mxu_numerics_not_selected_rtl_contract"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_MATMUL_ACC,MXUSEL_1,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VADD_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000000??????????????????1010111",
+      "dialect_op": "atlas.vpu_binary",
+      "mode_attrs": {
+        "kind": "add"
+      },
+      "model_classes": [
+        "VADD_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_add_reference.py::test_selected_core_matches_exact_sum_then_bf16_chop",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_rounding_vs_rtl_chop_unresolved"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_ADD,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VSUB_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000010??????????????????1010111",
+      "dialect_op": "atlas.vpu_binary",
+      "mode_attrs": {
+        "kind": "sub"
+      },
+      "model_classes": [
+        "VSUB_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_sub_reference.py::test_selected_core_matches_exact_difference_then_bf16_chop",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_SUB,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMUL_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000011??????????????????1010111",
+      "dialect_op": "atlas.vpu_binary",
+      "mode_attrs": {
+        "kind": "mul"
+      },
+      "model_classes": [
+        "VMUL_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_mul_reference.py::test_selected_core_matches_exact_bf16_multiply",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_MUL,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMIN_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000100??????????????????1010111",
+      "dialect_op": "atlas.vpu_binary",
+      "mode_attrs": {
+        "kind": "min"
+      },
+      "model_classes": [
+        "VMINIMUM_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_PAIRMIN,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMAX_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000110??????????????????1010111",
+      "dialect_op": "atlas.vpu_binary",
+      "mode_attrs": {
+        "kind": "max"
+      },
+      "model_classes": [
+        "VMAXIMUM_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_max_reference.py::test_selected_core_matches_bit_order_and_preserves_inputs",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_PAIRMAX,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDSUM_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000001??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "col_sum"
+      },
+      "model_classes": [
+        "VREDSUM_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_CSUM,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDMIN_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000101??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "col_min"
+      },
+      "model_classes": [
+        "VREDMIN_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_CMIN,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDMAX_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0000111??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "col_max"
+      },
+      "model_classes": [
+        "VREDMAX_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_CMAX,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDSUM_ROW_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0100001??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "row_sum"
+      },
+      "model_classes": [
+        "VREDSUM_ROW_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_row_sum_reference.py::test_selected_core_matches_tree_and_pair_broadcast",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_reduction_order_unresolved"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_RSUM,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDMIN_ROW_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0100100??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "row_min"
+      },
+      "model_classes": [
+        "VREDMIN_ROW_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_row_min_reference.py::test_selected_core_matches_full_row_minimum_and_preserves_input",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_RMIN,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VREDMAX_ROW_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "0100110??????????????????1010111",
+      "dialect_op": "atlas.vpu_reduce",
+      "mode_attrs": {
+        "kind": "row_max"
+      },
+      "model_classes": [
+        "VREDMAX_ROW_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_RMAX,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VMOV",
+      "family": "vpu",
+      "rtl_bitpat": "1000000??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "mov"
+      },
+      "model_classes": [
+        "VMOV"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_relu_reference.py::test_selected_core_executes_relu_across_both_bf16_halves",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_one_register_vs_rtl_pair"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_MOV,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VRECIP_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "1000001??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "recip"
+      },
+      "model_classes": [
+        "VRECIP_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_RCP,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VEXP",
+      "family": "vpu",
+      "rtl_bitpat": "1000010??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "exp"
+      },
+      "model_classes": [
+        "VEXP_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_EXP,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VEXP2",
+      "family": "vpu",
+      "rtl_bitpat": "1000011??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "exp2"
+      },
+      "model_classes": [
+        "VEXP2_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_EXP2,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VSQUARE_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "1000110??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "square"
+      },
+      "model_classes": [
+        "VSQUARE_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_funct7_differs_from_rtl"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_SQUARE,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VCUBE_BF16",
+      "family": "vpu",
+      "rtl_bitpat": "1000111??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "cube"
+      },
+      "model_classes": [
+        "VCUBE_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_funct7_differs_from_rtl"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_CUBE,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VRELU",
+      "family": "vpu",
+      "rtl_bitpat": "1001000??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "relu"
+      },
+      "model_classes": [
+        "VRELU_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_relu_reference.py::test_selected_core_executes_relu_across_both_bf16_halves",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_RELU,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VSIN",
+      "family": "vpu",
+      "rtl_bitpat": "1001001??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "sin"
+      },
+      "model_classes": [
+        "VSIN_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_SIN,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VCOS",
+      "family": "vpu",
+      "rtl_bitpat": "1001010??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "cos"
+      },
+      "model_classes": [
+        "VCOS_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_COS,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VTANH",
+      "family": "vpu",
+      "rtl_bitpat": "1001011??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "tanh"
+      },
+      "model_classes": [
+        "VTANH_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_TANH,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VLOG2",
+      "family": "vpu",
+      "rtl_bitpat": "1001100??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "log2"
+      },
+      "model_classes": [
+        "VLOG2_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_LOG,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VSQRT",
+      "family": "vpu",
+      "rtl_bitpat": "1001101??????????????????1010111",
+      "dialect_op": "atlas.vpu_unary",
+      "mode_attrs": {
+        "kind": "sqrt"
+      },
+      "model_classes": [
+        "VSQRT_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_SQRT,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VFP8PACK",
+      "family": "vpu",
+      "rtl_bitpat": "1000100??????????????????1010111",
+      "dialect_op": "atlas.vpu_pack",
+      "mode_attrs": {
+        "direction": "bf16_to_fp8"
+      },
+      "model_classes": [
+        "VPACK_BF16_FP8"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "e8m0_scale_reg_0_31",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_scale_code_interpretation_requires_qualification"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_FP8PACK,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VFP8UNPACK",
+      "family": "vpu",
+      "rtl_bitpat": "1000101??????????????????1010111",
+      "dialect_op": "atlas.vpu_pack",
+      "mode_attrs": {
+        "direction": "fp8_to_bf16"
+      },
+      "model_classes": [
+        "VUNPACK_FP8_BF16"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/VectorEngine.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "e8m0_scale_reg_0_31",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_scale_code_interpretation_requires_qualification"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_FP8UNPACK,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VLI_ALL",
+      "family": "vli",
+      "rtl_bitpat": "????????????????000??????1011111",
+      "dialect_op": "atlas.vli",
+      "mode_attrs": {
+        "mode": "all"
+      },
+      "model_classes": [
+        "VLI_ALL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/laneBoxes/VectorLoadImm.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "raw_imm16",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vli_all_reference.py::test_selected_core_fills_both_halves_as_raw_bits",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_LI_ALL,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VLI_ROW",
+      "family": "vli",
+      "rtl_bitpat": "????????????????001??????1011111",
+      "dialect_op": "atlas.vli",
+      "mode_attrs": {
+        "mode": "row"
+      },
+      "model_classes": [
+        "VLI_ROW"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/laneBoxes/VectorLoadImm.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "raw_imm16",
+        "bf16_even_pair_0_62"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_numeric_assignment_vs_rtl_raw_immediate"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_LI_ROW,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VLI_COL",
+      "family": "vli",
+      "rtl_bitpat": "????????????????010??????1011111",
+      "dialect_op": "atlas.vli",
+      "mode_attrs": {
+        "mode": "col"
+      },
+      "model_classes": [
+        "VLI_COL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/laneBoxes/VectorLoadImm.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "raw_imm16"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_numeric_assignment_vs_rtl_raw_immediate"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_LI_COL,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VLI_ONE",
+      "family": "vli",
+      "rtl_bitpat": "????????????????011??????1011111",
+      "dialect_op": "atlas.vli",
+      "mode_attrs": {
+        "mode": "one"
+      },
+      "model_classes": [
+        "VLI_ONE"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/vector/laneBoxes/VectorLoadImm.scala",
+        "src/main/scala/atlas/vector/VectorFSM.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63",
+        "raw_imm16"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_numeric_assignment_vs_rtl_raw_immediate"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_LI_ONE,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "VTRPOSE_XLU",
+      "family": "xlu",
+      "rtl_bitpat": "0000000??????????????????1101011",
+      "dialect_op": "atlas.xlu_transpose",
+      "mode_attrs": {},
+      "model_classes": [
+        "VTRPOSE_XLU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/xlu/XLU.scala"
+      ],
+      "parameter_domains": [
+        "mreg_0_63"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_xlu_reference.py::test_selected_core_transposes_non_symmetric_bytes_and_preserves_source",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_TRPOSE,MEM_X,LSU_X"
+    },
+    {
+      "id": "ADD",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????000?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "add"
+      },
+      "model_classes": [
+        "ADD"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SUB",
+      "family": "scalar",
+      "rtl_bitpat": "0100000??????????000?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "sub"
+      },
+      "model_classes": [
+        "SUB"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SUB,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLL",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????001?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "sll"
+      },
+      "model_classes": [
+        "SLL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLL,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLT",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????010?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "slt"
+      },
+      "model_classes": [
+        "SLT"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLT,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLTU",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????011?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "sltu"
+      },
+      "model_classes": [
+        "SLTU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLTU,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "XOR",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????100?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "xor"
+      },
+      "model_classes": [
+        "XOR"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_XOR,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SRL",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????101?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "srl"
+      },
+      "model_classes": [
+        "SRL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SRL,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SRA",
+      "family": "scalar",
+      "rtl_bitpat": "0100000??????????101?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "sra"
+      },
+      "model_classes": [
+        "SRA"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SRA,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "OR",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????110?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "or"
+      },
+      "model_classes": [
+        "OR"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_OR,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "AND",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????111?????0110011",
+      "dialect_op": "atlas.alu_reg",
+      "mode_attrs": {
+        "kind": "and"
+      },
+      "model_classes": [
+        "AND"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_AND,BR_X,OP1_RS1,OP2_RS2,IMM_X,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "ADDI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "addi"
+      },
+      "model_classes": [
+        "ADDI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLTI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????010?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "slti"
+      },
+      "model_classes": [
+        "SLTI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLT,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLTIU",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????011?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "sltiu"
+      },
+      "model_classes": [
+        "SLTIU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLTU,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "XORI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????100?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "xori"
+      },
+      "model_classes": [
+        "XORI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_XOR,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "ORI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????110?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "ori"
+      },
+      "model_classes": [
+        "ORI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_OR,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "ANDI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????111?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "andi"
+      },
+      "model_classes": [
+        "ANDI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_alu_signed_imm12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_AND,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SLLI",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????001?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "slli"
+      },
+      "model_classes": [
+        "SLLI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_shift_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SLL,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SRLI",
+      "family": "scalar",
+      "rtl_bitpat": "0000000??????????101?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "srli"
+      },
+      "model_classes": [
+        "SRLI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_shift_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SRL,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SRAI",
+      "family": "scalar",
+      "rtl_bitpat": "0100000??????????101?????0010011",
+      "dialect_op": "atlas.alu_imm",
+      "mode_attrs": {
+        "kind": "srai"
+      },
+      "model_classes": [
+        "SRAI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_shift_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_SRA,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "BEQ",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "beq"
+      },
+      "model_classes": [
+        "BEQ"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_reference.py::test_selected_core_executes_one_delay_slot",
+      "blocked": [
+        "full_domain_semantics",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_EQ,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LB",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "lb"
+      },
+      "model_classes": [
+        "LB"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_LB,LSU_X"
+    },
+    {
+      "id": "BNE",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????001?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "bne"
+      },
+      "model_classes": [
+        "BNE"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_NE,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LH",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????001?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "lh"
+      },
+      "model_classes": [
+        "LH"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_LH,LSU_X"
+    },
+    {
+      "id": "BLT",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????100?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "blt"
+      },
+      "model_classes": [
+        "BLT"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_LT,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LW",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????010?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "lw"
+      },
+      "model_classes": [
+        "LW"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_LW,LSU_X"
+    },
+    {
+      "id": "BGE",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????101?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "bge"
+      },
+      "model_classes": [
+        "BGE"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_GE,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LBU",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????100?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "lbu"
+      },
+      "model_classes": [
+        "LBU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_LBU,LSU_X"
+    },
+    {
+      "id": "BLTU",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????110?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "bltu"
+      },
+      "model_classes": [
+        "BLTU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_LTU,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LHU",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????101?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "lhu"
+      },
+      "model_classes": [
+        "LHU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_LHU,LSU_X"
+    },
+    {
+      "id": "BGEU",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????111?????1100011",
+      "dialect_op": "atlas.branch",
+      "mode_attrs": {
+        "kind": "bgeu"
+      },
+      "model_classes": [
+        "BGEU"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_GEU,OP1_RS1,OP2_RS2,IMM_B,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SELD",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????110?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "seld"
+      },
+      "model_classes": [
+        "SELD"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_SELD,LSU_X"
+    },
+    {
+      "id": "JAL",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????????????1101111",
+      "dialect_op": "atlas.jump",
+      "mode_attrs": {
+        "kind": "jal"
+      },
+      "model_classes": [
+        "JAL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_PC,OP2_IMM,IMM_J,Y,Y,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "LUI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????????????0110111",
+      "dialect_op": "atlas.upper",
+      "mode_attrs": {
+        "kind": "lui"
+      },
+      "model_classes": [
+        "LUI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "upper_raw_20_bit"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_PASS_B,BR_X,OP1_X,OP2_IMM,IMM_U,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "JALR",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????1100111",
+      "dialect_op": "atlas.jump",
+      "mode_attrs": {
+        "kind": "jalr"
+      },
+      "model_classes": [
+        "JALR"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "signed_pc_relative_or_indirect"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": false,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_I,Y,N,Y,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "AUIPC",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????????????0010111",
+      "dialect_op": "atlas.upper",
+      "mode_attrs": {
+        "kind": "auipc"
+      },
+      "model_classes": [
+        "AUIPC"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "upper_raw_20_bit"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_PC,OP2_IMM,IMM_U,Y,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "DELAY",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????001?????1100111",
+      "dialect_op": "atlas.delay",
+      "mode_attrs": {},
+      "model_classes": [
+        "DELAY"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "delay_cycles_0_4095"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRW",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????001?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrw"
+      },
+      "model_classes": [
+        "CSRRW"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,Y,N,N,CSR_RW,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRS",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????010?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrs"
+      },
+      "model_classes": [
+        "CSRRS"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,Y,N,N,CSR_RS,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRC",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????011?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrc"
+      },
+      "model_classes": [
+        "CSRRC"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,Y,N,N,CSR_RC,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRWI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????101?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrwi"
+      },
+      "model_classes": [
+        "CSRRWI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_Z,Y,N,N,CSR_RWI,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRSI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????110?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrsi"
+      },
+      "model_classes": [
+        "CSRRSI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_Z,Y,N,N,CSR_RSI,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "CSRRCI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????111?????1110011",
+      "dialect_op": "atlas.csr",
+      "mode_attrs": {
+        "kind": "rrci"
+      },
+      "model_classes": [
+        "CSRRCI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "selected_csr_addresses"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [
+        "model_funct3_differs_from_rtl"
+      ],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_Z,Y,N,N,CSR_RCI,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "ECALL",
+      "family": "scalar",
+      "rtl_bitpat": "00000000000000000000000001110011",
+      "dialect_op": "atlas.trap",
+      "mode_attrs": {
+        "kind": "ecall"
+      },
+      "model_classes": [
+        "ECALL"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "EBREAK",
+      "family": "scalar",
+      "rtl_bitpat": "00000000000100000000000001110011",
+      "dialect_op": "atlas.trap",
+      "mode_attrs": {
+        "kind": "ebreak"
+      },
+      "model_classes": [
+        "EBREAK"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "FENCE",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????0001111",
+      "dialect_op": "atlas.fence",
+      "mode_attrs": {},
+      "model_classes": [
+        "FENCE"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SELI",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????111?????0000011",
+      "dialect_op": "atlas.scalar_load",
+      "mode_attrs": {
+        "kind": "seli"
+      },
+      "model_classes": [
+        "SELI"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "e8m0_code_0_255"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
+    },
+    {
+      "id": "SB",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????000?????0100011",
+      "dialect_op": "atlas.scalar_store",
+      "mode_attrs": {
+        "kind": "sb"
+      },
+      "model_classes": [
+        "SB"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_S,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_SB,LSU_X"
+    },
+    {
+      "id": "SH",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????001?????0100011",
+      "dialect_op": "atlas.scalar_store",
+      "mode_attrs": {
+        "kind": "sh"
+      },
+      "model_classes": [
+        "SH"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_S,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_SH,LSU_X"
+    },
+    {
+      "id": "SW",
+      "family": "scalar",
+      "rtl_bitpat": "?????????????????010?????0100011",
+      "dialect_op": "atlas.scalar_store",
+      "mode_attrs": {
+        "kind": "sw"
+      },
+      "model_classes": [
+        "SW"
+      ],
+      "architecture_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala",
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ],
+      "parameter_domains": [
+        "scalar_gpr_0_31",
+        "scalar_signed_byte_offset_12"
+      ],
+      "required": true,
+      "software_admitted": false,
+      "represented": true,
+      "word_emitted": true,
+      "llvm_word_emitted": true,
+      "independent_semantic_test": false,
+      "standalone_core_executed": false,
+      "bounded_evidence": null,
+      "blocked": [
+        "independent_semantics",
+        "standalone_execution",
+        "timing_and_integrated_execution"
+      ],
+      "source_discrepancies": [],
+      "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_RS1,OP2_IMM,IMM_S,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_SW,LSU_X"
+    }
+  ]
+}
