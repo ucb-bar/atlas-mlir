@@ -8,7 +8,7 @@ are static checks, not evidence of integrated execution.
 | --- | --- | --- | --- |
 | VR operand fields | `ScalarDecoder.scala` uses `vd[12:7]`, `vs1[18:13]`, `vs2[24:19]`, six bits each | `npu_model/isa.py::VRType.to_bytecode` masks `vs1` to seven bits and `vs2` to five bits | Emitter uses RTL layout; test exercises a nonzero secondary operand. Model assembly encoding cannot be the sole oracle. |
 | DMA config | `Instructions.scala::DMA_CONFIG_ANY` fixes funct7 to zero; `DMA_WAIT_ANY` fixes it to one | `DMA_CONFIG_CH0..7` set funct7 to one | Emitter uses RTL config word and reserves other fields at zero; integrated DMA config/wait behavior still needs testing. |
-| CSRRCI | `Instructions.scala::CSRRCI` has funct3 `111` | Model class has funct3 `100` | Scalar/CSR lowering is outstanding. |
+| CSRRCI | `Instructions.scala::CSRRCI` has funct3 `111` | Model class has funct3 `100` | Word and LLVM lowering use selected RTL bits; integrated CSR behavior remains unqualified. |
 | Square/cube VPU encodings | `VSQUARE_BF16` uses funct7 `0x46`; `VCUBE_BF16` uses `0x47` | Model classes use `0x4e` and `0x4f` | Emitter uses selected RTL; numerical execution and dispatch still need qualification. |
 | VPU BF16 pair alignment | `ScalarCore.scala` asserts even source and destination banks for VPU pair operations | Model helper checks only that pair base is below register 63 | Verifier conservatively requires even pair bases in VPU paths. |
 | VPU move width | `ScalarCore.scala` treats `VMOV` as a pair read/write | Model `VMOV.exec` reads and writes one BF16 register | Verifier treats it as a pair; semantics unresolved. |

@@ -20,8 +20,23 @@ checks that branches/jumps have a non-redirecting delay-slot instruction.
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
 flat stream. It uses the RTL decoder's six-bit VR field layout and the selected
-RTL's DMA config encoding. The output is an instruction-word listing, not a
-binary plus constants or a launchable execution plan.
+RTL's DMA config encoding. The registered `--convert-atlas-to-llvm` pass
+lowers a flat validated stream to `llvm.func @atlas_program` with one
+side-effecting `llvm.inline_asm` block containing the selected words in order.
+One block keeps direct branch targets and the next delay-slot instruction
+adjacent through LLVM lowering. The pass rejects JALR and direct targets
+outside the block; it does not resolve dynamic control flow.
+
+This is physical instruction lowering for the selected Atlas RISC-V target.
+The inline assembly words are **not executable on a generic host CPU** and an
+ELF object is **not a qualified Atlas end-to-end runtime**. The void function
+has no Atlas launch ABI, input/output plan, register-save policy, memory
+initialization, completion/drain protocol, or simulator execution evidence.
+In particular, fixed scalar-register instructions may alter the return-address
+or other ABI registers if called as an ordinary RISC-V function. Atlas's PC
+uses an instruction index and shifts encoded branch byte displacements by one;
+ordinary RISC-V object linking or execution does not certify equivalent
+branch behavior. No ACT compiler package or executable is used by this repo.
 
 ## Source selection
 
@@ -50,9 +65,15 @@ cmake -S . -B build -G Ninja -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DC
 cmake --build build --parallel 2
 build/bin/atlas-opt test/examples/mxu.mlir
 build/bin/atlas-emit test/examples/mxu.mlir
+build/bin/atlas-opt --convert-atlas-to-llvm test/examples/mxu.mlir > build/mxu-llvm.mlir
+mlir-translate --mlir-to-llvmir build/mxu-llvm.mlir > build/mxu.ll
+llc -mtriple=riscv32-unknown-elf -filetype=obj build/mxu.ll -o build/mxu.o
+llvm-readelf -h build/mxu.o
+llvm-objdump -d build/mxu.o
 python -m unittest discover -s test -v
 ctest --test-dir build --output-on-failure
 ATLAS_RTL_ROOT=/path/to/atlas-npu ATLAS_MODEL_ROOT=/path/to/npu_model-atlas \
+ATLAS_LLVM_BIN=/path/to/llvm-install/bin \
   python -m unittest discover -s test -v
 ```
 
@@ -62,6 +83,13 @@ test also checks exact operand positions, parser/printer round trips, 33
 negative verifier cases, and rejection of an invalid state/delay-slot stream. A BitPat
 match checks fixed encoding bits; it does not establish hardware legality or
 semantic correctness.
+
+The LLVM conversion tests check a single ordered side-effecting assembly
+block, 98/99 selected pattern variants with statically bounded control flow,
+explicit rejection of JALR, escaping targets, unsupported nested operations,
+and broken state/delay-slot chains. A smoke test translates the MXU example to
+LLVM IR and assembles an ELF32 RISC-V object whose disassembly contains the
+four selected words. This checks lowering and object emission only.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -79,7 +107,8 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Exact numerical semantics | Not qualified; MXU/VPU and scale behavior need discriminating hardware checks |
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Source-level delay-slot structure checked; integrated branch and halt behavior not qualified |
-| Program binary, ABI, execution | Not implemented; no hardware execution claim |
+| LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
+| Program binary, ABI, execution | Raw object words only; no Atlas launch ABI, constants, runtime, or hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
 semantic and hardware tests pass. Merlin's generated dialect and this hand

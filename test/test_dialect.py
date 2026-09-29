@@ -7,13 +7,23 @@ import os
 import pathlib
 import random
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OPT = ROOT / "build/bin/atlas-opt"
 EMIT = ROOT / "build/bin/atlas-emit"
+
+
+def llvm_tool(name: str) -> str | None:
+    configured = os.environ.get("ATLAS_LLVM_BIN")
+    if configured:
+        path = pathlib.Path(configured) / name
+        return str(path) if path.is_file() else None
+    return shutil.which(name)
 
 
 def attrs(**fields: object) -> str:
@@ -356,6 +366,109 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertNotEqual(nested.returncode, 0)
         self.assertIn("branch or jump in selected RTL delay slot", nested.stderr)
         self.assertEqual(nested.stdout, "")
+
+    def test_llvm_pass_preserves_one_ordered_encoded_block(self) -> None:
+        source = (ROOT / "test/examples/mxu.mlir").read_text()
+        emitted = run(EMIT, source)
+        lowered = run(OPT, source, "--convert-atlas-to-llvm")
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        self.assertIn("llvm.func @atlas_program", lowered.stdout)
+        self.assertIn("llvm.inline_asm has_side_effects", lowered.stdout)
+        self.assertIn('"~{memory}"', lowered.stdout)
+        self.assertEqual(lowered.stdout.count("llvm.inline_asm"), 1)
+        self.assertNotIn("atlas.", lowered.stdout)
+        words = emitted.stdout.splitlines()
+        self.assertEqual(len(words), 4)
+        for word in words:
+            self.assertIn(f".word 0x{word}", lowered.stdout)
+        self.assertEqual(run(OPT, lowered.stdout).returncode, 0)
+
+    def test_llvm_pass_to_riscv_object(self) -> None:
+        needed = ("mlir-translate", "llc", "llvm-readelf", "llvm-objdump")
+        tools = {name: llvm_tool(name) for name in needed}
+        if not all(tools.values()):
+            self.skipTest("ATLAS_LLVM_BIN lacks MLIR/LLVM object tools")
+        source = (ROOT / "test/examples/mxu.mlir").read_text()
+        lowered = run(OPT, source, "--convert-atlas-to-llvm")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        translated = subprocess.run(
+            [tools["mlir-translate"], "--mlir-to-llvmir"],
+            input=lowered.stdout, text=True, capture_output=True,
+        )
+        self.assertEqual(translated.returncode, 0, translated.stderr)
+        compiled = subprocess.run(
+            [tools["llc"], "-mtriple=riscv32-unknown-elf", "-filetype=obj", "-o", "-"],
+            input=translated.stdout.encode(), capture_output=True,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr.decode())
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = pathlib.Path(tmp) / "atlas.o"
+            obj.write_bytes(compiled.stdout)
+            info = subprocess.run([tools["llvm-readelf"], "-h", str(obj)],
+                                  text=True, capture_output=True)
+            dump = subprocess.run([tools["llvm-objdump"], "-d", str(obj)],
+                                  text=True, capture_output=True)
+            self.assertEqual(info.returncode, 0, info.stderr)
+            self.assertEqual(dump.returncode, 0, dump.stderr)
+            self.assertIn("ELF32", info.stdout)
+            self.assertIn("RISC-V", info.stdout)
+            for word in run(EMIT, source).stdout.splitlines():
+                self.assertIn(f"0x{word}", dump.stdout)
+
+    def test_llvm_pass_rejects_unresolved_control_or_state(self) -> None:
+        branch = ("branch", dict(kind="beq", lhs=1, rhs=2, offset_bytes=8), "")
+        slot = ("alu_imm", dict(kind="addi", dst=1, src=1, immediate=1), "")
+        jalr = ("jump", dict(kind="jalr", dst=1, base=2, offset=0), "")
+        for source, message in (
+            (program([branch]), "delay-slot"),
+            (program([branch, slot]), "escapes"),
+            (program([jalr, slot]), "JALR"),
+            (program([branch, jalr, slot]), "delay slot"),
+        ):
+            with self.subTest(message=message):
+                result = run(OPT, source, "--convert-atlas-to-llvm")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+        source = '''module {
+  %s0 = "atlas.start"() : () -> !atlas.state
+  %s1 = "atlas.dma_wait"(%s0) {channel = 0 : i32} : (!atlas.state) -> !atlas.state
+  %s2 = "atlas.dma_wait"(%s0) {channel = 1 : i32} : (!atlas.state) -> !atlas.state
+}'''
+        result = run(OPT, source, "--convert-atlas-to-llvm")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("linear Atlas state chain", result.stderr)
+
+        nested = '''module {
+  %s0 = "atlas.start"() : () -> !atlas.state
+  llvm.func @foreign() { llvm.return }
+  %s1 = "atlas.dma_wait"(%s0) {channel = 0 : i32} : (!atlas.state) -> !atlas.state
+}'''
+        result = run(OPT, nested, "--convert-atlas-to-llvm")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("flat, linear Atlas state chain", result.stderr)
+
+    def test_llvm_pass_accepts_in_block_branch_target(self) -> None:
+        cases = [
+            ("branch", dict(kind="beq", lhs=1, rhs=2, offset_bytes=4), ""),
+            ("alu_imm", dict(kind="addi", dst=1, src=1, immediate=1), ""),
+            ("dma_wait", dict(channel=0), ""),
+        ]
+        result = run(OPT, program(cases), "--convert-atlas-to-llvm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count(".word"), 3)
+
+    def test_llvm_pass_covers_static_selected_pattern_subset(self) -> None:
+        # JALR requires a runtime register target and is intentionally excluded.
+        cases = variants() + [
+            case for case in scalar_variants()
+            if not (case[0] == "jump" and case[1]["kind"] == "jalr")
+        ]
+        self.assertEqual(len(cases), 98)
+        result = run(OPT, program(cases), "--convert-atlas-to-llvm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count(".word"), 98)
 
     def test_pinned_model_encoding_differences_are_visible(self) -> None:
         rtl_root = os.environ.get("ATLAS_RTL_ROOT")
