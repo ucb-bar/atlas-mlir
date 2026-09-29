@@ -31,14 +31,14 @@ run does not execute it.
 | Family | Required modes | Represented and word-emitted | Bounded semantic and standalone-core test | Remaining full-qualification blockers |
 | --- | ---: | ---: | ---: | ---: |
 | Memory transfer | 2 | 2 | 0 | 2 |
-| DMA | 4 | 4 | 2 | 4 |
+| DMA | 4 | 4 | 3 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
 | VPU arithmetic, reduction, pack | 25 | 25 | 15 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 2 | 49 |
-| **Total** | **99** | **99** | **28** | **99** |
+| **Total** | **99** | **99** | **29** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -49,7 +49,7 @@ by the single-block LLVM pass because its dynamic target cannot be checked
 there. `blocked=99` means each mode still lacks some full D-gate evidence,
 even when a bounded mode-specific test passed.
 
-The independently checked bounded modes are DMA load/store, MXU0 reset and
+The independently checked bounded modes are DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VSQUARE, VCUBE, column minimum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ and BLT. The ledger links

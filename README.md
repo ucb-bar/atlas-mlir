@@ -178,6 +178,11 @@ scale codes 128 and 126. Two selected-core runs checked packed FP8 bytes,
 unpacked BF16 halves, and downstream MXU1 output. The packed row order
 follows consecutive physical BF16 rows and differs from the inspected model's
 same-row concatenation; neither conversion mode is fully admitted.
+The [DMA pointer-lifetime check](docs/dma-pointer-lifetime-observation.md)
+checks a launch-time scalar-address snapshot followed by two waited transfers
+that reuse VMEM. It compares typed, assembled, and LLVM-object words and
+checks guarded outputs and internal busy/marker order on the selected
+standalone core. It does not establish an unrestricted DMA timing contract.
 The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
 29-word typed stream and an independent raw-byte index reference. Three
 selected-source-linked standalone-core executions checked all 1,024 bytes
