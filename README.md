@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 24/24 Python test
+selected RTL checkout. The current diagnostic run passed 26/26 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -103,7 +103,7 @@ byte. Fresh elaboration produced FIRRTL SHA-256
 equal to the FIRRTL used to extract the 78-module `AtlasCore` closure. A
 fresh ARC build from that closure produced state JSON SHA-256
 `db2d8ae3c8a4ce6a417b0c691be1d446f1c0be95efe5607a251a6946a80de9e3`.
-All 24 Python tests passed again against the rebuilt shared library. This
+All 26 Python tests passed again against the rebuilt shared library. This
 links the diagnostic standalone core to the selected Atlas source bytes; it
 does not qualify the full integrated SoC, all Chipyard dependencies, or
 physical RTL simulation.
