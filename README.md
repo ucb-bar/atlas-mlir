@@ -105,9 +105,11 @@ does not qualify the full integrated SoC, all Chipyard dependencies, or
 physical RTL simulation.
 The selected Atlas commit records submodule revisions `9a0cc09c` for
 `sp26-fp-units` (which supplies `E4M3FMA`) and `ab0cf6f5` for `fpex`.
-The local Chipyard dependency copies have broken Git metadata, so their
-revisions have not been matched to those pins. Numerical claims remain scoped
-to the exact rebuilt model and tested inputs.
+Fresh checkouts at those pins matched all 45 tracked `sp26-fp-units` files
+and all 26 `fpex` files present in the Chipyard copy byte for byte; the three
+absent `fpex` files are tests. Numerical claims remain scoped to the exact
+rebuilt model and tested inputs. Other Chipyard dependencies and full SoC
+behavior have not been qualified.
 The optional ModeLIR driver imports NumPy; configure CTest with the Python
 environment that contains it when enabling the core-model checks.
 

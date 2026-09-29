@@ -5,8 +5,9 @@ and local model `5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d`. These
 are primarily static checks. The branch row also records a diagnostic
 `AtlasCore` ARC execution. A fresh elaboration of the selected source copy
 and a fresh ARC rebuild now link that standalone core model to the selected
-Atlas Scala bytes. The `sp26-fp-units` and `fpex` dependency-copy revisions
-remain unverified against the selected Atlas Git submodule pins. Full SoC
+Atlas Scala bytes. Fresh checkouts at the selected Atlas Git submodule pins
+matched all 45 `sp26-fp-units` files and all 26 present `fpex` files byte for
+byte; three `fpex` test files are absent from the Chipyard copy. Full SoC
 execution remains unqualified.
 
 | Subject | Selected RTL | Examined model | Handling here |
