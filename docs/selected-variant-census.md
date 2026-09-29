@@ -33,12 +33,12 @@ run does not execute it.
 | Memory transfer | 2 | 2 | 0 | 2 |
 | DMA | 4 | 4 | 2 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
-| MXU1 | 7 | 7 | 1 | 7 |
+| MXU1 | 7 | 7 | 2 | 7 |
 | VPU arithmetic, reduction, pack | 25 | 25 | 13 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 1 | 49 |
-| **Total** | **99** | **99** | **24** | **99** |
+| **Total** | **99** | **99** | **25** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -50,7 +50,7 @@ there. `blocked=99` means each mode still lacks some full D-gate evidence,
 even when a bounded mode-specific test passed.
 
 The independently checked bounded modes are DMA load/store, MXU0 reset and
-continuation matmul, MXU1 reset matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
+continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VSQUARE, VCUBE, column minimum, row sum, row minimum and row maximum, all four VLI
 modes, XLU transpose, and BEQ. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,

@@ -766,12 +766,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_mxu1_continuation_reference.py::test_selected_core_continues_then_rejects_reset_mutation",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_numerical_domain",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [
