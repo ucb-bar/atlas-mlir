@@ -134,9 +134,10 @@ matched the selected assembler and LLVM object words, then executed on the
 selected-source-linked standalone core for four sparse/control input cases.
 A 42-word variant stored both BF16 register halves; a weight at logical output
 column 20 appeared in the second half at checked halfword index 4.
-An independent exact-rational oracle additionally checked 20 seeded vectors
-of length 2–16 at one MXU0 output cell, using eight finite normal E4M3
-encodings (four magnitudes and both signs). All 20 selected-source-linked
+An independent exact-rational oracle additionally checked 43 vectors
+of length 2–32 at one MXU0 output cell: 40 seeded vectors across the finite
+normal E4M3 domain plus three directed cases to include every normal input
+encoding at least once. All 43 selected-source-linked
 standalone-core results matched ordered per-product BF16 round-to-nearest-even
 under this bound. The oracle also checks the positive tie and negative
 half-ULP cases. This is a bounded MXU0 observation, not general numerical
@@ -161,7 +162,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
-| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 20 seeded finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. General arithmetic and scheduling remain open |
+| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. General arithmetic and scheduling remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent

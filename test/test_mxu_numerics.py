@@ -108,12 +108,20 @@ class MXUNumericsTest(unittest.TestCase):
 
             cosim_atlas.CosimCore = SelectedCore
             rng = random.Random(0xA71A5)
-            values = (0x18, 0x30, 0x38, 0x40, 0x98, 0xB0, 0xB8, 0xC0)
+            values = tuple(bits for bits in range(256) if ((bits >> 3) & 15) > 0 and
+                           not (((bits >> 3) & 15) == 15 and (bits & 7) == 7))
+            cases = []
+            for _ in range(40):
+                k = rng.randint(2, 32)
+                cases.append((tuple(rng.choice(values) for _ in range(k)),
+                              tuple(rng.choice(values) for _ in range(k))))
+            covered = {bit for weights, acts in cases for bit in (*weights, *acts)}
+            for bit in sorted(set(values) - covered):
+                cases.append(((bit, 0), (0x38, 0x38)))
+            self.assertEqual({bit for weights, acts in cases for bit in (*weights, *acts)} & set(values),
+                             set(values))
             try:
-                for case in range(20):
-                    k = rng.randint(2, 16)
-                    weights = tuple(rng.choice(values) for _ in range(k))
-                    acts = tuple(rng.choice(values) for _ in range(k))
+                for case, (weights, acts) in enumerate(cases):
                     expected = dot(weights, acts)
                     with self.subTest(case=case, weights=weights, acts=acts):
                         result = cosim_atlas.run_program(
