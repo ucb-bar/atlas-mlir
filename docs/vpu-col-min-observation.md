@@ -14,8 +14,10 @@ minimum for every one of its 32 logical columns. The selected RTL's
 64-row accumulation pass. `VectorEngine.scala` feeds one 16-lane
 `PairWiseMin` accumulator, then the FSM broadcasts its 16 result lanes to
 both destination banks. This source reading predicts a 64-by-16 physical
-column reduction; it does not settle whether the RTL or the architectural
-intent should define a future executable compatibility contract.
+column reduction. The
+[selected-RTL compatibility decision](selected-rtl-column-reduction-contract.md)
+uses that executing behavior for this source revision and retains the
+architectural 32-by-32 result as a discrepancy.
 
 The [typed 36-word stream](../test/examples/vpu_col_min_pair.mlir) loads a
 32-by-32 architectural BF16 tile into a register pair and stores both output
@@ -40,7 +42,7 @@ Each run halted, observed 64 DMA reads and 64 writes, preserved the full
 `DELAY 256` is diagnostic slack for the two-pass column operation, not a
 qualified minimum availability bound. This evidence covers one register
 pair, the finite-normal panels, this program, and the standalone core with
-ModeLIR's external TileLink driver. The intent/RTL layout mismatch, general
-numerical behavior, temporal scheduling, and integrated SoC execution
-remain unresolved. `VREDMIN_BF16` stays outside a frozen executable
-software contract. Local logs are under `out/qualifications/oot-vpu-col-min-r1/`.
+ModeLIR's external TileLink driver. General numerical behavior, temporal
+scheduling, and integrated SoC execution remain unqualified. `VREDMIN_BF16`
+stays outside a frozen executable software admission despite the selected
+layout decision. Local logs are under `out/qualifications/oot-vpu-col-min-r1/`.

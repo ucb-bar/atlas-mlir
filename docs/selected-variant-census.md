@@ -49,6 +49,11 @@ proven in-block word-index target from a restricted straight-line scalar
 prefix; unresolved dynamic targets remain rejected. `blocked=99` means each mode still lacks some full D-gate evidence,
 even when a bounded mode-specific test passed.
 
+The executable compatibility direction for BF16 column minimum and maximum
+is now the [selected RTL's 64-by-16 physical reduction](selected-rtl-column-reduction-contract.md).
+This resolves which layout the compiler should target for this revision; it
+does not change the software-admission or blocked counts above.
+
 The independently checked bounded modes are DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VSQUARE, VCUBE, column minimum and maximum, row sum, row minimum and row maximum, all four VLI

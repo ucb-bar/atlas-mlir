@@ -37,5 +37,7 @@ failures. The retained CTest summary is under
 cover one register pair, two finite-normal panels, this flat program, and a
 standalone core driven by ModeLIR. Exceptional values, arbitrary register
 pairs, timing, and integrated SoC behavior remain unqualified. The
-intent/RTL layout discrepancy prevents software admission without a reviewed
-compatibility decision. Gate D remains blocked.
+layout selection is recorded in the
+[selected-RTL compatibility decision](selected-rtl-column-reduction-contract.md).
+The remaining numerical, timing, and integrated-execution obligations prevent
+software admission. Gate D remains blocked.
