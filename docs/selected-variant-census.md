@@ -34,11 +34,11 @@ run does not execute it.
 | DMA | 4 | 4 | 3 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
-| VPU arithmetic, reduction, pack | 25 | 25 | 15 | 25 |
+| VPU arithmetic, reduction, pack | 25 | 25 | 16 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 3 | 49 |
-| **Total** | **99** | **99** | **30** | **99** |
+| **Total** | **99** | **99** | **31** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -51,7 +51,7 @@ even when a bounded mode-specific test passed.
 
 The independently checked bounded modes are DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
-VRELU, VSQUARE, VCUBE, column minimum, row sum, row minimum and row maximum, all four VLI
+VRELU, VSQUARE, VCUBE, column minimum and maximum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, and bounded JALR. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
@@ -66,7 +66,7 @@ accumulator variants, full-domain VLI qualification, remaining VPU unary and col
 modes, scalar/CSR/control variants, complete reserved-field legality,
 cross-family timing, and integrated execution. Model/RTL differences for
 DMA config, CSRRCI, square/cube encodings, VMOV width, VADD rounding,
-row-sum order, column-minimum layout, pack/unpack physical row order, and MXU arithmetic are recorded per mode. Selective VLI modes
+row-sum order, column-minimum/maximum layout, pack/unpack physical row order, and MXU arithmetic are recorded per mode. Selective VLI modes
 now have a [bounded raw-bit standalone-core test](vli-selective-observation.md):
 the selected RTL writes a raw immediate while the inspected model routine
 numerically assigns that integer to a BF16 tensor before a bit view. See

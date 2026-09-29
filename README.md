@@ -296,6 +296,10 @@ both halves, while the architectural/model view expects separate minima for
 32 logical columns. Two panels made the high and low halves win in turn and
 matched the selected RTL's 64-by-16 result. The intended 32-by-32 behavior
 remains blocked pending a reviewed compatibility decision.
+The [VPU BF16 column-maximum check](docs/vpu-col-max-observation.md) likewise
+matched a 64-by-16 physical-lane maximum and disagreed with separate maxima
+for 32 logical columns. Two finite-normal panels made opposite register halves
+win; the layout difference remains unresolved for admission.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -333,6 +337,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
 | VPU BF16 row maximum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row raw-bit panels checked both broadcast result halves, signed zeros, NaNs, infinities, input and guard on selected standalone core. Other encodings and general timing remain open |
 | VPU BF16 column minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two finite-normal panels checked the selected core's 64-by-16 physical-column result and demonstrated disagreement with the 32-by-32 architectural/model result. The layout discrepancy, full-domain semantics, and timing remain unresolved |
+| VPU BF16 column maximum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two finite-normal panels checked the selected core's 64-by-16 physical-column result and demonstrated disagreement with the 32-by-32 architectural/model result. The layout discrepancy, full-domain semantics, and timing remain unresolved |
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
 | VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
