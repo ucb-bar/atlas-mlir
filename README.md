@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Three test programs have diagnostic
+initialization, or completion/drain protocol. Four test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 26/26 Python test
+selected RTL checkout. The current diagnostic run passed 29/29 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -134,6 +134,12 @@ matched the selected assembler and LLVM object words, then executed on the
 selected-source-linked standalone core for four sparse/control input cases.
 A 42-word variant stored both BF16 register halves; a weight at logical output
 column 20 appeared in the second half at checked halfword index 4.
+The hand-authored 36-word VRELU stream matched the independent selected
+assembler and the RISC-V object bytes, then executed two dense BF16 panels
+through both register halves on the same selected-source-linked standalone
+core. All 1,024 cells per panel matched a small independent finite-value
+reference; an otherwise identical VMOV-mode program produced distinguishable
+negative-value output. See [the bounded VPU observation](docs/vpu-relu-observation.md).
 An independent exact-rational oracle additionally checked 43 vectors
 of length 2–32 at one MXU0 output cell: 40 seeded vectors across the finite
 normal E4M3 domain plus three directed cases to include every normal input
@@ -163,6 +169,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. General arithmetic and scheduling remain open |
+| VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
 This package should become a golden *comparison reference* only after independent
