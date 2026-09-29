@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Five test programs have diagnostic
+initialization, or completion/drain protocol. Six test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 32/32 Python test
+selected RTL checkout. The current diagnostic run passed 36/36 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -156,6 +156,12 @@ selected-source-linked standalone-core runs checked every output cell in both
 BF16 register halves against the independent ordered-BF16 oracle, including
 a reset mutation that yields the second tile alone. The tested finite FP8
 set, timing and launch scope remain bounded as described in that note.
+The separate [MXU1 anchor-tree check](docs/mxu1-anchor-observation.md) uses
+a 42-word typed stream and an independent exact-rational round-once reference.
+Three MXU1 standalone-core runs checked both BF16 register halves across
+1,024 output cells each. A tie case produced `0x3f81` on MXU1 and `0x3f80`
+on the separately executed MXU0 path, demonstrating a numerical-policy
+distinction on that input. Broader MXU1 ranges and state remain open.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -170,12 +176,13 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Custom RTL pattern representation | 50/50 selected custom BitPat rows have a typed parameterized MLIR operation route |
 | Scalar/control/CSR representation | 49/49 selected BitPat rows have a typed parameterized MLIR operation route |
 | Source-level word emission | 99/99 selected BitPat rows crosschecked at fixed-bit level; valid fields and integrated decode remain unqualified |
-| Exact numerical semantics | Four typed MXU0 sparse/control cases executed on selected-source-linked standalone core, including ordered-rounding and weight-orientation discriminators; full MXU/VPU and scale semantics remain unqualified |
+| Exact numerical semantics | Bounded MXU0 ordered-BF16 and MXU1 anchor-tree cases executed separately on selected-source-linked standalone core, including a tie that distinguishes the units; full MXU/VPU and scale semantics remain unqualified |
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
+| MXU1 arithmetic | Hand-authored typed 42-word program matched selected assembler and LLVM object bytes; three bounded finite cases checked all 1,024 output cells on the selected-source-linked standalone core, plus a paired MXU0 tie comparison. General anchor precision, accumulation, and scheduling remain open |
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 
