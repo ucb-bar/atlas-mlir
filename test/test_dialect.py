@@ -268,6 +268,17 @@ class AtlasDialectTest(unittest.TestCase):
         unique = {(pattern, word) for word, (_, _, pattern) in zip(words, cases, strict=True)}
         self.assertGreaterEqual(len(unique), 1000)
 
+    def test_selected_pattern_census_is_exact(self) -> None:
+        modeled = [name for _, _, name in variants() + scalar_variants()]
+        self.assertEqual(len(modeled), 99)
+        self.assertEqual(len(set(modeled)), 99)
+        rtl_root = os.environ.get("ATLAS_RTL_ROOT")
+        if not rtl_root:
+            return
+        instructions = pathlib.Path(rtl_root) / "src/main/scala/atlas/scalar/Instructions.scala"
+        actual = set(re.findall(r'def\s+(\w+)\s*=\s*BitPat', instructions.read_text()))
+        self.assertEqual(set(modeled), actual)
+
     def test_negative_verifiers(self) -> None:
         base = variants()
         failures = [
