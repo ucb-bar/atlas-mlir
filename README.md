@@ -30,8 +30,11 @@ outside the block; it does not resolve dynamic control flow.
 This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
-has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Fifteen test programs have diagnostic
+has no callable Atlas ABI, register-save policy, dynamic arguments, or
+qualified completion/drain protocol. A separate bounded
+[reset-entry capsule](docs/atlas-launch-abi-gap.md) now declares fixed DRAM
+input/output regions and checked IMEM words for one standalone program; it
+does not make the LLVM function C-callable. Multiple test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -301,6 +304,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
+| Bounded reset-entry capsule | ACT-independent `atlas-boot-pack` binds checked Atlas source words to one complete ELF `.text`, writes `program.bin` and an explicit fixed-DRAM manifest, and executes the packaged bytes on selected standalone AtlasCore; no callable ABI or integrated SoC claim |
 
 No row in the **99 selected RTL BitPat-row inventory** lacks a typed operation
 route or source-level emitter: the count of unrepresented BitPat rows is 0/99.
