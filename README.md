@@ -200,6 +200,12 @@ special encodings. Two complete 1,024-element panels matched the selected
 standalone core, including its NaN-to-positive-zero behavior. The selected
 funct7 `0x46` differs from the inspected model class's `0x4e`; full-domain
 arithmetic and timing remain unqualified.
+The separate [LLVM boot-entry check](docs/llvm-boot-entry-observation.md)
+loaded all 37 words of one LLVM-produced `atlas_program` function into the
+selected standalone core and executed it to ECALL halt. It checked the ELF
+symbol, executable section, and absence of text relocations; the complete
+output matched the independent VSQUARE reference. This is a fixed-address
+diagnostic entry, not a callable Atlas ABI or an ELF runtime loader.
 The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
 uses a 16-word typed stream and a before/after-launch mutation. On the
 selected standalone core, changing the address register immediately after
@@ -249,6 +255,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
+| LLVM-produced function boot entry | One full 37-word ELF `.text` function executed on selected standalone core with fixed DRAM preload and ECALL halt; PC trace excluded LLVM RET. No general call ABI or ELF loader |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
 | DMA scalar pointer capture | Typed 16-word stream matched selected assembler and LLVM object bytes; selected standalone core chose A when the address register changed to B after issue and B when changed before issue, with complete 128-byte output/input/guard checks. General queueing, timing and integrated behavior remain open |
 | MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
