@@ -907,15 +907,16 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_min_reference.py::test_selected_core_matches_bit_order_and_preserves_inputs",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "rtl_raw_bit_min_vs_model_torch_minimum"
+      ],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_PAIRMIN,XLU_X,MEM_X,LSU_X"
     },
     {
