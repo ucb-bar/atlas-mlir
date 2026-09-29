@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Twelve test programs have diagnostic
+initialization, or completion/drain protocol. Thirteen test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 59/59 Python test
+selected RTL checkout. The current diagnostic run passed 63/63 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -186,6 +186,11 @@ subset. Two complete 1,024-element panels matched the selected standalone
 core, including a case that distinguishes the RTL's final BF16 bit chop from
 nearest-even rounding. Other arithmetic and temporal behavior remains
 unqualified.
+The [VPU BF16 pairwise maximum check](docs/vpu-max-observation.md) uses a
+49-word typed stream and a separate raw-bit ordering calculation. Two
+complete 1,024-element panels matched the selected standalone core, including
+signed-zero and NaN encoding cases that a generic floating-point maximum
+cannot explain. General timing and integrated execution remain unqualified.
 The separate [VPU BF16 row-sum check](docs/vpu-row-sum-observation.md) uses a
 36-word typed stream and an exact-rational FP32 tree reference. Two full
 32-row panels matched the selected standalone core, including a row that
@@ -223,6 +228,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 addition | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two bounded 1,024-element panels executed with both output halves, all inputs, and guard checked. FP32-inexact sums and exceptional values remain open |
 | VPU BF16 multiply | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two finite-normal 1,024-element panels checked BF16 nearest-even ties, signs, both output halves, inputs and guard on selected standalone core. Exceptional values and general timing remain open |
 | VPU BF16 subtraction | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two FP32-exact finite-normal 1,024-element panels checked subtraction order, signs, final BF16 bit chop, both output halves, inputs and guard on selected standalone core. FP32-inexact differences, exceptional values, and general timing remain open |
+| VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
