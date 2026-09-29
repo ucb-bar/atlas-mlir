@@ -168,6 +168,11 @@ Three MXU1 standalone-core runs checked both BF16 register halves across
 1,024 output cells each. A tie case produced `0x3f81` on MXU1 and `0x3f80`
 on the separately executed MXU0 path, demonstrating a numerical-policy
 distinction on that input. Broader MXU1 ranges and state remain open.
+The [MXU arithmetic discriminator](docs/mxu-arithmetic-discriminator-observation.md)
+uses two exact bit-level witnesses to compare MXU0 ordered BF16 steps,
+MXU1's bounded single-rounding path, and the inspected model's FP16-then-BF16
+expression. Four standalone-core runs found a model mismatch for each unit
+on a different witness; no full-domain numerical contract follows.
 The [two-K-tile MXU1 continuation check](docs/mxu1-continuation-observation.md)
 compares a rounded prior tile plus the second tile against reset and a
 single 64-product rounding. Six bounded standalone-core runs checked all
