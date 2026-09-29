@@ -31,7 +31,7 @@ This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
 has no Atlas launch ABI, input/output plan, register-save policy, memory
-initialization, or completion/drain protocol. Four test programs have diagnostic
+initialization, or completion/drain protocol. Five test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
 The tests load the extracted instruction words through ModeLIR's existing
@@ -90,7 +90,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 29/29 Python test
+selected RTL checkout. The current diagnostic run passed 32/32 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -148,7 +148,14 @@ standalone-core results matched ordered per-product BF16 round-to-nearest-even
 under this bound. The oracle also checks the positive tie and negative
 half-ULP cases. This is a bounded MXU0 observation, not general numerical
 qualification; subnormals, NaNs, overflow, initial accumulators, MXU1, and
-the other output cells still need independent checks.
+the other output cells in that single-tile numerical corpus still need
+independent checks.
+The separate [two-K-tile MXU0 check](docs/mxu0-k-continuation-observation.md)
+compares reset and continuation on a 57-word typed stream. Four
+selected-source-linked standalone-core runs checked every output cell in both
+BF16 register halves against the independent ordered-BF16 oracle, including
+a reset mutation that yields the second tile alone. The tested finite FP8
+set, timing and launch scope remain bounded as described in that note.
 
 The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
 patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
@@ -168,7 +175,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
-| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. General arithmetic and scheduling remain open |
+| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
 | VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
 | Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
 

@@ -2,8 +2,8 @@
 
 Source observations for RTL `0079c0541111197741a231c002e3843fa6f545b2`
 and local model `5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d`. These
-are primarily static checks. The branch row also records a diagnostic
-`AtlasCore` ARC execution. A fresh elaboration of the selected source copy
+are primarily static checks, with bounded branch, DMA, MXU0, and VPU
+diagnostic `AtlasCore` ARC executions. A fresh elaboration of the selected source copy
 and a fresh ARC rebuild now link that standalone core model to the selected
 Atlas Scala bytes. Fresh checkouts at the selected Atlas Git submodule pins
 matched all 45 `sp26-fp-units` files and all 26 present `fpex` files byte for
@@ -16,9 +16,9 @@ execution remains unqualified.
 | DMA config | `Instructions.scala::DMA_CONFIG_ANY` fixes funct7 to zero; `DMA_WAIT_ANY` fixes it to one | `DMA_CONFIG_CH0..7` set funct7 to one | Emitter uses RTL config word and reserves other fields at zero; integrated DMA config/wait behavior still needs testing. |
 | CSRRCI | `Instructions.scala::CSRRCI` has funct3 `111` | Model class has funct3 `100` | Word and LLVM lowering use selected RTL bits; integrated CSR behavior remains unqualified. |
 | Square/cube VPU encodings | `VSQUARE_BF16` uses funct7 `0x46`; `VCUBE_BF16` uses `0x47` | Model classes use `0x4e` and `0x4f` | Emitter uses selected RTL; numerical execution and dispatch still need qualification. |
-| VPU BF16 pair alignment | `ScalarCore.scala` asserts even source and destination banks for VPU pair operations | Model helper checks only that pair base is below register 63 | Verifier conservatively requires even pair bases in VPU paths. |
-| VPU move width | `ScalarCore.scala` treats `VMOV` as a pair read/write | Model `VMOV.exec` reads and writes one BF16 register | Verifier treats it as a pair; semantics unresolved. |
-| MXU arithmetic | MXU0 uses `PEArchitecture.CustomFMA` (`E4M3FMA`) while MXU1 uses an anchor-aligned integer reduction tree; they need separate contracts | Model `_vmatmul` uses FP16 matmul and converts to BF16 | No model/RTL arithmetic equivalence is claimed. The 43-case exact-rational MXU0 check covers one cell, every finite normal E4M3 encoding at least once, and ordered BF16 steps only. |
+| VPU BF16 pair alignment | `ScalarCore.scala` asserts even source and destination banks for VPU pair operations | Model helper checks only that pair base is below register 63 | Verifier requires even pair bases in VPU paths. The bounded VRELU stream checked both halves over two finite panels. |
+| VPU move width | `ScalarCore.scala` treats `VMOV` as a pair read/write | Model `VMOV.exec` reads and writes one BF16 register | Verifier treats it as a pair. A selected-core VRELU-to-VMOV mutation preserved both input halves for one finite panel; general semantics remain open. |
+| MXU arithmetic | MXU0 uses `PEArchitecture.CustomFMA` (`E4M3FMA`) while MXU1 uses an anchor-aligned integer reduction tree; they need separate contracts | Model `_vmatmul` uses FP16 matmul and converts to BF16 | No model/RTL arithmetic equivalence is claimed. The 43-case exact-rational MXU0 check covers one cell and every finite normal E4M3 encoding at least once. A separate two-K reset/continuation check compared all 1,024 cells for dense and fixed-seed mixed finite inputs against ordered BF16 steps. |
 | Branch delay | `PcControl.scala` describes/implements one delay slot in the inspected RTL | `npu_spec/04_functional_units/README.md` requires two | Emitter requires one following non-redirecting instruction. A typed branch stream and changed-target mutation exhibited one-slot behavior on the rebuilt standalone `AtlasCore` ARC model; integrated SoC execution remains open. |
 | CSR address aliases | `CSRFile.scala` maps only `0xC00..0xC03` and `0xC10..0xC11`; an unmapped scalar CSR address defaults to the cycle-counter index | The ISA names a scale-register CSR range, but the selected internal CSR file does not route it | Verifier allows only the six mapped addresses and zero-source reads of read-only status/illegal registers. Integrated CSR behavior still needs testing. |
 | Scale interpretation | RTL VPU pack/unpack uses an E8M0 exponent shift | This local model revision contains a later E8M0 fix; earlier inspected model revision did not | `scale_reg` is explicit for pack/unpack and FP8 MXU pop; no quantization semantics are certified. |
