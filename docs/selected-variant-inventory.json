@@ -3012,6 +3012,7 @@
       "bounded_evidence": "test_jalr_reference.py::test_selected_core_executes_odd_word_target_link_and_one_slot",
       "blocked": [
         "unproven_dynamic_targets",
+        "no_architectural_scalar_load_completion_wait",
         "link_abi_and_integrated_execution"
       ],
       "source_discrepancies": [

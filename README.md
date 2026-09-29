@@ -195,6 +195,10 @@ The [JALR word-target check](docs/jalr-word-target-observation.md) validates
 an odd register-indirect word target, signed offset, link value, and one
 delay slot against selected standalone-core execution. General dynamic
 targets and a callable LLVM/Atlas ABI remain unqualified.
+The [scalar-load/JALR timing check](docs/jalr-load-delay-observation.md)
+distinguishes a fixed `DELAY` from `FENCE` and zero delay after a scalar LW.
+The loaded target remains rejected by LLVM lowering because its value is not
+statically proven.
 The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
 29-word typed stream and an independent raw-byte index reference. Three
 selected-source-linked standalone-core executions checked all 1,024 bytes
