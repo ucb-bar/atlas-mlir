@@ -3,6 +3,7 @@
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
+#include <array>
 #include <optional>
 
 using namespace mlir;
@@ -188,6 +189,57 @@ FailureOr<uint32_t> mlir::atlas::encodeMachineWord(Operation *op) {
   return failure();
 }
 
+// ScalarCore.scala uses the scalar register value plus a signed I-immediate
+// as a *word-index* PC for JALR. The single LLVM inline-assembly block can
+// only contain the jump if that register value is proven from the linear
+// prefix. This deliberately recognizes only synchronous LUI/ADDI constant
+// materialization. Prior redirects, asynchronous scalar loads, and unknown
+// effects make the proof inconclusive rather than silently accepting a
+// possibly escaping target.
+static FailureOr<uint32_t> proveJalrTarget(
+    llvm::ArrayRef<Operation *> ops, size_t index, JumpOp jump) {
+  std::array<std::optional<uint32_t>, 32> values{};
+  values[0] = 0;
+  auto write = [&](unsigned dst, std::optional<uint32_t> value) {
+    if (dst != 0) values[dst] = value;
+  };
+  for (size_t i = 0; i < index; ++i) {
+    Operation *op = ops[i];
+    if (isa<BranchOp, JumpOp, TrapOp, CSROp, ScalarLoadOp>(op)) {
+      jump.emitError("JALR target proof cannot cross earlier control flow, CSR effects, or an asynchronous scalar load");
+      return failure();
+    }
+    if (auto alu = dyn_cast<ALUImmOp>(op)) {
+      std::optional<uint32_t> result;
+      if (alu.getKind() == "addi" && values[alu.getSrc()]) {
+        auto immediate = alu.getImmediateAttr().getValue().getSExtValue();
+        result = *values[alu.getSrc()] + static_cast<uint32_t>(immediate);
+      }
+      write(alu.getDst(), result);
+    } else if (auto upper = dyn_cast<UpperOp>(op)) {
+      write(upper.getDst(), upper.getKind() == "lui"
+                                 ? std::optional<uint32_t>(upper.getImmediate() << 12)
+                                 : std::nullopt);
+    } else if (auto alu = dyn_cast<ALURegOp>(op)) {
+      write(alu.getDst(), std::nullopt);
+    } else if (!isa<DelayOp, FenceOp>(op)) {
+      jump.emitError("JALR target proof has an unmodeled preceding instruction effect");
+      return failure();
+    }
+  }
+  if (!values[jump.getBase()]) {
+    jump.emitError("JALR base register has no proven constant word-index value");
+    return failure();
+  }
+  auto offset = jump.getOffsetAttr().getValue().getSExtValue();
+  int64_t target = static_cast<int64_t>(*values[jump.getBase()]) + offset;
+  if (target < 0 || target >= static_cast<int64_t>(ops.size())) {
+    jump.emitError("JALR register-indirect target escapes the LLVM inline assembly block");
+    return failure();
+  }
+  return static_cast<uint32_t>(target);
+}
+
 LogicalResult mlir::atlas::collectAtlasWords(
     ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock) {
   if (failed(verify(module))) return failure();
@@ -217,12 +269,6 @@ LogicalResult mlir::atlas::collectAtlasWords(
       return failure();
     }
     needsDelaySlot = redirects;
-    if (llvmBlock)
-      if (auto jump = dyn_cast<JumpOp>(&op))
-        if (jump.getKind() == "jalr") {
-          op.emitError("JALR has no statically checkable target in an LLVM inline assembly block");
-          return failure();
-        }
     auto word = encodeMachineWord(&op);
     if (failed(word)) {
       op.emitError("has no selected RTL encoding");
@@ -242,6 +288,13 @@ LogicalResult mlir::atlas::collectAtlasWords(
   }
   if (llvmBlock) {
     for (auto [index, op] : llvm::enumerate(encodedOps)) {
+      if (auto jump = dyn_cast<JumpOp>(op)) {
+        if (jump.getKind() == "jalr") {
+          if (failed(proveJalrTarget(encodedOps, index, jump)))
+            return failure();
+          continue;
+        }
+      }
       int64_t offsetBytes = 0;
       // The generated I32 accessors expose raw unsigned bits. Interpret the
       // encoded displacement as signed before validating backward targets.

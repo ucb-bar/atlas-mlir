@@ -24,8 +24,10 @@ RTL's DMA config encoding. The registered `--convert-atlas-to-llvm` pass
 lowers a flat validated stream to `llvm.func @atlas_program` with one
 side-effecting `llvm.inline_asm` block containing the selected words in order.
 One block keeps direct branch targets and the next delay-slot instruction
-adjacent through LLVM lowering. The pass rejects JALR and direct targets
-outside the block; it does not resolve dynamic control flow.
+adjacent through LLVM lowering. The pass accepts JALR only when a restricted
+straight-line scalar prefix proves its register-indirect word-index target
+remains in that block. It rejects unresolved targets and direct targets
+outside the block; it does not provide a general dynamic-control ABI.
 
 This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
@@ -131,8 +133,9 @@ match checks fixed encoding bits; it does not establish hardware legality or
 semantic correctness.
 
 The LLVM conversion tests check a single ordered side-effecting assembly
-block, 98/99 selected pattern variants with statically bounded control flow,
-explicit rejection of JALR, escaping targets, unsupported nested operations,
+block, 98 unconstrained selected pattern variants and one JALR variant with
+a proven in-block target. They reject unresolved JALR and escaping targets,
+unsupported nested operations,
 and broken state/delay-slot chains. A smoke test translates the MXU example to
 LLVM IR and assembles an ELF32 RISC-V object whose disassembly contains the
 four selected words. A separate hand-authored 35-word MXU0 stream also
@@ -188,6 +191,10 @@ checks a launch-time scalar-address snapshot followed by two waited transfers
 that reuse VMEM. It compares typed, assembled, and LLVM-object words and
 checks guarded outputs and internal busy/marker order on the selected
 standalone core. It does not establish an unrestricted DMA timing contract.
+The [JALR word-target check](docs/jalr-word-target-observation.md) validates
+an odd register-indirect word target, signed offset, link value, and one
+delay slot against selected standalone-core execution. General dynamic
+targets and a callable LLVM/Atlas ABI remain unqualified.
 The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
 29-word typed stream and an independent raw-byte index reference. Three
 selected-source-linked standalone-core executions checked all 1,024 bytes
@@ -303,7 +310,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | Branch delay positions and backward loop | A second 14-word typed BEQ/BLT stream matched selected assembler and LLVM object words. Selected standalone core executed the first taken-branch CSR side effect, skipped the second, and completed a three-iteration backward loop; the architectural spec's two-slot rule remains discrepant. Negative target/slot checks pass; integrated timing remains unqualified |
-| LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR rejected |
+| LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR accepted only with a proven in-block register target |
 | LLVM-produced function boot entry | One full 37-word ELF `.text` function executed on selected standalone core with fixed DRAM preload and ECALL halt; PC trace excluded LLVM RET. No general call ABI or ELF loader |
 | DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
 | DMA scalar pointer capture | Typed 16-word stream matched selected assembler and LLVM object bytes; selected standalone core chose A when the address register changed to B after issue and B when changed before issue, with complete 128-byte output/input/guard checks. General queueing, timing and integrated behavior remain open |

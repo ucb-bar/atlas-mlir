@@ -56,8 +56,8 @@ def validate_rows(inventory: dict, instruction_text: str, decode_text: str) -> N
             raise ValueError(f"decoder control drift: {name}")
         if not row["required"] or not row["represented"] or not row["word_emitted"]:
             raise ValueError(f"declared required/representation/emission drift: {name}")
-        if row["llvm_word_emitted"] != (name != "JALR"):
-            raise ValueError(f"LLVM emission exception drift: {name}")
+        if not row["llvm_word_emitted"]:
+            raise ValueError(f"declared LLVM word route drift: {name}")
         if row["software_admitted"]:
             raise ValueError(f"unreviewed full-domain admission: {name}")
         if row["standalone_core_executed"] != row["independent_semantic_test"]:

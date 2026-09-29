@@ -461,7 +461,7 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertEqual(result.stdout.count(".word"), 3)
 
     def test_llvm_pass_covers_static_selected_pattern_subset(self) -> None:
-        # JALR requires a runtime register target and is intentionally excluded.
+        # Unconstrained JALR remains excluded; the proved-target fixture covers it.
         cases = variants() + [
             case for case in scalar_variants()
             if not (case[0] == "jump" and case[1]["kind"] == "jalr")

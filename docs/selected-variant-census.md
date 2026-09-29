@@ -37,22 +37,22 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 15 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 2 | 49 |
-| **Total** | **99** | **99** | **29** | **99** |
+| Scalar, control, CSR | 49 | 49 | 3 | 49 |
+| **Total** | **99** | **99** | **30** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
 contract has not been frozen. This does not mean the hardware lacks those
-features. All 99 have typed representation and source-level word emission;
-98 also have an LLVM inline-assembly word route. JALR is deliberately refused
-by the single-block LLVM pass because its dynamic target cannot be checked
-there. `blocked=99` means each mode still lacks some full D-gate evidence,
+features. All 99 have typed representation, source-level word emission, and
+at least one LLVM inline-assembly word route. JALR's LLVM route requires a
+proven in-block word-index target from a restricted straight-line scalar
+prefix; unresolved dynamic targets remain rejected. `blocked=99` means each mode still lacks some full D-gate evidence,
 even when a bounded mode-specific test passed.
 
 The independently checked bounded modes are DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VSQUARE, VCUBE, column minimum, row sum, row minimum and row maximum, all four VLI
-modes, BF16/FP8 pack and unpack, XLU transpose, BEQ and BLT. The ledger links
+modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, and bounded JALR. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
