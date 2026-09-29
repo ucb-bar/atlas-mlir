@@ -194,6 +194,12 @@ The [VPU BF16 pairwise maximum check](docs/vpu-max-observation.md) uses a
 complete 1,024-element panels matched the selected standalone core, including
 signed-zero and NaN encoding cases that a generic floating-point maximum
 cannot explain. General timing and integrated execution remain unqualified.
+The [VPU BF16 square check](docs/vpu-square-observation.md) uses a 36-word
+typed stream and an independent raw-bit reference for exact powers of two and
+special encodings. Two complete 1,024-element panels matched the selected
+standalone core, including its NaN-to-positive-zero behavior. The selected
+funct7 `0x46` differs from the inspected model class's `0x4e`; full-domain
+arithmetic and timing remain unqualified.
 The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
 uses a 16-word typed stream and a before/after-launch mutation. On the
 selected standalone core, changing the address register immediately after
@@ -252,6 +258,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 multiply | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two finite-normal 1,024-element panels checked BF16 nearest-even ties, signs, both output halves, inputs and guard on selected standalone core. Exceptional values and general timing remain open |
 | VPU BF16 subtraction | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two FP32-exact finite-normal 1,024-element panels checked subtraction order, signs, final BF16 bit chop, both output halves, inputs and guard on selected standalone core. FP32-inexact differences, exceptional values, and general timing remain open |
 | VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
+| VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
