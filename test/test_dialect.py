@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import os
 import pathlib
+import random
 import re
 import subprocess
 import unittest
@@ -131,6 +132,63 @@ def scalar_variants() -> list[tuple[str, dict[str, object], str]]:
     return cases
 
 
+def randomized_case(
+    case: tuple[str, dict[str, object], str], rng: random.Random
+) -> tuple[str, dict[str, object], str]:
+    op, original, pattern = case
+    fields = dict(original)
+    for name in ("dst", "src", "lhs", "rhs", "base", "reg", "dram", "size", "base_reg", "source"):
+        if name not in fields:
+            continue
+        if (op == "jump" and fields.get("kind") == "jal" and name == "base") or (
+            op == "scalar_load" and fields.get("kind") == "seli" and name == "base"
+        ):
+            continue
+        physical = op in ("vload", "vstore", "mxu_push", "mxu_matmul", "mxu_pop",
+                          "vpu_binary", "vpu_unary", "vpu_pack", "vpu_reduce", "vli",
+                          "xlu_transpose") and name in ("dst", "src", "lhs", "rhs")
+        pair = (op == "vpu_binary" or op == "vpu_unary" or op == "vpu_reduce" or
+                op == "mxu_push" and fields.get("kind") == "acc_bf16" and name == "src" or
+                op == "mxu_pop" and fields.get("format") == "bf16" and name == "dst" or
+                op == "vpu_pack" and
+                ((fields["direction"] == "bf16_to_fp8" and name == "src") or
+                 (fields["direction"] == "fp8_to_bf16" and name == "dst")) or
+                op == "vli" and fields.get("mode") in ("all", "row") and name == "dst")
+        if physical and pair:
+            fields[name] = 2 * rng.randrange(32)
+        elif physical:
+            fields[name] = rng.randrange(64)
+        else:
+            fields[name] = rng.randrange(32)
+    if "channel" in fields:
+        fields["channel"] = rng.randrange(8)
+    for slot in ("slot", "weight_slot", "acc_slot"):
+        if slot in fields:
+            fields[slot] = rng.randrange(2)
+    if "scale_reg" in fields and not (op == "mxu_pop" and fields["format"] == "bf16"):
+        fields["scale_reg"] = rng.randrange(32)
+    if op in ("vload", "vstore", "scalar_store"):
+        fields["offset"] = rng.randrange(-2048, 2048)
+    elif op == "scalar_load":
+        fields["offset"] = rng.randrange(256) if fields["kind"] == "seli" else rng.randrange(-2048, 2048)
+    elif op == "alu_imm":
+        fields["immediate"] = rng.randrange(32) if fields["kind"] in ("slli", "srli", "srai") else rng.randrange(-2048, 2048)
+    elif op == "branch":
+        fields["offset_bytes"] = 2 * rng.randrange(-2048, 2048)
+    elif op == "jump":
+        fields["offset"] = (2 * rng.randrange(-524288, 524288) if fields["kind"] == "jal"
+                            else rng.randrange(-2048, 2048))
+    elif op == "delay":
+        fields["cycles"] = rng.randrange(4096)
+    elif op == "upper":
+        fields["immediate"] = rng.randrange(1 << 20)
+    elif op == "vli":
+        fields["immediate"] = rng.randrange(1 << 16)
+    elif op == "csr":
+        fields["address"] = rng.choice((0xC00, 0xC01, 0xC10, 0xC11))
+    return op, fields, pattern
+
+
 def check_rtl_bitpats(words: list[int], cases: list[tuple[str, dict[str, object], str]]) -> None:
     rtl_root = os.environ.get("ATLAS_RTL_ROOT")
     if not rtl_root:
@@ -194,6 +252,21 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertEqual(by_pattern["ECALL"], 0x00000073)
         self.assertEqual(by_pattern["EBREAK"], 0x00100073)
         check_rtl_bitpats(words, cases)
+
+    def test_seeded_encoding_variants(self) -> None:
+        rng = random.Random(0xA71A5)
+        cases = [
+            randomized_case(case, rng)
+            for _ in range(12) for case in variants() + scalar_variants()
+        ]
+        self.assertEqual(len(cases), 1188)
+        emitted = run(EMIT, program(cases))
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        words = [int(line, 16) for line in emitted.stdout.splitlines()]
+        self.assertEqual(len(words), 1188)
+        check_rtl_bitpats(words, cases)
+        unique = {(pattern, word) for word, (_, _, pattern) in zip(words, cases, strict=True)}
+        self.assertGreaterEqual(len(unique), 1000)
 
     def test_negative_verifiers(self) -> None:
         base = variants()

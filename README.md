@@ -63,6 +63,12 @@ negative verifier cases, and rejection of an invalid state/delay-slot stream. A 
 match checks fixed encoding bits; it does not establish hardware legality or
 semantic correctness.
 
+The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
+patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
+local Python 3.12 run). It varies register fields, slots, channels, and
+immediates within the verifier's declared domain. This is source-level
+encoding coverage, not 1,188 hardware-executed instruction cases.
+
 ## Scope of this candidate
 
 | Obligation | Current evidence |
