@@ -98,7 +98,7 @@ class HandoffExamplesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             for name, folder, tiles, expected in cases:
                 with self.subTest(name=name):
-                    elf = ROOT / "examples/handoff" / folder / "06-riscv-linked.elf"
+                    elf = ROOT / "examples/handoff" / folder / "07-riscv-linked.elf"
                     text_file = pathlib.Path(temporary) / f"{name}.text"
                     subprocess.run([
                         str(pathlib.Path(llvm) / "llvm-objcopy"),
@@ -128,7 +128,7 @@ class HandoffExamplesTest(unittest.TestCase):
                 "--output-dir", str(output),
             ], check=True, capture_output=True, text=True)
             manifest = json.loads((output / "manifest.json").read_text())
-            self.assertEqual(manifest["schema"], "atlas-llvm-handoff-v2")
+            self.assertEqual(manifest["schema"], "atlas-llvm-handoff-v3")
             stale = subprocess.run([
                 sys.executable, str(ROOT / "tools/export_llvm_handoff.py"),
                 "--atlas-bin-dir", str(BIN), "--llvm-bin-dir", llvm,
@@ -145,12 +145,13 @@ class HandoffExamplesTest(unittest.TestCase):
                               ("mlp_tile" if name == NAMES[0] else "attention_tile"))
                     stages = {
                         "atlas.mlir": "01-atlas-machine.mlir",
-                        "llvm.mlir": "02-llvm-dialect.mlir",
-                        "ll": "03-llvm-ir.ll",
-                        "s": "04-riscv-words.s",
-                        "o": "05-riscv-relocatable.o",
-                        "elf": "06-riscv-linked.elf",
-                        "disasm.txt": "07-riscv-disassembly.txt",
+                        "llvm-structured.mlir": "02-llvm-structured.mlir",
+                        "llvm.mlir": "03-llvm-encoded.mlir",
+                        "ll": "04-llvm-ir.ll",
+                        "s": "05-riscv-words.s",
+                        "o": "06-riscv-relocatable.o",
+                        "elf": "07-riscv-linked.elf",
+                        "disasm.txt": "08-riscv-disassembly.txt",
                         "words.txt": "atlas-words.txt",
                         "word-map.json": "atlas-word-map.json",
                     }
@@ -169,10 +170,16 @@ class HandoffExamplesTest(unittest.TestCase):
                     self.assertTrue(manifest["examples"][name]
                                     ["object_prefix_matches_emitter"])
                     llvm_mlir = (output / f"{name}.llvm.mlir").read_text()
-                    snapshot = (folder / "02-llvm-dialect.mlir").read_text()
+                    snapshot = (folder / "03-llvm-encoded.mlir").read_text()
                     self.assertEqual(llvm_mlir.rstrip(), snapshot.rstrip())
                     self.assertEqual(llvm_mlir.count("llvm.inline_asm"), 1)
                     self.assertIn("has_side_effects", llvm_mlir)
+                    structured = (output / f"{name}.llvm-structured.mlir").read_text()
+                    self.assertEqual(structured.count("llvm.call @atlas_emit_"),
+                                     len(words(name)))
+                    self.assertNotIn("llvm.inline_asm", structured)
+                    self.assertEqual(structured.count('atlas.availability = "unknown"'),
+                                     len(words(name)))
                     object_text = (output / f"{name}.text.bin").read_bytes()
                     expected = b"".join(struct.pack("<I", word)
                                         for word in words(name))
@@ -219,6 +226,32 @@ class HandoffExamplesTest(unittest.TestCase):
                         mapped[branch["word_index"] + 1]
                         ["delay_slot_for_word_index"], branch["word_index"]
                     )
+
+    def test_structured_llvm_rechecks_fields_and_words(self) -> None:
+        source = ROOT / "test/examples/handoff_mlp_tile.mlir"
+        structured = subprocess.run([
+            str(BIN / "atlas-opt"), "--convert-atlas-to-llvm-calls", str(source),
+        ], capture_output=True, text=True, check=True).stdout
+        direct = subprocess.run([
+            str(BIN / "atlas-opt"), "--convert-atlas-to-llvm", str(source),
+        ], capture_output=True, text=True, check=True).stdout
+        checked = subprocess.run([
+            str(BIN / "atlas-opt"), "--finalize-atlas-llvm-calls", "-",
+        ], input=structured, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(checked, direct)
+        self.assertIn("llvm.call @atlas_emit_mxu_matmul", structured)
+        for original, replacement in (
+            ("dst = 28 : i32", "dst = 27 : i32"),
+            ("atlas.word = 1052179 : i32", "atlas.word = 1052178 : i32"),
+            ("atlas.word_index = 0 : i32", "atlas.word_index = 1 : i32"),
+        ):
+            with self.subTest(original=original):
+                self.assertIn(original, structured)
+                changed = structured.replace(original, replacement, 1)
+                result = subprocess.run([
+                    str(BIN / "atlas-opt"), "--finalize-atlas-llvm-calls", "-",
+                ], input=changed, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_uniform_directed_programs_on_selected_core(self) -> None:
         cases = (

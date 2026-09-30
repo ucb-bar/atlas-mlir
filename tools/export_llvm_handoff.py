@@ -52,7 +52,7 @@ def main() -> None:
     revision = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
     dirty = bool(run(["git", "-C", str(ROOT), "status", "--porcelain"]))
     manifest: dict[str, object] = {
-        "schema": "atlas-llvm-handoff-v2",
+        "schema": "atlas-llvm-handoff-v3",
         "dialect_revision": revision,
         "working_tree_dirty": dirty,
         "selected_rtl_revision": RTL_REVISION,
@@ -78,8 +78,15 @@ def main() -> None:
                        or row["word_hex"] != f"{words[index]:08x}"
                        for index, row in enumerate(mapped))):
             raise RuntimeError(f"{name}: source operation map differs from emitted words")
-        llvm_mlir = run([str(atlas / "atlas-opt"), "--convert-atlas-to-llvm",
-                         str(source)]).rstrip() + "\n"
+        structured_mlir = run([
+            str(atlas / "atlas-opt"), "--convert-atlas-to-llvm-calls", str(source),
+        ]).rstrip() + "\n"
+        if (structured_mlir.count("llvm.call @atlas_emit_") != len(words)
+                or "llvm.inline_asm" in structured_mlir):
+            raise RuntimeError(f"{name}: structured LLVM call count differs from emitter")
+        llvm_mlir = run([
+            str(atlas / "atlas-opt"), "--finalize-atlas-llvm-calls", "-",
+        ], input_text=structured_mlir).rstrip() + "\n"
         if llvm_mlir.count("llvm.inline_asm has_side_effects") != 1:
             raise RuntimeError(f"{name}: expected one side-effecting LLVM inline asm")
         if llvm_mlir.count(".word 0x") != len(words):
@@ -125,6 +132,7 @@ def main() -> None:
         if not re.search(r"<atlas_program>:", disassembly):
             raise RuntimeError(f"{name}: linked ELF lost atlas_program symbol")
         shutil.copyfile(source, output / f"{name}.atlas.mlir")
+        (output / f"{name}.llvm-structured.mlir").write_text(structured_mlir)
         (output / f"{name}.llvm.mlir").write_text(llvm_mlir)
         (output / f"{name}.ll").write_text(llvm_ir)
         (output / f"{name}.s").write_text(asm)
@@ -135,6 +143,7 @@ def main() -> None:
         manifest["examples"][name] = {
             "word_count": len(words),
             "source_sha256": digest(raw),
+            "structured_llvm_mlir_sha256": digest(structured_mlir.encode()),
             "llvm_mlir_sha256": digest(llvm_mlir.encode()),
             "object_sha256": digest(obj.read_bytes()),
             "elf_sha256": digest(elf.read_bytes()),

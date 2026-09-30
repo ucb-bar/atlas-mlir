@@ -30,9 +30,12 @@ eight-digit hexadecimal 32-bit word per instruction, after checking the whole
 flat stream. It uses the RTL decoder's six-bit VR field layout and the selected
 RTL's DMA config encoding. The registered `--verify-atlas-machine-stream`
 pass checks the full physical stream without changing Atlas MLIR. The
-registered `--convert-atlas-to-llvm` pass
-lowers a flat validated stream to `llvm.func @atlas_program` with one
-side-effecting `llvm.inline_asm` block containing the selected words in order.
+registered `--convert-atlas-to-llvm-calls` pass preserves each checked
+instruction as a separate LLVM-dialect call with its operation fields and
+word index. `--finalize-atlas-llvm-calls` rechecks those calls and lowers to
+`llvm.func @atlas_program` with one side-effecting `llvm.inline_asm` block
+containing the selected words in order. The older direct
+`--convert-atlas-to-llvm` pass remains available and emits the same final block.
 One block keeps direct branch targets and the next delay-slot instruction
 adjacent through LLVM lowering. The pass accepts JALR only when a restricted
 straight-line scalar prefix proves its register-indirect word-index target

@@ -12,12 +12,13 @@ Open either directory in numeric order:
 | Stage | File | What to inspect |
 | --- | --- | --- |
 | 01 | [MLP Atlas](mlp_tile/01-atlas-machine.mlir) · [attention Atlas](attention_tile/01-atlas-machine.mlir) | Typed `atlas.*` operations and ordered `!atlas.state` chain. |
-| 02 | [MLP LLVM dialect](mlp_tile/02-llvm-dialect.mlir) · [attention LLVM dialect](attention_tile/02-llvm-dialect.mlir) | `llvm.func` and side-effecting inline assembly containing every Atlas word. |
-| 03 | [MLP LLVM IR](mlp_tile/03-llvm-ir.ll) · [attention LLVM IR](attention_tile/03-llvm-ir.ll) | LLVM IR translated by `mlir-translate`. |
-| 04 | [MLP RV32 assembly](mlp_tile/04-riscv-words.s) · [attention RV32 assembly](attention_tile/04-riscv-words.s) | `llc` output. Atlas words appear as `.word` directives, followed by LLVM's unreachable `ret`. |
-| 05 | [MLP relocatable object](mlp_tile/05-riscv-relocatable.o) · [attention relocatable object](attention_tile/05-riscv-relocatable.o) | ELF32 RISC-V `ET_REL` emitted by LLVM. |
-| 06 | [MLP linked ELF](mlp_tile/06-riscv-linked.elf) · [attention linked ELF](attention_tile/06-riscv-linked.elf) | ELF32 RISC-V `ET_EXEC` linked with `ld.lld`; `atlas_program` entry is at address zero. |
-| 07 | [MLP disassembly](mlp_tile/07-riscv-disassembly.txt) · [attention disassembly](attention_tile/07-riscv-disassembly.txt) | `llvm-objdump -d` view of the linked `.text`. Generic RISC-V decoding does not explain Atlas custom operations. |
+| 02 | [MLP structured LLVM dialect](mlp_tile/02-llvm-structured.mlir) · [attention structured LLVM dialect](attention_tile/02-llvm-structured.mlir) | One `llvm.call @atlas_emit_*` per instruction, with physical fields, checked word index, conservative effects, and unknown availability. These calls are compiler markers; run the finalizer before LLVM IR translation. |
+| 03 | [MLP encoded LLVM dialect](mlp_tile/03-llvm-encoded.mlir) · [attention encoded LLVM dialect](attention_tile/03-llvm-encoded.mlir) | Finalizer rechecks the stream and emits one side-effecting inline-assembly block. |
+| 04 | [MLP LLVM IR](mlp_tile/04-llvm-ir.ll) · [attention LLVM IR](attention_tile/04-llvm-ir.ll) | LLVM IR translated by `mlir-translate`. |
+| 05 | [MLP RV32 assembly](mlp_tile/05-riscv-words.s) · [attention RV32 assembly](attention_tile/05-riscv-words.s) | `llc` output. Atlas words appear as `.word` directives, followed by LLVM's unreachable `ret`. |
+| 06 | [MLP relocatable object](mlp_tile/06-riscv-relocatable.o) · [attention relocatable object](attention_tile/06-riscv-relocatable.o) | ELF32 RISC-V `ET_REL` emitted by LLVM. |
+| 07 | [MLP linked ELF](mlp_tile/07-riscv-linked.elf) · [attention linked ELF](attention_tile/07-riscv-linked.elf) | ELF32 RISC-V `ET_EXEC` linked with `ld.lld`; `atlas_program` entry is at address zero. |
+| 08 | [MLP disassembly](mlp_tile/08-riscv-disassembly.txt) · [attention disassembly](attention_tile/08-riscv-disassembly.txt) | `llvm-objdump -d` view of the linked `.text`. Generic RISC-V decoding does not explain Atlas custom operations. |
 
 The [MLP word map](mlp_tile/atlas-word-map.json) and [attention word map](attention_tile/atlas-word-map.json)
 connect each emitted word and byte offset back to its Atlas operation and
@@ -26,11 +27,12 @@ attributes. The paired `atlas-words.txt` files contain the independent
 assembly loses; they are the starting point for source-linked delay analysis.
 
 For example, the MLP Atlas source contains
-`"atlas.mxu_matmul"(...){unit = 0, ...}`. The LLVM dialect contains a
-side-effecting `llvm.inline_asm` with `.word 0x...` for the whole stream;
+`"atlas.mxu_matmul"(...){unit = 0, ...}`. The structured LLVM dialect has a
+corresponding `llvm.call @atlas_emit_mxu_matmul` with the same physical fields.
+The final LLVM dialect stage contains one side-effecting `llvm.inline_asm`;
 the LLVM IR represents that as `call void asm sideeffect`. `llc` prints the
-same words in [stage 04](mlp_tile/04-riscv-words.s), and
-[stage 07](mlp_tile/07-riscv-disassembly.txt) shows their addresses and bytes
+same words in [stage 05](mlp_tile/05-riscv-words.s), and
+[stage 08](mlp_tile/08-riscv-disassembly.txt) shows their addresses and bytes
 inside the linked ELF. The [word map](mlp_tile/atlas-word-map.json) identifies
 which Atlas operation produced each address. LLVM does not retain the names of
 the MXU, VPU, or DMA operations in the assembly itself.

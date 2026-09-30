@@ -72,6 +72,8 @@ between selected RTL, architecture text, and the inspected model.
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
+| `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
+| `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |
 | `--convert-atlas-to-llvm` | `atlas-opt` module pass | Replace checked stream with `llvm.func @atlas_program()` containing one side-effecting, ordered `llvm.inline_asm` word block and `llvm.return`. This is a reset-entry body, not a C-callable ABI. |
 | `atlas-emit` | tool, not pass | Emit words or `--map-json` sidecar with source operation, attributes, word index, branch/delay-slot mapping, conservative effects, and `availability: unknown`. |
 | `atlas-boot-pack` | tool, not pass | Package one checked reset-entry ELF `.text` section with a narrow authored memory layout and manifest. |
@@ -83,12 +85,18 @@ repository. Delays in the example programs are authored diagnostic spacing.
 
 ## Why the LLVM handoff uses inline assembly
 
-The selected unmodified LLVM RISC-V target does not define Atlas's custom
-tensor instructions or its instruction-index PC behavior. Standard LLVM IR
-therefore cannot carry an MXU, VPU, or DMA operation as a target instruction.
-`--convert-atlas-to-llvm` freezes the verified Atlas stream as one side-effecting
-inline-assembly block of encoded words. Keeping it in one block prevents LLVM
-from placing instructions between a branch and its selected delay slot or
+The MLIR LLVM dialect can retain an inspectable machine stream without an LLVM
+source change. `--convert-atlas-to-llvm-calls` now uses one `llvm.call` per
+Atlas instruction, keeping the operation family, physical fields, checked word,
+source location, and order. These calls are compiler markers. The finalizer
+reconstructs the typed Atlas stream and checks the encodings again; translating
+the marker calls directly to LLVM IR would leave unresolved external functions.
+
+The selected unmodified LLVM RISC-V code generator does not define Atlas's
+custom tensor instructions or its instruction-index PC behavior.
+`--finalize-atlas-llvm-calls` therefore freezes the verified stream as one
+side-effecting inline-assembly block of encoded words. Keeping it in one block
+prevents LLVM from placing instructions between a branch and its selected delay slot or
 changing the offsets of internal targets. The numbered handoff examples prove
 that LLVM emitted the checked bytes; they do not give LLVM knowledge of the
 Atlas operations or certify a callable function.
@@ -104,28 +112,35 @@ LLVM build. Splitting the current block into one inline-assembly call per
 Atlas operation would expose more boundaries in LLVM IR but could insert code
 between selected instructions and invalidate branch and delay-slot placement.
 
-The typed Atlas stream and `atlas-emit --map-json` sidecar are the reviewable
-inputs for timing annotations and scheduling. Perform those passes before
-`--convert-atlas-to-llvm`; keep the operation-to-word map with the resulting
-ELF so binary offsets remain traceable afterward.
+The typed Atlas stream is the primary place for timing annotations and
+scheduling. The structured LLVM-call stage is available for LLVM-dialect
+analysis and metadata passes; any pass that changes the instruction stream
+must update the checked fields, word, index, and source map consistently or
+the finalizer rejects it. Keep the `atlas-emit --map-json` sidecar with the
+resulting ELF so binary offsets remain traceable afterward.
 
-Nicolas and Jeremy can add resource/availability annotation and scheduling
-passes over this typed stream **before** LLVM conversion. The first pass
-should bind facts to a selected-RTL source identity and leave unknowns
-explicit. The second can insert waits/delays while preserving state order,
-the one-slot control rule, and asynchronous scalar/transfer lifetimes. The
-result should pass the stream verifier, emitter, and selected-core checks.
-LLVM inline assembly has lost the structure needed for those analyses.
+Nicolas and Jeremy can add resource/availability annotation passes on the
+structured LLVM-call stage, or on typed Atlas machine IR. The call attributes
+expose each operation and its physical fields without modifying LLVM. A pass
+that inserts or reorders instructions must also regenerate checked words,
+indexes, and the operation-to-word map. That support is not implemented yet;
+for scheduling work today, the typed Atlas stream already has the encoder and
+map exporter. The first annotation pass should bind facts to a selected-RTL
+source identity and leave unknowns explicit. A scheduler must preserve the
+one-slot control rule and asynchronous scalar/transfer lifetimes. Its result
+needs stream verification, fresh mapping, and selected-core checks. The final
+inline-assembly block no longer exposes individual operations.
 
 To add a pass, place its declaration under `include/Atlas/`, its implementation
 under `lib/`, list the new source in `lib/CMakeLists.txt`, and register it in
 `tools/atlas-opt.cpp`. `AtlasStreamVerification.cpp` is a minimal example of
 that wiring. Operation definitions and local legality belong in
 `include/Atlas/AtlasOps.td` and `lib/AtlasOps.cpp` if a new attribute or mode
-is actually required. Preserve the source-bound timing facts as typed Atlas
-attributes while analyzing or scheduling; the word-map exporter will carry
-the operation attributes to the binary offset. Once converted to LLVM, those
-attributes are no longer represented in the inline-assembly body.
+is actually required. Preserve source-bound timing facts as attributes on
+Atlas operations or structured LLVM calls. The word-map exporter carries
+Atlas operation attributes to binary offsets; an LLVM-call transformation
+that changes the stream also needs to update that map. The final block does
+not retain individual operation attributes.
 
 The current IR is a **flat word stream** with branch offsets, not a control-flow
 graph. A scheduler must account for backward branches and multiple executions
@@ -137,5 +152,8 @@ post-schedule selected-core runs before replacing `availability: unknown`.
 
 ```sh
 build/bin/atlas-opt --verify-atlas-machine-stream \
-  --convert-atlas-to-llvm test/examples/handoff_mlp_tile.mlir
+  --convert-atlas-to-llvm-calls test/examples/handoff_mlp_tile.mlir \
+  > out/mlp.structured-llvm.mlir
+build/bin/atlas-opt --finalize-atlas-llvm-calls \
+  out/mlp.structured-llvm.mlir > out/mlp.encoded-llvm.mlir
 ```

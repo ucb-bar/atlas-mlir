@@ -38,9 +38,31 @@ The full file shows the ReLU, pack, scalar relayout loop, second MXU, DMA
 stores, and termination. The state token fixes instruction order, including
 the loop's branch and its one executed delay slot.
 
-## Actual last stage
+## Structured LLVM dialect and final encoding
 
-The output has one function and one ordered, side-effecting inline assembly
+`--convert-atlas-to-llvm-calls` produces one LLVM-dialect call per checked
+Atlas instruction. For example:
+
+```mlir
+llvm.call @atlas_emit_mxu_matmul() {atlas.fields = {acc_slot = 0 : i32, accumulate = false, src = 0 : i32, unit = 0 : i32, weight_slot = 0 : i32}, atlas.source_op = "atlas.mxu_matmul", atlas.word = 335544439 : i32, atlas.word_index = 26 : i32} : () -> ()
+```
+
+The checked-in stage 02 files show the exact calls and values. These calls
+are compiler markers, not runtime functions. The LLVM dialect can carry
+per-instruction fields and annotations without changing LLVM. Before LLVM IR
+translation, `--finalize-atlas-llvm-calls` reconstructs the Atlas stream,
+rechecks each field/word pairing and control target, and replaces the calls
+with the final word block. An inconsistent field, word, or index is rejected.
+
+```sh
+build/bin/atlas-opt --convert-atlas-to-llvm-calls \
+  test/examples/handoff_mlp_tile.mlir > out/mlp.structured-llvm.mlir
+build/bin/atlas-opt --finalize-atlas-llvm-calls \
+  out/mlp.structured-llvm.mlir > out/mlp.encoded-llvm.mlir
+mlir-translate --mlir-to-llvmir out/mlp.encoded-llvm.mlir > out/mlp.ll
+```
+
+The final stage has one function and one ordered, side-effecting inline assembly
 operation. The MLP snapshot starts as follows; the full checked-in files retain
 all 102 or 116 words:
 
@@ -70,7 +92,8 @@ python tools/export_llvm_handoff.py \
   --output-dir out/llvm-handoff-fresh
 ```
 
-The output directory must be empty. The exporter checks that exactly one
+The output directory must be empty. The exporter checks that each structured
+call corresponds to one emitted word, then checks that exactly one final
 side-effecting inline-assembly operation contains all source words, compares
 the leading object words against `atlas-emit`, and checks that linking did not
 change `.text`. The linked ELF has entry `atlas_program` at zero. It records
@@ -112,12 +135,14 @@ shapes, a qualified schedule, or an integrated SoC launch.
 
 ## Delay-analysis handoff
 
-The LLVM snapshot is useful for object generation and exact byte comparison.
-It has lost operation names, physical resource roles, and the reason for each
-delay. A delay scheduler should consume the paired **Atlas machine MLIR**
-before `--convert-atlas-to-llvm`, plus a source-bound timing/effects contract.
-It can return a scheduled Atlas stream; this package can then revalidate and
-lower it to the same LLVM form.
+The structured LLVM snapshot retains operation names, physical fields, and
+instruction order. The final encoded LLVM snapshot is useful for object
+generation and exact byte comparison but has lost those roles. A delay
+scheduler can consume the **Atlas machine MLIR** or the structured LLVM-call
+stage with a source-bound timing/effects contract. Changes to an LLVM-call
+stream must retain field/word consistency and update word indexes and the
+source map; the current finalizer rechecks the former but does not regenerate
+the latter. Scheduling and availability qualification are not implemented here.
 
 The exporter emits `<example>.word-map.json` alongside LLVM MLIR. Its
 `atlas.machine_word_map.v1` rows bind every zero-based Atlas word index and
@@ -138,9 +163,10 @@ to the right word, then return an edited Atlas MLIR stream for verification
 and re-export. Unit-specific effects and timing bounds require source-backed
 contracts and tests before they can replace these unknowns.
 
-For a consumer that only accepts LLVM MLIR, the source-to-word-index sidecar
-is necessary for analysis. Editing individual `.word` instructions inside the
-inline-assembly string would bypass this dialect's verifiers and emission
-checks; schedule edits should return to Atlas MLIR and be lowered again.
+For a consumer that only accepts LLVM MLIR, stage 02 supplies one structured
+call per instruction; the source-to-word-index sidecar links it to the final
+binary. Editing individual `.word` instructions inside the final
+inline-assembly string would bypass the earlier dialect checks. Schedule edits
+should use Atlas MLIR or the structured LLVM-call stage and be revalidated.
 The exact adapter to another project remains to be defined against that
 project's parser and pass interface.

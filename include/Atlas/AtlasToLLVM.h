@@ -3,6 +3,8 @@
 
 namespace mlir::atlas {
 void registerConvertAtlasToLLVMPass();
+void registerConvertAtlasToLLVMCallsPass();
+void registerFinalizeAtlasLLVMCallsPass();
 }
 
 #endif
