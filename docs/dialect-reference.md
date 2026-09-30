@@ -119,7 +119,7 @@ must update the checked fields, word, index, and source map consistently or
 the finalizer rejects it. Keep the `atlas-emit --map-json` sidecar with the
 resulting ELF so binary offsets remain traceable afterward.
 
-Nicolas and Jeremy can add resource/availability annotation passes on the
+Contributors can add resource/availability annotation passes on the
 structured LLVM-call stage, or on typed Atlas machine IR. The call attributes
 expose each operation and its physical fields without modifying LLVM. A pass
 that inserts or reorders instructions must also regenerate checked words,

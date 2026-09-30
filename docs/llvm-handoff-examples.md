@@ -157,7 +157,7 @@ Python exporter does not recover operation identity from source text.
 The current dialect gives every issued operation conservative physical-state
 read/write effects. The sidecar reports `availability: "unknown"` for every
 row, including an explicit `atlas.delay`: a stall count alone does not prove
-an MXU result or DMA transfer has completed. Jeremy's scheduler can use the
+an MXU result or DMA transfer has completed. A scheduling pass can use the
 index map to attach qualified resource, scalar lifetime, and completion facts
 to the right word, then return an edited Atlas MLIR stream for verification
 and re-export. Unit-specific effects and timing bounds require source-backed
