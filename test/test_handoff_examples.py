@@ -105,6 +105,10 @@ class HandoffExamplesTest(unittest.TestCase):
                              manifest)
             for name in NAMES:
                 with self.subTest(name=name):
+                    source = (ROOT / "test/examples" / f"{name}.mlir").read_text()
+                    self.assertEqual(source.count('"atlas.branch"'), 1)
+                    self.assertEqual(source.count('kind = "lw"'), 8)
+                    self.assertEqual(source.count('"atlas.scalar_store"'), 8)
                     self.assertEqual(manifest["examples"][name]["word_count"],
                                      len(words(name)))
                     self.assertTrue(manifest["examples"][name]
@@ -134,7 +138,7 @@ class HandoffExamplesTest(unittest.TestCase):
                 self.assertEqual(struct.unpack("<1024H", output),
                                  (expected,) * 1024)
 
-    def test_sparse_mlp_exposes_unrepaired_pack_layout(self) -> None:
+    def test_sparse_mlp_relayout_preserves_logical_position(self) -> None:
         activation = bytearray(1024)
         activation[20] = 0x38
         identity = bytearray(1024)
@@ -144,27 +148,48 @@ class HandoffExamplesTest(unittest.TestCase):
                                   (bytes(activation), bytes(identity),
                                    bytes(identity)))
         self.assertTrue(result.halted)
-        # The logical two-layer MLP would retain (row 0, column 20).  The
-        # selected PACK instead joins consecutive 16-lane physical rows.
-        self.assertEqual(cell(output, 0, 20), 0)
-        self.assertEqual(cell(output, 16, 4), 0x3F80)
+        # The selected PACK joins physical rows; the scalar loop restores the
+        # logical row before the second MXU consumes the FP8 tile.
+        self.assertEqual(cell(output, 0, 20), 0x3F80)
+        self.assertEqual(cell(output, 16, 4), 0)
         self.assertEqual(sum(code != 0 for code in struct.unpack("<1024H", output)), 1)
 
-    def test_sparse_attention_exposes_unrepaired_pack_layout(self) -> None:
+    def test_mlp_relayout_covers_all_rows_and_columns(self) -> None:
+        fp8 = (0x00, 0x30, 0x38, 0x40)
+        bf16 = (0x0000, 0x3F00, 0x3F80, 0x4000)
+        activation = bytes(fp8[(row * 7 + col * 3) % len(fp8)]
+                           for row in range(32) for col in range(32))
+        identity = bytearray(1024)
+        for index in range(32):
+            identity[32 * index + index] = 0x38
+        result, output = run_core(NAMES[0],
+                                  (activation, bytes(identity), bytes(identity)))
+        self.assertTrue(result.halted)
+        for row in range(32):
+            for col in range(32):
+                with self.subTest(row=row, col=col):
+                    self.assertEqual(cell(output, row, col),
+                                     bf16[(row * 7 + col * 3) % len(bf16)])
+
+    def test_sparse_attention_relayout_preserves_logical_position(self) -> None:
         query = bytearray(1024)
         query[0] = 0x38
+        query[17 * 32 + 1] = 0x38
         key = bytearray(1024)
         key[20 * 32] = 0x38
+        key[3 * 32 + 1] = 0x38
         value = bytearray(1024)
         for index in range(32):
             value[32 * index + index] = 0x38
         result, output = run_core(NAMES[1],
                                   (bytes(query), bytes(key), bytes(value)))
         self.assertTrue(result.halted)
-        # The elevated key-20 probability belongs in row 0, column 20.
-        # Physical PACK moves it to row 16, column 4 before PV.
-        self.assertEqual(cell(output, 0, 20), 0x3D00)
-        self.assertEqual(cell(output, 16, 4), 0x3D20)
+        # The elevated key-20 probability remains in row 0, column 20
+        # after the packed FP8 tile has been reordered for the PV MXU.
+        self.assertEqual(cell(output, 0, 20), 0x3D20)
+        self.assertEqual(cell(output, 16, 4), 0x3D00)
+        self.assertEqual(cell(output, 17, 3), 0x3D20)
+        self.assertEqual(struct.unpack("<1024H", output).count(0x3D20), 2)
 
 
 if __name__ == "__main__":

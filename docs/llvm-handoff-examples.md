@@ -7,8 +7,8 @@ attention compilation.
 
 | Example | Intended instruction chain | Atlas words | Checked-in LLVM MLIR |
 | --- | --- | ---: | --- |
-| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, MXU1 | 57 | [LLVM snapshot](../examples/handoff/handoff_mlp_tile.llvm.mlir) |
-| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row maximum, subtract, multiply by a BF16 approximation to log₂(e)/√32, exp2, row sum, reciprocal, normalize, E8M0 pack, PV | 71 | [LLVM snapshot](../examples/handoff/handoff_attention_tile.llvm.mlir) |
+| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [LLVM snapshot](../examples/handoff/handoff_mlp_tile.llvm.mlir) |
+| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [LLVM snapshot](../examples/handoff/handoff_attention_tile.llvm.mlir) |
 
 Both inputs use fixed 32×32 FP8 tiles and already oriented weights. The MLP
 has no bias; the attention sequence has no mask or causal state. `SELI 127`
@@ -17,12 +17,29 @@ MXU1 have different arithmetic. The handwritten delays are diagnostic spacing
 based on public instruction examples, **not** general hardware availability
 bounds. The selected RTL revision is
 `0079c0541111197741a231c002e3843fa6f545b2`.
+After PACK, a 32-iteration scalar VMEM loop copies each 16-lane row half into
+the corresponding logical FP8 row. It uses scalar `lw`/`sw`, a backward `blt`,
+and an explicit nonredirecting branch delay-slot instruction. This is a
+fixed-shape implementation of the selected physical layout, not a general
+layout conversion pass.
+
+Representative Atlas machine MLIR from the MLP fixture:
+
+```mlir
+%s27 = "atlas.mxu_matmul"(%s26) {unit = 0 : i32, src = 0 : i32, weight_slot = 0 : i32, acc_slot = 0 : i32, accumulate = false} : (!atlas.state) -> !atlas.state
+%s28 = "atlas.delay"(%s27) {cycles = 95 : i32} : (!atlas.state) -> !atlas.state
+%s29 = "atlas.mxu_pop"(%s28) {format = "bf16", unit = 0 : i32, dst = 8 : i32, slot = 0 : i32, scale_reg = 0 : i32} : (!atlas.state) -> !atlas.state
+```
+
+The full file shows the ReLU, pack, scalar relayout loop, second MXU, DMA
+stores, and termination. The state token fixes instruction order, including
+the loop's branch and its one executed delay slot.
 
 ## Actual last stage
 
 The output has one function and one ordered, side-effecting inline assembly
 operation. The MLP snapshot starts as follows; the full checked-in files retain
-all 57 or 71 words:
+all 102 or 116 words:
 
 ```mlir
 module {
@@ -63,22 +80,24 @@ On the source-linked standalone `AtlasCore`, three uniform FP8-one MLP input
 tiles produced 1,024 BF16 outputs of `0x4480` (1024). Zero Q/K and FP8-one V
 produced 1,024 BF16 attention outputs of `0x3f80` (1). Both streams halted,
 preserved their three inputs and a DRAM guard, and performed 96 DMA reads and
-64 writes. The MLP run took 897 selected-core cycles; attention took 1,359.
+64 writes. The MLP run took 2,966 selected-core cycles; attention took 3,428.
 These are two directed smoke inputs, not a timing qualification or general
 model result. `test/test_handoff_examples.py` reproduces them when the selected
 standalone-core environment is supplied.
 
-The next nonuniform MLP input reveals a required layout conversion. With an
-activation of 1 at logical row 0, column 20 and two identity weights, a
-logical two-layer MLP would return 1 at row 0, column 20. This stream returns
-zero there and 1 at row 16, column 4. The selected BF16-to-FP8 pack joins
-successive physical 16-lane rows; the downstream MXU expects a different
-32×32 layout. The attention sequence has the same gap before PV. With a
-single elevated logit for key 20 and identity V, its elevated result appeared
-at row 16, column 4 rather than row 0, column 20 in a diagnostic run.
-Neither example should be used as a correct general MLP/attention program
-until a checked relayout and numerical policy are added. Both sparse layout
-gaps have executable regression tests.
+The fixed-shape loop was added after an earlier version's sparse tests exposed
+the selected PACK layout: a logical value at row 0, column 20 appeared at row
+16, column 4 before relayout. With the loop, an MLP input containing just that
+value and two identity weights returned exactly one BF16 one at row 0, column
+20. A second directed MLP panel used two identity weights and four positive
+FP8 codes to check all 1,024 output coordinates against their expected BF16
+values. An attention input with elevated logits at (row 0, key 20) and
+(row 17, key 3), plus identity V, returned `0x3d20` at those two coordinates;
+the other 1,022 codes were `0x3d00`. The input tensors and a DRAM guard
+remained unchanged in these selected-core runs. These cases check the
+composition route and layout position. They do not establish full-domain
+arithmetic equivalence to framework MLP or softmax, masks, tails, arbitrary
+shapes, a qualified schedule, or an integrated SoC launch.
 
 ## Proposed delay-analysis handoff
 
