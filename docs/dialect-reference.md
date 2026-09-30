@@ -81,6 +81,34 @@ No timing annotation pass, delay scheduler, instruction selector, allocator,
 Linalg-to-Atlas pass, or general callable ABI is implemented in this hand OOT
 repository. Delays in the example programs are authored diagnostic spacing.
 
+## Why the LLVM handoff uses inline assembly
+
+The selected unmodified LLVM RISC-V target does not define Atlas's custom
+tensor instructions or its instruction-index PC behavior. Standard LLVM IR
+therefore cannot carry an MXU, VPU, or DMA operation as a target instruction.
+`--convert-atlas-to-llvm` freezes the verified Atlas stream as one side-effecting
+inline-assembly block of encoded words. Keeping it in one block prevents LLVM
+from placing instructions between a branch and its selected delay slot or
+changing the offsets of internal targets. The numbered handoff examples prove
+that LLVM emitted the checked bytes; they do not give LLVM knowledge of the
+Atlas operations or certify a callable function.
+
+For a standalone Atlas program, a future object writer could put the checked
+encoder's words directly into an ELF section and link them with `ld.lld`. That
+would remove the inline-assembly bridge, but LLVM would no longer generate
+those instruction bytes. Encoding the words as an LLVM global in an executable
+section would also hide their meaning as data. An instruction-aware LLVM route
+requires adding Atlas instruction definitions and lowering to an LLVM target;
+that is a separate toolchain project, not a capability of this unmodified
+LLVM build. Splitting the current block into one inline-assembly call per
+Atlas operation would expose more boundaries in LLVM IR but could insert code
+between selected instructions and invalidate branch and delay-slot placement.
+
+The typed Atlas stream and `atlas-emit --map-json` sidecar are the reviewable
+inputs for timing annotations and scheduling. Perform those passes before
+`--convert-atlas-to-llvm`; keep the operation-to-word map with the resulting
+ELF so binary offsets remain traceable afterward.
+
 Nicolas and Jeremy can add resource/availability annotation and scheduling
 passes over this typed stream **before** LLVM conversion. The first pass
 should bind facts to a selected-RTL source identity and leave unknowns
