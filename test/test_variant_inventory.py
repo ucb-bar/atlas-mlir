@@ -44,7 +44,7 @@ class VariantInventoryTest(unittest.TestCase):
         self.assertEqual(counts(inventory), {
             "required": 99, "software_admitted": 0, "represented": 99,
             "word_emitted": 99, "llvm_word_emitted": 99,
-            "independent_semantic_test": 53, "standalone_core_executed": 53,
+            "independent_semantic_test": 54, "standalone_core_executed": 54,
             "blocked": 99, "denominator": 99,
         })
 

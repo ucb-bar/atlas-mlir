@@ -98,7 +98,7 @@ build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The current diagnostic run passed 66/66 Python test
+selected RTL checkout. An earlier diagnostic run passed 66/66 Python test
 methods with these paths supplied: the typed branch program executed one
 delay slot, while a changed branch target produced a different checked state;
 the typed DMA loopback performed four reads and four writes, matched 32/32
@@ -234,6 +234,15 @@ special encodings. Two complete 1,024-element panels matched the selected
 standalone core, including its NaN-to-positive-zero behavior. The selected
 funct7 `0x46` differs from the inspected model class's `0x4e`; full-domain
 arithmetic and timing remain unqualified.
+The [VPU BF16 reciprocal check](docs/vpu-recip-observation.md) uses a 36-word
+typed stream and an independent exact-power exponent reference with explicit
+selected-RTL boundary rules. Two complete 1,024-element panels matched the
+selected standalone core across both register halves, including signed
+zero/subnormal/infinity/NaN cases. The selected reciprocal LUT remains
+unqualified for normal inputs with nonzero fractions and general timing.
+The fresh reciprocal-branch build passed 141/141 source-linked Python methods
+through CTest, with no skips; the source-bound ledger counts 54/99 bounded
+modes and 0 software-admitted modes.
 The [VPU BF16 cube check](docs/vpu-cube-observation.md) uses the same physical
 pair shape and a separate exact-power raw-bit oracle. Two complete
 1,024-element panels matched the selected standalone core, including signed
@@ -334,6 +343,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 pairwise minimum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
+| VPU BF16 reciprocal | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact-power reciprocals and signed special-value behavior across both register halves on selected standalone core. LUT approximations for nonzero fractions and general timing remain open |
 | VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
