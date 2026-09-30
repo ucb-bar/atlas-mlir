@@ -177,6 +177,10 @@ uses two exact bit-level witnesses to compare MXU0 ordered BF16 steps,
 MXU1's bounded single-rounding path, and the inspected model's FP16-then-BF16
 expression. Four standalone-core runs found a model mismatch for each unit
 on a different witness; no full-domain numerical contract follows.
+The [MXU0 signed-zero discriminator](docs/mxu0-signed-zero-observation.md)
+ran eight reset programs with finite-normal weight panels and `+0`/`-0`
+FP8 activation encodings. All 2,048 output bytes, both input panels, and a
+guard matched the bounded expected values in each standalone-core run.
 The [two-K-tile MXU1 continuation check](docs/mxu1-continuation-observation.md)
 compares a rounded prior tile plus the second tile against reset and a
 single 64-product rounding. Six bounded standalone-core runs checked all
