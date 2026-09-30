@@ -1,9 +1,10 @@
 # Atlas MLIR hand-authored reference candidate
 
-See the [MLP and attention LLVM handoff examples](docs/llvm-handoff-examples.md)
-for paired Atlas machine MLIR, checked-in LLVM MLIR snapshots, a reproducible
-object export with per-word operation maps, and the fixed-shape VMEM relayout
-used between layers.
+See the [numbered MLP and attention stage bundles](examples/handoff/README.md)
+for Atlas machine MLIR, LLVM MLIR, LLVM IR, RISC-V assembly, relocatable
+objects, linked ELF files, disassembly, and per-word operation maps. The
+[handoff notes](docs/llvm-handoff-examples.md) cover the fixed-shape VMEM
+relayout and selected-core diagnostic evidence.
 The [dialect reference](docs/dialect-reference.md) lists every current
 operation, its checked physical fields, and the implemented pass inventory.
 

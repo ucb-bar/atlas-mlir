@@ -407,6 +407,19 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertNotEqual(missing_slot.returncode, 0)
         self.assertIn("lacks its required delay-slot", missing_slot.stderr)
 
+    def test_pre_lowering_stream_keeps_external_operation_annotations(self) -> None:
+        source = program([
+            ("alu_imm", dict(kind="addi", dst=1, src=0, immediate=1), "")
+        ])
+        annotated = source.replace(
+            "immediate = 1 : i32",
+            'immediate = 1 : i32, atlas.test_annotation = "source-bound"',
+        )
+        checked = run(OPT, annotated, "--verify-atlas-machine-stream")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn('atlas.test_annotation = "source-bound"', checked.stdout)
+        self.assertEqual(run(EMIT, annotated).stdout, run(EMIT, source).stdout)
+
     def test_llvm_pass_to_riscv_object(self) -> None:
         needed = ("mlir-translate", "llc", "llvm-readelf", "llvm-objdump")
         tools = {name: llvm_tool(name) for name in needed}

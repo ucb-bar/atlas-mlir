@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import pathlib
+import shutil
 import struct
 import subprocess
 import sys
@@ -26,7 +27,8 @@ def words(name: str) -> tuple[int, ...]:
     return tuple(int(line, 16) for line in result.stdout.splitlines())
 
 
-def run_core(name: str, tiles: tuple[bytes, bytes, bytes]):
+def run_core(name: str, tiles: tuple[bytes, bytes, bytes],
+             program_words: tuple[int, ...] | None = None):
     for key in ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT"):
         if not os.environ.get(key):
             raise unittest.SkipTest(f"set {key} for selected standalone core")
@@ -60,7 +62,9 @@ def run_core(name: str, tiles: tuple[bytes, bytes, bytes]):
             preloads += [(BASE + 0xC00, b"\xA5" * 1024),
                          (BASE + 0x1000, b"\xA5" * 1024),
                          (BASE + 0x1400, b"\x5A" * 32)]
-            result = cosim_atlas.run_program(model, state, words(name),
+            result = cosim_atlas.run_program(model, state,
+                                             words(name) if program_words is None
+                                             else program_words,
                                              preload=preloads, max_cycles=20000)
             for index, tile in enumerate(tiles):
                 assert result.slave.captured(BASE + 0x400 * index, 1024) == tile
@@ -82,22 +86,53 @@ def cell(output: bytes, row: int, col: int) -> int:
 
 
 class HandoffExamplesTest(unittest.TestCase):
+    def test_linked_elf_text_executes_on_selected_core(self) -> None:
+        llvm = os.environ.get("ATLAS_LLVM_BIN")
+        if not llvm:
+            self.skipTest("set ATLAS_LLVM_BIN for ELF text extraction")
+        cases = (
+            (NAMES[0], "mlp_tile", (bytes([0x38]) * 1024,) * 3, 0x4480),
+            (NAMES[1], "attention_tile",
+             (bytes(1024), bytes(1024), bytes([0x38]) * 1024), 0x3F80),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, folder, tiles, expected in cases:
+                with self.subTest(name=name):
+                    elf = ROOT / "examples/handoff" / folder / "06-riscv-linked.elf"
+                    text_file = pathlib.Path(temporary) / f"{name}.text"
+                    subprocess.run([
+                        str(pathlib.Path(llvm) / "llvm-objcopy"),
+                        "--dump-section", f".text={text_file}", str(elf),
+                    ], capture_output=True, check=True)
+                    raw = text_file.read_bytes()
+                    linked_words = struct.unpack(f"<{len(raw) // 4}I", raw)
+                    self.assertEqual(linked_words, words(name) + (0x00008067,))
+                    result, output = run_core(name, tiles, linked_words)
+                    self.assertTrue(result.halted)
+                    self.assertEqual(struct.unpack("<1024H", output),
+                                     (expected,) * 1024)
+
     def test_llvm_mlir_and_object_words_match_emitter(self) -> None:
         llvm = os.environ.get("ATLAS_LLVM_BIN")
         if not llvm:
             self.skipTest("set ATLAS_LLVM_BIN for LLVM object handoff")
+        linker = os.environ.get("ATLAS_LLD") or shutil.which("ld.lld")
+        if not linker:
+            self.skipTest("set ATLAS_LLD or install ld.lld for linked ELF handoff")
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "handoff"
             subprocess.run([
                 sys.executable, str(ROOT / "tools/export_llvm_handoff.py"),
                 "--atlas-bin-dir", str(BIN), "--llvm-bin-dir", llvm,
+                "--linker", linker,
                 "--output-dir", str(output),
             ], check=True, capture_output=True, text=True)
             manifest = json.loads((output / "manifest.json").read_text())
-            self.assertEqual(manifest["schema"], "atlas-llvm-handoff-v1")
+            self.assertEqual(manifest["schema"], "atlas-llvm-handoff-v2")
             stale = subprocess.run([
                 sys.executable, str(ROOT / "tools/export_llvm_handoff.py"),
                 "--atlas-bin-dir", str(BIN), "--llvm-bin-dir", llvm,
+                "--linker", linker,
                 "--output-dir", str(output),
             ], capture_output=True, text=True)
             self.assertNotEqual(stale.returncode, 0)
@@ -106,6 +141,25 @@ class HandoffExamplesTest(unittest.TestCase):
                              manifest)
             for name in NAMES:
                 with self.subTest(name=name):
+                    folder = (ROOT / "examples/handoff" /
+                              ("mlp_tile" if name == NAMES[0] else "attention_tile"))
+                    stages = {
+                        "atlas.mlir": "01-atlas-machine.mlir",
+                        "llvm.mlir": "02-llvm-dialect.mlir",
+                        "ll": "03-llvm-ir.ll",
+                        "s": "04-riscv-words.s",
+                        "o": "05-riscv-relocatable.o",
+                        "elf": "06-riscv-linked.elf",
+                        "disasm.txt": "07-riscv-disassembly.txt",
+                        "words.txt": "atlas-words.txt",
+                        "word-map.json": "atlas-word-map.json",
+                    }
+                    for suffix, snapshot in stages.items():
+                        self.assertEqual(
+                            (output / f"{name}.{suffix}").read_bytes(),
+                            (folder / snapshot).read_bytes(),
+                            f"{name}: stage {snapshot} differs from fresh LLVM output",
+                        )
                     source = (ROOT / "test/examples" / f"{name}.mlir").read_text()
                     self.assertEqual(source.count('"atlas.branch"'), 1)
                     self.assertEqual(source.count('kind = "lw"'), 8)
@@ -115,8 +169,7 @@ class HandoffExamplesTest(unittest.TestCase):
                     self.assertTrue(manifest["examples"][name]
                                     ["object_prefix_matches_emitter"])
                     llvm_mlir = (output / f"{name}.llvm.mlir").read_text()
-                    snapshot = (ROOT / "examples/handoff" /
-                                f"{name}.llvm.mlir").read_text()
+                    snapshot = (folder / "02-llvm-dialect.mlir").read_text()
                     self.assertEqual(llvm_mlir.rstrip(), snapshot.rstrip())
                     self.assertEqual(llvm_mlir.count("llvm.inline_asm"), 1)
                     self.assertIn("has_side_effects", llvm_mlir)
@@ -124,10 +177,16 @@ class HandoffExamplesTest(unittest.TestCase):
                     expected = b"".join(struct.pack("<I", word)
                                         for word in words(name))
                     self.assertTrue(object_text.startswith(expected))
+                    self.assertEqual(
+                        (output / f"{name}.elf.text.bin").read_bytes(),
+                        object_text,
+                    )
+                    self.assertTrue(manifest["examples"][name]
+                                    ["linked_text_matches_object"])
                     map_bytes = (output / f"{name}.word-map.json").read_bytes()
                     self.assertEqual(
                         map_bytes,
-                        (ROOT / "examples/handoff" / f"{name}.word-map.json").read_bytes(),
+                        (folder / "atlas-word-map.json").read_bytes(),
                     )
                     self.assertEqual(hashlib.sha256(map_bytes).hexdigest(),
                                      manifest["examples"][name]["word_map_sha256"])

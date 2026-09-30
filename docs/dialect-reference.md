@@ -75,7 +75,7 @@ between selected RTL, architecture text, and the inspected model.
 | `--convert-atlas-to-llvm` | `atlas-opt` module pass | Replace checked stream with `llvm.func @atlas_program()` containing one side-effecting, ordered `llvm.inline_asm` word block and `llvm.return`. This is a reset-entry body, not a C-callable ABI. |
 | `atlas-emit` | tool, not pass | Emit words or `--map-json` sidecar with source operation, attributes, word index, branch/delay-slot mapping, conservative effects, and `availability: unknown`. |
 | `atlas-boot-pack` | tool, not pass | Package one checked reset-entry ELF `.text` section with a narrow authored memory layout and manifest. |
-| `export_llvm_handoff.py` | exporter, not pass | Produce paired Atlas/LLVM MLIR, LLVM IR, object, binary words, hashes, and word map for the MLP/attention fixtures. |
+| `export_llvm_handoff.py` | exporter, not pass | Produce numbered Atlas/LLVM MLIR, LLVM IR, RV32 assembly, relocatable object, linked ELF, disassembly, word map, and hashes for the bounded MLP/attention fixtures. |
 
 No timing annotation pass, delay scheduler, instruction selector, allocator,
 Linalg-to-Atlas pass, or general callable ABI is implemented in this hand OOT
@@ -88,6 +88,24 @@ explicit. The second can insert waits/delays while preserving state order,
 the one-slot control rule, and asynchronous scalar/transfer lifetimes. The
 result should pass the stream verifier, emitter, and selected-core checks.
 LLVM inline assembly has lost the structure needed for those analyses.
+
+To add a pass, place its declaration under `include/Atlas/`, its implementation
+under `lib/`, list the new source in `lib/CMakeLists.txt`, and register it in
+`tools/atlas-opt.cpp`. `AtlasStreamVerification.cpp` is a minimal example of
+that wiring. Operation definitions and local legality belong in
+`include/Atlas/AtlasOps.td` and `lib/AtlasOps.cpp` if a new attribute or mode
+is actually required. Preserve the source-bound timing facts as typed Atlas
+attributes while analyzing or scheduling; the word-map exporter will carry
+the operation attributes to the binary offset. Once converted to LLVM, those
+attributes are no longer represented in the inline-assembly body.
+
+The current IR is a **flat word stream** with branch offsets, not a control-flow
+graph. A scheduler must account for backward branches and multiple executions
+of one static operation; the linear state token alone does not prove a
+cross-iteration dependency safe. The verifier checks encoding and in-block
+targets, but it does not validate an annotation's timing claim. Their pass
+tests should include loops, asynchronous reads, changed delay slots, and
+post-schedule selected-core runs before replacing `availability: unknown`.
 
 ```sh
 build/bin/atlas-opt --verify-atlas-machine-stream \

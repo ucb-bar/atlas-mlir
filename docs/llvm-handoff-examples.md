@@ -5,10 +5,13 @@ produced by this out-of-tree package. They are not generated from PyTorch,
 Linalg, or Merlin's native selector. They do not qualify whole-model MLP or
 attention compilation.
 
-| Example | Intended instruction chain | Atlas words | Checked-in LLVM MLIR | Word map |
+| Example | Intended instruction chain | Atlas words | Numbered stage bundle |
 | --- | --- | ---: | --- |
-| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [LLVM snapshot](../examples/handoff/handoff_mlp_tile.llvm.mlir) | [map](../examples/handoff/handoff_mlp_tile.word-map.json) |
-| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [LLVM snapshot](../examples/handoff/handoff_attention_tile.llvm.mlir) | [map](../examples/handoff/handoff_attention_tile.word-map.json) |
+| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [Atlas → LLVM → assembly → ELF](../examples/handoff/mlp_tile/01-atlas-machine.mlir) |
+| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [Atlas → LLVM → assembly → ELF](../examples/handoff/attention_tile/01-atlas-machine.mlir) |
+
+The [examples index](../examples/handoff/README.md) links every numbered
+stage, both linked ELF files, disassemblies, and operation-to-word maps.
 
 Both inputs use fixed 32×32 FP8 tiles and already oriented weights. The MLP
 has no bias; the attention sequence has no mask or causal state. `SELI 127`
@@ -56,23 +59,28 @@ adjacent. It is a void reset-entry program body, not a C-callable Atlas ABI.
 The `.word` stream is not executable on a generic host RISC-V CPU.
 
 To reproduce a complete bundle with the Atlas source, LLVM MLIR, LLVM IR,
-RISC-V object, extracted `.text`, words, a per-word operation map, and hashes:
+RISC-V `.word` assembly, relocatable object, linked ELF32 executable,
+disassembly, extracted `.text`, operation map, and hashes:
 
 ```sh
 python tools/export_llvm_handoff.py \
   --atlas-bin-dir build/bin \
   --llvm-bin-dir /path/to/matching/llvm-install/bin \
+  --linker /path/to/ld.lld \
   --output-dir out/llvm-handoff-fresh
 ```
 
-The checked-in snapshots omit the printer's extra final blank line. The output
-directory must be empty. The exporter compares the leading object
-words against `atlas-emit`, checks that exactly one side-effecting inline
-assembly operation contains all source words, and records the source/tool
-identity in `manifest.json`. The checked-in LLVM snapshots are regression
-fixtures; `test/test_handoff_examples.py` compares them with fresh lowering,
-ignoring only trailing whitespace. Rebuild `atlas-opt` from this repo and use
-matching LLVM/MLIR tools before reproducing them.
+The output directory must be empty. The exporter checks that exactly one
+side-effecting inline-assembly operation contains all source words, compares
+the leading object words against `atlas-emit`, and checks that linking did not
+change `.text`. The linked ELF has entry `atlas_program` at zero. It records
+source and tool identity in `manifest.json`. `test/test_handoff_examples.py`
+compares every checked-in stage with fresh output from the pinned toolchain.
+Rebuild `atlas-opt` from this repo before reproducing the bundle. The snapshot
+was generated with unmodified LLVM/MLIR 23.0.0git; the available `ld.lld`
+18.1.3 only linked the LLVM-produced object. Linking does not qualify an
+Atlas launch ABI, and generic RISC-V disassembly is not a semantic decode of
+Atlas custom operations.
 
 ## What the selected-core smoke runs establish
 
@@ -83,7 +91,10 @@ preserved their three inputs and a DRAM guard, and performed 96 DMA reads and
 64 writes. The MLP run took 2,966 selected-core cycles; attention took 3,428.
 These are two directed smoke inputs, not a timing qualification or general
 model result. `test/test_handoff_examples.py` reproduces them when the selected
-standalone-core environment is supplied.
+standalone-core environment is supplied. It additionally extracts `.text`
+from each checked-in linked ELF and reruns one directed panel using those
+exact LLVM-produced words; both halt and produce the expected 1,024 BF16
+cells.
 
 The fixed-shape loop was added after an earlier version's sparse tests exposed
 the selected PACK layout: a logical value at row 0, column 20 appeared at row
@@ -108,7 +119,7 @@ before `--convert-atlas-to-llvm`, plus a source-bound timing/effects contract.
 It can return a scheduled Atlas stream; this package can then revalidate and
 lower it to the same LLVM form.
 
-The exporter now emits `<example>.word-map.json` alongside LLVM MLIR. Its
+The exporter emits `<example>.word-map.json` alongside LLVM MLIR. Its
 `atlas.machine_word_map.v1` rows bind every zero-based Atlas word index and
 byte offset to the parsed machine operation, encoding, and typed attribute
 text. A delay row includes its explicit stall count. A branch row includes
