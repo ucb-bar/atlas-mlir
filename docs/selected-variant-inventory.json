@@ -3067,15 +3067,16 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_delay_reference.py::test_selected_core_stalls_successor_for_exact_counter_span",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_delay_domain_and_interacting_resources",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "model_DELAY_noop_vs_selected_RTL_stall"
+      ],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_I,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
     },
     {
