@@ -258,6 +258,14 @@ arbitrary register pairs, overlap, and timing remain open.
 The fresh square-root branch passed 150/150 source-linked Python methods
 through CTest with no skips; the ledger counts 55/99 bounded modes, 0
 software-admitted modes, and 99 full-qualification blockers.
+The [VEXP2 BF16 check](docs/vpu-exp2-observation.md) adds a typed 36-word
+program and an exact-power reference for directed integer and special
+inputs. Two selected-core panels checked both BF16 halves, including the
+RTL's early positive overflow at 89. Fractional, subnormal, and NaN inputs
+remain outside this bounded oracle.
+The fresh VEXP2 build passed 154/154 source-linked Python methods through
+CTest with no skips. The checked ledger counts 56/99 bounded modes, 0
+software-admitted modes, and 99 full-qualification blockers.
 The [VPU BF16 cube check](docs/vpu-cube-observation.md) uses the same physical
 pair shape and a separate exact-power raw-bit oracle. Two complete
 1,024-element panels matched the selected standalone core, including signed
@@ -366,6 +374,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 reciprocal | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked an independent exact-power oracle. A source-derived LUT checker then matched all 65,536 BF16 raw encodings across both register halves on one persistent selected standalone core. Arbitrary register pairs, overlapping use, and general timing remain open |
 | VPU BF16 square root | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels and a source-derived full-code checker matched selected standalone core, including negative finite and special input encodings. Mathematical software compatibility, arbitrary register pairs, overlap, and timing remain open |
+| VPU BF16 base-two exponential | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element selected-core panels checked exact integer powers, signed zeros, infinities, and early overflow at positive input 89 across both BF16 halves. Fractional/NaN/subnormal semantics and timing remain open |
 | VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
