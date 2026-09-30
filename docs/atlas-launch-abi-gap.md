@@ -4,9 +4,11 @@ The hand OOT dialect can lower a validated flat Atlas stream to an LLVM
 function containing the exact selected instruction words. The
 [complete-function test](llvm-boot-entry-observation.md) executes a 37-word
 VSQUARE function body from IMEM word zero on the selected standalone
-`AtlasCore`. A new `atlas-boot-pack` tool makes that narrow reset-entry
-contract explicit and reproducible. Neither result establishes a callable
-function ABI or an integrated Atlas runtime.
+`AtlasCore`. `atlas-boot-pack` makes that narrow reset-entry contract explicit
+and reproducible. A separate [mailbox-call observation](mailbox-call-observation.md)
+now executes the same LLVM-produced program twice on one standalone core
+with changed runtime pointers and data. This is a bounded custom launch ABI;
+it does not establish a C-callable function ABI or integrated Atlas runtime.
 
 ## Bounded reset-entry capsule
 
@@ -19,8 +21,12 @@ ECALL-before-RET ending, an oversized IMEM program, an overlapping DRAM
 region, a stale output destination, or a source/object mismatch. It copies
 only `.text` into `program.bin` and writes `manifest.json` with input/object/
 packer hashes, target revision declaration, fixed DRAM regions, IMEM base,
-entry word, start CSR, and ECALL completion word. Runtime tensor values and
-expected outputs are absent from the capsule.
+entry word, start CSR, and ECALL completion word. Layout v2 additionally
+declares one mailbox and disjoint input/output address pools, with u32 pointer
+field offsets, fixed tensor byte length, and alignment. It validates pointer
+arguments before the host writes a descriptor. The manifest marks that the
+packer does not prove arbitrary program-to-mailbox dataflow. Runtime tensor
+values and expected outputs are absent from either capsule.
 
 For the [VSQUARE layout](../test/examples/vpu_square_boot_layout.json),
 the standalone driver loads all 37 words at `imemTL` byte address `0x20000`,
@@ -46,21 +52,22 @@ build/bin/atlas-boot-pack \
 ```
 
 The current diagnostic artifact is under
-`out/qualifications/oot-boot-capsule-r1/`; output paths belong to the
+`out/qualifications/oot-boot-capsule-r1/`; the bounded mailbox-call artifact
+is under `out/qualifications/oot-mailbox-call-r1/`. Output paths belong to the
 invocation, not the source tree.
 
 ## Remaining obligations
 
 | Boundary | Evidence now | Still required for a reusable ABI |
 | --- | --- | --- |
-| Scalar registers and stack | This stream writes fixed Atlas registers and halts. The manifest marks register initialization unproved. | Define/reset initial registers, argument registers, clobbers, callee saves, stack, and live scalar DMA pointers. The emitted stream can overwrite ordinary RISC-V return and saved registers. |
-| Arguments and results | The reset entry declares no call arguments or returns. Inputs and outputs use fixed DRAM addresses. | Bind dynamic pointers, shapes, constants, state, multiple outputs, and errors to a stable invocation interface. Check that every read has an initialized source. |
+| Scalar registers and stack | The tested mailbox stream initializes the registers it uses and halts; the packer does not prove register initialization for arbitrary source. | Define/reset initial registers, argument registers, clobbers, callee saves, stack, and live scalar DMA pointers. The emitted stream can overwrite ordinary RISC-V return and saved registers. |
+| Arguments and results | A declared 32-byte DRAM mailbox supplies one runtime input pointer and one output pointer. Two same-core invocations with changed addresses/data passed the bounded test. | Bind general shapes, constants, state, multiple outputs, and errors to a stable invocation interface. Verify source-to-mailbox dataflow for arbitrary programs and check every read has an initialized source. |
 | IMEM loading | The capsule checks one symbol spanning `.text`, zero text relocations, 32-bit words, and the selected 128-KiB IMEM capacity. ModeLIR loads its words over `imemTL`. | Implement a qualified loader/linker for multiple functions/sections, placement, relocation, capacity, and physical SoC launch. Non-text ELF sections are discarded here. |
-| Completion and memory visibility | The standalone driver starts via CSR `0x18` and observes halt after ECALL. This program issues its own DMA waits. | Establish accelerator/system drain and memory visibility guarantees for all operations, exceptions, timeouts, and repeated invocations. |
+| Completion and memory visibility | The standalone driver starts twice via CSR `0x18`, observes two ECALL halts, and sees the first output retained after the second run. The stream issues its own DMA waits. | Establish accelerator/system drain and memory visibility guarantees for all operations, exceptions, timeouts, and general repeated invocations. |
 | Branch and jump relocation | `atlas-emit` validates in-block direct targets and delay-slot adjacency; the capsule binds the exact checked words. | Qualify Atlas instruction-word PC conventions under linking, program placement, cross-block branches, and control-flow effects. The OOT converter refuses JALR. |
 | Numerical and platform scope | The capsule test executes one restricted VSQUARE panel on standalone `AtlasCore` with ModeLIR's TileLink driver. | Qualify full admitted numerics, all required modes, integrated SoC execution, model composition, and host/accelerator boundaries. |
 
 The selected layout JSON declares a target revision, but the packer does not
-prove that a later simulator or chip actually has that revision. The test
-binds it to its separately pinned ARC model. The capsule is not a C function
+prove that a later simulator or chip actually has that revision. The tests
+bind it to a separately pinned ARC model. The capsule is not a C function
 call, generic ELF loader, runtime scheduler, or full D/F/M/N result.

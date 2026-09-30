@@ -32,10 +32,11 @@ outside the block; it does not provide a general dynamic-control ABI.
 This is physical instruction lowering for the selected Atlas RISC-V target.
 The inline assembly words are **not executable on a generic host CPU** and an
 ELF object is **not a qualified Atlas end-to-end runtime**. The void function
-has no callable Atlas ABI, register-save policy, dynamic arguments, or
-qualified completion/drain protocol. A separate bounded
-[reset-entry capsule](docs/atlas-launch-abi-gap.md) now declares fixed DRAM
-input/output regions and checked IMEM words for one standalone program; it
+has no C-callable Atlas ABI, register-save policy, or general completion/drain
+protocol. A bounded [reset-entry capsule](docs/atlas-launch-abi-gap.md)
+declares checked IMEM words and DRAM regions. A separate
+[mailbox-call test](docs/mailbox-call-observation.md) supplies runtime input
+and output pointers and restarts the same standalone core with new data; it
 does not make the LLVM function C-callable. Multiple test programs have diagnostic
 execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
 elaboration of the selected Atlas source copy.
@@ -261,6 +262,12 @@ selected standalone core and executed it to ECALL halt. It checked the ELF
 symbol, executable section, and absence of text relocations; the complete
 output matched the independent VSQUARE reference. This is a fixed-address
 diagnostic entry, not a callable Atlas ABI or an ELF runtime loader.
+The [mailbox-call check](docs/mailbox-call-observation.md) uses one 40-word
+LLVM-produced reset-entry capsule and a declared pair of runtime DRAM
+pointers. Two starts in one selected standalone core instance with changed
+pointers and tensor bytes matched the independent VSQUARE reference while
+preserving inputs, prior output, and guard. It is a bounded custom launch ABI,
+not a C-callable function or integrated SoC runtime.
 The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
 uses a 16-word typed stream and a before/after-launch mutation. On the
 selected standalone core, changing the address register immediately after
@@ -354,8 +361,8 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
 | VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
-| Program binary, ABI, execution | Extracted object words run through an external diagnostic driver; no Atlas launch ABI, constants package, or qualified hardware execution claim |
-| Bounded reset-entry capsule | ACT-independent `atlas-boot-pack` binds checked Atlas source words to one complete ELF `.text`, writes `program.bin` and an explicit fixed-DRAM manifest, and executes the packaged bytes on selected standalone AtlasCore; no callable ABI or integrated SoC claim |
+| Program binary, ABI, execution | One checked 40-word capsule uses a bounded reset-entry mailbox ABI with runtime input/output pointers and two starts in the same standalone core; no C-callable or integrated SoC runtime claim |
+| Bounded reset-entry capsule | ACT-independent `atlas-boot-pack` binds checked Atlas source words to one complete ELF `.text`, writes `program.bin`, and records fixed DRAM regions or the bounded mailbox pointer contract; packaging alone does not prove program-to-mailbox binding |
 
 No row in the **99 selected RTL BitPat-row inventory** lacks a typed operation
 route or source-level emitter: the count of unrepresented BitPat rows is 0/99.

@@ -1,0 +1,21 @@
+{
+  "schema": "atlas.reset-entry-layout.v2",
+  "selected_rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "dram_window_base": "0x90000000",
+  "regions": [
+    {"name": "mailbox", "kind": "mailbox", "address": "0x90000000", "size_bytes": 32},
+    {"name": "input_pool", "kind": "input_pool", "address": "0x90002000", "size_bytes": 8192},
+    {"name": "output_pool", "kind": "output_pool", "address": "0x90006000", "size_bytes": 8192},
+    {"name": "guard", "kind": "guard", "address": "0x9000a000", "size_bytes": 32}
+  ],
+  "call": {
+    "kind": "mailbox-pointers",
+    "mailbox_region": "mailbox",
+    "input_region": "input_pool",
+    "output_region": "output_pool",
+    "input_pointer_offset_bytes": 0,
+    "output_pointer_offset_bytes": 4,
+    "tensor_bytes": 2048,
+    "buffer_alignment_bytes": 32
+  }
+}

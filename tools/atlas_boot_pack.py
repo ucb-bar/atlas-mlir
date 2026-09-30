@@ -34,7 +34,8 @@ def _number(value: int | str) -> int:
 
 
 def validate_layout(layout: dict) -> dict:
-    if layout.get("schema") != "atlas.reset-entry-layout.v1":
+    schema = layout.get("schema")
+    if schema not in ("atlas.reset-entry-layout.v1", "atlas.reset-entry-layout.v2"):
         raise ValueError("unsupported reset-entry layout schema")
     revision = layout.get("selected_rtl_revision")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -56,8 +57,10 @@ def validate_layout(layout: dict) -> dict:
         if name in names:
             raise ValueError("duplicate DRAM region name")
         names.add(name)
-        if kind not in ("input", "output", "guard"):
-            raise ValueError("region kind must be input, output, or guard")
+        allowed_kinds = (("input", "output", "guard") if schema.endswith("v1")
+                         else ("mailbox", "input_pool", "output_pool", "guard"))
+        if kind not in allowed_kinds:
+            raise ValueError("region kind is invalid for reset-entry layout schema")
         address, size = _number(row["address"]), _number(row["size_bytes"])
         if (size <= 0 or address % 32 or size % 32 or
                 address < base or address + size > base + DRAM_WINDOW_SIZE):
@@ -68,12 +71,79 @@ def validate_layout(layout: dict) -> dict:
     for left, right in zip(ordered, ordered[1:]):
         if left["address"] + left["size_bytes"] > right["address"]:
             raise ValueError("overlapping DRAM regions")
-    if not any(row["kind"] == "input" for row in normalized):
-        raise ValueError("an input region is required")
-    if not any(row["kind"] == "output" for row in normalized):
-        raise ValueError("an output region is required")
-    return {"schema": layout["schema"], "selected_rtl_revision": revision,
-            "dram_window_base": base, "regions": normalized}
+    if schema.endswith("v1"):
+        if not any(row["kind"] == "input" for row in normalized):
+            raise ValueError("an input region is required")
+        if not any(row["kind"] == "output" for row in normalized):
+            raise ValueError("an output region is required")
+        return {"schema": schema, "selected_rtl_revision": revision,
+                "dram_window_base": base, "regions": normalized}
+
+    call = layout.get("call")
+    fields = {"kind", "mailbox_region", "input_region", "output_region",
+              "input_pointer_offset_bytes", "output_pointer_offset_bytes",
+              "tensor_bytes", "buffer_alignment_bytes"}
+    if not isinstance(call, dict) or set(call) != fields or call["kind"] != "mailbox-pointers":
+        raise ValueError("v2 requires a complete mailbox-pointers call declaration")
+    by_name = {row["name"]: row for row in normalized}
+    for field, kind in (("mailbox_region", "mailbox"),
+                        ("input_region", "input_pool"),
+                        ("output_region", "output_pool")):
+        name = call[field]
+        if not isinstance(name, str) or name not in by_name or by_name[name]["kind"] != kind:
+            raise ValueError(f"{field} must name a {kind} region")
+    if (sum(row["kind"] == "mailbox" for row in normalized) != 1 or
+            sum(row["kind"] == "input_pool" for row in normalized) != 1 or
+            sum(row["kind"] == "output_pool" for row in normalized) != 1):
+        raise ValueError("v2 requires one mailbox and one pool per pointer")
+    size = _number(call["tensor_bytes"])
+    alignment = _number(call["buffer_alignment_bytes"])
+    if size <= 0 or size % 32 or alignment < 32 or alignment & (alignment - 1):
+        raise ValueError("mailbox tensor size/alignment must be positive 32-byte units")
+    for field in ("input_region", "output_region"):
+        if by_name[call[field]]["size_bytes"] < size:
+            raise ValueError("mailbox buffer pool is smaller than one tensor")
+    mailbox = by_name[call["mailbox_region"]]
+    offsets = []
+    for field in ("input_pointer_offset_bytes", "output_pointer_offset_bytes"):
+        offset = _number(call[field])
+        if offset < 0 or offset % 4 or offset + 4 > mailbox["size_bytes"]:
+            raise ValueError("mailbox pointer offset is outside descriptor")
+        offsets.append(offset)
+    if offsets[0] == offsets[1]:
+        raise ValueError("mailbox pointer fields overlap")
+    return {"schema": schema, "selected_rtl_revision": revision,
+            "dram_window_base": base, "regions": normalized,
+            "call": {**call, "tensor_bytes": size,
+                     "buffer_alignment_bytes": alignment,
+                     "input_pointer_offset_bytes": offsets[0],
+                     "output_pointer_offset_bytes": offsets[1]}}
+
+
+def mailbox_descriptor(layout: dict, input_address: int, output_address: int) -> bytes:
+    """Validate one runtime invocation and encode its little-endian mailbox.
+
+    This validates the host's declared pointer arguments. It does not inspect
+    or alter the compiled instruction stream or infer its pointer dataflow.
+    """
+    if layout.get("schema") != "atlas.reset-entry-layout.v2":
+        raise ValueError("mailbox descriptor requires a v2 layout")
+    call = layout["call"]
+    regions = {row["name"]: row for row in layout["regions"]}
+    size = call["tensor_bytes"]
+    alignment = call["buffer_alignment_bytes"]
+    for label, address, field in (("input", input_address, "input_region"),
+                                  ("output", output_address, "output_region")):
+        if isinstance(address, bool) or not isinstance(address, int) or address < 0 or address > 0xFFFFFFFF:
+            raise ValueError(f"{label} pointer must be a 32-bit byte address")
+        region = regions[call[field]]
+        if (address % alignment or address < region["address"] or
+                address + size > region["address"] + region["size_bytes"]):
+            raise ValueError(f"{label} pointer is outside its aligned declared pool")
+    descriptor = bytearray(regions[call["mailbox_region"]]["size_bytes"])
+    struct.pack_into("<I", descriptor, call["input_pointer_offset_bytes"], input_address)
+    struct.pack_into("<I", descriptor, call["output_pointer_offset_bytes"], output_address)
+    return bytes(descriptor)
 
 
 def validate_text(metadata: dict, text: bytes) -> tuple[int, ...]:
@@ -151,9 +221,22 @@ def pack(object_path: pathlib.Path, source_path: pathlib.Path,
     words = validate_text(parsed[0], text)
     if words != selected_words + (RET,):
         raise ValueError("ELF .text differs from checked Atlas source words")
+    call = layout.get("call")
+    if call is None:
+        arguments, returns = [], []
+        scope = "selected standalone AtlasCore reset entry; not a callable ABI or ELF loader"
+    else:
+        arguments = [{"name": "input", "kind": "runtime_dram_pointer",
+                      "mailbox_offset_bytes": call["input_pointer_offset_bytes"],
+                      "region": call["input_region"], "size_bytes": call["tensor_bytes"]}]
+        returns = [{"name": "output", "kind": "runtime_dram_pointer",
+                    "mailbox_offset_bytes": call["output_pointer_offset_bytes"],
+                    "region": call["output_region"], "size_bytes": call["tensor_bytes"]}]
+        scope = ("selected standalone AtlasCore mailbox reset-entry call; "
+                 "not a C ABI or general ELF loader")
     manifest = {
         "schema": "atlas.boot-capsule.v1",
-        "scope": "selected standalone AtlasCore reset entry; not a callable ABI or ELF loader",
+        "scope": scope,
         "packer_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
         "source_object_sha256": hashlib.sha256(object_bytes).hexdigest(),
         "source_mlir_sha256": hashlib.sha256(source_bytes).hexdigest(),
@@ -168,8 +251,9 @@ def pack(object_path: pathlib.Path, source_path: pathlib.Path,
         "start_csr_value": 1,
         "completion": {"kind": "ecall_halt", "ecall_pc_word": len(words) - 2,
                        "unreachable_llvm_ret_pc_word": len(words) - 1},
-        "arguments": [], "returns": [],
+        "arguments": arguments, "returns": returns,
         "register_initialization_proved": False,
+        "program_mailbox_binding_proved_by_packer": False,
         "checked_atlas_source_word_match": True,
         "dram": layout,
     }
