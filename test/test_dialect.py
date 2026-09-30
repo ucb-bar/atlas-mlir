@@ -385,6 +385,28 @@ class AtlasDialectTest(unittest.TestCase):
             self.assertIn(f".word 0x{word}", lowered.stdout)
         self.assertEqual(run(OPT, lowered.stdout).returncode, 0)
 
+    def test_pre_lowering_stream_pass_checks_targets_without_rewriting(self) -> None:
+        source = (ROOT / "test/examples/handoff_mlp_tile.mlir").read_text()
+        checked = run(OPT, source, "--verify-atlas-machine-stream")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn('"atlas.mxu_matmul"', checked.stdout)
+        self.assertNotIn("llvm.inline_asm", checked.stdout)
+        lowered = run(OPT, source, "--verify-atlas-machine-stream",
+                      "--convert-atlas-to-llvm")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        self.assertEqual(lowered.stdout.count("llvm.inline_asm"), 1)
+
+        branch = ("branch", dict(kind="beq", lhs=1, rhs=2, offset_bytes=8), "")
+        slot = ("alu_imm", dict(kind="addi", dst=1, src=1, immediate=1), "")
+        escaping = run(OPT, program([branch, slot]),
+                       "--verify-atlas-machine-stream")
+        self.assertNotEqual(escaping.returncode, 0)
+        self.assertIn("escapes the LLVM inline assembly block", escaping.stderr)
+        missing_slot = run(OPT, program([branch]),
+                           "--verify-atlas-machine-stream")
+        self.assertNotEqual(missing_slot.returncode, 0)
+        self.assertIn("lacks its required delay-slot", missing_slot.stderr)
+
     def test_llvm_pass_to_riscv_object(self) -> None:
         needed = ("mlir-translate", "llc", "llvm-readelf", "llvm-objdump")
         tools = {name: llvm_tool(name) for name in needed}
