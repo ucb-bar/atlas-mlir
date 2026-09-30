@@ -37,8 +37,8 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 20 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 26 | 49 |
-| **Total** | **99** | **99** | **60** | **99** |
+| Scalar, control, CSR | 49 | 49 | 27 | 49 |
+| **Total** | **99** | **99** | **61** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -58,7 +58,7 @@ The independently checked bounded modes are VLOAD/VSTORE raw-byte transfer,
 DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VRECIP, VEXP2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
-modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, bounded JAL, bounded JALR, and bounded DELAY. The ledger links
+modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, bounded JAL, bounded JALR, bounded DELAY, and bounded FENCE. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
@@ -74,6 +74,9 @@ qualify general control flow or a callable ABI.
 A [DELAY observation](delay-timing-observation.md) checks counter values
 0 and 4 against selected-core cycle traces and CSR state. It does not
 qualify interactions with asynchronous resources or the full count range.
+A [FENCE observation](fence-no-wait-observation.md) checks one-step scalar
+control flow and ties a typed FENCE word to the prior scalar-load no-wait
+discriminator. It does not establish general memory ordering.
 All 19 scalar register and immediate ALU modes now have a
 [bounded selected-core check](../test/test_scalar_alu_reference.py): two directed
 operand panels per mode, typed/selected-assembler/LLVM word agreement, and an

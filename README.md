@@ -206,6 +206,9 @@ one delay slot, and two skipped instructions on the standalone core.
 The [DELAY counter check](docs/delay-timing-observation.md) compares zero
 and four-cycle forms through typed IR, selected assembly, LLVM object words,
 and standalone-core PC/CSR traces.
+The [FENCE no-wait check](docs/fence-no-wait-observation.md) binds a
+canonical typed FENCE to selected assembly and LLVM object words, then
+checks one-step scalar progression and the existing scalar-load no-wait case.
 The [scalar-load/JALR timing check](docs/jalr-load-delay-observation.md)
 distinguishes a fixed `DELAY` from `FENCE` and zero delay after a scalar LW.
 The loaded target remains rejected by LLVM lowering because its value is not
@@ -370,6 +373,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Branch delay positions and backward loop | A second 14-word typed BEQ/BLT stream matched selected assembler and LLVM object words. Selected standalone core executed the first taken-branch CSR side effect, skipped the second, and completed a three-iteration backward loop; the architectural spec's two-slot rule remains discrepant. Negative target/slot checks pass; integrated timing remains unqualified |
 | Direct JAL target and link | Typed eight-word stream matched selected assembler and LLVM object words; selected standalone core executed one delay slot, skipped two words, wrote link word index 2, and distinguished a changed direct target. General control flow, callable ABI, and integrated execution remain open |
 | DELAY frontend hold | Typed six-word stream matched selected assembler and LLVM object words for counts 0 and 4. Selected standalone core held the successor for four counter cycles only in the latter run; pre/post CSR markers and DRAM guards were preserved. Full delay-domain, asynchronous-resource interaction, and integrated timing remain open |
+| FENCE scalar progression | Typed six-word stream matched selected assembler and LLVM object bytes. Selected standalone core fired the successor on the next cycle and matched NOP's scalar markers; a separate typed FENCE substitution did not wait for scalar LW before JALR. Memory-ordering and integrated effects remain open |
 | Scalar ALU | All 19 register/immediate modes matched the selected assembler and LLVM object words, then produced the independent RV32 result on the selected-source-linked standalone core for two directed operand panels each. Full operand/register domains and integrated timing remain open |
 | Scalar upper immediate | LUI and AUIPC matched the selected assembler, LLVM object words, and standalone core for two directed upper immediates. AUIPC adds the selected RTL's instruction word index, unlike the inspected model's byte-PC formulation; see the [source-linked observation](docs/scalar-upper-pc-observation.md) |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR accepted only with a proven in-block register target |

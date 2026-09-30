@@ -3380,13 +3380,12 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_fence_reference.py::test_selected_core_fence_has_no_scalar_frontend_stall",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
-        "timing_and_integrated_execution"
+        "memory_ordering_and_cross_resource_effects",
+        "integrated_execution"
       ],
       "source_discrepancies": [],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"

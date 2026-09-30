@@ -7,6 +7,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -92,6 +93,20 @@ class JALRLoadDelayReferenceTest(unittest.TestCase):
                                    for key in keys)
         assembler = _assembler()
         words = _words()
+        fence_source = SOURCE.read_text().replace(
+            '"atlas.delay"(%s5) {cycles = 8 : i32}',
+            '"atlas.fence"(%s5)')
+        self.assertNotEqual(fence_source, SOURCE.read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            fence_path = pathlib.Path(temporary) / "typed_fence.mlir"
+            fence_path.write_text(fence_source)
+            fence_words = tuple(int(line, 16) for line in subprocess.check_output(
+                [str(BIN / "atlas-emit"), str(fence_path)], text=True).splitlines())
+        self.assertEqual(fence_words,
+                         tuple(assembler.assemble(ASSEMBLY.read_text().replace(
+                             "DELAY 8", "FENCE"))))
+        self.assertEqual(fence_words[5], assembler.FENCE())
+        self.assertEqual(fence_words[:5] + fence_words[6:], words[:5] + words[6:])
         guards = ((0x90000000, b"\xA5" * 32),
                   (0x90000400, b"\x5A" * 32))
         old_cwd = pathlib.Path.cwd()
@@ -114,8 +129,9 @@ class JALRLoadDelayReferenceTest(unittest.TestCase):
                     ("fence", assembler.FENCE(), 8, 2),
                 ):
                     with self.subTest(name=name):
-                        program = list(words)
-                        program[5] = opcode
+                        program = list(fence_words if name == "fence" else words)
+                        if name != "fence":
+                            program[5] = opcode
                         trace: list[tuple[int, ...]] = []
 
                         def on_cycle(core: SelectedCore) -> None:
