@@ -2926,15 +2926,16 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_jal_reference.py::test_selected_core_executes_direct_target_link_and_one_slot",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_control_flow_and_link_abi",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "model_byte_pc_vs_selected_rtl_word_index"
+      ],
       "rtl_decode_controls": "Y,ALU_ADD,BR_X,OP1_PC,OP2_IMM,IMM_J,Y,Y,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_X,XLU_X,MEM_X,LSU_X"
     },
     {

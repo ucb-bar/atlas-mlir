@@ -200,6 +200,9 @@ The [JALR word-target check](docs/jalr-word-target-observation.md) validates
 an odd register-indirect word target, signed offset, link value, and one
 delay slot against selected standalone-core execution. General dynamic
 targets and a callable LLVM/Atlas ABI remain unqualified.
+The [direct JAL check](docs/jal-direct-target-observation.md) validates
+the selected RTL's byte-displacement-to-word-target conversion, link value,
+one delay slot, and two skipped instructions on the standalone core.
 The [scalar-load/JALR timing check](docs/jalr-load-delay-observation.md)
 distinguishes a fixed `DELAY` from `FENCE` and zero delay after a scalar LW.
 The loaded target remains rejected by LLVM lowering because its value is not
@@ -362,6 +365,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
 | Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
 | Branch delay positions and backward loop | A second 14-word typed BEQ/BLT stream matched selected assembler and LLVM object words. Selected standalone core executed the first taken-branch CSR side effect, skipped the second, and completed a three-iteration backward loop; the architectural spec's two-slot rule remains discrepant. Negative target/slot checks pass; integrated timing remains unqualified |
+| Direct JAL target and link | Typed eight-word stream matched selected assembler and LLVM object words; selected standalone core executed one delay slot, skipped two words, wrote link word index 2, and distinguished a changed direct target. General control flow, callable ABI, and integrated execution remain open |
 | Scalar ALU | All 19 register/immediate modes matched the selected assembler and LLVM object words, then produced the independent RV32 result on the selected-source-linked standalone core for two directed operand panels each. Full operand/register domains and integrated timing remain open |
 | Scalar upper immediate | LUI and AUIPC matched the selected assembler, LLVM object words, and standalone core for two directed upper immediates. AUIPC adds the selected RTL's instruction word index, unlike the inspected model's byte-PC formulation; see the [source-linked observation](docs/scalar-upper-pc-observation.md) |
 | LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR accepted only with a proven in-block register target |
