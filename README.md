@@ -4,6 +4,8 @@ See the [MLP and attention LLVM handoff examples](docs/llvm-handoff-examples.md)
 for paired Atlas machine MLIR, checked-in LLVM MLIR snapshots, a reproducible
 object export with per-word operation maps, and the fixed-shape VMEM relayout
 used between layers.
+The [dialect reference](docs/dialect-reference.md) lists every current
+operation, its checked physical fields, and the implemented pass inventory.
 
 This is an out-of-tree ODS/C++ **machine-stage** dialect for one selected Atlas
 RTL revision. It is a reviewable reference candidate for comparing Merlin's
@@ -25,7 +27,9 @@ checks that branches/jumps have a non-redirecting delay-slot instruction.
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
 flat stream. It uses the RTL decoder's six-bit VR field layout and the selected
-RTL's DMA config encoding. The registered `--convert-atlas-to-llvm` pass
+RTL's DMA config encoding. The registered `--verify-atlas-machine-stream`
+pass checks the full physical stream without changing Atlas MLIR. The
+registered `--convert-atlas-to-llvm` pass
 lowers a flat validated stream to `llvm.func @atlas_program` with one
 side-effecting `llvm.inline_asm` block containing the selected words in order.
 One block keeps direct branch targets and the next delay-slot instruction
