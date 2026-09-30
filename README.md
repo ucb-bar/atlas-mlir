@@ -266,6 +266,12 @@ remain outside this bounded oracle.
 The fresh VEXP2 build passed 154/154 source-linked Python methods through
 CTest with no skips. The checked ledger counts 56/99 bounded modes, 0
 software-admitted modes, and 99 full-qualification blockers.
+The [bounded VLOAD/VSTORE check](docs/vload-vstore-observation.md) uses a
+hand-authored 29-word program and three 1 KiB raw-byte panels. It checks
+selected assembler and LLVM object words, both copied outputs, original
+input, and guard memory on the selected standalone core. The ledger now counts
+58/99 bounded modes, 0 software-admitted modes, and 99 full-qualification
+blockers; full address and temporal qualification remains open.
 The [VPU BF16 cube check](docs/vpu-cube-observation.md) uses the same physical
 pair shape and a separate exact-power raw-bit oracle. Two complete
 1,024-element panels matched the selected standalone core, including signed
@@ -403,5 +409,6 @@ implementation should consume the same frozen selected target contract; this
 repository must not become a hidden second authority for numerical semantics.
 
 No `.merlin` certification or release manifest is included because the
-required backend and execution evidence do not yet exist. No remote push has
-been made.
+required backend and execution evidence do not yet exist. The
+`handwritten-implementation` branch is published on `ucb-bar/atlas-mlir`;
+its tests remain bounded diagnostic evidence.

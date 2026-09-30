@@ -53,12 +53,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vload_vstore_reference.py::test_selected_core_preserves_all_bytes_and_guards",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -89,12 +88,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vload_vstore_reference.py::test_selected_core_preserves_all_bytes_and_guards",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
