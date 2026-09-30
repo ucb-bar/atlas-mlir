@@ -23,3 +23,11 @@ arbitrary register pairs, timing, or integrated SoC behavior. The dialect's
 obligations are checked. Any future corrected RTL or architectural mode needs
 a separately identified target configuration and tests; it must not silently
 change the meaning of this selected revision.
+
+The later [column-sum observation](vpu-col-sum-observation.md) found the same
+64-by-16 physical reduction and broadcast on two bounded panels. Its widened
+serial binary32 additions and final upper-bit chop are separate numerical
+requirements from the min/max comparisons. The inspected model's logical
+32-by-32 BF16-sum routine remains a source discrepancy. This observation
+extends the executable layout choice to column sum for this RTL revision;
+it does not qualify its full numerical or timing domain.

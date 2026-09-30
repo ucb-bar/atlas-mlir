@@ -34,11 +34,11 @@ run does not execute it.
 | DMA | 4 | 4 | 3 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
-| VPU arithmetic, reduction, pack | 25 | 25 | 16 | 25 |
+| VPU arithmetic, reduction, pack | 25 | 25 | 17 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 24 | 49 |
-| **Total** | **99** | **99** | **52** | **99** |
+| **Total** | **99** | **99** | **53** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -49,14 +49,14 @@ proven in-block word-index target from a restricted straight-line scalar
 prefix; unresolved dynamic targets remain rejected. `blocked=99` means each mode still lacks some full D-gate evidence,
 even when a bounded mode-specific test passed.
 
-The executable compatibility direction for BF16 column minimum and maximum
+The executable compatibility direction for BF16 column sum, minimum, and maximum
 is now the [selected RTL's 64-by-16 physical reduction](selected-rtl-column-reduction-contract.md).
 This resolves which layout the compiler should target for this revision; it
 does not change the software-admission or blocked counts above.
 
 The independently checked bounded modes are DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
-VRELU, VSQUARE, VCUBE, column minimum and maximum, row sum, row minimum and row maximum, all four VLI
+VRELU, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, and bounded JALR. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete

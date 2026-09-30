@@ -964,7 +964,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/vector/VectorEngine.scala",
-        "src/main/scala/atlas/vector/VectorFSM.scala"
+        "src/main/scala/atlas/vector/VectorFSM.scala",
+        "src/main/scala/atlas/vector/laneBoxes/ColAddVec.scala"
       ],
       "parameter_domains": [
         "mreg_0_63",
@@ -975,15 +976,17 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_vpu_col_sum_reference.py::test_selected_core_matches_physical_column_and_preserves_input",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "architectural_32x32_vs_selected_64x16_layout_mismatch",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
-      "source_discrepancies": [],
+      "source_discrepancies": [
+        "selected_rtl_col_sum_64x16_widened_serial_chop_vs_model_32x32_sum_bf16"
+      ],
       "rtl_decode_controls": "Y,ALU_X,BR_X,OP1_X,OP2_X,IMM_X,N,N,N,CSR_X,DMA_X,MXU_X,MXUSEL_X,VPU_CSUM,XLU_X,MEM_X,LSU_X"
     },
     {
