@@ -1,5 +1,9 @@
 # Atlas MLIR hand-authored reference candidate
 
+See the [MLP and attention LLVM handoff examples](docs/llvm-handoff-examples.md)
+for paired Atlas machine MLIR, checked-in LLVM MLIR snapshots, a reproducible
+object export, and the current layout limitation on composition.
+
 This is an out-of-tree ODS/C++ **machine-stage** dialect for one selected Atlas
 RTL revision. It is a reviewable reference candidate for comparing Merlin's
 generated dialect against an implementation written directly from the selected

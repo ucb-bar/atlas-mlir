@@ -1,0 +1,6 @@
+module {
+  llvm.func @atlas_program() {
+    llvm.inline_asm has_side_effects ".word 0x00100e13\0A.word 0x00000293\0A.word 0x0002807f\0A.word 0x40000113\0A.word 0x00000313\0A.word 0x900000b7\0A.word 0x0020837b\0A.word 0x0200007f\0A.word 0x00030007\0A.word 0x02101067\0A.word 0x10000313\0A.word 0x900000b7\0A.word 0x40008093\0A.word 0x0020837b\0A.word 0x0200007f\0A.word 0x00030107\0A.word 0x02101067\0A.word 0x20000313\0A.word 0x900010b7\0A.word 0x80008093\0A.word 0x0020837b\0A.word 0x0200007f\0A.word 0x00030207\0A.word 0x02101067\0A.word 0x00004077\0A.word 0x01f01067\0A.word 0x14000077\0A.word 0x05f01067\0A.word 0x10000477\0A.word 0x01f01067\0A.word 0x90010557\0A.word 0x04001067\0A.word 0x07f07183\0A.word 0x88506657\0A.word 0x07f01067\0A.word 0x02008077\0A.word 0x01f01067\0A.word 0x16018077\0A.word 0x05f01067\0A.word 0x12000777\0A.word 0x01f01067\0A.word 0x30000413\0A.word 0x00042707\0A.word 0x02101067\0A.word 0x900011b7\0A.word 0xc0018193\0A.word 0x022411fb\0A.word 0x0200107f\0A.word 0x40000413\0A.word 0x00042787\0A.word 0x02101067\0A.word 0x900011b7\0A.word 0x022411fb\0A.word 0x0200107f\0A.word 0x00100093\0A.word 0xc1009073\0A.word 0x00000073\0A", "~{memory}"  : () -> ()
+    llvm.return
+  }
+}
