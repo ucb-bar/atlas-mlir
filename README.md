@@ -243,8 +243,9 @@ The [VPU BF16 reciprocal check](docs/vpu-recip-observation.md) uses a 36-word
 typed stream and an independent exact-power exponent reference with explicit
 selected-RTL boundary rules. Two complete 1,024-element panels matched the
 selected standalone core across both register halves, including signed
-zero/subnormal/infinity/NaN cases. The selected reciprocal LUT remains
-unqualified for normal inputs with nonzero fractions and general timing.
+zero/subnormal/infinity/NaN cases. A later source-derived all-code diagnostic
+matched all 65,536 BF16 encodings on one persistent selected standalone core;
+arbitrary register pairs and general timing remain unqualified.
 The fresh reciprocal-branch build passed 141/141 source-linked Python methods
 through CTest, with no skips; the source-bound ledger counts 54/99 bounded
 modes and 0 software-admitted modes.
@@ -354,7 +355,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 pairwise minimum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
 | VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
-| VPU BF16 reciprocal | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact-power reciprocals and signed special-value behavior across both register halves on selected standalone core. LUT approximations for nonzero fractions and general timing remain open |
+| VPU BF16 reciprocal | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked an independent exact-power oracle. A source-derived LUT checker then matched all 65,536 BF16 raw encodings across both register halves on one persistent selected standalone core. Arbitrary register pairs, overlapping use, and general timing remain open |
 | VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
 | VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
 | VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
