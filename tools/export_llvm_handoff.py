@@ -58,6 +58,17 @@ def main() -> None:
         raw = source.read_bytes()
         words_text = run([str(atlas / "atlas-emit"), str(source)])
         words = tuple(int(line, 16) for line in words_text.splitlines())
+        word_map = json.loads(run([str(atlas / "atlas-emit"), "--map-json",
+                                   str(source)]))
+        mapped = word_map.get("operations", ())
+        if (word_map.get("schema") != "atlas.machine_word_map.v1"
+                or word_map.get("word_count") != len(words)
+                or len(mapped) != len(words)
+                or any(row["word_index"] != index
+                       or row["byte_offset"] != 4 * index
+                       or row["word_hex"] != f"{words[index]:08x}"
+                       for index, row in enumerate(mapped))):
+            raise RuntimeError(f"{name}: source operation map differs from emitted words")
         llvm_mlir = run([str(atlas / "atlas-opt"), "--convert-atlas-to-llvm",
                          str(source)])
         if llvm_mlir.count("llvm.inline_asm has_side_effects") != 1:
@@ -82,12 +93,16 @@ def main() -> None:
         (output / f"{name}.llvm.mlir").write_text(llvm_mlir)
         (output / f"{name}.ll").write_text(llvm_ir)
         (output / f"{name}.words.txt").write_text(words_text)
+        map_bytes = (json.dumps(word_map, indent=2, sort_keys=True) + "\n").encode()
+        (output / f"{name}.word-map.json").write_bytes(map_bytes)
         manifest["examples"][name] = {
             "word_count": len(words),
             "source_sha256": digest(raw),
             "llvm_mlir_sha256": digest(llvm_mlir.encode()),
             "object_sha256": digest(obj.read_bytes()),
             "object_prefix_matches_emitter": True,
+            "word_map_sha256": digest(map_bytes),
+            "word_map_schema": word_map["schema"],
             "text_bytes": len(actual),
         }
 

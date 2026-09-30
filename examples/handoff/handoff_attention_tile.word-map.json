@@ -1,0 +1,1546 @@
+{
+  "operations": [
+    {
+      "attributes": {
+        "dst": "28 : i32",
+        "immediate": "1 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 0,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00100e13",
+      "word_index": 0
+    },
+    {
+      "attributes": {
+        "dst": "5 : i32",
+        "immediate": "0 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 4,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000293",
+      "word_index": 1
+    },
+    {
+      "attributes": {
+        "base_reg": "5 : i32",
+        "channel": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 8,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_config",
+      "word_hex": "0002807f",
+      "word_index": 2
+    },
+    {
+      "attributes": {
+        "dst": "2 : i32",
+        "immediate": "1024 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 12,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000113",
+      "word_index": 3
+    },
+    {
+      "attributes": {
+        "dst": "6 : i32",
+        "immediate": "0 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 16,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000313",
+      "word_index": 4
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "589824 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 20,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "900000b7",
+      "word_index": 5
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32",
+        "direction": "\"load\"",
+        "dram": "1 : i32",
+        "reg": "6 : i32",
+        "size": "2 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 24,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 6
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 28,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 7
+    },
+    {
+      "attributes": {
+        "base": "6 : i32",
+        "dst": "0 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 32,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vload",
+      "word_hex": "00030007",
+      "word_index": 8
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 36,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 9
+    },
+    {
+      "attributes": {
+        "dst": "6 : i32",
+        "immediate": "256 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 40,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "10000313",
+      "word_index": 10
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "589824 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 44,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "900000b7",
+      "word_index": 11
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "1024 : i32",
+        "kind": "\"addi\"",
+        "src": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 48,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "40008093",
+      "word_index": 12
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32",
+        "direction": "\"load\"",
+        "dram": "1 : i32",
+        "reg": "6 : i32",
+        "size": "2 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 52,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 13
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 56,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 14
+    },
+    {
+      "attributes": {
+        "base": "6 : i32",
+        "dst": "2 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 60,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vload",
+      "word_hex": "00030107",
+      "word_index": 15
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 64,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 16
+    },
+    {
+      "attributes": {
+        "dst": "6 : i32",
+        "immediate": "512 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 68,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "20000313",
+      "word_index": 17
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "589825 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 72,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "900010b7",
+      "word_index": 18
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "-2048 : i32",
+        "kind": "\"addi\"",
+        "src": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 76,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "80008093",
+      "word_index": 19
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32",
+        "direction": "\"load\"",
+        "dram": "1 : i32",
+        "reg": "6 : i32",
+        "size": "2 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 80,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 20
+    },
+    {
+      "attributes": {
+        "channel": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 84,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 21
+    },
+    {
+      "attributes": {
+        "base": "6 : i32",
+        "dst": "4 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 88,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vload",
+      "word_hex": "00030207",
+      "word_index": 22
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 92,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 23
+    },
+    {
+      "attributes": {
+        "kind": "\"weight_fp8\"",
+        "slot": "0 : i32",
+        "src": "2 : i32",
+        "unit": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 96,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_push",
+      "word_hex": "00004077",
+      "word_index": 24
+    },
+    {
+      "attributes": {
+        "cycles": "31 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 100,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 31,
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 25
+    },
+    {
+      "attributes": {
+        "acc_slot": "0 : i32",
+        "accumulate": "false",
+        "src": "0 : i32",
+        "unit": "0 : i32",
+        "weight_slot": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 104,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "14000077",
+      "word_index": 26
+    },
+    {
+      "attributes": {
+        "cycles": "95 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 108,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 95,
+      "operation": "atlas.delay",
+      "word_hex": "05f01067",
+      "word_index": 27
+    },
+    {
+      "attributes": {
+        "dst": "8 : i32",
+        "format": "\"bf16\"",
+        "scale_reg": "0 : i32",
+        "slot": "0 : i32",
+        "unit": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 112,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_pop",
+      "word_hex": "10000477",
+      "word_index": 28
+    },
+    {
+      "attributes": {
+        "cycles": "31 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 116,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 31,
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 29
+    },
+    {
+      "attributes": {
+        "dst": "10 : i32",
+        "kind": "\"row_max\"",
+        "src": "8 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 120,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_reduce",
+      "word_hex": "4c010557",
+      "word_index": 30
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 124,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 31
+    },
+    {
+      "attributes": {
+        "dst": "12 : i32",
+        "kind": "\"sub\"",
+        "lhs": "8 : i32",
+        "rhs": "10 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 128,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_binary",
+      "word_hex": "04510657",
+      "word_index": 32
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 132,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 33
+    },
+    {
+      "attributes": {
+        "dst": "14 : i32",
+        "immediate": "16003 : i32",
+        "mode": "\"all\""
+      },
+      "availability": "unknown",
+      "byte_offset": 136,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vli",
+      "word_hex": "3e83075f",
+      "word_index": 34
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 140,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 35
+    },
+    {
+      "attributes": {
+        "dst": "16 : i32",
+        "kind": "\"mul\"",
+        "lhs": "12 : i32",
+        "rhs": "14 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 144,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_binary",
+      "word_hex": "06718857",
+      "word_index": 36
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 148,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 37
+    },
+    {
+      "attributes": {
+        "dst": "18 : i32",
+        "kind": "\"exp2\"",
+        "src": "16 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 152,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_unary",
+      "word_hex": "86020957",
+      "word_index": 38
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 156,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 39
+    },
+    {
+      "attributes": {
+        "dst": "20 : i32",
+        "kind": "\"row_sum\"",
+        "src": "18 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 160,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_reduce",
+      "word_hex": "42024a57",
+      "word_index": 40
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 164,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 41
+    },
+    {
+      "attributes": {
+        "dst": "22 : i32",
+        "kind": "\"recip\"",
+        "src": "20 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 168,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_unary",
+      "word_hex": "82028b57",
+      "word_index": 42
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 172,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 43
+    },
+    {
+      "attributes": {
+        "dst": "24 : i32",
+        "kind": "\"mul\"",
+        "lhs": "18 : i32",
+        "rhs": "22 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 176,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_binary",
+      "word_hex": "06b24c57",
+      "word_index": 44
+    },
+    {
+      "attributes": {
+        "cycles": "64 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 180,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 64,
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 45
+    },
+    {
+      "attributes": {
+        "base": "0 : i32",
+        "dst": "3 : i32",
+        "kind": "\"seli\"",
+        "offset": "127 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 184,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "07f07183",
+      "word_index": 46
+    },
+    {
+      "attributes": {
+        "direction": "\"bf16_to_fp8\"",
+        "dst": "26 : i32",
+        "scale_reg": "3 : i32",
+        "src": "24 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 188,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vpu_pack",
+      "word_hex": "88c06d57",
+      "word_index": 47
+    },
+    {
+      "attributes": {
+        "cycles": "127 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 192,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 127,
+      "operation": "atlas.delay",
+      "word_hex": "07f01067",
+      "word_index": 48
+    },
+    {
+      "attributes": {
+        "dst": "8 : i32",
+        "immediate": "1280 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 196,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "50000413",
+      "word_index": 49
+    },
+    {
+      "attributes": {
+        "base": "8 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32",
+        "src": "26 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 200,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vstore",
+      "word_hex": "00042d07",
+      "word_index": 50
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 204,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 51
+    },
+    {
+      "attributes": {
+        "dst": "10 : i32",
+        "immediate": "1 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 208,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "00001537",
+      "word_index": 52
+    },
+    {
+      "attributes": {
+        "dst": "10 : i32",
+        "immediate": "1024 : i32",
+        "kind": "\"addi\"",
+        "src": "10 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 212,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "40050513",
+      "word_index": 53
+    },
+    {
+      "attributes": {
+        "dst": "11 : i32",
+        "immediate": "1 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 216,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "000015b7",
+      "word_index": 54
+    },
+    {
+      "attributes": {
+        "dst": "11 : i32",
+        "immediate": "1536 : i32",
+        "kind": "\"addi\"",
+        "src": "11 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 220,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "60058593",
+      "word_index": 55
+    },
+    {
+      "attributes": {
+        "dst": "12 : i32",
+        "immediate": "2 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 224,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "00002637",
+      "word_index": 56
+    },
+    {
+      "attributes": {
+        "dst": "12 : i32",
+        "immediate": "-2048 : i32",
+        "kind": "\"addi\"",
+        "src": "12 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 228,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "80060613",
+      "word_index": 57
+    },
+    {
+      "attributes": {
+        "dst": "13 : i32",
+        "immediate": "0 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 232,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000693",
+      "word_index": 58
+    },
+    {
+      "attributes": {
+        "dst": "14 : i32",
+        "immediate": "32 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 236,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "02000713",
+      "word_index": 59
+    },
+    {
+      "attributes": {
+        "base": "10 : i32",
+        "dst": "16 : i32",
+        "kind": "\"lw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 240,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "00052803",
+      "word_index": 60
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 244,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 61
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "0 : i32",
+        "src": "16 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 248,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062023",
+      "word_index": 62
+    },
+    {
+      "attributes": {
+        "base": "11 : i32",
+        "dst": "17 : i32",
+        "kind": "\"lw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 252,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "0005a883",
+      "word_index": 63
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 256,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 64
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "16 : i32",
+        "src": "17 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 260,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162823",
+      "word_index": 65
+    },
+    {
+      "attributes": {
+        "base": "10 : i32",
+        "dst": "16 : i32",
+        "kind": "\"lw\"",
+        "offset": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 264,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "00452803",
+      "word_index": 66
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 268,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 67
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "4 : i32",
+        "src": "16 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 272,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062223",
+      "word_index": 68
+    },
+    {
+      "attributes": {
+        "base": "11 : i32",
+        "dst": "17 : i32",
+        "kind": "\"lw\"",
+        "offset": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 276,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "0045a883",
+      "word_index": 69
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 280,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 70
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "20 : i32",
+        "src": "17 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 284,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162a23",
+      "word_index": 71
+    },
+    {
+      "attributes": {
+        "base": "10 : i32",
+        "dst": "16 : i32",
+        "kind": "\"lw\"",
+        "offset": "8 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 288,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "00852803",
+      "word_index": 72
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 292,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 73
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "8 : i32",
+        "src": "16 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 296,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062423",
+      "word_index": 74
+    },
+    {
+      "attributes": {
+        "base": "11 : i32",
+        "dst": "17 : i32",
+        "kind": "\"lw\"",
+        "offset": "8 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 300,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "0085a883",
+      "word_index": 75
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 304,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 76
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "24 : i32",
+        "src": "17 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 308,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162c23",
+      "word_index": 77
+    },
+    {
+      "attributes": {
+        "base": "10 : i32",
+        "dst": "16 : i32",
+        "kind": "\"lw\"",
+        "offset": "12 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 312,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c52803",
+      "word_index": 78
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 316,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 79
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "12 : i32",
+        "src": "16 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 320,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062623",
+      "word_index": 80
+    },
+    {
+      "attributes": {
+        "base": "11 : i32",
+        "dst": "17 : i32",
+        "kind": "\"lw\"",
+        "offset": "12 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 324,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c5a883",
+      "word_index": 81
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 328,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 82
+    },
+    {
+      "attributes": {
+        "base": "12 : i32",
+        "kind": "\"sw\"",
+        "offset": "28 : i32",
+        "src": "17 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 332,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162e23",
+      "word_index": 83
+    },
+    {
+      "attributes": {
+        "dst": "10 : i32",
+        "immediate": "16 : i32",
+        "kind": "\"addi\"",
+        "src": "10 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 336,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "01050513",
+      "word_index": 84
+    },
+    {
+      "attributes": {
+        "dst": "11 : i32",
+        "immediate": "16 : i32",
+        "kind": "\"addi\"",
+        "src": "11 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 340,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "01058593",
+      "word_index": 85
+    },
+    {
+      "attributes": {
+        "dst": "12 : i32",
+        "immediate": "32 : i32",
+        "kind": "\"addi\"",
+        "src": "12 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 344,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "02060613",
+      "word_index": 86
+    },
+    {
+      "attributes": {
+        "dst": "13 : i32",
+        "immediate": "1 : i32",
+        "kind": "\"addi\"",
+        "src": "13 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 348,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00168693",
+      "word_index": 87
+    },
+    {
+      "attributes": {
+        "kind": "\"blt\"",
+        "lhs": "13 : i32",
+        "offset_bytes": "-56 : i32",
+        "rhs": "14 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 352,
+      "direct_target_word_index": 60,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.branch",
+      "word_hex": "fce6c4e3",
+      "word_index": 88
+    },
+    {
+      "attributes": {
+        "dst": "0 : i32",
+        "immediate": "0 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 356,
+      "delay_slot_for_word_index": 88,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000013",
+      "word_index": 89
+    },
+    {
+      "attributes": {
+        "cycles": "4 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 360,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 4,
+      "operation": "atlas.delay",
+      "word_hex": "00401067",
+      "word_index": 90
+    },
+    {
+      "attributes": {
+        "dst": "6 : i32",
+        "immediate": "1536 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 364,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "60000313",
+      "word_index": 91
+    },
+    {
+      "attributes": {
+        "base": "6 : i32",
+        "dst": "26 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 368,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vload",
+      "word_hex": "00030d07",
+      "word_index": 92
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 372,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 93
+    },
+    {
+      "attributes": {
+        "kind": "\"weight_fp8\"",
+        "slot": "0 : i32",
+        "src": "4 : i32",
+        "unit": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 376,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_push",
+      "word_hex": "02008077",
+      "word_index": 94
+    },
+    {
+      "attributes": {
+        "cycles": "31 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 380,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 31,
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 95
+    },
+    {
+      "attributes": {
+        "acc_slot": "0 : i32",
+        "accumulate": "false",
+        "src": "26 : i32",
+        "unit": "1 : i32",
+        "weight_slot": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 384,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "16034077",
+      "word_index": 96
+    },
+    {
+      "attributes": {
+        "cycles": "95 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 388,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 95,
+      "operation": "atlas.delay",
+      "word_hex": "05f01067",
+      "word_index": 97
+    },
+    {
+      "attributes": {
+        "dst": "28 : i32",
+        "format": "\"bf16\"",
+        "scale_reg": "0 : i32",
+        "slot": "0 : i32",
+        "unit": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 392,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.mxu_pop",
+      "word_hex": "12000e77",
+      "word_index": 98
+    },
+    {
+      "attributes": {
+        "cycles": "31 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 396,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 31,
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 99
+    },
+    {
+      "attributes": {
+        "dst": "8 : i32",
+        "immediate": "768 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 400,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "30000413",
+      "word_index": 100
+    },
+    {
+      "attributes": {
+        "base": "8 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32",
+        "src": "28 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 404,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vstore",
+      "word_hex": "00042e07",
+      "word_index": 101
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 408,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 102
+    },
+    {
+      "attributes": {
+        "dst": "3 : i32",
+        "immediate": "589825 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 412,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "900011b7",
+      "word_index": 103
+    },
+    {
+      "attributes": {
+        "dst": "3 : i32",
+        "immediate": "-1024 : i32",
+        "kind": "\"addi\"",
+        "src": "3 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 416,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "c0018193",
+      "word_index": 104
+    },
+    {
+      "attributes": {
+        "channel": "1 : i32",
+        "direction": "\"store\"",
+        "dram": "3 : i32",
+        "reg": "8 : i32",
+        "size": "2 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 420,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma",
+      "word_hex": "022411fb",
+      "word_index": 105
+    },
+    {
+      "attributes": {
+        "channel": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 424,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 106
+    },
+    {
+      "attributes": {
+        "dst": "8 : i32",
+        "immediate": "1024 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 428,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000413",
+      "word_index": 107
+    },
+    {
+      "attributes": {
+        "base": "8 : i32",
+        "format": "\"raw\"",
+        "offset": "0 : i32",
+        "src": "29 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 432,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.vstore",
+      "word_hex": "00042e87",
+      "word_index": 108
+    },
+    {
+      "attributes": {
+        "cycles": "33 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 436,
+      "effect_scope": "conservative_physical_state_read_write",
+      "explicit_stall_cycles": 33,
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 109
+    },
+    {
+      "attributes": {
+        "dst": "3 : i32",
+        "immediate": "589825 : i32",
+        "kind": "\"lui\""
+      },
+      "availability": "unknown",
+      "byte_offset": 440,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.upper",
+      "word_hex": "900011b7",
+      "word_index": 110
+    },
+    {
+      "attributes": {
+        "channel": "1 : i32",
+        "direction": "\"store\"",
+        "dram": "3 : i32",
+        "reg": "8 : i32",
+        "size": "2 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 444,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma",
+      "word_hex": "022411fb",
+      "word_index": 111
+    },
+    {
+      "attributes": {
+        "channel": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 448,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 112
+    },
+    {
+      "attributes": {
+        "dst": "1 : i32",
+        "immediate": "1 : i32",
+        "kind": "\"addi\"",
+        "src": "0 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 452,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.alu_imm",
+      "word_hex": "00100093",
+      "word_index": 113
+    },
+    {
+      "attributes": {
+        "address": "3088 : i32",
+        "dst": "0 : i32",
+        "kind": "\"rrw\"",
+        "source": "1 : i32"
+      },
+      "availability": "unknown",
+      "byte_offset": 456,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.csr",
+      "word_hex": "c1009073",
+      "word_index": 114
+    },
+    {
+      "attributes": {
+        "kind": "\"ecall\""
+      },
+      "availability": "unknown",
+      "byte_offset": 460,
+      "effect_scope": "conservative_physical_state_read_write",
+      "operation": "atlas.trap",
+      "word_hex": "00000073",
+      "word_index": 115
+    }
+  ],
+  "schema": "atlas.machine_word_map.v1",
+  "word_count": 116
+}

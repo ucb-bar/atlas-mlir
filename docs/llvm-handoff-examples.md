@@ -5,10 +5,10 @@ produced by this out-of-tree package. They are not generated from PyTorch,
 Linalg, or Merlin's native selector. They do not qualify whole-model MLP or
 attention compilation.
 
-| Example | Intended instruction chain | Atlas words | Checked-in LLVM MLIR |
+| Example | Intended instruction chain | Atlas words | Checked-in LLVM MLIR | Word map |
 | --- | --- | ---: | --- |
-| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [LLVM snapshot](../examples/handoff/handoff_mlp_tile.llvm.mlir) |
-| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [LLVM snapshot](../examples/handoff/handoff_attention_tile.llvm.mlir) |
+| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [LLVM snapshot](../examples/handoff/handoff_mlp_tile.llvm.mlir) | [map](../examples/handoff/handoff_mlp_tile.word-map.json) |
+| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [LLVM snapshot](../examples/handoff/handoff_attention_tile.llvm.mlir) | [map](../examples/handoff/handoff_attention_tile.word-map.json) |
 
 Both inputs use fixed 32×32 FP8 tiles and already oriented weights. The MLP
 has no bias; the attention sequence has no mask or causal state. `SELI 127`
@@ -56,7 +56,7 @@ adjacent. It is a void reset-entry program body, not a C-callable Atlas ABI.
 The `.word` stream is not executable on a generic host RISC-V CPU.
 
 To reproduce a complete bundle with the Atlas source, LLVM MLIR, LLVM IR,
-RISC-V object, extracted `.text`, words, and hashes:
+RISC-V object, extracted `.text`, words, a per-word operation map, and hashes:
 
 ```sh
 python tools/export_llvm_handoff.py \
@@ -99,7 +99,7 @@ composition route and layout position. They do not establish full-domain
 arithmetic equivalence to framework MLP or softmax, masks, tails, arbitrary
 shapes, a qualified schedule, or an integrated SoC launch.
 
-## Proposed delay-analysis handoff
+## Delay-analysis handoff
 
 The LLVM snapshot is useful for object generation and exact byte comparison.
 It has lost operation names, physical resource roles, and the reason for each
@@ -108,15 +108,24 @@ before `--convert-atlas-to-llvm`, plus a source-bound timing/effects contract.
 It can return a scheduled Atlas stream; this package can then revalidate and
 lower it to the same LLVM form.
 
-A small versioned sidecar could map each non-`atlas.start` operation to its
-zero-based word index and carry its reads, writes, completion event, and
-evidence tier. For example, an MXU launch would state that the accumulator
-cannot be popped until its completion condition is met. A DMA launch would
-identify the channel and scalar address register lifetime; an architectural
-`atlas.dma_wait` would discharge that event. An `atlas.delay` records an
-explicit stall count, not proof that all older work has completed. Static
-latencies should carry the selected RTL/configuration identity and the test
-or proof establishing their bound; unknown latency stays unknown.
+The exporter now emits `<example>.word-map.json` alongside LLVM MLIR. Its
+`atlas.machine_word_map.v1` rows bind every zero-based Atlas word index and
+byte offset to the parsed machine operation, encoding, and typed attribute
+text. A delay row includes its explicit stall count. A branch row includes
+its direct word-index target; the following row identifies its delay-slot
+owner. `manifest.json` hashes the map, source, LLVM MLIR, and object. The
+exporter checks map words against both `atlas-emit` and the LLVM object prefix.
+The map is generated from parsed MLIR operations inside `atlas-emit`; the
+Python exporter does not recover operation identity from source text.
+
+The current dialect gives every issued operation conservative physical-state
+read/write effects. The sidecar reports `availability: "unknown"` for every
+row, including an explicit `atlas.delay`: a stall count alone does not prove
+an MXU result or DMA transfer has completed. Jeremy's scheduler can use the
+index map to attach qualified resource, scalar lifetime, and completion facts
+to the right word, then return an edited Atlas MLIR stream for verification
+and re-export. Unit-specific effects and timing bounds require source-backed
+contracts and tests before they can replace these unknowns.
 
 For a consumer that only accepts LLVM MLIR, the source-to-word-index sidecar
 is necessary for analysis. Editing individual `.word` instructions inside the

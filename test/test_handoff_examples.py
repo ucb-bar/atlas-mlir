@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import pathlib
 import struct
@@ -123,6 +124,42 @@ class HandoffExamplesTest(unittest.TestCase):
                     expected = b"".join(struct.pack("<I", word)
                                         for word in words(name))
                     self.assertTrue(object_text.startswith(expected))
+                    map_bytes = (output / f"{name}.word-map.json").read_bytes()
+                    self.assertEqual(
+                        map_bytes,
+                        (ROOT / "examples/handoff" / f"{name}.word-map.json").read_bytes(),
+                    )
+                    self.assertEqual(hashlib.sha256(map_bytes).hexdigest(),
+                                     manifest["examples"][name]["word_map_sha256"])
+                    word_map = json.loads(map_bytes)
+                    self.assertEqual(word_map["schema"], "atlas.machine_word_map.v1")
+                    mapped = word_map["operations"]
+                    self.assertEqual(len(mapped), len(words(name)))
+                    self.assertTrue(all(
+                        (row["word_index"], row["byte_offset"], row["word_hex"])
+                        == (index, 4 * index, f"{word:08x}")
+                        for index, (row, word) in enumerate(zip(mapped, words(name)))
+                    ))
+                    self.assertTrue(all(
+                        row["effect_scope"] == "conservative_physical_state_read_write"
+                        and row["availability"] == "unknown"
+                        for row in mapped
+                    ))
+                    self.assertTrue(any(row["operation"] == "atlas.mxu_matmul"
+                                        for row in mapped))
+                    self.assertTrue(any(row["operation"] == "atlas.delay"
+                                        and row["explicit_stall_cycles"] > 0
+                                        for row in mapped))
+                    branches = [row for row in mapped
+                                if row["operation"] == "atlas.branch"]
+                    self.assertEqual(len(branches), 1)
+                    branch = branches[0]
+                    self.assertLess(branch["direct_target_word_index"],
+                                    branch["word_index"])
+                    self.assertEqual(
+                        mapped[branch["word_index"] + 1]
+                        ["delay_slot_for_word_index"], branch["word_index"]
+                    )
 
     def test_uniform_directed_programs_on_selected_core(self) -> None:
         cases = (
