@@ -28,7 +28,11 @@ checks that branches/jumps have a non-redirecting delay-slot instruction.
 The separate [`virtual_bf16_ssa.mlir`](test/examples/virtual_bf16_ssa.mlir)
 fixture uses `%t` SSA tensor values before physical register assignment;
 `--verify-atlas-virtual-stream` checks its boundary state chain and output
-identities. No virtual-to-physical allocator is implemented here.
+identities. A [CFG fixture](test/examples/virtual_bf16_cfg.mlir) uses MLIR
+block arguments for a branch merge and a loop-carried tile/state; the virtual
+verifier checks state handoffs across `cf` edges and requires boundary outputs
+in the single return block. No virtual-to-physical allocator or general CFG
+machine lowering is implemented here.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole

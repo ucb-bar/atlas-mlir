@@ -11,6 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 EXAMPLE = ROOT / "test/examples/virtual_bf16_ssa.mlir"
+CFG_EXAMPLE = ROOT / "test/examples/virtual_bf16_cfg.mlir"
 
 
 def run(tool: str, source: str, *options: str) -> subprocess.CompletedProcess[str]:
@@ -40,6 +41,75 @@ class VirtualSSAStageTest(unittest.TestCase):
         self.assertEqual(first.stdout.count('"atlas.virtual_output_bf16"'), 2)
         self.assertEqual(first.stdout.count('"atlas.virtual_input_bf16"'), 1)
         self.assertIn('"atlas.virtual_vpu_binary"', first.stdout)
+
+    def test_cfg_uses_block_arguments_for_merge_and_loop_carried_values(self) -> None:
+        source = CFG_EXAMPLE.read_text()
+        first = run("atlas-opt", source, "--verify-atlas-virtual-stream")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = run("atlas-opt", first.stdout, "--verify-atlas-virtual-stream")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertIn("cf.cond_br", first.stdout)
+        self.assertIn("cf.br", first.stdout)
+        self.assertIn("2 preds:", first.stdout)
+        self.assertIn("i32):  // 2 preds:", first.stdout)
+        self.assertNotIn("phi", first.stdout)
+
+    def test_cfg_rejects_wrong_state_edge_stale_return_and_bad_dominance(self) -> None:
+        source = CFG_EXAMPLE.read_text()
+        changes = [
+            (source.replace("cf.br ^join(%left_io, %left_result",
+                            "cf.br ^join(%io1, %left_result", 1),
+             "current virtual state"),
+            (source.replace("return %io2 : !atlas.virtual_state",
+                            "return %joined_io : !atlas.virtual_state", 1),
+             "current virtual state"),
+            (source.replace('"atlas.virtual_vpu_unary"(%left_tile)',
+                            '"atlas.virtual_vpu_unary"(%right_result)', 1),
+             ""),
+        ]
+        for changed, expected in changes:
+            with self.subTest(expected=expected):
+                result = run("atlas-opt", changed,
+                             "--verify-atlas-virtual-stream")
+                self.assertNotEqual(result.returncode, 0)
+                if expected:
+                    self.assertIn(expected, result.stderr)
+
+    def test_cfg_is_not_a_physical_word_stream(self) -> None:
+        source = CFG_EXAMPLE.read_text()
+        for tool, options in [
+            ("atlas-emit", ()),
+            ("atlas-opt", ("--verify-atlas-machine-stream",)),
+            ("atlas-opt", ("--convert-atlas-to-llvm",)),
+        ]:
+            with self.subTest(tool=tool, options=options):
+                result = run(tool, source, *options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
+    def test_cfg_rejects_a_second_return_or_output_on_only_one_path(self) -> None:
+        source = CFG_EXAMPLE.read_text()
+        second_return = source.replace(
+            "cf.br ^join(%left_io, %left_result : !atlas.virtual_state, !atlas.virtual_bf16)",
+            "return %left_io : !atlas.virtual_state", 1,
+        )
+        early_output = source.replace(
+            "    cf.br ^join(%left_io, %left_result",
+            '    %early_io = "atlas.virtual_output_bf16"(%left_io, %left_result) '
+            '{index = 1 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) '
+            '-> !atlas.virtual_state\n'
+            "    cf.br ^join(%early_io, %left_result", 1,
+        )
+        for changed, expected in [
+            (second_return, "one return block"),
+            (early_output, "outputs must be in the return block"),
+        ]:
+            with self.subTest(expected=expected):
+                result = run("atlas-opt", changed,
+                             "--verify-atlas-virtual-stream")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
 
     def test_wrong_state_and_value_types_fail(self) -> None:
         source = EXAMPLE.read_text()
