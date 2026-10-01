@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -98,6 +99,14 @@ class CapturedMLPEndToEndTest(unittest.TestCase):
             checked = tuple(int(line, 16) for line in
                             (compiled / "program.words.txt").read_text().splitlines())
             self.assertEqual(words[:len(checked)], checked)
+            physical = json.loads((compiled / "physical-program.json").read_text())
+            self.assertEqual(physical["schema"], "atlas.physical_program.v1")
+            self.assertEqual([row["word_u32"] for row in physical["instructions"]],
+                             list(checked))
+            self.assertEqual(
+                hashlib.sha256((compiled / "physical-program.json").read_bytes()).hexdigest(),
+                manifest["program"]["physical_program_sha256"],
+            )
             public_words = tuple(int(line, 16) for line in
                                  (ROOT / "examples/handoff/captured_mlp/atlas-words.txt")
                                  .read_text().splitlines())

@@ -10,6 +10,9 @@ operation, its checked physical fields, and the implemented pass inventory.
 The [virtual SSA interpreter contract](docs/virtual-ssa-interpreter-contract.md)
 explains block arguments, loop visits, state tokens, and the checks needed by
 an independent interpreter.
+The [physical program contract](docs/functional-stream-contract.md) gives a
+separate instruction-level functional model exact words, typed fields, and
+control-flow metadata without making it interpret virtual SSA.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
