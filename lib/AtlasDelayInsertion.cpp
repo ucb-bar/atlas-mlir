@@ -1,12 +1,3 @@
-// insert-atlas-delays: inserts the minimum delays that the ported timing model
-// (AtlasTiming.h) requires into a stream that has none, without reordering.
-//
-// Each basic block is timed in program order: an instruction issues at the
-// first cycle at which every earlier instruction of the block allows it and
-// its units and ports are free; any gap before it becomes a delay. As in
-// atlas-compiler-experiments, fixed-latency work drains at block boundaries,
-// a dma.wait releases at an unknown time, and a DMA transfer is never covered
-// by a delay (it needs a dma.wait).
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
@@ -26,8 +17,6 @@ namespace {
 
 int64_t signedValue(IntegerAttr attr) { return attr.getValue().getSExtValue(); }
 
-// The npu_model instruction an Atlas operation encodes, in the timing model's
-// field layout.
 FailureOr<Instr> toInstr(Operation *op) {
   Instr in;
   std::string name;
@@ -35,14 +24,16 @@ FailureOr<Instr> toInstr(Operation *op) {
   auto ch = [](uint32_t channel) { return ".ch" + std::to_string(channel); };
   if (auto x = dyn_cast<VLoadOp>(op)) {
     name = "vload";
-    in.rd = x.getDst(), in.rs1 = x.getBase();
+    in.rd = x.getDst();
+    in.rs1 = x.getBase();
     in.imm = signedValue(x.getOffsetAttr());
   } else if (auto x = dyn_cast<VStoreOp>(op)) {
     name = "vstore";
-    in.rd = x.getSrc(), in.rs1 = x.getBase();
+    in.rd = x.getSrc();
+    in.rs1 = x.getBase();
     in.imm = signedValue(x.getOffsetAttr());
   } else if (auto x = dyn_cast<DMAOp>(op)) {
-    // The same register fields as encodeMachineWord.
+    // Register fields as in encodeMachineWord.
     bool store = x.getDirection() == "store";
     name = (store ? "dma.store" : "dma.load") + ch(x.getChannel());
     in.rd = store ? x.getDram() : x.getReg();
@@ -59,69 +50,92 @@ FailureOr<Instr> toInstr(Operation *op) {
                .Case("acc_fp8", "vmatpush.acc.fp8")
                .Default("vmatpush.acc.bf16") +
            mxu(x.getUnit());
-    in.rd = x.getSlot(), in.rs1 = x.getSrc();
+    in.rd = x.getSlot();
+    in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<MXUMatmulOp>(op)) {
     name = (x.getAccumulate() ? "vmatmul.acc" : "vmatmul") + mxu(x.getUnit());
-    in.rd = x.getAccSlot(), in.rs1 = x.getSrc(), in.rs2 = x.getWeightSlot();
+    in.rd = x.getAccSlot();
+    in.rs1 = x.getSrc();
+    in.rs2 = x.getWeightSlot();
   } else if (auto x = dyn_cast<MXUPopOp>(op)) {
     name = (x.getFormat() == "fp8" ? "vmatpop.fp8.acc" : "vmatpop.bf16.acc") +
            mxu(x.getUnit());
-    in.rd = x.getDst(), in.rs2 = x.getSlot(), in.rs1 = x.getScaleReg();
+    in.rd = x.getDst();
+    in.rs2 = x.getSlot();
+    in.rs1 = x.getScaleReg();
   } else if (auto x = dyn_cast<VPUBinaryOp>(op)) {
     name = llvm::StringSwitch<std::string>(x.getKind())
                .Case("min", "vminimum.bf16")
                .Case("max", "vmaximum.bf16")
                .Default("v" + x.getKind().str() + ".bf16");
-    in.rd = x.getDst(), in.rs1 = x.getLhs(), in.rs2 = x.getRhs();
+    in.rd = x.getDst();
+    in.rs1 = x.getLhs();
+    in.rs2 = x.getRhs();
   } else if (auto x = dyn_cast<VPUUnaryOp>(op)) {
     name = x.getKind() == "mov" ? "vmov" : "v" + x.getKind().str() + ".bf16";
-    in.rd = x.getDst(), in.rs1 = x.getSrc();
+    in.rd = x.getDst();
+    in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<VPUPackOp>(op)) {
     name = x.getDirection() == "bf16_to_fp8" ? "vpack.bf16.fp8"
                                              : "vunpack.fp8.bf16";
-    in.rd = x.getDst(), in.rs2 = x.getSrc(), in.rs1 = x.getScaleReg();
+    in.rd = x.getDst();
+    in.rs2 = x.getSrc();
+    in.rs1 = x.getScaleReg();
   } else if (auto x = dyn_cast<VPUReduceOp>(op)) {
     StringRef kind = x.getKind(); // col_sum, row_max, ...
     std::string reduction = "vred" + kind.drop_front(4).str();
     name = reduction + (kind.starts_with("row") ? ".row.bf16" : ".bf16");
-    in.rd = x.getDst(), in.rs1 = x.getSrc();
+    in.rd = x.getDst();
+    in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<VLIOp>(op)) {
     name = "vli." + x.getMode().str();
-    in.rd = x.getDst(), in.imm = x.getImmediate();
+    in.rd = x.getDst();
+    in.imm = x.getImmediate();
   } else if (auto x = dyn_cast<XLUTransposeOp>(op)) {
     name = "vtrpose.xlu";
-    in.rd = x.getDst(), in.rs1 = x.getSrc();
+    in.rd = x.getDst();
+    in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<ALURegOp>(op)) {
     name = x.getKind().str();
-    in.rd = x.getDst(), in.rs1 = x.getLhs(), in.rs2 = x.getRhs();
+    in.rd = x.getDst();
+    in.rs1 = x.getLhs();
+    in.rs2 = x.getRhs();
   } else if (auto x = dyn_cast<ALUImmOp>(op)) {
     name = x.getKind().str();
-    in.rd = x.getDst(), in.rs1 = x.getSrc();
+    in.rd = x.getDst();
+    in.rs1 = x.getSrc();
     in.imm = signedValue(x.getImmediateAttr());
   } else if (auto x = dyn_cast<BranchOp>(op)) {
     name = x.getKind().str();
-    in.rs1 = x.getLhs(), in.rs2 = x.getRhs();
+    in.rs1 = x.getLhs();
+    in.rs2 = x.getRhs();
   } else if (auto x = dyn_cast<JumpOp>(op)) {
     name = x.getKind().str();
-    in.rd = x.getDst(), in.rs1 = x.getBase();
+    in.rd = x.getDst();
+    in.rs1 = x.getBase();
     in.imm = signedValue(x.getOffsetAttr());
   } else if (auto x = dyn_cast<UpperOp>(op)) {
     name = x.getKind().str();
-    in.rd = x.getDst(), in.imm = x.getImmediate();
+    in.rd = x.getDst();
+    in.imm = x.getImmediate();
   } else if (auto x = dyn_cast<CSROp>(op)) {
     name = "cs" + x.getKind().str(); // rrw -> csrrw
-    in.rd = x.getDst(), in.rs1 = x.getSource(), in.imm = x.getAddress();
+    in.rd = x.getDst();
+    in.rs1 = x.getSource();
+    in.imm = x.getAddress();
   } else if (auto x = dyn_cast<TrapOp>(op)) {
     name = x.getKind().str();
   } else if (isa<FenceOp>(op)) {
     name = "fence";
   } else if (auto x = dyn_cast<ScalarLoadOp>(op)) {
-    name = x.getKind().str(); // lb ... lhu, seld, seli
-    in.rd = x.getDst(), in.rs1 = x.getBase();
+    name = x.getKind().str();
+    in.rd = x.getDst();
+    in.rs1 = x.getBase();
     in.imm = signedValue(x.getOffsetAttr());
   } else if (auto x = dyn_cast<ScalarStoreOp>(op)) {
     name = x.getKind().str();
-    in.rs2 = x.getSrc(), in.rs1 = x.getBase();
+    in.rs2 = x.getSrc();
+    in.rs1 = x.getBase();
     in.imm = signedValue(x.getOffsetAttr());
   }
   in.op = findOp(name);
@@ -130,7 +144,6 @@ FailureOr<Instr> toInstr(Operation *op) {
   return in;
 }
 
-// A scalar ALU instruction writing x0: it has no effect.
 bool isNop(Operation *op) {
   if (auto alu = dyn_cast<ALUImmOp>(op))
     return alu.getDst() == 0;
@@ -147,7 +160,7 @@ Operation *createNop(OpBuilder &builder, Location loc, Value state) {
                           builder.getI32IntegerAttr(0));
 }
 
-// Delays covering `idle` cycles: delay N stalls N+1 cycles, and N has 12 bits.
+// delay N stalls N + 1 cycles, and N has 12 bits.
 std::vector<uint32_t> idleDelays(int idle) {
   std::vector<uint32_t> out;
   while (idle > 0) {
@@ -158,19 +171,20 @@ std::vector<uint32_t> idleDelays(int idle) {
   return out;
 }
 
-// What goes in front of one instruction.
 struct Insertion {
   std::vector<uint32_t> delays;
-  bool guard = false; // follow the delays with a NOP (in front of a halt)
+  bool guard = false;
   std::string reason;
 };
 
-// src/core/values.cpp: a register stays known only if every path agrees.
 bool mergeInto(RegValues &into, const RegValues &from) {
   bool changed = false;
-  for (int r = 1; r < 32; r++)
-    if (into[r] && (!from[r] || *from[r] != *into[r]))
-      into[r].reset(), changed = true;
+  for (int r = 1; r < 32; r++) {
+    if (into[r] && (!from[r] || *from[r] != *into[r])) {
+      into[r].reset();
+      changed = true;
+    }
+  }
   return changed;
 }
 
@@ -180,17 +194,14 @@ struct Issued {
   int cycle;
 };
 
-// Bound on how far one instruction may move while searching for a free cycle.
 constexpr int kMaxSearch = 100000;
 
-// Times ops[begin, end) in program order and records the delays it needs.
-// A block ending in a branch or jump ends with its delay slot.
 LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
                         size_t begin, size_t end, bool fallsThrough,
                         RegValues regs, std::vector<Insertion> &before) {
   ReservationTable table;
   std::vector<Issued> issued;
-  std::array<std::vector<size_t>, 8> pending; // DMA commands not yet waited
+  std::array<std::vector<size_t>, 8> pending;
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
@@ -205,7 +216,6 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
     }
     return cycle;
   };
-  // First cycle at which this block's fixed-latency work is finished.
   auto drained = [&] {
     int cycle = 0;
     for (const Issued &x : issued)
@@ -223,9 +233,6 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
                  << ", which may still be in flight; a delay cannot cover a "
                     "DMA transfer, so add atlas.dma_wait first";
       }
-    // npu_model keeps a channel busy until two cycles after its last command
-    // completes. Only a dma.wait guarantees that, and inserting one is not
-    // this pass's job, so report it and keep going.
     const OpInfo &op = *instrs[i].op;
     if (op.engine == Engine::Dma && op.opClass != OpClass::DmaWait &&
         !pending[op.channel].empty())
@@ -252,7 +259,6 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
     applyScalar(in, regs);
     nextFree = cycle + naturalGap(in);
   };
-  // Advances `cycle` until `fits` reports no conflict.
   auto search = [&](size_t i, int &cycle, std::string &reason,
                     function_ref<std::string(int)> fits) -> LogicalResult {
     for (int start = cycle;; ++cycle) {
@@ -281,18 +287,18 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
           return ops[i]->emitOpError()
                  << "halts while DMA channel " << ch
                  << " may still be in flight; add atlas.dma_wait first";
-      // A halt neither retires nor drains in-flight work.
+      // A halt neither drains in-flight work nor waits for a delay, so its
+      // stall ends on a NOP, reusing one that is already there.
       for (const Issued &x : issued)
         if (x.cycle + x.f.doneAge > cycle) {
           cycle = x.cycle + x.f.doneAge;
           reason = "halt waits for " + name(x.index) + " to finish";
         }
-      // A halt does not wait for a pending delay, so the stall must end on a
-      // NOP. Reuse a NOP that already precedes the halt.
       int idle = cycle - nextFree;
       if (idle > 0) {
         size_t prev = i - 1;
-        bool reuse = i > begin && isNop(ops[prev]) && before[prev].delays.empty();
+        bool reuse =
+            i > begin && isNop(ops[prev]) && before[prev].delays.empty();
         if (reuse)
           before[prev] = {idleDelays(idle), false, reason};
         else
@@ -304,8 +310,7 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
     }
 
     if (isControlFlow(*in.op)) {
-      // The delay slot issues on the next cycle, and the next block starts
-      // two cycles after the branch, drained.
+      // The slot issues next; the successors start drained two cycles later.
       size_t s = i + 1;
       const Instr &slot = instrs[s];
       RegValues after = regs;
@@ -329,8 +334,10 @@ LogicalResult timeBlock(ArrayRef<Operation *> ops, ArrayRef<Instr> instrs,
         std::string slotReason;
         int slotCycle = earliest(slot, sf, c + 1, slotReason);
         Dependence d = dependence(in, f, slot, sf);
-        if (c + d.distance > slotCycle)
-          slotCycle = c + d.distance, slotReason = d.reason + " after " + name(i);
+        if (c + d.distance > slotCycle) {
+          slotCycle = c + d.distance;
+          slotReason = d.reason + " after " + name(i);
+        }
         if (slotCycle > c + 1)
           return "delay slot: " + slotReason;
         ReservationTable withBranch = table;
@@ -374,13 +381,10 @@ LogicalResult insertDelays(ModuleOp module) {
       ops.push_back(&op);
 
   for (Operation *op : ops) {
-    // This pass decides every delay, so its input has none.
     if (isa<DelayOp>(op))
       return op->emitOpError(
           "is not allowed in the input; insert-atlas-delays computes every "
           "delay");
-    // Inserting words moves later instructions, so nothing may depend on an
-    // instruction's own index.
     if (auto upper = dyn_cast<UpperOp>(op); upper && upper.getKind() == "auipc")
       return op->emitOpError(
           "reads its own instruction index, which inserting delays changes");
@@ -394,8 +398,7 @@ LogicalResult insertDelays(ModuleOp module) {
     }
   }
 
-  // Resolve branch targets to operations (nullptr: the end of the stream)
-  // before anything moves.
+  // Targets kept as operations survive insertion; nullptr is the stream end.
   llvm::DenseMap<Operation *, Operation *> targetOf;
   for (auto [index, op] : llvm::enumerate(ops)) {
     int64_t offset;
@@ -428,8 +431,6 @@ LogicalResult insertDelays(ModuleOp module) {
     return target ? indexOf.lookup(target) : n;
   };
 
-  // Basic blocks start at the entry, at branch targets, after delay slots,
-  // and after halts.
   std::set<size_t> leaders = {0};
   for (size_t i = 0; i < n; ++i) {
     if (isControlFlow(*instrs[i].op)) {
@@ -469,9 +470,7 @@ LogicalResult insertDelays(ModuleOp module) {
     }
   }
 
-  // Known scalar values at each block entry (src/core/values.cpp). Unlike the
-  // source, which starts from npu_model's all-zero registers, nothing but x0
-  // is assumed at entry: a restarted core keeps its old register values.
+  // Unlike npu_model's all-zero reset, a restarted core keeps its registers.
   std::vector<RegValues> entry(blocks, unknownRegs());
   std::vector<bool> reached(blocks, false);
   reached[0] = true;
@@ -484,7 +483,9 @@ LogicalResult insertDelays(ModuleOp module) {
       applyScalar(instrs[i], regs);
     for (size_t s : succs[b]) {
       if (!reached[s]) {
-        entry[s] = regs, reached[s] = true, work.push_back(s);
+        entry[s] = regs;
+        reached[s] = true;
+        work.push_back(s);
       } else if (mergeInto(entry[s], regs)) {
         work.push_back(s);
       }
@@ -525,7 +526,6 @@ LogicalResult insertDelays(ModuleOp module) {
     op->setOperand(0, state);
   }
 
-  // Re-aim every branch and jump at its original instruction.
   llvm::DenseMap<Operation *, int64_t> word;
   int64_t count = 0;
   for (Operation &op : module.getBody()->getOperations())
@@ -539,7 +539,6 @@ LogicalResult insertDelays(ModuleOp module) {
       cast<JumpOp>(op).setOffsetAttr(builder.getI32IntegerAttr(offset));
   }
 
-  // Recheck encodings, delay slots, and branch offset ranges.
   words.clear();
   return collectAtlasWords(module, words, /*llvmBlock=*/false);
 }

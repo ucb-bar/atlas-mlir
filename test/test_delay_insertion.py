@@ -25,7 +25,6 @@ def run(tool: pathlib.Path, source: str, *args: str) -> subprocess.CompletedProc
 
 
 def program(ops: list[tuple[str, str]]) -> str:
-    """A flat stream from (operation, attribute dictionary body) pairs."""
     lines = ['module {', '  %s0 = "atlas.start"() : () -> !atlas.state']
     for i, (op, fields) in enumerate(ops, 1):
         lines.append(f'  %s{i} = "atlas.{op}"(%s{i-1}) {{{fields}}} '
@@ -34,7 +33,6 @@ def program(ops: list[tuple[str, str]]) -> str:
 
 
 def without_delays(source: str) -> str:
-    """The same stream without its delays, with branch offsets re-aimed."""
     lines = source.splitlines()
     ops = [(i, LINE.search(line)) for i, line in enumerate(lines)]
     ops = [(i, m) for i, m in ops if m and m.group(2) != "start"]
@@ -42,7 +40,7 @@ def without_delays(source: str) -> str:
     for _, m in ops:
         new_index.append(kept)
         kept += m.group(2) != "delay"
-    new_index.append(kept)  # the end of the stream
+    new_index.append(kept)
     alias: dict[str, str] = {}
     for old, (i, m) in enumerate(ops):
         result, name, state = m.groups()
@@ -62,7 +60,6 @@ def without_delays(source: str) -> str:
 
 
 def stream(printed: str) -> list[tuple[str, str, str]]:
-    """(operation, properties, reason) for each printed instruction."""
     return [m.groups(default="") for m in OP.finditer(printed)]
 
 
@@ -90,18 +87,14 @@ class DelayInsertionTest(unittest.TestCase):
 
                 result = run(OPT, without_delays(authored), "--insert-atlas-delays")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                # The examples reuse DMA channel 0 right after dma_config.
                 self.assertEqual(result.stderr.count("warning:"), 1, result.stderr)
                 self.assertIn("reuses DMA channel 0", result.stderr)
 
                 ops = stream(result.stdout)
                 delays = [(cycles(f), reason) for op, f, reason in ops if op == "delay"]
                 self.assertTrue(all(reason for _, reason in delays))
-                # MXU0 writes accumulator row 0 at age 63, so its pop waits 64.
                 self.assertIn((62, "RAW on mxu0.acc0 after atlas.mxu_matmul"), delays)
-                # A scalar load writes its register at age 3.
                 self.assertEqual(sum(1 for d in delays if d == (2, "RAW on x16 after atlas.scalar_load")), 4)
-                # Each DMA store waits until the VSTORE wrote what it reads.
                 self.assertIn((31, "RAW on VMEM 0xc00 after atlas.vstore"), delays)
 
                 self.assertNotEqual(run(OPT, result.stdout, "--insert-atlas-delays").returncode, 0)
@@ -132,8 +125,6 @@ class DelayInsertionTest(unittest.TestCase):
 
     def test_halt_stall_ends_on_a_nop(self) -> None:
         vload = ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"')
-        # The VLOAD is busy through age 34; a halt does not wait for a delay,
-        # so the stall ends on a NOP, reusing one that precedes the halt.
         for ops, guard in (
             ([addi(6, 0, 0), vload, ("trap", 'kind = "ecall"')], "a halt does not wait for a delay"),
             ([addi(6, 0, 0), vload, nop(), ("trap", 'kind = "ecall"')], ""),

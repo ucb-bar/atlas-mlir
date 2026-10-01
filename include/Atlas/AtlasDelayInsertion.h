@@ -3,7 +3,7 @@
 
 namespace mlir::atlas {
 
-// Register the pass that recomputes every atlas.delay from the timing model.
+// Register the delay insertion pass with atlas-opt.
 void registerInsertAtlasDelaysPass();
 
 } // namespace mlir::atlas

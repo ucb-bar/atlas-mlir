@@ -1,17 +1,11 @@
-// Ported from atlas-compiler-experiments 3ae2b5d; see AtlasTiming.h. Each
-// section names the source file it comes from.
 #include "Atlas/AtlasTiming.h"
-
+#include "llvm/ADT/StringSwitch.h"
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdio>
 
 using namespace mlir::atlas::timing;
-
-//===----------------------------------------------------------------------===//
-// Opcode table (src/core/asm.cpp)
-//===----------------------------------------------------------------------===//
 
 static std::vector<OpInfo> buildTable() {
   std::vector<OpInfo> t;
@@ -56,7 +50,8 @@ static std::vector<OpInfo> buildTable() {
     add("vmatpop.bf16.acc" + s, "md a2", OpClass::PopBf16, e);
     add("vmatmul" + s, "ad m1 w2", OpClass::MatMul, e);
     add("vmatmul.acc" + s, "ad m1 w2", OpClass::MatMulAcc, e);
-    for (int i = (int)t.size() - 7; i < (int)t.size(); i++)
+    for (int i = static_cast<int>(t.size()) - 7;
+         i < static_cast<int>(t.size()); i++)
       t[i].mxu = m;
   }
 
@@ -89,7 +84,8 @@ static std::vector<OpInfo> buildTable() {
     add("dma.store" + s, "xd x1 x2", OpClass::DmaStore, Engine::Dma);
     add("dma.config" + s, "x1", OpClass::DmaConfig, Engine::Dma);
     add("dma.wait" + s, "", OpClass::DmaWait, Engine::Dma);
-    for (int i = (int)t.size() - 4; i < (int)t.size(); i++)
+    for (int i = static_cast<int>(t.size()) - 4;
+         i < static_cast<int>(t.size()); i++)
       t[i].channel = ch;
   }
   return t;
@@ -122,9 +118,11 @@ static std::vector<std::string> tokenize(const std::string &s) {
   std::vector<std::string> out;
   std::string cur;
   for (char c : s) {
-    if (c == ',' || std::isspace((unsigned char)c)) {
-      if (!cur.empty())
-        out.push_back(cur), cur.clear();
+    if (c == ',' || std::isspace(static_cast<unsigned char>(c))) {
+      if (!cur.empty()) {
+        out.push_back(cur);
+        cur.clear();
+      }
     } else {
       cur += c;
     }
@@ -140,14 +138,11 @@ bool mlir::atlas::timing::hasOperand(const OpInfo &op,
   return std::find(spec.begin(), spec.end(), token) != spec.end();
 }
 
-// src/core/blocks.cpp
 int mlir::atlas::timing::naturalGap(const Instr &in) {
-  return in.op->opClass == OpClass::Delay ? 1 + (int)(in.imm & 0xFFF) : 1;
+  if (in.op->opClass != OpClass::Delay)
+    return 1;
+  return 1 + static_cast<int>(in.imm & 0xFFF);
 }
-
-//===----------------------------------------------------------------------===//
-// Known scalar values (src/core/values.cpp)
-//===----------------------------------------------------------------------===//
 
 RegValues mlir::atlas::timing::unknownRegs() {
   RegValues r;
@@ -155,45 +150,47 @@ RegValues mlir::atlas::timing::unknownRegs() {
   return r;
 }
 
-// Semantics follow npu_model's isa_definition.py (RV32, masked to 32 bits).
+// RV32 semantics of npu_model's isa_definition.py, masked to 32 bits.
 std::optional<uint32_t> mlir::atlas::timing::aluResult(const Instr &in,
                                                        const RegValues &regs) {
   const std::string &n = in.op->name;
   if (n == "lui")
-    return (uint32_t)((in.imm & 0xFFFFF) << 12);
+    return static_cast<uint32_t>((in.imm & 0xFFFFF) << 12);
   if (!regs[in.rs1])
     return std::nullopt;
   uint32_t a = *regs[in.rs1];
-  int32_t sa = (int32_t)a;
+  int32_t sa = static_cast<int32_t>(a);
   if (hasOperand(*in.op, "i")) {
-    uint32_t imm = (uint32_t)signExtend(in.imm, 12);
-    int shamt = (int)(in.imm & 0x1F);
-    if (n == "addi") return a + imm;
-    if (n == "slti") return sa < (int32_t)imm ? 1u : 0u;
-    if (n == "sltiu") return a < imm ? 1u : 0u;
-    if (n == "xori") return a ^ imm;
-    if (n == "ori") return a | imm;
-    if (n == "andi") return a & imm;
-    if (n == "slli") return a << shamt;
-    if (n == "srli") return a >> shamt;
-    if (n == "srai") return (uint32_t)(sa >> shamt);
-    return std::nullopt;
+    uint32_t imm = static_cast<uint32_t>(signExtend(in.imm, 12));
+    int shamt = static_cast<int>(in.imm & 0x1F);
+    return llvm::StringSwitch<std::optional<uint32_t>>(n)
+        .Case("addi", a + imm)
+        .Case("slti", sa < static_cast<int32_t>(imm) ? 1u : 0u)
+        .Case("sltiu", a < imm ? 1u : 0u)
+        .Case("xori", a ^ imm)
+        .Case("ori", a | imm)
+        .Case("andi", a & imm)
+        .Case("slli", a << shamt)
+        .Case("srli", a >> shamt)
+        .Case("srai", static_cast<uint32_t>(sa >> shamt))
+        .Default(std::nullopt);
   }
   if (!regs[in.rs2])
     return std::nullopt;
   uint32_t b = *regs[in.rs2];
-  int32_t sb = (int32_t)b;
-  if (n == "add") return a + b;
-  if (n == "sub") return a - b;
-  if (n == "sll") return a << (b & 0x1F);
-  if (n == "slt") return sa < sb ? 1u : 0u;
-  if (n == "sltu") return a < b ? 1u : 0u;
-  if (n == "xor") return a ^ b;
-  if (n == "srl") return a >> (b & 0x1F);
-  if (n == "sra") return (uint32_t)(sa >> (b & 0x1F));
-  if (n == "or") return a | b;
-  if (n == "and") return a & b;
-  return std::nullopt;
+  int32_t sb = static_cast<int32_t>(b);
+  return llvm::StringSwitch<std::optional<uint32_t>>(n)
+      .Case("add", a + b)
+      .Case("sub", a - b)
+      .Case("sll", a << (b & 0x1F))
+      .Case("slt", sa < sb ? 1u : 0u)
+      .Case("sltu", a < b ? 1u : 0u)
+      .Case("xor", a ^ b)
+      .Case("srl", a >> (b & 0x1F))
+      .Case("sra", static_cast<uint32_t>(sa >> (b & 0x1F)))
+      .Case("or", a | b)
+      .Case("and", a & b)
+      .Default(std::nullopt);
 }
 
 void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
@@ -205,15 +202,11 @@ void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
   regs[in.rd] = c == OpClass::Alu ? aluResult(in, regs) : std::nullopt;
 }
 
-//===----------------------------------------------------------------------===//
-// Footprints and dependences (src/core/machine.cpp)
-//===----------------------------------------------------------------------===//
-
 int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
   // 32-bit link, 2 cycles per beat, 2 command words.
   long long offchip = (bytes + 8 + 3) / 4 * 2;
   long long vmem = (bytes + 63) / 64;
-  return (int)std::max(1LL, std::max(offchip, vmem));
+  return static_cast<int>(std::max(1LL, std::max(offchip, vmem)));
 }
 
 int mlir::atlas::timing::unitCapacity(Unit u, int index) {
@@ -228,12 +221,12 @@ const char *mlir::atlas::timing::unitName(Unit u) {
       "VMEM bank", "XLU", "MXU port", "MXU in-flight matmuls",
       "accumulator read", "accumulator write", "weight push stream",
       "accumulator push stream"};
-  return names[(int)u];
+  return names[static_cast<int>(u)];
 }
 
 const char *mlir::atlas::timing::edgeKindName(EdgeKind k) {
   static const char *names[] = {"RAW", "WAR", "WAW", "rule", "order"};
-  return names[(int)k];
+  return names[static_cast<int>(k)];
 }
 
 bool mlir::atlas::timing::isBarrier(const Instr &in) {
@@ -245,7 +238,7 @@ bool mlir::atlas::timing::vpuUsesBothSlots(const OpInfo &op) {
   return op.twoInput || op.opClass == OpClass::VpuRowReduce;
 }
 
-// Lane-logic groups from npu_model's vpu.py: members of a group cannot overlap.
+// Lane-logic groups from npu_model's vpu.py; members cannot overlap.
 static int vpuLogicGroup(const std::string &name) {
   static const std::vector<std::vector<std::string>> groups = {
       {"vadd.bf16", "vsub.bf16", "vredsum.row.bf16"},
@@ -259,7 +252,7 @@ static int vpuLogicGroup(const std::string &name) {
   for (size_t g = 0; g < groups.size(); g++)
     for (const std::string &n : groups[g])
       if (n == name)
-        return (int)g;
+        return static_cast<int>(g);
   return -1;
 }
 
@@ -274,7 +267,6 @@ bool mlir::atlas::timing::vpuCanOverlap(const OpInfo &a, const OpInfo &b) {
 
 namespace {
 
-// Collects the accesses and holds of one instruction.
 struct Builder {
   Footprint f;
 
@@ -307,21 +299,21 @@ struct Builder {
                 std::to_string(reg) + ")";
   }
 
-  // VMEM lines [byteAddr, byteAddr + bytes), line i touched at age + i*step.
   void vmem(std::optional<long long> byteAddr, std::optional<long long> bytes,
             bool write, int age, int step, bool atCompletion = false) {
     if (bytes && *bytes <= 0)
-      return; // a zero-length transfer touches nothing
+      return;
     Access a{Res::Vmem, write, 0, 1, age, step};
     a.atCompletion = atCompletion;
     if (!byteAddr || !bytes) {
       a.anywhere = true;
-      a.count = bytes ? (int)((*bytes + kLineBytes - 1) / kLineBytes) : 1;
+      a.count = bytes ? static_cast<int>((*bytes + kLineBytes - 1) / kLineBytes)
+                       : 1;
     } else {
       long long firstLine = *byteAddr / kLineBytes;
       long long lastLine = (*byteAddr + *bytes - 1) / kLineBytes;
-      a.first = (int)firstLine;
-      a.count = (int)(lastLine - firstLine + 1);
+      a.first = static_cast<int>(firstLine);
+      a.count = static_cast<int>(lastLine - firstLine + 1);
       if (*byteAddr + *bytes > kVmemBytes)
         f.error = "VMEM access past the end of VMEM";
     }
@@ -329,9 +321,10 @@ struct Builder {
   }
   void bankHold(std::optional<long long> byteAddr, int from, int to) {
     if (byteAddr) {
-      hold(Unit::VmemBank, (int)(*byteAddr / kVmemBankBytes), from, to);
+      hold(Unit::VmemBank, static_cast<int>(*byteAddr / kVmemBankBytes), from,
+           to);
     } else {
-      for (int b = 0; b < kVmemBanks; b++) // unknown bank
+      for (int b = 0; b < kVmemBanks; b++)
         hold(Unit::VmemBank, b, from, to);
     }
   }
@@ -340,10 +333,10 @@ struct Builder {
 std::optional<long long> reg(const RegValues &regs, int r) {
   if (!regs[r])
     return std::nullopt;
-  return (long long)*regs[r];
+  return static_cast<long long>(*regs[r]);
 }
 
-// Byte address of scalar loads/stores (ScalarCore keeps the VMEM bits only).
+// ScalarCore keeps only the VMEM bits of a scalar byte address.
 std::optional<long long> scalarAddress(const Instr &in, const RegValues &regs) {
   auto base = reg(regs, in.rs1);
   if (!base)
@@ -351,8 +344,8 @@ std::optional<long long> scalarAddress(const Instr &in, const RegValues &regs) {
   return (*base + signExtend(in.imm, 12)) & 0x1FFFFF;
 }
 
-// vload/vstore operands are word addresses; the imm adds 32 words per unit
-// and the LSU drops the three low word bits to get a 32-byte line.
+// VLS bases are word addresses; the immediate counts 32 words and the LSU
+// drops the three low word bits to get a 32-byte line.
 std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
   auto base = reg(regs, in.rs1);
   if (!base)
@@ -363,7 +356,7 @@ std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
 
 void scalarRegs(Builder &b, const Instr &in) {
   const OpInfo &op = *in.op;
-  // csrr*i: rs1 holds an immediate
+  // csrr*i encodes an immediate in rs1.
   bool immediateCsr = op.opClass == OpClass::Csr && op.name.back() == 'i';
   if (hasOperand(op, "x1") && !immediateCsr)
     b.x(in.rs1, false, 0);
@@ -387,7 +380,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     return b.f;
   }
   int mxu = op.mxu;
-  int cf = mxu == 0 ? 63 : 3; // age of the first accumulator row a matmul writes
+  int cf = mxu == 0 ? 63 : 3; // age of a matmul's first accumulator write
 
   switch (op.opClass) {
   case OpClass::Alu:
@@ -426,9 +419,10 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     int size = in.op->name == "sb" ? 1 : in.op->name == "sh" ? 2 : 4;
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);
-    b.vmem(addr ? std::optional<long long>(*addr & ~(long long)(size - 1))
-                : std::nullopt,
-           size, true, 1, 1);
+    std::optional<long long> first;
+    if (addr)
+      first = *addr & ~static_cast<long long>(size - 1);
+    b.vmem(first, size, true, 1, 1);
     b.bankHold(addr, 1, 1);
     break;
   }
@@ -442,8 +436,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
           "vload/vstore address must be 1 KiB aligned inside one VMEM bank";
     b.x(in.rs1, false, 0);
     if (load) {
-      b.vmem(addr, 1024, false, 1, 1); // VMEM row r read at age 1+r
-      b.mrows(in.rd, true, 3);         // register row r written at age 3+r
+      b.vmem(addr, 1024, false, 1, 1);
+      b.mrows(in.rd, true, 3);
       b.f.mregWrites = {in.rd};
       b.f.writeRelease = 34;
       b.f.writeDuringRead = true;
@@ -522,7 +516,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     break;
 
   case OpClass::VpuElementwise: {
-    // A BF16 pair streams its low register in ages 0..31, high in 32..63.
     std::vector<int> sources = {in.rs1};
     if (op.twoInput)
       sources.push_back(in.rs2);
@@ -537,7 +530,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd, true, 2);
     b.mrows(in.rd + 1, true, 34);
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 63, b.f.writeRelease = 65;
+    b.f.readRelease = 63;
+    b.f.writeRelease = 65;
     break;
   }
   case OpClass::VpuPack:
@@ -545,10 +539,11 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rs2, false, 0);
     b.mrows(in.rs2 + 1, false, 32);
     b.e(in.rs1, false, 0);
-    b.mrows(in.rd, true, 3, 2); // one packed FP8 row every other cycle
+    b.mrows(in.rd, true, 3, 2);
     b.f.mregReads = {in.rs2, in.rs2 + 1};
     b.f.mregWrites = {in.rd};
-    b.f.readRelease = 63, b.f.writeRelease = 65;
+    b.f.readRelease = 63;
+    b.f.writeRelease = 65;
     break;
   case OpClass::VpuUnpack:
     b.needEven(in.rd, "BF16 destination");
@@ -558,7 +553,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd + 1, true, 35);
     b.f.mregReads = {in.rs2};
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 31, b.f.writeRelease = 66;
+    b.f.readRelease = 31;
+    b.f.writeRelease = 66;
     break;
   case OpClass::VpuRowReduce: {
     int lag = op.name == "vredsum.row.bf16" ? 7 : 2;
@@ -570,13 +566,14 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd + 1, true, lag);
     b.f.mregReads = {in.rs1, in.rs1 + 1};
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 31, b.f.writeRelease = 31 + lag;
+    b.f.readRelease = 31;
+    b.f.writeRelease = 31 + lag;
     break;
   }
   case OpClass::VpuColReduce:
     b.needEven(in.rs1, "BF16 source");
     b.needEven(in.rd, "BF16 destination");
-    for (int pass = 0; pass < 2; pass++) { // the source pair streams twice
+    for (int pass = 0; pass < 2; pass++) {
       b.mrows(in.rs1, false, pass * 64);
       b.mrows(in.rs1 + 1, false, pass * 64 + 32);
     }
@@ -584,7 +581,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd + 1, true, 98);
     b.f.mregReads = {in.rs1, in.rs1 + 1};
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 127, b.f.writeRelease = 129;
+    b.f.readRelease = 127;
+    b.f.writeRelease = 129;
     break;
   case OpClass::VpuLoadImmPair:
     b.needEven(in.rd, "BF16 destination");
@@ -603,20 +601,18 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd, true, 34);
     b.f.mregReads = {in.rs1};
     b.f.mregWrites = {in.rd};
-    b.f.readRelease = 33, b.f.writeRelease = 65;
+    b.f.readRelease = 33;
+    b.f.writeRelease = 65;
     b.hold(Unit::Xlu, 0, 0, 65);
     break;
 
   case OpClass::DmaLoad:
   case OpClass::DmaStore: {
-    // The model reads a DMA's registers and moves the data at completion.
+    // The model reads a DMA's registers and moves its data at completion.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
-    // Deviation from the source: npu_model counts DMA VMEM addresses in
-    // bytes, but Atlas RTL counts them in 32-bit words like VLS bases
-    // (AtlasCore.scala drops the word offset bits of scDma.vmemAddr), and
-    // this repository's selected-core references use one register value for
-    // both.
+    // Unlike npu_model, which counts bytes, AtlasCore.scala takes the DMA VMEM
+    // address in words, as for VLS bases.
     auto addr = reg(regs, vmemReg);
     if (addr)
       *addr *= 4;
@@ -630,7 +626,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.vmem(addr, bytes, load, 0, 0, true);
     if (addr && (*addr % 32 != 0))
       b.f.error = "DMA VMEM address must be 32-byte aligned";
-    // An unknown size is guessed as one tile.
     b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024);
     break;
   }
@@ -639,14 +634,14 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     Access base{Res::DmaBase, true, 0, 1, 0, 1};
     base.atCompletion = true;
     b.f.accesses.push_back(base);
-    b.f.dmaCycles = dmaTransferCycles(0); // npu_model sizes it from x0
+    b.f.dmaCycles = dmaTransferCycles(0);
     break;
   }
   }
 
   Footprint &f = b.f;
   if (op.engine == Engine::Vpu)
-    f.vpuLive = f.writeRelease; // a VPU slot frees on its last write cycle
+    f.vpuLive = f.writeRelease;
   f.doneAge = std::max(f.readRelease, f.writeRelease);
   for (const Access &a : f.accesses)
     if (!a.atCompletion)
@@ -681,10 +676,8 @@ static std::string elementName(Res res, int element) {
   return "?";
 }
 
-// Distance needed so every element y touches is ordered after x touches it.
-// Returns INT_MIN when the two accesses cannot touch the same element.
+// INT_MIN when the two accesses cannot touch the same element.
 static int dataDistance(const Access &x, const Access &y, int &element) {
-  // y's DMA accesses happen at completion, which can be right after issue.
   auto ageY = [&](long long e) {
     return y.atCompletion ? 0LL : y.age + (e - y.first) * y.step;
   };
@@ -698,8 +691,9 @@ static int dataDistance(const Access &x, const Access &y, int &element) {
   long long hi = std::min(x.first + x.count - 1, y.first + y.count - 1);
   if (lo > hi)
     return INT_MIN;
-  element = (int)lo;
-  return (int)std::max(ageX(lo) - ageY(lo), ageX(hi) - ageY(hi)) + 1;
+  element = static_cast<int>(lo);
+  return static_cast<int>(std::max(ageX(lo) - ageY(lo), ageX(hi) - ageY(hi))) +
+         1;
 }
 
 static bool contains(const std::vector<int> &v, int x) {
@@ -721,14 +715,10 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
     consider(1, EdgeKind::Order, A.name + " is a barrier");
   if (isBarrier(b))
     consider(1, EdgeKind::Order, B.name + " is a barrier");
-  // CSR runs before engines; same-tick completion is too late. DMA needs a
-  // wait.
   if (b.release)
     consider(fa.doneAge + 1, EdgeKind::Order,
              "atlas.complete waits for prior fixed-latency work to complete");
 
-  // DMA commands leave the queue in issue order; waits stay ordered with
-  // their channel.
   if (A.engine == Engine::Dma && B.engine == Engine::Dma) {
     bool aWait = A.opClass == OpClass::DmaWait,
          bWait = B.opClass == OpClass::DmaWait;
@@ -738,10 +728,9 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
       consider(1, EdgeKind::Order, "DMA channel " + std::to_string(A.channel));
   }
 
-  // Row/element timing of every shared piece of storage.
   for (const Access &x : fa.accesses) {
     if (x.atCompletion)
-      continue; // handled through the matching dma.wait
+      continue;
     for (const Access &y : fb.accesses) {
       if (x.res != y.res || (!x.write && !y.write))
         continue;
@@ -758,7 +747,6 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
     }
   }
 
-  // ScalarCore's logical MREG reservations are held until their release age.
   for (int r : fa.mregWrites) {
     if (contains(fb.mregReads, r))
       consider(fa.writeRelease + 1, EdgeKind::RAW,
@@ -776,7 +764,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
                  "m" + std::to_string(r) + " reserved for reading until age " +
                      std::to_string(fa.readRelease));
 
-  // MXU sequencer rules (npu_model mxu.py).
+  // npu_model mxu.py sequencer rules.
   if (A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
     std::string mx = "MXU" + std::to_string(m) + ": ";
@@ -829,10 +817,6 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
   return best;
 }
 
-//===----------------------------------------------------------------------===//
-// DMA completion conflicts (src/core/depgraph.cpp)
-//===----------------------------------------------------------------------===//
-
 static bool overlaps(const Access &x, const Access &y) {
   if (x.res != y.res)
     return false;
@@ -853,7 +837,7 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
       if (!overlaps(x, y) || (!x.write && !y.write && !queuedVmem))
         continue;
       if (x.res == Res::DmaBase && y.atCompletion)
-        continue; // the DMA queue keeps these in order
+        continue;
       kind = x.write && y.write ? EdgeKind::WAW
              : x.write          ? EdgeKind::RAW
              : y.write          ? EdgeKind::WAR
@@ -864,11 +848,9 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
   return false;
 }
 
-//===----------------------------------------------------------------------===//
-// Reservation table (src/core/reservations.cpp)
-//===----------------------------------------------------------------------===//
-
-static int unitKey(Unit u, int index) { return (int)u * 64 + index; }
+static int unitKey(Unit u, int index) {
+  return static_cast<int>(u) * 64 + index;
+}
 
 bool ReservationTable::unitFree(Unit u, int index, int from, int to) const {
   auto it = units_.find(unitKey(u, index));
@@ -948,7 +930,6 @@ std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
           (u->second.row < 0 || u->second.row == p.row))
         return "same-row read/write on m" + std::to_string(p.reg);
     }
-    // The instruction's own port uses must also fit together.
     for (size_t j = 0; j < i; j++) {
       const PortRequest &q = requests[j];
       if (q.cycle != p.cycle)
@@ -969,7 +950,7 @@ void ReservationTable::reserve(const Instr &in, const Footprint &f,
   for (const Hold &h : f.holds) {
     int index = chooseIndex(h, cycle);
     if (index < 0)
-      index = h.index; // caller ignored conflict(); record it anyway
+      index = h.index;
     int key = unitKey(h.unit, index);
     for (int c = cycle + h.from; c <= cycle + h.to; c++)
       units_[key][c]++;
@@ -978,7 +959,7 @@ void ReservationTable::reserve(const Instr &in, const Footprint &f,
   for (int age = 0; age < f.vpuLive; age++)
     vpu_[cycle + age].push_back(in.op);
 
-  std::map<int, PortWindow> windows; // per port key: first and last cycle
+  std::map<int, PortWindow> windows;
   for (const PortRequest &p : portRequests(in, f, cycle)) {
     ports_[p.key][p.cycle] = {p.reg, p.row, p.shareable};
     auto it = windows.find(p.key);
@@ -994,7 +975,6 @@ void ReservationTable::reserve(const Instr &in, const Footprint &f,
 }
 
 void ReservationTable::extendForWait(int cycle) {
-  // Widen each hold separately to preserve unit capacity counts.
   for (UnitWindow &w : unitWindows_) {
     if (w.to < cycle || w.from <= cycle)
       continue;
@@ -1005,7 +985,6 @@ void ReservationTable::extendForWait(int cycle) {
   for (PortWindow &w : portWindows_) {
     if (w.to < cycle)
       continue;
-    // Fill burst gaps and clear row identity: stalls make sharing unsafe.
     for (int c = cycle; c <= w.to; c++)
       ports_[w.key][c] = PortUse{};
     w.from = std::min(w.from, cycle);
