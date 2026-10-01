@@ -11,8 +11,8 @@ timing, or integrated SoC qualification.
 
 ## Common contract
 
-The dialect has two checked stages. `!atlas.virtual_bf16` is an unallocated
-32×32 BF16 VPU tile. A name such as `%t1` identifies an MLIR SSA *value*;
+The dialect has two checked stages. `!atlas.virtual_bf16` and
+`!atlas.virtual_fp8` are unallocated 32×32 tiles. A name such as `%t1` identifies an MLIR SSA *value*;
 the spelling and number do not select Atlas register 1. In this narrow
 pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads and
 writes, with names such as `%io1`. In the physical examples, `%s1` is an SSA
@@ -26,7 +26,10 @@ loop-carried tiles and the state token; there is no separate `phi` operation.
 The verifier checks each edge passes the current state, MLIR checks ordinary
 SSA dominance and block-argument types, and the current CFG slice places all
 external outputs in one return block. Its verifier does not choose an issue
-order or prove numerical equivalence.
+order or prove numerical equivalence. See the
+[virtual SSA interpreter contract](virtual-ssa-interpreter-contract.md) for
+the incoming-edge binding rule, loop visits, state tokens, and interpreter
+test cases.
 
 After allocation, `!atlas.state` is the *physical* instruction-order token.
 `atlas.start` produces it and emits no word. Each machine operation consumes
@@ -43,7 +46,7 @@ accumulator slots `0..1` belong to a specific MXU `0` or `1`. Scalar registers
 are `0..31`. The parser/printer uses MLIR generic operation syntax. Semantic
 tensor operations, dynamic shapes, host calls, and a callable ABI are absent.
 
-## Pre-allocation BF16 SSA slice
+## Pre-allocation BF16/FP8 SSA slice
 
 The following operations provide a small, concrete hand-authored example of
 virtual tensor-register def/use. They are instruction candidates, not an
@@ -56,8 +59,11 @@ chooses the pair and stages these tiles through the selected VMEM layout.
 | --- | --- | --- |
 | `atlas.virtual_start` | `() -> !atlas.virtual_state` | Begin one virtual region; no word. |
 | `atlas.virtual_input_bf16` | state, nonnegative input index -> next state, `!atlas.virtual_bf16` | Read a declared external tile; memory-read effect. |
+| `atlas.virtual_input_fp8` | state, nonnegative input index -> next state, `!atlas.virtual_fp8` | Read a declared 32×32 FP8 tile; memory-read effect. |
 | `atlas.virtual_vpu_unary` | `!atlas.virtual_bf16`, selected unary kind -> `!atlas.virtual_bf16` | Preserve the chosen operation and SSA dependency; no physical register assigned. |
 | `atlas.virtual_vpu_binary` | two `!atlas.virtual_bf16` values, selected binary kind -> `!atlas.virtual_bf16` | Both sources remain explicit, including shared uses. |
+| `atlas.virtual_mxu_matmul` | two `!atlas.virtual_fp8` values, unit `0` or `1` -> `!atlas.virtual_bf16` | One 32×32 reset contraction; the unit is part of the numerical semantics. |
+| `atlas.virtual_pack_fp8` | `!atlas.virtual_bf16`, E8M0 scale code -> `!atlas.virtual_fp8` | Logical row-major FP8 tile; the current physical lowering admits code `127` only and explicitly relayouts the selected pack result. |
 | `atlas.virtual_output_bf16` | state, `!atlas.virtual_bf16`, nonnegative output index -> next state | Write a declared output tile; memory-write effect. |
 
 See [`virtual_bf16_ssa.mlir`](../test/examples/virtual_bf16_ssa.mlir): one
@@ -78,7 +84,7 @@ tiles. The control mailbox holds i1/i32 arguments as consecutive little-endian
 `atlas.scalar_arg_regs`. This is a reset-entry program ABI for the selected
 standalone core, not a C-callable function ABI.
 
-The implemented slice colors CFG-live virtual BF16 tiles onto 31 usable
+The implemented BF16-only slice colors CFG-live virtual BF16 tiles onto 31 usable
 even-based register pairs and i1/i32 controls onto scalar x10..x26. Pair 62
 and x27 are reserved for parallel-copy cycles. It reuses a location when the
 source SSA value is dead, checks coloring against its interference graph, and
@@ -88,11 +94,23 @@ bank 1 stages outputs, with DMA completion before reads and stores. Fixed
 serialization adds diagnostic delays after VPU and VMEM operations. The
 generated-stream checker enforces those waits and the selected one-slot
 branch convention before word emission or LLVM lowering. The stage does not
-solve general MXU/FP8 allocation, alternate scheduling, layer tiling, or a
-qualified latency model. Generated execution currently admits VPU `mov` and
-`relu` only; other virtual unary and all binary modes receive an explicit
-qualification error. Changing issue order would require recomputing live
-ranges and checking the physical assignment again.
+solve alternate scheduling, layer tiling, or a qualified latency model.
+Generated VPU execution currently admits `mov` and `relu` only; other virtual
+unary and all binary modes receive an explicit qualification error. With FP8
+values present, it reserves tensor registers 0..31 for FP8 and pairs 32..60
+for BF16, with pair 62 as a temporary. A pack reserves scalar x10..x17 for
+its VMEM relayout and colors runtime controls in x18..x26. The external input
+ABI uses 2,048-byte slots; a 32×32 FP8 tile occupies the first 1,024 bytes of
+its slot. Pack scratch uses VMEM words 32768..33279 and currently requires
+input indexes below 64. These are conservative, explicit physical partitions,
+not a general alias-aware allocator. Changing issue order would require
+recomputing live ranges and checking the physical assignment again.
+
+[`virtual_fp8_two_layer_mlp.mlir`](../test/examples/virtual_fp8_two_layer_mlp.mlir)
+is a fixed 32×32 virtual SSA example: MXU0, BF16 ReLU, unit-scale pack,
+MXU1, BF16 output. Its output is checked through selected standalone-core
+execution with changed runtime weights. It has no bias, tails, Linalg import,
+or captured model precision transformation.
 
 ```sh
 build/bin/atlas-opt --verify-atlas-virtual-stream \
@@ -144,8 +162,8 @@ between selected RTL, architecture text, and the inspected model.
 
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
-| `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the virtual BF16 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
-| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs and scalar registers; stage input/output tiles and runtime controls; resolve block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
+| `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
+| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
 | `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, same-channel DMA waits, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
@@ -157,7 +175,7 @@ between selected RTL, architecture text, and the inspected model.
 
 No general timing annotation pass, instruction selector, whole-target
 allocator, Linalg-to-Atlas pass, or callable ABI is implemented here. The
-generated BF16 VPU/CFG path uses conservative serial diagnostic spacing; the
+generated virtual path uses conservative serial diagnostic spacing; the
 other physical example programs retain authored delays. Focused selected-core
 tests cover a long SSA chain with physical pair reuse, a swap backedge,
 branch merges, runtime mailbox control, two ordered outputs, actual

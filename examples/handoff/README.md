@@ -1,17 +1,23 @@
 # Atlas → LLVM → RISC-V inspection examples
 
-These are **hand-authored fixed 32×32 tile programs** for the selected Atlas
+These are **authored fixed 32×32 tile programs** for the selected Atlas
 RTL. They show a complete *machine-code handoff* from Atlas MLIR through the
 unmodified LLVM/MLIR tools used by this build. They are not PyTorch-to-Atlas
 compiler outputs or complete model layers.
 The authored inputs live under `test/examples/handoff_*_tile.mlir`; stage 01
 is their checked-in copy, compared byte-for-byte during the export test.
+The [virtual MLP](virtual_mlp/00-atlas-virtual-ssa.mlir) adds a stage 00: SSA
+tensor values precede generated physical register and scratch assignments.
+Its stage 01 is produced by `--lower-atlas-virtual-to-machine`, then follows
+the same LLVM path. Its source is
+[`virtual_fp8_two_layer_mlp.mlir`](../../test/examples/virtual_fp8_two_layer_mlp.mlir).
 
-Open either directory in numeric order:
+Open a directory in numeric order:
 
 | Stage | File | What to inspect |
 | --- | --- | --- |
-| 01 | [MLP Atlas](mlp_tile/01-atlas-machine.mlir) · [attention Atlas](attention_tile/01-atlas-machine.mlir) | Typed `atlas.*` operations and ordered `!atlas.state` chain. |
+| 00 | [Virtual MLP SSA](virtual_mlp/00-atlas-virtual-ssa.mlir) | `%x`, `%h0`, `%h1`, `%h2`, and `%y` are logical tensor values; no physical register numbers. |
+| 01 | [MLP Atlas](mlp_tile/01-atlas-machine.mlir) · [attention Atlas](attention_tile/01-atlas-machine.mlir) · [virtual MLP Atlas](virtual_mlp/01-atlas-machine.mlir) | Typed `atlas.*` operations and ordered `!atlas.state` chain. |
 | 02 | [MLP structured LLVM dialect](mlp_tile/02-llvm-structured.mlir) · [attention structured LLVM dialect](attention_tile/02-llvm-structured.mlir) | One `llvm.call @atlas_emit_*` per instruction, with physical fields, checked word index, conservative effects, and unknown availability. These calls are compiler markers; run the finalizer before LLVM IR translation. |
 | 03 | [MLP encoded LLVM dialect](mlp_tile/03-llvm-encoded.mlir) · [attention encoded LLVM dialect](attention_tile/03-llvm-encoded.mlir) | Finalizer rechecks the stream and emits one side-effecting inline-assembly block. |
 | 04 | [MLP LLVM IR](mlp_tile/04-llvm-ir.ll) · [attention LLVM IR](attention_tile/04-llvm-ir.ll) | LLVM IR translated by `mlir-translate`. |
@@ -20,7 +26,8 @@ Open either directory in numeric order:
 | 07 | [MLP linked ELF](mlp_tile/07-riscv-linked.elf) · [attention linked ELF](attention_tile/07-riscv-linked.elf) | ELF32 RISC-V `ET_EXEC` linked with `ld.lld`; `atlas_program` entry is at address zero. |
 | 08 | [MLP disassembly](mlp_tile/08-riscv-disassembly.txt) · [attention disassembly](attention_tile/08-riscv-disassembly.txt) | `llvm-objdump -d` view of the linked `.text`. Generic RISC-V decoding does not explain Atlas custom operations. |
 
-The [MLP word map](mlp_tile/atlas-word-map.json) and [attention word map](attention_tile/atlas-word-map.json)
+The [MLP word map](mlp_tile/atlas-word-map.json), [attention word map](attention_tile/atlas-word-map.json),
+and [virtual MLP word map](virtual_mlp/atlas-word-map.json)
 connect each emitted word and byte offset back to its Atlas operation and
 attributes. The paired `atlas-words.txt` files contain the independent
 `atlas-emit` stream. These sidecars retain structure that LLVM's inline
@@ -45,6 +52,12 @@ already supplied `Q`, transposed `K`, and `V` tiles:
 multiply → pack/relayout → PV`. It has no Q/K/V projections, mask, causal
 state, batching, or qualified full-domain softmax policy. Both contain authored
 diagnostic delays; those are not proved availability bounds.
+The virtual MLP expresses the same operation sequence through SSA. The OOT
+lowerer generates 109 selected words and a VMEM relayout for packed FP8 rows.
+The same LLVM object words executed on the selected standalone AtlasCore with
+two different runtime weight sets, checking all 1,024 output cells each time.
+The test covers a small exactly representable FP8 set and does not prove the
+full numerical or timing domain.
 
 ## Reproduce and inspect
 
