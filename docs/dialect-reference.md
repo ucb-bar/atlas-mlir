@@ -18,9 +18,15 @@ pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads and
 writes, with names such as `%io1`. In the physical examples, `%s1` is an SSA
 machine-state token, not scalar register 1. Pure VPU
 candidate operations express their tensor dependencies through `%t` operands.
-The `--verify-atlas-virtual-stream` pass checks one flat virtual state chain,
+The `--verify-atlas-virtual-stream` pass checks the virtual state chain,
 distinct output indexes, and that no physical operation is mixed into it.
-Its verifier does not choose an issue order or prove numerical equivalence.
+For virtual control flow, the tool uses MLIR `func.func`, `cf.br`, and
+`cf.cond_br`. SSA values merge through successor block arguments, including
+loop-carried tiles and the state token; there is no separate `phi` operation.
+The verifier checks each edge passes the current state, MLIR checks ordinary
+SSA dominance and block-argument types, and the current CFG slice places all
+external outputs in one return block. Its verifier does not choose an issue
+order or prove numerical equivalence.
 
 After allocation, `!atlas.state` is the *physical* instruction-order token.
 `atlas.start` produces it and emits no word. Each machine operation consumes
@@ -58,6 +64,13 @@ See [`virtual_bf16_ssa.mlir`](../test/examples/virtual_bf16_ssa.mlir): one
 input `%t0` feeds both a unary operation and a later binary operation; two
 results are retained. That shared use creates a liveness requirement. The
 state `%io1` orders external I/O, whereas `%t0` carries tensor dataflow.
+[`virtual_bf16_cfg.mlir`](../test/examples/virtual_bf16_cfg.mlir) shows a
+diamond merge and a loop. MLIR may rename the textual `%t` and block labels
+when printing; SSA identity is the value and CFG edge, not the spelling.
+The CFG verifier accepts only i1/i32 controls and virtual BF16 tiles in block
+arguments, a single `virtual_start`, one return block, and boundary outputs in
+that block. This is a restricted pre-allocation form, not general Atlas
+control-flow lowering or physical register allocation.
 
 The intended order across ownership boundaries is: Merlin provides the
 selected target facts and semantic candidate; dependency scheduling uses
@@ -121,7 +134,7 @@ between selected RTL, architecture text, and the inspected model.
 
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
-| `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the narrow virtual BF16 stage's SSA types, flat external-state chain, unique output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
+| `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the virtual BF16 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
 | `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |
