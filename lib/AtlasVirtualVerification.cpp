@@ -189,35 +189,38 @@ struct VerifyAtlasVirtualStreamPass
   }
 
   void runOnOperation() override {
-    ModuleOp module = getOperation();
-    bool hasFunctions = llvm::any_of(module.getBody()->getOperations(),
-                                     [](Operation &op) { return isa<func::FuncOp>(op); });
-    if (hasFunctions) {
-      for (Operation &op : module.getBody()->getOperations()) {
-        auto function = dyn_cast<func::FuncOp>(op);
-        if (!function) {
-          op.emitOpError("virtual CFG module must contain only func.func operations");
-          return signalPassFailure();
-        }
-        if (failed(verifyVirtualFunction(function)))
-          return signalPassFailure();
-      }
-      return;
-    }
-    unsigned starts = 0;
-    unsigned outputs = 0;
-    llvm::DenseSet<int64_t> outputIndices;
-    if (failed(verifyVirtualBlock(*module.getBody(), /*entry=*/true,
-                                  /*cfg=*/false, starts, outputs,
-                                  outputIndices)))
+    if (failed(mlir::atlas::verifyAtlasVirtualModule(getOperation())))
       return signalPassFailure();
-    if (starts != 1 || outputs == 0) {
-      module.emitOpError("virtual stream requires one start and at least one output");
-      signalPassFailure();
-    }
   }
 };
 } // namespace
+
+LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
+  bool hasFunctions = llvm::any_of(module.getBody()->getOperations(),
+                                   [](Operation &op) { return isa<func::FuncOp>(op); });
+  if (hasFunctions) {
+    for (Operation &op : module.getBody()->getOperations()) {
+      auto function = dyn_cast<func::FuncOp>(op);
+      if (!function)
+        return op.emitOpError(
+            "virtual CFG module must contain only func.func operations");
+      if (failed(verifyVirtualFunction(function)))
+        return failure();
+    }
+    return success();
+  }
+  unsigned starts = 0;
+  unsigned outputs = 0;
+  llvm::DenseSet<int64_t> outputIndices;
+  if (failed(verifyVirtualBlock(*module.getBody(), /*entry=*/true,
+                                /*cfg=*/false, starts, outputs,
+                                outputIndices)))
+    return failure();
+  if (starts != 1 || outputs == 0)
+    return module.emitOpError(
+        "virtual stream requires one start and at least one output");
+  return success();
+}
 
 void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
