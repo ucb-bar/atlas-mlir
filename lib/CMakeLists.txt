@@ -5,5 +5,6 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasEncoding.cpp
   AtlasToLLVM.cpp
   AtlasStreamVerification.cpp
+  AtlasVirtualVerification.cpp
   DEPENDS MLIRAtlasOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRLLVMDialect MLIRPass)
