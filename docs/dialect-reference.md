@@ -95,9 +95,11 @@ serialization adds diagnostic delays after VPU and VMEM operations. The
 generated-stream checker enforces those waits and the selected one-slot
 branch convention before word emission or LLVM lowering. The stage does not
 solve alternate scheduling, layer tiling, or a qualified latency model.
-Generated VPU execution currently admits `mov` and `relu` only; other virtual
-unary and all binary modes receive an explicit qualification error. With FP8
-values present, it reserves tensor registers 0..31 for FP8 and pairs 32..60
+Generated VPU execution currently admits unary `mov`/`relu` and binary `add`;
+other virtual modes receive an explicit
+qualification error. `add` uses the selected VPU's FP32 sum followed by a
+BF16 bit chop; it is not a generic BF16 round-to-nearest-even operation.
+With FP8 values present, it reserves tensor registers 0..31 for FP8 and pairs 32..60
 for BF16, with pair 62 as a temporary. A pack reserves scalar x10..x17 for
 its VMEM relayout and colors runtime controls in x18..x26. The external input
 ABI uses 2,048-byte slots; a 32×32 FP8 tile occupies the first 1,024 bytes of
@@ -111,6 +113,10 @@ is a fixed 32×32 virtual SSA example: MXU0, BF16 ReLU, unit-scale pack,
 MXU1, BF16 output. Its output is checked through selected standalone-core
 execution with changed runtime weights. It has no bias, tails, Linalg import,
 or captured model precision transformation.
+[`virtual_fp8_two_layer_mlp_bias.mlir`](../test/examples/virtual_fp8_two_layer_mlp_bias.mlir)
+adds BF16 VPU bias addition after each MXU. Its boundary biases are already
+broadcast into physical 32×32 tiles; capturing a vector bias and preparing
+that tile are separate frontend/ABI obligations.
 
 ```sh
 build/bin/atlas-opt --verify-atlas-virtual-stream \

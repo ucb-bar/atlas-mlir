@@ -35,6 +35,22 @@ def bf16_cell(data: bytes, row: int, col: int) -> int:
     )[0]
 
 
+def bf16_bits(value: float) -> int:
+    bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    assert bits & 0xFFFF == 0, "directed reference value must be exact BF16"
+    return bits >> 16
+
+
+def bf16_bias_tile(by_column: tuple[float, ...]) -> bytes:
+    assert len(by_column) == 32
+    tile = bytearray(2048)
+    for row in range(32):
+        for col in range(32):
+            offset = (col // 16) * 1024 + (row * 16 + col % 16) * 2
+            struct.pack_into("<H", tile, offset, bf16_bits(by_column[col]))
+    return bytes(tile)
+
+
 class VirtualMXUTest(unittest.TestCase):
     def source(self, unit: int = 0) -> str:
         text = (EXAMPLES / "virtual_fp8_matmul_program.mlir").read_text()
@@ -75,6 +91,17 @@ class VirtualMXUTest(unittest.TestCase):
         )
         self.assertNotEqual(scratch_overlap.returncode, 0)
         self.assertIn("input indexes below 64", scratch_overlap.stderr)
+        biased_source = (
+            EXAMPLES / "virtual_fp8_two_layer_mlp_bias.mlir"
+        ).read_text()
+        unqualified_add = run(
+            "atlas-opt", biased_source.replace('kind = "add"',
+                                               'kind = "sub"', 1),
+            "--lower-atlas-virtual-to-machine",
+        )
+        self.assertNotEqual(unqualified_add.returncode, 0)
+        self.assertIn("binary VPU admission currently requires add",
+                      unqualified_add.stderr)
         changed = machine.replace("cycles = 256 : i32", "cycles = 1 : i32", 1)
         rejected = run("atlas-emit", changed)
         self.assertNotEqual(rejected.returncode, 0)
@@ -220,6 +247,60 @@ class VirtualMXUTest(unittest.TestCase):
                                          second_weight)
                         self.assertEqual(result.slave.captured(base + 0x2800, 64),
                                          b"\x5A" * 64)
+                biased_source = (
+                    EXAMPLES / "virtual_fp8_two_layer_mlp_bias.mlir"
+                ).read_text()
+                biased_machine = lower(biased_source)
+                self.assertEqual(biased_machine.count('"atlas.vpu_binary"'), 2)
+                biased_words = object_words(biased_machine)
+                self.assertEqual(biased_words, emitted(biased_machine))
+                b0_values = tuple(0.5 if col % 2 == 0 else 1.0
+                                  for col in range(32))
+                b1_values = tuple(0.25 if col % 2 == 0 else 0.5
+                                  for col in range(32))
+                b0, b1 = bf16_bias_tile(b0_values), bf16_bias_tile(b1_values)
+                float_codes = {0x00: 0.0, 0x30: 0.5, 0x38: 1.0,
+                               0x40: 2.0, 0xB8: -1.0}
+                for first_shift, second_shift in ((0, 0), (3, 5)):
+                    with self.subTest(biased_mlp=(first_shift, second_shift)):
+                        first_weight = weight(first_shift)
+                        second_weight = weight(second_shift)
+                        result = cosim_atlas.run_program(
+                            model, state, biased_words,
+                            preload=[(base, source_panel),
+                                     (base + 0x800, first_weight),
+                                     (base + 0x1000, second_weight),
+                                     (base + 0x1800, b0),
+                                     (base + 0x2000, b1),
+                                     (base + 0x3000, b"\xA5" * 2048),
+                                     (base + 0x3800, b"\x5A" * 64)],
+                            max_cycles=100000,
+                        )
+                        output = result.slave.captured(base + 0x3000, 2048)
+                        self.assertTrue(result.halted)
+                        self.assertEqual((result.reads, result.writes), (224, 64))
+                        for row in range(32):
+                            for col in range(32):
+                                middle_col = (col + second_shift) % 32
+                                source = source_panel[
+                                    row * 32 +
+                                    (middle_col + first_shift) % 32
+                                ]
+                                value = max(float_codes[source] +
+                                            b0_values[middle_col], 0.0)
+                                expected = bf16_bits(value + b1_values[col])
+                                self.assertEqual(
+                                    bf16_cell(output, row, col), expected,
+                                    (first_shift, second_shift, row, col),
+                                )
+                        for address, data in ((base, source_panel),
+                                              (base + 0x800, first_weight),
+                                              (base + 0x1000, second_weight),
+                                              (base + 0x1800, b0),
+                                              (base + 0x2000, b1),
+                                              (base + 0x3800, b"\x5A" * 64)):
+                            self.assertEqual(result.slave.captured(address, len(data)),
+                                             data)
             finally:
                 cosim_atlas.CosimCore = original
         finally:
