@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the hand-authored Atlas examples and their exact LLVM MLIR stage.
+"""Export the authored Atlas examples and their exact LLVM MLIR stages.
 
 This is a diagnostic handoff, not a model compiler or an execution certificate.
 """
@@ -17,7 +17,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = ("handoff_mlp_tile", "handoff_attention_tile")
+EXAMPLES = ("handoff_mlp_tile", "handoff_attention_tile",
+            "virtual_fp8_two_layer_mlp")
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
 
 
@@ -58,17 +59,30 @@ def main() -> None:
         "selected_rtl_revision": RTL_REVISION,
         "llvm_version": run([str(llvm / "mlir-translate"), "--version"]).strip(),
         "linker_version": run([str(linker), "--version"]).strip(),
-        "scope": "hand-authored fixed 32x32 diagnostic streams; no general MLP or attention claim",
+        "scope": ("authored fixed 32x32 physical examples and one virtual SSA "
+                  "MLP lowering; no captured-model or general MLP/attention claim"),
         "examples": {},
     }
 
     for name in EXAMPLES:
         source = ROOT / "test" / "examples" / f"{name}.mlir"
         raw = source.read_bytes()
-        words_text = run([str(atlas / "atlas-emit"), str(source)])
+        if name == "virtual_fp8_two_layer_mlp":
+            machine_text = run([
+                str(atlas / "atlas-opt"), "--lower-atlas-virtual-to-machine",
+                str(source),
+            ]).rstrip() + "\n"
+            if 'atlas.generated_from_virtual' not in machine_text:
+                raise RuntimeError(f"{name}: virtual lowering lost generated marker")
+            (output / f"{name}.virtual.mlir").write_bytes(raw)
+            machine_source = output / f"{name}.atlas.mlir"
+            machine_source.write_text(machine_text)
+        else:
+            machine_source = source
+        words_text = run([str(atlas / "atlas-emit"), str(machine_source)])
         words = tuple(int(line, 16) for line in words_text.splitlines())
         word_map = json.loads(run([str(atlas / "atlas-emit"), "--map-json",
-                                   str(source)]))
+                                   str(machine_source)]))
         mapped = word_map.get("operations", ())
         if (word_map.get("schema") != "atlas.machine_word_map.v1"
                 or word_map.get("word_count") != len(words)
@@ -79,7 +93,8 @@ def main() -> None:
                        for index, row in enumerate(mapped))):
             raise RuntimeError(f"{name}: source operation map differs from emitted words")
         structured_mlir = run([
-            str(atlas / "atlas-opt"), "--convert-atlas-to-llvm-calls", str(source),
+            str(atlas / "atlas-opt"), "--convert-atlas-to-llvm-calls",
+            str(machine_source),
         ]).rstrip() + "\n"
         if (structured_mlir.count("llvm.call @atlas_emit_") != len(words)
                 or "llvm.inline_asm" in structured_mlir):
@@ -131,7 +146,8 @@ def main() -> None:
         disassembly = raw_disassembly.replace(str(elf), "<linked-elf>")
         if not re.search(r"<atlas_program>:", disassembly):
             raise RuntimeError(f"{name}: linked ELF lost atlas_program symbol")
-        shutil.copyfile(source, output / f"{name}.atlas.mlir")
+        if machine_source != output / f"{name}.atlas.mlir":
+            shutil.copyfile(source, output / f"{name}.atlas.mlir")
         (output / f"{name}.llvm-structured.mlir").write_text(structured_mlir)
         (output / f"{name}.llvm.mlir").write_text(llvm_mlir)
         (output / f"{name}.ll").write_text(llvm_ir)
@@ -143,6 +159,9 @@ def main() -> None:
         manifest["examples"][name] = {
             "word_count": len(words),
             "source_sha256": digest(raw),
+            "machine_sha256": digest((output / f"{name}.atlas.mlir").read_bytes()),
+            "source_stage": ("virtual_ssa" if name == "virtual_fp8_two_layer_mlp"
+                             else "atlas_machine"),
             "structured_llvm_mlir_sha256": digest(structured_mlir.encode()),
             "llvm_mlir_sha256": digest(llvm_mlir.encode()),
             "object_sha256": digest(obj.read_bytes()),

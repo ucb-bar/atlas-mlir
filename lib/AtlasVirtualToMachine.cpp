@@ -34,7 +34,10 @@ constexpr unsigned kLastScalarValue = 26;
 constexpr uint64_t kTileBytes = 2048;
 constexpr uint64_t kHalfBytes = 1024;
 constexpr uint64_t kScratchBankWords = 65536; // selected 256-KiB VMEM bank
+constexpr uint32_t kPackScratchWord = 32768;
+constexpr uint32_t kPackRelayoutWord = kPackScratchWord + 256;
 constexpr unsigned kDiagnosticDelay = 256;
+enum class RegisterKind { BF16, FP8, Scalar };
 
 struct PlannedOp {
   std::string name;
@@ -154,13 +157,20 @@ private:
       if (auto x = dyn_cast<VirtualInputBF16Op>(op))
         maxInput = std::max(maxInput,
                             static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
+      if (auto x = dyn_cast<VirtualInputFP8Op>(op))
+        maxInput = std::max(maxInput,
+                            static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
       if (auto x = dyn_cast<VirtualOutputBF16Op>(op))
         maxOutput = std::max(maxOutput,
                              static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
+      hasPack |= isa<VirtualPackFP8Op>(op);
     });
     if (maxInput >= kScratchBankWords * 4 / kTileBytes ||
         maxOutput >= kScratchBankWords * 4 / kTileBytes)
       return function.emitOpError("input or output tile index exceeds its VMEM bank");
+    if (hasPack && maxInput >= kPackScratchWord / 512)
+      return function.emitOpError(
+          "FP8 pack scratch window requires input indexes below 64");
     uint64_t inputEnd = inputBase + (maxInput + 1) * kTileBytes;
     uint64_t outputEnd = outputBase + (maxOutput + 1) * kTileBytes;
     if (inputEnd > (1ULL << 32) || outputEnd > (1ULL << 32) ||
@@ -190,20 +200,28 @@ private:
   }
 
   LogicalResult allocateValues() {
-    if (failed(colorValues(/*tensor=*/true)) ||
-        failed(colorValues(/*tensor=*/false)))
+    function.walk([&](Operation *op) {
+      for (Value result : op->getResults())
+        mixedFp8 |= isa<VirtualFP8Type>(result.getType());
+    });
+    if (failed(colorValues(RegisterKind::BF16)) ||
+        failed(colorValues(RegisterKind::FP8)) ||
+        failed(colorValues(RegisterKind::Scalar)))
       return failure();
     for (BlockArgument arg : function.getArguments())
       scalarArgumentRegs.push_back(scalar(arg));
     return success();
   }
 
-  LogicalResult colorValues(bool tensor) {
+  LogicalResult colorValues(RegisterKind kind) {
     using Set = llvm::DenseSet<Value>;
     auto selected = [&](Value value) {
       Type type = value.getType();
-      return tensor ? isa<VirtualBF16Type>(type)
-                    : type.isInteger(1) || type.isInteger(32);
+      if (kind == RegisterKind::BF16)
+        return isa<VirtualBF16Type>(type);
+      if (kind == RegisterKind::FP8)
+        return isa<VirtualFP8Type>(type);
+      return type.isInteger(1) || type.isInteger(32);
     };
     SmallVector<Value> values;
     llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
@@ -289,7 +307,7 @@ private:
     // All runtime controls are loaded from the mailbox before the entry
     // block executes. Their physical registers therefore overlap at staging,
     // even if their SSA uses are disjoint later in the CFG.
-    if (!tensor) {
+    if (kind == RegisterKind::Scalar) {
       Set stagedArguments;
       for (BlockArgument arg : function.getArguments())
         stagedArguments.insert(arg);
@@ -346,8 +364,12 @@ private:
       return neighbors[a].size() > neighbors[b].size();
     });
     llvm::DenseMap<Value, unsigned> colors;
-    unsigned count = tensor ? kTensorPairTemporary / 2
-                            : kLastScalarValue - kFirstScalarValue + 1;
+    unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
+    unsigned count = kind == RegisterKind::BF16
+                         ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
+                         : kind == RegisterKind::FP8
+                               ? 32
+                               : kLastScalarValue - firstScalar + 1;
     for (Value value : values) {
       bool assigned = false;
       for (unsigned color = 0; color < count; ++color) {
@@ -362,23 +384,32 @@ private:
         }
       }
       if (!assigned)
-        return function.emitOpError(tensor
-            ? "virtual BF16 interference exceeds 31 physical pairs"
-            : "virtual control interference exceeds 17 scalar registers");
+        return function.emitOpError(
+            kind == RegisterKind::BF16
+                ? (mixedFp8 ? "mixed virtual BF16 interference exceeds 15 physical pairs"
+                            : "virtual BF16 interference exceeds 31 physical pairs")
+                : kind == RegisterKind::FP8
+                      ? "virtual FP8 interference exceeds 32 physical registers"
+                      : (hasPack
+                             ? "virtual control interference exceeds 9 scalar registers with FP8 pack"
+                             : "virtual control interference exceeds 17 scalar registers"));
     }
     for (Value value : values) {
       for (Value other : neighbors[value])
         if (colors[value] == colors[other])
           return function.emitOpError("internal register-coloring overlap");
-      if (tensor)
-        tileRegs[value] = 2 * colors[value];
+      if (kind == RegisterKind::BF16)
+        tileRegs[value] = (mixedFp8 ? 32 : 0) + 2 * colors[value];
+      else if (kind == RegisterKind::FP8)
+        fp8Regs[value] = colors[value];
       else
-        scalarRegs[value] = kFirstScalarValue + colors[value];
+        scalarRegs[value] = firstScalar + colors[value];
     }
     return success();
   }
 
   unsigned tile(Value value) const { return tileRegs.find(value)->second; }
+  unsigned fp8(Value value) const { return fp8Regs.find(value)->second; }
   unsigned scalar(Value value) const { return scalarRegs.find(value)->second; }
 
   void materializeScalar(unsigned dst, uint32_t value, Location loc) {
@@ -524,6 +555,73 @@ private:
     add("atlas.dma_wait", loc, {{"channel", i32(1)}});
   }
 
+  LogicalResult lowerPack(VirtualPackFP8Op pack) {
+    if (pack.getScaleCode() != 127)
+      return pack.emitOpError(
+          "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
+    Location loc = pack.getLoc();
+    add("atlas.scalar_load", loc,
+        {{"kind", str("seli")}, {"dst", i32(3)}, {"base", i32(0)},
+         {"offset", i32(pack.getScaleCode())}});
+    add("atlas.vpu_pack", loc,
+        {{"direction", str("bf16_to_fp8")},
+         {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
+         {"scale_reg", i32(3)}});
+    delay(loc, "vpu_pack_completion");
+
+    // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
+    // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
+    // in the free upper half of input VMEM and interleave its two 512-byte
+    // halves through a bounded 32-row scalar loop.
+    materializeScalar(8, kPackScratchWord, loc);
+    add("atlas.vstore", loc,
+        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(8)},
+         {"offset", i32(0)}, {"format", str("raw")}});
+    delay(loc, "pack_vstore_completion");
+    materializeScalar(10, kPackScratchWord * 4, loc);
+    materializeScalar(11, kPackScratchWord * 4 + 512, loc);
+    materializeScalar(12, kPackRelayoutWord * 4, loc);
+    materializeScalar(13, 0, loc);
+    materializeScalar(14, 32, loc);
+    unsigned loop = newLabel();
+    mark(loop);
+    for (unsigned word = 0; word < 4; ++word) {
+      for (unsigned half = 0; half < 2; ++half) {
+        unsigned source = half ? 11 : 10;
+        unsigned temp = half ? 17 : 16;
+        add("atlas.scalar_load", loc,
+            {{"kind", str("lw")}, {"dst", i32(temp)},
+             {"base", i32(source)}, {"offset", i32(4 * word)}});
+        add("atlas.delay", loc,
+            {{"cycles", i32(8)},
+             {"atlas.delay_reason", str("scalar_load_completion")}});
+        add("atlas.scalar_store", loc,
+            {{"kind", str("sw")}, {"src", i32(temp)}, {"base", i32(12)},
+             {"offset", i32(4 * word + 16 * half)}});
+      }
+    }
+    for (unsigned reg : {10u, 11u, 12u})
+      add("atlas.alu_imm", loc,
+          {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
+           {"immediate", i32(reg == 12 ? 32 : 16)}});
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(13)}, {"src", i32(13)},
+         {"immediate", i32(1)}});
+    add("atlas.branch", loc,
+        {{"kind", str("blt")}, {"lhs", i32(13)}, {"rhs", i32(14)}},
+        loop);
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
+         {"immediate", i32(0)}});
+    delay(loc, "scalar_relayout_completion");
+    materializeScalar(6, kPackRelayoutWord, loc);
+    add("atlas.vload", loc,
+        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(6)},
+         {"offset", i32(0)}, {"format", str("raw")}});
+    delay(loc, "pack_relayout_vload_completion");
+    return success();
+  }
+
   LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
     if (isa<VirtualStartOp>(op))
@@ -534,6 +632,33 @@ private:
         inputHalf(tile(input.getValue()) + half, index, half, loc);
       return success();
     }
+    if (auto input = dyn_cast<VirtualInputFP8Op>(op)) {
+      uint64_t index = input.getIndexAttr().getValue().getZExtValue();
+      // Each boundary index reserves a 2-KiB slot. An FP8 tile occupies its
+      // first half, keeping mixed FP8/BF16 boundary addressing unambiguous.
+      inputHalf(fp8(input.getValue()), index, 0, loc);
+      return success();
+    }
+    if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
+      unsigned unit = static_cast<unsigned>(matmul.getUnit());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("weight_fp8")}, {"unit", i32(unit)},
+           {"src", i32(fp8(matmul.getWeight()))}, {"slot", i32(0)}});
+      delay(loc, "mxu_weight_completion");
+      add("atlas.mxu_matmul", loc,
+          {{"unit", i32(unit)}, {"src", i32(fp8(matmul.getActivation()))},
+           {"weight_slot", i32(0)}, {"acc_slot", i32(0)},
+           {"accumulate", boolean(false)}});
+      delay(loc, "mxu_matmul_completion");
+      add("atlas.mxu_pop", loc,
+          {{"format", str("bf16")}, {"unit", i32(unit)},
+           {"dst", i32(tile(matmul.getResult()))},
+           {"slot", i32(0)}, {"scale_reg", i32(0)}});
+      delay(loc, "mxu_readout_completion");
+      return success();
+    }
+    if (auto pack = dyn_cast<VirtualPackFP8Op>(op))
+      return lowerPack(pack);
     if (auto output = dyn_cast<VirtualOutputBF16Op>(op)) {
       uint64_t index = output.getIndexAttr().getValue().getZExtValue();
       for (unsigned half = 0; half < 2; ++half)
@@ -664,7 +789,9 @@ private:
   ModuleOp module;
   func::FuncOp function;
   Builder attrs;
-  llvm::DenseMap<Value, unsigned> tileRegs, scalarRegs;
+  llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
+  bool mixedFp8 = false;
+  bool hasPack = false;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
   std::vector<PlannedOp> planned;

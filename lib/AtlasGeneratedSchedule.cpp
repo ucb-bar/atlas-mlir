@@ -12,7 +12,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
     if (isa<StartOp>(op))
       continue;
     Operation *next = op.getNextNode();
-    if (isa<VLoadOp, VStoreOp, VPUUnaryOp, VPUBinaryOp>(op)) {
+    if (isa<VLoadOp, VStoreOp, VPUUnaryOp, VPUBinaryOp, VPUPackOp,
+            MXUPushOp, MXUMatmulOp, MXUPopOp>(op)) {
       auto wait = next ? dyn_cast<DelayOp>(next) : DelayOp{};
       if (!wait || wait.getCycles() < 256 ||
           !wait->getAttrOfType<StringAttr>("atlas.delay_reason"))

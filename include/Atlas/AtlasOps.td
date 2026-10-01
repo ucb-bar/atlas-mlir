@@ -25,6 +25,31 @@ def Atlas_VirtualInputBF16Op :
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualInputFP8Op :
+    Atlas_Op<"virtual_input_fp8",
+             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Read one externally declared FP8 tile into a virtual value";
+  let arguments = (ins Atlas_VirtualStateType:$state, I32Attr:$index);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualFP8Type:$value);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul", [Pure]> {
+  let summary = "Reset one selected MXU with 32 by 32 FP8 operands";
+  let arguments = (ins Atlas_VirtualFP8Type:$activation,
+                       Atlas_VirtualFP8Type:$weight, I32Attr:$unit);
+  let results = (outs Atlas_VirtualBF16Type:$result);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8", [Pure]> {
+  let summary = "Convert a logical BF16 tile to a logical FP8 MXU operand tile";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
+  let results = (outs Atlas_VirtualFP8Type:$result);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualVPUUnaryOp : Atlas_Op<"virtual_vpu_unary", [Pure]> {
   let summary = "BF16 VPU unary candidate with virtual register def/use";
   let arguments = (ins Atlas_VirtualBF16Type:$src, StrAttr:$kind);

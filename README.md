@@ -7,8 +7,11 @@ objects, linked ELF files, disassembly, and per-word operation maps. The
 relayout and selected-core diagnostic evidence.
 The [dialect reference](docs/dialect-reference.md) lists every current
 operation, its checked physical fields, and the implemented pass inventory.
+The [virtual SSA interpreter contract](docs/virtual-ssa-interpreter-contract.md)
+explains block arguments, loop visits, state tokens, and the checks needed by
+an independent interpreter.
 
-This is an out-of-tree ODS/C++ dialect with a narrow virtual BF16 VPU SSA slice
+This is an out-of-tree ODS/C++ dialect with a bounded virtual BF16/FP8 SSA slice
 and a selected-encoding **machine stage** for one Atlas RTL revision. It is a
 reviewable reference candidate for comparing Merlin's
 generated dialect against an implementation written directly from the selected
@@ -39,6 +42,15 @@ tiles through DMA/VMEM, and emits serial waits. The
 and related branch, swap, and dynamic-control fixtures exercise that path.
 This is a narrow VPU/CFG lowering slice, not a general Atlas allocator or
 model compiler.
+The [`virtual_fp8_two_layer_mlp.mlir`](test/examples/virtual_fp8_two_layer_mlp.mlir)
+fixture now adds two virtual MXU contractions around BF16 ReLU and unit-scale
+FP8 pack. The same virtual-to-machine pass assigns separate FP8 and BF16
+physical register ranges, stages runtime tiles, relayouts packed FP8 rows in
+VMEM, and emits a checked selected instruction stream. Tests translate that
+stream through unmodified LLVM to object words and execute it on the selected
+standalone AtlasCore with two different runtime weight sets. This is one fixed
+32×32 quantized tile without bias, tails, or a Linalg/PyTorch importer; it is
+not a complete captured-model MLP or a general native instruction selector.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
@@ -139,6 +151,14 @@ build/bin/atlas-opt --finalize-atlas-llvm-calls \
   build/loop.structured-llvm.mlir > build/loop.llvm.mlir
 build/bin/atlas-emit build/loop.machine.mlir > build/loop.words
 ```
+
+For the bounded quantized MLP tile, replace the loop source with
+`test/examples/virtual_fp8_two_layer_mlp.mlir`. The first pass produces a
+109-word physical stream, and the same verification and LLVM handoff commands
+apply. The numbered [virtual MLP bundle](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir)
+shows each stage, including RISC-V assembly and an inspectable ELF. Recreate
+it with `tools/export_llvm_handoff.py` using the arguments shown in the
+[handoff README](examples/handoff/README.md).
 
 The generated delay rule is a conservative diagnostic policy: 256 cycles
 after each VLOAD/VSTORE/VPU operation, a channel-specific DMA wait, and eight
