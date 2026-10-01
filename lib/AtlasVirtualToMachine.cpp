@@ -676,8 +676,16 @@ private:
       return success();
     }
     if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
-      return binary.emitOpError(
-          "virtual-to-machine binary VPU modes require separate numerical and timing qualification");
+      if (binary.getKind() != "add")
+        return binary.emitOpError(
+            "virtual-to-machine binary VPU admission currently requires add");
+      add("atlas.vpu_binary", loc,
+          {{"kind", binary.getKindAttr()},
+           {"dst", i32(tile(binary.getDst()))},
+           {"lhs", i32(tile(binary.getLhs()))},
+           {"rhs", i32(tile(binary.getRhs()))}});
+      delay(loc, "vpu_completion");
+      return success();
     }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
