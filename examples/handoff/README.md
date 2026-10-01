@@ -37,6 +37,9 @@ connect each emitted word and byte offset back to its Atlas operation and
 attributes. The paired `atlas-words.txt` files contain the independent
 `atlas-emit` stream. These sidecars retain structure that LLVM's inline
 assembly loses; they are the starting point for source-linked delay analysis.
+The paired `atlas-physical-program.json` files contain the exact words and
+typed operation/control fields for an instruction-level functional model;
+see the [consumer contract](../../docs/functional-stream-contract.md).
 
 For example, the MLP Atlas source contains
 `"atlas.mxu_matmul"(...){unit = 0, ...}`. The structured LLVM dialect has a

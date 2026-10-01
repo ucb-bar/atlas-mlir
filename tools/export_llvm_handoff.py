@@ -19,7 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ("handoff_mlp_tile", "handoff_attention_tile",
             "virtual_fp8_two_layer_mlp")
-RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
+RTL_REVISION = json.loads((ROOT / "docs/selected-variant-inventory.json")
+                          .read_text())["selected_sources"]["rtl_revision"]
 
 
 def run(command: list[str], *, input_text: str | None = None) -> str:
@@ -92,6 +93,14 @@ def main() -> None:
                        or row["word_hex"] != f"{words[index]:08x}"
                        for index, row in enumerate(mapped))):
             raise RuntimeError(f"{name}: source operation map differs from emitted words")
+        physical_program = json.loads(run([str(atlas / "atlas-emit"),
+                                           "--program-json", str(machine_source)]))
+        if (physical_program.get("schema") != "atlas.physical_program.v1"
+                or physical_program.get("selected_rtl_revision") != RTL_REVISION
+                or physical_program.get("word_count") != len(words)
+                or [row.get("word_u32") for row in
+                    physical_program.get("instructions", [])] != list(words)):
+            raise RuntimeError(f"{name}: physical program differs from emitted words")
         structured_mlir = run([
             str(atlas / "atlas-opt"), "--convert-atlas-to-llvm-calls",
             str(machine_source),
@@ -156,6 +165,9 @@ def main() -> None:
         (output / f"{name}.words.txt").write_text(words_text)
         map_bytes = (json.dumps(word_map, indent=2, sort_keys=True) + "\n").encode()
         (output / f"{name}.word-map.json").write_bytes(map_bytes)
+        physical_bytes = (json.dumps(physical_program, indent=2, sort_keys=True)
+                          + "\n").encode()
+        (output / f"{name}.physical-program.json").write_bytes(physical_bytes)
         manifest["examples"][name] = {
             "word_count": len(words),
             "source_sha256": digest(raw),
@@ -172,6 +184,7 @@ def main() -> None:
             "linked_text_matches_object": True,
             "word_map_sha256": digest(map_bytes),
             "word_map_schema": word_map["schema"],
+            "physical_program_sha256": digest(physical_bytes),
             "text_bytes": len(actual),
         }
 

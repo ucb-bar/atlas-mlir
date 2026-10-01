@@ -24,7 +24,9 @@ from xdsl.ir import BlockArgument, SSAValue
 from xdsl.parser import Parser
 
 
-RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
+RTL_REVISION = json.loads((Path(__file__).resolve().parents[1] /
+                           "docs/selected-variant-inventory.json")
+                          .read_text())["selected_sources"]["rtl_revision"]
 POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v1"
 
 
@@ -515,6 +517,16 @@ def compile_program(virtual: str, output: Path, atlas: Path,
     require(word_map.get("word_count") == len(words),
             "machine word map differs from emitted stream")
     (output / "word-map.json").write_text(json.dumps(word_map, indent=2) + "\n")
+    physical_program = json.loads(run([atlas_emit, "--program-json", "-"],
+                                      input_text=machine))
+    require(physical_program.get("schema") == "atlas.physical_program.v1"
+            and physical_program.get("selected_rtl_revision") == RTL_REVISION
+            and physical_program.get("word_count") == len(words)
+            and [row.get("word_u32") for row in
+                 physical_program.get("instructions", [])] == list(words),
+            "physical functional stream differs from emitted Atlas words")
+    (output / "physical-program.json").write_text(
+        json.dumps(physical_program, indent=2) + "\n")
     structured = run([atlas_opt, "--convert-atlas-to-llvm-calls", "-"],
                      input_text=machine).rstrip() + "\n"
     require(structured.count("llvm.call @atlas_emit_") == len(words),
@@ -554,6 +566,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
         "virtual_sha256": sha256(output / "atlas-virtual.mlir"),
         "machine_sha256": sha256(output / "atlas-machine.mlir"),
         "object_sha256": sha256(obj), "elf_sha256": sha256(elf),
+        "physical_program_sha256": sha256(output / "physical-program.json"),
         "linked_text_matches_object": True,
         "object_prefix_matches_emitter": True,
     }
