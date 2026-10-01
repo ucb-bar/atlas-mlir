@@ -10,4 +10,16 @@ def Atlas_StateType : TypeDef<Atlas_Dialect, "State"> {
   let assemblyFormat = "";
 }
 
+def Atlas_VirtualStateType : TypeDef<Atlas_Dialect, "VirtualState"> {
+  let mnemonic = "virtual_state";
+  let summary = "Ordered pre-allocation Atlas boundary state";
+  let assemblyFormat = "";
+}
+
+def Atlas_VirtualBF16Type : TypeDef<Atlas_Dialect, "VirtualBF16"> {
+  let mnemonic = "virtual_bf16";
+  let summary = "Unallocated 32 by 32 BF16 VPU tile value";
+  let assemblyFormat = "";
+}
+
 #endif

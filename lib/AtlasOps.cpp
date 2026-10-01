@@ -43,6 +43,18 @@ ATLAS_MACHINE_EFFECTS(FenceOp)
 ATLAS_MACHINE_EFFECTS(ScalarLoadOp)
 ATLAS_MACHINE_EFFECTS(ScalarStoreOp)
 
+void VirtualInputBF16Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+}
+
+void VirtualOutputBF16Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 static LogicalResult inRange(Operation *op, StringRef name, int64_t value,
                              int64_t first, int64_t last) {
   if (value >= first && value <= last)
@@ -66,6 +78,36 @@ static LogicalResult scalarReg(Operation *op, StringRef name, int64_t value) {
 
 static LogicalResult mxuSlot(Operation *op, StringRef name, int64_t value) {
   return inRange(op, name, value, 0, 1);
+}
+
+LogicalResult VirtualInputBF16Op::verify() {
+  if (getIndexAttr().getValue().getSExtValue() < 0)
+    return emitOpError("input index must be nonnegative");
+  return success();
+}
+
+LogicalResult VirtualOutputBF16Op::verify() {
+  if (getIndexAttr().getValue().getSExtValue() < 0)
+    return emitOpError("output index must be nonnegative");
+  return success();
+}
+
+LogicalResult VirtualVPUUnaryOp::verify() {
+  StringRef kind = getKind();
+  if (kind != "mov" && kind != "recip" && kind != "exp" &&
+      kind != "exp2" && kind != "square" && kind != "cube" &&
+      kind != "relu" && kind != "sin" && kind != "cos" &&
+      kind != "tanh" && kind != "log2" && kind != "sqrt")
+    return emitOpError("unknown virtual unary VPU kind");
+  return success();
+}
+
+LogicalResult VirtualVPUBinaryOp::verify() {
+  StringRef kind = getKind();
+  if (kind != "add" && kind != "sub" && kind != "mul" &&
+      kind != "min" && kind != "max")
+    return emitOpError("unknown virtual binary VPU kind");
+  return success();
 }
 
 LogicalResult VLoadOp::verify() {

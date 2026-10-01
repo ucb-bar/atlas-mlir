@@ -8,14 +8,15 @@ relayout and selected-core diagnostic evidence.
 The [dialect reference](docs/dialect-reference.md) lists every current
 operation, its checked physical fields, and the implemented pass inventory.
 
-This is an out-of-tree ODS/C++ **machine-stage** dialect for one selected Atlas
-RTL revision. It is a reviewable reference candidate for comparing Merlin's
+This is an out-of-tree ODS/C++ dialect with a narrow virtual BF16 VPU SSA slice
+and a selected-encoding **machine stage** for one Atlas RTL revision. It is a
+reviewable reference candidate for comparing Merlin's
 generated dialect against an implementation written directly from the selected
 RTL and the `npu_model` sources. It was authored with Codex assistance and is
 not a clean-room or certified reference. It is not a Merlin compiler, a qualified
 executable target dialect, or an Atlas hardware certificate.
 
-The dialect has a typed `!atlas.state` token and 26 parameterized operation
+The physical stage has a typed `!atlas.state` token and 26 parameterized operation
 classes covering the **99 selected RTL BitPat rows**: tensor load/store,
 DMA load/store/config/wait, both MXUs, VPU arithmetic/reduction/pack/immediate,
 XLU transpose, scalar ALU/load/store, CSR, branch/jump/delay, and termination.
@@ -24,6 +25,10 @@ Verifiers check known physical register, pair, slot, channel, CSR-address,
 immediate, and mode limits. Machine operations declare conservative physical
 state read/write effects. `atlas-emit` requires a linear state chain and
 checks that branches/jumps have a non-redirecting delay-slot instruction.
+The separate [`virtual_bf16_ssa.mlir`](test/examples/virtual_bf16_ssa.mlir)
+fixture uses `%t` SSA tensor values before physical register assignment;
+`--verify-atlas-virtual-stream` checks its boundary state chain and output
+identities. No virtual-to-physical allocator is implemented here.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
