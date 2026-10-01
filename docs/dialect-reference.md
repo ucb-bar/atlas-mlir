@@ -47,10 +47,10 @@ tensor operations, dynamic shapes, host calls, and a callable ABI are absent.
 
 The following operations provide a small, concrete hand-authored example of
 virtual tensor-register def/use. They are instruction candidates, not an
-automatic selector, allocator, or machine lowering. Boundary indexes name
-declared external input/output tiles; their physical VMEM layout is still an
-obligation. One BF16 tile will require an even-based *pair* of 1,024-byte
-physical registers on the selected RTL. This stage does not choose that pair.
+automatic semantic selector. Boundary indexes name declared external
+input/output tiles. One BF16 tile requires an even-based *pair* of 1,024-byte
+physical registers on the selected RTL. The bounded CFG materializer below
+chooses the pair and stages these tiles through the selected VMEM layout.
 
 | Operation | Operands and result | Obligation |
 | --- | --- | --- |
@@ -69,20 +69,30 @@ diamond merge and a loop. MLIR may rename the textual `%t` and block labels
 when printing; SSA identity is the value and CFG edge, not the spelling.
 The CFG verifier accepts only i1/i32 controls and virtual BF16 tiles in block
 arguments, a single `virtual_start`, one return block, and boundary outputs in
-that block. This is a restricted pre-allocation form, not general Atlas
-control-flow lowering or physical register allocation.
+that block. The implemented lowering accepts exactly one such function per
+module. The function has explicit DRAM input/output base attributes and, for
+runtime scalar arguments, a separate control mailbox base. Each base is a
+1,024-byte-aligned 32-bit address; tile indexes identify 2,048-byte BF16
+tiles. The control mailbox holds i1/i32 arguments as consecutive little-endian
+32-bit words. Lowering records their chosen scalar registers in
+`atlas.scalar_arg_regs`. This is a reset-entry program ABI for the selected
+standalone core, not a C-callable function ABI.
 
-The intended order across ownership boundaries is: Merlin provides the
-selected target facts and semantic candidate; dependency scheduling uses
-virtual SSA values and explicit memory/resource dependencies; register and
-scratch allocation binds physical locations using target-specific alias,
-pair, bank, slot, alignment, and lifetime facts; a materializer writes the
-existing physical Atlas operations; timing annotation and final scheduling
-then check availability; any schedule change triggers a physical-lifetime
-recheck; the machine stream verifier runs before LLVM lowering. The first
-schedule is a dependency/order proposal, not a timing certificate. This OOT
-does not yet implement virtual-to-physical allocation, timing annotation,
-or final scheduling. Thus the example is not the output of those passes.
+The implemented slice colors CFG-live virtual BF16 tiles onto 31 usable
+even-based register pairs and i1/i32 controls onto scalar x10..x26. Pair 62
+and x27 are reserved for parallel-copy cycles. It reuses a location when the
+source SSA value is dead, checks coloring against its interference graph, and
+rejects excess pressure. Block arguments become edge copies; a cycle is
+broken through the reserved temporary. VMEM bank 0 stages input tiles and
+bank 1 stages outputs, with DMA completion before reads and stores. Fixed
+serialization adds diagnostic delays after VPU and VMEM operations. The
+generated-stream checker enforces those waits and the selected one-slot
+branch convention before word emission or LLVM lowering. The stage does not
+solve general MXU/FP8 allocation, alternate scheduling, layer tiling, or a
+qualified latency model. Generated execution currently admits VPU `mov` and
+`relu` only; other virtual unary and all binary modes receive an explicit
+qualification error. Changing issue order would require recomputing live
+ranges and checking the physical assignment again.
 
 ```sh
 build/bin/atlas-opt --verify-atlas-virtual-stream \
@@ -135,6 +145,8 @@ between selected RTL, architecture text, and the inspected model.
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the virtual BF16 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
+| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs and scalar registers; stage input/output tiles and runtime controls; resolve block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
+| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, same-channel DMA waits, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
 | `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |
@@ -143,10 +155,16 @@ between selected RTL, architecture text, and the inspected model.
 | `atlas-boot-pack` | tool, not pass | Package one checked reset-entry ELF `.text` section with a narrow authored memory layout and manifest. |
 | `export_llvm_handoff.py` | exporter, not pass | Produce numbered Atlas/LLVM MLIR, LLVM IR, RV32 assembly, relocatable object, linked ELF, disassembly, word map, and hashes for the bounded MLP/attention fixtures. |
 
-No timing annotation pass, delay scheduler, instruction selector, allocator,
-virtual-to-physical materializer, Linalg-to-Atlas pass, or general callable ABI
-is implemented in this hand OOT repository. Delays in the physical example
-programs are authored diagnostic spacing.
+No general timing annotation pass, instruction selector, whole-target
+allocator, Linalg-to-Atlas pass, or callable ABI is implemented here. The
+generated BF16 VPU/CFG path uses conservative serial diagnostic spacing; the
+other physical example programs retain authored delays. Focused selected-core
+tests cover a long SSA chain with physical pair reuse, a swap backedge,
+branch merges, runtime mailbox control, two ordered outputs, actual
+LLVM-produced object words, and memory guards. A 32-tile simultaneously live
+case fails with an explicit
+31-pair pressure diagnostic. These tests do not establish full target or SoC
+qualification.
 
 ## Why the LLVM handoff uses inline assembly
 
@@ -207,8 +225,9 @@ Atlas operation attributes to binary offsets; an LLVM-call transformation
 that changes the stream also needs to update that map. The final block does
 not retain individual operation attributes.
 
-The current IR is a **flat word stream** with branch offsets, not a control-flow
-graph. A scheduler must account for backward branches and multiple executions
+The physical IR is a **flat word stream** with branch offsets; the preceding
+virtual IR has an MLIR control-flow graph. A future general scheduler must
+account for backward branches and multiple executions
 of one static operation; the linear state token alone does not prove a
 cross-iteration dependency safe. The verifier checks encoding and in-block
 targets, but it does not validate an annotation's timing claim. Their pass
