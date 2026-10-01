@@ -31,8 +31,14 @@ fixture uses `%t` SSA tensor values before physical register assignment;
 identities. A [CFG fixture](test/examples/virtual_bf16_cfg.mlir) uses MLIR
 block arguments for a branch merge and a loop-carried tile/state; the virtual
 verifier checks state handoffs across `cf` edges and requires boundary outputs
-in the single return block. No virtual-to-physical allocator or general CFG
-machine lowering is implemented here.
+in the single return block. `--lower-atlas-virtual-to-machine` now lowers this
+bounded CFG form to a physical stream: it colors live BF16 pairs and scalar
+controls, resolves block-argument edge copies and branches, stages external
+tiles through DMA/VMEM, and emits serial waits. The
+[`virtual_bf16_loop_program.mlir`](test/examples/virtual_bf16_loop_program.mlir)
+and related branch, swap, and dynamic-control fixtures exercise that path.
+This is a narrow VPU/CFG lowering slice, not a general Atlas allocator or
+model compiler.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
@@ -117,6 +123,31 @@ ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
 CTest binds the Python tests to the `atlas-opt` and `atlas-emit` binaries in
 its own CMake build directory. For a direct Python invocation against another
 build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
+
+The generated virtual-CFG path runs in this order:
+
+```sh
+build/bin/atlas-opt --verify-atlas-virtual-stream \
+  test/examples/virtual_bf16_loop_program.mlir
+build/bin/atlas-opt --lower-atlas-virtual-to-machine \
+  test/examples/virtual_bf16_loop_program.mlir > build/loop.machine.mlir
+build/bin/atlas-opt --verify-atlas-generated-schedule \
+  --verify-atlas-machine-stream build/loop.machine.mlir
+build/bin/atlas-opt --convert-atlas-to-llvm-calls \
+  build/loop.machine.mlir > build/loop.structured-llvm.mlir
+build/bin/atlas-opt --finalize-atlas-llvm-calls \
+  build/loop.structured-llvm.mlir > build/loop.llvm.mlir
+build/bin/atlas-emit build/loop.machine.mlir > build/loop.words
+```
+
+The generated delay rule is a conservative diagnostic policy: 256 cycles
+after each VLOAD/VSTORE/VPU operation, a channel-specific DMA wait, and eight
+cycles after each asynchronous scalar LW. The selected-core tests pass for
+MOV/ReLU, a two-step loop, a value-swap backedge, static branches, and a
+runtime i1 branch read from a DRAM control mailbox. They do not qualify a
+mode-wide completion bound, integrated EE290 execution, a callable ABI, or
+other VPU numerical modes. The same compiled dynamic-branch words execute
+for several mailbox values; tensor contents are runtime inputs.
 
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
