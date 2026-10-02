@@ -39,6 +39,11 @@ constexpr uint32_t kPackRelayoutWord = kPackScratchWord + 256;
 constexpr unsigned kDiagnosticDelay = 256;
 enum class RegisterKind { BF16, FP8, Scalar };
 
+struct MXUPlacement {
+  unsigned unit;
+  unsigned slot;
+};
+
 struct PlannedOp {
   std::string name;
   SmallVector<NamedAttribute> attrs;
@@ -201,8 +206,17 @@ private:
 
   LogicalResult allocateValues() {
     function.walk([&](Operation *op) {
-      for (Value result : op->getResults())
+      for (Value result : op->getResults()) {
         mixedFp8 |= isa<VirtualFP8Type>(result.getType());
+        // The virtual verifier permits one current weight and one live
+        // accumulator per unit, confined to a block. All versions therefore
+        // share slot 0 in their respective unit-local weight/accumulator banks;
+        // handles never participate in tensor-register coloring.
+        if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
+          mxuResources[result] = {weight.getUnit(), 0};
+        if (auto acc = dyn_cast<VirtualMXUAccType>(result.getType()))
+          mxuResources[result] = {acc.getUnit(), 0};
+      }
     });
     if (failed(colorValues(RegisterKind::BF16)) ||
         failed(colorValues(RegisterKind::FP8)) ||
@@ -411,6 +425,9 @@ private:
   unsigned tile(Value value) const { return tileRegs.find(value)->second; }
   unsigned fp8(Value value) const { return fp8Regs.find(value)->second; }
   unsigned scalar(Value value) const { return scalarRegs.find(value)->second; }
+  MXUPlacement mxu(Value value) const {
+    return mxuResources.find(value)->second;
+  }
 
   void materializeScalar(unsigned dst, uint32_t value, Location loc) {
     uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
@@ -639,6 +656,44 @@ private:
       inputHalf(fp8(input.getValue()), index, 0, loc);
       return success();
     }
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      MXUPlacement weight = mxu(load.getWeight());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
+           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
+      delay(loc, "mxu_weight_completion");
+      return success();
+    }
+    if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
+      MXUPlacement weight = mxu(reset.getWeight());
+      MXUPlacement acc = mxu(reset.getAcc());
+      add("atlas.mxu_matmul", loc,
+          {{"unit", i32(acc.unit)}, {"src", i32(fp8(reset.getActivation()))},
+           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
+           {"accumulate", boolean(false)}});
+      delay(loc, "mxu_matmul_completion");
+      return success();
+    }
+    if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+      MXUPlacement weight = mxu(accumulate.getWeight());
+      MXUPlacement acc = mxu(accumulate.getAcc());
+      add("atlas.mxu_matmul", loc,
+          {{"unit", i32(acc.unit)},
+           {"src", i32(fp8(accumulate.getActivation()))},
+           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
+           {"accumulate", boolean(true)}});
+      delay(loc, "mxu_matmul_completion");
+      return success();
+    }
+    if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
+      MXUPlacement acc = mxu(readout.getAcc());
+      add("atlas.mxu_pop", loc,
+          {{"format", str("bf16")}, {"unit", i32(acc.unit)},
+           {"dst", i32(tile(readout.getValue()))},
+           {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
+      delay(loc, "mxu_readout_completion");
+      return success();
+    }
     if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
       unsigned unit = static_cast<unsigned>(matmul.getUnit());
       add("atlas.mxu_push", loc,
@@ -798,6 +853,7 @@ private:
   func::FuncOp function;
   Builder attrs;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
+  llvm::DenseMap<Value, MXUPlacement> mxuResources;
   bool mixedFp8 = false;
   bool hasPack = false;
   llvm::DenseMap<Block *, unsigned> blockLabels;

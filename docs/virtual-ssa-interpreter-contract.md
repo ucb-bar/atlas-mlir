@@ -65,7 +65,7 @@ The checked virtual dialect also represents weight loading, reset contractions, 
 
 Each explicit MXU operation advances the virtual state token. A weight load replaces the current weight identity and can occur while an accumulator is live. Reset requires no live accumulator, accumulation replaces its input accumulator version, and readout consumes that version while preserving the weight. Every contraction must use the current weight. Both units can have independent live chains. The present verifier requires handles to stay within their defining block and every accumulator to be read out before block exit. A legacy `virtual_mxu_matmul` invalidates the selected unit's weight handle and is rejected while that unit has a live explicit accumulator.
 
-These are implemented structural and lifetime checks, not an implemented interpreter or a numerical qualification. Physical lowering of these four explicit operations is not yet supported. A future interpreter must preserve the selected unit's accumulation precision and readout behavior rather than substituting a generic matrix multiplication.
+These are implemented structural and lifetime checks, not an implemented interpreter or a numerical qualification. Physical lowering supports these four operations within the existing single-function ABI, using unit-local weight and accumulator slot 0 and the existing diagnostic delays. That placement is a backend choice; an interpreter should keep resource identities independent of physical slots. A future interpreter must preserve the selected unit's accumulation precision and readout behavior rather than substituting a generic matrix multiplication.
 
 ## Semantic boundaries
 

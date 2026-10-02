@@ -1,4 +1,4 @@
-"""Resident MXU handles are checked virtual SSA, with no physical lowering yet."""
+"""Resident MXU handles are checked virtual SSA before explicit lowering."""
 
 from __future__ import annotations
 
@@ -280,22 +280,24 @@ class VirtualMXUHandleTest(unittest.TestCase):
         ).replace('(%next_state, %a0)', '(%next_state, %next_acc)')
         self.rejected(passed_acc, "must read out the live MXU accumulator before block exit")
 
-    def test_virtual_handles_are_not_admitted_to_physical_stages(self) -> None:
+    def test_virtual_handles_require_explicit_lowering_before_physical_stages(self) -> None:
         source = EXAMPLE.read_text()
         self.accepted(source)
         for tool, options in (
             ("atlas-emit", ()),
             ("atlas-opt", ("--verify-atlas-machine-stream",)),
             ("atlas-opt", ("--convert-atlas-to-llvm",)),
-            ("atlas-opt", ("--lower-atlas-virtual-to-machine",)),
         ):
             with self.subTest(tool=tool, options=options):
                 result = run(tool, source, *options)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
-                if options == ("--lower-atlas-virtual-to-machine",):
-                    self.assertIn("virtual_mxu_load_weight", result.stderr)
-                    self.assertNotIn("requires explicit", result.stderr)
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        self.assertNotIn("!atlas.virtual_", lowered.stdout)
+        emitted = run("atlas-emit", lowered.stdout)
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        self.assertTrue(emitted.stdout)
 
 
 if __name__ == "__main__":

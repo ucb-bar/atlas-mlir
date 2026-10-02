@@ -124,7 +124,7 @@ build/bin/atlas-opt --verify-atlas-virtual-stream \
   test/examples/virtual_bf16_ssa.mlir
 ```
 
-### Explicit virtual MXU resources (verification checkpoint)
+### Explicit virtual MXU resources
 
 `!atlas.virtual_mxu_weight<unit>` identifies a resident FP8 weight, and `!atlas.virtual_mxu_acc<unit>` identifies one accumulator version. Units are `0` or `1` and remain part of the selected arithmetic semantics. These handles have no physical register or slot numbers. This first slice allows one resident weight and one live accumulator per unit within a block.
 
@@ -139,7 +139,9 @@ All four operations consume and return the current `!atlas.virtual_state` and de
 
 The existing reset-only `virtual_mxu_matmul` remains supported. Within a mixed stream it invalidates the current weight handle on its selected unit and cannot overwrite a live explicit accumulator on that unit. Transformations of mixed streams must recheck this ordering contract; the existing convenience operation retains its original pure trait.
 
-[`virtual_mxu_accumulation.mlir`](../test/examples/virtual_mxu_accumulation.mlir) demonstrates independent chains on both units. This checkpoint implements parsing, operation verification, and stream lifetime checks only. Physical lowering explicitly rejects the new operations; the existing placement, diagnostic delays, and reset-only lowering are unchanged. Slot allocation, handles across blocks, numerical execution tests, and asynchronous lifetime qualification remain future work.
+[`virtual_mxu_accumulation.mlir`](../test/examples/virtual_mxu_accumulation.mlir) demonstrates independent chains on both units. In the existing single-function ABI, physical lowering maps weight handles to weight slot 0 and accumulator versions to accumulator slot 0 on their selected unit. A separate handle placement map keeps these resources out of tensor-register coloring. Loading emits `atlas.mxu_push`, reset/continuation emit `atlas.mxu_matmul` with `accumulate=false/true`, and readout emits a BF16 `atlas.mxu_pop` into an allocated tensor pair. Each instruction retains the existing annotated 256-cycle diagnostic delay. Weight reuse emits no extra push; explicit replacement emits a new push without resetting the accumulator.
+
+The original reset-only lowering remains unchanged. General slot allocation, handles across blocks, numerical execution qualification of these new virtual chains, and asynchronous lifetime qualification remain future work. The generated-schedule check enforces the conservative serial-delay convention; it does not establish a minimal or fully qualified hardware schedule.
 
 ## Every current operation
 
