@@ -128,6 +128,31 @@ Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
+// b issues at least `distance` cycles after a.
+struct Edge {
+  int from, to;
+  int distance;
+  EdgeKind kind;
+  std::string reason;
+};
+
+// Nodes are one block's instructions in program order, so edges point forward.
+struct DepGraph {
+  std::vector<Instr> nodes;
+  std::vector<Footprint> footprints;
+  std::vector<Edge> edges;
+  std::vector<std::vector<int>> in, out;
+};
+
+// Pending transfers per channel at block entry; null keeps broad barriers.
+using IncomingDma = std::array<std::vector<Footprint>, 8>;
+DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
+                    uint32_t dmaRegs = 0xFFFFFFFE,
+                    const IncomingDma *incomingDma = nullptr);
+uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
+// Longest path in cycles from each node until everything after it finishes.
+std::vector<int> criticalHeights(const DepGraph &g);
+
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
