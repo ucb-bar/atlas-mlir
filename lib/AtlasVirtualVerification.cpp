@@ -12,6 +12,29 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+struct VirtualDMATransfers {
+  Value pending;
+
+  LogicalResult verify(Operation &op) {
+    if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+      if (pending)
+        return op.emitOpError("must complete the pending DMA before another launch");
+      pending = op.getResult(1);
+      return success();
+    }
+    if (!pending || op.getOperand(1) != pending)
+      return op.emitOpError("must consume the current pending DMA transfer");
+    pending = Value{};
+    return success();
+  }
+
+  LogicalResult verifyClosed(Operation *where) {
+    if (pending)
+      return where->emitOpError("must complete pending DMA before block exit");
+    return success();
+  }
+};
+
 // Track one current weight and accumulator per unit within a block.
 struct VirtualMXUResources {
   Value weights[2];
@@ -103,6 +126,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
                                  llvm::DenseSet<int64_t> &outputIndices) {
   Value state;
   VirtualMXUResources mxu;
+  VirtualDMATransfers dma;
   if (cfg) {
     if (entry) {
       for (BlockArgument arg : block.getArguments())
@@ -131,11 +155,22 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
 
   for (Operation &operation : block.getOperations()) {
     // Dominance alone permits cross-block captures of resident handles.
-    for (Value operand : operation.getOperands())
+    for (Value operand : operation.getOperands()) {
       if (isa<VirtualMXUWeightType, VirtualMXUAccType>(operand.getType()) &&
           operand.getParentBlock() != &block)
         return operation.emitOpError(
             "virtual MXU handles cannot cross CFG blocks");
+      if (isa<VirtualDMALoadFP8Type, VirtualDMALoadBF16Type,
+              VirtualDMAStoreType>(operand.getType()) &&
+          operand.getParentBlock() != &block)
+        return operation.emitOpError(
+            "pending DMA handles cannot cross CFG blocks");
+    }
+    if (dma.pending &&
+        isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
+            VirtualPackFP8Op>(operation))
+      return operation.emitOpError(
+          "must complete pending DMA before implicit memory operations");
     if (auto start = dyn_cast<VirtualStartOp>(operation)) {
       if (!entry || &operation != &block.front() || ++starts != 1 || state) {
         start.emitOpError("virtual_start must be the unique first entry operation");
@@ -174,6 +209,19 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       ++outputs;
       continue;
     }
+    if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
+            VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
+            VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
+            VirtualDMAWaitOp>(operation)) {
+      if (!state || operation.getOperand(0) != state)
+        return operation.emitOpError("nonlinear virtual state chain");
+      if (failed(dma.verify(operation)))
+        return failure();
+      state = operation.getResult(0);
+      if (isa<VirtualDMAWaitOp>(operation))
+        ++outputs;
+      continue;
+    }
     if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op,
             VirtualMXULoadAccBF16Op, VirtualMXUResetOp, VirtualMXUAccumulateOp,
             VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(operation)) {
@@ -198,11 +246,30 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualPackFP8Op,
             VirtualScaleConstantOp>(operation))
       continue;
-    if (cfg && isa<arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(operation))
+    if (auto constant = dyn_cast<arith::ConstantOp>(operation)) {
+      Type type = constant.getResult().getType();
+      if (!isa<IntegerAttr>(constant.getValue()) ||
+          (!type.isInteger(1) && !type.isInteger(32)))
+        return constant.emitOpError("virtual scalar constants require i1 or i32");
       continue;
+    }
+    if (auto add = dyn_cast<arith::AddIOp>(operation)) {
+      if (!add.getResult().getType().isInteger(32))
+        return add.emitOpError("virtual scalar addition requires i32");
+      if (add.getOverflowFlags() != arith::IntegerOverflowFlags::none)
+        return add.emitOpError("virtual scalar addition requires wrapping arithmetic");
+      continue;
+    }
+    if (auto cmp = dyn_cast<arith::CmpIOp>(operation)) {
+      if (!cmp.getLhs().getType().isInteger(32) ||
+          !cmp.getRhs().getType().isInteger(32))
+        return cmp.emitOpError("virtual scalar comparison requires i32 operands");
+      continue;
+    }
     if (cfg) {
       if (operation.hasTrait<OpTrait::IsTerminator>() &&
-          failed(mxu.verifyClosed(&operation)))
+          (failed(mxu.verifyClosed(&operation)) ||
+           failed(dma.verifyClosed(&operation))))
         return failure();
       if (auto branch = dyn_cast<cf::BranchOp>(operation))
         return verifySuccessor(operation, branch.getDest(),
@@ -230,7 +297,9 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     block.getParentOp()->emitOpError("virtual CFG block has no terminator");
     return failure();
   }
-  return mxu.verifyClosed(block.getParentOp());
+  if (failed(mxu.verifyClosed(block.getParentOp())))
+    return failure();
+  return dma.verifyClosed(block.getParentOp());
 }
 
 LogicalResult verifyVirtualFunction(func::FuncOp function) {
@@ -270,7 +339,9 @@ LogicalResult verifyVirtualFunction(func::FuncOp function) {
   // once. More general path-sensitive boundary effects need a separate proof.
   for (Block &block : function.getBody())
     for (Operation &op : block)
-      if (isa<VirtualOutputBF16Op>(op) && &block != returnBlock) {
+      if (isa<VirtualOutputBF16Op, VirtualDMAStoreFP8Op,
+              VirtualDMAStoreBF16Op, VirtualDMAWaitOp>(op) &&
+          &block != returnBlock) {
         op.emitOpError("virtual CFG outputs must be in the return block");
         return failure();
       }

@@ -124,6 +124,29 @@ build/bin/atlas-opt --verify-atlas-virtual-stream \
   test/examples/virtual_bf16_ssa.mlir
 ```
 
+### Channel-free virtual DMA and scalar SSA (verification checkpoint)
+
+The DMA slice represents asynchronous whole-tile I/O without choosing a channel, VMEM address, or scalar register. `arith.constant` supplies i1/i32 values, `arith.addi` supplies wrapping i32 arithmetic, and `arith.cmpi` compares i32 operands to produce an i1 control value. These operations are admitted in both module streams and CFG functions. DMA addresses and lengths use those ordinary i32 SSA values; a separate scalar-register type is unnecessary.
+
+Overflow flags on `arith.addi` are rejected throughout virtual streams and CFG functions, including arithmetic unrelated to DMA, tightening the prior CFG scalar admission.
+
+| Operation | Operands after current virtual state | Results after next virtual state |
+| --- | --- | --- |
+| `atlas.virtual_dma_load_fp8` / `virtual_dma_load_bf16` | DRAM byte address, byte length | `!atlas.virtual_dma_load_fp8` / `!atlas.virtual_dma_load_bf16` pending handle |
+| `atlas.virtual_dma_await_fp8` / `virtual_dma_await_bf16` | Matching pending-load handle | Ready `!atlas.virtual_fp8` / `!atlas.virtual_bf16` tile |
+| `atlas.virtual_dma_store_fp8` / `virtual_dma_store_bf16` | Source tile, DRAM byte address, byte length | `!atlas.virtual_dma_store` pending handle |
+| `atlas.virtual_dma_wait` | Pending-store handle | No additional result; the store is complete |
+
+All seven operations advance the virtual state chain and have conservative read/write effects. A pending handle owns a private logical staging buffer until completion. A load exposes no usable tensor until its await. A store captures its source tile into transfer-owned staging; that staging must survive until the wait. Future physical lowering and allocation must implement this ownership. The IR does not assign that buffer to a physical bank or window.
+
+The current admission requires FP8 transfers of exactly 1,024 bytes or BF16 transfers of exactly 2,048 bytes. Addresses and lengths must be proven from i32 constants and unflagged constant-addition expressions. Address bits are interpreted unsigned, additions wrap modulo 2^32, and additions with overflow flags are rejected rather than evaluated as wrapped constants. DRAM addresses must be at least `0x80000000`, aligned to 32 bytes, and have a widened exclusive transfer end at most 2^32. The contract uses an upper DRAM address half of zero. These checks establish the bounded address form; external memory accessibility and initialization remain invocation requirements. Runtime DMA addresses/lengths and arbitrary sub-tile transfers are not admitted yet.
+
+Only one transfer may be outstanding. Await/wait must consume its exact handle once; pending handles cannot cross blocks or survive block exit. Pure computation and explicit MXU operations may occur between issue and completion. Existing `virtual_input_*`, `virtual_output_bf16`, and `virtual_pack_fp8` are rejected while DMA is pending because their lowering uses implicit DMA or VMEM scratch. Completed store waits count as external outputs. In a CFG, both store issue and completion must be in the unique return block, as with the existing output convention.
+
+The invocation must keep load-source memory stable and exclude conflicting external accesses to transfer ranges until completion. The stream verifier checks operations in this IR; it cannot enforce concurrent host behavior.
+
+[`virtual_dma_tiles.mlir`](../test/examples/virtual_dma_tiles.mlir) demonstrates SSA address arithmetic and explicit load/store completion. This checkpoint implements representation and verification only. Physical lowering rejects these new DMA operations; the existing boundary-I/O lowering and its fixed channels/registers are unchanged. This is tile I/O virtualization, not arbitrary VMEM movement, a general allocator, or an overlap scheduler.
+
 ### Explicit virtual MXU resources
 
 `!atlas.virtual_mxu_weight<unit>` identifies a resident FP8 weight, and `!atlas.virtual_mxu_acc<unit>` identifies one accumulator version. Units are `0` or `1` and remain part of the selected arithmetic semantics. These handles have no physical register or slot numbers. This first slice allows one resident weight and one live accumulator per unit within a block.

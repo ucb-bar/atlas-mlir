@@ -59,6 +59,16 @@ checks; an interpreter still needs dynamic arity, type, current-token, and
 step-limit checks. The existing virtual stream verifier additionally requires
 the current state token on each CFG edge and one return block for outputs.
 
+## Explicit DMA completion and scalar values
+
+Channel-free DMA tile operations take ordinary i32 SSA values for DRAM byte addresses and byte lengths. The current admission proves these operands from constants and unflagged wrapping additions, requires complete FP8/BF16 tiles (1,024/2,048 bytes), and checks 32-byte DRAM alignment and the selected 32-bit address range. No scalar register is encoded by the SSA name. The contract fixes the upper DRAM half at zero and does not yet admit runtime DMA addresses or lengths.
+
+An interpreter must distinguish a pending transfer from a ready tensor. `virtual_dma_load_fp8/bf16` creates a pending-load identity; its matching `virtual_dma_await_fp8/bf16` produces the usable tile. `virtual_dma_store_fp8/bf16` captures an immutable source tile into transfer-owned staging, and `virtual_dma_wait` establishes completion of the external write. Treat the staging as a private logical buffer owned through completion, not as an assigned VMEM window. An untimed interpreter may perform the copy eagerly internally, but must preserve these visibility and handle-lifetime rules.
+
+The current stream verifier allows one pending transfer, requires completion in the same block, and rejects repeated or mismatched completions. Existing implicit boundary I/O and VPU pack cannot run while it is pending. A completed store counts as an external output; CFG stores and their waits occur in the unique return block. This representation enables future channel and staging allocation; it does not implement physical DMA lowering, a DMA interpreter, or a timing model.
+
+The environment must keep external load sources stable and exclude conflicting accesses to transfer ranges until completion. The IR checks do not prove host-side synchronization.
+
 ## Explicit MXU handle extension
 
 The checked virtual dialect also represents weight loading, reset contractions, accumulation, and BF16 readout explicitly. `!atlas.virtual_mxu_weight<unit>` is a resident-weight identity; `!atlas.virtual_mxu_acc<unit>` is a consumable accumulator version. Neither is an ordinary tensor value or a physical slot number. An interpreter implementing these operations needs a current weight identity and current accumulator identity for each selected unit, in addition to its immutable tensor environment.

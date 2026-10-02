@@ -1,8 +1,12 @@
 #include "Atlas/AtlasOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSwitch.h"
+#include <cstdint>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -51,6 +55,13 @@ ATLAS_MACHINE_EFFECTS(VirtualMXUResetOp)
 ATLAS_MACHINE_EFFECTS(VirtualMXUAccumulateOp)
 ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMALoadFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMALoadBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAAwaitFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAAwaitBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAStoreFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAStoreBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAWaitOp)
 
 void VirtualInputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -93,6 +104,85 @@ static LogicalResult scalarReg(Operation *op, StringRef name, int64_t value) {
 
 static LogicalResult mxuSlot(Operation *op, StringRef name, int64_t value) {
   return inRange(op, name, value, 0, 1);
+}
+
+static std::optional<uint32_t>
+constantI32(Value value, llvm::DenseMap<Value, std::optional<uint32_t>> &constants) {
+  auto [entry, inserted] = constants.try_emplace(value, std::nullopt);
+  if (!inserted)
+    return entry->second;
+  if (!value.getType().isInteger(32))
+    return std::nullopt;
+  std::optional<uint32_t> result;
+  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+      result = static_cast<uint32_t>(integer.getValue().getZExtValue());
+  } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+    if (add.getOverflowFlags() != arith::IntegerOverflowFlags::none)
+      return std::nullopt;
+    auto lhs = constantI32(add.getLhs(), constants);
+    auto rhs = constantI32(add.getRhs(), constants);
+    if (lhs && rhs)
+      result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
+  }
+  constants[value] = result;
+  return result;
+}
+
+static LogicalResult verifyVirtualDMAAttributes(Operation *op) {
+  if (op->hasAttr("channel"))
+    return op->emitOpError("virtual DMA does not select a physical channel");
+  return success();
+}
+
+static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
+                                             Value sizeBytes,
+                                             uint32_t tileBytes) {
+  if (failed(verifyVirtualDMAAttributes(op)))
+    return failure();
+  llvm::DenseMap<Value, std::optional<uint32_t>> constants;
+  auto address = constantI32(dramByte, constants);
+  auto size = constantI32(sizeBytes, constants);
+  if (!address || !size)
+    return op->emitOpError(
+        "DRAM address and byte length must be proven by i32 arith.constant/arith.addi expressions");
+  if (*size != tileBytes)
+    return op->emitOpError("byte length must equal the complete tile size ")
+           << tileBytes;
+  if (*address < 0x80000000u || *address % 32)
+    return op->emitOpError(
+        "DRAM address must be a 32-byte-aligned selected-memory address");
+  if (static_cast<uint64_t>(*address) + *size > (1ULL << 32))
+    return op->emitOpError("DRAM transfer span exceeds the 32-bit address space");
+  return success();
+}
+
+LogicalResult VirtualDMALoadFP8Op::verify() {
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+}
+
+LogicalResult VirtualDMALoadBF16Op::verify() {
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+}
+
+LogicalResult VirtualDMAAwaitFP8Op::verify() {
+  return verifyVirtualDMAAttributes(getOperation());
+}
+
+LogicalResult VirtualDMAAwaitBF16Op::verify() {
+  return verifyVirtualDMAAttributes(getOperation());
+}
+
+LogicalResult VirtualDMAStoreFP8Op::verify() {
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+}
+
+LogicalResult VirtualDMAStoreBF16Op::verify() {
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+}
+
+LogicalResult VirtualDMAWaitOp::verify() {
+  return verifyVirtualDMAAttributes(getOperation());
 }
 
 LogicalResult VirtualInputBF16Op::verify() {
