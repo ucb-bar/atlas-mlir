@@ -59,6 +59,14 @@ checks; an interpreter still needs dynamic arity, type, current-token, and
 step-limit checks. The existing virtual stream verifier additionally requires
 the current state token on each CFG edge and one return block for outputs.
 
+## Explicit MXU handle extension
+
+The checked virtual dialect also represents weight loading, reset contractions, accumulation, and BF16 readout explicitly. `!atlas.virtual_mxu_weight<unit>` is a resident-weight identity; `!atlas.virtual_mxu_acc<unit>` is a consumable accumulator version. Neither is an ordinary tensor value or a physical slot number. An interpreter implementing these operations needs a current weight identity and current accumulator identity for each selected unit, in addition to its immutable tensor environment.
+
+Each explicit MXU operation advances the virtual state token. A weight load replaces the current weight identity and can occur while an accumulator is live. Reset requires no live accumulator, accumulation replaces its input accumulator version, and readout consumes that version while preserving the weight. Every contraction must use the current weight. Both units can have independent live chains. The present verifier requires handles to stay within their defining block and every accumulator to be read out before block exit. A legacy `virtual_mxu_matmul` invalidates the selected unit's weight handle and is rejected while that unit has a live explicit accumulator.
+
+These are implemented structural and lifetime checks, not an implemented interpreter or a numerical qualification. Physical lowering of these four explicit operations is not yet supported. A future interpreter must preserve the selected unit's accumulation precision and readout behavior rather than substituting a generic matrix multiplication.
+
 ## Semantic boundaries
 
 Interpret the virtual SSA stage and the physical machine stage separately.

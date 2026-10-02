@@ -43,6 +43,13 @@ ATLAS_MACHINE_EFFECTS(FenceOp)
 ATLAS_MACHINE_EFFECTS(ScalarLoadOp)
 ATLAS_MACHINE_EFFECTS(ScalarStoreOp)
 
+// Preserve explicit virtual MXU state transitions conservatively until a
+// scheduler has a qualified per-resource effect model.
+ATLAS_MACHINE_EFFECTS(VirtualMXULoadWeightOp)
+ATLAS_MACHINE_EFFECTS(VirtualMXUResetOp)
+ATLAS_MACHINE_EFFECTS(VirtualMXUAccumulateOp)
+ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutBF16Op)
+
 void VirtualInputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -100,6 +107,30 @@ LogicalResult VirtualInputFP8Op::verify() {
 
 LogicalResult VirtualMXUMatmulOp::verify() {
   return inRange(getOperation(), "unit", getUnit(), 0, 1);
+}
+
+LogicalResult VirtualMXULoadWeightOp::verify() {
+  if (failed(inRange(getOperation(), "unit", getUnit(), 0, 1)))
+    return failure();
+  if (cast<VirtualMXUWeightType>(getWeight().getType()).getUnit() != getUnit())
+    return emitOpError("weight handle unit must match the selected unit");
+  return success();
+}
+
+LogicalResult VirtualMXUResetOp::verify() {
+  if (cast<VirtualMXUWeightType>(getWeight().getType()).getUnit() !=
+      cast<VirtualMXUAccType>(getAcc().getType()).getUnit())
+    return emitOpError("weight and accumulator must use the same MXU unit");
+  return success();
+}
+
+LogicalResult VirtualMXUAccumulateOp::verify() {
+  unsigned unit = cast<VirtualMXUAccType>(getAcc().getType()).getUnit();
+  if (cast<VirtualMXUWeightType>(getWeight().getType()).getUnit() != unit ||
+      cast<VirtualMXUAccType>(getNextAcc().getType()).getUnit() != unit)
+    return emitOpError(
+        "weight and accumulator versions must use the same MXU unit");
+  return success();
 }
 
 LogicalResult VirtualPackFP8Op::verify() {

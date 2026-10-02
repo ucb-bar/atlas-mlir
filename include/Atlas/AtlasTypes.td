@@ -28,4 +28,20 @@ def Atlas_VirtualFP8Type : TypeDef<Atlas_Dialect, "VirtualFP8"> {
   let assemblyFormat = "";
 }
 
+def Atlas_VirtualMXUWeightType : TypeDef<Atlas_Dialect, "VirtualMXUWeight"> {
+  let mnemonic = "virtual_mxu_weight";
+  let summary = "A resident FP8 weight on one selected MXU, before slot allocation";
+  let parameters = (ins "unsigned":$unit);
+  let assemblyFormat = "`<` $unit `>`";
+  let genVerifyDecl = 1;
+}
+
+def Atlas_VirtualMXUAccType : TypeDef<Atlas_Dialect, "VirtualMXUAcc"> {
+  let mnemonic = "virtual_mxu_acc";
+  let summary = "One version of a selected MXU accumulator, before slot allocation";
+  let parameters = (ins "unsigned":$unit);
+  let assemblyFormat = "`<` $unit `>`";
+  let genVerifyDecl = 1;
+}
+
 #endif

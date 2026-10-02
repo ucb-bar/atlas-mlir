@@ -14,8 +14,9 @@ timing, or integrated SoC qualification.
 The dialect has two checked stages. `!atlas.virtual_bf16` and
 `!atlas.virtual_fp8` are unallocated 32×32 tiles. A name such as `%t1` identifies an MLIR SSA *value*;
 the spelling and number do not select Atlas register 1. In this narrow
-pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads and
-writes, with names such as `%io1`. In the physical examples, `%s1` is an SSA
+pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads,
+writes, and explicit MXU resource transitions, with names such as `%io1`.
+In the physical examples, `%s1` is an SSA
 machine-state token, not scalar register 1. Pure VPU
 candidate operations express their tensor dependencies through `%t` operands.
 The `--verify-atlas-virtual-stream` pass checks the virtual state chain,
@@ -122,6 +123,23 @@ that tile are separate frontend/ABI obligations.
 build/bin/atlas-opt --verify-atlas-virtual-stream \
   test/examples/virtual_bf16_ssa.mlir
 ```
+
+### Explicit virtual MXU resources (verification checkpoint)
+
+`!atlas.virtual_mxu_weight<unit>` identifies a resident FP8 weight, and `!atlas.virtual_mxu_acc<unit>` identifies one accumulator version. Units are `0` or `1` and remain part of the selected arithmetic semantics. These handles have no physical register or slot numbers. This first slice allows one resident weight and one live accumulator per unit within a block.
+
+| Operation | Operands and results, in addition to the virtual state chain | Meaning |
+| --- | --- | --- |
+| `atlas.virtual_mxu_load_weight` | FP8 tile, `unit` attribute -> weight handle | Replace the selected unit's current weight. |
+| `atlas.virtual_mxu_reset` | FP8 activation, weight handle -> accumulator handle | Start a reset contraction; require no live accumulator on that unit. |
+| `atlas.virtual_mxu_accumulate` | FP8 activation, weight handle, accumulator handle -> next accumulator handle | Continue contraction, consuming the current accumulator version. |
+| `atlas.virtual_mxu_readout_bf16` | accumulator handle -> BF16 tile | Read the result and consume the current accumulator version. |
+
+All four operations consume and return the current `!atlas.virtual_state` and declare conservative read/write effects. The stream verifier rejects stale weights, stale or forked accumulator versions, overlapping resets, and accumulators left live at block exit. Loading replacement weights during accumulation is allowed; subsequent contractions must use the replacement handle. Readout leaves the current weight available for another reset. Handles cannot cross CFG edges, including implicit uses of a dominating handle in another block. BF16 readout values can use the existing BF16 block-argument convention.
+
+The existing reset-only `virtual_mxu_matmul` remains supported. Within a mixed stream it invalidates the current weight handle on its selected unit and cannot overwrite a live explicit accumulator on that unit. Transformations of mixed streams must recheck this ordering contract; the existing convenience operation retains its original pure trait.
+
+[`virtual_mxu_accumulation.mlir`](../test/examples/virtual_mxu_accumulation.mlir) demonstrates independent chains on both units. This checkpoint implements parsing, operation verification, and stream lifetime checks only. Physical lowering explicitly rejects the new operations; the existing placement, diagnostic delays, and reset-only lowering are unchanged. Slot allocation, handles across blocks, numerical execution tests, and asynchronous lifetime qualification remain future work.
 
 ## Every current operation
 

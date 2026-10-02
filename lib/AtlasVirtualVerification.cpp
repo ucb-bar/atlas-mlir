@@ -12,6 +12,69 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+// This first explicit-MXU slice has one resident weight and one live
+// accumulator version per unit. Handles stay within a block; physical slot
+// allocation and asynchronous lifetimes remain a later lowering concern.
+struct VirtualMXUResources {
+  Value weights[2];
+  Value accumulators[2];
+
+  LogicalResult verify(Operation &op) {
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      unsigned unit =
+          cast<VirtualMXUWeightType>(load.getWeight().getType()).getUnit();
+      if (unit > 1)
+        return op.emitOpError("MXU unit must be in [0, 1]");
+      weights[unit] = load.getWeight();
+      return success();
+    }
+    if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
+      unsigned unit = cast<VirtualMXUAccType>(reset.getAcc().getType()).getUnit();
+      if (unit > 1)
+        return op.emitOpError("MXU unit must be in [0, 1]");
+      if (weights[unit] != reset.getWeight())
+        return op.emitOpError(
+            "must use the current weight handle; stale weight handle");
+      if (accumulators[unit])
+        return op.emitOpError("cannot reset a unit with a live accumulator");
+      accumulators[unit] = reset.getAcc();
+      return success();
+    }
+    if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+      unsigned unit =
+          cast<VirtualMXUAccType>(accumulate.getAcc().getType()).getUnit();
+      if (unit > 1)
+        return op.emitOpError("MXU unit must be in [0, 1]");
+      if (weights[unit] != accumulate.getWeight())
+        return op.emitOpError(
+            "must use the current weight handle; stale weight handle");
+      if (accumulators[unit] != accumulate.getAcc())
+        return op.emitOpError("must consume the current accumulator version; "
+                              "stale accumulator handle");
+      accumulators[unit] = accumulate.getNextAcc();
+      return success();
+    }
+    auto readout = cast<VirtualMXUReadoutBF16Op>(op);
+    unsigned unit = cast<VirtualMXUAccType>(readout.getAcc().getType()).getUnit();
+    if (unit > 1)
+      return op.emitOpError("MXU unit must be in [0, 1]");
+    if (accumulators[unit] != readout.getAcc())
+      return op.emitOpError("must consume the current accumulator version; "
+                            "stale accumulator handle");
+    accumulators[unit] = Value{};
+    return success();
+  }
+
+  LogicalResult verifyClosed(Operation *where) {
+    for (unsigned unit = 0; unit < 2; ++unit)
+      if (accumulators[unit])
+        return where->emitOpError(
+                   "must read out the live MXU accumulator before block exit; unit ")
+               << unit;
+    return success();
+  }
+};
+
 // The virtual state is an SSA edge value. Every successor receives the current
 // state as its first block argument; a conditional branch may pass that same
 // state to both mutually exclusive successors. MLIR checks ordinary value
@@ -31,6 +94,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
                                  unsigned &starts, unsigned &outputs,
                                  llvm::DenseSet<int64_t> &outputIndices) {
   Value state;
+  VirtualMXUResources mxu;
   if (cfg) {
     if (entry) {
       for (BlockArgument arg : block.getArguments())
@@ -58,6 +122,13 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
   }
 
   for (Operation &operation : block.getOperations()) {
+    // MLIR dominance permits implicit captures in successor blocks. This slice
+    // rejects those as well as explicit resource-valued block arguments.
+    for (Value operand : operation.getOperands())
+      if (isa<VirtualMXUWeightType, VirtualMXUAccType>(operand.getType()) &&
+          operand.getParentBlock() != &block)
+        return operation.emitOpError(
+            "virtual MXU handles cannot cross CFG blocks");
     if (auto start = dyn_cast<VirtualStartOp>(operation)) {
       if (!entry || &operation != &block.front() || ++starts != 1 || state) {
         start.emitOpError("virtual_start must be the unique first entry operation");
@@ -96,12 +167,35 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       ++outputs;
       continue;
     }
-    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp,
-            VirtualMXUMatmulOp, VirtualPackFP8Op>(operation))
+    if (isa<VirtualMXULoadWeightOp, VirtualMXUResetOp,
+            VirtualMXUAccumulateOp, VirtualMXUReadoutBF16Op>(operation)) {
+      if (!state || operation.getOperand(0) != state)
+        return operation.emitOpError("nonlinear virtual state chain");
+      if (failed(mxu.verify(operation)))
+        return failure();
+      state = operation.getResult(0);
+      continue;
+    }
+    if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(operation)) {
+      unsigned unit = matmul.getUnit();
+      if (unit > 1)
+        return matmul.emitOpError("unit must be in [0, 1]");
+      if (mxu.accumulators[unit])
+        return matmul.emitOpError(
+            "legacy virtual_mxu_matmul cannot overwrite a live accumulator");
+      // Existing lowering overwrites weight slot 0 on the selected unit.
+      // It completes readout internally, so no accumulator remains live.
+      mxu.weights[unit] = Value{};
+      continue;
+    }
+    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualPackFP8Op>(operation))
       continue;
     if (cfg && isa<arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(operation))
       continue;
     if (cfg) {
+      if (operation.hasTrait<OpTrait::IsTerminator>() &&
+          failed(mxu.verifyClosed(&operation)))
+        return failure();
       if (auto branch = dyn_cast<cf::BranchOp>(operation))
         return verifySuccessor(operation, branch.getDest(),
                                branch.getDestOperands(), state);
@@ -128,7 +222,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     block.getParentOp()->emitOpError("virtual CFG block has no terminator");
     return failure();
   }
-  return success();
+  return mxu.verifyClosed(block.getParentOp());
 }
 
 LogicalResult verifyVirtualFunction(func::FuncOp function) {
