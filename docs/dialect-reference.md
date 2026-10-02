@@ -124,7 +124,7 @@ build/bin/atlas-opt --verify-atlas-virtual-stream \
   test/examples/virtual_bf16_ssa.mlir
 ```
 
-### Channel-free virtual DMA and scalar SSA (verification checkpoint)
+### Channel-free virtual DMA and scalar SSA
 
 The DMA slice represents asynchronous whole-tile I/O without choosing a channel, VMEM address, or scalar register. `arith.constant` supplies i1/i32 values, `arith.addi` supplies wrapping i32 arithmetic, and `arith.cmpi` compares i32 operands to produce an i1 control value. These operations are admitted in both module streams and CFG functions. DMA addresses and lengths use those ordinary i32 SSA values; a separate scalar-register type is unnecessary.
 
@@ -137,7 +137,7 @@ Overflow flags on `arith.addi` are rejected throughout virtual streams and CFG f
 | `atlas.virtual_dma_store_fp8` / `virtual_dma_store_bf16` | Source tile, DRAM byte address, byte length | `!atlas.virtual_dma_store` pending handle |
 | `atlas.virtual_dma_wait` | Pending-store handle | No additional result; the store is complete |
 
-All seven operations advance the virtual state chain and have conservative read/write effects. A pending handle owns a private logical staging buffer until completion. A load exposes no usable tensor until its await. A store captures its source tile into transfer-owned staging; that staging must survive until the wait. Future physical lowering and allocation must implement this ownership. The IR does not assign that buffer to a physical bank or window.
+All seven operations advance the virtual state chain and have conservative read/write effects. A pending handle owns a private logical staging buffer until completion. A load exposes no usable tensor until its await. A store captures its source tile into transfer-owned staging; that staging must survive until the wait. Physical lowering implements this ownership; the virtual IR does not assign that buffer to a physical bank or window.
 
 The current admission requires FP8 transfers of exactly 1,024 bytes or BF16 transfers of exactly 2,048 bytes. Addresses and lengths must be proven from i32 constants and unflagged constant-addition expressions. Address bits are interpreted unsigned, additions wrap modulo 2^32, and additions with overflow flags are rejected rather than evaluated as wrapped constants. DRAM addresses must be at least `0x80000000`, aligned to 32 bytes, and have a widened exclusive transfer end at most 2^32. The contract uses an upper DRAM address half of zero. These checks establish the bounded address form; external memory accessibility and initialization remain invocation requirements. Runtime DMA addresses/lengths and arbitrary sub-tile transfers are not admitted yet.
 
@@ -145,7 +145,11 @@ Only one transfer may be outstanding. Await/wait must consume its exact handle o
 
 The invocation must keep load-source memory stable and exclude conflicting external accesses to transfer ranges until completion. The stream verifier checks operations in this IR; it cannot enforce concurrent host behavior.
 
-[`virtual_dma_tiles.mlir`](../test/examples/virtual_dma_tiles.mlir) demonstrates SSA address arithmetic and explicit load/store completion. This checkpoint implements representation and verification only. Physical lowering rejects these new DMA operations; the existing boundary-I/O lowering and its fixed channels/registers are unchanged. This is tile I/O virtualization, not arbitrary VMEM movement, a general allocator, or an overlap scheduler.
+[`virtual_dma_tiles.mlir`](../test/examples/virtual_dma_tiles.mlir) demonstrates SSA address arithmetic and explicit load/store completion. Within the existing single-function ABI, physical lowering reserves a private 2-KiB staging window at VMEM bank 2, word address 131072 (byte address 524288). Loads launch one full-tile DMA on channel 0 at issue; await emits the matching wait before loading the ready tensor. Stores snapshot the tensor into staging before launching one full-tile DMA on channel 1; `virtual_dma_wait` emits its completion wait. BF16 halves occupy consecutive 1-KiB regions. Every tensor load/store retains its annotated 256-cycle diagnostic delay.
+
+SSA addresses and lengths use the existing bounded scalar coloring. At issue, lowering copies their values into reserved x7/x9 and materializes the staging base in x4, keeping these registers stable until completion even if the original SSA registers are reused. Legacy boundary I/O and its x2 half-tile length remain unchanged. Explicit DMA functions still require the existing input/output base attributes; transfers may not overlap the control mailbox used for function arguments. Runtime addresses, general channel/window allocation, and an overlap scheduler remain future work.
+
+Generated explicit launches and waits carry matching `atlas.virtual_dma_transfer` IDs. The generated-schedule checker permits independent scalar, VPU, and MXU work in between, while rejecting DMA operand-register clobbers, VMEM accesses, additional transfers/configuration, and control-flow entry or exit inside that interval. SELI remains allowed because it writes the separate scale-register file. Unmarked legacy DMA still requires an immediate same-channel wait. These checks enforce the bounded placement policy; they do not establish numerical or cycle-accurate execution qualification.
 
 ### Explicit virtual MXU resources
 
@@ -222,7 +226,7 @@ between selected RTL, architecture text, and the inspected model.
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
 | `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
-| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, same-channel DMA waits, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
+| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, matching DMA waits and protected explicit-transfer intervals, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
 | `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |

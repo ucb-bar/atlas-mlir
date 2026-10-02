@@ -36,12 +36,22 @@ constexpr uint64_t kHalfBytes = 1024;
 constexpr uint64_t kScratchBankWords = 65536; // selected 256-KiB VMEM bank
 constexpr uint32_t kPackScratchWord = 32768;
 constexpr uint32_t kPackRelayoutWord = kPackScratchWord + 256;
+constexpr uint32_t kDMAStagingWord = 2 * kScratchBankWords;
+constexpr unsigned kDMAStagingReg = 4;
+constexpr unsigned kDMADramReg = 7;
+constexpr unsigned kDMASizeReg = 9;
 constexpr unsigned kDiagnosticDelay = 256;
 enum class RegisterKind { BF16, FP8, Scalar };
 
 struct MXUPlacement {
   unsigned unit;
   unsigned slot;
+};
+
+struct DMATransferPlacement {
+  unsigned channel;
+  unsigned halves;
+  unsigned id;
 };
 
 struct PlannedOp {
@@ -141,6 +151,24 @@ private:
   }
   void mark(unsigned label) { labelPC[label] = planned.size(); }
 
+  std::optional<uint32_t> constantAddress(Value value) {
+    auto [entry, inserted] = constantAddresses.try_emplace(value, std::nullopt);
+    if (!inserted)
+      return entry->second;
+    std::optional<uint32_t> result;
+    if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+      if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+        result = static_cast<uint32_t>(integer.getValue().getZExtValue());
+    } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+      auto lhs = constantAddress(add.getLhs());
+      auto rhs = constantAddress(add.getRhs());
+      if (lhs && rhs)
+        result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
+    }
+    constantAddresses[value] = result;
+    return result;
+  }
+
   LogicalResult readABI() {
     auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
     auto output = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
@@ -200,6 +228,26 @@ private:
           (*controlBase < outputEnd && outputBase < controlEnd))
         return function.emitOpError(
             "control mailbox overlaps a tensor buffer or overflows DRAM");
+      WalkResult checked = function.walk([&](Operation *op) {
+        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
+        bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+        if (!fp8 && !load && !isa<VirtualDMAStoreBF16Op>(op))
+          return WalkResult::advance();
+        auto address = constantAddress(op->getOperand(load ? 1 : 2));
+        if (!address) {
+          op->emitOpError("DMA address is not statically known");
+          return WalkResult::interrupt();
+        }
+        uint64_t end = static_cast<uint64_t>(*address) +
+                       (fp8 ? kHalfBytes : kTileBytes);
+        if (*address < controlEnd && *controlBase < end) {
+          op->emitOpError("explicit DMA span overlaps the control mailbox");
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (checked.wasInterrupted())
+        return failure();
     }
     return success();
   }
@@ -569,6 +617,56 @@ private:
     add("atlas.dma_wait", loc, {{"channel", i32(1)}});
   }
 
+  void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
+                 unsigned halves, std::optional<unsigned> src, Location loc) {
+    DMATransferPlacement placement{src ? 1u : 0u, halves, nextTransfer++};
+    dmaTransfers[transfer] = placement;
+    emitCopy(kDMADramReg, scalar(dramByte), false, loc);
+    emitCopy(kDMASizeReg, scalar(sizeBytes), false, loc);
+    materializeScalar(kDMAStagingReg, kDMAStagingWord, loc);
+    if (src) {
+      for (unsigned half = 0; half < halves; ++half) {
+        if (half)
+          materializeScalar(kDMAStagingReg, kDMAStagingWord + half * 256, loc);
+        add("atlas.vstore", loc,
+            {{"src", i32(*src + half)}, {"base", i32(kDMAStagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vstore_completion");
+      }
+      if (halves > 1)
+        materializeScalar(kDMAStagingReg, kDMAStagingWord, loc);
+    }
+    add("atlas.dma", loc,
+        {{"direction", str(src ? "store" : "load")},
+         {"channel", i32(placement.channel)}, {"reg", i32(kDMAStagingReg)},
+         {"dram", i32(kDMADramReg)}, {"size", i32(kDMASizeReg)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+  }
+
+  LogicalResult completeDMA(Value transfer, std::optional<unsigned> dst,
+                            Operation &op) {
+    auto found = dmaTransfers.find(transfer);
+    if (found == dmaTransfers.end())
+      return op.emitOpError("has no allocated DMA transfer");
+    DMATransferPlacement placement = found->second;
+    Location loc = op.getLoc();
+    add("atlas.dma_wait", loc,
+        {{"channel", i32(placement.channel)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+    if (dst) {
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        if (half)
+          materializeScalar(kDMAStagingReg, kDMAStagingWord + half * 256, loc);
+        add("atlas.vload", loc,
+            {{"dst", i32(*dst + half)}, {"base", i32(kDMAStagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vload_completion");
+      }
+    }
+    dmaTransfers.erase(found);
+    return success();
+  }
+
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
     if (pack.getScaleCode() != 127)
       return pack.emitOpError(
@@ -640,6 +738,32 @@ private:
     Location loc = op.getLoc();
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
+    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
+      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
+                1, std::nullopt, loc);
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
+      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
+                2, std::nullopt, loc);
+      return success();
+    }
+    if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
+      return completeDMA(await.getTransfer(), fp8(await.getValue()), op);
+    if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op))
+      return completeDMA(await.getTransfer(), tile(await.getValue()), op);
+    if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
+      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+                1, fp8(store.getSrc()), loc);
+      return success();
+    }
+    if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
+      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+                2, tile(store.getSrc()), loc);
+      return success();
+    }
+    if (auto wait = dyn_cast<VirtualDMAWaitOp>(op))
+      return completeDMA(wait.getTransfer(), std::nullopt, op);
     if (auto input = dyn_cast<VirtualInputBF16Op>(op)) {
       uint64_t index = input.getIndexAttr().getValue().getZExtValue();
       for (unsigned half = 0; half < 2; ++half)
@@ -884,12 +1008,15 @@ private:
   Builder attrs;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
   llvm::DenseMap<Value, MXUPlacement> mxuResources;
+  llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
+  llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   bool mixedFp8 = false;
   bool hasPack = false;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
   std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
+  unsigned nextTransfer = 0;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
   SmallVector<int32_t> scalarArgumentRegs;

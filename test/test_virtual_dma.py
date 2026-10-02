@@ -349,22 +349,27 @@ class VirtualDMATest(unittest.TestCase):
             f"  ^work(%work_io: {STATE}):\n" + dma_load("bf16", before="work_io"))
         self.rejected(second_return, "virtual CFG requires one return block")
 
-    def test_no_physical_emission_or_partial_lowering_is_available(self) -> None:
+    def test_physical_consumers_require_explicit_function_lowering(self) -> None:
         for source in (EXAMPLE.read_text(), copy("fp8"), copy(flat=True)):
             self.accepted(source)
             for tool, options in (
                 ("atlas-emit", ()),
                 ("atlas-opt", ("--verify-atlas-machine-stream",)),
                 ("atlas-opt", ("--convert-atlas-to-llvm",)),
-                ("atlas-opt", ("--lower-atlas-virtual-to-machine",)),
             ):
                 with self.subTest(tool=tool, options=options):
                     result = run(tool, source, *options)
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertTrue(result.stderr)
                     self.assertEqual(result.stdout, "")
-                    if options == ("--lower-atlas-virtual-to-machine",) and "func.func" in source:
-                        self.assertIn("has no virtual-to-machine lowering", result.stderr)
+            lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+            if "func.func" in source:
+                self.assertEqual(lowered.returncode, 0, lowered.stderr)
+                self.assertNotIn('"atlas.virtual_', lowered.stdout)
+            else:
+                self.assertNotEqual(lowered.returncode, 0, lowered.stdout)
+                self.assertTrue(lowered.stderr)
+                self.assertEqual(lowered.stdout, "")
 
 
 if __name__ == "__main__":
