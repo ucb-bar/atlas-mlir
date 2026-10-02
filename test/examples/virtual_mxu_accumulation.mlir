@@ -1,6 +1,4 @@
-// Explicit MXU handles describe resident weights and destructive accumulator
-// updates. Both units may have an active chain; readout consumes each chain.
-// Explicit lowering assigns weight/accumulator slot zero on each unit.
+// Interleaved accumulator chains on both MXU units.
 module {
   func.func @two_unit_accumulation() -> !atlas.virtual_state attributes {atlas.input_dram_base = 2415919104 : i64, atlas.output_dram_base = 2415923200 : i64} {
     %io0 = "atlas.virtual_start"() : () -> !atlas.virtual_state

@@ -35,6 +35,13 @@ def Atlas_VirtualInputFP8Op :
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualScaleConstantOp : Atlas_Op<"virtual_scale_constant", [Pure]> {
+  let summary = "Define an immutable E8M0 scale code";
+  let arguments = (ins I32Attr:$code);
+  let results = (outs Atlas_VirtualScaleType:$value);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul", [Pure]> {
   let summary = "Reset one selected MXU with 32 by 32 FP8 operands";
   let arguments = (ins Atlas_VirtualFP8Type:$activation,
@@ -43,8 +50,6 @@ def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul", [Pure]> {
   let hasVerifier = 1;
 }
 
-// Explicit unit-local resource operations use the virtual state chain. Their
-// handles are not tensor-register values and have no physical slot numbers.
 class Atlas_VirtualMXUOp<string mnemonic> :
     Atlas_Op<mnemonic, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]>;
 
@@ -55,6 +60,26 @@ def Atlas_VirtualMXULoadWeightOp :
                        Atlas_VirtualFP8Type:$src, I32Attr:$unit);
   let results = (outs Atlas_VirtualStateType:$next,
                       Atlas_VirtualMXUWeightType:$weight);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualMXULoadAccFP8Op :
+    Atlas_VirtualMXUOp<"virtual_mxu_load_acc_fp8"> {
+  let summary = "Initialize an MXU accumulator from a logical FP8 tile";
+  let arguments = (ins Atlas_VirtualStateType:$state,
+                       Atlas_VirtualFP8Type:$src, I32Attr:$unit);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualMXUAccType:$acc);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualMXULoadAccBF16Op :
+    Atlas_VirtualMXUOp<"virtual_mxu_load_acc_bf16"> {
+  let summary = "Initialize an MXU accumulator from a logical BF16 tile";
+  let arguments = (ins Atlas_VirtualStateType:$state,
+                       Atlas_VirtualBF16Type:$src, I32Attr:$unit);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualMXUAccType:$acc);
   let hasVerifier = 1;
 }
 
@@ -87,6 +112,16 @@ def Atlas_VirtualMXUReadoutBF16Op :
                        Atlas_VirtualMXUAccType:$acc);
   let results = (outs Atlas_VirtualStateType:$next,
                       Atlas_VirtualBF16Type:$value);
+}
+
+def Atlas_VirtualMXUReadoutFP8Op :
+    Atlas_VirtualMXUOp<"virtual_mxu_readout_fp8"> {
+  let summary = "Consume an accumulator version and read out a scaled FP8 tile";
+  let arguments = (ins Atlas_VirtualStateType:$state,
+                       Atlas_VirtualMXUAccType:$acc,
+                       Atlas_VirtualScaleType:$scale);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualFP8Type:$value);
 }
 
 def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8", [Pure]> {

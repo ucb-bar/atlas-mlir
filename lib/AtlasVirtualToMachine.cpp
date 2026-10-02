@@ -208,10 +208,7 @@ private:
     function.walk([&](Operation *op) {
       for (Value result : op->getResults()) {
         mixedFp8 |= isa<VirtualFP8Type>(result.getType());
-        // The virtual verifier permits one current weight and one live
-        // accumulator per unit, confined to a block. All versions therefore
-        // share slot 0 in their respective unit-local weight/accumulator banks;
-        // handles never participate in tensor-register coloring.
+        // Verified lifetimes permit slot 0 in each unit's weight/accumulator bank.
         if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
           mxuResources[result] = {weight.getUnit(), 0};
         if (auto acc = dyn_cast<VirtualMXUAccType>(result.getType()))
@@ -641,7 +638,7 @@ private:
 
   LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
-    if (isa<VirtualStartOp>(op))
+    if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
     if (auto input = dyn_cast<VirtualInputBF16Op>(op)) {
       uint64_t index = input.getIndexAttr().getValue().getZExtValue();
@@ -662,6 +659,22 @@ private:
           {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
            {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
       delay(loc, "mxu_weight_completion");
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
+      MXUPlacement acc = mxu(load.getAcc());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("acc_fp8")}, {"unit", i32(acc.unit)},
+           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      delay(loc, "mxu_accumulator_completion");
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
+      MXUPlacement acc = mxu(load.getAcc());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("acc_bf16")}, {"unit", i32(acc.unit)},
+           {"src", i32(tile(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      delay(loc, "mxu_accumulator_completion");
       return success();
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
@@ -691,6 +704,23 @@ private:
           {{"format", str("bf16")}, {"unit", i32(acc.unit)},
            {"dst", i32(tile(readout.getValue()))},
            {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
+      delay(loc, "mxu_readout_completion");
+      return success();
+    }
+    if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
+      auto scale = readout.getScale().getDefiningOp<VirtualScaleConstantOp>();
+      if (!scale)
+        return readout.emitOpError(
+            "FP8 readout currently requires a virtual_scale_constant");
+      MXUPlacement acc = mxu(readout.getAcc());
+      // Rematerialize each use: readouts and VPU pack share scratch e3.
+      add("atlas.scalar_load", loc,
+          {{"kind", str("seli")}, {"dst", i32(3)}, {"base", i32(0)},
+           {"offset", i32(scale.getCode())}});
+      add("atlas.mxu_pop", loc,
+          {{"format", str("fp8")}, {"unit", i32(acc.unit)},
+           {"dst", i32(fp8(readout.getValue()))},
+           {"slot", i32(acc.slot)}, {"scale_reg", i32(3)}});
       delay(loc, "mxu_readout_completion");
       return success();
     }

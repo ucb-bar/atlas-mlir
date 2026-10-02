@@ -224,7 +224,6 @@ class VirtualMXUHandleTest(unittest.TestCase):
             return (f'    %legacy = "atlas.virtual_mxu_matmul"(%x, %w) '
                     f'{{unit = {unit} : i32}} : ({FP8}, {FP8}) -> {BF16}')
 
-        # A complete operation on the other unit does not disturb this chain.
         self.accepted(program(
             load("io2", "s0", "weight"), reset("s0", "s1", "a0"),
             legacy(1), readout("s1", "s2", "y", "a0"), final_state="s2",
@@ -246,7 +245,6 @@ class VirtualMXUHandleTest(unittest.TestCase):
         ))
 
     def test_handles_cannot_cross_blocks_by_capture_or_block_argument(self) -> None:
-        # The resident weight dominates the successor, but is block local.
         captured_weight = program(
             load("io2", "s0", "weight"),
             f"    cf.br ^next(%s0 : {STATE})",

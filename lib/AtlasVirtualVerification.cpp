@@ -12,9 +12,7 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// This first explicit-MXU slice has one resident weight and one live
-// accumulator version per unit. Handles stay within a block; physical slot
-// allocation and asynchronous lifetimes remain a later lowering concern.
+// Track one current weight and accumulator per unit within a block.
 struct VirtualMXUResources {
   Value weights[2];
   Value accumulators[2];
@@ -26,6 +24,16 @@ struct VirtualMXUResources {
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
       weights[unit] = load.getWeight();
+      return success();
+    }
+    if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
+      Value acc = op.getResult(1);
+      unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
+      if (unit > 1)
+        return op.emitOpError("MXU unit must be in [0, 1]");
+      if (accumulators[unit])
+        return op.emitOpError("cannot load a unit with a live accumulator");
+      accumulators[unit] = acc;
       return success();
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
@@ -54,11 +62,11 @@ struct VirtualMXUResources {
       accumulators[unit] = accumulate.getNextAcc();
       return success();
     }
-    auto readout = cast<VirtualMXUReadoutBF16Op>(op);
-    unsigned unit = cast<VirtualMXUAccType>(readout.getAcc().getType()).getUnit();
+    Value acc = op.getOperand(1);
+    unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
     if (unit > 1)
       return op.emitOpError("MXU unit must be in [0, 1]");
-    if (accumulators[unit] != readout.getAcc())
+    if (accumulators[unit] != acc)
       return op.emitOpError("must consume the current accumulator version; "
                             "stale accumulator handle");
     accumulators[unit] = Value{};
@@ -122,8 +130,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
   }
 
   for (Operation &operation : block.getOperations()) {
-    // MLIR dominance permits implicit captures in successor blocks. This slice
-    // rejects those as well as explicit resource-valued block arguments.
+    // Dominance alone permits cross-block captures of resident handles.
     for (Value operand : operation.getOperands())
       if (isa<VirtualMXUWeightType, VirtualMXUAccType>(operand.getType()) &&
           operand.getParentBlock() != &block)
@@ -167,8 +174,9 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       ++outputs;
       continue;
     }
-    if (isa<VirtualMXULoadWeightOp, VirtualMXUResetOp,
-            VirtualMXUAccumulateOp, VirtualMXUReadoutBF16Op>(operation)) {
+    if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op,
+            VirtualMXULoadAccBF16Op, VirtualMXUResetOp, VirtualMXUAccumulateOp,
+            VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(operation)) {
       if (!state || operation.getOperand(0) != state)
         return operation.emitOpError("nonlinear virtual state chain");
       if (failed(mxu.verify(operation)))
@@ -183,12 +191,12 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       if (mxu.accumulators[unit])
         return matmul.emitOpError(
             "legacy virtual_mxu_matmul cannot overwrite a live accumulator");
-      // Existing lowering overwrites weight slot 0 on the selected unit.
-      // It completes readout internally, so no accumulator remains live.
+      // Legacy matmul overwrites weights and completes readout internally.
       mxu.weights[unit] = Value{};
       continue;
     }
-    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualPackFP8Op>(operation))
+    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualPackFP8Op,
+            VirtualScaleConstantOp>(operation))
       continue;
     if (cfg && isa<arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(operation))
       continue;

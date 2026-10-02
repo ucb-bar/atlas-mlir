@@ -43,12 +43,14 @@ ATLAS_MACHINE_EFFECTS(FenceOp)
 ATLAS_MACHINE_EFFECTS(ScalarLoadOp)
 ATLAS_MACHINE_EFFECTS(ScalarStoreOp)
 
-// Preserve explicit virtual MXU state transitions conservatively until a
-// scheduler has a qualified per-resource effect model.
+// Conservatively model virtual MXU resource transitions as read/write effects.
 ATLAS_MACHINE_EFFECTS(VirtualMXULoadWeightOp)
+ATLAS_MACHINE_EFFECTS(VirtualMXULoadAccFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualMXULoadAccBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualMXUResetOp)
 ATLAS_MACHINE_EFFECTS(VirtualMXUAccumulateOp)
 ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutFP8Op)
 
 void VirtualInputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -109,12 +111,35 @@ LogicalResult VirtualMXUMatmulOp::verify() {
   return inRange(getOperation(), "unit", getUnit(), 0, 1);
 }
 
+LogicalResult VirtualScaleConstantOp::verify() {
+  return inRange(getOperation(), "code", getCodeAttr().getValue().getSExtValue(),
+                 0, 255);
+}
+
 LogicalResult VirtualMXULoadWeightOp::verify() {
   if (failed(inRange(getOperation(), "unit", getUnit(), 0, 1)))
     return failure();
   if (cast<VirtualMXUWeightType>(getWeight().getType()).getUnit() != getUnit())
     return emitOpError("weight handle unit must match the selected unit");
   return success();
+}
+
+static LogicalResult verifyVirtualAccLoad(Operation *op, Value acc,
+                                          int64_t unit) {
+  if (failed(inRange(op, "unit", unit, 0, 1)))
+    return failure();
+  if (cast<VirtualMXUAccType>(acc.getType()).getUnit() != unit)
+    return op->emitOpError(
+        "accumulator handle unit must match the selected unit");
+  return success();
+}
+
+LogicalResult VirtualMXULoadAccFP8Op::verify() {
+  return verifyVirtualAccLoad(getOperation(), getAcc(), getUnit());
+}
+
+LogicalResult VirtualMXULoadAccBF16Op::verify() {
+  return verifyVirtualAccLoad(getOperation(), getAcc(), getUnit());
 }
 
 LogicalResult VirtualMXUResetOp::verify() {

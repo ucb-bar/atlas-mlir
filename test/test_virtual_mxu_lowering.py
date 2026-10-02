@@ -181,8 +181,7 @@ class VirtualMXULoweringTest(unittest.TestCase):
                          if entry["operation"] == "atlas.vload"]
                 mxu = [entry for entry in entries
                        if entry["operation"].startswith("atlas.mxu_")]
-                # These new tiles occupy the source registers after their
-                # contents have moved into the resident weight/accumulator.
+                # Tensor sources may be reused after transfer into the MXU.
                 self.assertEqual(mxu[0]["fields"]["src"], loads[2])
                 self.assertEqual(mxu[1]["fields"]["src"], loads[3])
 

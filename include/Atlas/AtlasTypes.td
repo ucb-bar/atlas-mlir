@@ -28,6 +28,12 @@ def Atlas_VirtualFP8Type : TypeDef<Atlas_Dialect, "VirtualFP8"> {
   let assemblyFormat = "";
 }
 
+def Atlas_VirtualScaleType : TypeDef<Atlas_Dialect, "VirtualScale"> {
+  let mnemonic = "virtual_scale";
+  let summary = "Immutable E8M0 scale code without a selected physical register";
+  let assemblyFormat = "";
+}
+
 def Atlas_VirtualMXUWeightType : TypeDef<Atlas_Dialect, "VirtualMXUWeight"> {
   let mnemonic = "virtual_mxu_weight";
   let summary = "A resident FP8 weight on one selected MXU, before slot allocation";
