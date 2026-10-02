@@ -124,6 +124,12 @@ build/bin/atlas-opt --verify-atlas-virtual-stream \
   test/examples/virtual_bf16_ssa.mlir
 ```
 
+### Allocation policy and instruction emission
+
+[`VirtualAllocationPlan`](../include/Atlas/AtlasVirtualAllocation.h) computes placements before machine instruction emission. Its [implementation](../lib/AtlasVirtualAllocation.cpp) owns the existing CFG interference coloring, MXU handle slots, explicit DMA transfer placements and IDs, and fixed scratch registers, channels, and VMEM windows. [`AtlasVirtualToMachine.cpp`](../lib/AtlasVirtualToMachine.cpp) reads these placements to materialize values and emit instructions; it no longer colors registers or assigns DMA resources while emitting them.
+
+This extraction preserves the existing bounded policy, diagnostics, instruction order, and delays. It adds an internal C++ allocation plan, not another dialect stage or standalone pass. The plan refers to verified source SSA values and must be rebuilt after changing that IR or its order. General allocation, spilling, independent resource-lifetime validation, and scheduling remain future work; the current interference check and virtual/generated stream verifiers retain their existing roles.
+
 ### Channel-free virtual DMA and scalar SSA
 
 The DMA slice represents asynchronous whole-tile I/O without choosing a channel, VMEM address, or scalar register. `arith.constant` supplies i1/i32 values, `arith.addi` supplies wrapping i32 arithmetic, and `arith.cmpi` compares i32 operands to produce an i1 control value. These operations are admitted in both module streams and CFG functions. DMA addresses and lengths use those ordinary i32 SSA values; a separate scalar-register type is unnecessary.
