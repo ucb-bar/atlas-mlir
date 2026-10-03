@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -303,6 +304,18 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       scalarRegs[value] = firstScalar + colors[value];
   }
   return success();
+}
+
+LogicalResult VirtualAllocationPlan::verify() const {
+  SmallVector<VirtualRegisterAssignment> assignments;
+  for (const auto &[value, reg] : tileRegs)
+    assignments.push_back({value, reg});
+  for (const auto &[value, reg] : fp8Regs)
+    assignments.push_back({value, reg});
+  for (const auto &[value, reg] : scalarRegs)
+    assignments.push_back({value, reg});
+  return verifyAtlasRegisterAllocation(function, assignments, fixedResources,
+                                      scalarArgumentRegs);
 }
 
 unsigned VirtualAllocationPlan::tile(Value value) const {

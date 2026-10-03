@@ -68,6 +68,7 @@ public:
   // placement accessors require successful allocation and live source IR.
   // Query only mapped value kinds; placement references/views expire on rebuild.
   LogicalResult allocate(func::FuncOp function);
+  LogicalResult verify() const;
   unsigned tile(Value value) const;
   unsigned fp8(Value value) const;
   unsigned scalar(Value value) const;

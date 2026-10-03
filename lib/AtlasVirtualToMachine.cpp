@@ -40,7 +40,7 @@ public:
       : module(module), function(function), attrs(module.getContext()) {}
 
   LogicalResult plan() {
-    if (failed(readABI()) || failed(allocation.allocate(function)))
+    if (failed(readABI()) || failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
     Location loc = function.getLoc();
     add("atlas.alu_imm", loc,
