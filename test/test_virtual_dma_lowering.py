@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from itertools import product
 import os
 from pathlib import Path
 import re
@@ -11,13 +12,17 @@ import unittest
 from test_virtual_dma import (
     STATE, constants, copy, dma_load, dma_await, dma_store, dma_wait, tile, wrap,
 )
-from test_virtual_lowering import BIN, emitted, lower, object_words, run
+from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run
 from test_virtual_mxu_handles import program, load, reset, readout
 from test_virtual_mxu_lowering import instructions
 
 
 MARKER = "atlas.virtual_dma_transfer"
 STAGING_WORD = 131072
+MXU_EXAMPLES = {
+    "fp8": ROOT / "test/examples/virtual_dma_mxu.mlir",
+    "bf16": ROOT / "test/examples/virtual_dma_mxu_bf16.mlir",
+}
 
 
 def observed(entries: list[dict]) -> list[tuple[dict, dict[int, int]]]:
@@ -137,6 +142,77 @@ class VirtualDMALoweringTest(unittest.TestCase):
         self.assertEqual(snapshots[launch][1][7], 0x80000000)
         self.assertEqual(snapshots[wait][1][7], 0x80000000)
         self.assertEqual(snapshots[store][1][7], 0x80000800)
+
+    def test_explicit_dma_mxu_chain_preserves_dataflow_on_both_units(self) -> None:
+        for fmt, unit in product(MXU_EXAMPLES, (0, 1)):
+            with self.subTest(fmt=fmt, unit=unit):
+                source = MXU_EXAMPLES[fmt].read_text()
+                halves = 1 if fmt == "fp8" else 2
+                virtual = source.replace("unit = 0 : i32", f"unit = {unit} : i32")
+                for handle in ("weight", "acc"):
+                    virtual = virtual.replace(f"virtual_mxu_{handle}<0>",
+                                              f"virtual_mxu_{handle}<{unit}>")
+                _, entries = self.checked(virtual)
+                snapshots = observed(entries)
+                dma = [(entry["fields"], registers)
+                       for entry, registers in snapshots
+                       if entry["operation"] == "atlas.dma"]
+                self.assertEqual([(fields["direction"], fields["channel"],
+                                   registers[fields["reg"]], registers[fields["dram"]],
+                                   registers[fields["size"]])
+                                  for fields, registers in dma],
+                                 [("load", 0, STAGING_WORD, 0x90000000, 1024),
+                                  ("load", 0, STAGING_WORD, 0x90000400, 1024),
+                                  ("store", 1, STAGING_WORD, 0x90001000, 1024 * halves)])
+                waits = [entry["fields"] for entry in entries
+                         if entry["operation"] == "atlas.dma_wait"]
+                self.assertEqual([(fields["channel"], fields[MARKER]) for fields in waits],
+                                 [(fields["channel"], fields[MARKER]) for fields, _ in dma])
+                self.assertEqual(len({fields[MARKER] for fields, _ in dma}), 3)
+                flow = [entry["operation"] for entry in entries
+                        if entry["operation"] in ("atlas.dma", "atlas.dma_wait", "atlas.vload", "atlas.vstore")
+                        or entry["operation"].startswith("atlas.mxu_")]
+                self.assertEqual(flow, ["atlas.dma", "atlas.dma_wait", "atlas.vload"] * 2
+                                 + ["atlas.mxu_push", "atlas.mxu_matmul", "atlas.mxu_matmul",
+                                    "atlas.mxu_pop"] + ["atlas.vstore"] * halves
+                                 + ["atlas.dma", "atlas.dma_wait"])
+                loads = [entry["fields"] for entry in entries
+                         if entry["operation"] == "atlas.vload"]
+                self.assertNotEqual(loads[0]["dst"], loads[1]["dst"])
+                mxu = [entry["fields"] for entry in entries
+                       if entry["operation"].startswith("atlas.mxu_")]
+                self.assertTrue(all(fields["unit"] == unit for fields in mxu))
+                self.assertEqual(mxu[0]["kind"], "weight_fp8")
+                self.assertEqual(mxu[0]["src"], loads[1]["dst"])
+                self.assertEqual([fields["src"] for fields in mxu[1:3]], [loads[0]["dst"]] * 2)
+                self.assertEqual([fields["accumulate"] for fields in mxu[1:3]],
+                                 [False, True])
+                pop = mxu[-1]
+                self.assertEqual(pop["format"], fmt)
+                if fmt == "bf16":
+                    self.assertGreaterEqual(pop["dst"], 32)
+                    self.assertEqual(pop["dst"] % 2, 0)
+                    self.assertEqual(pop["scale_reg"], 0)
+                pop_index = next(index for index, entry in enumerate(entries)
+                                 if entry["operation"] == "atlas.mxu_pop")
+                scale = [(index, entry["fields"]) for index, entry in enumerate(entries)
+                         if entry["operation"] == "atlas.scalar_load"
+                         and entry["fields"]["kind"] == "seli"]
+                self.assertEqual([(fields["dst"], fields["offset"]) for _, fields in scale],
+                                 [(pop["scale_reg"], 129)] if fmt == "fp8" else [])
+                self.assertTrue(all(index < pop_index for index, _ in scale))
+                stores = [entry["fields"] for entry in entries
+                          if entry["operation"] == "atlas.vstore"]
+                self.assertEqual([fields["src"] for fields in stores],
+                                 [pop["dst"] + half for half in range(halves)])
+                addresses = {"atlas.vload": [], "atlas.vstore": []}
+                for entry, registers in snapshots:
+                    if entry["operation"] in addresses:
+                        fields = entry["fields"]
+                        addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 8)
+                self.assertEqual(addresses["atlas.vload"], [STAGING_WORD] * 2)
+                self.assertEqual(addresses["atlas.vstore"],
+                                 [STAGING_WORD + 256 * half for half in range(halves)])
 
     def test_later_implicit_boundary_transfers_keep_their_half_tile_size(self) -> None:
         source = copy().replace(dma_store("bf16"),
