@@ -62,7 +62,13 @@ class NativeBindingTest(unittest.TestCase):
         modified = record.get("modified_after_import", {})
         self.assertEqual(
             set(modified),
-            {"atlas_native_support/dialect_plan.py", "atlas_native_support/requirements.json"},
+            {
+                "atlas_native_support/dialect_plan.py",
+                "atlas_native_support/mxu0_binding.py",
+                "atlas_native_support/mxu0_emit.py",
+                "atlas_native_support/mxu0_program_set.py",
+                "atlas_native_support/requirements.json",
+            },
         )
         unchanged = 0
         for relative, digest in record["source_file_sha256"].items():
@@ -76,7 +82,7 @@ class NativeBindingTest(unittest.TestCase):
             else:
                 self.assertEqual(actual, digest, relative)
                 unchanged += 1
-        self.assertEqual(unchanged, 12)
+        self.assertEqual(unchanged, 9)
 
     def test_installed_profile(self) -> None:
         binding = load_native_target_binding("atlas_tensor")

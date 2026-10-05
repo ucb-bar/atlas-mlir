@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atlas-native-support"
-version = "0.0.5"
+version = "0.0.6"
 description = "Selected Atlas target bindings for Merlin's native semantic engine"
 requires-python = ">=3.12"
 dependencies = []

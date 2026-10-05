@@ -1,18 +1,30 @@
 {
+  "modified_after_import": {
+    "atlas_native_support/dialect_plan.py": {
+      "reason": "Qualify custom Atlas value types and place machine effects inside checked MLIR signatures",
+      "sha256": "0c0b1c216107723f0e84850cf0a989899150732c96ef539d6af0b900cbc77df1"
+    },
+    "atlas_native_support/mxu0_binding.py": {
+      "reason": "Resume native compilation through checked spatial partition after bounded combined-graph resource or allocation failure",
+      "sha256": "8dd943b624d950f4134f3cc2b49fd3f16dbb14062d28c8b25a1ecf92523c272f"
+    },
+    "atlas_native_support/mxu0_emit.py": {
+      "reason": "Preserve structured native search status for bounded fallback and diagnostic reporting",
+      "sha256": "04d14920f98bffe38340837778948ec17150ba73e925a8893f1c588fe6e22400"
+    },
+    "atlas_native_support/mxu0_program_set.py": {
+      "reason": "Bind program-set source, segments, search-feedback trigger, and replay verification to one native publication",
+      "sha256": "1a4c2d62321839d977e3c60074d3ce25f7177d6461b8a1a26ebda589e074e8a8"
+    },
+    "atlas_native_support/requirements.json": {
+      "reason": "Pin the reviewed one-commit Merlin native program-set and deterministic allocation implementation; exact Rust bridge and Cargo lock remain selected",
+      "sha256": "cc035334ddf14abdb346c88a291fb471abc35a2ac59e9f2b76cb359fd99b5af7"
+    }
+  },
   "modified_on_import": [
     "pyproject.toml: package version 0.0.3 and setuptools build pin",
     "src/atlas_native_support/requirements.json: exact Merlin revision pin"
   ],
-  "modified_after_import": {
-    "atlas_native_support/dialect_plan.py": {
-      "sha256": "0c0b1c216107723f0e84850cf0a989899150732c96ef539d6af0b900cbc77df1",
-      "reason": "Qualify custom Atlas value types and place machine effects inside checked MLIR signatures"
-    },
-    "atlas_native_support/requirements.json": {
-      "sha256": "9eab096f7b784220afe156cc55066011e6998f71a3e1cb5ed3a46392cdde9722",
-      "reason": "Pin the reviewed one-commit Merlin Atlas integration with packaged Rust bridge; selector, extractor, allocator, and Cargo lock match the previous selected revision"
-    }
-  },
   "schema": "atlas.native_support_source_import.v1",
   "source_artifact": "native-vpu-exp2-package-r1",
   "source_file_sha256": {

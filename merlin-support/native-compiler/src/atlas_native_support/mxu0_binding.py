@@ -7,6 +7,7 @@ from pathlib import Path
 from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.snapshot import NativeSnapshot, NativeTargetProfile
+from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 from .mxu0 import Mxu0Contract, mxu0_profile
 from .mxu0_emit import compile_mxu0
@@ -65,20 +66,35 @@ class Binding:
                     fixed_outputs=fixed_outputs, rtl_root=target_source,
                     destination=destination, limits=limits, contract=contract,
                 )
-            return compile_mxu0(
-                snapshot,
-                tiling.lowered,
-                fixed_inputs=tiling.fixed_panel_inputs(fixed_inputs),
-                fixed_outputs=(
-                    tiling.fixed_tile_outputs(fixed_outputs)
-                    if isinstance(tiling, SpatialTilePlan) else fixed_outputs
-                ),
-                rtl_root=target_source,
-                destination=destination,
-                limits=limits,
-                contract=contract,
-                tiling=tiling,
-            )
+            try:
+                return compile_mxu0(
+                    snapshot,
+                    tiling.lowered,
+                    fixed_inputs=tiling.fixed_panel_inputs(fixed_inputs),
+                    fixed_outputs=(
+                        tiling.fixed_tile_outputs(fixed_outputs)
+                        if isinstance(tiling, SpatialTilePlan) else fixed_outputs
+                    ),
+                    rtl_root=target_source,
+                    destination=destination,
+                    limits=limits,
+                    contract=contract,
+                    tiling=tiling,
+                )
+            except NativeCompilationError as error:
+                if (
+                    not isinstance(tiling, SpatialTilePlan)
+                    or len(tiling.output_tiles) < 2
+                    or error.status not in {"resource_limit", "infeasible_candidate"}
+                ):
+                    raise
+                return compile_mxu0_program_set(
+                    snapshot, tiling, fixed_inputs=fixed_inputs,
+                    fixed_outputs=fixed_outputs, rtl_root=target_source,
+                    destination=destination, limits=limits, contract=contract,
+                    partition_trigger=f"combined_{error.status}",
+                    combined_reason=error.reason,
+                )
         return compile_mxu0(
             snapshot,
             request,

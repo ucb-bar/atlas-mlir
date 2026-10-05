@@ -53,12 +53,22 @@ def compile_mxu0_program_set(
     destination: Path,
     limits: SearchLimits,
     contract: Mxu0Contract,
+    partition_trigger: str = "node_budget",
+    combined_reason: str = "",
 ) -> dict[str, object]:
     """Compile one ordered-K chain per output tile with disjoint external ABI."""
     if destination.exists():
         raise FileExistsError("native program set needs a fresh destination")
     if tiling.source.target_identity != contract.identity:
         raise ValueError("program set target identity differs from selected Atlas")
+    if partition_trigger == "node_budget":
+        if len(tiling.lowered.nodes) <= MAX_COMBINED_SPATIAL_NODES or combined_reason:
+            raise ValueError("node-budget partition has no exceeded node budget")
+    elif (
+        partition_trigger not in {"combined_resource_limit", "combined_infeasible_candidate"}
+        or not combined_reason
+    ):
+        raise ValueError("program set has an unrecognized search-feedback trigger")
     partitions = tiling.partition_outputs(fixed_inputs, fixed_outputs)
     if len(partitions) < 2:
         raise ValueError("program set needs multiple independent output tiles")
@@ -77,6 +87,7 @@ def compile_mxu0_program_set(
         output_id, m_start, n_start = tiling.output_tiles[index]
         rows.append({
             "index": index,
+            "path": f"segments/{index:03d}",
             "output_id": output_id,
             "m_start": m_start,
             "n_start": n_start,
@@ -90,12 +101,17 @@ def compile_mxu0_program_set(
     manifest: dict[str, object] = {
         "schema": "atlas.native_tensor_program_set.v1",
         "status": "diagnostic_program_set",
+        "artifact_kind": "program_set",
         "engine": "merlin_native",
         "target_identity": contract.identity,
+        "request_digest": tiling.source.digest(),
         "source_request_digest": tiling.source.digest(),
         "lowered_request_digest": tiling.lowered.digest(),
         "tiling_sha256": _sha(destination / "tiling.json"),
         "partition_policy": "one_complete_ordered_k_chain_per_output_tile",
+        "partition_trigger": partition_trigger,
+        "combined_rejection_reason": combined_reason,
+        "search_limits": limits.record(),
         "max_combined_spatial_nodes": MAX_COMBINED_SPATIAL_NODES,
         "fixed_source_inputs": fixed_inputs,
         "fixed_source_outputs": list(fixed_outputs),
@@ -123,8 +139,10 @@ def verify_mxu0_program_set(
     if (
         manifest.get("schema") != "atlas.native_tensor_program_set.v1"
         or manifest.get("status") != "diagnostic_program_set"
+        or manifest.get("artifact_kind") != "program_set"
         or manifest.get("engine") != "merlin_native"
         or manifest.get("target_identity") != contract.identity
+        or manifest.get("request_digest") != expected_request_digest
         or manifest.get("source_request_digest") != expected_request_digest
         or source.digest() != expected_request_digest
         or manifest.get("lowered_request_digest") != tiling.lowered.digest()
@@ -134,6 +152,24 @@ def verify_mxu0_program_set(
         or manifest.get("max_combined_spatial_nodes") != MAX_COMBINED_SPATIAL_NODES
     ):
         raise ValueError("native program set source, target, or partition changed")
+    trigger = manifest.get("partition_trigger")
+    if trigger == "node_budget":
+        if (len(tiling.lowered.nodes) <= MAX_COMBINED_SPATIAL_NODES
+                or manifest.get("combined_rejection_reason") != ""):
+            raise ValueError("native program set node-budget trigger changed")
+    elif trigger in {"combined_resource_limit", "combined_infeasible_candidate"}:
+        limits = SearchLimits.from_record(manifest.get("search_limits"))
+        rejected = snapshot.select(
+            tiling.lowered,
+            fixed_inputs=tiling.fixed_panel_inputs(manifest["fixed_source_inputs"]),
+            fixed_outputs=tiling.fixed_tile_outputs(tuple(manifest["fixed_source_outputs"])),
+            limits=limits,
+        )
+        if (rejected.status != trigger.removeprefix("combined_")
+                or rejected.reason != manifest.get("combined_rejection_reason")):
+            raise ValueError("native program set combined-search rejection changed")
+    else:
+        raise ValueError("native program set partition trigger changed")
     if {item.name for item in destination.iterdir()} != {
         "manifest.json", "source_request.json", "tiling.json", "segments",
     }:
@@ -155,6 +191,7 @@ def verify_mxu0_program_set(
         segment_manifest = json.loads((segment_path / "manifest.json").read_text())
         expected = {
             "index": index,
+            "path": f"segments/{index:03d}",
             "output_id": output_id,
             "m_start": m_start,
             "n_start": n_start,
@@ -191,8 +228,10 @@ def prepare_mxu0_program_set_launch(
     if (
         manifest.get("schema") != "atlas.native_tensor_program_set.v1"
         or manifest.get("status") != "diagnostic_program_set"
+        or manifest.get("artifact_kind") != "program_set"
         or manifest.get("engine") != "merlin_native"
         or manifest.get("target_identity") != contract.identity
+        or manifest.get("request_digest") != expected_request_digest
         or source.digest() != expected_request_digest
         or manifest.get("source_request_digest") != expected_request_digest
         or manifest.get("lowered_request_digest") != tiling.lowered.digest()
@@ -202,6 +241,15 @@ def prepare_mxu0_program_set_launch(
         or manifest.get("max_combined_spatial_nodes") != MAX_COMBINED_SPATIAL_NODES
     ):
         raise ValueError("program set invocation identity or partition changed")
+    trigger = manifest.get("partition_trigger")
+    if trigger == "node_budget":
+        if (len(tiling.lowered.nodes) <= MAX_COMBINED_SPATIAL_NODES
+                or manifest.get("combined_rejection_reason") != ""):
+            raise ValueError("program set invocation node-budget trigger changed")
+    elif (trigger not in {"combined_resource_limit", "combined_infeasible_candidate"}
+          or not manifest.get("combined_rejection_reason")):
+        raise ValueError("program set invocation search-feedback trigger changed")
+    SearchLimits.from_record(manifest.get("search_limits"))
     if {item.name for item in destination.iterdir()} != {
         "manifest.json", "source_request.json", "tiling.json", "segments",
     }:
@@ -224,6 +272,7 @@ def prepare_mxu0_program_set_launch(
         segment_manifest = json.loads((segment / "manifest.json").read_text())
         expected = {
             "index": index,
+            "path": f"segments/{index:03d}",
             "output_id": output_id,
             "m_start": m_start,
             "n_start": n_start,

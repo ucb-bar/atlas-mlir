@@ -15,6 +15,7 @@ from pathlib import Path
 from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.snapshot import NativeSnapshot
+from merlin.semantic_compiler.target_binding import NativeCompilationError
 from merlin.semantic_compiler.verify import check_selection
 
 from .movement import (
@@ -818,9 +819,7 @@ def compile_mxu0(
             selected.exploration,
         )
     ):
-        raise RuntimeError(
-            f"native MXU0 selection failed: {selected.status}: {selected.reason}"
-        )
+        raise NativeCompilationError(selected.status, selected.reason or "native MXU0 selection failed")
     replay = check_selection(
         request,
         profile.descriptors,

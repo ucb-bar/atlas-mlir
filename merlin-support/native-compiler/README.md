@@ -25,8 +25,8 @@ not qualify the integrated EE290 system or general multi-output execution.
 
 `src/atlas_native_support/source_import.json` records hashes of the retained
 diagnostic wheel used to recover this source. The import changed the package
-version and its Merlin revision pin. Version 0.0.5 pins the squashed Merlin
-Atlas integration commit. Its selector, extractor, allocator, Rust bridge,
+version and its Merlin revision pin. Version 0.0.6 pins Merlin's checked
+program-set publication interface. Its selector, extractor, allocator, Rust bridge,
 Cargo lock, and selected Atlas software specification are byte-identical to
 the previous `1b7517c` pin. Merlin's snapshot and CLI now support rebuilding
 the packaged bridge and accepting parsed Linalg.
@@ -49,7 +49,7 @@ provides fixed external addresses, not runtime tensor contents or goldens.
 ```sh
 merlin-targetgen native-build --engine merlin_native --support atlas_tensor \
   --cargo-target-dir "$ARTIFACT_ROOT/cargo" \
-  --source-revision 68f4d2e4d91d4cb10ec462a085e53e6cc661d2dd \
+  --source-revision 3a10b83dfd9da119efb8e22e504ca5ebef76b02e \
   --out "$ARTIFACT_ROOT/snapshot"
 
 merlin-targetgen native-compile --engine merlin_native \
@@ -67,7 +67,7 @@ qualified Atlas platform; successful compilation alone is not execution.
 
 ## Host build binding
 
-Version 0.0.5 retains `runtime/atlas_host.{c,h}` and
+Version 0.0.6 retains `runtime/atlas_host.{c,h}` and
 `atlas_native_support.host_build.ee290_baremetal_recipe`. The latter supplies
 Atlas/EE290 flags, the C driver, and the selected linker files to Merlin's
 shared `HarnessBuildRecipe`. The caller selects the RISC-V compiler,
@@ -96,6 +96,9 @@ fails. Its numerical reference code stays outside the compiler package; a
 passing result is limited to the supplied standalone core and panels.
 The [bounded selected-core observation](../../docs/native-support-selected-core-observation.md)
 records the current eight-panel result and its source and model hashes.
+The [shape-seed observation](../../docs/native-shape-seed-selected-core-observation.md)
+records eight strict-native shape compiles and 16 exact selected-core panels,
+including multiple tiles and tails, under its stated numerical scope.
 
 ## Generated diagnostic machine IR
 
