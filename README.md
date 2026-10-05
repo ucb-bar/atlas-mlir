@@ -1,5 +1,10 @@
 # Atlas MLIR hand-authored reference candidate
 
+The separately installable [Atlas native support package](merlin-support/native-compiler/README.md)
+binds a bounded Atlas target profile to Merlin's native selector and emits
+diagnostic instruction streams. It does not participate in this handwritten
+dialect's generation or verification path, and neither package invokes ACT.
+
 See the [numbered MLP and attention stage bundles](examples/handoff/README.md)
 for Atlas machine MLIR, LLVM MLIR, LLVM IR, RISC-V assembly, relocatable
 objects, linked ELF files, disassembly, and per-word operation maps. The
@@ -16,6 +21,9 @@ control-flow metadata without making it interpret virtual SSA.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
+The [integrated EE290 diagnostic](docs/native-support-ee290-diagnostic.md)
+records eight bounded Merlin-native program runs on a local, explicitly patched
+`EE290SimConfig` simulator with a compiled RISC-V evaluator host.
 
 This is an out-of-tree ODS/C++ dialect with a bounded virtual BF16/FP8 SSA slice
 and a selected-encoding **machine stage** for one Atlas RTL revision. It is a

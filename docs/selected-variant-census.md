@@ -4,7 +4,7 @@ The frozen ledger is [selected-variant-inventory.json](selected-variant-inventor
 It is an evidence index for the selected RTL commit, not a second executable
 semantic specification. Every row names one decoder mode, the hand dialect
 operation and mode attributes, selected RTL BitPat and decoder controls,
-inspected model class, architectural source files, parameter domains, observed
+inspected model class, architectural source files, parameter-domain candidates, observed
 tests, source discrepancies, and unresolved obligations.
 
 The selected source pins are `atlas-npu`
@@ -19,6 +19,18 @@ the same 99 names and declared mode attributes. Mutation tests show that a
 changed pattern, decoder control, added or removed mode, or changed fixture
 fails this check. None of these checks establishes runtime legality.
 
+The 19 parameter domains record units, finite values or intervals, and selected
+RTL source paths. Branch byte displacements, JAL byte displacements, and JALR
+word offsets are distinct domains because their encodings and units differ.
+SELI and SELD destination fields name E8M0 scale registers; they do not name
+scalar general-purpose registers. ECALL and EBREAK have fixed words and no
+operand parameter domain.
+The source-bound check requires the cited files at the pinned RTL revision.
+All 19 remain `reviewed=false`: they are inputs to a legality review, not
+admitted full-domain contracts. FP8 and BF16 register indices refer to one
+physical MREG file. The E8M0 scale-register and code ranges do not establish
+a model quantization policy.
+
 ## Denominators
 
 These counts are at the **decoder semantic-mode** level, not at the level of
@@ -31,14 +43,14 @@ run does not execute it.
 | Family | Required modes | Represented and word-emitted | Bounded semantic and standalone-core test | Remaining full-qualification blockers |
 | --- | ---: | ---: | ---: | ---: |
 | Memory transfer | 2 | 2 | 2 | 2 |
-| DMA | 4 | 4 | 3 | 4 |
+| DMA | 4 | 4 | 4 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
-| VPU arithmetic, reduction, pack | 25 | 25 | 20 | 25 |
+| VPU arithmetic, reduction, pack | 25 | 25 | 25 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 35 | 49 |
-| **Total** | **99** | **99** | **69** | **99** |
+| Scalar, control, CSR | 49 | 49 | 49 | 49 |
+| **Total** | **99** | **99** | **89** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -55,15 +67,35 @@ This resolves which layout the compiler should target for this revision; it
 does not change the software-admission or blocked counts above.
 
 The independently checked bounded modes are VLOAD/VSTORE raw-byte transfer,
-DMA load/store/wait, MXU0 reset and
+DMA load/store/wait/config, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
-VRELU, VRECIP, VEXP2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
-modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded LB/LBU/LH/LHU/LW/SB/SH/SW. The ledger links
+VRELU, VRECIP, VEXP, VEXP2, VSIN, VCOS, VTANH, VLOG2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
+modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BNE, BLT, BGE, BLTU,
+BGEU, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded
+LB/LBU/LH/LHU/LW/SB/SH/SW/SELD/SELI, ECALL, EBREAK, plus all six CSR read/modify/write modes. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
 transfer/CSR instructions appear in those programs but have no independent
 mode-specific reference test; they remain at zero in the semantic numerator.
+The four newly checked conditional modes use signed/unsigned discriminator
+panels, taken and untaken paths, and a one-slot side effect. See the
+[bounded branch observation](branch-mode-observation.md).
+The [CSR mode observation](csr-mode-observation.md) checks old-value readback,
+new debug-register contents, untouched sibling state, and the selected
+CSRRCI encoding. It does not qualify untested addresses or timing.
+The [scale and trap observation](scale-trap-mode-observation.md) checks SELI
+immediates, SELD low-byte VMEM reads through a base plus offset, untouched
+scale registers, and distinct ECALL/EBREAK halt reasons. It does not qualify
+all scale codes, register indices, VMEM addresses, or asynchronous collisions.
+The [VPU transcendental observation](vpu-transcendental-observation.md) checks
+five selected LUT modes on two full-pair BF16 input panels. Exact mathematical
+anchors and a one-BF16-code-step diagnostic comparison are separate checks;
+the latter does not define the selected RTL's complete numerical contract.
+The [DMA configuration observation](dma-config-observation.md) checks that
+selected RTL channel fields 0 and 7 update one global upper-address register
+with the scalar source value at issue. It does not qualify a following DMA
+transfer or all register/channel/timing combinations.
 The VLOAD/VSTORE test checks three full 1 KiB raw-byte panels copied through
 one MREG into two separate VMEM windows, with both DRAM outputs, original
 input, and a guard checked. See [the observation](vload-vstore-observation.md).
