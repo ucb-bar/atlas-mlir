@@ -1,0 +1,13 @@
+diff --git a/src/main/scala/trace/TraceEncoderController.scala b/src/main/scala/trace/TraceEncoderController.scala
+index f80f321..c5662fe 100644
+--- a/src/main/scala/trace/TraceEncoderController.scala
++++ b/src/main/scala/trace/TraceEncoderController.scala
+@@ -28 +28,3 @@ class TraceEncoderController(addr: BigInt, beatBytes: Int, hartId: Int)(implicit
+-    address = Seq(AddressSet(addr, 0xFF)),
++    // Saturn's vector frontend translates memory devices at page granularity.
++    // Reserve a page even though the implemented control registers use less.
++    address = Seq(AddressSet(addr, 0xFFF)),
+@@ -85 +87 @@ class TraceEncoderController(addr: BigInt, beatBytes: Int, hartId: Int)(implicit
+-}
+\ No newline at end of file
++}

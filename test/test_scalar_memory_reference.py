@@ -174,12 +174,18 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
             sys.path.remove(str(modelir))
 
     def test_ecall_immediately_after_delay_discards_pending_last_load(self) -> None:
-        keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT")
+        keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT",
+                "ATLAS_ASSEMBLER_ROOT")
         if not all(os.environ.get(key) for key in keys):
-            self.skipTest("set selected-source-linked ARC model, state and ModeLIR paths")
-        model, state, modelir = (
+            self.skipTest("set selected ARC, state, ModeLIR and assembler paths")
+        model, state, modelir, assembler_root = (
             pathlib.Path(os.environ[key]).resolve(strict=True) for key in keys
         )
+        spec = importlib.util.spec_from_file_location(
+            "atlas_selected_unsafe_scalar_assembler", assembler_root / "assembler.py")
+        assert spec is not None and spec.loader is not None
+        assembler = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(assembler)
         old_cwd = pathlib.Path.cwd()
         sys.path.insert(0, str(modelir))
         try:
@@ -196,10 +202,17 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
             try:
                 with tempfile.TemporaryDirectory() as temporary:
                     path = pathlib.Path(temporary) / "early_halt.mlir"
-                    source, _, expected = _program(
+                    source, assembly, expected = _program(
                         *PANELS[0], drain_before_halt=False
                     )
                     path.write_text(source)
+                    rejected = subprocess.run([str(BIN / "atlas-emit"), str(path)],
+                                              text=True, capture_output=True, check=False)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("trap immediately after nonzero DELAY", rejected.stderr)
+                    # Preserve the negative selected-core experiment with
+                    # independently assembled words, outside the safe OOT emitter.
+                    unsafe_words = tuple(assembler.assemble(assembly))
                     final: dict[str, int] = {}
 
                     def on_cycle(core: SelectedCore) -> None:
@@ -207,7 +220,7 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
                         final["x17"] = core.peek("scalar/regfile/regs_17")
 
                     result = cosim_atlas.run_program(
-                        model, state, _emitted(path), max_cycles=250, on_cycle=on_cycle,
+                        model, state, unsafe_words, max_cycles=250, on_cycle=on_cycle,
                     )
                     self.assertTrue(result.halted)
                     self.assertEqual(result.halt_reason, 2)

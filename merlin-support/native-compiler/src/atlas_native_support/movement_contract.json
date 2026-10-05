@@ -1,0 +1,22 @@
+{
+  "schema": "atlas.native_movement_contract.v1",
+  "scope": "diagnostic 128-byte raw movement on selected AtlasCore",
+  "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "source_sha256": {
+    "src/main/scala/atlas/scalar/Instructions.scala": "83dd5f1467a0293aff0d2c47ed52f98165660558a1ebe0add4b354d2a4c28265",
+    "src/main/scala/atlas/scalar/ScalarCore.scala": "3ae39e67520d7d684d3aaa57c060ca4f7b191f30be8b783ae3b0f4d8f0aeca3a",
+    "src/main/scala/atlas/common/VmemParams.scala": "46c82541e1c802d5843abf2c0c924d8a9fb37660ef5f8530d0d3866a63288109",
+    "src/main/scala/atlas/common/DmaParams.scala": "7d335eff289859e6d5a114c76593aa47bbcf24b521645f98268f981c9136d4ad",
+    "src/main/scala/diplomatic/memory/DMA.scala": "9b802f714f8afa08758ea97d2e92629645e99bf51d7d7af943fb87a93344dfad",
+    "src/main/scala/diplomatic/top/AtlasCore.scala": "cac182a402e37a27f688a1d714b238e7b4ad5189c0b19f3f3e21580e9e60c78b",
+    "baremetal/assembler.py": "fc3db08366d0fcba0c4ca4bd8eeef351a512145acc95ef92b6b299bbdf300bf6"
+  },
+  "block_bytes": 128,
+  "dma_beat_bytes": 32,
+  "scalar_word_bytes": 4,
+  "dram_window_bytes": 1048576,
+  "vmem_capacity_bytes": 1572864,
+  "dram_program_base": 2415919104,
+  "load_channel": 0,
+  "store_channel": 1
+}

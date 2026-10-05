@@ -13,6 +13,9 @@ The terminal negative variant removes the otherwise harmless ADDI x0, x0, 0
 between DELAY 8 and ECALL. The selected core then reports ECALL halt reason 2
 while `scalar/memLoadPending` is still 1 and the last LW destination remains
 zero. With the ADDI, that destination contains the expected adjacent word.
+The OOT emitter now rejects the unsafe DELAY-to-ECALL stream. The negative
+hardware test deliberately obtains its words from the selected assembler and
+checks the emitter refusal before executing those words on the core.
 `ScalarCore.scala` forms `ecall_ebreak` from decoded validity without gating it
 on `delay_stall`, and forms `halt_now` from `ecall_ebreak`. The test proves this
 interaction for the selected program; a compiler scheduler must drain required
