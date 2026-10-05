@@ -10,7 +10,9 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from check_variant_inventory import counts, load_inventory, validate_rows, validate_sources
+from check_variant_inventory import (
+    counts, load_inventory, validate_domains, validate_rows, validate_sources,
+)
 from test_dialect import scalar_variants, variants
 
 
@@ -27,12 +29,36 @@ def synthetic_sources(inventory: dict) -> tuple[str, str]:
 
 
 class VariantInventoryTest(unittest.TestCase):
+    def test_finite_parameter_domains_keep_pc_units_separate(self) -> None:
+        inventory = load_inventory()
+        validate_domains(inventory)
+        self.assertEqual(len(inventory["parameter_domains"]), 19)
+        self.assertFalse(any(domain["reviewed"] for domain in inventory["parameter_domains"].values()))
+        by_name = {row["id"]: row for row in inventory["variants"]}
+        self.assertIn("branch_byte_displacement", by_name["BEQ"]["parameter_domains"])
+        self.assertIn("jal_byte_displacement", by_name["JAL"]["parameter_domains"])
+        self.assertIn("jalr_word_offset", by_name["JALR"]["parameter_domains"])
+
+        changed = copy.deepcopy(inventory)
+        changed["parameter_domains"]["bf16_even_pair_0_62"]["intervals"][0]["max"] = 63
+        with self.assertRaisesRegex(ValueError, "invalid interval"):
+            validate_domains(changed)
+        changed = copy.deepcopy(inventory)
+        changed["parameter_domains"]["mreg_0_63"]["evidence_sources"] = ["../unselected/MregFile.scala"]
+        with self.assertRaisesRegex(ValueError, "invalid parameter evidence path"):
+            validate_domains(changed)
+
     def test_declared_modes_match_typed_dialect_fixtures(self) -> None:
         inventory = load_inventory()
         by_name = {row["id"]: row for row in inventory["variants"]}
         fixtures = {name: (op, attrs) for op, attrs, name in variants() + scalar_variants()}
         self.assertEqual(len(by_name), 99)
         self.assertEqual(set(by_name), set(fixtures))
+        self.assertEqual(by_name["ECALL"]["parameter_domains"], [])
+        self.assertEqual(by_name["EBREAK"]["parameter_domains"], [])
+        self.assertIn("e8m0_scale_reg_0_31", by_name["SELD"]["parameter_domains"])
+        self.assertIn("e8m0_scale_reg_0_31", by_name["SELI"]["parameter_domains"])
+        self.assertNotIn("scalar_gpr_0_31", by_name["SELI"]["parameter_domains"])
         for name, (op, attrs) in fixtures.items():
             with self.subTest(name=name):
                 row = by_name[name]
@@ -44,7 +70,7 @@ class VariantInventoryTest(unittest.TestCase):
         self.assertEqual(counts(inventory), {
             "required": 99, "software_admitted": 0, "represented": 99,
             "word_emitted": 99, "llvm_word_emitted": 99,
-            "independent_semantic_test": 69, "standalone_core_executed": 69,
+            "independent_semantic_test": 99, "standalone_core_executed": 99,
             "blocked": 99, "denominator": 99,
         })
 
@@ -67,6 +93,10 @@ class VariantInventoryTest(unittest.TestCase):
         removed["variants"].pop()
         with self.assertRaisesRegex(ValueError, "99 frozen"):
             validate_rows(removed, instructions, decode)
+        missing_domain = copy.deepcopy(inventory)
+        next(row for row in missing_domain["variants"] if row["id"] == "SELI")["parameter_domains"] = []
+        with self.assertRaisesRegex(ValueError, "variable encoding lacks parameter domain"):
+            validate_rows(missing_domain, instructions, decode)
         added = decode + "\nNEW_OPCODE -> List(Y)\n"
         with self.assertRaisesRegex(ValueError, "required variant drift"):
             validate_rows(inventory, instructions, added)

@@ -1,0 +1,9 @@
+{
+  "fixed_inputs": {
+    "source": 0
+  },
+  "fixed_outputs": [
+    8,
+    16
+  ]
+}
