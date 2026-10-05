@@ -16,12 +16,22 @@ It does not qualify integrated EE290 timing, a Zephyr driver, complete model
 invocations, or all Atlas instructions. An emitted `program.bin` is an Atlas
 instruction stream, not a C-callable host ELF.
 
+The installed smoke also compiles a public two-output graph in which one BF16
+input feeds LOG2 and SQRT. It checks that both outputs receive distinct fixed
+addresses and that swapping the requested output order swaps their bindings.
+This is compilation and ABI evidence only; that new graph has not been
+executed on the selected standalone core or integrated EE290 system.
+
 `src/atlas_native_support/source_import.json` records hashes of the retained
-diagnostic wheel used to recover this source. The import changes the package
-version and the exact
-Merlin revision pin. The checked RTL revision, arithmetic contracts, source
-hashes, and solver/Cargo pins remain in the package data. Review a new pin
-against actual compiler behavior before changing it.
+diagnostic wheel used to recover this source. The import changed the package
+version and its Merlin revision pin. Version 0.0.5 pins the squashed Merlin
+Atlas integration commit. Its selector, extractor, allocator, Rust bridge,
+Cargo lock, and selected Atlas software specification are byte-identical to
+the previous `1b7517c` pin. Merlin's snapshot and CLI now support rebuilding
+the packaged bridge and accepting parsed Linalg.
+The checked RTL revision, arithmetic contracts, and solver/Cargo pins remain
+in the package data. This is a new diagnostic package identity, not a
+retroactive change to earlier run receipts.
 
 Install this package into the same environment as the selected Merlin commit:
 
@@ -37,9 +47,8 @@ provides fixed external addresses, not runtime tensor contents or goldens.
 
 ```sh
 merlin-targetgen native-build --engine merlin_native --support atlas_tensor \
-  --crate "$MERLIN_ROOT/src/merlin/semantic_compiler/egg_bridge" \
   --cargo-target-dir "$ARTIFACT_ROOT/cargo" \
-  --source-revision 1b7517c022727499f3beb9dba64745e445c710b4 \
+  --source-revision 68f4d2e4d91d4cb10ec462a085e53e6cc661d2dd \
   --out "$ARTIFACT_ROOT/snapshot"
 
 merlin-targetgen native-compile --engine merlin_native \
@@ -57,7 +66,7 @@ qualified Atlas platform; successful compilation alone is not execution.
 
 ## Host build binding
 
-Version 0.0.4 includes `runtime/atlas_host.{c,h}` and
+Version 0.0.5 retains `runtime/atlas_host.{c,h}` and
 `atlas_native_support.host_build.ee290_baremetal_recipe`. The latter supplies
 Atlas/EE290 flags, the C driver, and the selected linker files to Merlin's
 shared `HarnessBuildRecipe`. The caller selects the RISC-V compiler,

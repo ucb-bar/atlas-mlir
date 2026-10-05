@@ -60,11 +60,12 @@ class NativeBindingTest(unittest.TestCase):
         record = json.loads(package.joinpath("source_import.json").read_text())
         self.assertEqual(record["schema"], "atlas.native_support_source_import.v1")
         modified = record.get("modified_after_import", {})
-        self.assertEqual(set(modified), {"atlas_native_support/dialect_plan.py"})
+        self.assertEqual(
+            set(modified),
+            {"atlas_native_support/dialect_plan.py", "atlas_native_support/requirements.json"},
+        )
         unchanged = 0
         for relative, digest in record["source_file_sha256"].items():
-            if Path(relative).name == "requirements.json":
-                continue
             actual = hashlib.sha256(
                 package.joinpath(Path(relative).name).read_bytes()
             ).hexdigest()
@@ -107,7 +108,6 @@ class NativeBindingTest(unittest.TestCase):
             snapshot = work / "snapshot"
             built = _command(
                 "native-build", "--engine", "merlin_native", "--support", "atlas_tensor",
-                "--crate", merlin_root / "src/merlin/semantic_compiler/egg_bridge",
                 "--cargo-target-dir", cargo, "--source-revision", revision,
                 "--out", snapshot,
             )
@@ -116,12 +116,15 @@ class NativeBindingTest(unittest.TestCase):
 
             request = FIXTURES / "log2-request.json"
             abi = FIXTURES / "log2-abi.json"
-            for name in ("log2", "sqrt", "exp2", "minmax"):
+            for name in ("log2", "sqrt", "exp2", "minmax", "shared-log2-sqrt"):
                 with self.subTest(name=name):
                     artifact = work / f"{name}-program"
                     selected_request = FIXTURES / f"{name}-request.json"
                     status_file = work / f"{name}-status.json"
-                    selected_abi = FIXTURES / ("minmax-abi.json" if name == "minmax" else "log2-abi.json")
+                    selected_abi = FIXTURES / (
+                        f"{name}-abi.json" if name in {"minmax", "shared-log2-sqrt"}
+                        else "log2-abi.json"
+                    )
                     search_limits = (
                         ["--search-limits", str(FIXTURES / "minmax-search-limits.json")]
                         if name == "minmax" else []
@@ -144,6 +147,53 @@ class NativeBindingTest(unittest.TestCase):
                     self.assertGreater(len(binary), 0)
                     if name == "minmax":
                         self.assertGreater(manifest["selected_instructions"], 1)
+                    if name == "shared-log2-sqrt":
+                        plan = json.loads((artifact / "execution_plan.json").read_text())
+                        self.assertEqual([row["source"] for row in plan["inputs"]], ["source"])
+                        self.assertEqual(
+                            [row["source"] for row in plan["outputs"]],
+                            ["log2", "sqrt"],
+                        )
+                        self.assertEqual(
+                            [row["byte_address"] for row in plan["outputs"]],
+                            [0x90002000, 0x90004000],
+                        )
+                        self.assertEqual(
+                            [row["byte_length"] for row in plan["outputs"]],
+                            [2048, 2048],
+                        )
+                        self.assertGreaterEqual(manifest["selected_instructions"], 2)
+
+                        swapped_request = json.loads(selected_request.read_text())
+                        swapped_request["outputs"].reverse()
+                        swapped_request["source_identity"] = "public-swapped-bf16-outputs"
+                        swapped_path = work / "swapped-request.json"
+                        swapped_path.write_text(json.dumps(swapped_request))
+                        swapped_artifact = work / "swapped-program"
+                        swapped_status = work / "swapped-status.json"
+                        swapped = _command(
+                            "native-compile", "--engine", "merlin_native",
+                            "--support", "atlas_tensor", "--snapshot", snapshot,
+                            "--request", swapped_path, "--abi", selected_abi,
+                            "--target-source", atlas_root, "--mode", "strict-native",
+                            "--out", swapped_artifact, "--status-file", swapped_status,
+                        )
+                        self.assertEqual(swapped.returncode, 0, swapped.stderr + swapped.stdout)
+                        swapped_plan = json.loads(
+                            (swapped_artifact / "execution_plan.json").read_text()
+                        )
+                        self.assertEqual(
+                            [row["source"] for row in swapped_plan["outputs"]],
+                            ["sqrt", "log2"],
+                        )
+                        self.assertEqual(
+                            [row["byte_address"] for row in swapped_plan["outputs"]],
+                            [0x90002000, 0x90004000],
+                        )
+                        self.assertNotEqual(
+                            manifest["request_digest"],
+                            json.loads((swapped_artifact / "manifest.json").read_text())["request_digest"],
+                        )
 
             changed = json.loads(request.read_text())
             changed["target_identity"] = "foreign-target"

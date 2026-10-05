@@ -7,6 +7,10 @@
     "atlas_native_support/dialect_plan.py": {
       "sha256": "0c0b1c216107723f0e84850cf0a989899150732c96ef539d6af0b900cbc77df1",
       "reason": "Qualify custom Atlas value types and place machine effects inside checked MLIR signatures"
+    },
+    "atlas_native_support/requirements.json": {
+      "sha256": "9eab096f7b784220afe156cc55066011e6998f71a3e1cb5ed3a46392cdde9722",
+      "reason": "Pin the reviewed one-commit Merlin Atlas integration with packaged Rust bridge; selector, extractor, allocator, and Cargo lock match the previous selected revision"
     }
   },
   "schema": "atlas.native_support_source_import.v1",
