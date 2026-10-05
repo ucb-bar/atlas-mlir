@@ -7,6 +7,74 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 class Atlas_MachineOp<string mnemonic> :
     Atlas_Op<mnemonic, [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]>;
 
+// A small pre-allocation instruction stage.  SSA values express virtual tensor
+// def/use; these operations are not encodable until physical placement and
+// machine-state materialization have been checked.
+def Atlas_VirtualStartOp : Atlas_Op<"virtual_start"> {
+  let summary = "Start one pre-allocation Atlas region";
+  let results = (outs Atlas_VirtualStateType:$next);
+}
+
+def Atlas_VirtualInputBF16Op :
+    Atlas_Op<"virtual_input_bf16",
+             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Read one externally declared BF16 tile into a virtual value";
+  let arguments = (ins Atlas_VirtualStateType:$state, I32Attr:$index);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualBF16Type:$value);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualInputFP8Op :
+    Atlas_Op<"virtual_input_fp8",
+             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Read one externally declared FP8 tile into a virtual value";
+  let arguments = (ins Atlas_VirtualStateType:$state, I32Attr:$index);
+  let results = (outs Atlas_VirtualStateType:$next,
+                      Atlas_VirtualFP8Type:$value);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul", [Pure]> {
+  let summary = "Reset one selected MXU with 32 by 32 FP8 operands";
+  let arguments = (ins Atlas_VirtualFP8Type:$activation,
+                       Atlas_VirtualFP8Type:$weight, I32Attr:$unit);
+  let results = (outs Atlas_VirtualBF16Type:$result);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8", [Pure]> {
+  let summary = "Convert a logical BF16 tile to a logical FP8 MXU operand tile";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
+  let results = (outs Atlas_VirtualFP8Type:$result);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualVPUUnaryOp : Atlas_Op<"virtual_vpu_unary", [Pure]> {
+  let summary = "BF16 VPU unary candidate with virtual register def/use";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, StrAttr:$kind);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualVPUBinaryOp : Atlas_Op<"virtual_vpu_binary", [Pure]> {
+  let summary = "BF16 VPU binary candidate with virtual register def/use";
+  let arguments = (ins Atlas_VirtualBF16Type:$lhs,
+                       Atlas_VirtualBF16Type:$rhs, StrAttr:$kind);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualOutputBF16Op :
+    Atlas_Op<"virtual_output_bf16",
+             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Write a virtual BF16 tile to an external output boundary";
+  let arguments = (ins Atlas_VirtualStateType:$state,
+                       Atlas_VirtualBF16Type:$value, I32Attr:$index);
+  let results = (outs Atlas_VirtualStateType:$next);
+  let hasVerifier = 1;
+}
+
 // A state token makes operations non-reorderable, including asynchronous launches.
 def Atlas_StartOp : Atlas_Op<"start"> {
   let summary = "Start one physical instruction stream";

@@ -11,20 +11,117 @@ timing, or integrated SoC qualification.
 
 ## Common contract
 
-`!atlas.state` is an ordering token, not a tensor. `atlas.start` produces the
-initial state and emits no word. Each other operation consumes one state and
-returns the next. The encoder requires one flat linear chain, at least one
-machine operation, and one nonredirecting instruction after each branch or
-jump for the selected RTL's delay slot. Machine operations currently declare
-conservative physical-state read/write effects. Physical registers and slots
-are attributes, so MLIR SSA does not yet express their dataflow.
+The dialect has two checked stages. `!atlas.virtual_bf16` and
+`!atlas.virtual_fp8` are unallocated 32×32 tiles. A name such as `%t1` identifies an MLIR SSA *value*;
+the spelling and number do not select Atlas register 1. In this narrow
+pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads and
+writes, with names such as `%io1`. In the physical examples, `%s1` is an SSA
+machine-state token, not scalar register 1. Pure VPU
+candidate operations express their tensor dependencies through `%t` operands.
+The `--verify-atlas-virtual-stream` pass checks the virtual state chain,
+distinct output indexes, and that no physical operation is mixed into it.
+For virtual control flow, the tool uses MLIR `func.func`, `cf.br`, and
+`cf.cond_br`. SSA values merge through successor block arguments, including
+loop-carried tiles and the state token; there is no separate `phi` operation.
+The verifier checks each edge passes the current state, MLIR checks ordinary
+SSA dominance and block-argument types, and the current CFG slice places all
+external outputs in one return block. Its verifier does not choose an issue
+order or prove numerical equivalence. See the
+[virtual SSA interpreter contract](virtual-ssa-interpreter-contract.md) for
+the incoming-edge binding rule, loop visits, state tokens, and interpreter
+test cases.
+
+After allocation, `!atlas.state` is the *physical* instruction-order token.
+`atlas.start` produces it and emits no word. Each machine operation consumes
+one state and returns the next. The encoder requires one flat linear chain,
+at least one machine operation, and one nonredirecting instruction after each
+branch or jump for the selected RTL's delay slot. Machine operations declare
+conservative physical-state read/write effects. Their physical registers and
+slots are checked integer attributes. This is intentional: after allocation,
+the chosen physical numbers and aliases must be visible to the encoder.
 
 The machine register file has 64 registers of 1,024 bytes. BF16 tiles occupy
 even-based pairs in `0..62`; FP8 tiles use one register in `0..63`. Weight and
 accumulator slots `0..1` belong to a specific MXU `0` or `1`. Scalar registers
-are `0..31`. The parser/printer uses MLIR generic operation syntax. This is
-machine IR; semantic tensor operations, dynamic shapes, host calls, and a
-callable ABI are absent.
+are `0..31`. The parser/printer uses MLIR generic operation syntax. Semantic
+tensor operations, dynamic shapes, host calls, and a callable ABI are absent.
+
+## Pre-allocation BF16/FP8 SSA slice
+
+The following operations provide a small, concrete hand-authored example of
+virtual tensor-register def/use. They are instruction candidates, not an
+automatic semantic selector. Boundary indexes name declared external
+input/output tiles. One BF16 tile requires an even-based *pair* of 1,024-byte
+physical registers on the selected RTL. The bounded CFG materializer below
+chooses the pair and stages these tiles through the selected VMEM layout.
+
+| Operation | Operands and result | Obligation |
+| --- | --- | --- |
+| `atlas.virtual_start` | `() -> !atlas.virtual_state` | Begin one virtual region; no word. |
+| `atlas.virtual_input_bf16` | state, nonnegative input index -> next state, `!atlas.virtual_bf16` | Read a declared external tile; memory-read effect. |
+| `atlas.virtual_input_fp8` | state, nonnegative input index -> next state, `!atlas.virtual_fp8` | Read a declared 32×32 FP8 tile; memory-read effect. |
+| `atlas.virtual_vpu_unary` | `!atlas.virtual_bf16`, selected unary kind -> `!atlas.virtual_bf16` | Preserve the chosen operation and SSA dependency; no physical register assigned. |
+| `atlas.virtual_vpu_binary` | two `!atlas.virtual_bf16` values, selected binary kind -> `!atlas.virtual_bf16` | Both sources remain explicit, including shared uses. |
+| `atlas.virtual_mxu_matmul` | two `!atlas.virtual_fp8` values, unit `0` or `1` -> `!atlas.virtual_bf16` | One 32×32 reset contraction; the unit is part of the numerical semantics. |
+| `atlas.virtual_pack_fp8` | `!atlas.virtual_bf16`, E8M0 scale code -> `!atlas.virtual_fp8` | Logical row-major FP8 tile; the current physical lowering admits code `127` only and explicitly relayouts the selected pack result. |
+| `atlas.virtual_output_bf16` | state, `!atlas.virtual_bf16`, nonnegative output index -> next state | Write a declared output tile; memory-write effect. |
+
+See [`virtual_bf16_ssa.mlir`](../test/examples/virtual_bf16_ssa.mlir): one
+input `%t0` feeds both a unary operation and a later binary operation; two
+results are retained. That shared use creates a liveness requirement. The
+state `%io1` orders external I/O, whereas `%t0` carries tensor dataflow.
+[`virtual_bf16_cfg.mlir`](../test/examples/virtual_bf16_cfg.mlir) shows a
+diamond merge and a loop. MLIR may rename the textual `%t` and block labels
+when printing; SSA identity is the value and CFG edge, not the spelling.
+The CFG verifier accepts only i1/i32 controls and virtual BF16 tiles in block
+arguments, a single `virtual_start`, one return block, and boundary outputs in
+that block. The implemented lowering accepts exactly one such function per
+module. The function has explicit DRAM input/output base attributes and, for
+runtime scalar arguments, a separate control mailbox base. Each base is a
+1,024-byte-aligned 32-bit address; tile indexes identify 2,048-byte BF16
+tiles. The control mailbox holds i1/i32 arguments as consecutive little-endian
+32-bit words. Lowering records their chosen scalar registers in
+`atlas.scalar_arg_regs`. This is a reset-entry program ABI for the selected
+standalone core, not a C-callable function ABI.
+
+The implemented BF16-only slice colors CFG-live virtual BF16 tiles onto 31 usable
+even-based register pairs and i1/i32 controls onto scalar x10..x26. Pair 62
+and x27 are reserved for parallel-copy cycles. It reuses a location when the
+source SSA value is dead, checks coloring against its interference graph, and
+rejects excess pressure. Block arguments become edge copies; a cycle is
+broken through the reserved temporary. VMEM bank 0 stages input tiles and
+bank 1 stages outputs, with DMA completion before reads and stores. Fixed
+serialization adds diagnostic delays after VPU and VMEM operations. The
+generated-stream checker enforces those waits and the selected one-slot
+branch convention before word emission or LLVM lowering. The stage does not
+solve alternate scheduling, layer tiling, or a qualified latency model.
+Generated VPU execution currently admits unary `mov`/`relu` and binary `add`;
+other virtual modes receive an explicit
+qualification error. `add` uses the selected VPU's FP32 sum followed by a
+BF16 bit chop; it is not a generic BF16 round-to-nearest-even operation.
+With FP8 values present, it reserves tensor registers 0..31 for FP8 and pairs 32..60
+for BF16, with pair 62 as a temporary. A pack reserves scalar x10..x17 for
+its VMEM relayout and colors runtime controls in x18..x26. The external input
+ABI uses 2,048-byte slots; a 32×32 FP8 tile occupies the first 1,024 bytes of
+its slot. Pack scratch uses VMEM words 32768..33279 and currently requires
+input indexes below 64. These are conservative, explicit physical partitions,
+not a general alias-aware allocator. Changing issue order would require
+recomputing live ranges and checking the physical assignment again.
+
+[`virtual_fp8_two_layer_mlp.mlir`](../test/examples/virtual_fp8_two_layer_mlp.mlir)
+is a fixed 32×32 virtual SSA example: MXU0, BF16 ReLU, unit-scale pack,
+MXU1, BF16 output. Its output is checked through selected standalone-core
+execution with changed runtime weights. It has no bias, tails, Linalg import,
+or captured model precision transformation.
+[`virtual_fp8_two_layer_mlp_bias.mlir`](../test/examples/virtual_fp8_two_layer_mlp_bias.mlir)
+adds BF16 VPU bias addition after each MXU. Its boundary biases are already
+broadcast into physical 32×32 tiles; capturing a vector bias and preparing
+that tile are separate frontend/ABI obligations.
+
+```sh
+build/bin/atlas-opt --verify-atlas-virtual-stream \
+  test/examples/virtual_bf16_ssa.mlir
+```
 
 ## Every current operation
 
@@ -71,17 +168,28 @@ between selected RTL, architecture text, and the inspected model.
 
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
+| `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
+| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
+| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, same-channel DMA waits, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
 | `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |
 | `--convert-atlas-to-llvm` | `atlas-opt` module pass | Replace checked stream with `llvm.func @atlas_program()` containing one side-effecting, ordered `llvm.inline_asm` word block and `llvm.return`. This is a reset-entry body, not a C-callable ABI. |
 | `atlas-emit` | tool, not pass | Emit words or `--map-json` sidecar with source operation, attributes, word index, branch/delay-slot mapping, conservative effects, and `availability: unknown`. |
+| `atlas-emit --program-json` | tool mode, not pass | Emit the checked physical words with typed fields and selected-PC control metadata for a separate functional model. It does not define numerical or timing semantics. |
 | `atlas-boot-pack` | tool, not pass | Package one checked reset-entry ELF `.text` section with a narrow authored memory layout and manifest. |
 | `export_llvm_handoff.py` | exporter, not pass | Produce numbered Atlas/LLVM MLIR, LLVM IR, RV32 assembly, relocatable object, linked ELF, disassembly, word map, and hashes for the bounded MLP/attention fixtures. |
 
-No timing annotation pass, delay scheduler, instruction selector, allocator,
-Linalg-to-Atlas pass, or general callable ABI is implemented in this hand OOT
-repository. Delays in the example programs are authored diagnostic spacing.
+No general timing annotation pass, instruction selector, whole-target
+allocator, Linalg-to-Atlas pass, or callable ABI is implemented here. The
+generated virtual path uses conservative serial diagnostic spacing; the
+other physical example programs retain authored delays. Focused selected-core
+tests cover a long SSA chain with physical pair reuse, a swap backedge,
+branch merges, runtime mailbox control, two ordered outputs, actual
+LLVM-produced object words, and memory guards. A 32-tile simultaneously live
+case fails with an explicit
+31-pair pressure diagnostic. These tests do not establish full target or SoC
+qualification.
 
 ## Why the LLVM handoff uses inline assembly
 
@@ -142,8 +250,9 @@ Atlas operation attributes to binary offsets; an LLVM-call transformation
 that changes the stream also needs to update that map. The final block does
 not retain individual operation attributes.
 
-The current IR is a **flat word stream** with branch offsets, not a control-flow
-graph. A scheduler must account for backward branches and multiple executions
+The physical IR is a **flat word stream** with branch offsets; the preceding
+virtual IR has an MLIR control-flow graph. A future general scheduler must
+account for backward branches and multiple executions
 of one static operation; the linear state token alone does not prove a
 cross-iteration dependency safe. The verifier checks encoding and in-block
 targets, but it does not validate an annotation's timing claim. Their pass

@@ -1,0 +1,1600 @@
+{
+  "entry_word_index": 0,
+  "instructions": [
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 28,
+        "immediate": 1,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00100e13",
+      "word_index": 0,
+      "word_u32": 1052179
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 5,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000293",
+      "word_index": 1,
+      "word_u32": 659
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base_reg": 5,
+        "channel": 0
+      },
+      "operation": "atlas.dma_config",
+      "word_hex": "0002807f",
+      "word_index": 2,
+      "word_u32": 163967
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base_reg": 5,
+        "channel": 1
+      },
+      "operation": "atlas.dma_config",
+      "word_hex": "0002907f",
+      "word_index": 3,
+      "word_u32": 168063
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 2,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000113",
+      "word_index": 4,
+      "word_u32": 1073742099
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 6,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000313",
+      "word_index": 5,
+      "word_u32": 787
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 589824,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900000b7",
+      "word_index": 6,
+      "word_u32": 2415919287
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 1
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00008093",
+      "word_index": 7,
+      "word_u32": 32915
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0,
+        "direction": "load",
+        "dram": 1,
+        "reg": 6,
+        "size": 2
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 8,
+      "word_u32": 2130811
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 9,
+      "word_u32": 33554559
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 6,
+        "dst": 1,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00030087",
+      "word_index": 10,
+      "word_u32": 196743
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vload_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 11,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 6,
+        "immediate": 512,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "20000313",
+      "word_index": 12,
+      "word_u32": 536871699
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 589825,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900010b7",
+      "word_index": 13,
+      "word_u32": 2415923383
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": -2048,
+        "kind": "addi",
+        "src": 1
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "80008093",
+      "word_index": 14,
+      "word_u32": 2147516563
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0,
+        "direction": "load",
+        "dram": 1,
+        "reg": 6,
+        "size": 2
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 15,
+      "word_u32": 2130811
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 16,
+      "word_u32": 33554559
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 6,
+        "dst": 2,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00030107",
+      "word_index": 17,
+      "word_u32": 196871
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vload_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 18,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 6,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000313",
+      "word_index": 19,
+      "word_u32": 1073742611
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 589825,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900010b7",
+      "word_index": 20,
+      "word_u32": 2415923383
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 1
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00008093",
+      "word_index": 21,
+      "word_u32": 32915
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0,
+        "direction": "load",
+        "dram": 1,
+        "reg": 6,
+        "size": 2
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0020837b",
+      "word_index": 22,
+      "word_u32": 2130811
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 0
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 23,
+      "word_u32": 33554559
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 6,
+        "dst": 0,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00030007",
+      "word_index": 24,
+      "word_u32": 196615
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vload_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 25,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "kind": "weight_fp8",
+        "slot": 0,
+        "src": 2,
+        "unit": 0
+      },
+      "operation": "atlas.mxu_push",
+      "word_hex": "00004077",
+      "word_index": 26,
+      "word_u32": 16503
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_weight_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 27,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "acc_slot": 0,
+        "accumulate": false,
+        "src": 1,
+        "unit": 0,
+        "weight_slot": 0
+      },
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "14002077",
+      "word_index": 28,
+      "word_u32": 335552631
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_matmul_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 29,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 32,
+        "format": "bf16",
+        "scale_reg": 0,
+        "slot": 0,
+        "unit": 0
+      },
+      "operation": "atlas.mxu_pop",
+      "word_hex": "10001077",
+      "word_index": 30,
+      "word_u32": 268439671
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_readout_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 31,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 34,
+        "kind": "relu",
+        "src": 32
+      },
+      "operation": "atlas.vpu_unary",
+      "word_hex": "90041157",
+      "word_index": 32,
+      "word_u32": 2416185687
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vpu_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 33,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 0,
+        "dst": 3,
+        "kind": "seli",
+        "offset": 127
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "07f07183",
+      "word_index": 34,
+      "word_u32": 133198211
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "direction": "bf16_to_fp8",
+        "dst": 1,
+        "scale_reg": 3,
+        "src": 34
+      },
+      "operation": "atlas.vpu_pack",
+      "word_hex": "891060d7",
+      "word_index": 35,
+      "word_u32": 2299551959
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vpu_pack_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 36,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 8,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00008437",
+      "word_index": 37,
+      "word_u32": 33847
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 8
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00040413",
+      "word_index": 38,
+      "word_u32": 263187
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 8,
+        "format": "raw",
+        "offset": 0,
+        "src": 1
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00042087",
+      "word_index": 39,
+      "word_u32": 270471
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "pack_vstore_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 40,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 10,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020537",
+      "word_index": 41,
+      "word_u32": 132407
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 10,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 10
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00050513",
+      "word_index": 42,
+      "word_u32": 328979
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 11,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "000205b7",
+      "word_index": 43,
+      "word_u32": 132535
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 11,
+        "immediate": 512,
+        "kind": "addi",
+        "src": 11
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "20058593",
+      "word_index": 44,
+      "word_u32": 537232787
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 12,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020637",
+      "word_index": 45,
+      "word_u32": 132663
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 12,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 12
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40060613",
+      "word_index": 46,
+      "word_u32": 1074136595
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 13,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000693",
+      "word_index": 47,
+      "word_u32": 1683
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 14,
+        "immediate": 32,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "02000713",
+      "word_index": 48,
+      "word_u32": 33556243
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 0
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00052803",
+      "word_index": 49,
+      "word_u32": 337923
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 50,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 0,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062023",
+      "word_index": 51,
+      "word_u32": 17178659
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 0
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0005a883",
+      "word_index": 52,
+      "word_u32": 370819
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 53,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 16,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162823",
+      "word_index": 54,
+      "word_u32": 18229283
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 4
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00452803",
+      "word_index": 55,
+      "word_u32": 4532227
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 56,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 4,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062223",
+      "word_index": 57,
+      "word_u32": 17179171
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 4
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0045a883",
+      "word_index": 58,
+      "word_u32": 4565123
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 59,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 20,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162a23",
+      "word_index": 60,
+      "word_u32": 18229795
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 8
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00852803",
+      "word_index": 61,
+      "word_u32": 8726531
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 62,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 8,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062423",
+      "word_index": 63,
+      "word_u32": 17179683
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 8
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0085a883",
+      "word_index": 64,
+      "word_u32": 8759427
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 65,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 24,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162c23",
+      "word_index": 66,
+      "word_u32": 18230307
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 12
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c52803",
+      "word_index": 67,
+      "word_u32": 12920835
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 68,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 12,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062623",
+      "word_index": 69,
+      "word_u32": 17180195
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 12
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c5a883",
+      "word_index": 70,
+      "word_u32": 12953731
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 8,
+      "fields": {
+        "atlas.delay_reason": "scalar_load_completion",
+        "cycles": 8
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00801067",
+      "word_index": 71,
+      "word_u32": 8392807
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 12,
+        "kind": "sw",
+        "offset": 28,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162e23",
+      "word_index": 72,
+      "word_u32": 18230819
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 10,
+        "immediate": 16,
+        "kind": "addi",
+        "src": 10
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "01050513",
+      "word_index": 73,
+      "word_u32": 17106195
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 11,
+        "immediate": 16,
+        "kind": "addi",
+        "src": 11
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "01058593",
+      "word_index": 74,
+      "word_u32": 17139091
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 12,
+        "immediate": 32,
+        "kind": "addi",
+        "src": 12
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "02060613",
+      "word_index": 75,
+      "word_u32": 33949203
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 13,
+        "immediate": 1,
+        "kind": "addi",
+        "src": 13
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00168693",
+      "word_index": 76,
+      "word_u32": 1476243
+    },
+    {
+      "control": {
+        "delay_slot_word_index": 78,
+        "fallthrough_word_index": 79,
+        "kind": "conditional_direct",
+        "target_word_index": 49
+      },
+      "fields": {
+        "kind": "blt",
+        "lhs": 13,
+        "offset_bytes": -56,
+        "rhs": 14
+      },
+      "operation": "atlas.branch",
+      "word_hex": "fce6c4e3",
+      "word_index": 77,
+      "word_u32": 4242982115
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "delay_slot_for_word_index": 77,
+      "fields": {
+        "dst": 0,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000013",
+      "word_index": 78,
+      "word_u32": 19
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "scalar_relayout_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 79,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 6,
+        "immediate": 8,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00008337",
+      "word_index": 80,
+      "word_u32": 33591
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 6,
+        "immediate": 256,
+        "kind": "addi",
+        "src": 6
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "10030313",
+      "word_index": 81,
+      "word_u32": 268632851
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 6,
+        "dst": 1,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00030087",
+      "word_index": 82,
+      "word_u32": 196743
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "pack_relayout_vload_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 83,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "kind": "weight_fp8",
+        "slot": 0,
+        "src": 0,
+        "unit": 1
+      },
+      "operation": "atlas.mxu_push",
+      "word_hex": "02000077",
+      "word_index": 84,
+      "word_u32": 33554551
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_weight_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 85,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "acc_slot": 0,
+        "accumulate": false,
+        "src": 1,
+        "unit": 1,
+        "weight_slot": 0
+      },
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "16002077",
+      "word_index": 86,
+      "word_u32": 369107063
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_matmul_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 87,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 32,
+        "format": "bf16",
+        "scale_reg": 0,
+        "slot": 0,
+        "unit": 1
+      },
+      "operation": "atlas.mxu_pop",
+      "word_hex": "12001077",
+      "word_index": 88,
+      "word_u32": 301994103
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "mxu_readout_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 89,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 16,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00010437",
+      "word_index": 90,
+      "word_u32": 66615
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 8
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00040413",
+      "word_index": 91,
+      "word_u32": 263187
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 8,
+        "format": "raw",
+        "offset": 0,
+        "src": 32
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00043007",
+      "word_index": 92,
+      "word_u32": 274439
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vstore_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 93,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 3,
+        "immediate": 589826,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900021b7",
+      "word_index": 94,
+      "word_u32": 2415927735
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 3,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 3
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00018193",
+      "word_index": 95,
+      "word_u32": 98707
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 1,
+        "direction": "store",
+        "dram": 3,
+        "reg": 8,
+        "size": 2
+      },
+      "operation": "atlas.dma",
+      "word_hex": "022411fb",
+      "word_index": 96,
+      "word_u32": 35918331
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 1
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 97,
+      "word_u32": 33558655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 16,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00010437",
+      "word_index": 98,
+      "word_u32": 66615
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 8,
+        "immediate": 256,
+        "kind": "addi",
+        "src": 8
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "10040413",
+      "word_index": 99,
+      "word_u32": 268698643
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "base": 8,
+        "format": "raw",
+        "offset": 0,
+        "src": 33
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00043087",
+      "word_index": 100,
+      "word_u32": 274567
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 256,
+      "fields": {
+        "atlas.delay_reason": "vstore_completion",
+        "cycles": 256
+      },
+      "operation": "atlas.delay",
+      "word_hex": "10001067",
+      "word_index": 101,
+      "word_u32": 268439655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 3,
+        "immediate": 589826,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900021b7",
+      "word_index": 102,
+      "word_u32": 2415927735
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 3,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 3
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40018193",
+      "word_index": 103,
+      "word_u32": 1073840531
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 1,
+        "direction": "store",
+        "dram": 3,
+        "reg": 8,
+        "size": 2
+      },
+      "operation": "atlas.dma",
+      "word_hex": "022411fb",
+      "word_index": 104,
+      "word_u32": 35918331
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "channel": 1
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 105,
+      "word_u32": 33558655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "dst": 1,
+        "immediate": 1,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00100093",
+      "word_index": 106,
+      "word_u32": 1048723
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "address": 3088,
+        "dst": 0,
+        "kind": "rrw",
+        "source": 1
+      },
+      "operation": "atlas.csr",
+      "word_hex": "c1009073",
+      "word_index": 107,
+      "word_u32": 3238039667
+    },
+    {
+      "control": {
+        "kind": "trap"
+      },
+      "fields": {
+        "kind": "ecall"
+      },
+      "operation": "atlas.trap",
+      "word_hex": "00000073",
+      "word_index": 108,
+      "word_u32": 115
+    }
+  ],
+  "pc_unit": "instruction_word",
+  "schema": "atlas.physical_program.v1",
+  "selected_rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "timing_scope": "explicit_delay_only; other availability unqualified",
+  "word_count": 109,
+  "word_endianness": "little"
+}
