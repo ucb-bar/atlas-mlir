@@ -58,7 +58,8 @@ qualified Atlas platform; successful compilation alone is not execution.
 For a bounded standalone-core check, the evaluator-only
 [`test/qualify_native_support.py`](../../test/qualify_native_support.py) takes
 four already compiled artifact directories (`exp2`, `sqrt`, `log2`, `minmax`),
-an explicit ARC shared library and state manifest, and a ModeLIR checkout.
+an explicit ARC shared library and state manifest, their expected SHA-256
+identities, the selected RTL revision, and a ModeLIR checkout.
 It verifies each program and plan hash, executes two public input panels per
 case, and checks every output byte plus input and guard preservation. The
 script refuses a preexisting receipt path and returns nonzero if any panel

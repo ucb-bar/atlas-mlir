@@ -54,7 +54,7 @@ def inputs_and_expected(case: str, phase: int) -> tuple[dict[str, bytes], bytes]
     raise ValueError(f"unknown public case: {case}")
 
 
-def load_artifact(case: str, directory: Path) -> tuple[tuple[int, ...], dict]:
+def load_artifact(case: str, directory: Path, source_revision: str) -> tuple[tuple[int, ...], dict]:
     manifest = json.loads((directory / "manifest.json").read_text())
     plan_path = directory / "execution_plan.json"
     plan = json.loads(plan_path.read_text())
@@ -62,7 +62,9 @@ def load_artifact(case: str, directory: Path) -> tuple[tuple[int, ...], dict]:
     raw = program.read_bytes()
     if manifest.get("engine") != "merlin_native" or manifest.get("status") != "diagnostic_program":
         raise ValueError(f"{case}: expected a successful Merlin-native diagnostic")
-    if len(raw) % 4 or digest(program) != manifest["binary_sha256"]:
+    if manifest.get("source_revision") != source_revision:
+        raise ValueError(f"{case}: source revision differs from selected model source")
+    if not raw or len(raw) % 4 or digest(program) != manifest["binary_sha256"]:
         raise ValueError(f"{case}: invalid program identity")
     if digest(program) != plan["program"]["sha256"]:
         raise ValueError(f"{case}: plan/program identity mismatch")
@@ -78,6 +80,9 @@ def main() -> int:
     parser.add_argument("--arc-model", type=Path, required=True)
     parser.add_argument("--arc-state", type=Path, required=True)
     parser.add_argument("--modelir", type=Path, required=True)
+    parser.add_argument("--expected-model-sha256", required=True)
+    parser.add_argument("--expected-state-sha256", required=True)
+    parser.add_argument("--expected-source-revision", required=True)
     parser.add_argument("--program", action="append", required=True,
                         help="case=compiled artifact directory; supply all four cases")
     parser.add_argument("--out", type=Path, required=True)
@@ -96,6 +101,10 @@ def main() -> int:
     model = args.arc_model.resolve(strict=True)
     state = args.arc_state.resolve(strict=True)
     modelir = args.modelir.resolve(strict=True)
+    model_sha = digest(model)
+    state_sha = digest(state)
+    if model_sha != args.expected_model_sha256 or state_sha != args.expected_state_sha256:
+        parser.error("ARC model or state manifest differs from the selected identity")
     sys.path.insert(0, str(modelir))
     old_cwd = Path.cwd()
     os.chdir(modelir)  # ModeLIR bootstrap resolves its interface cache here.
@@ -119,7 +128,7 @@ def main() -> int:
         try:
             observations = []
             for case in CASES:
-                words, plan = load_artifact(case, selected[case])
+                words, plan = load_artifact(case, selected[case], args.expected_source_revision)
                 output = plan["outputs"][0]
                 for phase in (0, 5):
                     sources, expected = inputs_and_expected(case, phase)
@@ -160,7 +169,8 @@ def main() -> int:
         sys.path.remove(str(modelir))
     receipt = {
         "schema": "atlas.native_support_selected_core_bounded.v1",
-        "model_sha256": digest(model), "state_sha256": digest(state),
+        "model_sha256": model_sha, "state_sha256": state_sha,
+        "selected_source_revision": args.expected_source_revision,
         "checker_sha256": digest(Path(__file__)),
         "reference_source_sha256": {
             "exp2": digest(Path(__file__).with_name("test_vpu_exp2_reference.py")),

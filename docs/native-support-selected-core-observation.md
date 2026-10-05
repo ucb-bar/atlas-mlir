@@ -37,13 +37,30 @@ the compiled model SHA-256 is
 Both exactly match the earlier selected-source receipts. ARC conversion took
 195.41 seconds; Clang shared-library compilation took 283.82 seconds.
 
-The evaluator checks the native engine label and binary/plan hashes before
-running. A one-bit modification of the EXP2 binary was rejected with a nonzero
-exit and no success receipt. The detailed local receipts are under the
+The evaluator requires the exact selected model, state, and RTL revision
+identities. It checks the native engine label and binary/plan hashes before
+running. A one-bit modification of the EXP2 binary and substitution of an
+older ARC model were each rejected with a nonzero exit and no success receipt.
+The detailed local receipts are under the
 Merlin invocation-owned `out/artifacts/targets/atlas/` root:
 `phase1-selected-core-build-r1/receipt.json`,
-`phase1-native-selected-core-bounded-r1.json`, and
+`phase1-native-selected-core-bounded-r2.json`, and
 `phase1-native-support-diagnostic-r1.json`.
+
+From the OOT checkout, with those four native compile artifacts available:
+
+```sh
+python test/qualify_native_support.py \
+  --arc-model "$ARC_MODEL" --arc-state "$ARC_STATE" --modelir "$MODELIR_ROOT" \
+  --expected-model-sha256 196380fca0cb3416a188538b342f8940802ebcf4d42e8d05dfe351b00b2c46fc \
+  --expected-state-sha256 db2d8ae3c8a4ce6a417b0c691be1d446f1c0be95efe5607a251a6946a80de9e3 \
+  --expected-source-revision 0079c0541111197741a231c002e3843fa6f545b2 \
+  --program "exp2=$MERLIN_ARTIFACT_ROOT/phase1-95-exp2-compile-r1" \
+  --program "sqrt=$MERLIN_ARTIFACT_ROOT/phase1-95-sqrt-compile-r1" \
+  --program "log2=$MERLIN_ARTIFACT_ROOT/phase1-95-log2-compile-r1" \
+  --program "minmax=$MERLIN_ARTIFACT_ROOT/phase1-95-minmax-compile-r1" \
+  --out "$MERLIN_ARTIFACT_ROOT/phase1-native-selected-core-bounded-r2.json"
+```
 
 This is standalone-core execution with diagnostic static delays. The FIRRTL
 selection used `AtlasRocketConfig`, so it is not an integrated `EE290SimConfig`
