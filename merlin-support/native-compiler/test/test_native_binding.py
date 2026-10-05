@@ -12,8 +12,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from atlas_native_support.host_build import ee290_baremetal_recipe
 from merlin.semantic_compiler.target_binding import load_native_target_binding
-
+from merlin.targetgen.contract.build_recipe import HarnessBuildRecipe
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "test/fixtures"
@@ -30,6 +31,30 @@ def _command(*args: object) -> subprocess.CompletedProcess[str]:
 
 
 class NativeBindingTest(unittest.TestCase):
+    def test_installed_ee290_host_recipe(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atlas-host-recipe-") as temporary:
+            root = Path(temporary)
+            compiler, linker, specs = (root / name for name in ("cc", "link.ld", "htif.specs"))
+            for path in (compiler, linker, specs):
+                path.write_text("selected tool input\n")
+            recipe = ee290_baremetal_recipe(
+                compiler=compiler, link_script=linker, specs=specs,
+            )
+            self.assertIs(type(recipe), HarnessBuildRecipe)
+            driver = recipe.support_sources[0]
+            self.assertTrue(driver.is_file())
+            self.assertTrue(driver.with_suffix(".h").is_file())
+            self.assertIn("atlas_ee290_run", driver.read_text())
+            self.assertNotIn("golden", driver.read_text().lower())
+            command = recipe.command(sources=(root / "host.c",), output=root / "host.elf")
+            self.assertEqual(command.count(str(driver)), 1)
+            self.assertIn("-march=rv64imafd", command)
+            self.assertIn(f"-specs={specs}", command)
+            with self.assertRaises(FileNotFoundError):
+                ee290_baremetal_recipe(
+                    compiler=compiler, link_script=linker, specs=root / "absent.specs",
+                )
+
     def test_imported_source_identity(self) -> None:
         package = importlib.resources.files("atlas_native_support")
         record = json.loads(package.joinpath("source_import.json").read_text())
