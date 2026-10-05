@@ -68,3 +68,8 @@ execution. These panels do not qualify all 99 decoder modes, full-domain
 numerics, temporal scheduling, arbitrary tiles, complete models, a host driver,
 or Phase 1 gates D/F/M/N. The required original-model FP8/BF16 quality policy
 and post-freeze held-out evaluation remain open.
+
+An [integrated EE290 diagnostic](native-support-ee290-diagnostic.md) later ran
+the same four native program binaries through a compiled RISC-V evaluator host
+on a local setup variant. It remains separate from this standalone-core result
+and from qualification of the original unmodified `EE290SimConfig` source.
