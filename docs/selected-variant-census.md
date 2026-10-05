@@ -46,8 +46,8 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 20 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 35 | 49 |
-| **Total** | **99** | **99** | **69** | **99** |
+| Scalar, control, CSR | 49 | 49 | 39 | 49 |
+| **Total** | **99** | **99** | **73** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -67,12 +67,17 @@ The independently checked bounded modes are VLOAD/VSTORE raw-byte transfer,
 DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VRECIP, VEXP2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
-modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BLT, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded LB/LBU/LH/LHU/LW/SB/SH/SW. The ledger links
+modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BNE, BLT, BGE, BLTU,
+BGEU, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded
+LB/LBU/LH/LHU/LW/SB/SH/SW. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
 transfer/CSR instructions appear in those programs but have no independent
 mode-specific reference test; they remain at zero in the semantic numerator.
+The four newly checked conditional modes use signed/unsigned discriminator
+panels, taken and untaken paths, and a one-slot side effect. See the
+[bounded branch observation](branch-mode-observation.md).
 The VLOAD/VSTORE test checks three full 1 KiB raw-byte panels copied through
 one MREG into two separate VMEM windows, with both DRAM outputs, original
 input, and a guard checked. See [the observation](vload-vstore-observation.md).
