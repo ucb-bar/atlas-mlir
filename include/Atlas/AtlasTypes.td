@@ -22,4 +22,10 @@ def Atlas_VirtualBF16Type : TypeDef<Atlas_Dialect, "VirtualBF16"> {
   let assemblyFormat = "";
 }
 
+def Atlas_VirtualFP8Type : TypeDef<Atlas_Dialect, "VirtualFP8"> {
+  let mnemonic = "virtual_fp8";
+  let summary = "Unallocated 32 by 32 E4M3 FP8 MXU operand tile";
+  let assemblyFormat = "";
+}
+
 #endif

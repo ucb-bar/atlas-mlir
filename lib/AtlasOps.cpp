@@ -49,6 +49,12 @@ void VirtualInputBF16Op::getEffects(
   effects.emplace_back(MemoryEffects::Read::get());
 }
 
+void VirtualInputFP8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+}
+
 void VirtualOutputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -84,6 +90,20 @@ LogicalResult VirtualInputBF16Op::verify() {
   if (getIndexAttr().getValue().getSExtValue() < 0)
     return emitOpError("input index must be nonnegative");
   return success();
+}
+
+LogicalResult VirtualInputFP8Op::verify() {
+  if (getIndexAttr().getValue().getSExtValue() < 0)
+    return emitOpError("input index must be nonnegative");
+  return success();
+}
+
+LogicalResult VirtualMXUMatmulOp::verify() {
+  return inRange(getOperation(), "unit", getUnit(), 0, 1);
+}
+
+LogicalResult VirtualPackFP8Op::verify() {
+  return inRange(getOperation(), "scale_code", getScaleCode(), 0, 255);
 }
 
 LogicalResult VirtualOutputBF16Op::verify() {

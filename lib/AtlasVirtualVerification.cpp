@@ -74,6 +74,14 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       state = input.getNext();
       continue;
     }
+    if (auto input = dyn_cast<VirtualInputFP8Op>(operation)) {
+      if (!state || input.getState() != state) {
+        input.emitOpError("nonlinear virtual state chain");
+        return failure();
+      }
+      state = input.getNext();
+      continue;
+    }
     if (auto output = dyn_cast<VirtualOutputBF16Op>(operation)) {
       if (!state || output.getState() != state) {
         output.emitOpError("nonlinear virtual state chain");
@@ -88,7 +96,8 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       ++outputs;
       continue;
     }
-    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp>(operation))
+    if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp,
+            VirtualMXUMatmulOp, VirtualPackFP8Op>(operation))
       continue;
     if (cfg && isa<arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(operation))
       continue;
