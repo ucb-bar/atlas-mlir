@@ -1,0 +1,2 @@
+recursive-include test/fixtures *.json
+recursive-include src/atlas_native_support/runtime *.c *.h

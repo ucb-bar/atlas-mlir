@@ -1,0 +1,47 @@
+{
+  "modified_after_import": {
+    "atlas_native_support/dialect_plan.py": {
+      "reason": "Qualify custom Atlas value types and place machine effects inside checked MLIR signatures",
+      "sha256": "0c0b1c216107723f0e84850cf0a989899150732c96ef539d6af0b900cbc77df1"
+    },
+    "atlas_native_support/mxu0_binding.py": {
+      "reason": "Resume native compilation through checked spatial partition after bounded combined-graph resource or allocation failure",
+      "sha256": "8dd943b624d950f4134f3cc2b49fd3f16dbb14062d28c8b25a1ecf92523c272f"
+    },
+    "atlas_native_support/mxu0_emit.py": {
+      "reason": "Preserve structured native search status for bounded fallback and diagnostic reporting",
+      "sha256": "04d14920f98bffe38340837778948ec17150ba73e925a8893f1c588fe6e22400"
+    },
+    "atlas_native_support/mxu0_program_set.py": {
+      "reason": "Bind program-set source, segments, search-feedback trigger, and replay verification to one native publication",
+      "sha256": "1a4c2d62321839d977e3c60074d3ce25f7177d6461b8a1a26ebda589e074e8a8"
+    },
+    "atlas_native_support/requirements.json": {
+      "reason": "Pin the reviewed one-commit Merlin native program-set and deterministic allocation implementation; exact Rust bridge and Cargo lock remain selected",
+      "sha256": "cc035334ddf14abdb346c88a291fb471abc35a2ac59e9f2b76cb359fd99b5af7"
+    }
+  },
+  "modified_on_import": [
+    "pyproject.toml: package version 0.0.3 and setuptools build pin",
+    "src/atlas_native_support/requirements.json: exact Merlin revision pin"
+  ],
+  "schema": "atlas.native_support_source_import.v1",
+  "source_artifact": "native-vpu-exp2-package-r1",
+  "source_file_sha256": {
+    "atlas_native_support/__init__.py": "f9339c098f0a432a7d2dcafb2198f6b937f85a1161a7ee9a4355f9269d3da118",
+    "atlas_native_support/binding.py": "4d02ece24410eccf2a44e9dcb881499bc728ba27fa8c38c2268ea1ebc148d8f4",
+    "atlas_native_support/dialect_plan.py": "57904046872aa80f0697cfc489d27da361d0ccbe470d1dc3fc2766b3608a234d",
+    "atlas_native_support/movement.py": "459e42dfbf825403b96839b8ceaed034fb96b231e223c93ca92ed7523b69bdc5",
+    "atlas_native_support/movement_contract.json": "199f7377af1417ec16c1a419df860ba97afc373d1f2de138e0aba6df5852192a",
+    "atlas_native_support/mxu0.py": "2942edb1cfcfd5a8e7978c17814964e2f4ab1a796e21c5a5f41b41e12f930a4e",
+    "atlas_native_support/mxu0_binding.py": "c913ada6e6983a742905e8cb25a27b0423893f1ece52894809ceac5637620162",
+    "atlas_native_support/mxu0_contract.json": "1abcb221e8a2344583de2bca7bff2c42c84eb1553b1e59362eecc44601754d1c",
+    "atlas_native_support/mxu0_emit.py": "b5e27d5ed473fe7bebf98261b9627d5e8ba5198b65a9166e46d231c531ac5824",
+    "atlas_native_support/mxu0_launch.py": "b0b810e12b095b9cc266c120a886467044e718f92571d83b65ef7443816cd932",
+    "atlas_native_support/mxu0_program_set.py": "68f3c821ce9c497866c0dbed2a3bf7b070d6f3ea82465dd15282b13b5d56c008",
+    "atlas_native_support/mxu0_spatial_tiling.py": "b132c343d7019e2e581715bb8a4fcb4443ded3ed3b354d7989053df944eb4628",
+    "atlas_native_support/mxu0_tiling.py": "babd624f186f519054f31bee0d814ac9bc505acecf1a280e528891f5f2bd87cc",
+    "atlas_native_support/requirements.json": "cb29b947c7aaf093320a6f6a8299e21a2513451e3d00182aee02015f1c658a73"
+  },
+  "source_wheel_sha256": "8a6daa65278d4bf7368cf6f997134b2ecd1be80fd28884355532f7946a0f9fdb"
+}
