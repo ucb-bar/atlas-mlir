@@ -1,5 +1,10 @@
 # Atlas MLIR hand-authored reference candidate
 
+The separately installable [Atlas native support package](merlin-support/native-compiler/README.md)
+binds a bounded Atlas target profile to Merlin's native selector and emits
+diagnostic instruction streams. It does not participate in this handwritten
+dialect's generation or verification path, and neither package invokes ACT.
+
 See the [numbered MLP and attention stage bundles](examples/handoff/README.md)
 for Atlas machine MLIR, LLVM MLIR, LLVM IR, RISC-V assembly, relocatable
 objects, linked ELF files, disassembly, and per-word operation maps. The
