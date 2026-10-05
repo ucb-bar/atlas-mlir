@@ -84,14 +84,20 @@ class NativeBindingTest(unittest.TestCase):
 
             request = FIXTURES / "log2-request.json"
             abi = FIXTURES / "log2-abi.json"
-            for name in ("log2", "sqrt", "exp2"):
+            for name in ("log2", "sqrt", "exp2", "minmax"):
                 with self.subTest(name=name):
                     artifact = work / f"{name}-program"
                     selected_request = FIXTURES / f"{name}-request.json"
                     status_file = work / f"{name}-status.json"
+                    selected_abi = FIXTURES / ("minmax-abi.json" if name == "minmax" else "log2-abi.json")
+                    search_limits = (
+                        ["--search-limits", str(FIXTURES / "minmax-search-limits.json")]
+                        if name == "minmax" else []
+                    )
                     compiled = _command(
                         "native-compile", "--engine", "merlin_native", "--support", "atlas_tensor",
-                        "--snapshot", snapshot, "--request", selected_request, "--abi", abi,
+                        "--snapshot", snapshot, "--request", selected_request, "--abi", selected_abi,
+                        *search_limits,
                         "--target-source", atlas_root, "--mode", "strict-native",
                         "--out", artifact, "--status-file", status_file,
                     )
@@ -104,6 +110,8 @@ class NativeBindingTest(unittest.TestCase):
                     self.assertEqual(status["binary_sha256"], hashlib.sha256(binary).hexdigest())
                     self.assertEqual(manifest["binary_sha256"], status["binary_sha256"])
                     self.assertGreater(len(binary), 0)
+                    if name == "minmax":
+                        self.assertGreater(manifest["selected_instructions"], 1)
 
             changed = json.loads(request.read_text())
             changed["target_identity"] = "foreign-target"
