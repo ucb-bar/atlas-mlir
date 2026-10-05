@@ -118,8 +118,10 @@ def validate_rows(inventory: dict, instruction_text: str, decode_text: str) -> N
             raise ValueError(f"missing bounded evidence identity: {name}")
         if not row["blocked"]:
             raise ValueError(f"missing full-qualification blocker: {name}")
-        if not row["parameter_domains"] or set(row["parameter_domains"]) - domains:
+        if set(row["parameter_domains"]) - domains:
             raise ValueError(f"unknown parameter domain: {name}")
+        if "?" in row["rtl_bitpat"] and not row["parameter_domains"]:
+            raise ValueError(f"variable encoding lacks parameter domain: {name}")
 
 
 def _git_revision(root: pathlib.Path) -> str:

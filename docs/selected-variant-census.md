@@ -22,6 +22,9 @@ fails this check. None of these checks establishes runtime legality.
 The 19 parameter domains record units, finite values or intervals, and selected
 RTL source paths. Branch byte displacements, JAL byte displacements, and JALR
 word offsets are distinct domains because their encodings and units differ.
+SELI and SELD destination fields name E8M0 scale registers; they do not name
+scalar general-purpose registers. ECALL and EBREAK have fixed words and no
+operand parameter domain.
 The source-bound check requires the cited files at the pinned RTL revision.
 All 19 remain `reviewed=false`: they are inputs to a legality review, not
 admitted full-domain contracts. FP8 and BF16 register indices refer to one
@@ -46,8 +49,8 @@ run does not execute it.
 | VPU arithmetic, reduction, pack | 25 | 25 | 20 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
-| Scalar, control, CSR | 49 | 49 | 45 | 49 |
-| **Total** | **99** | **99** | **79** | **99** |
+| Scalar, control, CSR | 49 | 49 | 49 | 49 |
+| **Total** | **99** | **99** | **83** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -69,7 +72,7 @@ continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN,
 VRELU, VRECIP, VEXP2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BNE, BLT, BGE, BLTU,
 BGEU, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded
-LB/LBU/LH/LHU/LW/SB/SH/SW, plus all six CSR read/modify/write modes. The ledger links
+LB/LBU/LH/LHU/LW/SB/SH/SW/SELD/SELI, ECALL, EBREAK, plus all six CSR read/modify/write modes. The ledger links
 each flag to a test method. These tests use restricted inputs, geometries,
 programs, and the standalone core, so they cannot be promoted to complete
 instruction semantics or integrated hardware coverage. Some supporting
@@ -81,6 +84,10 @@ panels, taken and untaken paths, and a one-slot side effect. See the
 The [CSR mode observation](csr-mode-observation.md) checks old-value readback,
 new debug-register contents, untouched sibling state, and the selected
 CSRRCI encoding. It does not qualify untested addresses or timing.
+The [scale and trap observation](scale-trap-mode-observation.md) checks SELI
+immediates, SELD low-byte VMEM reads through a base plus offset, untouched
+scale registers, and distinct ECALL/EBREAK halt reasons. It does not qualify
+all scale codes, register indices, VMEM addresses, or asynchronous collisions.
 The VLOAD/VSTORE test checks three full 1 KiB raw-byte panels copied through
 one MREG into two separate VMEM windows, with both DRAM outputs, original
 input, and a guard checked. See [the observation](vload-vstore-observation.md).

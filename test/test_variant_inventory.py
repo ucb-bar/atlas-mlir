@@ -54,6 +54,11 @@ class VariantInventoryTest(unittest.TestCase):
         fixtures = {name: (op, attrs) for op, attrs, name in variants() + scalar_variants()}
         self.assertEqual(len(by_name), 99)
         self.assertEqual(set(by_name), set(fixtures))
+        self.assertEqual(by_name["ECALL"]["parameter_domains"], [])
+        self.assertEqual(by_name["EBREAK"]["parameter_domains"], [])
+        self.assertIn("e8m0_scale_reg_0_31", by_name["SELD"]["parameter_domains"])
+        self.assertIn("e8m0_scale_reg_0_31", by_name["SELI"]["parameter_domains"])
+        self.assertNotIn("scalar_gpr_0_31", by_name["SELI"]["parameter_domains"])
         for name, (op, attrs) in fixtures.items():
             with self.subTest(name=name):
                 row = by_name[name]
@@ -65,7 +70,7 @@ class VariantInventoryTest(unittest.TestCase):
         self.assertEqual(counts(inventory), {
             "required": 99, "software_admitted": 0, "represented": 99,
             "word_emitted": 99, "llvm_word_emitted": 99,
-            "independent_semantic_test": 79, "standalone_core_executed": 79,
+            "independent_semantic_test": 83, "standalone_core_executed": 83,
             "blocked": 99, "denominator": 99,
         })
 
@@ -88,6 +93,10 @@ class VariantInventoryTest(unittest.TestCase):
         removed["variants"].pop()
         with self.assertRaisesRegex(ValueError, "99 frozen"):
             validate_rows(removed, instructions, decode)
+        missing_domain = copy.deepcopy(inventory)
+        next(row for row in missing_domain["variants"] if row["id"] == "SELI")["parameter_domains"] = []
+        with self.assertRaisesRegex(ValueError, "variable encoding lacks parameter domain"):
+            validate_rows(missing_domain, instructions, decode)
         added = decode + "\nNEW_OPCODE -> List(Y)\n"
         with self.assertRaisesRegex(ValueError, "required variant drift"):
             validate_rows(inventory, instructions, added)
