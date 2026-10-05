@@ -46,11 +46,11 @@ run does not execute it.
 | DMA | 4 | 4 | 3 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
-| VPU arithmetic, reduction, pack | 25 | 25 | 20 | 25 |
+| VPU arithmetic, reduction, pack | 25 | 25 | 25 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 49 | 49 |
-| **Total** | **99** | **99** | **83** | **99** |
+| **Total** | **99** | **99** | **88** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -69,7 +69,7 @@ does not change the software-admission or blocked counts above.
 The independently checked bounded modes are VLOAD/VSTORE raw-byte transfer,
 DMA load/store/wait, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
-VRELU, VRECIP, VEXP2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
+VRELU, VRECIP, VEXP, VEXP2, VSIN, VCOS, VTANH, VLOG2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BNE, BLT, BGE, BLTU,
 BGEU, bounded JAL, bounded JALR, bounded DELAY, bounded FENCE, and bounded
 LB/LBU/LH/LHU/LW/SB/SH/SW/SELD/SELI, ECALL, EBREAK, plus all six CSR read/modify/write modes. The ledger links
@@ -88,6 +88,10 @@ The [scale and trap observation](scale-trap-mode-observation.md) checks SELI
 immediates, SELD low-byte VMEM reads through a base plus offset, untouched
 scale registers, and distinct ECALL/EBREAK halt reasons. It does not qualify
 all scale codes, register indices, VMEM addresses, or asynchronous collisions.
+The [VPU transcendental observation](vpu-transcendental-observation.md) checks
+five selected LUT modes on two full-pair BF16 input panels. Exact mathematical
+anchors and a one-BF16-code-step diagnostic comparison are separate checks;
+the latter does not define the selected RTL's complete numerical contract.
 The VLOAD/VSTORE test checks three full 1 KiB raw-byte panels copied through
 one MREG into two separate VMEM windows, with both DRAM outputs, original
 input, and a guard checked. See [the observation](vload-vstore-observation.md).
