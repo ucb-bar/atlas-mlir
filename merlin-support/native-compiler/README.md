@@ -54,3 +54,16 @@ The manifest binds the request, selected profile, binary, execution plan, and
 source revision. The native compiler refuses a mismatched dependency pin or
 RTL source. Execute the program only through a separately selected and
 qualified Atlas platform; successful compilation alone is not execution.
+
+For a bounded standalone-core check, the evaluator-only
+[`test/qualify_native_support.py`](../../test/qualify_native_support.py) takes
+four already compiled artifact directories (`exp2`, `sqrt`, `log2`, `minmax`),
+an explicit ARC shared library and state manifest, their expected SHA-256
+identities, the selected RTL revision, and a ModeLIR checkout.
+It verifies each program and plan hash, executes two public input panels per
+case, and checks every output byte plus input and guard preservation. The
+script refuses a preexisting receipt path and returns nonzero if any panel
+fails. Its numerical reference code stays outside the compiler package; a
+passing result is limited to the supplied standalone core and panels.
+The [bounded selected-core observation](../../docs/native-support-selected-core-observation.md)
+records the current eight-panel result and its source and model hashes.
