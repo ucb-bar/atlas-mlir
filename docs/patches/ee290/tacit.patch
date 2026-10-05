@@ -1,0 +1,9 @@
+diff --git a/src/main/scala/TraceSinkDMA.scala b/src/main/scala/TraceSinkDMA.scala
+index d3123b2..28ac3a7 100644
+--- a/src/main/scala/TraceSinkDMA.scala
++++ b/src/main/scala/TraceSinkDMA.scala
+@@ -27 +27,3 @@ class TraceSinkDMA(params: TraceSinkDMAParams)(implicit p: Parameters) extends L
+-    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFF)),
++    // The selected Saturn frontend requires page-sized memory-device windows.
++    // The implemented DMA control registers still occupy only the low offsets.
++    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFFF)),

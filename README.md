@@ -21,6 +21,9 @@ control-flow metadata without making it interpret virtual SSA.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
+The [integrated EE290 diagnostic](docs/native-support-ee290-diagnostic.md)
+records eight bounded Merlin-native program runs on a local, explicitly patched
+`EE290SimConfig` simulator with a compiled RISC-V evaluator host.
 
 This is an out-of-tree ODS/C++ dialect with a bounded virtual BF16/FP8 SSA slice
 and a selected-encoding **machine stage** for one Atlas RTL revision. It is a

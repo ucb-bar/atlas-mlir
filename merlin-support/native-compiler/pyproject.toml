@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atlas-native-support"
-version = "0.0.3"
+version = "0.0.4"
 description = "Selected Atlas target bindings for Merlin's native semantic engine"
 requires-python = ">=3.12"
 dependencies = []
@@ -19,4 +19,4 @@ atlas_tensor = "atlas_native_support.mxu0_binding:Binding"
 where = ["src"]
 
 [tool.setuptools.package-data]
-atlas_native_support = ["movement_contract.json", "mxu0_contract.json", "requirements.json", "source_import.json"]
+atlas_native_support = ["movement_contract.json", "mxu0_contract.json", "requirements.json", "source_import.json", "runtime/*.c", "runtime/*.h"]
