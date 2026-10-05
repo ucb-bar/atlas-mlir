@@ -43,14 +43,14 @@ run does not execute it.
 | Family | Required modes | Represented and word-emitted | Bounded semantic and standalone-core test | Remaining full-qualification blockers |
 | --- | ---: | ---: | ---: | ---: |
 | Memory transfer | 2 | 2 | 2 | 2 |
-| DMA | 4 | 4 | 3 | 4 |
+| DMA | 4 | 4 | 4 | 4 |
 | MXU0 | 7 | 7 | 2 | 7 |
 | MXU1 | 7 | 7 | 2 | 7 |
 | VPU arithmetic, reduction, pack | 25 | 25 | 25 | 25 |
 | VLI | 4 | 4 | 4 | 4 |
 | XLU | 1 | 1 | 1 | 1 |
 | Scalar, control, CSR | 49 | 49 | 49 | 49 |
-| **Total** | **99** | **99** | **88** | **99** |
+| **Total** | **99** | **99** | **89** | **99** |
 
 All 99 modes are required for the selected source inventory. None has
 `software_admitted=true` because a full-domain, reviewed semantic and temporal
@@ -67,7 +67,7 @@ This resolves which layout the compiler should target for this revision; it
 does not change the software-admission or blocked counts above.
 
 The independently checked bounded modes are VLOAD/VSTORE raw-byte transfer,
-DMA load/store/wait, MXU0 reset and
+DMA load/store/wait/config, MXU0 reset and
 continuation matmul, MXU1 reset and continuation matmul, VADD, VSUB, VMUL, VMIN, VMAX, VMOV,
 VRELU, VRECIP, VEXP, VEXP2, VSIN, VCOS, VTANH, VLOG2, VSQRT, VSQUARE, VCUBE, column sum, minimum and maximum, row sum, row minimum and row maximum, all four VLI
 modes, BF16/FP8 pack and unpack, XLU transpose, BEQ, BNE, BLT, BGE, BLTU,
@@ -92,6 +92,10 @@ The [VPU transcendental observation](vpu-transcendental-observation.md) checks
 five selected LUT modes on two full-pair BF16 input panels. Exact mathematical
 anchors and a one-BF16-code-step diagnostic comparison are separate checks;
 the latter does not define the selected RTL's complete numerical contract.
+The [DMA configuration observation](dma-config-observation.md) checks that
+selected RTL channel fields 0 and 7 update one global upper-address register
+with the scalar source value at issue. It does not qualify a following DMA
+transfer or all register/channel/timing combinations.
 The VLOAD/VSTORE test checks three full 1 KiB raw-byte panels copied through
 one MREG into two separate VMEM windows, with both DRAM outputs, original
 input, and a guard checked. See [the observation](vload-vstore-observation.md).
