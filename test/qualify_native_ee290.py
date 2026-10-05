@@ -120,6 +120,9 @@ def main() -> int:
     cc = args.cc.resolve(strict=True)
     simulator = args.simulator.resolve(strict=True)
     ini_dir = args.dramsim_ini_dir.resolve(strict=True)
+    for ini_name in ("DDR3_micron_64M_8B_x4_sg15.ini", "system.ini"):
+        if not (ini_dir / ini_name).is_file():
+            parser.error(f"DRAMSim configuration missing: {ini_dir / ini_name}")
     setup_revision = _git_revision(ee290_source)
     if setup_revision != args.expected_ee290_revision:
         parser.error("EE290 setup revision differs from selected source variant")

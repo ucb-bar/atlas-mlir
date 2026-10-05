@@ -105,7 +105,7 @@ python test/qualify_native_ee290.py \
   --cc "$RISCV_TOOLCHAIN/bin/riscv64-unknown-elf-gcc" \
   --simulator "$EE290_SOURCE/sims/verilator/simulator-chipyard.harness-EE290SimConfig" \
   --expected-simulator-sha256 f68831a388e4abb16ba60420ddcf0f3c14509e7d35513e60a9df0e5dda52b7e1 \
-  --dramsim-ini-dir "$EE290_SOURCE/tools/DRAMSim2" \
+  --dramsim-ini-dir "$EE290_SOURCE/generators/testchipip/src/main/resources/dramsim2_ini" \
   --out "$MERLIN_ARTIFACT_ROOT/ee290-native-minmax-phase5-recheck"
 ```
 
