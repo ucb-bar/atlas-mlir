@@ -9,23 +9,301 @@
     "model_classes": "npu_model/configs/isa_definition.py"
   },
   "parameter_domains": {
-    "mreg_0_63": "physical tensor register index; BF16 and FP8 views alias the same file",
-    "bf16_even_pair_0_62": "even base of two adjacent physical tensor registers",
-    "scalar_gpr_0_31": "RV32 scalar register index",
-    "vls_signed_32_byte_offset": "signed 12-bit immediate in 32-byte units",
-    "dma_channel_0_7": "encoded DMA channel",
-    "mxu_unit_0_1": "distinct MXU0 systolic and MXU1 inner-product-tree units",
-    "mxu_local_slot_0_1": "local slot scoped to owning MXU",
-    "raw_imm16": "raw 16-bit immediate; VLI mode determines destination extent",
-    "e8m0_scale_reg_0_31": "scalar scale-register selector, not an admitted quantization scheme",
-    "selected_csr_addresses": "0xc00..0xc03 and 0xc10..0xc11, narrowed by verifier",
-    "signed_pc_relative_or_indirect": "branch/JAL encoded byte displacement interpreted by selected PC; JALR dynamic target",
-    "e8m0_code_0_255": "raw E8M0 byte loaded through SELI; no operand scaling scheme inferred",
-    "scalar_signed_byte_offset_12": "signed 12-bit scalar load/store byte offset",
-    "scalar_alu_signed_imm12": "signed 12-bit arithmetic immediate",
-    "scalar_shift_0_31": "five-bit RV32 shift amount",
-    "delay_cycles_0_4095": "unsigned DELAY cycle field",
-    "upper_raw_20_bit": "raw 20-bit upper immediate"
+    "mreg_0_63": {
+      "kind": "integer",
+      "unit": "mreg_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 63,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/common/MregParams.scala",
+        "src/main/scala/atlas/mreg/MregFile.scala"
+      ]
+    },
+    "bf16_even_pair_0_62": {
+      "kind": "integer",
+      "unit": "mreg_pair_base",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 62,
+          "step": 2
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/common/MregParams.scala",
+        "src/main/scala/atlas/mxu/sa/SystolicArraySequencer.scala",
+        "src/main/scala/atlas/mxu/ipt/InnerProductTreesSequencer.scala"
+      ]
+    },
+    "scalar_gpr_0_31": {
+      "kind": "integer",
+      "unit": "scalar_register_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 31,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarRegFile.scala"
+      ]
+    },
+    "vls_signed_32_byte_offset": {
+      "kind": "integer",
+      "unit": "32_byte_line_offset",
+      "intervals": [
+        {
+          "min": -2048,
+          "max": 2047,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ]
+    },
+    "dma_channel_0_7": {
+      "kind": "integer",
+      "unit": "dma_channel_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 7,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/common/DmaParams.scala"
+      ]
+    },
+    "mxu_unit_0_1": {
+      "kind": "integer",
+      "unit": "mxu_unit_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 1,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/IDecode.scala"
+      ]
+    },
+    "mxu_local_slot_0_1": {
+      "kind": "integer",
+      "unit": "mxu_local_slot_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 1,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/common/MxuParams.scala",
+        "src/main/scala/atlas/mxu/WeightBuffers.scala"
+      ]
+    },
+    "raw_imm16": {
+      "kind": "integer",
+      "unit": "raw_u16",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 65535,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ]
+    },
+    "e8m0_scale_reg_0_31": {
+      "kind": "integer",
+      "unit": "scale_register_index",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 31,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarISA.scala",
+        "src/main/scala/atlas/scalar/ScalingFactorRegFile.scala"
+      ]
+    },
+    "selected_csr_addresses": {
+      "kind": "enum",
+      "unit": "csr_address",
+      "values": [
+        3072,
+        3073,
+        3074,
+        3075,
+        3088,
+        3089
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarISA.scala"
+      ]
+    },
+    "branch_byte_displacement": {
+      "kind": "integer",
+      "unit": "branch_byte_displacement",
+      "intervals": [
+        {
+          "min": -4096,
+          "max": 4094,
+          "step": 2
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/atlas/scalar/PcControl.scala"
+      ]
+    },
+    "jal_byte_displacement": {
+      "kind": "integer",
+      "unit": "jal_byte_displacement",
+      "intervals": [
+        {
+          "min": -1048576,
+          "max": 1048574,
+          "step": 2
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/atlas/scalar/PcControl.scala"
+      ]
+    },
+    "jalr_word_offset": {
+      "kind": "integer",
+      "unit": "jalr_word_offset",
+      "intervals": [
+        {
+          "min": -2048,
+          "max": 2047,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/atlas/scalar/PcControl.scala"
+      ]
+    },
+    "e8m0_code_0_255": {
+      "kind": "integer",
+      "unit": "e8m0_code",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 255,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarISA.scala",
+        "src/main/scala/atlas/scalar/ScalingFactorRegFile.scala"
+      ]
+    },
+    "scalar_signed_byte_offset_12": {
+      "kind": "integer",
+      "unit": "byte_offset",
+      "intervals": [
+        {
+          "min": -2048,
+          "max": 2047,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ]
+    },
+    "scalar_alu_signed_imm12": {
+      "kind": "integer",
+      "unit": "scalar_immediate",
+      "intervals": [
+        {
+          "min": -2048,
+          "max": 2047,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ]
+    },
+    "scalar_shift_0_31": {
+      "kind": "integer",
+      "unit": "shift_amount",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 31,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarALU.scala"
+      ]
+    },
+    "delay_cycles_0_4095": {
+      "kind": "integer",
+      "unit": "cycle_count",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 4095,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarCore.scala"
+      ]
+    },
+    "upper_raw_20_bit": {
+      "kind": "integer",
+      "unit": "raw_u20",
+      "intervals": [
+        {
+          "min": 0,
+          "max": 1048575,
+          "step": 1
+        }
+      ],
+      "reviewed": false,
+      "evidence_sources": [
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+      ]
+    }
   },
   "variants": [
     {
@@ -2497,7 +2775,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2567,7 +2845,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2636,7 +2914,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2706,7 +2984,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2775,7 +3053,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2844,7 +3122,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "branch_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2914,7 +3192,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "jal_byte_displacement"
       ],
       "required": true,
       "software_admitted": false,
@@ -2984,7 +3262,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
-        "signed_pc_relative_or_indirect"
+        "jalr_word_offset"
       ],
       "required": true,
       "software_admitted": false,

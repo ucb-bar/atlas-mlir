@@ -10,7 +10,9 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from check_variant_inventory import counts, load_inventory, validate_rows, validate_sources
+from check_variant_inventory import (
+    counts, load_inventory, validate_domains, validate_rows, validate_sources,
+)
 from test_dialect import scalar_variants, variants
 
 
@@ -27,6 +29,25 @@ def synthetic_sources(inventory: dict) -> tuple[str, str]:
 
 
 class VariantInventoryTest(unittest.TestCase):
+    def test_finite_parameter_domains_keep_pc_units_separate(self) -> None:
+        inventory = load_inventory()
+        validate_domains(inventory)
+        self.assertEqual(len(inventory["parameter_domains"]), 19)
+        self.assertFalse(any(domain["reviewed"] for domain in inventory["parameter_domains"].values()))
+        by_name = {row["id"]: row for row in inventory["variants"]}
+        self.assertIn("branch_byte_displacement", by_name["BEQ"]["parameter_domains"])
+        self.assertIn("jal_byte_displacement", by_name["JAL"]["parameter_domains"])
+        self.assertIn("jalr_word_offset", by_name["JALR"]["parameter_domains"])
+
+        changed = copy.deepcopy(inventory)
+        changed["parameter_domains"]["bf16_even_pair_0_62"]["intervals"][0]["max"] = 63
+        with self.assertRaisesRegex(ValueError, "invalid interval"):
+            validate_domains(changed)
+        changed = copy.deepcopy(inventory)
+        changed["parameter_domains"]["mreg_0_63"]["evidence_sources"] = ["../unselected/MregFile.scala"]
+        with self.assertRaisesRegex(ValueError, "invalid parameter evidence path"):
+            validate_domains(changed)
+
     def test_declared_modes_match_typed_dialect_fixtures(self) -> None:
         inventory = load_inventory()
         by_name = {row["id"]: row for row in inventory["variants"]}

@@ -4,7 +4,7 @@ The frozen ledger is [selected-variant-inventory.json](selected-variant-inventor
 It is an evidence index for the selected RTL commit, not a second executable
 semantic specification. Every row names one decoder mode, the hand dialect
 operation and mode attributes, selected RTL BitPat and decoder controls,
-inspected model class, architectural source files, parameter domains, observed
+inspected model class, architectural source files, parameter-domain candidates, observed
 tests, source discrepancies, and unresolved obligations.
 
 The selected source pins are `atlas-npu`
@@ -18,6 +18,15 @@ and evidence test-method identities. The local operation fixtures must have
 the same 99 names and declared mode attributes. Mutation tests show that a
 changed pattern, decoder control, added or removed mode, or changed fixture
 fails this check. None of these checks establishes runtime legality.
+
+The 19 parameter domains record units, finite values or intervals, and selected
+RTL source paths. Branch byte displacements, JAL byte displacements, and JALR
+word offsets are distinct domains because their encodings and units differ.
+The source-bound check requires the cited files at the pinned RTL revision.
+All 19 remain `reviewed=false`: they are inputs to a legality review, not
+admitted full-domain contracts. FP8 and BF16 register indices refer to one
+physical MREG file. The E8M0 scale-register and code ranges do not establish
+a model quantization policy.
 
 ## Denominators
 

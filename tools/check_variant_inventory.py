@@ -36,7 +36,59 @@ def source_rows(instruction_text: str, decode_text: str) -> tuple[dict[str, str]
     return bits, controls
 
 
+def validate_domains(inventory: dict, rtl_root: pathlib.Path | None = None) -> None:
+    """Check authored finite domains without promoting them to legal hardware modes."""
+    domains = inventory["parameter_domains"]
+    if not isinstance(domains, dict) or not domains:
+        raise ValueError("parameter domains must be a nonempty mapping")
+    for name, domain in domains.items():
+        if not isinstance(name, str) or not name or not isinstance(domain, dict):
+            raise ValueError(f"unstructured parameter domain: {name}")
+        if not isinstance(domain.get("unit"), str) or not domain["unit"]:
+            raise ValueError(f"missing parameter unit: {name}")
+        if type(domain.get("reviewed")) is not bool:
+            raise ValueError(f"missing review status: {name}")
+        sources = domain.get("evidence_sources")
+        if (not isinstance(sources, list) or not sources or
+                any(not isinstance(source, str) for source in sources) or
+                len(sources) != len(set(sources))):
+            raise ValueError(f"missing parameter evidence: {name}")
+        for source in sources:
+            if not source or pathlib.Path(source).is_absolute() or ".." in pathlib.Path(source).parts:
+                raise ValueError(f"invalid parameter evidence path: {name}")
+            if rtl_root is not None and not (rtl_root / source).is_file():
+                raise ValueError(f"parameter evidence missing from RTL: {name}: {source}")
+        kind = domain.get("kind")
+        if kind == "integer":
+            if set(domain) != {"kind", "unit", "intervals", "reviewed", "evidence_sources"}:
+                raise ValueError(f"malformed integer parameter domain: {name}")
+            intervals = domain["intervals"]
+            if not isinstance(intervals, list) or not intervals:
+                raise ValueError(f"empty integer parameter domain: {name}")
+            previous_max = None
+            for interval in intervals:
+                if not isinstance(interval, dict) or set(interval) != {"min", "max", "step"}:
+                    raise ValueError(f"malformed interval: {name}")
+                low, high, step = (interval[field] for field in ("min", "max", "step"))
+                if (any(type(value) is not int for value in (low, high, step))
+                        or step <= 0 or low > high or (high - low) % step
+                        or previous_max is not None and low <= previous_max):
+                    raise ValueError(f"invalid interval: {name}")
+                previous_max = high
+        elif kind == "enum":
+            if set(domain) != {"kind", "unit", "values", "reviewed", "evidence_sources"}:
+                raise ValueError(f"malformed enum parameter domain: {name}")
+            values = domain["values"]
+            if (not isinstance(values, list) or not values
+                    or any(type(value) is not int for value in values)
+                    or len(values) != len(set(values))):
+                raise ValueError(f"invalid enum parameter domain: {name}")
+        else:
+            raise ValueError(f"unknown parameter domain kind: {name}")
+
+
 def validate_rows(inventory: dict, instruction_text: str, decode_text: str) -> None:
+    validate_domains(inventory)
     rows = inventory["variants"]
     ids = [row["id"] for row in rows]
     if len(ids) != len(set(ids)):
@@ -90,10 +142,13 @@ def validate_sources(inventory: dict, rtl_root: pathlib.Path,
         raise ValueError("selected RTL revision changed")
     if _git_revision(model_root) != source["model_revision"]:
         raise ValueError("inspected model revision changed")
+    validate_domains(inventory, rtl_root)
     _require_clean_source(
         rtl_root, {source["rtl_patterns"], source["rtl_decode"]} |
         {path for row in inventory["variants"]
-         for path in row["architecture_sources"]})
+         for path in row["architecture_sources"]} |
+        {path for domain in inventory["parameter_domains"].values()
+         for path in domain["evidence_sources"]})
     _require_clean_source(model_root, {source["model_classes"]})
     instructions = (rtl_root / source["rtl_patterns"]).read_text()
     decode = (rtl_root / source["rtl_decode"]).read_text()
