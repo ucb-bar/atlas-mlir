@@ -1,5 +1,4 @@
 #include "Atlas/AtlasEncoding.h"
-#include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/StringRef.h"
@@ -244,9 +243,6 @@ static FailureOr<uint32_t> proveJalrTarget(
 LogicalResult mlir::atlas::collectAtlasWords(
     ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock) {
   if (failed(verify(module))) return failure();
-  if (module->hasAttr("atlas.generated_from_virtual") &&
-      failed(verifyAtlasGeneratedSchedule(module)))
-    return failure();
   llvm::SmallVector<uint32_t> collected;
   llvm::SmallVector<Operation *> encodedOps;
   Value previous;

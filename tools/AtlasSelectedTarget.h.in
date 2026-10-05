@@ -1,8 +1,0 @@
-#ifndef ATLAS_SELECTED_TARGET_H
-#define ATLAS_SELECTED_TARGET_H
-
-namespace mlir::atlas {
-inline constexpr char kSelectedRTLRevision[] = "@ATLAS_SELECTED_RTL_REVISION@";
-} // namespace mlir::atlas
-
-#endif

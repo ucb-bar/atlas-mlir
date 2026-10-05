@@ -7,25 +7,15 @@ objects, linked ELF files, disassembly, and per-word operation maps. The
 relayout and selected-core diagnostic evidence.
 The [dialect reference](docs/dialect-reference.md) lists every current
 operation, its checked physical fields, and the implemented pass inventory.
-The [virtual SSA interpreter contract](docs/virtual-ssa-interpreter-contract.md)
-explains block arguments, loop visits, state tokens, and the checks needed by
-an independent interpreter.
-The [physical program contract](docs/functional-stream-contract.md) gives a
-separate instruction-level functional model exact words, typed fields, and
-control-flow metadata without making it interpret virtual SSA.
-The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
-parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
-linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
 
-This is an out-of-tree ODS/C++ dialect with a bounded virtual BF16/FP8 SSA slice
-and a selected-encoding **machine stage** for one Atlas RTL revision. It is a
-reviewable reference candidate for comparing Merlin's
+This is an out-of-tree ODS/C++ **machine-stage** dialect for one selected Atlas
+RTL revision. It is a reviewable reference candidate for comparing Merlin's
 generated dialect against an implementation written directly from the selected
 RTL and the `npu_model` sources. It was authored with Codex assistance and is
 not a clean-room or certified reference. It is not a Merlin compiler, a qualified
 executable target dialect, or an Atlas hardware certificate.
 
-The physical stage has a typed `!atlas.state` token and 26 parameterized operation
+The dialect has a typed `!atlas.state` token and 26 parameterized operation
 classes covering the **99 selected RTL BitPat rows**: tensor load/store,
 DMA load/store/config/wait, both MXUs, VPU arithmetic/reduction/pack/immediate,
 XLU transpose, scalar ALU/load/store, CSR, branch/jump/delay, and termination.
@@ -34,29 +24,6 @@ Verifiers check known physical register, pair, slot, channel, CSR-address,
 immediate, and mode limits. Machine operations declare conservative physical
 state read/write effects. `atlas-emit` requires a linear state chain and
 checks that branches/jumps have a non-redirecting delay-slot instruction.
-The separate [`virtual_bf16_ssa.mlir`](test/examples/virtual_bf16_ssa.mlir)
-fixture uses `%t` SSA tensor values before physical register assignment;
-`--verify-atlas-virtual-stream` checks its boundary state chain and output
-identities. A [CFG fixture](test/examples/virtual_bf16_cfg.mlir) uses MLIR
-block arguments for a branch merge and a loop-carried tile/state; the virtual
-verifier checks state handoffs across `cf` edges and requires boundary outputs
-in the single return block. `--lower-atlas-virtual-to-machine` now lowers this
-bounded CFG form to a physical stream: it colors live BF16 pairs and scalar
-controls, resolves block-argument edge copies and branches, stages external
-tiles through DMA/VMEM, and emits serial waits. The
-[`virtual_bf16_loop_program.mlir`](test/examples/virtual_bf16_loop_program.mlir)
-and related branch, swap, and dynamic-control fixtures exercise that path.
-This is a narrow VPU/CFG lowering slice, not a general Atlas allocator or
-model compiler.
-The [`virtual_fp8_two_layer_mlp.mlir`](test/examples/virtual_fp8_two_layer_mlp.mlir)
-fixture now adds two virtual MXU contractions around BF16 ReLU and unit-scale
-FP8 pack. The same virtual-to-machine pass assigns separate FP8 and BF16
-physical register ranges, stages runtime tiles, relayouts packed FP8 rows in
-VMEM, and emits a checked selected instruction stream. Tests translate that
-stream through unmodified LLVM to object words and execute it on the selected
-standalone AtlasCore with two different runtime weight sets. This is one fixed
-32×32 quantized tile without bias, tails, or a Linalg/PyTorch importer; it is
-not a complete captured-model MLP or a general native instruction selector.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole
@@ -141,39 +108,6 @@ ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
 CTest binds the Python tests to the `atlas-opt` and `atlas-emit` binaries in
 its own CMake build directory. For a direct Python invocation against another
 build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
-
-The generated virtual-CFG path runs in this order:
-
-```sh
-build/bin/atlas-opt --verify-atlas-virtual-stream \
-  test/examples/virtual_bf16_loop_program.mlir
-build/bin/atlas-opt --lower-atlas-virtual-to-machine \
-  test/examples/virtual_bf16_loop_program.mlir > build/loop.machine.mlir
-build/bin/atlas-opt --verify-atlas-generated-schedule \
-  --verify-atlas-machine-stream build/loop.machine.mlir
-build/bin/atlas-opt --convert-atlas-to-llvm-calls \
-  build/loop.machine.mlir > build/loop.structured-llvm.mlir
-build/bin/atlas-opt --finalize-atlas-llvm-calls \
-  build/loop.structured-llvm.mlir > build/loop.llvm.mlir
-build/bin/atlas-emit build/loop.machine.mlir > build/loop.words
-```
-
-For the bounded quantized MLP tile, replace the loop source with
-`test/examples/virtual_fp8_two_layer_mlp.mlir`. The first pass produces a
-109-word physical stream, and the same verification and LLVM handoff commands
-apply. The numbered [virtual MLP bundle](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir)
-shows each stage, including RISC-V assembly and an inspectable ELF. Recreate
-it with `tools/export_llvm_handoff.py` using the arguments shown in the
-[handoff README](examples/handoff/README.md).
-
-The generated delay rule is a conservative diagnostic policy: 256 cycles
-after each VLOAD/VSTORE/VPU operation, a channel-specific DMA wait, and eight
-cycles after each asynchronous scalar LW. The selected-core tests pass for
-MOV/ReLU, a two-step loop, a value-swap backedge, static branches, and a
-runtime i1 branch read from a DRAM control mailbox. They do not qualify a
-mode-wide completion bound, integrated EE290 execution, a callable ABI, or
-other VPU numerical modes. The same compiled dynamic-branch words execute
-for several mailbox values; tensor contents are runtime inputs.
 
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,

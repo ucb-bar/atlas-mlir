@@ -19,7 +19,6 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 
 enable_testing()
-add_subdirectory(test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME atlas-dialect
   COMMAND ${CMAKE_COMMAND} -E env

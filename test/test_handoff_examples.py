@@ -154,7 +154,6 @@ class HandoffExamplesTest(unittest.TestCase):
                         "disasm.txt": "08-riscv-disassembly.txt",
                         "words.txt": "atlas-words.txt",
                         "word-map.json": "atlas-word-map.json",
-                        "physical-program.json": "atlas-physical-program.json",
                     }
                     for suffix, snapshot in stages.items():
                         self.assertEqual(
@@ -198,15 +197,6 @@ class HandoffExamplesTest(unittest.TestCase):
                     )
                     self.assertEqual(hashlib.sha256(map_bytes).hexdigest(),
                                      manifest["examples"][name]["word_map_sha256"])
-                    physical_bytes = (output / f"{name}.physical-program.json").read_bytes()
-                    self.assertEqual(
-                        hashlib.sha256(physical_bytes).hexdigest(),
-                        manifest["examples"][name]["physical_program_sha256"],
-                    )
-                    physical = json.loads(physical_bytes)
-                    self.assertEqual(physical["schema"], "atlas.physical_program.v1")
-                    self.assertEqual([row["word_u32"] for row in physical["instructions"]],
-                                     list(words(name)))
                     word_map = json.loads(map_bytes)
                     self.assertEqual(word_map["schema"], "atlas.machine_word_map.v1")
                     mapped = word_map["operations"]
