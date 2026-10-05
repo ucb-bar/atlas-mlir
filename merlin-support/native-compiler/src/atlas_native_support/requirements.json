@@ -1,0 +1,7 @@
+{
+  "schema": "atlas.native_movement_requirements.v1",
+  "merlin_revision": "1b7517c022727499f3beb9dba64745e445c710b4",
+  "merlin_egg_cargo_lock_sha256": "db63eb549e6f4d7518245abbcf0eda509ad002a4c8dee2867c0384d5ad0b57f3",
+  "z3_solver_version": "4.16.0.0",
+  "act_required": false
+}

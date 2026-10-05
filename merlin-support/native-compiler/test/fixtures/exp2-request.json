@@ -1,0 +1,52 @@
+{
+  "constants": [],
+  "input_storages": {
+    "source": "external_bf16"
+  },
+  "lowering_policy": "strict-native",
+  "nodes": [
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "source",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "bf16_exp2_integer_special_subset_v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "exp2",
+      "index_maps": [],
+      "inputs": [
+        "source"
+      ],
+      "op": "exp2",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "vpu_exp2_integer_special_selected_rtl_v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    }
+  ],
+  "output_storages": [
+    "external_bf16"
+  ],
+  "outputs": [
+    "exp2"
+  ],
+  "schema": "merlin.semantic_kernel.v2",
+  "source_identity": "public-bounded-selected-bf16-exp2-pair",
+  "target_identity": "atlas-tensor-selection-d647c23c92e162c45701dcc87f640797ab71504ae6ae7606f1e627770841c08c"
+}
