@@ -1,0 +1,11 @@
+{
+  "fixed_inputs": {
+    "activation_a": 0,
+    "activation_b": 2,
+    "weight_a": 1,
+    "weight_b": 3
+  },
+  "fixed_outputs": [
+    8
+  ]
+}

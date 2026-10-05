@@ -39,3 +39,9 @@ The test covers only counts 0 and 4 in a short scalar stream. It does not
 establish behavior at all 4096 count values, overlapping DMA or tensor
 activity, branch-delay-slot interactions, clock-domain behavior, or the
 full integrated SoC. DELAY remains unadmitted and blocked for gate D.
+
+The later [MXU transfer observation](mxu-transfer-observation.md) exercises
+an asynchronous operation and confirms that ECALL directly after a nonzero
+DELAY may halt before the DELAY drains. The physical-stream verifier rejects
+that immediate sequence; the compiler still needs a qualified completion
+protocol for arbitrary asynchronous work.

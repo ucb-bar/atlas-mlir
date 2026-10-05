@@ -272,6 +272,17 @@ LogicalResult mlir::atlas::collectAtlasWords(
       op.emitError("branch or jump in selected RTL delay slot");
       return failure();
     }
+    // ScalarCore computes ECALL/EBREAK halt from s1_valid without gating it
+    // on the DELAY stall. A trap immediately after a nonzero DELAY therefore
+    // halts before the counter drains and may abandon an asynchronous write.
+    if (isa<TrapOp>(op) && !encodedOps.empty()) {
+      if (auto delay = dyn_cast<DelayOp>(encodedOps.back())) {
+        if (delay.getCycles() != 0) {
+          op.emitError("trap immediately after nonzero DELAY bypasses selected RTL stall");
+          return failure();
+        }
+      }
+    }
     needsDelaySlot = redirects;
     auto word = encodeMachineWord(&op);
     if (failed(word)) {
