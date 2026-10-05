@@ -368,6 +368,24 @@ class AtlasDialectTest(unittest.TestCase):
         self.assertIn("branch or jump in selected RTL delay slot", nested.stderr)
         self.assertEqual(nested.stdout, "")
 
+    def test_trap_cannot_bypass_nonzero_delay(self) -> None:
+        for trap_kind in ("ecall", "ebreak"):
+            trap = ("trap", dict(kind=trap_kind), trap_kind.upper())
+            for cycles in (1, 64):
+                with self.subTest(cycles=cycles, trap=trap_kind):
+                    source = program([("delay", dict(cycles=cycles), "DELAY"), trap])
+                    emitted = run(EMIT, source)
+                    self.assertNotEqual(emitted.returncode, 0)
+                    self.assertIn("trap immediately after nonzero DELAY", emitted.stderr)
+                    self.assertEqual(emitted.stdout, "")
+                    checked = run(OPT, source, "--verify-atlas-machine-stream")
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn("trap immediately after nonzero DELAY", checked.stderr)
+            self.assertEqual(run(EMIT, program([("delay", dict(cycles=0), "DELAY"), trap])).returncode, 0)
+            spacer = ("alu_imm", dict(kind="addi", dst=9, src=0, immediate=11), "ADDI")
+            self.assertEqual(run(EMIT, program([("delay", dict(cycles=64), "DELAY"),
+                                                    spacer, trap])).returncode, 0)
+
     def test_llvm_pass_preserves_one_ordered_encoded_block(self) -> None:
         source = (ROOT / "test/examples/mxu.mlir").read_text()
         emitted = run(EMIT, source)
