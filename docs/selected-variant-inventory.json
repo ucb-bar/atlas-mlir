@@ -2852,12 +2852,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_mode_reference.py::test_selected_core_matches_signed_unsigned_branch_semantics",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -2991,12 +2990,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_mode_reference.py::test_selected_core_matches_signed_unsigned_branch_semantics",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3060,12 +3058,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_mode_reference.py::test_selected_core_matches_signed_unsigned_branch_semantics",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3129,12 +3126,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_branch_mode_reference.py::test_selected_core_matches_signed_unsigned_branch_semantics",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3157,6 +3153,7 @@
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
+        "e8m0_scale_reg_0_31",
         "scalar_signed_byte_offset_12"
       ],
       "required": true,
@@ -3164,12 +3161,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_scale_trap_reference.py::test_selected_core_scale_registers_and_trap_reasons",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3365,7 +3361,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3376,12 +3373,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3400,7 +3396,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3411,12 +3408,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3435,7 +3431,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3446,12 +3443,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3470,7 +3466,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3481,12 +3478,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3505,7 +3501,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3516,12 +3513,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3540,7 +3536,8 @@
       ],
       "architecture_sources": [
         "src/main/scala/atlas/scalar/ScalarCore.scala",
-        "src/main/scala/atlas/scalar/ScalarDecoder.scala"
+        "src/main/scala/atlas/scalar/ScalarDecoder.scala",
+        "src/main/scala/diplomatic/memory/CSRFile.scala"
       ],
       "parameter_domains": [
         "scalar_gpr_0_31",
@@ -3551,12 +3548,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_csr_mode_reference.py::test_selected_core_matches_independent_read_modify_write",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [
@@ -3579,20 +3575,17 @@
         "src/main/scala/atlas/scalar/ScalarCore.scala",
         "src/main/scala/atlas/scalar/ScalarDecoder.scala"
       ],
-      "parameter_domains": [
-        "scalar_gpr_0_31"
-      ],
+      "parameter_domains": [],
       "required": true,
       "software_admitted": false,
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_scale_trap_reference.py::test_selected_core_scale_registers_and_trap_reasons",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3613,20 +3606,17 @@
         "src/main/scala/atlas/scalar/ScalarCore.scala",
         "src/main/scala/atlas/scalar/ScalarDecoder.scala"
       ],
-      "parameter_domains": [
-        "scalar_gpr_0_31"
-      ],
+      "parameter_domains": [],
       "required": true,
       "software_admitted": false,
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_scale_trap_reference.py::test_selected_core_scale_registers_and_trap_reasons",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
@@ -3679,7 +3669,7 @@
         "src/main/scala/atlas/scalar/ScalarDecoder.scala"
       ],
       "parameter_domains": [
-        "scalar_gpr_0_31",
+        "e8m0_scale_reg_0_31",
         "e8m0_code_0_255"
       ],
       "required": true,
@@ -3687,12 +3677,11 @@
       "represented": true,
       "word_emitted": true,
       "llvm_word_emitted": true,
-      "independent_semantic_test": false,
-      "standalone_core_executed": false,
-      "bounded_evidence": null,
+      "independent_semantic_test": true,
+      "standalone_core_executed": true,
+      "bounded_evidence": "test_scale_trap_reference.py::test_selected_core_scale_registers_and_trap_reasons",
       "blocked": [
-        "independent_semantics",
-        "standalone_execution",
+        "full_domain_semantics",
         "timing_and_integrated_execution"
       ],
       "source_discrepancies": [],
