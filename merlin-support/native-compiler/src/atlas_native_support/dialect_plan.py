@@ -151,15 +151,19 @@ def _descriptor_signature(descriptor: InstructionDescriptor) -> tuple[dict, set[
     )
     signature = {
         "operands": [
-            {"name": f"source{index}", "type": kind}
+            {"name": f"source{index}", "type": f"!atlas.{kind}"}
             for index, kind in enumerate(input_types)
         ],
-        "results": [{"name": "result", "type": output_type}],
+        "results": [{"name": "result", "type": f"!atlas.{output_type}"}],
         "attributes": [
             {"name": f"source{index}Address", "type": "i64"}
             for index in range(len(input_types))
         ]
         + [{"name": "resultAddress", "type": "i64"}],
+        # The typed MLIR generator owns effects as part of each operation's
+        # checked signature. A selected machine operation reads and writes
+        # physical state even when its semantic value is pure.
+        "effects": ["read", "write"],
     }
     return signature, {*input_types, output_type}
 
@@ -221,9 +225,6 @@ def selected_dialect_plan() -> tuple[dict, dict]:
                 "name": name,
                 "summary": f"Selected Atlas {descriptor.computation} in physical {descriptor.output_storage}",
                 "signature": signature,
-                # A selected machine instruction reads source storage and writes
-                # target storage, even when the semantic value is pure.
-                "effects": ["read", "write"],
             }
         )
     plan = {

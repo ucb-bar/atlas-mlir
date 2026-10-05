@@ -86,3 +86,34 @@ fails. Its numerical reference code stays outside the compiler package; a
 passing result is limited to the supplied standalone core and panels.
 The [bounded selected-core observation](../../docs/native-support-selected-core-observation.md)
 records the current eight-panel result and its source and model hashes.
+
+## Generated diagnostic machine IR
+
+`atlas_native_support.dialect_plan` consumes the selected native descriptors
+and generates a typed MLIR/C++ dialect package. Its 97 operations are reviewed
+descriptor interfaces, not a count of RTL decoder modes. Each operation has
+qualified Atlas value types and explicit read/write effects. The coverage
+manifest identifies omitted ISA families and remaining verifier, encoding,
+temporal, and LLVM-lowering obligations. This generated view is separate from
+the handwritten Atlas MLIR reference and does not replace its lowering path.
+
+Use the Merlin revision pinned in `requirements.json`, the selected RTL source,
+and a fresh output directory:
+
+```sh
+PYTHONPATH="$MERLIN_ROOT/src:$PWD/merlin-support/native-compiler/src" \
+  python3 -m atlas_native_support.dialect_plan \
+  --output "$ARTIFACT_ROOT/generated-dialect" \
+  --target-source "$ATLAS_RTL_ROOT" \
+  --software-spec "$MERLIN_ROOT/examples/atlas/target/software-spec.yaml"
+
+cmake -S "$ARTIFACT_ROOT/generated-dialect" \
+  -B "$ARTIFACT_ROOT/generated-dialect/build" \
+  -DMLIR_DIR="$MLIR_INSTALL/lib/cmake/mlir" \
+  -DLLVM_DIR="$MLIR_INSTALL/lib/cmake/llvm"
+cmake --build "$ARTIFACT_ROOT/generated-dialect/build" -j4
+```
+
+The compiled `merlin-atlas-opt` parser/printer checks the generated types and
+required address attributes. The package does not currently lower these
+generated operations to LLVM or Atlas instruction words.

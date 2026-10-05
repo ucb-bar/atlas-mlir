@@ -3,6 +3,12 @@
     "pyproject.toml: package version 0.0.3 and setuptools build pin",
     "src/atlas_native_support/requirements.json: exact Merlin revision pin"
   ],
+  "modified_after_import": {
+    "atlas_native_support/dialect_plan.py": {
+      "sha256": "0c0b1c216107723f0e84850cf0a989899150732c96ef539d6af0b900cbc77df1",
+      "reason": "Qualify custom Atlas value types and place machine effects inside checked MLIR signatures"
+    }
+  },
   "schema": "atlas.native_support_source_import.v1",
   "source_artifact": "native-vpu-exp2-package-r1",
   "source_file_sha256": {
