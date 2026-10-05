@@ -19,8 +19,9 @@ instruction stream, not a C-callable host ELF.
 The installed smoke also compiles a public two-output graph in which one BF16
 input feeds LOG2 and SQRT. It checks that both outputs receive distinct fixed
 addresses and that swapping the requested output order swaps their bindings.
-This is compilation and ABI evidence only; that new graph has not been
-executed on the selected standalone core or integrated EE290 system.
+The [bounded selected-core observation](../../docs/native-two-output-selected-core-observation.md)
+executes both output orders on the source-linked standalone AtlasCore. It does
+not qualify the integrated EE290 system or general multi-output execution.
 
 `src/atlas_native_support/source_import.json` records hashes of the retained
 diagnostic wheel used to recover this source. The import changed the package
