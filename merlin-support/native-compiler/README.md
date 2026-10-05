@@ -7,16 +7,18 @@ e-graph search, buffer-aware extraction, allocation, and selection checking.
 The package does not import or run ACT. It also does not call the handwritten
 Atlas MLIR tools, so their comparison path remains separate.
 
-This is a bounded diagnostic compiler. The `atlas_tensor` entry point accepts
-selected 32×32 FP8/BF16 matrix, movement, XLU, and VPU tile compositions,
-plus the explicitly checked tiling forms in the package. Its generated program
+This is a bounded diagnostic compiler. The `atlas_tensor` entry point exposes
+95 selected instruction descriptors and accepts selected 32×32 FP8/BF16 matrix,
+movement, XLU, and VPU tile compositions, including bounded log2, sqrt, and
+exp2 paths, plus the explicitly checked tiling forms in the package. Its program
 uses conservative delays and the selected standalone AtlasCore conventions.
 It does not qualify integrated EE290 timing, a Zephyr driver, complete model
 invocations, or all Atlas instructions. An emitted `program.bin` is an Atlas
 instruction stream, not a C-callable host ELF.
 
-`src/atlas_native_support/source_import.json` records hashes of the retained diagnostic package used
-to recover this source. The import changes the package version and the exact
+`src/atlas_native_support/source_import.json` records hashes of the retained
+diagnostic wheel used to recover this source. The import changes the package
+version and the exact
 Merlin revision pin. The checked RTL revision, arithmetic contracts, source
 hashes, and solver/Cargo pins remain in the package data. Review a new pin
 against actual compiler behavior before changing it.
