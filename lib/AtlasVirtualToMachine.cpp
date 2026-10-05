@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -9,7 +10,6 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
@@ -23,21 +23,9 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// The selected RTL has 64 1-KiB tensor registers. BF16 uses even/odd pairs;
-// pair 62 is reserved for cycle breaking in CFG edge copies. Scalar x27 is the
-// corresponding edge-copy temporary. Live values are colored on separate
-// physical locations; dead locations may be reused across CFG regions.
-constexpr unsigned kTensorPairTemporary = 62;
-constexpr unsigned kScalarTemporary = 27;
-constexpr unsigned kFirstScalarValue = 10;
-constexpr unsigned kLastScalarValue = 26;
 constexpr uint64_t kTileBytes = 2048;
 constexpr uint64_t kHalfBytes = 1024;
-constexpr uint64_t kScratchBankWords = 65536; // selected 256-KiB VMEM bank
-constexpr uint32_t kPackScratchWord = 32768;
-constexpr uint32_t kPackRelayoutWord = kPackScratchWord + 256;
 constexpr unsigned kDiagnosticDelay = 256;
-enum class RegisterKind { BF16, FP8, Scalar };
 
 struct PlannedOp {
   std::string name;
@@ -52,19 +40,19 @@ public:
       : module(module), function(function), attrs(module.getContext()) {}
 
   LogicalResult plan() {
-    if (failed(readABI()) || failed(allocateValues()))
+    if (failed(readABI()) || failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
     Location loc = function.getLoc();
     add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(28)}, {"src", i32(0)},
+        {{"kind", str("addi")}, {"dst", i32(fixed().oneReg)}, {"src", i32(0)},
          {"immediate", i32(1)}});
     add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(5)}, {"src", i32(0)},
+        {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    for (unsigned channel : {0u, 1u})
+    for (unsigned channel : {fixed().loadChannel, fixed().storeChannel})
       add("atlas.dma_config", loc,
-          {{"channel", i32(channel)}, {"base_reg", i32(5)}});
-    materializeScalar(2, kHalfBytes, loc);
+          {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
+    materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
     if (controlBase)
       stageScalarArguments(loc);
 
@@ -100,7 +88,7 @@ public:
     module->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
     module->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
     module->setAttr("atlas.scalar_arg_regs",
-                    builder.getDenseI32ArrayAttr(scalarArgumentRegs));
+                    builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
       module->setAttr("atlas.control_dram_base",
                       builder.getI64IntegerAttr(*controlBase));
@@ -136,6 +124,24 @@ private:
   }
   void mark(unsigned label) { labelPC[label] = planned.size(); }
 
+  std::optional<uint32_t> constantAddress(Value value) {
+    auto [entry, inserted] = constantAddresses.try_emplace(value, std::nullopt);
+    if (!inserted)
+      return entry->second;
+    std::optional<uint32_t> result;
+    if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+      if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+        result = static_cast<uint32_t>(integer.getValue().getZExtValue());
+    } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+      auto lhs = constantAddress(add.getLhs());
+      auto rhs = constantAddress(add.getRhs());
+      if (lhs && rhs)
+        result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
+    }
+    constantAddresses[value] = result;
+    return result;
+  }
+
   LogicalResult readABI() {
     auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
     auto output = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
@@ -153,6 +159,7 @@ private:
     outputBase = static_cast<uint64_t>(out);
 
     uint64_t maxInput = 0, maxOutput = 0;
+    bool hasPack = false;
     function.walk([&](Operation *op) {
       if (auto x = dyn_cast<VirtualInputBF16Op>(op))
         maxInput = std::max(maxInput,
@@ -165,10 +172,10 @@ private:
                              static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
       hasPack |= isa<VirtualPackFP8Op>(op);
     });
-    if (maxInput >= kScratchBankWords * 4 / kTileBytes ||
-        maxOutput >= kScratchBankWords * 4 / kTileBytes)
+    if (maxInput >= fixed().inputWindowWords * 4 / kTileBytes ||
+        maxOutput >= fixed().outputWindowWords * 4 / kTileBytes)
       return function.emitOpError("input or output tile index exceeds its VMEM bank");
-    if (hasPack && maxInput >= kPackScratchWord / 512)
+    if (hasPack && maxInput >= (fixed().packWord - fixed().inputWord) / 512)
       return function.emitOpError(
           "FP8 pack scratch window requires input indexes below 64");
     uint64_t inputEnd = inputBase + (maxInput + 1) * kTileBytes;
@@ -195,222 +202,35 @@ private:
           (*controlBase < outputEnd && outputBase < controlEnd))
         return function.emitOpError(
             "control mailbox overlaps a tensor buffer or overflows DRAM");
+      WalkResult checked = function.walk([&](Operation *op) {
+        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
+        bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+        if (!fp8 && !load && !isa<VirtualDMAStoreBF16Op>(op))
+          return WalkResult::advance();
+        auto address = constantAddress(op->getOperand(load ? 1 : 2));
+        if (!address) {
+          op->emitOpError("DMA address is not statically known");
+          return WalkResult::interrupt();
+        }
+        uint64_t end = static_cast<uint64_t>(*address) +
+                       (fp8 ? kHalfBytes : kTileBytes);
+        if (*address < controlEnd && *controlBase < end) {
+          op->emitOpError("explicit DMA span overlaps the control mailbox");
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (checked.wasInterrupted())
+        return failure();
     }
     return success();
   }
 
-  LogicalResult allocateValues() {
-    function.walk([&](Operation *op) {
-      for (Value result : op->getResults())
-        mixedFp8 |= isa<VirtualFP8Type>(result.getType());
-    });
-    if (failed(colorValues(RegisterKind::BF16)) ||
-        failed(colorValues(RegisterKind::FP8)) ||
-        failed(colorValues(RegisterKind::Scalar)))
-      return failure();
-    for (BlockArgument arg : function.getArguments())
-      scalarArgumentRegs.push_back(scalar(arg));
-    return success();
-  }
-
-  LogicalResult colorValues(RegisterKind kind) {
-    using Set = llvm::DenseSet<Value>;
-    auto selected = [&](Value value) {
-      Type type = value.getType();
-      if (kind == RegisterKind::BF16)
-        return isa<VirtualBF16Type>(type);
-      if (kind == RegisterKind::FP8)
-        return isa<VirtualFP8Type>(type);
-      return type.isInteger(1) || type.isInteger(32);
-    };
-    SmallVector<Value> values;
-    llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
-    for (Block &block : function.getBody()) {
-      Set &defined = defs[&block];
-      Set &used = uses[&block];
-      for (BlockArgument arg : block.getArguments())
-        if (selected(arg)) {
-          values.push_back(arg);
-          defined.insert(arg);
-        }
-      for (Operation &op : block) {
-        // A branch's tile/block-argument operands are edge uses, not uses on
-        // both paths. They enter the fixed-point equation below per successor.
-        if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
-          Value condition = branch.getCondition();
-          if (selected(condition) && !defined.contains(condition))
-            used.insert(condition);
-        } else if (!isa<cf::BranchOp>(op))
-          for (Value operand : op.getOperands())
-            if (selected(operand) && !defined.contains(operand))
-              used.insert(operand);
-        for (Value result : op.getResults())
-          if (selected(result)) {
-            values.push_back(result);
-            defined.insert(result);
-          }
-      }
-    }
-    auto same = [](const Set &a, const Set &b) {
-      if (a.size() != b.size())
-        return false;
-      for (Value value : a)
-        if (!b.contains(value))
-          return false;
-      return true;
-    };
-    bool changed;
-    do {
-      changed = false;
-      for (Block &block : llvm::reverse(function.getBody())) {
-        Set out;
-        auto edge = [&](Block *successor, ValueRange operands) {
-          for (Value value : liveIn[successor])
-            out.insert(value);
-          for (Value operand : operands)
-            if (selected(operand))
-              out.insert(operand);
-        };
-        Operation *terminator = block.getTerminator();
-        if (auto branch = dyn_cast<cf::BranchOp>(terminator))
-          edge(branch.getDest(), branch.getDestOperands());
-        if (auto branch = dyn_cast<cf::CondBranchOp>(terminator)) {
-          edge(branch.getTrueDest(), branch.getTrueDestOperands());
-          edge(branch.getFalseDest(), branch.getFalseDestOperands());
-        }
-        Set in = uses[&block];
-        for (Value value : out)
-          if (!defs[&block].contains(value))
-            in.insert(value);
-        if (!same(out, liveOut[&block]) || !same(in, liveIn[&block])) {
-          liveOut[&block] = std::move(out);
-          liveIn[&block] = std::move(in);
-          changed = true;
-        }
-      }
-    } while (changed);
-
-    llvm::DenseMap<Value, Set> neighbors;
-    for (Value value : values)
-      neighbors[value];
-    auto interfere = [&](Value first, Value second) {
-      if (first == second)
-        return;
-      neighbors[first].insert(second);
-      neighbors[second].insert(first);
-    };
-    auto clique = [&](const Set &set) {
-      for (Value first : set)
-        for (Value second : set)
-          interfere(first, second);
-    };
-    // All runtime controls are loaded from the mailbox before the entry
-    // block executes. Their physical registers therefore overlap at staging,
-    // even if their SSA uses are disjoint later in the CFG.
-    if (kind == RegisterKind::Scalar) {
-      Set stagedArguments;
-      for (BlockArgument arg : function.getArguments())
-        stagedArguments.insert(arg);
-      clique(stagedArguments);
-    }
-    for (Block &block : function.getBody()) {
-      Set live = liveOut[&block];
-      clique(live);
-      for (Operation &op : llvm::reverse(block.getOperations())) {
-        if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
-          Value condition = branch.getCondition();
-          if (selected(condition)) {
-            live.insert(condition);
-            clique(live);
-          }
-          continue;
-        }
-        if (isa<cf::BranchOp>(op))
-          continue;
-        SmallVector<Value> results, operands;
-        for (Value result : op.getResults())
-          if (selected(result))
-            results.push_back(result);
-        for (Value operand : op.getOperands())
-          if (selected(operand))
-            operands.push_back(operand);
-        for (Value result : results) {
-          for (Value other : live)
-            interfere(result, other);
-          // No in-place tensor or scalar update is assumed by this allocator.
-          for (Value operand : operands)
-            interfere(result, operand);
-          live.erase(result);
-        }
-        for (Value operand : operands)
-          live.insert(operand);
-        clique(live);
-      }
-      SmallVector<Value> args;
-      for (BlockArgument arg : block.getArguments())
-        if (selected(arg))
-          args.push_back(arg);
-      for (Value arg : args)
-        for (Value other : live)
-          interfere(arg, other);
-      for (Value first : args)
-        for (Value second : args)
-          interfere(first, second);
-    }
-
-    // Stable degree-first coloring reduces pressure without depending on
-    // textual SSA names. Any coloring is checked against the graph below.
-    std::stable_sort(values.begin(), values.end(), [&](Value a, Value b) {
-      return neighbors[a].size() > neighbors[b].size();
-    });
-    llvm::DenseMap<Value, unsigned> colors;
-    unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
-    unsigned count = kind == RegisterKind::BF16
-                         ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
-                         : kind == RegisterKind::FP8
-                               ? 32
-                               : kLastScalarValue - firstScalar + 1;
-    for (Value value : values) {
-      bool assigned = false;
-      for (unsigned color = 0; color < count; ++color) {
-        bool conflict = llvm::any_of(neighbors[value], [&](Value other) {
-          auto found = colors.find(other);
-          return found != colors.end() && found->second == color;
-        });
-        if (!conflict) {
-          colors[value] = color;
-          assigned = true;
-          break;
-        }
-      }
-      if (!assigned)
-        return function.emitOpError(
-            kind == RegisterKind::BF16
-                ? (mixedFp8 ? "mixed virtual BF16 interference exceeds 15 physical pairs"
-                            : "virtual BF16 interference exceeds 31 physical pairs")
-                : kind == RegisterKind::FP8
-                      ? "virtual FP8 interference exceeds 32 physical registers"
-                      : (hasPack
-                             ? "virtual control interference exceeds 9 scalar registers with FP8 pack"
-                             : "virtual control interference exceeds 17 scalar registers"));
-    }
-    for (Value value : values) {
-      for (Value other : neighbors[value])
-        if (colors[value] == colors[other])
-          return function.emitOpError("internal register-coloring overlap");
-      if (kind == RegisterKind::BF16)
-        tileRegs[value] = (mixedFp8 ? 32 : 0) + 2 * colors[value];
-      else if (kind == RegisterKind::FP8)
-        fp8Regs[value] = colors[value];
-      else
-        scalarRegs[value] = firstScalar + colors[value];
-    }
-    return success();
-  }
-
-  unsigned tile(Value value) const { return tileRegs.find(value)->second; }
-  unsigned fp8(Value value) const { return fp8Regs.find(value)->second; }
-  unsigned scalar(Value value) const { return scalarRegs.find(value)->second; }
+  const FixedResourcePlacement &fixed() const { return allocation.fixed(); }
+  unsigned tile(Value value) const { return allocation.tile(value); }
+  unsigned fp8(Value value) const { return allocation.fp8(value); }
+  unsigned scalar(Value value) const { return allocation.scalar(value); }
+  MXUPlacement mxu(Value value) const { return allocation.mxu(value); }
 
   void materializeScalar(unsigned dst, uint32_t value, Location loc) {
     uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
@@ -435,17 +255,19 @@ private:
   void stageScalarArguments(Location loc) {
     // The first 1-KiB VMEM window is a temporary mailbox. Tensor input DMA
     // may reuse it only after every asynchronous scalar LW has completed.
-    materializeScalar(6, 0, loc);
-    materializeScalar(1, static_cast<uint32_t>(*controlBase), loc);
+    materializeScalar(fixed().inputBaseReg, fixed().mailboxWord, loc);
+    materializeScalar(fixed().inputDramReg, static_cast<uint32_t>(*controlBase), loc);
     add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(0)},
-         {"reg", i32(6)}, {"dram", i32(1)}, {"size", i32(2)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(0)}});
+        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
+         {"reg", i32(fixed().inputBaseReg)},
+         {"dram", i32(fixed().inputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
     for (auto [index, arg] : llvm::enumerate(function.getArguments())) {
       unsigned reg = scalar(arg);
       add("atlas.scalar_load", loc,
           {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
-           {"offset", i32(4 * index)}});
+           {"offset", i32(4 * (fixed().mailboxWord + index))}});
       add("atlas.delay", loc,
           {{"cycles", i32(8)},
            {"atlas.delay_reason", str("scalar_load_completion")}});
@@ -492,7 +314,8 @@ private:
       if (progressed)
         continue;
       unsigned saved = copies.front().first;
-      unsigned temporary = tensor ? kTensorPairTemporary : kScalarTemporary;
+      unsigned temporary =
+          tensor ? fixed().tensorTemporary : fixed().scalarTemporary;
       emitCopy(temporary, saved, tensor, loc);
       for (auto &copy : copies)
         if (copy.second == saved)
@@ -523,36 +346,88 @@ private:
   }
 
   void inputHalf(unsigned dst, uint64_t index, unsigned half, Location loc) {
-    uint32_t scratchWord = static_cast<uint32_t>(index * 512 + half * 256);
+    uint32_t scratchWord = static_cast<uint32_t>(
+        fixed().inputWord + index * 512 + half * 256);
     uint32_t dramByte = static_cast<uint32_t>(inputBase + index * kTileBytes +
                                               half * kHalfBytes);
-    materializeScalar(6, scratchWord, loc);
-    materializeScalar(1, dramByte, loc);
+    materializeScalar(fixed().inputBaseReg, scratchWord, loc);
+    materializeScalar(fixed().inputDramReg, dramByte, loc);
     add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(0)},
-         {"reg", i32(6)}, {"dram", i32(1)}, {"size", i32(2)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(0)}});
+        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
+         {"reg", i32(fixed().inputBaseReg)},
+         {"dram", i32(fixed().inputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
     add("atlas.vload", loc,
-        {{"dst", i32(dst)}, {"base", i32(6)}, {"offset", i32(0)},
+        {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
     delay(loc, "vload_completion");
   }
 
   void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
-    uint32_t scratchWord = static_cast<uint32_t>(kScratchBankWords +
+    uint32_t scratchWord = static_cast<uint32_t>(fixed().outputWord +
                                                  index * 512 + half * 256);
     uint32_t dramByte = static_cast<uint32_t>(outputBase + index * kTileBytes +
                                               half * kHalfBytes);
-    materializeScalar(8, scratchWord, loc);
+    materializeScalar(fixed().outputBaseReg, scratchWord, loc);
     add("atlas.vstore", loc,
-        {{"src", i32(src)}, {"base", i32(8)}, {"offset", i32(0)},
+        {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
     delay(loc, "vstore_completion");
-    materializeScalar(3, dramByte, loc);
+    materializeScalar(fixed().outputDramReg, dramByte, loc);
     add("atlas.dma", loc,
-        {{"direction", str("store")}, {"channel", i32(1)},
-         {"reg", i32(8)}, {"dram", i32(3)}, {"size", i32(2)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(1)}});
+        {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
+         {"reg", i32(fixed().outputBaseReg)},
+         {"dram", i32(fixed().outputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().storeChannel)}});
+  }
+
+  void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
+                 std::optional<unsigned> src, Location loc) {
+    const DMATransferPlacement &placement = allocation.dma(transfer);
+    emitCopy(placement.dramReg, scalar(dramByte), false, loc);
+    emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
+    materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    if (src) {
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        if (half)
+          materializeScalar(placement.stagingReg,
+                            placement.stagingWord + half * 256, loc);
+        add("atlas.vstore", loc,
+            {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vstore_completion");
+      }
+      if (placement.halves > 1)
+        materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    }
+    add("atlas.dma", loc,
+        {{"direction", str(src ? "store" : "load")},
+         {"channel", i32(placement.channel)}, {"reg", i32(placement.stagingReg)},
+         {"dram", i32(placement.dramReg)}, {"size", i32(placement.sizeReg)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+  }
+
+  LogicalResult completeDMA(Value transfer, std::optional<unsigned> dst,
+                            Operation &op) {
+    const DMATransferPlacement &placement = allocation.dma(transfer);
+    Location loc = op.getLoc();
+    add("atlas.dma_wait", loc,
+        {{"channel", i32(placement.channel)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+    if (dst) {
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        if (half)
+          materializeScalar(placement.stagingReg,
+                            placement.stagingWord + half * 256, loc);
+        add("atlas.vload", loc,
+            {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vload_completion");
+      }
+    }
+    return success();
   }
 
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
@@ -561,34 +436,34 @@ private:
           "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
     Location loc = pack.getLoc();
     add("atlas.scalar_load", loc,
-        {{"kind", str("seli")}, {"dst", i32(3)}, {"base", i32(0)},
+        {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
          {"offset", i32(pack.getScaleCode())}});
     add("atlas.vpu_pack", loc,
         {{"direction", str("bf16_to_fp8")},
          {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
-         {"scale_reg", i32(3)}});
+         {"scale_reg", i32(fixed().scaleReg)}});
     delay(loc, "vpu_pack_completion");
 
     // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
     // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
     // in the free upper half of input VMEM and interleave its two 512-byte
     // halves through a bounded 32-row scalar loop.
-    materializeScalar(8, kPackScratchWord, loc);
+    materializeScalar(fixed().outputBaseReg, fixed().packWord, loc);
     add("atlas.vstore", loc,
-        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(8)},
+        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
     delay(loc, "pack_vstore_completion");
-    materializeScalar(10, kPackScratchWord * 4, loc);
-    materializeScalar(11, kPackScratchWord * 4 + 512, loc);
-    materializeScalar(12, kPackRelayoutWord * 4, loc);
-    materializeScalar(13, 0, loc);
-    materializeScalar(14, 32, loc);
+    materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
+    materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
+    materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
+    materializeScalar(fixed().packRowReg, 0, loc);
+    materializeScalar(fixed().packRowsReg, 32, loc);
     unsigned loop = newLabel();
     mark(loop);
     for (unsigned word = 0; word < 4; ++word) {
       for (unsigned half = 0; half < 2; ++half) {
-        unsigned source = half ? 11 : 10;
-        unsigned temp = half ? 17 : 16;
+        unsigned source = fixed().packSourceRegs[half];
+        unsigned temp = fixed().packTemporaryRegs[half];
         add("atlas.scalar_load", loc,
             {{"kind", str("lw")}, {"dst", i32(temp)},
              {"base", i32(source)}, {"offset", i32(4 * word)}});
@@ -596,27 +471,31 @@ private:
             {{"cycles", i32(8)},
              {"atlas.delay_reason", str("scalar_load_completion")}});
         add("atlas.scalar_store", loc,
-            {{"kind", str("sw")}, {"src", i32(temp)}, {"base", i32(12)},
+            {{"kind", str("sw")}, {"src", i32(temp)},
+             {"base", i32(fixed().packDestinationReg)},
              {"offset", i32(4 * word + 16 * half)}});
       }
     }
-    for (unsigned reg : {10u, 11u, 12u})
+    for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
+                         fixed().packDestinationReg})
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
-           {"immediate", i32(reg == 12 ? 32 : 16)}});
+           {"immediate", i32(reg == fixed().packDestinationReg ? 32 : 16)}});
     add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(13)}, {"src", i32(13)},
+        {{"kind", str("addi")}, {"dst", i32(fixed().packRowReg)},
+         {"src", i32(fixed().packRowReg)},
          {"immediate", i32(1)}});
     add("atlas.branch", loc,
-        {{"kind", str("blt")}, {"lhs", i32(13)}, {"rhs", i32(14)}},
+        {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
+         {"rhs", i32(fixed().packRowsReg)}},
         loop);
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
          {"immediate", i32(0)}});
     delay(loc, "scalar_relayout_completion");
-    materializeScalar(6, kPackRelayoutWord, loc);
+    materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
     add("atlas.vload", loc,
-        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(6)},
+        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
     delay(loc, "pack_relayout_vload_completion");
     return success();
@@ -624,8 +503,34 @@ private:
 
   LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
-    if (isa<VirtualStartOp>(op))
+    if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
+    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
+      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
+                std::nullopt, loc);
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
+      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
+                std::nullopt, loc);
+      return success();
+    }
+    if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
+      return completeDMA(await.getTransfer(), fp8(await.getValue()), op);
+    if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op))
+      return completeDMA(await.getTransfer(), tile(await.getValue()), op);
+    if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
+      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+                fp8(store.getSrc()), loc);
+      return success();
+    }
+    if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
+      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+                tile(store.getSrc()), loc);
+      return success();
+    }
+    if (auto wait = dyn_cast<VirtualDMAWaitOp>(op))
+      return completeDMA(wait.getTransfer(), std::nullopt, op);
     if (auto input = dyn_cast<VirtualInputBF16Op>(op)) {
       uint64_t index = input.getIndexAttr().getValue().getZExtValue();
       for (unsigned half = 0; half < 2; ++half)
@@ -639,21 +544,94 @@ private:
       inputHalf(fp8(input.getValue()), index, 0, loc);
       return success();
     }
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      MXUPlacement weight = mxu(load.getWeight());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
+           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
+      delay(loc, "mxu_weight_completion");
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
+      MXUPlacement acc = mxu(load.getAcc());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("acc_fp8")}, {"unit", i32(acc.unit)},
+           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      delay(loc, "mxu_accumulator_completion");
+      return success();
+    }
+    if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
+      MXUPlacement acc = mxu(load.getAcc());
+      add("atlas.mxu_push", loc,
+          {{"kind", str("acc_bf16")}, {"unit", i32(acc.unit)},
+           {"src", i32(tile(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      delay(loc, "mxu_accumulator_completion");
+      return success();
+    }
+    if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
+      MXUPlacement weight = mxu(reset.getWeight());
+      MXUPlacement acc = mxu(reset.getAcc());
+      add("atlas.mxu_matmul", loc,
+          {{"unit", i32(acc.unit)}, {"src", i32(fp8(reset.getActivation()))},
+           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
+           {"accumulate", boolean(false)}});
+      delay(loc, "mxu_matmul_completion");
+      return success();
+    }
+    if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+      MXUPlacement weight = mxu(accumulate.getWeight());
+      MXUPlacement acc = mxu(accumulate.getAcc());
+      add("atlas.mxu_matmul", loc,
+          {{"unit", i32(acc.unit)},
+           {"src", i32(fp8(accumulate.getActivation()))},
+           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
+           {"accumulate", boolean(true)}});
+      delay(loc, "mxu_matmul_completion");
+      return success();
+    }
+    if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
+      MXUPlacement acc = mxu(readout.getAcc());
+      add("atlas.mxu_pop", loc,
+          {{"format", str("bf16")}, {"unit", i32(acc.unit)},
+           {"dst", i32(tile(readout.getValue()))},
+           {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
+      delay(loc, "mxu_readout_completion");
+      return success();
+    }
+    if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
+      auto scale = readout.getScale().getDefiningOp<VirtualScaleConstantOp>();
+      if (!scale)
+        return readout.emitOpError(
+            "FP8 readout currently requires a virtual_scale_constant");
+      MXUPlacement acc = mxu(readout.getAcc());
+      // Rematerialize each use: readouts and VPU pack share scratch e3.
+      add("atlas.scalar_load", loc,
+          {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
+           {"offset", i32(scale.getCode())}});
+      add("atlas.mxu_pop", loc,
+          {{"format", str("fp8")}, {"unit", i32(acc.unit)},
+           {"dst", i32(fp8(readout.getValue()))},
+           {"slot", i32(acc.slot)}, {"scale_reg", i32(fixed().scaleReg)}});
+      delay(loc, "mxu_readout_completion");
+      return success();
+    }
     if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
       unsigned unit = static_cast<unsigned>(matmul.getUnit());
       add("atlas.mxu_push", loc,
           {{"kind", str("weight_fp8")}, {"unit", i32(unit)},
-           {"src", i32(fp8(matmul.getWeight()))}, {"slot", i32(0)}});
+           {"src", i32(fp8(matmul.getWeight()))},
+           {"slot", i32(fixed().mxuWeightSlot)}});
       delay(loc, "mxu_weight_completion");
       add("atlas.mxu_matmul", loc,
           {{"unit", i32(unit)}, {"src", i32(fp8(matmul.getActivation()))},
-           {"weight_slot", i32(0)}, {"acc_slot", i32(0)},
+           {"weight_slot", i32(fixed().mxuWeightSlot)},
+           {"acc_slot", i32(fixed().mxuAccSlot)},
            {"accumulate", boolean(false)}});
       delay(loc, "mxu_matmul_completion");
       add("atlas.mxu_pop", loc,
           {{"format", str("bf16")}, {"unit", i32(unit)},
            {"dst", i32(tile(matmul.getResult()))},
-           {"slot", i32(0)}, {"scale_reg", i32(0)}});
+           {"slot", i32(fixed().mxuAccSlot)}, {"scale_reg", i32(0)}});
       delay(loc, "mxu_readout_completion");
       return success();
     }
@@ -725,9 +703,9 @@ private:
       return success();
     }
     if (isa<func::ReturnOp>(op)) {
-      materializeScalar(1, 1, loc);
+      materializeScalar(fixed().haltReg, 1, loc);
       add("atlas.csr", loc,
-          {{"kind", str("rrw")}, {"dst", i32(0)}, {"source", i32(1)},
+          {{"kind", str("rrw")}, {"dst", i32(0)}, {"source", i32(fixed().haltReg)},
            {"address", i32(0xc10)}});
       add("atlas.trap", loc, {{"kind", str("ecall")}});
       return success();
@@ -797,16 +775,14 @@ private:
   ModuleOp module;
   func::FuncOp function;
   Builder attrs;
-  llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
-  bool mixedFp8 = false;
-  bool hasPack = false;
+  VirtualAllocationPlan allocation;
+  llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
   std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
-  SmallVector<int32_t> scalarArgumentRegs;
 };
 
 struct LowerAtlasVirtualToMachinePass
