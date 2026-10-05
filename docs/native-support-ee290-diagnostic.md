@@ -112,11 +112,52 @@ python test/qualify_native_ee290.py \
 Other programs use `--case log2`, `sqrt`, or `exp2`, their matching
 `phase1-95-*-compile-r1` artifact, and `--phase 0` or `5`.
 
+## Input-only host driver and shared build recipe
+
+The installable `atlas-native-support` 0.0.4 wheel includes an attributed
+Atlas/EE290 C driver and a target-specific binding to Merlin's shared
+`HarnessBuildRecipe`. The driver does IMEM readback, start, bounded completion
+polling, stop, and raw status reporting. The host ELF contains public input
+payloads and output addresses, but no expected-output table or reference
+function. Its three readback digests cover input preservation, the complete
+output, and the guard; the Python evaluator compares them with expected data
+held outside the ELF. Two independent 64-bit accumulators per region make
+this **bounded digest validation**, not an exact-word proof. The eight earlier
+host-side exact comparisons remain separate evidence.
+
+| Driver mode run | Outcome | Checked words | Host package |
+| --- | --- | ---: | --- |
+| MXU0→VPU MIN, phase 5 | PASS, three digests | 1,544 | source driver |
+| LOG2, phase 0 | PASS, three digests | 1,032 | source driver |
+| LOG2, phase 5 | PASS, three digests | 1,032 | installed 0.0.4 wheel and shared recipe |
+
+The first attempt printed every word over UART and reached its 600-second
+wall bound after Atlas completed; it produced only 130 of 1,544 lines. Its
+failed receipt is retained as `ee290-driver-minmax-phase5-r1/receipt.json`.
+The compact rerun is `ee290-driver-minmax-phase5-r2/receipt.json`. Mutating
+one recorded output digest caused the external checker to reject the result.
+The installed-wheel run is
+`ee290-driver-log2-phase5-wheel-r1/receipt.json`. Its receipt hashes the
+installed driver source and header, the host build binding, compiler, linker
+script and specs, the selected program, and the simulator.
+
+To reproduce the installed-wheel path, run `test/qualify_native_ee290.py` with
+`--host-driver` set to the installed package's `runtime/atlas_host.c`, its
+`--expected-host-driver-sha256` and
+`--expected-host-driver-header-sha256`, and the selected
+`--host-link-script` and `--host-specs`. The `--host-emitter` arguments are
+used only for the historical evaluator-embedded exact check. The host build
+binding calls Merlin's `HarnessBuildRecipe`, so the target-specific flags and
+support source are supplied by the OOT package while the compiler invocation
+shape remains shared with other targets. Zephyr would be a separate platform
+binding to the same compiled-program and execution-plan identities.
+
 ## Limits
 
 This run exercises actual Merlin-native emitted Atlas words inside a local
-integrated EE290 simulator and a compiled RISC-V evaluator host. It does not
-establish a deployable Atlas host driver, Zephyr integration, callable kernel
+integrated EE290 simulator and compiled RISC-V hosts. The new C driver has
+only this bounded diagnostic execution evidence. It does not establish a
+deployable Atlas host runtime, Zephyr integration, callable kernel
 ABI, general DMA scheduling, numerical semantics beyond these panels, tail or
 multi-tile behavior, complete models, or the D/F/M/N Phase 1 gates. The
 unmodified source revision still fails elaboration. Admitting the diagnostic

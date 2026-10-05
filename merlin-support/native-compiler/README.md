@@ -55,6 +55,25 @@ source revision. The native compiler refuses a mismatched dependency pin or
 RTL source. Execute the program only through a separately selected and
 qualified Atlas platform; successful compilation alone is not execution.
 
+## Host build binding
+
+Version 0.0.4 includes `runtime/atlas_host.{c,h}` and
+`atlas_native_support.host_build.ee290_baremetal_recipe`. The latter supplies
+Atlas/EE290 flags, the C driver, and the selected linker files to Merlin's
+shared `HarnessBuildRecipe`. The caller selects the RISC-V compiler,
+`htif.ld`, and `htif_nano.specs` by exact path. The C entrypoint
+`atlas_ee290_run` loads and reads back IMEM, starts the selected tile, polls
+its diagnostic completion marker with a bound, stops it, and reports raw
+counters/status. It accepts an already encoded program; it does no instruction
+selection, tensor computation, expected-output comparison, or ACT invocation.
+
+The [integrated EE290 diagnostic](../../docs/native-support-ee290-diagnostic.md)
+builds a host ELF through that shared recipe. The input-only variant places
+public runtime inputs in the host harness and sends three short readback
+digests to the evaluator, which holds the expected output separately. This
+is a bounded bare-metal interface test, not a qualified Zephyr adapter,
+general callable ABI, or complete model runtime.
+
 For a bounded standalone-core check, the evaluator-only
 [`test/qualify_native_support.py`](../../test/qualify_native_support.py) takes
 four already compiled artifact directories (`exp2`, `sqrt`, `log2`, `minmax`),
