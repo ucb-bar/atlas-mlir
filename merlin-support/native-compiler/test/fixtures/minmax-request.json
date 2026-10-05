@@ -1,0 +1,262 @@
+{
+  "constants": [],
+  "input_storages": {
+    "activation_a": "external_fp8",
+    "activation_b": "external_fp8",
+    "weight_a": "external_fp8",
+    "weight_b": "external_fp8"
+  },
+  "lowering_policy": "strict-native",
+  "nodes": [
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "activation_a",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "e4m3_exponent_1_14_or_zero",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "weight_a",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "e4m3_exponent_1_14_or_zero",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "reduction_order": "k_ascending"
+      },
+      "effect": "pure",
+      "id": "result_a",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "activation_a",
+        "weight_a"
+      ],
+      "op": "contraction",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "mxu0_custom_fma_bf16_rne_k_ascending",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "activation_b",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "e4m3_exponent_1_14_or_zero",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "weight_b",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "e4m3_exponent_1_14_or_zero",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "reduction_order": "k_ascending"
+      },
+      "effect": "pure",
+      "id": "result_b",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "activation_b",
+        "weight_b"
+      ],
+      "op": "contraction",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "mxu0_custom_fma_bf16_rne_k_ascending",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "min_result",
+      "index_maps": [],
+      "inputs": [
+        "result_a",
+        "result_b"
+      ],
+      "op": "min",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "vpu_min_bf16_sign_folded_raw_order",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    }
+  ],
+  "output_storages": [
+    "external_bf16"
+  ],
+  "outputs": [
+    "min_result"
+  ],
+  "schema": "merlin.semantic_kernel.v2",
+  "source_identity": "public-two-mxu0-results-to-vpu-min",
+  "target_identity": "atlas-tensor-selection-d647c23c92e162c45701dcc87f640797ab71504ae6ae7606f1e627770841c08c"
+}

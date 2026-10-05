@@ -13,7 +13,8 @@ from merlin.semantic_compiler.model import KernelRequest
 
 from .movement import _canonical, _sha
 from .mxu0 import (
-    Mxu0Contract, admits_bf16_anchor_pair, admits_bf16_raw_pair,
+    Mxu0Contract, admits_bf16_anchor_pair, admits_bf16_exp2_pair,
+    admits_bf16_raw_pair,
     admits_fp8_tile, mxu0_profile,
 )
 from .mxu0_spatial_tiling import lower_tiled_contraction
@@ -124,6 +125,7 @@ def prepare_mxu0_launch(
                 (
                     admits_bf16_raw_pair(contract, node.type.numerical_policy, payload)
                     or admits_bf16_anchor_pair(contract, node.type.numerical_policy, payload)
+                    or admits_bf16_exp2_pair(contract, node.type.numerical_policy, payload)
                 )
                 if count == 2
                 else admits_fp8_tile(contract, node.type.numerical_policy, payload)
@@ -140,6 +142,8 @@ def prepare_mxu0_launch(
                 domain = (
                     "BF16 anchor domain"
                     if node.type.numerical_policy == conversion["input_policy"]
+                    else "BF16 exp2 bounded domain"
+                    if node.type.numerical_policy == contract.record["vpu_exp2"]["operand_policy"]
                     else "BF16 raw domain"
                 )
                 raise ValueError(

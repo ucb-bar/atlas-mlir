@@ -14,7 +14,7 @@
       "op": "input",
       "type": {
         "dtype": "bf16",
-        "numerical_policy": "bf16_raw_bits",
+        "numerical_policy": "bf16_exp2_integer_special_subset_v1",
         "shape": [
           32,
           32
@@ -24,15 +24,15 @@
     {
       "attrs": {},
       "effect": "pure",
-      "id": "log2",
+      "id": "exp2",
       "index_maps": [],
       "inputs": [
         "source"
       ],
-      "op": "log2",
+      "op": "exp2",
       "type": {
         "dtype": "bf16",
-        "numerical_policy": "vpu_log2_lut_q9n16_selected_rtl",
+        "numerical_policy": "vpu_exp2_integer_special_selected_rtl_v1",
         "shape": [
           32,
           32
@@ -44,9 +44,9 @@
     "external_bf16"
   ],
   "outputs": [
-    "log2"
+    "exp2"
   ],
   "schema": "merlin.semantic_kernel.v2",
-  "source_identity": "public-selected-bf16-log2-pair",
+  "source_identity": "public-bounded-selected-bf16-exp2-pair",
   "target_identity": "atlas-tensor-selection-d647c23c92e162c45701dcc87f640797ab71504ae6ae7606f1e627770841c08c"
 }

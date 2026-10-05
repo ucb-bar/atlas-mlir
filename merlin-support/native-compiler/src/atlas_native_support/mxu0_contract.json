@@ -1,5 +1,5 @@
 {
-  "schema": "atlas.native_tensor_contract.v19",
+  "schema": "atlas.native_tensor_contract.v21",
   "scope": "diagnostic_execution_unqualified_timing",
   "movement_contract_identity": "atlas-movement-1544a857ab469dc04a8c9fd489c0f34eff7849c4d3e2547bf57c418c47619f30",
   "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
@@ -28,6 +28,8 @@
     "src/main/scala/atlas/vector/laneBoxes/SquareCubeVec.scala": "352c91514e6496475dae0b8432f05c4f1ea651218fd11fc1c1013b147bd289ae",
     "src/main/scala/atlas/vector/laneBoxes/Rcp.scala": "6520e13247f3256aa2b1b56a0ee5627ac2eb88296b5dea284cdb8dc265464faf",
     "src/main/scala/atlas/vector/laneBoxes/Log.scala": "85b6e42ece93a02a44f76bc35694fb89bdbae622a6bb027b4c0e2b53aa6e7b3c",
+    "src/main/scala/atlas/vector/laneBoxes/Sqrt.scala": "195d8057452636733bfdbd2d02dab449e32f07db9315eefe21541925ae50e201",
+    "src/main/scala/atlas/vector/laneBoxes/ExpLane.scala": "ee2903c92f2fe359f927c993b6885d211ff1b66a7dc0f3841ca2877578d903cb",
     "src/main/scala/atlas/vector/laneBoxes/VectorParam.scala": "8fe146132fdf75ede72351a5f9791cf64c86a1ef2c44ddb93a659ba416e2c42c",
     "src/main/scala/atlas/vector/laneBoxes/FP8Pack.scala": "940e40259934febdd47de3c7d3925d92b1bfa774c81237e721e793d74b6c7c8d",
     "src/main/scala/atlas/vector/laneBoxes/FP8Unpack.scala": "7e06028b4f09f481b40298b9562089c775f810a990363e38e4d910e8f78c6b84",
@@ -177,6 +179,47 @@
     "arithmetic_source_sha256": {
       "LogLUT.scala": "13ee6e5367003d163996660086a25027f2f3b4e0d93c69a890136725b7b35e37",
       "LUTParams.scala": "684aac051fe104a04784545bdc2df29b4dfc06734c1309c1aee5ba4242dbbcb5"
+    }
+  },
+  "vpu_sqrt": {
+    "operation": "sqrt",
+    "operand_dtype": "bf16",
+    "operand_policies": ["bf16_raw_bits", "mxu0_custom_fma_bf16_rne_k_ascending"],
+    "result_policy": "vpu_sqrt_lut_q1n16_selected_rtl",
+    "shape": [32, 32],
+    "physical_layout": "column_halves_row_major",
+    "register_count": 2,
+    "semantic_domain": "all_bf16_raw_encodings_isolated_pair_program",
+    "lut_entries": 128,
+    "fixed_integer_bits": 1,
+    "fixed_fraction_bits": 16,
+    "output_fraction_bits": 7,
+    "input_sign_policy": "ignored",
+    "special_exponent_policy": "zero_or_subnormal_to_positive_zero_infinity_to_positive_infinity_nan_to_positive_zero",
+    "instruction": "VSQRT",
+    "in_place_admitted": false,
+    "arithmetic_source_sha256": {
+      "SqrtLUT.scala": "490cf82e396c2a400330d8a0e625423f25ee49dfe51aac66e09785081f01b54b",
+      "LUTParams.scala": "684aac051fe104a04784545bdc2df29b4dfc06734c1309c1aee5ba4242dbbcb5"
+    }
+  },
+  "vpu_exp2": {
+    "operation": "exp2",
+    "operand_dtype": "bf16",
+    "operand_policy": "bf16_exp2_integer_special_subset_v1",
+    "result_policy": "vpu_exp2_integer_special_selected_rtl_v1",
+    "shape": [32, 32],
+    "physical_layout": "column_halves_row_major",
+    "register_count": 2,
+    "semantic_domain": "17_directed_bf16_integer_zero_infinity_codes",
+    "admitted_input_codes_hex": ["0000", "8000", "7f80", "ff80", "3f80", "bf80", "4000", "c000", "4080", "c080", "4100", "c100", "42b0", "42b2", "42c8", "c2b2", "c2c8"],
+    "selected_positive_overflow_integer": 89,
+    "instruction": "VEXP2",
+    "in_place_admitted": false,
+    "arithmetic_source_sha256": {
+      "src/main/scala/sp26-fp-units/vpuLUTs/ExLUT.scala": "a4c61f023e39a86fc5c894a7a0bd03a666e09daa9886309b6ed470140d6d52ed",
+      "src/main/scala/sp26-fp-units/Qmn.scala": "d717095d4504896fce8216ac359ec3db2653b89e53c26b4d060f0180fcfe9185",
+      "src/main/scala/sp26-fp-units/common.scala": "21182c1398c92fc2fc1c99d4f9d841ce061844b0e91b1d95b045d3adbcef3e0f"
     }
   },
   "vpu_min": {

@@ -93,7 +93,7 @@ def _materialize(selected, contract: Mxu0Contract) -> tuple[str, tuple[int, ...]
                 f"DMA.WAIT {load_channel}",
             ]
         elif (
-            name in {"dma_load_bf16_anchor_pair", "dma_load_bf16_raw_pair"}
+            name in {"dma_load_bf16_anchor_pair", "dma_load_bf16_raw_pair", "dma_load_bf16_exp2_pair"}
             and len(children) == 1
             and (children[0].storage, value.storage) == ("external_bf16", "vmem_bf16")
             and address[value_id] % result_registers == 0
@@ -114,7 +114,7 @@ def _materialize(selected, contract: Mxu0Contract) -> tuple[str, tuple[int, ...]
             scalar_address(6, address[children[0].id] * tile_bytes // word_bytes)
             lines += [f"VLOAD {address[value_id]}, x6, 0", f"DELAY {vector_delay}"]
         elif (
-            name in {"vload_bf16_anchor_pair", "vload_bf16_raw_pair"}
+            name in {"vload_bf16_anchor_pair", "vload_bf16_raw_pair", "vload_bf16_exp2_pair"}
             and len(children) == 1
             and (children[0].storage, value.storage) == ("vmem_bf16", "vrf_bf16")
             and address[value_id] % result_registers == 0
@@ -306,6 +306,34 @@ def _materialize(selected, contract: Mxu0Contract) -> tuple[str, tuple[int, ...]
                 f"DELAY {vpu_pair_delay}",
             ]
         elif (
+            name in {"vpu_sqrt_bf16_raw", "vpu_sqrt_bf16_mxu0"}
+            and len(children) == 1
+            and (children[0].storage, value.storage) == ("vrf_bf16", "vrf_bf16")
+            and address[value_id] % result_registers == 0
+            and address[children[0].id] % result_registers == 0
+        ):
+            lines += [
+                (
+                    f"{contract.record['vpu_sqrt']['instruction']} "
+                    f"{address[value_id]}, {address[children[0].id]}"
+                ),
+                f"DELAY {vpu_pair_delay}",
+            ]
+        elif (
+            name == "vpu_exp2_bf16_bounded"
+            and len(children) == 1
+            and (children[0].storage, value.storage) == ("vrf_bf16", "vrf_bf16")
+            and address[value_id] % result_registers == 0
+            and address[children[0].id] % result_registers == 0
+        ):
+            lines += [
+                (
+                    f"{contract.record['vpu_exp2']['instruction']} "
+                    f"{address[value_id]}, {address[children[0].id]}"
+                ),
+                f"DELAY {vpu_pair_delay}",
+            ]
+        elif (
             name in {"vpu_add_bf16", "vpu_mul_bf16", "vpu_sub_bf16",
                      "vpu_min_bf16", "vpu_max_bf16"}
             and len(children) == 2
@@ -366,6 +394,8 @@ def _materialize(selected, contract: Mxu0Contract) -> tuple[str, tuple[int, ...]
                 "vstore_vpu_square_bf16_pair",
                 "vstore_vpu_recip_bf16_pair",
                 "vstore_vpu_log2_bf16_pair",
+                "vstore_vpu_sqrt_bf16_pair",
+                "vstore_vpu_exp2_bf16_pair",
                 "vstore_vpu_min_bf16_pair",
                 "vstore_vpu_max_bf16_pair",
                 "vstore_vpu_col_min_bf16_pair",
@@ -406,6 +436,8 @@ def _materialize(selected, contract: Mxu0Contract) -> tuple[str, tuple[int, ...]
                 "dma_store_vpu_square_bf16_pair",
                 "dma_store_vpu_recip_bf16_pair",
                 "dma_store_vpu_log2_bf16_pair",
+                "dma_store_vpu_sqrt_bf16_pair",
+                "dma_store_vpu_exp2_bf16_pair",
                 "dma_store_vpu_min_bf16_pair",
                 "dma_store_vpu_max_bf16_pair",
                 "dma_store_vpu_col_min_bf16_pair",
@@ -551,6 +583,7 @@ def compile_mxu0(
             } | {
                 ((rows, cols), "bf16", conversion["input_policy"]),
                 ((rows, cols), "bf16", contract.record["vpu_recip"]["operand_policies"][0]),
+                ((rows, cols), "bf16", contract.record["vpu_exp2"]["operand_policy"]),
             }:
                 raise ValueError(
                     "Atlas matrix input shape or numerical policy is outside selected tile"
@@ -558,6 +591,7 @@ def compile_mxu0(
             if node.op == "constant" and signature in {
                 ((rows, cols), "bf16", conversion["input_policy"]),
                 ((rows, cols), "bf16", contract.record["vpu_recip"]["operand_policies"][0]),
+                ((rows, cols), "bf16", contract.record["vpu_exp2"]["operand_policy"]),
             }:
                 raise ValueError(
                     "BF16 pair constants lack a selected package encoding"
@@ -691,6 +725,28 @@ def compile_mxu0(
             ):
                 raise ValueError(
                     "Atlas VPU log2 has an unadmitted type, policy, or signature"
+                )
+        elif node.op == "sqrt":
+            if (
+                (node.type.shape, node.type.dtype, node.type.numerical_policy)
+                != ((rows, cols), "bf16", contract.record["vpu_sqrt"]["result_policy"])
+                or len(node.inputs) != 1
+                or dict(node.attrs)
+                or node.index_maps
+            ):
+                raise ValueError(
+                    "Atlas VPU sqrt has an unadmitted type, policy, or signature"
+                )
+        elif node.op == "exp2":
+            if (
+                (node.type.shape, node.type.dtype, node.type.numerical_policy)
+                != ((rows, cols), "bf16", contract.record["vpu_exp2"]["result_policy"])
+                or len(node.inputs) != 1
+                or dict(node.attrs)
+                or node.index_maps
+            ):
+                raise ValueError(
+                    "Atlas VPU exp2 has an unadmitted type, policy, or signature"
                 )
         elif node.op in {"min", "max"}:
             mode = contract.record[f"vpu_{node.op}"]
@@ -875,7 +931,7 @@ def compile_mxu0(
         "schema": "atlas.native_tensor_compilation.v3",
         "status": "diagnostic_program",
         "engine": "merlin_native",
-        "scope": "selected MXU0, bounded MXU1, FP8 XLU, and bounded BF16 VPU ReLU/add/multiply/subtract/square/reciprocal/log2/min/max/physical-column-min-max/physical-row-min-max-sum tiles on source-linked standalone core only",
+        "scope": "selected MXU0, bounded MXU1, FP8 XLU, and bounded BF16 VPU ReLU/add/multiply/subtract/square/reciprocal/log2/sqrt/exp2/min/max/physical-column-min-max/physical-row-min-max-sum tiles on source-linked standalone core only",
         "target_identity": contract.identity,
         "request_digest": tiling.source.digest()
         if tiling is not None

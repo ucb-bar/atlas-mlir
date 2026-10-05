@@ -36,7 +36,7 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual(record["schema"], "atlas.native_support_source_import.v1")
         unchanged = 0
         for relative, digest in record["source_file_sha256"].items():
-            if relative in {"pyproject.toml", "src/atlas_native_support/requirements.json"}:
+            if Path(relative).name == "requirements.json":
                 continue
             self.assertEqual(
                 hashlib.sha256(package.joinpath(Path(relative).name).read_bytes()).hexdigest(),
@@ -48,9 +48,12 @@ class NativeBindingTest(unittest.TestCase):
     def test_installed_profile(self) -> None:
         binding = load_native_target_binding("atlas_tensor")
         profile = binding.profile()
-        self.assertEqual(len(profile.descriptors), 86)
+        self.assertEqual(len(profile.descriptors), 95)
         self.assertEqual(len(profile.banks), 10)
         self.assertTrue(profile.target_identity.startswith("atlas-tensor-selection-"))
+        names = {descriptor.name for descriptor in profile.descriptors}
+        self.assertTrue({"vpu_log2_bf16_raw", "vpu_sqrt_bf16_raw",
+                         "vpu_exp2_bf16_bounded"} <= names)
 
     def test_build_compile_and_wrong_target_refusal(self) -> None:
         merlin = os.environ.get("MERLIN_ROOT")
@@ -79,24 +82,36 @@ class NativeBindingTest(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr + built.stdout)
             self.assertEqual(json.loads(built.stdout)["status"], "selection_only")
 
-            artifact = work / "program"
             request = FIXTURES / "log2-request.json"
             abi = FIXTURES / "log2-abi.json"
-            compiled = _command(
-                "native-compile", "--engine", "merlin_native", "--support", "atlas_tensor",
-                "--snapshot", snapshot, "--request", request, "--abi", abi,
-                "--target-source", atlas_root, "--mode", "strict-native",
-                "--out", artifact, "--status-file", work / "status.json",
-            )
-            self.assertEqual(compiled.returncode, 0, compiled.stderr + compiled.stdout)
-            status = json.loads((work / "status.json").read_text())
-            manifest = json.loads((artifact / "manifest.json").read_text())
-            binary = (artifact / "program.bin").read_bytes()
-            self.assertEqual(status["status"], "emitted")
-            self.assertEqual(status["engine"], "merlin_native")
-            self.assertEqual(status["binary_sha256"], hashlib.sha256(binary).hexdigest())
-            self.assertEqual(manifest["binary_sha256"], status["binary_sha256"])
-            self.assertGreater(len(binary), 0)
+            for name in ("log2", "sqrt", "exp2", "minmax"):
+                with self.subTest(name=name):
+                    artifact = work / f"{name}-program"
+                    selected_request = FIXTURES / f"{name}-request.json"
+                    status_file = work / f"{name}-status.json"
+                    selected_abi = FIXTURES / ("minmax-abi.json" if name == "minmax" else "log2-abi.json")
+                    search_limits = (
+                        ["--search-limits", str(FIXTURES / "minmax-search-limits.json")]
+                        if name == "minmax" else []
+                    )
+                    compiled = _command(
+                        "native-compile", "--engine", "merlin_native", "--support", "atlas_tensor",
+                        "--snapshot", snapshot, "--request", selected_request, "--abi", selected_abi,
+                        *search_limits,
+                        "--target-source", atlas_root, "--mode", "strict-native",
+                        "--out", artifact, "--status-file", status_file,
+                    )
+                    self.assertEqual(compiled.returncode, 0, compiled.stderr + compiled.stdout)
+                    status = json.loads(status_file.read_text())
+                    manifest = json.loads((artifact / "manifest.json").read_text())
+                    binary = (artifact / "program.bin").read_bytes()
+                    self.assertEqual(status["status"], "emitted")
+                    self.assertEqual(status["engine"], "merlin_native")
+                    self.assertEqual(status["binary_sha256"], hashlib.sha256(binary).hexdigest())
+                    self.assertEqual(manifest["binary_sha256"], status["binary_sha256"])
+                    self.assertGreater(len(binary), 0)
+                    if name == "minmax":
+                        self.assertGreater(manifest["selected_instructions"], 1)
 
             changed = json.loads(request.read_text())
             changed["target_identity"] = "foreign-target"

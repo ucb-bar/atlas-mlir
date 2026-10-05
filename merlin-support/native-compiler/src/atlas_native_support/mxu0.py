@@ -58,6 +58,8 @@ class Mxu0Contract:
             "vpu_square",
             "vpu_recip",
             "vpu_log2",
+            "vpu_sqrt",
+            "vpu_exp2",
             "vpu_min",
             "vpu_max",
             "vpu_col_min",
@@ -71,7 +73,7 @@ class Mxu0Contract:
         }
         if (
             set(record) != expected
-            or record["schema"] != "atlas.native_tensor_contract.v19"
+            or record["schema"] != "atlas.native_tensor_contract.v21"
             or (record["scope"] != "diagnostic_execution_unqualified_timing")
         ):
             raise ValueError("unrecognized MXU0 selection contract")
@@ -285,6 +287,52 @@ class Mxu0Contract:
             },
         }:
             raise ValueError("VPU BF16 log2 contract is unqualified")
+        if record["vpu_sqrt"] != {
+            "operation": "sqrt",
+            "operand_dtype": "bf16",
+            "operand_policies": ["bf16_raw_bits", numerical["result_policy"]],
+            "result_policy": "vpu_sqrt_lut_q1n16_selected_rtl",
+            "shape": [rows, cols],
+            "physical_layout": layout["kind"],
+            "register_count": layout["register_count"],
+            "semantic_domain": "all_bf16_raw_encodings_isolated_pair_program",
+            "lut_entries": 128,
+            "fixed_integer_bits": 1,
+            "fixed_fraction_bits": 16,
+            "output_fraction_bits": 7,
+            "input_sign_policy": "ignored",
+            "special_exponent_policy": "zero_or_subnormal_to_positive_zero_infinity_to_positive_infinity_nan_to_positive_zero",
+            "instruction": "VSQRT",
+            "in_place_admitted": False,
+            "arithmetic_source_sha256": {
+                "SqrtLUT.scala": "490cf82e396c2a400330d8a0e625423f25ee49dfe51aac66e09785081f01b54b",
+                "LUTParams.scala": "684aac051fe104a04784545bdc2df29b4dfc06734c1309c1aee5ba4242dbbcb5",
+            },
+        }:
+            raise ValueError("VPU BF16 sqrt contract is unqualified")
+        if record["vpu_exp2"] != {
+            "operation": "exp2",
+            "operand_dtype": "bf16",
+            "operand_policy": "bf16_exp2_integer_special_subset_v1",
+            "result_policy": "vpu_exp2_integer_special_selected_rtl_v1",
+            "shape": [rows, cols],
+            "physical_layout": layout["kind"],
+            "register_count": layout["register_count"],
+            "semantic_domain": "17_directed_bf16_integer_zero_infinity_codes",
+            "admitted_input_codes_hex": [
+                "0000", "8000", "7f80", "ff80", "3f80", "bf80", "4000", "c000",
+                "4080", "c080", "4100", "c100", "42b0", "42b2", "42c8", "c2b2", "c2c8",
+            ],
+            "selected_positive_overflow_integer": 89,
+            "instruction": "VEXP2",
+            "in_place_admitted": False,
+            "arithmetic_source_sha256": {
+                "src/main/scala/sp26-fp-units/vpuLUTs/ExLUT.scala": "a4c61f023e39a86fc5c894a7a0bd03a666e09daa9886309b6ed470140d6d52ed",
+                "src/main/scala/sp26-fp-units/Qmn.scala": "d717095d4504896fce8216ac359ec3db2653b89e53c26b4d060f0180fcfe9185",
+                "src/main/scala/sp26-fp-units/common.scala": "21182c1398c92fc2fc1c99d4f9d841ce061844b0e91b1d95b045d3adbcef3e0f",
+            },
+        }:
+            raise ValueError("VPU BF16 exp2 bounded contract is unqualified")
         for kind in ("min", "max"):
             if record[f"vpu_{kind}"] != {
                 "operation": kind,
@@ -437,6 +485,7 @@ class Mxu0Contract:
             "src/main/scala/atlas/vector/laneBoxes/RowMin.scala",
             "src/main/scala/atlas/vector/laneBoxes/RowMax.scala",
             "src/main/scala/atlas/vector/laneBoxes/SumRedu.scala",
+            "src/main/scala/atlas/vector/laneBoxes/ExpLane.scala",
         } <= set(sources):
             raise ValueError("Atlas tensor source pins are incomplete")
         if (
@@ -572,11 +621,29 @@ def admits_bf16_anchor_pair(
 def admits_bf16_raw_pair(
     contract: Mxu0Contract, policy: str, payload: bytes
 ) -> bool:
-    """The selected reciprocal LUT defines an output for every BF16 bit pattern."""
+    """Admit every BF16 bit pattern for selected raw-input unary VPU modes."""
     return (
         policy == contract.record["vpu_recip"]["operand_policies"][0]
         and type(payload) is bytes
         and len(payload) == 2 * contract.record["geometry"]["matrix_register_bytes"]
+    )
+
+
+def admits_bf16_exp2_pair(
+    contract: Mxu0Contract, policy: str, payload: bytes
+) -> bool:
+    """Check every runtime lane against the independently tested exp2 subset."""
+    mode = contract.record["vpu_exp2"]
+    tile_bytes = contract.record["geometry"]["matrix_register_bytes"]
+    admitted = {int(code, 16) for code in mode["admitted_input_codes_hex"]}
+    return (
+        policy == mode["operand_policy"]
+        and type(payload) is bytes
+        and len(payload) == 2 * tile_bytes
+        and all(
+            int.from_bytes(payload[index : index + 2], "little") in admitted
+            for index in range(0, len(payload), 2)
+        )
     )
 
 
@@ -1054,6 +1121,73 @@ def mxu0_profile(contract: Mxu0Contract) -> NativeTargetProfile:
         _copy(
             contract, "dma_store_vpu_log2_bf16_pair", "vmem_bf16", "external_bf16",
             result_dtype, log2["result_policy"], result_registers,
+        ),
+    )
+    sqrt = contract.record["vpu_sqrt"]
+    descriptors += (
+        *(
+            InstructionDescriptor(
+                f"vpu_sqrt_bf16_{origin}",
+                sqrt["operation"],
+                ("vrf_bf16",),
+                "vrf_bf16",
+                result_dtype,
+                sqrt["result_policy"],
+                (2,),
+                extent=result_registers,
+                input_dtypes=(result_dtype,),
+                input_numerical_policies=(policy,),
+                input_ranks=(2,),
+                output_axis_bounds=_tile_bounds(contract),
+                input_axis_bounds=(_tile_bounds(contract),),
+                input_read_offsets=(2 * rows + 3,),
+                completion_offset=2 * rows + 8,
+            )
+            for origin, policy in zip(("raw", "mxu0"), sqrt["operand_policies"], strict=True)
+        ),
+        _copy(
+            contract, "vstore_vpu_sqrt_bf16_pair", "vrf_bf16", "vmem_bf16",
+            result_dtype, sqrt["result_policy"], result_registers,
+        ),
+        _copy(
+            contract, "dma_store_vpu_sqrt_bf16_pair", "vmem_bf16", "external_bf16",
+            result_dtype, sqrt["result_policy"], result_registers,
+        ),
+    )
+    exp2 = contract.record["vpu_exp2"]
+    descriptors += (
+        _copy(
+            contract, "dma_load_bf16_exp2_pair", "external_bf16", "vmem_bf16",
+            result_dtype, exp2["operand_policy"], result_registers,
+        ),
+        _copy(
+            contract, "vload_bf16_exp2_pair", "vmem_bf16", "vrf_bf16",
+            result_dtype, exp2["operand_policy"], result_registers,
+        ),
+        InstructionDescriptor(
+            "vpu_exp2_bf16_bounded",
+            exp2["operation"],
+            ("vrf_bf16",),
+            "vrf_bf16",
+            result_dtype,
+            exp2["result_policy"],
+            (2,),
+            extent=result_registers,
+            input_dtypes=(result_dtype,),
+            input_numerical_policies=(exp2["operand_policy"],),
+            input_ranks=(2,),
+            output_axis_bounds=_tile_bounds(contract),
+            input_axis_bounds=(_tile_bounds(contract),),
+            input_read_offsets=(2 * rows + 3,),
+            completion_offset=2 * rows + 8,
+        ),
+        _copy(
+            contract, "vstore_vpu_exp2_bf16_pair", "vrf_bf16", "vmem_bf16",
+            result_dtype, exp2["result_policy"], result_registers,
+        ),
+        _copy(
+            contract, "dma_store_vpu_exp2_bf16_pair", "vmem_bf16", "external_bf16",
+            result_dtype, exp2["result_policy"], result_registers,
         ),
     )
     for kind in ("min", "max"):
