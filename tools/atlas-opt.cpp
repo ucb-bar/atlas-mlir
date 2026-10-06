@@ -1,4 +1,6 @@
+#include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasToLLVM.h"
 #include "Atlas/AtlasStreamVerification.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -11,6 +13,8 @@ int main(int argc, char **argv) {
   mlir::atlas::registerConvertAtlasToLLVMCallsPass();
   mlir::atlas::registerFinalizeAtlasLLVMCallsPass();
   mlir::atlas::registerVerifyAtlasMachineStreamPass();
+  mlir::atlas::registerInsertAtlasDelaysPass();
+  mlir::atlas::registerScheduleAtlasStreamPass();
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Atlas dialect verifier\n", registry));
 }
