@@ -15,8 +15,7 @@ The dialect has two checked stages. `!atlas.virtual_bf16` and
 `!atlas.virtual_fp8` are unallocated 32×32 tiles. A name such as `%t1` identifies an MLIR SSA *value*;
 the spelling and number do not select Atlas register 1. In this narrow
 pre-allocation stage, `!atlas.virtual_state` tracks ordered external reads,
-writes, and explicit MXU resource transitions, with names such as `%io1`.
-In the physical examples, `%s1` is an SSA
+writes, and explicit MXU resource transitions, with names such as `%io1`. In the physical examples, `%s1` is an SSA
 machine-state token, not scalar register 1. Pure VPU
 candidate operations express their tensor dependencies through `%t` operands.
 The `--verify-atlas-virtual-stream` pass checks the virtual state chain,
@@ -118,11 +117,6 @@ or captured model precision transformation.
 adds BF16 VPU bias addition after each MXU. Its boundary biases are already
 broadcast into physical 32×32 tiles; capturing a vector bias and preparing
 that tile are separate frontend/ABI obligations.
-
-```sh
-build/bin/atlas-opt --verify-atlas-virtual-stream \
-  test/examples/virtual_bf16_ssa.mlir
-```
 
 ### Allocation policy and instruction emission
 
@@ -250,14 +244,14 @@ between selected RTL, architecture text, and the inspected model.
 
 No instruction selector, whole-target allocator, general Linalg-to-Atlas pass,
 qualified timing model, or callable ABI is implemented here. The generated
-virtual path uses conservative serial diagnostic spacing. For physical streams
-without delays, `--insert-atlas-delays` and `--schedule-atlas-stream` use the
-ported timing model, with the latter also reordering instructions within each
-block. Neither pass currently replaces delays in the generated virtual path.
-Focused selected-core tests cover SSA register reuse, CFG copies and loops,
-runtime mailbox control, two outputs, LLVM-produced object words, and memory
-guards. A 32-tile simultaneously live case fails with an explicit 31-pair
-pressure diagnostic. These tests do not establish full target or SoC
+virtual path uses conservative serial diagnostic spacing; the physical timing
+passes accept a stream without delays and have not been integrated into that
+virtual lowering. Other physical examples retain authored delays. Focused selected-core
+tests cover a long SSA chain with physical pair reuse, a swap backedge,
+branch merges, runtime mailbox control, two ordered outputs, actual
+LLVM-produced object words, and memory guards. A 32-tile simultaneously live
+case fails with an explicit
+31-pair pressure diagnostic. These tests do not establish full target or SoC
 qualification.
 
 ## Why the LLVM handoff uses inline assembly
@@ -274,8 +268,8 @@ custom tensor instructions or its instruction-index PC behavior.
 `--finalize-atlas-llvm-calls` therefore freezes the verified stream as one
 side-effecting inline-assembly block of encoded words. Keeping it in one block
 prevents LLVM from placing instructions between a branch and its selected delay slot or
-changing the offsets of internal targets. The numbered handoff examples prove
-that LLVM emitted the checked bytes; they do not give LLVM knowledge of the
+changing the offsets of internal targets. The handoff tests compare freshly
+generated LLVM object bytes with the checked stream; they do not give LLVM knowledge of the
 Atlas operations or certify a callable function.
 
 For a standalone Atlas program, a future object writer could put the checked

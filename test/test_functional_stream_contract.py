@@ -13,6 +13,8 @@ import subprocess
 import unittest
 
 from test_dialect import program as machine_program, variants
+from test_captured_mlp_import import imported
+from test_virtual_lowering import lower
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,11 +85,16 @@ class FunctionalStreamContractTest(unittest.TestCase):
         self.assertEqual(indirect[2]["delay_slot_for_word_index"], 1)
 
     def test_captured_mlp_machine_stream_exports_without_virtual_values(self) -> None:
-        source = ROOT / "examples/handoff/captured_mlp/02-atlas-machine.mlir"
-        exported = emit(source, "--program-json")
+        virtual, _ = imported()
+        machine = lower(virtual)
+        exported = subprocess.run([str(EMIT), "--program-json", "-"],
+                                  input=machine, text=True, capture_output=True)
         self.assertEqual(exported.returncode, 0, exported.stderr)
         program = json.loads(exported.stdout)
-        words = [int(line, 16) for line in emit(source).stdout.splitlines()]
+        emitted = subprocess.run([str(EMIT), "-"], input=machine,
+                                 text=True, capture_output=True)
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        words = [int(line, 16) for line in emitted.stdout.splitlines()]
         self.assertEqual(program["word_count"], 143)
         self.assertEqual([row["word_u32"] for row in program["instructions"]], words)
         self.assertTrue(any(row["operation"] == "atlas.mxu_matmul"

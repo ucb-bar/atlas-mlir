@@ -1,8 +1,8 @@
 # Atlas MLIR hand-authored reference candidate
 
-See the [numbered MLP and attention stage bundles](examples/handoff/README.md)
-for Atlas machine MLIR, LLVM MLIR, LLVM IR, RISC-V assembly, relocatable
-objects, linked ELF files, disassembly, and per-word operation maps. The
+See the [MLP and attention source examples](examples/handoff/README.md) and
+their regeneration commands for Atlas machine MLIR, LLVM MLIR, LLVM IR,
+RISC-V assembly, objects, linked ELFs, disassembly, and per-word maps. The
 [handoff notes](docs/llvm-handoff-examples.md) cover the fixed-shape VMEM
 relayout and selected-core diagnostic evidence.
 The [dialect reference](docs/dialect-reference.md) lists every current
@@ -161,9 +161,9 @@ build/bin/atlas-emit build/loop.machine.mlir > build/loop.words
 For the bounded quantized MLP tile, replace the loop source with
 `test/examples/virtual_fp8_two_layer_mlp.mlir`. The first pass produces a
 109-word physical stream, and the same verification and LLVM handoff commands
-apply. The numbered [virtual MLP bundle](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir)
-shows each stage, including RISC-V assembly and an inspectable ELF. Recreate
-it with `tools/export_llvm_handoff.py` using the arguments shown in the
+apply. The [virtual MLP source](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir)
+can generate each stage, including RISC-V assembly and an inspectable ELF.
+Run `tools/export_llvm_handoff.py` using the arguments shown in the
 [handoff README](examples/handoff/README.md).
 
 The generated delay rule is a conservative diagnostic policy: 256 cycles

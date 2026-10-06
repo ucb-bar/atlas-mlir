@@ -58,10 +58,11 @@ sets `timing_scope` to explicit delay only: it does not assert availability
 latencies, DMA completion, or the numerical meaning of any operation. Unknown
 semantics must remain an explicit unsupported result in a qualified model.
 
-The captured MLP bundle has an
-[example physical program](../examples/handoff/captured_mlp/atlas-physical-program.json)
-and a separate [compiler manifest](../examples/handoff/captured_mlp/compiler-manifest.json)
-for input, constant, output, and precision-policy bindings. The exported
+The [captured MLP source](../examples/handoff/captured_mlp/00-linalg.mlir)
+can generate a physical program and a separate compiler manifest under
+`out/captured-mlp/public-compiler/`, using the command in the
+[compiler notes](captured-mlp-compiler.md). The manifest records input,
+constant, output, and precision-policy bindings. The exported
 program has no sample inputs or golden outputs. Its 143 Atlas words match
 the leading object and linked ELF text words; LLVM's trailing return is not
 an Atlas instruction. A functional-model invocation needs its own runtime

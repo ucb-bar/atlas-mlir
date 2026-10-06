@@ -23,8 +23,9 @@ chooses code from the function name or provenance label. The
 shows this structure without a machine-local weights path. The matching
 [public weights fixture](../test/examples/captured_mlp32_weights.safetensors)
 and [argument manifest](../test/examples/captured_mlp32_arguments.json)
-allow the [numbered compiled bundle](../examples/handoff/captured_mlp/00-linalg.mlir)
-to be rebuilt without the capture environment. A fresh capture of the same
+allow the generated compiler stages to be rebuilt without the capture
+environment. The [Linalg source example](../examples/handoff/captured_mlp/00-linalg.mlir)
+is kept in Git; generated stages belong under `out/`. A fresh capture of the same
 loader produced identical linked executable text.
 
 The source is f32. The [proposed numerical policy](../test/examples/atlas_mlp_numeric_policy.json)
@@ -81,6 +82,19 @@ files expose `atlas-llvm-structured.mlir`, `atlas-llvm.mlir`, `program.ll`,
 `program.s`, `program.o`, `program.elf`, selected words, a word map, and
 constant slot payloads. A failed run leaves diagnostics but no success
 manifest, and a nonempty output directory is refused.
+
+To regenerate the inspectable stages without Model2MLIR, use the public
+source, parameter, manifest, and policy fixtures:
+
+```sh
+"$M2M_PYTHON" tools/compile_atlas_linalg_tile.py \
+  --linalg test/examples/captured_mlp32_linalg.mlir \
+  --argument-manifest test/examples/captured_mlp32_arguments.json \
+  --weights test/examples/captured_mlp32_weights.safetensors \
+  --policy test/examples/atlas_mlp_numeric_policy.json \
+  --atlas-bin-dir build/bin --llvm-bin-dir "$LLVM_BIN" \
+  --linker "$LLD" --output-dir out/captured-mlp/public-compiler
+```
 
 Each external input slot reserves 2,048 bytes. An FP8 operand uses its first
 1,024 bytes. The ABI maps source arguments and frozen parameter keys to

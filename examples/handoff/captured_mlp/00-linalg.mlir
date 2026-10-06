@@ -1,4 +1,4 @@
-builtin.module attributes {prov.weights_file = "captured_mlp32_weights.safetensors", prov.level = "linalg-on-tensors"} {
+builtin.module attributes {prov.weights_file = "../../../test/examples/captured_mlp32_weights.safetensors", prov.level = "linalg-on-tensors"} {
   func.func @forward(%0: tensor<32x32xf32>, %1: tensor<32xf32>, %2: tensor<32x32xf32>, %3: tensor<32xf32>, %4: tensor<32x32xf32>) -> tensor<32x32xf32> {
     %5 = tensor.empty() : tensor<32x32xf32>
     %6 = linalg.transpose ins(%0:tensor<32x32xf32>) outs(%5:tensor<32x32xf32>) permutation = [1, 0]

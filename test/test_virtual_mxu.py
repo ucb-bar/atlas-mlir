@@ -107,7 +107,7 @@ class VirtualMXUTest(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("DELAY >= 256", rejected.stderr)
 
-    def test_numbered_virtual_mlp_handoff_matches_fresh_export(self) -> None:
+    def test_virtual_mlp_handoff_generates_all_stages(self) -> None:
         llvm = os.environ.get("ATLAS_LLVM_BIN")
         linker = os.environ.get("ATLAS_LLD") or shutil.which("ld.lld")
         if not llvm or not linker:
@@ -124,25 +124,25 @@ class VirtualMXUTest(unittest.TestCase):
             self.assertEqual(manifest["examples"][name]["source_stage"],
                              "virtual_ssa")
             self.assertEqual(manifest["examples"][name]["word_count"], 109)
-            stages = {
-                "virtual.mlir": "00-atlas-virtual-ssa.mlir",
-                "atlas.mlir": "01-atlas-machine.mlir",
-                "llvm-structured.mlir": "02-llvm-structured.mlir",
-                "llvm.mlir": "03-llvm-encoded.mlir",
-                "ll": "04-llvm-ir.ll",
-                "s": "05-riscv-words.s",
-                "o": "06-riscv-relocatable.o",
-                "elf": "07-riscv-linked.elf",
-                "disasm.txt": "08-riscv-disassembly.txt",
-                "words.txt": "atlas-words.txt",
-                "word-map.json": "atlas-word-map.json",
-            }
-            for suffix, snapshot in stages.items():
-                with self.subTest(stage=snapshot):
-                    self.assertEqual(
-                        (output / f"{name}.{suffix}").read_bytes(),
-                        (ROOT / "examples/handoff/virtual_mlp" / snapshot).read_bytes(),
-                    )
+            self.assertEqual(
+                (output / f"{name}.virtual.mlir").read_bytes(),
+                (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_bytes(),
+            )
+            self.assertEqual(
+                (ROOT / "examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir")
+                .read_bytes(),
+                (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_bytes(),
+            )
+            self.assertEqual(
+                (output / f"{name}.atlas.mlir").read_text(),
+                lower((EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()).rstrip()
+                + "\n",
+            )
+            for suffix in ("llvm-structured.mlir", "llvm.mlir", "ll", "s",
+                           "o", "elf", "disasm.txt", "words.txt",
+                           "word-map.json", "physical-program.json"):
+                with self.subTest(stage=suffix):
+                    self.assertTrue((output / f"{name}.{suffix}").is_file())
 
     def test_both_mxus_execute_generated_matmul_and_preserve_memory(self) -> None:
         required = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE",
