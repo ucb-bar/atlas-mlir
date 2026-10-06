@@ -9,6 +9,7 @@ attention compilation.
 | --- | --- | ---: | --- |
 | [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [Atlas → LLVM → assembly → ELF](../examples/handoff/mlp_tile/01-atlas-machine.mlir) |
 | [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [Atlas → LLVM → assembly → ELF](../examples/handoff/attention_tile/01-atlas-machine.mlir) |
+| [Virtual SSA MLP tile](../test/examples/virtual_fp8_two_layer_mlp.mlir) | Generated MXU0, BF16 ReLU, unit-scale E8M0 pack and relayout, MXU1 | 109 | [virtual SSA → Atlas → LLVM → assembly → ELF](../examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir) |
 
 The [examples index](../examples/handoff/README.md) links every numbered
 stage, both linked ELF files, disassemblies, and operation-to-word maps.

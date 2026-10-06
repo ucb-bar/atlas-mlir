@@ -178,6 +178,9 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
+    if (module->hasAttr("atlas.generated_from_virtual"))
+      reconstructed->setAttr("atlas.generated_from_virtual",
+                             builder.getUnitAttr());
     builder.setInsertionPointToStart(reconstructed.getBody());
     OperationState startState(module.getLoc(), "atlas.start");
     auto stateType = mlir::atlas::StateType::get(module.getContext());

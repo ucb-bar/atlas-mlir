@@ -9,5 +9,12 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasStream.cpp
   AtlasDelayInsertion.cpp
   AtlasScheduling.cpp
+  AtlasVirtualVerification.cpp
+  AtlasVirtualToMachine.cpp
+  AtlasVirtualAllocation.cpp
+  AtlasRegisterAllocationVerification.cpp
+  AtlasGeneratedSchedule.cpp
   DEPENDS MLIRAtlasOpsIncGen
-  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRLLVMDialect MLIRPass)
+  LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRArithDialect
+                   MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect
+                   MLIRPass)
