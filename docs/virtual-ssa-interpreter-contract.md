@@ -23,6 +23,73 @@ This fragment omits a return terminator; the checked fixtures under
 `test/examples/virtual_bf16_cfg.mlir` have executable syntax and complete
 control-flow examples.
 
+## Parser interface
+
+Contract version `atlas.virtual-evaluator.v1` provides a
+[parser and typed runtime records](../tools/atlas_virtual_evaluator.py).
+Operation execution is not implemented. Parsing checks supported signatures,
+types, attributes, and modes; it does not prove state flow, dominance, handle
+lifetimes, DMA ranges, or hardware legality. The
+[coverage inventory](virtual-evaluator-coverage.md) lists the admitted operations,
+source revisions, and remaining numerical questions for
+[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).
+
+The sources have distinct roles:
+
+- The pinned [PR #13](https://github.com/ucb-bar/atlas-mlir/pull/13) interface is
+  the compatibility target; the default branch supplies existing regressions.
+  Scheduler and allocator decisions are subjects of verification.
+- This contract and reconciled specifications define logical meaning. Selected
+  RTL and matching CIRCT artifacts establish behavior for the target configuration.
+- Audited `npu-model` components supply numerical implementations. Independent
+  expectations and selected-core comparisons check their use; model timing
+  assumptions do not establish RTL guarantees.
+
+`parse_program` accepts flat IR or a selected function, requiring a name for
+multi-function modules. It retains xDSL SSA/block identities and boundary/control
+declarations. Reparse after mutating its IR. `validate_inputs` requires exactly
+the declared indices/formats, including untaken paths, and controls in entry
+argument order.
+
+```python
+from tools.atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, parse_program
+
+program = parse_program(source, function="choose_tile")
+inputs = RuntimeInputs({0: Tile("bf16", (0x3f80,) * 1024)}, (Scalar(1, 1),))
+program.validate_inputs(inputs)
+```
+
+Runtime values own immutable copies:
+
+- `Tile(format, bits)`: 1,024 row-major raw BF16 words or FP8 E4M3 bytes,
+  preserving signed zeros and exceptional encodings without quantization.
+- `Scalar(width, bits)`: unsigned i1/i32 bits; encode -1 as
+  `Scalar(32, 0xffffffff)`.
+- `MemoryRegion(address, data)`: a nonempty byte snapshot within 32-bit DRAM.
+  Supplied regions, including guards, cannot overlap.
+- `RuntimeInputs(tiles, controls, memory)`: boundary tiles, scalar controls, and
+  initial memory. `EvaluationResult(outputs, memory)` describes BF16 outputs and
+  final snapshots of the same regions. FP8 stores are memory effects.
+
+Logical tiles are independent of transport layout. BF16 pair-halves transport
+uses little-endian words at byte offset
+`(col // 16) * 1024 + (row * 16 + col % 16) * 2`.
+FP8 payloads are 1,024 row-major bytes; implicit input slots reserve 2,048 bytes.
+Weights are `W[N,K]`, one row per output column, so contraction is
+`A[M,K] @ W[N,K].T`. Adapt that orientation explicitly for numerical helpers;
+do not derive expected values from compiler relayout.
+
+Install and test the interface in a dedicated environment:
+
+```sh
+python -m pip install -r tools/requirements-virtual-evaluator.txt
+python -m unittest discover -s test -p test_virtual_evaluator_interface.py -v
+```
+
+The parser pins xDSL 0.65.0 and was tested with Python 3.12. Numerical integration
+requires the selected model's Python >=3.14 environment. Its source/configuration
+must be reconciled with the selected-core artifact before numerical comparison.
+
 ## Recommended interpreter state
 
 Keep three distinct things:
@@ -65,19 +132,47 @@ Channel-free DMA tile operations take ordinary i32 SSA values for DRAM byte addr
 
 An interpreter must distinguish a pending transfer from a ready tensor. `virtual_dma_load_fp8/bf16` creates a pending-load identity; its matching `virtual_dma_await_fp8/bf16` produces the usable tile. `virtual_dma_store_fp8/bf16` captures an immutable source tile into transfer-owned staging, and `virtual_dma_wait` establishes completion of the external write. Treat the staging as a private logical buffer owned through completion, not as an assigned VMEM window. An untimed interpreter may perform the copy eagerly internally, but must preserve these visibility and handle-lifetime rules.
 
-The current stream verifier allows one pending transfer, requires completion in the same block, and rejects repeated or mismatched completions. Existing implicit boundary I/O and VPU pack cannot run while it is pending. A completed store counts as an external output; CFG stores and their waits occur in the unique return block. Physical lowering preserves issue/completion separation with a private bank-2 staging window, fixed load/store channels 0/1, and scalar operand snapshots kept stable through completion. These are bounded backend choices; an interpreter should keep transfer identities independent of that placement. General channel/window allocation, a DMA interpreter, and a timing model remain future work.
+The local baseline permits one pending DMA transfer; the pinned
+[PR #13](https://github.com/ucb-bar/atlas-mlir/pull/13) target
+permits two independent handles, awaited in either order. Both require completion
+in the defining block and reject repeated or mismatched completions. Implicit
+boundary I/O and VPU pack require no pending transfers. A completed store counts
+as output; CFG stores and waits occur in the unique return block.
+
+Awaiting B exposes B, not A. Logical completion remains separate from physical
+progress: a transfer may finish before its handle is consumed. Keep identities
+independent of channels, staging windows, and scalar helpers. Scalar capture at
+launch does not release source memory; physical ownership and release belong to
+[issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10). Model FIFO progression
+does not establish RTL completion order.
 
 The environment must keep external load sources stable and exclude conflicting accesses to transfer ranges until completion. The IR checks do not prove host-side synchronization.
 
 ## Explicit MXU handle extension
 
-The checked virtual dialect also represents weight loading, reset contractions, accumulation, and BF16 readout explicitly. `!atlas.virtual_mxu_weight<unit>` is a resident-weight identity; `!atlas.virtual_mxu_acc<unit>` is a consumable accumulator version. Neither is an ordinary tensor value or a physical slot number. An interpreter implementing these operations needs a current weight identity and current accumulator identity for each selected unit, in addition to its immutable tensor environment.
+The dialect represents weight loading, reset contractions, accumulation, and
+BF16/FP8 readout. `!atlas.virtual_mxu_weight<unit>` identifies resident weights;
+`!atlas.virtual_mxu_acc<unit>` identifies a consumable accumulator version.
+Neither names a physical slot. The local baseline tracks one weight/accumulator
+per unit; the pinned target permits two weights and two independent accumulator
+chains per unit. The interpreter must retain those distinct identities.
 
-Each explicit MXU operation advances the virtual state token. A weight load replaces the current weight identity and can occur while an accumulator is live. Reset and accumulator loading require no live accumulator, accumulation replaces its input accumulator version, and either readout consumes that version while preserving the weight. Accumulator loading accepts an FP8 tile (decoded without a scale operand) or a BF16 tile and preserves resident weights. Every contraction must use the current weight. Both units can have independent live chains. The present verifier requires handles to stay within their defining block and every accumulator to be read out before block exit. A legacy `virtual_mxu_matmul` invalidates the selected unit's weight handle and is rejected while that unit has a live explicit accumulator.
+Each explicit MXU operation advances state. A weight load creates an identity;
+reset starts a contraction, not merely a zero accumulator. FP8/BF16 accumulator
+loads seed a chain and preserve weights; FP8 seeds decode without a scale.
+Accumulation consumes the current version and produces its successor. Either
+readout consumes that version while preserving weights. All handles must agree
+on their unit, remain in their defining block, and every accumulator must be
+read out before exit. In the pinned target, legacy `virtual_mxu_matmul` cannot
+overlap live explicit weights or accumulators on its unit.
 
 FP8 readout takes an immutable `!atlas.virtual_scale` produced by the pure `virtual_scale_constant` operation. Keep its raw code (`0..255`) in the value environment rather than treating it as a mutable physical scale register. The current slice admits constant scale definitions with ordinary dominance, but no scale block arguments or runtime scale inputs. A numerical interpreter must use the selected MXU converter, including its special-code behavior; VPU packing is not a substitute for MXU FP8 readout. FP8 readout produces the logical row-major tile layout used by virtual FP8 inputs.
 
-These are implemented structural and lifetime checks, not an implemented interpreter or a numerical qualification. Physical lowering supports all seven MXU forms within the existing single-function ABI, using unit-local weight and accumulator slot 0 and the existing diagnostic delays. FP8 readout rematerializes its scale code into scratch e3 before each use. That placement is a backend choice; an interpreter should keep resource identities independent of physical slots. A future interpreter must preserve the selected unit's accumulation precision and readout behavior rather than substituting a generic matrix multiplication.
+The compiler's structural/lifetime checks do not qualify numerical execution.
+Keep slot and scratch-scale assignments outside the logical reference. Reuse
+audited `RtlNumerics` components while preserving MXU0's per-MAC BF16 arithmetic
+and MXU1's distinct anchor accumulator/readout; a generic matmul or shared
+rounding shortcut is insufficient.
 
 ## Semantic boundaries
 
@@ -109,6 +204,7 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-This contract enables an interpreter in a separate package. It does not add
-one to this OOT dialect or assert that all virtual operation semantics are
-qualified.
+The parser/input layer is implemented in this repository's Python verification
+tooling. Operation execution and selected-core comparisons remain future work;
+input admission alone does not complete
+[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).

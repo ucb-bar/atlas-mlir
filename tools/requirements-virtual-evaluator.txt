@@ -1,0 +1,2 @@
+# Parser only; numerical dependencies belong to the npu-model environment.
+xdsl==0.65.0
