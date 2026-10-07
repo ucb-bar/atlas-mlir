@@ -631,7 +631,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     break;
   }
   case OpClass::DmaConfig: {
-    b.x(in.rs1, false, 0, true);
+    // ScalarCore.scala copies the base register as the config issues.
+    b.x(in.rs1, false, 0);
     Access base{Res::DmaBase, true, 0, 1, 0, 1};
     base.atCompletion = true;
     b.f.accesses.push_back(base);

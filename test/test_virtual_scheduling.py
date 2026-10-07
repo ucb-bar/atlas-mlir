@@ -509,6 +509,62 @@ class VirtualSchedulingTest(unittest.TestCase):
             z_overlaps |= at["load z"] < at["wait y"] or at["load z"] < at["await y"]
         self.assertTrue(z_overlaps, "no order ran the load of z beside another transfer")
 
+    def test_computed_dram_addresses_never_overlap_a_store(self) -> None:
+        # The scheduler reads constant addresses only. One built by
+        # arith.addi may touch anything, so a load from it never runs beside
+        # a store, though the two ranges here are disjoint.
+        store = (f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
+                 f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)')
+        source = function("computed", [
+            start(), inp("io0", "io1", "t", 0), const("y", -2147481600),
+            const("base", -2147479552), const("zero", 0),
+            "%z = arith.addi %base, %zero : i32", const("size", 2048), store,
+            f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
+            dma_load("io3", "io4", "ez", "z", "size", "bf16"),
+            dma_await("io4", "io5", "v", "ez", "bf16"),
+            add("w", "t", "v"), outp("io5", "o", "w", 0), f"return %o : {S}"])
+        wait, load = line_of(source, "%io3 ="), line_of(source, "%ez =")
+        for options in ([], *([f"random-seed={seed}"] for seed in range(16))):
+            position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
+            self.assertLess(position[wait], position[load], options)
+
+    def test_loads_of_the_same_dram_may_overlap(self) -> None:
+        # Only a store makes overlapping DRAM a hazard.
+        source = function("reread", [
+            start(), const("y", -2147481600), const("size", 2048),
+            dma_load("io0", "io1", "e1", "y", "size", "bf16"),
+            dma_await("io1", "io2", "u", "e1", "bf16"),
+            dma_load("io2", "io3", "e2", "y", "size", "bf16"),
+            dma_await("io3", "io4", "v", "e2", "bf16"),
+            add("w", "u", "v"), outp("io4", "o", "w", 0), f"return %o : {S}"])
+        first_await, second_load = line_of(source, "%u ="), line_of(source, "%e2 =")
+        overlapped = False
+        for options in ([], *([f"random-seed={seed}"] for seed in range(16))):
+            position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
+            overlapped |= position[second_load] < position[first_await]
+        self.assertTrue(overlapped, "no order ran the two loads together")
+
+    def test_legacy_matmul_keeps_its_place_among_a_units_chains(self) -> None:
+        # The one-op matmul uses fixed slots of its unit, so no explicit MXU
+        # operation on that unit crosses it.
+        legacy = (f'%legacy = "atlas.virtual_mxu_matmul"(%x, %w2) {{unit = 0 : i32}} '
+                  f': ({F}, {F}) -> {T}')
+        source = function("legacy", [
+            start(), inp("io0", "io1", "x", 0, "fp8"), inp("io1", "io2", "w1", 1, "fp8"),
+            inp("io2", "io3", "w2", 2, "fp8"),
+            *mxu_chain("io3", 0, "w1", "x", "h1", "a"), legacy,
+            *mxu_chain("as3", 0, "w2", "x", "h2", "b"),
+            add("y1", "h1", "h2"), add("y", "y1", "legacy"), outp("bs3", "o", "y", 0),
+            f"return %o : {S}"])
+        before = [line_of(source, text) for text in ("%aw =", "%aa =", "%h1 =")]
+        after = [line_of(source, text) for text in ("%bw =", "%ba =", "%h2 =")]
+        matmul = line_of(source, "%legacy =")
+        for options in ([], *([f"random-seed={seed}"] for seed in range(16))):
+            position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
+            self.assertTrue(all(position[line] < position[matmul] for line in before), options)
+            self.assertTrue(all(position[matmul] < position[line] for line in after), options)
+        self.assertTrue(lowers(self.scheduled(source)))
+
     def test_loop_body_dma_interval_receives_vpu_work(self) -> None:
         body = blocks(self.scheduled(cfg_cases()["C14 explicit DMA in a loop body"]))[2]["ops"]
         load = body.index("atlas.virtual_dma_load_bf16")

@@ -1,9 +1,9 @@
 // Two independent MXU chains written in naive order: every DMA load is awaited
 // at once, both units compute, then both results are stored. The program is
 // DMA-bound; --schedule-atlas-virtual hides compute under the transfers by
-// moving each unit's work into issue-to-await intervals. DMA operations keep
-// their order (one pending transfer), and each unit keeps its own weight and
-// accumulator order.
+// moving each unit's work into issue-to-await intervals, and launches the
+// next transfer before awaiting the current one, up to the transfers the
+// verifier lets be pending at once.
 module {
   func.func @two_unit_overlap() -> !atlas.virtual_state attributes {atlas.input_dram_base = 2415919104 : i64, atlas.output_dram_base = 2415935488 : i64} {
     %io0 = "atlas.virtual_start"() : () -> !atlas.virtual_state

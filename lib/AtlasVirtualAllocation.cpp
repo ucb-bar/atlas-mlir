@@ -116,24 +116,36 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
 // Each weight takes the lowest slot of its unit free of live weights and
 // frees it after its last use; each accumulator chain takes the lowest free
 // accumulator slot from its start to its readout. The verifier bounds both by
-// the slot count.
+// the slot count and keeps both inside the block; the checks here state what
+// the lowering relies on.
 LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
   using Slots = std::array<Value, kVirtualMXUSlots>;
   std::array<Slots, 2> weightSlots{}, accSlots{};
   llvm::DenseMap<Value, unsigned> remainingUses;
-  auto take = [&](Slots &slots, Value value, unsigned unit) -> LogicalResult {
+  auto take = [&](Operation &op, Slots &slots, Value value,
+                  unsigned unit) -> LogicalResult {
     for (unsigned slot = 0; slot < kVirtualMXUSlots; ++slot)
       if (!slots[slot]) {
         slots[slot] = value;
         mxuResources[value] = {unit, slot};
         return success();
       }
-    return function.emitOpError("internal MXU slot overflow");
+    return op.emitOpError("needs an MXU slot while every slot of its unit "
+                          "is live");
   };
   auto release = [](Slots &slots, Value value) {
     for (Value &owner : slots)
       if (owner == value)
         owner = Value{};
+  };
+  // The live accumulator `acc` replaces or ends, and where it is.
+  auto liveAccumulator = [&](Operation &op,
+                             Value acc) -> FailureOr<MXUPlacement> {
+    auto placed = mxuResources.find(acc);
+    if (placed == mxuResources.end() ||
+        accSlots[placed->second.unit][placed->second.slot] != acc)
+      return op.emitOpError("uses an accumulator that is not live");
+    return placed->second;
   };
   for (Operation &op : block) {
     for (Value operand : op.getOperands())
@@ -143,7 +155,7 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
     if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
       Value weight = load.getWeight();
       unsigned unit = cast<VirtualMXUWeightType>(weight.getType()).getUnit();
-      if (failed(take(weightSlots[unit], weight, unit)))
+      if (failed(take(op, weightSlots[unit], weight, unit)))
         return failure();
       remainingUses[weight] =
           std::distance(weight.use_begin(), weight.use_end());
@@ -151,20 +163,35 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
         release(weightSlots[unit], weight);
     } else if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
       // The next version stays in its chain's slot.
-      MXUPlacement placement = mxu(accumulate.getAcc());
-      mxuResources[accumulate.getNextAcc()] = placement;
-      accSlots[placement.unit][placement.slot] = accumulate.getNextAcc();
+      FailureOr<MXUPlacement> placement =
+          liveAccumulator(op, accumulate.getAcc());
+      if (failed(placement))
+        return failure();
+      mxuResources[accumulate.getNextAcc()] = *placement;
+      accSlots[placement->unit][placement->slot] = accumulate.getNextAcc();
     } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-      MXUPlacement placement = mxu(op.getOperand(1));
-      accSlots[placement.unit][placement.slot] = Value{};
+      FailureOr<MXUPlacement> placement = liveAccumulator(op, op.getOperand(1));
+      if (failed(placement))
+        return failure();
+      accSlots[placement->unit][placement->slot] = Value{};
     } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
                    VirtualMXUResetOp>(op)) {
       Value acc = op.getResult(1);
       unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
-      if (failed(take(accSlots[unit], acc, unit)))
+      if (failed(take(op, accSlots[unit], acc, unit)))
         return failure();
+    } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
+      // The legacy form uses fixed slots of its unit, which must be free.
+      unsigned unit = matmul.getUnit();
+      if (weightSlots[unit][fixedResources.mxuWeightSlot] ||
+          accSlots[unit][fixedResources.mxuAccSlot])
+        return op.emitOpError("overwrites MXU slots that are live");
     }
   }
+  for (const Slots &slots : accSlots)
+    if (llvm::any_of(slots, [](Value acc) { return bool(acc); }))
+      return block.getTerminator()->emitOpError(
+          "leaves an MXU accumulator live at the block end");
   return success();
 }
 
@@ -176,14 +203,16 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                                               unsigned &nextTransfer) {
   std::array<Value, kDMAChannels> channels{}, windows{};
-  auto release = [](std::array<Value, kDMAChannels> &owners, Value transfer) {
-    *llvm::find(owners, transfer) = Value{};
-  };
   for (Operation &op : block) {
     if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(
             op)) {
-      release(channels, op.getOperand(1));
-      release(windows, op.getOperand(1));
+      Value transfer = op.getOperand(1);
+      auto channel = llvm::find(channels, transfer);
+      auto window = llvm::find(windows, transfer);
+      if (channel == channels.end() || window == windows.end())
+        return op.emitOpError("completes a DMA transfer that is not in flight");
+      *channel = Value{};
+      *window = Value{};
       continue;
     }
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
@@ -195,7 +224,8 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       channel = llvm::find(channels, Value{}) - channels.begin();
     auto window = llvm::find(windows, Value{});
     if (channel == kDMAChannels || window == windows.end())
-      return function.emitOpError("internal DMA channel overflow");
+      return op.emitOpError("launches a DMA transfer while every channel is "
+                            "in flight");
     Value transfer = op.getResult(1);
     channels[channel] = transfer;
     *window = transfer;
@@ -214,6 +244,9 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                               fixedResources.dmaDramReg,
                               fixedResources.dmaSizeReg};
   }
+  if (llvm::any_of(channels, [](Value transfer) { return bool(transfer); }))
+    return block.getTerminator()->emitOpError(
+        "leaves a DMA transfer in flight at the block end");
   return success();
 }
 

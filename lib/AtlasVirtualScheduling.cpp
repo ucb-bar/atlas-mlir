@@ -61,6 +61,10 @@ bool isLaunch(Operation *op) {
              VirtualDMAStoreBF16Op>(op);
 }
 
+bool isStore(Operation *op) {
+  return isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+}
+
 bool isCompletion(Operation *op) {
   return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op);
 }
@@ -102,29 +106,28 @@ bool mayOverlap(const std::optional<DRAMRange> &a,
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
 // and virtual_pack_fp8 are declared Pure yet have ordering obligations. DMA
 // ordering and slot limits are edges of their own (buildGraph, SlotPool).
+// An operation missing from the table is a full barrier.
 Effects effectsOf(Operation *op) {
   Effects e;
-  if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op) ||
-      isLaunch(op) || isCompletion(op)) {
-    // No pseudo-register.
-  } else if (isa<VirtualPackFP8Op>(op)) {
+  e.reads = bit(kBarrier);
+  if (isa<VirtualPackFP8Op>(op))
     e.writes = bit(kPack);
-  } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
-    e.reads = bit(kUnit0 + unitOf(load.getWeight().getType()));
-  } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
-                 VirtualMXUResetOp>(op)) {
-    e.reads = bit(kUnit0 + unitOf(op->getResult(1).getType()));
-  } else if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op)) {
-    e.reads = bit(kUnit0 + unitOf(acc.getAcc().getType()));
-  } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-    e.reads = bit(kUnit0 + unitOf(op->getOperand(1).getType()));
-  } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
+  else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
+    e.reads |= bit(kUnit0 + unitOf(load.getWeight().getType()));
+  else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
+               VirtualMXUResetOp>(op))
+    e.reads |= bit(kUnit0 + unitOf(op->getResult(1).getType()));
+  else if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op))
+    e.reads |= bit(kUnit0 + unitOf(acc.getAcc().getType()));
+  else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op))
+    e.reads |= bit(kUnit0 + unitOf(op->getOperand(1).getType()));
+  else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op))
     e.writes = bit(kUnit0 + matmul.getUnit());
-  } else if (!isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
-                  arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op)) {
+  else if (!isLaunch(op) && !isCompletion(op) &&
+           !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
+                VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
+                arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
-  }
-  e.reads |= bit(kBarrier);
   return e;
 }
 
@@ -138,20 +141,23 @@ public:
   explicit SlotPool(unsigned count) : slots(count) {}
 
   // `node` takes a slot for a holder last used by `lastUses`, all after it.
+  // False when every slot is still held at `node`.
   template <typename Edge>
-  void acquire(unsigned node, ArrayRef<unsigned> lastUses, Edge &&edge) {
+  bool acquire(unsigned node, ArrayRef<unsigned> lastUses, Edge &&edge) {
     Slot *oldest = nullptr;
     for (Slot &slot : slots)
       if (slot.freeAfter < static_cast<int>(node) &&
           (!oldest || slot.freeAfter < oldest->freeAfter))
         oldest = &slot;
-    assert(oldest && "the verifier bounds every pool by its slot count");
+    if (!oldest)
+      return false;
     for (unsigned use : oldest->lastUses)
       edge(use, node);
     oldest->lastUses.assign(lastUses.begin(), lastUses.end());
     oldest->freeAfter = node;
     for (unsigned use : lastUses)
       oldest->freeAfter = std::max(oldest->freeAfter, static_cast<int>(use));
+    return true;
   }
 
 private:
@@ -178,7 +184,9 @@ SmallVector<Operation *> freeOperations(Block &block) {
   return ops;
 }
 
-BlockGraph buildGraph(Block &block) {
+// Fails, with an error, on a block whose transfers or MXU chains break the
+// rules the verifier enforces, since no order of it could be checked.
+FailureOr<BlockGraph> buildGraph(Block &block) {
   BlockGraph g;
   g.nodes = freeOperations(block);
   unsigned n = g.nodes.size();
@@ -228,15 +236,69 @@ BlockGraph buildGraph(Block &block) {
       }
     }
   }
-  // Explicit transfers run at the same time unless they may touch the same
-  // DRAM bytes; then the later one launches after the earlier completes, as
-  // a verified source already orders them. Implicit memory work keeps its
-  // place among the transfers, so nothing is pending when it runs.
-  SmallVector<unsigned> launches, transfersAndCompletions, implicit;
+  auto cannotOrder = [](Operation *op, const Twine &why) {
+    return op->emitError("schedule-atlas-virtual cannot order this block: ")
+           << why;
+  };
+  auto nodeOf = [&](Operation *op) -> std::optional<unsigned> {
+    auto found = index.find(op);
+    if (found == index.end())
+      return std::nullopt;
+    return found->second;
+  };
+  // Each user of `value`, all of which must be operations of this block.
+  auto usersOf = [&](Value value) -> std::optional<SmallVector<unsigned, 2>> {
+    SmallVector<unsigned, 2> users;
+    for (Operation *user : value.getUsers()) {
+      std::optional<unsigned> node = nodeOf(user);
+      if (!node)
+        return std::nullopt;
+      users.push_back(*node);
+    }
+    return users;
+  };
+  // The completion of the transfer `launch` starts: its only user.
+  auto completionOf = [&](unsigned launch) -> std::optional<unsigned> {
+    Value transfer = g.nodes[launch]->getResult(1);
+    if (!transfer.hasOneUse())
+      return std::nullopt;
+    std::optional<unsigned> node = nodeOf(*transfer.user_begin());
+    if (!node || !isCompletion(g.nodes[*node]))
+      return std::nullopt;
+    return node;
+  };
+  // The readout ending the accumulator chain `acc` starts. Each version is
+  // used once, by the accumulate that replaces it or the readout.
+  auto chainEnd = [&](Value acc) -> std::optional<unsigned> {
+    while (acc.hasOneUse()) {
+      Operation *user = *acc.user_begin();
+      if (auto next = dyn_cast<VirtualMXUAccumulateOp>(user)) {
+        acc = next.getNextAcc();
+        continue;
+      }
+      if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(user))
+        return nodeOf(user);
+      return std::nullopt;
+    }
+    return std::nullopt;
+  };
+
+  // Explicit transfers run at the same time unless one is a store and they
+  // may touch the same DRAM bytes; then the later one launches after the
+  // earlier completes, as a verified source already orders them. Implicit
+  // memory work keeps its place among the transfers, so nothing is pending
+  // when it runs.
+  SmallVector<unsigned> launches, completions, transfersAndCompletions,
+      implicit;
   for (unsigned i = 0; i < n; ++i) {
     Operation *op = g.nodes[i];
-    if (isLaunch(op))
+    if (isLaunch(op)) {
+      std::optional<unsigned> completion = completionOf(i);
+      if (!completion)
+        return cannotOrder(op, "its transfer is not completed once in it");
       launches.push_back(i);
+      completions.push_back(*completion);
+    }
     if (isLaunch(op) || isCompletion(op))
       transfersAndCompletions.push_back(i);
     else if (isImplicitMemory(op))
@@ -250,47 +312,50 @@ BlockGraph buildGraph(Block &block) {
     ranges.push_back(dramRange(g.nodes[launch]));
   for (unsigned a = 0; a < launches.size(); ++a)
     for (unsigned b = a + 1; b < launches.size(); ++b) {
+      if (!isStore(g.nodes[launches[a]]) && !isStore(g.nodes[launches[b]]))
+        continue;
       if (!mayOverlap(ranges[a], ranges[b]))
         continue;
-      unsigned done =
-          index.lookup(*g.nodes[launches[a]]->getResult(1).user_begin());
       // A source that already overlaps them keeps their launch order.
-      edge(done < launches[b] ? done : launches[a], launches[b]);
+      edge(completions[a] < launches[b] ? completions[a] : launches[a],
+           launches[b]);
     }
 
   // Slot limits. A transfer is last used by its completion, a weight by its
   // users, or by its load if it has none, and an accumulator chain by the
   // readout that ends it.
-  auto usersOf = [&](Value value) {
-    SmallVector<unsigned, 2> users;
-    for (Operation *user : value.getUsers())
-      users.push_back(index.lookup(user));
-    return users;
-  };
-  // Each accumulator version has exactly one user, as the verifier requires.
-  auto chainEnd = [&](Value acc) {
-    while (auto next = dyn_cast<VirtualMXUAccumulateOp>(*acc.user_begin()))
-      acc = next.getNextAcc();
-    return index.lookup(*acc.user_begin());
-  };
   SlotPool transfers(kMaxPendingVirtualDMA);
   std::array<SlotPool, 2> weights = {SlotPool(kVirtualMXUSlots),
                                      SlotPool(kVirtualMXUSlots)};
   std::array<SlotPool, 2> accumulators = {SlotPool(kVirtualMXUSlots),
                                           SlotPool(kVirtualMXUSlots)};
-  for (unsigned i = 0; i < n; ++i) {
+  for (unsigned i = 0, t = 0; i < n; ++i) {
     Operation *op = g.nodes[i];
     if (isLaunch(op)) {
-      transfers.acquire(i, usersOf(op->getResult(1)), edge);
+      if (!transfers.acquire(i, {completions[t++]}, edge))
+        return cannotOrder(op, "it has more DMA transfers pending at once "
+                               "than the verifier allows");
     } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
-      SmallVector<unsigned, 2> users = usersOf(load.getWeight());
-      if (users.empty())
-        users.push_back(i);
-      weights[unitOf(load.getWeight().getType())].acquire(i, users, edge);
+      std::optional<SmallVector<unsigned, 2>> users =
+          usersOf(load.getWeight());
+      if (!users)
+        return cannotOrder(op, "its weight is used outside it");
+      if (users->empty())
+        users->push_back(i);
+      if (!weights[unitOf(load.getWeight().getType())].acquire(i, *users,
+                                                                edge))
+        return cannotOrder(op, "it holds more weights at once than the "
+                               "verifier allows");
     } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
                    VirtualMXUResetOp>(op)) {
       Value acc = op->getResult(1);
-      accumulators[unitOf(acc.getType())].acquire(i, {chainEnd(acc)}, edge);
+      std::optional<unsigned> end = chainEnd(acc);
+      if (!end)
+        return cannotOrder(op, "its accumulator chain does not end in a "
+                               "readout in it");
+      if (!accumulators[unitOf(acc.getType())].acquire(i, {*end}, edge))
+        return cannotOrder(op, "it holds more accumulators at once than the "
+                               "verifier allows");
     }
   }
   return g;
@@ -301,21 +366,61 @@ BlockGraph buildGraph(Block &block) {
 enum class Unit { Scalar, Lsu, Vpu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
 constexpr unsigned kUnits = static_cast<unsigned>(Unit::Weights1) + 1;
 
-// What an operation occupies: one functional unit for `cycles`, after which
-// its results are ready. A blocking operation also holds the in-order
-// frontend until it finishes.
+// What an operation costs: it holds one functional unit for `busy` cycles,
+// its results are ready after `latency`, and the in-order frontend issues the
+// next operation `frontend` cycles after it starts.
 struct Cost {
   Unit unit;
-  int cycles;
-  bool blocking = false;
+  int busy;
+  int latency;
+  int frontend = 1;
 };
 
-// Cycles until a machine operation's work is done, by npu_model's rules.
-int cyclesOf(const std::string &name) {
-  timing::Instr in;
-  in.op = timing::findOp(name);
-  assert(in.op && "the timing model knows every machine operation");
-  return timing::footprintOf(in, timing::unknownRegs()).doneAge + 1;
+// A machine operation's timing by npu_model's rules: cycles until its work
+// is done, and until the same operation on other registers and slots can
+// issue behind it on its unit.
+struct MachineTiming {
+  int latency;
+  int interval;
+};
+
+MachineTiming timingOf(const std::string &name) {
+  auto instruction = [&](int rd, int rs1, int rs2) {
+    timing::Instr in;
+    in.op = timing::findOp(name);
+    assert(in.op && "the timing model knows every machine operation");
+    in.rd = rd;
+    in.rs1 = rs1;
+    in.rs2 = rs2;
+    return in;
+  };
+  // Two instances that share no register, slot, or BF16 pair.
+  timing::Instr first = instruction(0, 2, 4), second = instruction(6, 8, 10);
+  switch (first.op->opClass) {
+  case timing::OpClass::WeightPush:
+  case timing::OpClass::AccPushFp8:
+  case timing::OpClass::AccPushBf16:
+  case timing::OpClass::MatMul:
+  case timing::OpClass::MatMulAcc:
+  case timing::OpClass::PopFp8:
+  case timing::OpClass::PopBf16:
+    // MXU slot operands are 0 or 1.
+    first = instruction(0, 0, 0);
+    second = instruction(1, 2, 1);
+    break;
+  default:
+    break;
+  }
+  timing::Footprint firstFootprint =
+      timing::footprintOf(first, timing::unknownRegs());
+  timing::Footprint secondFootprint =
+      timing::footprintOf(second, timing::unknownRegs());
+  timing::ReservationTable table;
+  table.reserve(first, firstFootprint, 0);
+  int interval = 1;
+  while (!table.conflict(second, secondFootprint, interval).empty())
+    ++interval;
+  return {firstFootprint.doneAge + 1, interval};
 }
 
 // A tile is 32 x 32 elements: one M register of FP8 or a pair of BF16. An M
@@ -324,46 +429,59 @@ int registersOf(bool fp8) { return fp8 ? 1 : 2; }
 constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 
 Cost onMxu(StringRef name, unsigned unit) {
-  return {unit ? Unit::Mxu1 : Unit::Mxu0,
-          cyclesOf((name + ".mxu" + Twine(unit)).str())};
+  MachineTiming t = timingOf((name + ".mxu" + Twine(unit)).str());
+  return {unit ? Unit::Mxu1 : Unit::Mxu0, t.interval, t.latency};
 }
 
 // Elementwise kinds share one footprint, so a kind the timing model does not
 // name costs as a move.
 Cost onVpu(StringRef kind) {
   std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
-  return {Unit::Vpu, cyclesOf(timing::findOp(name) ? name : "vmov")};
+  MachineTiming t = timingOf(timing::findOp(name) ? name : "vmov");
+  return {Unit::Vpu, t.interval, t.latency};
 }
 
-// An operation costs the machine operations it lowers to, run back to back
-// on the unit doing its work.
+// Work that holds the frontend from start to finish.
+Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
+
+// An operation costs the machine operations it lowers to, as they issue in
+// order on the unit doing its work.
 Cost costOf(Operation *op) {
-  int vload = cyclesOf("vload");
-  int vstore = cyclesOf("vstore");
-  int transfer = timing::dmaTransferCycles(kRegisterBytes);
+  static const MachineTiming vload = timingOf("vload");
+  static const MachineTiming vstore = timingOf("vstore");
+  static const int transfer = timing::dmaTransferCycles(kRegisterBytes);
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
-    return {Unit::Dma,
-            registersOf(isa<VirtualInputFP8Op>(op)) * (transfer + vload), true};
+    return blocking(Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) *
+                                   (transfer + vload.latency));
   if (isa<VirtualOutputBF16Op>(op))
-    return {Unit::Dma, registersOf(false) * (vstore + transfer), true};
+    return blocking(Unit::Dma,
+                    registersOf(false) * (vstore.latency + transfer));
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    return {Unit::Dma, timing::dmaTransferCycles(registers * kRegisterBytes)};
+    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
+    return {Unit::Dma, cycles, cycles};
   }
-  if (isa<VirtualDMAAwaitBF16Op, VirtualDMAAwaitFP8Op>(op))
-    return {Unit::Lsu, registersOf(isa<VirtualDMAAwaitFP8Op>(op)) * vload};
+  if (isa<VirtualDMAAwaitBF16Op, VirtualDMAAwaitFP8Op>(op)) {
+    // One VLOAD per register; each after the first waits for the load path.
+    int behind =
+        (registersOf(isa<VirtualDMAAwaitFP8Op>(op)) - 1) * vload.interval;
+    return {Unit::Lsu, behind + vload.interval, behind + vload.latency,
+            behind + 1};
+  }
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
+    // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
-    return {Unit::Dma,
-            registers * vstore +
-                timing::dmaTransferCycles(registers * kRegisterBytes)};
+    int staged = (registers - 1) * vstore.interval + vstore.latency;
+    int cycles = staged + timing::dmaTransferCycles(registers * kRegisterBytes);
+    return {Unit::Dma, cycles, cycles, staged + 1};
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());
-    return {unit ? Unit::Weights1 : Unit::Weights0,
-            onMxu("vmatpush.weight", unit).cycles};
+    Cost push = onMxu("vmatpush.weight", unit);
+    push.unit = unit ? Unit::Weights1 : Unit::Weights0;
+    return push;
   }
   if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op))
     return onMxu(isa<VirtualMXULoadAccFP8Op>(op) ? "vmatpush.acc.fp8"
@@ -380,11 +498,10 @@ Cost costOf(Operation *op) {
   if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
-    return {unit ? Unit::Mxu1 : Unit::Mxu0,
-            onMxu("vmatpush.weight", unit).cycles +
-                onMxu("vmatmul", unit).cycles +
-                onMxu("vmatpop.bf16.acc", unit).cycles,
-            true};
+    return blocking(unit ? Unit::Mxu1 : Unit::Mxu0,
+                    onMxu("vmatpush.weight", unit).latency +
+                        onMxu("vmatmul", unit).latency +
+                        onMxu("vmatpop.bf16.acc", unit).latency);
   }
   if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op))
     return onVpu(unary.getKind());
@@ -394,13 +511,14 @@ Cost costOf(Operation *op) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.
     int words = registersOf(true) * kRegisterBytes / 4;
-    return {Unit::Lsu,
-            cyclesOf("vpack.bf16.fp8") + vstore +
-                words * (cyclesOf("lw") + cyclesOf("sw")) + vload,
-            true};
+    return blocking(Unit::Lsu,
+                    timingOf("vpack.bf16.fp8").latency + vstore.latency +
+                        words * (timingOf("lw").latency +
+                                 timingOf("sw").latency) +
+                        vload.latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
-  return {Unit::Scalar, cyclesOf("addi")};
+  return {Unit::Scalar, 1, timingOf("addi").latency};
 }
 
 // Register kinds as the allocator colors them; counts are indexed by kind.
@@ -514,13 +632,13 @@ public:
 
   // When the frontend can issue again if `node` starts at `cycle`.
   int frontendAfter(unsigned node, int cycle) const {
-    return cycle + (costs[node].blocking ? costs[node].cycles : 1);
+    return cycle + costs[node].frontend;
   }
 
   void place(unsigned node) {
     int cycle = start(node);
-    finished[node] = cycle + costs[node].cycles;
-    unitFree[unit(node)] = finished[node];
+    finished[node] = cycle + costs[node].latency;
+    unitFree[unit(node)] = cycle + costs[node].busy;
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }
@@ -553,7 +671,7 @@ public:
       int below = 0;
       for (unsigned s : g.succs[i])
         below = std::max(below, heights[s]);
-      heights[i] = costs[i].cycles + below;
+      heights[i] = costs[i].latency + below;
     }
   }
 
@@ -596,9 +714,14 @@ public:
                           node);
       };
       unsigned best = ready.front();
-      for (unsigned node : ready)
-        if (key(node) < key(best))
+      auto bestKey = key(best);
+      for (unsigned node : ready.drop_front()) {
+        auto nodeKey = key(node);
+        if (nodeKey < bestKey) {
           best = node;
+          bestKey = nodeKey;
+        }
+      }
       pressure.place(g.nodes[best]);
       return best;
     });
@@ -663,13 +786,17 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
   }
 }
 
-// Reorder one block when the schedule is faster, or when it fits the
-// allocator's capacity and the source order does not. A random order is
-// taken as it is.
-void scheduleBlock(Block &block, unsigned index, const Liveness &liveness,
-                   const KindCounts &capacity,
-                   std::optional<unsigned> randomSeed) {
-  BlockGraph g = buildGraph(block);
+// Reorder one block when the schedule fits the allocator's capacity and the
+// source order does not, or when it is faster without giving up a fit the
+// source order has. A random order is taken as it is.
+LogicalResult scheduleBlock(Block &block, unsigned index,
+                            const Liveness &liveness,
+                            const KindCounts &capacity,
+                            std::optional<unsigned> randomSeed) {
+  FailureOr<BlockGraph> graph = buildGraph(block);
+  if (failed(graph))
+    return failure();
+  const BlockGraph &g = *graph;
   BlockScheduler scheduler(block, g, liveness);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
@@ -679,7 +806,7 @@ void scheduleBlock(Block &block, unsigned index, const Liveness &liveness,
   };
   if (randomSeed) {
     reorder(block, opsOf(scheduler.randomOrder(*randomSeed + index)));
-    return;
+    return success();
   }
 
   std::vector<unsigned> source(g.nodes.size());
@@ -693,9 +820,11 @@ void scheduleBlock(Block &block, unsigned index, const Liveness &liveness,
         return false;
     return true;
   };
-  if ((fits(ops) && !fits(g.nodes)) ||
-      scheduler.makespan(order) < scheduler.makespan(source))
+  bool sourceFits = fits(g.nodes), scheduleFits = fits(ops);
+  bool faster = scheduler.makespan(order) < scheduler.makespan(source);
+  if (sourceFits ? scheduleFits && faster : scheduleFits || faster)
     reorder(block, ops);
+  return success();
 }
 
 // Whether the register allocator succeeds on `function` as it stands; `why`
@@ -757,7 +886,8 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        scheduleBlock(block, index++, liveness, capacity, seed);
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed)))
+          return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
     // is a dependence the graph is missing.
