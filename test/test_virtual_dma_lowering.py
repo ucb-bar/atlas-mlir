@@ -116,6 +116,45 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertEqual(reparsed.returncode, 0, reparsed.stderr)
                 self.assertEqual(reparsed.stdout, machine)
 
+    def test_two_pending_transfers_take_separate_channels_staging_and_registers(self) -> None:
+        source = wrap([
+            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
+            "    %addr = arith.constant -2147483648 : i32",
+            "    %other = arith.constant -2147481600 : i32",
+            "    %out = arith.constant -2147479552 : i32",
+            "    %size = arith.constant 2048 : i32",
+            dma_load("bf16", "io0", "io1", "first"),
+            dma_load("bf16", "io1", "io2", "second", "other"),
+            dma_await("bf16", "io2", "io3", "second", "b"),
+            dma_await("bf16", "io3", "io4", "first", "a"),
+            f'    %sum = "atlas.virtual_vpu_binary"(%a, %b) {{kind = "add"}} '
+            f': ({tile("bf16")}, {tile("bf16")}) -> {tile("bf16")}',
+            dma_store("bf16", "io4", "io5", "sum").replace("%addr", "%out"),
+            dma_wait("io5", "io6"),
+        ], final="io6")
+        _, entries = self.checked(source)
+        configs = [entry["fields"]["channel"] for entry in entries
+                   if entry["operation"] == "atlas.dma_config"]
+        self.assertEqual(configs, [0, 1, 2], "only channels in use are configured")
+        launches, waits, loads = [], [], []
+        for entry, registers in observed(entries):
+            fields = entry["fields"]
+            if entry["operation"] == "atlas.dma":
+                launches.append((fields["channel"], (fields["reg"], fields["dram"], fields["size"]),
+                                 registers[fields["reg"]], registers[fields["dram"]]))
+            elif entry["operation"] == "atlas.dma_wait":
+                waits.append(fields["channel"])
+            elif entry["operation"] == "atlas.vload":
+                loads.append(registers[fields["base"]] + fields["offset"] * 8)
+        self.assertEqual(launches, [
+            (0, (4, 7, 9), STAGING_WORD, 0x80000000),
+            (2, (29, 30, 31), STAGING_WORD + 512, 0x80000800),
+            (1, (4, 7, 9), STAGING_WORD, 0x80001000),
+        ])
+        self.assertEqual(waits, [2, 0, 1], "the second load completes first")
+        self.assertEqual(loads, [STAGING_WORD + 512, STAGING_WORD + 768,
+                                 STAGING_WORD, STAGING_WORD + 256])
+
     def test_launch_completion_separation_preserves_mxu_and_scalar_register_reuse(self) -> None:
         _, entries = self.checked(independent_work())
         launch = next(i for i, entry in enumerate(entries)

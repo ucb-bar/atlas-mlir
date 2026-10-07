@@ -49,7 +49,13 @@ public:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    for (unsigned channel : {fixed().loadChannel, fixed().storeChannel})
+    // A configured channel must see a DMA.WAIT before the halt, so only the
+    // channels transfers use are configured.
+    SmallVector<unsigned> channels = {fixed().loadChannel, fixed().storeChannel};
+    for (unsigned channel : allocation.dmaChannels())
+      if (!llvm::is_contained(channels, channel))
+        channels.push_back(channel);
+    for (unsigned channel : channels)
       add("atlas.dma_config", loc,
           {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
     materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);

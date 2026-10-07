@@ -1,6 +1,7 @@
 #ifndef ATLAS_VIRTUAL_ALLOCATION_H
 #define ATLAS_VIRTUAL_ALLOCATION_H
 
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -26,6 +27,17 @@ struct DMATransferPlacement {
   unsigned sizeReg;
 };
 
+// One explicit DMA transfer in flight: a channel per direction, a staging
+// window, and the registers the DMA reads when it completes.
+struct DMASlotPlacement {
+  unsigned loadChannel;
+  unsigned storeChannel;
+  uint32_t stagingWord;
+  unsigned baseReg;
+  unsigned dramReg;
+  unsigned sizeReg;
+};
+
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;
@@ -46,10 +58,7 @@ struct FixedResourcePlacement {
   uint32_t outputWindowWords;
   uint32_t packWord;
   uint32_t packRelayoutWord;
-  uint32_t stagingWord;
-  unsigned dmaBaseReg;
-  unsigned dmaDramReg;
-  unsigned dmaSizeReg;
+  std::array<DMASlotPlacement, kMaxPendingVirtualDMA> dmaSlots;
   unsigned scaleReg;
   std::array<unsigned, 2> packSourceRegs;
   unsigned packDestinationReg;
@@ -82,9 +91,13 @@ public:
   const DMATransferPlacement &dma(Value value) const;
   llvm::ArrayRef<int32_t> scalarArguments() const;
   const FixedResourcePlacement &fixed() const;
+  // The channels the function's explicit transfers use, in first use order.
+  llvm::ArrayRef<unsigned> dmaChannels() const { return usedDMAChannels; }
 
 private:
   LogicalResult colorValues(RegisterKind kind);
+  LogicalResult placeMXU(Block &block);
+  LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
 
   func::FuncOp function;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
@@ -93,6 +106,7 @@ private:
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   bool mixedFp8 = false;
   bool hasPack = false;
+  llvm::SmallVector<unsigned, 4> usedDMAChannels;
   const FixedResourcePlacement fixedResources;
 };
 

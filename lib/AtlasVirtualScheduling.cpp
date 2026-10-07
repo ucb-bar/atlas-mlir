@@ -34,11 +34,10 @@ namespace {
 
 // Ordering obligations the IR does not express as SSA, as pseudo-registers.
 enum Pseudo : unsigned {
-  kDma,     // the single explicit-DMA pending slot
-  kWeight0, // the current weight of MXU0 and MXU1
-  kWeight1,
-  kAcc0, // the accumulator occupancy of MXU0 and MXU1
-  kAcc1,
+  kDmaLaunch, // the DMA queue, which moves data in launch order
+  kDmaDone,   // transfer completions; implicit memory work needs none pending
+  kUnit0,     // all of MXU0 or MXU1, which a legacy matmul takes
+  kUnit1,
   kPack,    // the pack's VMEM scratch and relayout registers
   kBarrier, // read by every operation, written by unknown ones
   kNumPseudo
@@ -56,37 +55,37 @@ unsigned unitOf(Type type) {
   return cast<VirtualMXUAccType>(type).getUnit();
 }
 
+bool isLaunch(Operation *op) {
+  return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+             VirtualDMAStoreBF16Op>(op);
+}
+
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
-// and virtual_pack_fp8 are declared Pure yet have ordering obligations.
+// and virtual_pack_fp8 are declared Pure yet have ordering obligations. Slot
+// limits are edges of their own (SlotPool).
 Effects effectsOf(Operation *op) {
   Effects e;
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op)) {
-    e.reads = bit(kDma);
-  } else if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-                 VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
-                 VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
+    e.reads = bit(kDmaLaunch) | bit(kDmaDone);
+  } else if (isLaunch(op)) {
+    e.writes = bit(kDmaLaunch);
+  } else if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
                  VirtualDMAWaitOp>(op)) {
-    e.writes = bit(kDma);
+    e.writes = bit(kDmaDone);
   } else if (isa<VirtualPackFP8Op>(op)) {
-    e.reads = bit(kDma);
+    e.reads = bit(kDmaLaunch) | bit(kDmaDone);
     e.writes = bit(kPack);
   } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
-    e.writes = bit(kWeight0 + unitOf(load.getWeight().getType()));
-  } else if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
-    unsigned unit = unitOf(reset.getAcc().getType());
-    e.reads = bit(kWeight0 + unit);
-    e.writes = bit(kAcc0 + unit);
+    e.reads = bit(kUnit0 + unitOf(load.getWeight().getType()));
+  } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
+                 VirtualMXUResetOp>(op)) {
+    e.reads = bit(kUnit0 + unitOf(op->getResult(1).getType()));
   } else if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op)) {
-    unsigned unit = unitOf(acc.getAcc().getType());
-    e.reads = bit(kWeight0 + unit);
-    e.writes = bit(kAcc0 + unit);
-  } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
-    e.writes = bit(kAcc0 + unitOf(op->getResult(1).getType()));
+    e.reads = bit(kUnit0 + unitOf(acc.getAcc().getType()));
   } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-    e.writes = bit(kAcc0 + unitOf(op->getOperand(1).getType()));
+    e.reads = bit(kUnit0 + unitOf(op->getOperand(1).getType()));
   } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
-    unsigned unit = matmul.getUnit();
-    e.writes = bit(kWeight0 + unit) | bit(kAcc0 + unit);
+    e.writes = bit(kUnit0 + matmul.getUnit());
   } else if (!isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
                   arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op)) {
     e.writes = bit(kNumPseudo) - 1;
@@ -94,6 +93,40 @@ Effects effectsOf(Operation *op) {
   e.reads |= bit(kBarrier);
   return e;
 }
+
+// A resource with a few interchangeable slots: explicit DMA transfers in
+// flight, or the weights or accumulators of one MXU unit. Along the source
+// order each holder takes the slot freed longest ago, and the next holder of
+// a slot waits for every last use of the one before. An order keeping these
+// edges never needs more slots than there are.
+class SlotPool {
+public:
+  explicit SlotPool(unsigned count) : slots(count) {}
+
+  // `node` takes a slot for a holder last used by `lastUses`, all after it.
+  template <typename Edge>
+  void acquire(unsigned node, ArrayRef<unsigned> lastUses, Edge &&edge) {
+    Slot *oldest = nullptr;
+    for (Slot &slot : slots)
+      if (slot.freeAfter < static_cast<int>(node) &&
+          (!oldest || slot.freeAfter < oldest->freeAfter))
+        oldest = &slot;
+    assert(oldest && "the verifier bounds every pool by its slot count");
+    for (unsigned use : oldest->lastUses)
+      edge(use, node);
+    oldest->lastUses.assign(lastUses.begin(), lastUses.end());
+    oldest->freeAfter = node;
+    for (unsigned use : lastUses)
+      oldest->freeAfter = std::max(oldest->freeAfter, static_cast<int>(use));
+  }
+
+private:
+  struct Slot {
+    int freeAfter = -1;
+    SmallVector<unsigned, 2> lastUses;
+  };
+  SmallVector<Slot, 2> slots;
+};
 
 // The dependence graph of one block's free operations. Every edge runs from
 // an earlier to a later source position.
@@ -161,14 +194,54 @@ BlockGraph buildGraph(Block &block) {
       }
     }
   }
+  // Slot limits. A transfer is last used by its completion, a weight by its
+  // users, or by its load if it has none, and an accumulator chain by the
+  // readout that ends it.
+  auto usersOf = [&](Value value) {
+    SmallVector<unsigned, 2> users;
+    for (Operation *user : value.getUsers())
+      users.push_back(index.lookup(user));
+    return users;
+  };
+  // Each accumulator version has exactly one user, as the verifier requires.
+  auto chainEnd = [&](Value acc) {
+    while (auto next = dyn_cast<VirtualMXUAccumulateOp>(*acc.user_begin()))
+      acc = next.getNextAcc();
+    return index.lookup(*acc.user_begin());
+  };
+  SlotPool transfers(kMaxPendingVirtualDMA);
+  std::array<SlotPool, 2> weights = {SlotPool(kVirtualMXUSlots),
+                                     SlotPool(kVirtualMXUSlots)};
+  std::array<SlotPool, 2> accumulators = {SlotPool(kVirtualMXUSlots),
+                                          SlotPool(kVirtualMXUSlots)};
+  for (unsigned i = 0; i < n; ++i) {
+    Operation *op = g.nodes[i];
+    if (isLaunch(op)) {
+      transfers.acquire(i, usersOf(op->getResult(1)), edge);
+    } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      SmallVector<unsigned, 2> users = usersOf(load.getWeight());
+      if (users.empty())
+        users.push_back(i);
+      weights[unitOf(load.getWeight().getType())].acquire(i, users, edge);
+    } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
+                   VirtualMXUResetOp>(op)) {
+      Value acc = op->getResult(1);
+      accumulators[unitOf(acc.getType())].acquire(i, {chainEnd(acc)}, edge);
+    }
+  }
   return g;
 }
+
+// The functional units an operation can occupy. Each MXU pushes weights
+// through its own stream, beside its array.
+enum class Unit { Scalar, Lsu, Vpu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
+constexpr unsigned kUnits = static_cast<unsigned>(Unit::Weights1) + 1;
 
 // What an operation occupies: one functional unit for `cycles`, after which
 // its results are ready. A blocking operation also holds the in-order
 // frontend until it finishes.
 struct Cost {
-  timing::Engine unit;
+  Unit unit;
   int cycles;
   bool blocking = false;
 };
@@ -186,49 +259,48 @@ int cyclesOf(const std::string &name) {
 int registersOf(bool fp8) { return fp8 ? 1 : 2; }
 constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 
-timing::Engine mxuEngine(unsigned unit) {
-  return unit ? timing::Engine::Mxu1 : timing::Engine::Mxu0;
-}
-
 Cost onMxu(StringRef name, unsigned unit) {
-  return {mxuEngine(unit), cyclesOf((name + ".mxu" + Twine(unit)).str())};
+  return {unit ? Unit::Mxu1 : Unit::Mxu0,
+          cyclesOf((name + ".mxu" + Twine(unit)).str())};
 }
 
 // Elementwise kinds share one footprint, so a kind the timing model does not
 // name costs as a move.
 Cost onVpu(StringRef kind) {
   std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
-  return {timing::Engine::Vpu, cyclesOf(timing::findOp(name) ? name : "vmov")};
+  return {Unit::Vpu, cyclesOf(timing::findOp(name) ? name : "vmov")};
 }
 
 // An operation costs the machine operations it lowers to, run back to back
 // on the unit doing its work.
 Cost costOf(Operation *op) {
-  using timing::Engine;
   int vload = cyclesOf("vload");
   int vstore = cyclesOf("vstore");
   int transfer = timing::dmaTransferCycles(kRegisterBytes);
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
-    return {Engine::Dma,
+    return {Unit::Dma,
             registersOf(isa<VirtualInputFP8Op>(op)) * (transfer + vload), true};
   if (isa<VirtualOutputBF16Op>(op))
-    return {Engine::Dma, registersOf(false) * (vstore + transfer), true};
+    return {Unit::Dma, registersOf(false) * (vstore + transfer), true};
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    return {Engine::Dma, timing::dmaTransferCycles(registers * kRegisterBytes)};
+    return {Unit::Dma, timing::dmaTransferCycles(registers * kRegisterBytes)};
   }
   if (isa<VirtualDMAAwaitBF16Op, VirtualDMAAwaitFP8Op>(op))
-    return {Engine::Lsu, registersOf(isa<VirtualDMAAwaitFP8Op>(op)) * vload};
+    return {Unit::Lsu, registersOf(isa<VirtualDMAAwaitFP8Op>(op)) * vload};
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
-    return {Engine::Dma,
+    return {Unit::Dma,
             registers * vstore +
                 timing::dmaTransferCycles(registers * kRegisterBytes)};
   }
-  if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
-    return onMxu("vmatpush.weight", unitOf(load.getWeight().getType()));
+  if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+    unsigned unit = unitOf(load.getWeight().getType());
+    return {unit ? Unit::Weights1 : Unit::Weights0,
+            onMxu("vmatpush.weight", unit).cycles};
+  }
   if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op))
     return onMxu(isa<VirtualMXULoadAccFP8Op>(op) ? "vmatpush.acc.fp8"
                                                  : "vmatpush.acc.bf16",
@@ -244,7 +316,7 @@ Cost costOf(Operation *op) {
   if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
-    return {mxuEngine(unit),
+    return {unit ? Unit::Mxu1 : Unit::Mxu0,
             onMxu("vmatpush.weight", unit).cycles +
                 onMxu("vmatmul", unit).cycles +
                 onMxu("vmatpop.bf16.acc", unit).cycles,
@@ -258,13 +330,13 @@ Cost costOf(Operation *op) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.
     int words = registersOf(true) * kRegisterBytes / 4;
-    return {Engine::Lsu,
+    return {Unit::Lsu,
             cyclesOf("vpack.bf16.fp8") + vstore +
                 words * (cyclesOf("lw") + cyclesOf("sw")) + vload,
             true};
   }
   // Scalar control, a DMA wait, or nothing at all.
-  return {Engine::Scalar, cyclesOf("addi")};
+  return {Unit::Scalar, cyclesOf("addi")};
 }
 
 // Register kinds as the allocator colors them; counts are indexed by kind.
@@ -360,8 +432,6 @@ private:
   llvm::DenseSet<Value> kept;
   KindCounts live{};
 };
-
-constexpr unsigned kUnits = static_cast<unsigned>(timing::Engine::Dma) + 1;
 
 // In-order issue onto functional units: an operation starts once the one
 // before it has issued, everything it depends on has finished, and its unit

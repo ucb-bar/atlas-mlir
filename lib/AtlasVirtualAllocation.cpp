@@ -5,6 +5,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
+#include <iterator>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -55,10 +56,11 @@ FixedResourcePlacement selectedResources() {
   resources.outputWindowWords = 65536;
   resources.packWord = 32768;
   resources.packRelayoutWord = 33024;
-  resources.stagingWord = 131072;
-  resources.dmaBaseReg = 4;
-  resources.dmaDramReg = 7;
-  resources.dmaSizeReg = 9;
+  // Slot 0 shares the boundary channels, which never run while an explicit
+  // transfer is pending; slot 1 takes x29-x31, which nothing else uses.
+  static_assert(kMaxPendingVirtualDMA == 2,
+                "each pending DMA needs its own slot here");
+  resources.dmaSlots = {{{0, 1, 131072, 4, 7, 9}, {2, 3, 131584, 29, 30, 31}}};
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;
@@ -89,16 +91,8 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   mxuResources.clear();
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
+  usedDMAChannels.clear();
   findReservations(function, mixedFp8, hasPack);
-  function.walk([&](Operation *op) {
-    for (Value result : op->getResults()) {
-      // Verified lifetimes permit slot 0 in each unit's weight/accumulator bank.
-      if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
-        mxuResources[result] = {weight.getUnit(), fixedResources.mxuWeightSlot};
-      if (auto acc = dyn_cast<VirtualMXUAccType>(result.getType()))
-        mxuResources[result] = {acc.getUnit(), fixedResources.mxuAccSlot};
-    }
-  });
   if (failed(colorValues(RegisterKind::BF16)) ||
       failed(colorValues(RegisterKind::FP8)) ||
       failed(colorValues(RegisterKind::Scalar)))
@@ -106,31 +100,103 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   for (BlockArgument arg : function.getArguments())
     scalarArgumentRegs.push_back(scalar(arg));
 
+  // MXU and DMA state never crosses a block, so each block places its own.
   unsigned nextTransfer = 0;
-  for (Block &block : function.getBody()) {
-    for (Operation &op : block) {
-      Value transfer;
-      unsigned channel = fixedResources.loadChannel;
-      unsigned halves = 1;
-      if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op))
-        transfer = load.getTransfer();
-      else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-        transfer = load.getTransfer();
-        halves = 2;
-      } else if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-        transfer = store.getTransfer();
-        channel = fixedResources.storeChannel;
-      } else if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-        transfer = store.getTransfer();
-        channel = fixedResources.storeChannel;
-        halves = 2;
+  for (Block &block : function.getBody())
+    if (failed(placeMXU(block)) || failed(placeDMA(block, nextTransfer)))
+      return failure();
+  return success();
+}
+
+// Each weight takes the lowest slot of its unit free of live weights and
+// frees it after its last use; each accumulator chain takes the lowest free
+// accumulator slot from its start to its readout. The verifier bounds both by
+// the slot count.
+LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
+  using Slots = std::array<Value, kVirtualMXUSlots>;
+  std::array<Slots, 2> weightSlots{}, accSlots{};
+  llvm::DenseMap<Value, unsigned> remainingUses;
+  auto take = [&](Slots &slots, Value value, unsigned unit) -> LogicalResult {
+    for (unsigned slot = 0; slot < kVirtualMXUSlots; ++slot)
+      if (!slots[slot]) {
+        slots[slot] = value;
+        mxuResources[value] = {unit, slot};
+        return success();
       }
-      if (transfer)
-        dmaTransfers[transfer] = {
-            channel, halves, nextTransfer++, fixedResources.stagingWord,
-            fixedResources.dmaBaseReg, fixedResources.dmaDramReg,
-            fixedResources.dmaSizeReg};
+    return function.emitOpError("internal MXU slot overflow");
+  };
+  auto release = [](Slots &slots, Value value) {
+    for (Value &owner : slots)
+      if (owner == value)
+        owner = Value{};
+  };
+  for (Operation &op : block) {
+    for (Value operand : op.getOperands())
+      if (auto weight = dyn_cast<VirtualMXUWeightType>(operand.getType()))
+        if (--remainingUses[operand] == 0)
+          release(weightSlots[weight.getUnit()], operand);
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      Value weight = load.getWeight();
+      unsigned unit = cast<VirtualMXUWeightType>(weight.getType()).getUnit();
+      if (failed(take(weightSlots[unit], weight, unit)))
+        return failure();
+      remainingUses[weight] =
+          std::distance(weight.use_begin(), weight.use_end());
+      if (weight.use_empty())
+        release(weightSlots[unit], weight);
+    } else if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+      // The next version stays in its chain's slot.
+      MXUPlacement placement = mxu(accumulate.getAcc());
+      mxuResources[accumulate.getNextAcc()] = placement;
+      accSlots[placement.unit][placement.slot] = accumulate.getNextAcc();
+    } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
+      MXUPlacement placement = mxu(op.getOperand(1));
+      accSlots[placement.unit][placement.slot] = Value{};
+    } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
+                   VirtualMXUResetOp>(op)) {
+      Value acc = op.getResult(1);
+      unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
+      if (failed(take(accSlots[unit], acc, unit)))
+        return failure();
     }
+  }
+  return success();
+}
+
+// Each transfer takes the lowest DMA slot free from its launch to its
+// completion, so a function with one transfer pending at a time uses slot 0
+// only.
+LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
+                                              unsigned &nextTransfer) {
+  std::array<Value, kMaxPendingVirtualDMA> slots{};
+  for (Operation &op : block) {
+    if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(
+            op)) {
+      *llvm::find(slots, op.getOperand(1)) = Value{};
+      continue;
+    }
+    bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+      continue;
+    auto free = llvm::find(slots, Value{});
+    if (free == slots.end())
+      return function.emitOpError("internal DMA slot overflow");
+    Value transfer = op.getResult(1);
+    *free = transfer;
+    const DMASlotPlacement &slot =
+        fixedResources.dmaSlots[free - slots.begin()];
+    unsigned channel = load ? slot.loadChannel : slot.storeChannel;
+    if (!llvm::is_contained(usedDMAChannels, channel))
+      usedDMAChannels.push_back(channel);
+    unsigned halves =
+        isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
+    dmaTransfers[transfer] = {channel,
+                              halves,
+                              nextTransfer++,
+                              slot.stagingWord,
+                              slot.baseReg,
+                              slot.dramReg,
+                              slot.sizeReg};
   }
   return success();
 }

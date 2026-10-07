@@ -326,10 +326,26 @@ def positions(ops: list[str], name: str) -> list[int]:
     return [i for i, op in enumerate(ops) if op == f"atlas.virtual_{name}"]
 
 
+def line_of(source: str, text: str) -> int:
+    [line] = [i + 1 for i, row in enumerate(source.splitlines()) if text in row]
+    return line
+
+
+def scheduled_lines(source: str, *options: str) -> list[int]:
+    """The source line of each operation, in scheduled order."""
+    result = schedule(source, *options, "--mlir-print-debuginfo")
+    assert result.returncode == 0, result.stderr
+    return [int(line) for line in re.findall(r'loc\("<stdin>":(\d+):\d+\)', result.stdout)]
+
+
 def schedule(source: str, *options: str):
-    joined = " ".join(options)
+    """Run the pass; options starting with "--" go to atlas-opt itself."""
+    joined = " ".join(o for o in options if not o.startswith("--"))
     flag = f"--schedule-atlas-virtual={joined}" if joined else "--schedule-atlas-virtual"
-    return run("atlas-opt", source, flag)
+    printing = [o for o in options if o.startswith("--")]
+    if printing:
+        printing.append("--mlir-print-local-scope")
+    return run("atlas-opt", source, flag, *printing)
 
 
 def lowers(source: str) -> bool:
@@ -385,12 +401,14 @@ class VirtualSchedulingTest(unittest.TestCase):
             start(), const("addr", -1879048192), const("size", 1024),
             dma_load("io0", "io1", "e1", "addr", "size", "fp8"),
             dma_load("io1", "io2", "e2", "addr", "size", "fp8"),
-            dma_await("io2", "io3", "x", "e1", "fp8"),
-            dma_await("io3", "io4", "y", "e2", "fp8"),
-            f"return %io4 : {S}"])
+            dma_load("io2", "io3", "e3", "addr", "size", "fp8"),
+            dma_await("io3", "io4", "x", "e1", "fp8"),
+            dma_await("io4", "io5", "y", "e2", "fp8"),
+            dma_await("io5", "io6", "z", "e3", "fp8"),
+            f"return %io6 : {S}"])
         result = schedule(source)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must complete the pending DMA before another launch",
+        self.assertIn("must complete a pending DMA before another launch",
                       result.stderr)
 
     def test_random_legal_orders_always_verify(self) -> None:
@@ -445,21 +463,31 @@ class VirtualSchedulingTest(unittest.TestCase):
                       "interference exceeds 31 physical pairs", result.stderr)
         self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
 
-    def test_dma_intervals_receive_independent_work(self) -> None:
-        ops = blocks(self.scheduled(OVERLAP.read_text()))[0]["ops"]
-        dma = [op for op in ops if "dma" in op]
-        source_dma = [op for op in blocks(run("atlas-opt", OVERLAP.read_text()).stdout)[0]["ops"]
-                      if "dma" in op]
-        self.assertEqual(dma, source_dma, "DMA operations keep their order")
-        inside = False
+    def test_dma_transfers_overlap_and_receive_independent_work(self) -> None:
+        def launch(op: str) -> bool:
+            return "dma_load" in op or "dma_store" in op
+
+        def completion(op: str) -> bool:
+            return "dma_await" in op or op == "atlas.virtual_dma_wait"
+
+        source = OVERLAP.read_text()
+        ops = blocks(self.scheduled(source))[0]["ops"]
+        before = blocks(run("atlas-opt", source).stdout)[0]["ops"]
+        self.assertEqual([op for op in ops if launch(op)], [op for op in before if launch(op)],
+                         "the DMA queue keeps its order")
+        self.assertEqual([op for op in ops if completion(op)],
+                         [op for op in before if completion(op)])
+        pending = peak = 0
         moved = []
         for op in ops:
-            if op.startswith("atlas.virtual_dma_load") or op.startswith("atlas.virtual_dma_store"):
-                inside = True
-            elif op.startswith("atlas.virtual_dma_await") or op == "atlas.virtual_dma_wait":
-                inside = False
-            elif inside and ("mxu" in op or "vpu" in op):
+            if launch(op):
+                pending += 1
+                peak = max(peak, pending)
+            elif completion(op):
+                pending -= 1
+            elif pending and ("mxu" in op or "vpu" in op):
                 moved.append(op)
+        self.assertEqual(peak, 2, "the next transfer launches before the current completes")
         self.assertIn("atlas.virtual_mxu_reset", moved)
 
     def test_loop_body_dma_interval_receives_vpu_work(self) -> None:
@@ -479,44 +507,45 @@ class VirtualSchedulingTest(unittest.TestCase):
             [pack] = positions(ops, "pack_fp8")
             self.assertFalse(load < pack < await_, (seed, ops))
 
-    def test_weight_slot_dependences_are_exact(self) -> None:
-        # Two chains on MXU0. A replacement weight load may rise above the
-        # previous readout, never above the reset that reads the old weight,
-        # and the second chain starts after the first is read out. Each unit
-        # keeps its order, so the k-th of each operation is chain k's.
+    def test_mxu_slot_dependences_are_exact(self) -> None:
+        # Three chains on MXU0. Two weights and two accumulators fit at once,
+        # so the second chain may start before the first is read out; the
+        # third reuses the first chain's slots and waits for them.
         source = function("weights", [
+            start(), inp("io0", "io1", "x", 0, "fp8"), inp("io1", "io2", "w1", 1, "fp8"),
+            inp("io2", "io3", "w2", 2, "fp8"), inp("io3", "io4", "w3", 3, "fp8"),
+            *mxu_chain("io4", 0, "w1", "x", "h1", "a"),
+            *mxu_chain("as3", 0, "w2", "x", "h2", "b"),
+            *mxu_chain("bs3", 0, "w3", "x", "h3", "c"),
+            add("y1", "h1", "h2"), add("y", "y1", "h3"), outp("cs3", "o", "y", 0),
+            f"return %o : {S}"])
+        role = {f"{step} {tag}": line_of(source, f"%{tag}{suffix} =")
+                for tag in "abc"
+                for step, suffix in (("load", "w"), ("reset", "a"))}
+        role.update({f"readout {tag}": line_of(source, f"%h{n} =")
+                     for n, tag in enumerate("abc", 1)})
+        weights_overlap = accumulators_overlap = False
+        for seed in range(24):
+            position = {line: i for i, line in
+                        enumerate(scheduled_lines(source, f"random-seed={seed}"))}
+            at = {name: position[line] for name, line in role.items()}
+            self.assertLess(at["reset a"], at["load c"], seed)
+            self.assertLess(at["readout a"], at["reset c"], seed)
+            weights_overlap |= at["load b"] < at["reset a"]
+            accumulators_overlap |= at["reset b"] < at["readout a"]
+        self.assertTrue(weights_overlap, "no order loaded the second weight early")
+        self.assertTrue(accumulators_overlap, "no order kept two accumulators live")
+
+    def test_second_weight_loads_while_the_first_chain_computes(self) -> None:
+        source = function("double", [
             start(), inp("io0", "io1", "x", 0, "fp8"), inp("io1", "io2", "w1", 1, "fp8"),
             inp("io2", "io3", "w2", 2, "fp8"),
             *mxu_chain("io3", 0, "w1", "x", "h1", "a"),
             *mxu_chain("as3", 0, "w2", "x", "h2", "b"),
             add("y", "h1", "h2"), outp("bs3", "o", "y", 0), f"return %o : {S}"])
-        early_load = False
-        for seed in range(24):
-            ops = blocks(self.scheduled(source, f"random-seed={seed}"))[0]["ops"]
-            _, load2 = positions(ops, "mxu_load_weight")
-            reset1, reset2 = positions(ops, "mxu_reset")
-            readout1, _ = positions(ops, "mxu_readout_bf16")
-            self.assertLess(reset1, load2, seed)
-            self.assertLess(readout1, reset2, seed)
-            early_load |= load2 < readout1
-        self.assertTrue(early_load, "no order loaded the next weight early")
-
-    def test_unit_order_is_kept_per_unit(self) -> None:
-        def per_unit(text: str) -> dict[str, list[str]]:
-            units: dict[str, list[str]] = {}
-            for line in text.splitlines():
-                op = re.search(r'"atlas\.virtual_mxu_([a-z_0-9]+)"', line)
-                unit = re.search(r"virtual_mxu_(?:weight|acc)<(\d)>", line)
-                if op and unit:
-                    units.setdefault(unit.group(1), []).append(op.group(1))
-            return units
-
-        source = OVERLAP.read_text()
-        expected = per_unit(run("atlas-opt", source).stdout)
-        self.assertEqual(sorted(expected), ["0", "1"])
-        for seed in range(12):
-            self.assertEqual(per_unit(self.scheduled(source, f"random-seed={seed}")),
-                             expected, seed)
+        position = {line: i for i, line in enumerate(scheduled_lines(source))}
+        self.assertLess(position[line_of(source, "%bw =")], position[line_of(source, "%aa =")])
+        self.assertTrue(lowers(self.scheduled(source)))
 
     def test_scheduling_is_deterministic(self) -> None:
         for source in (OVERLAP.read_text(), cfg_cases()["C14 explicit DMA in a loop body"],
