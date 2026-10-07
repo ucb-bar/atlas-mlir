@@ -192,11 +192,11 @@ bounded execution evidence in the census and source-discrepancy notes.
 | Operation | Attributes and verified forms | Physical meaning and limit |
 | --- | --- | --- |
 | `atlas.start` | none | Begin stream; no encoded word. |
-| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, scalar base, signed 12-bit offset in 32-byte units | Load one 1,024-byte VMEM tile into a tensor register. |
+| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, word-addressed scalar base, signed 12-bit offset in 32-word (128-byte) units | Load one 1,024-byte VMEM tile into a tensor register; the current address convention and selected-RTL audit requirements are described in the [retention guide](rtl-timing/retained-hw.md). |
 | `atlas.vstore` | `src, base, offset, format="raw"`; same register and offset bounds | Store one 1,024-byte tensor register to VMEM. |
 | `atlas.dma` | `direction=load/store, channel=0..7, reg, dram, size`; latter three are scalar register numbers | Launch asynchronous VMEM/DRAM transfer; completion is separate. |
 | `atlas.dma_wait` | `channel=0..7` | Wait for that DMA channel. |
-| `atlas.dma_config` | `channel=0..7, base_reg=0..31` | Set channel base from scalar register; encoding follows selected RTL. |
+| `atlas.dma_config` | `channel=0..7, base_reg=0..31` | Set the global DMA base from a scalar register; the encoded channel does not select a separate base. |
 | `atlas.mxu_push` | `kind=weight_fp8/acc_fp8/acc_bf16, unit=0/1, src, slot=0/1`; BF16 source even pair | Push tile to one unit's local weight or accumulator slot. |
 | `atlas.mxu_matmul` | `unit=0/1, src, weight_slot=0/1, acc_slot=0/1, accumulate=bool` | Launch reset or continuing contraction. MXU0/MXU1 have distinct arithmetic; issue is not completion. |
 | `atlas.mxu_pop` | `format=fp8/bf16, unit=0/1, dst, slot=0/1, scale_reg=0..31`; BF16 destination even pair and scale register zero | Read local accumulator to tensor registers. General FP8 scale policy is open. |

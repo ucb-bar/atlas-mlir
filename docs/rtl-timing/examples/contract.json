@@ -1,0 +1,1875 @@
+{
+  "schema": "atlas.rtl_timing.contract.v0",
+  "document_state": "draft",
+  "target": {
+    "config": "EE290SimConfig",
+    "reference": "https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25"
+  },
+  "build": {
+    "config": "EE290SimConfig",
+    "command": null,
+    "sources": [
+      {
+        "repository": "https://github.com/ucb-ee194-tapeout/bringup-chipyard",
+        "revision": null,
+        "local_changes_sha256": null,
+        "selection_complete": false
+      }
+    ],
+    "firrtl": null,
+    "annotations": [],
+    "hardware_ir": null,
+    "simulator": null,
+    "tools": [],
+    "provenance": null
+  },
+  "catalog": {
+    "path": "../operation-catalog.json",
+    "sha256": "4a991a7ceff88f53de9224ec0dddd45f949cbba09c3fe05ae483563d2f1c6944",
+    "compiler_revision": "7b1e3dab55c2d0bd05d51c8f6ec48e55bcedeb58",
+    "decoder_reference": "../../selected-variant-census.md: compiler baseline at atlas-npu 0079c0541111197741a231c002e3843fa6f545b2; no public EE290SimConfig build is bound by this example"
+  },
+  "conventions": {
+    "cycle_domain": "atlas_core_clock",
+    "age_origin": "instruction_issue",
+    "hold_end": "inclusive",
+    "memory_range": "half_open_bytes_after_effective_address_transform",
+    "unknown_value": null,
+    "event_mapping": "selected_target_unqualified",
+    "events": [
+      {
+        "id": "attempted_issue",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "instruction_issue",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": null,
+        "relation": "origin",
+        "offset_cycles": 0,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "engine_accept",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "first_operand_read",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "last_operand_read",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "first_result_write",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "last_result_write",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "engine_release",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "transfer_complete",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "wait_successful_issue",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "wait_return",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      },
+      {
+        "id": "halt_observed",
+        "cycle_domain": "atlas_core_clock",
+        "signal": null,
+        "edge": "unknown",
+        "condition": null,
+        "reference_event": "instruction_issue",
+        "relation": "unknown",
+        "offset_cycles": null,
+        "coverage": "selected_target_unqualified"
+      }
+    ]
+  },
+  "policy": {
+    "identity_mismatch": "reject",
+    "missing_operation": "reject",
+    "unknown_resolver": "reject",
+    "unqualified_safety_rule": "reject",
+    "cost_estimates_affect_legality": false
+  },
+  "resources": [
+    {
+      "id": "xreg",
+      "kind": "storage",
+      "element_unit": "register",
+      "dimensions": [
+        "register"
+      ],
+      "properties": [
+        {
+          "id": "xreg.entries",
+          "value": null,
+          "unit": "registers",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "xreg.width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "ereg",
+      "kind": "storage",
+      "element_unit": "register",
+      "dimensions": [
+        "register"
+      ],
+      "properties": [
+        {
+          "id": "ereg.entries",
+          "value": null,
+          "unit": "registers",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "ereg.width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mreg",
+      "kind": "storage",
+      "element_unit": "row",
+      "dimensions": [
+        "register",
+        "row"
+      ],
+      "properties": [
+        {
+          "id": "mreg.logical_registers",
+          "value": null,
+          "unit": "registers",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.rows_per_register",
+          "value": null,
+          "unit": "rows",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.row_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.physical_banks",
+          "value": null,
+          "unit": "banks",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.physical_rows_per_bank",
+          "value": null,
+          "unit": "rows",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.bank_index_bits",
+          "value": null,
+          "unit": "inclusive_bit_indices",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.register_half_bit",
+          "value": null,
+          "unit": "bit_index",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.depth",
+          "value": null,
+          "unit": "rows",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.readPorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.writePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.readwritePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.readLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "mreg.memory_declaration.writeLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "acc",
+      "kind": "storage",
+      "element_unit": "row",
+      "dimensions": [
+        "mxu",
+        "slot",
+        "row"
+      ],
+      "properties": [
+        {
+          "id": "acc.units",
+          "value": null,
+          "unit": "units",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.slot_selector_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.depth",
+          "value": null,
+          "unit": "rows",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.readPorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.writePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.readwritePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.readLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "acc.memory_declaration.writeLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "weight",
+      "kind": "storage",
+      "element_unit": "row",
+      "dimensions": [
+        "mxu",
+        "slot",
+        "row"
+      ],
+      "properties": [
+        {
+          "id": "weight.units",
+          "value": null,
+          "unit": "units",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "weight.slot_selector_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vmem",
+      "kind": "storage",
+      "element_unit": "byte",
+      "dimensions": [
+        "byte_address"
+      ],
+      "properties": [
+        {
+          "id": "vmem.banks",
+          "value": null,
+          "unit": "banks",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.lines_per_bank",
+          "value": null,
+          "unit": "lines",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.line_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.bank_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.total_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.rw_ports_per_bank",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.depth",
+          "value": null,
+          "unit": "rows",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.readPorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.writePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.readwritePorts",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.readLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "vmem.memory_declaration.writeLatency",
+          "value": null,
+          "unit": "cycles",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "dram",
+      "kind": "storage",
+      "element_unit": "byte",
+      "dimensions": [
+        "address_space",
+        "byte_address"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "dma_base",
+      "kind": "storage",
+      "element_unit": "register",
+      "dimensions": [
+        "global"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "csr",
+      "kind": "storage",
+      "element_unit": "register",
+      "dimensions": [
+        "csr_address"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "pc",
+      "kind": "storage",
+      "element_unit": "instruction_index",
+      "dimensions": [
+        "core"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "scalar_writeback",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "scale_writeback",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mreg_read",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "physical_bank",
+        "port"
+      ],
+      "properties": [
+        {
+          "id": "mreg_read.ports_per_bank",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mreg_write",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "physical_bank",
+        "port"
+      ],
+      "properties": [
+        {
+          "id": "mreg_write.ports_per_bank",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vload_path",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "path"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vstore_path",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "path"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "scalar_load_path",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "path"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "scalar_store_path",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "path"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mxu_acc_read",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "mxu",
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mxu_acc_write",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "mxu",
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mxu_weight_read",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "mxu",
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mxu_weight_write",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "mxu",
+        "port"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "mxu_compute",
+      "kind": "capacity",
+      "element_unit": "inflight_operation",
+      "dimensions": [
+        "mxu"
+      ],
+      "properties": [
+        {
+          "id": "mxu_compute.capacity",
+          "value": null,
+          "unit": "operations",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vpu_slot",
+      "kind": "capacity",
+      "element_unit": "inflight_operation",
+      "dimensions": [
+        "slot"
+      ],
+      "properties": [
+        {
+          "id": "vpu_slot.capacity",
+          "value": null,
+          "unit": "operations",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vpu_logic",
+      "kind": "capacity",
+      "element_unit": "inflight_operation",
+      "dimensions": [
+        "logic_group"
+      ],
+      "properties": [
+        {
+          "id": "vpu_logic.capacity",
+          "value": null,
+          "unit": "operations",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "xlu_engine",
+      "kind": "capacity",
+      "element_unit": "inflight_operation",
+      "dimensions": [
+        "engine"
+      ],
+      "properties": [
+        {
+          "id": "xlu_engine.capacity",
+          "value": null,
+          "unit": "operations",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "dma_queue",
+      "kind": "queue",
+      "element_unit": "command",
+      "dimensions": [
+        "ring_slot"
+      ],
+      "properties": [
+        {
+          "id": "dma_queue.capacity",
+          "value": null,
+          "unit": "commands",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "dma_queue.physical_slots",
+          "value": null,
+          "unit": "slots",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "dma_channel",
+      "kind": "control",
+      "element_unit": "transfer_generation",
+      "dimensions": [
+        "channel",
+        "generation"
+      ],
+      "properties": [
+        {
+          "id": "dma_channel.channels",
+          "value": null,
+          "unit": "channels",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "dma_channel.selector_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "frontend",
+      "kind": "control",
+      "element_unit": "instruction",
+      "dimensions": [
+        "core"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "host_publication",
+      "kind": "control",
+      "element_unit": "completion_event",
+      "dimensions": [
+        "core",
+        "launch_generation"
+      ],
+      "properties": [],
+      "coverage": "selected_target_unqualified"
+    },
+    {
+      "id": "vmem_rw",
+      "kind": "port",
+      "element_unit": "reservation",
+      "dimensions": [
+        "bank",
+        "port"
+      ],
+      "properties": [
+        {
+          "id": "vmem_rw.ports_per_bank",
+          "value": null,
+          "unit": "ports",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "coverage": "selected_target_unqualified"
+    }
+  ],
+  "rule_groups": [
+    {
+      "id": "rule.Alu",
+      "op_class": "Alu",
+      "mnemonics": [
+        "add",
+        "sub",
+        "sll",
+        "slt",
+        "sltu",
+        "xor",
+        "srl",
+        "sra",
+        "or",
+        "and",
+        "addi",
+        "slti",
+        "sltiu",
+        "xori",
+        "ori",
+        "andi",
+        "slli",
+        "srli",
+        "srai",
+        "lui",
+        "auipc"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Distinguish register/immediate and upper/PC-relative operands, x0, read capture and shared scalar writeback."
+      ]
+    },
+    {
+      "id": "rule.Csr",
+      "op_class": "Csr",
+      "mnemonics": [
+        "csrrw",
+        "csrrs",
+        "csrrc",
+        "csrrwi",
+        "csrrsi",
+        "csrrci"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Distinguish CSR address and read/modify/write modes, scalar versus immediate input, volatile counters and host publication ordering."
+      ]
+    },
+    {
+      "id": "rule.Branch",
+      "op_class": "Branch",
+      "mnemonics": [
+        "beq",
+        "bne",
+        "blt",
+        "bge",
+        "bltu",
+        "bgeu"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Bind branch condition capture, PC units, redirect, mandatory delay slot and pending-state transfer for both successors."
+      ]
+    },
+    {
+      "id": "rule.Jump",
+      "op_class": "Jump",
+      "mnemonics": [
+        "jal",
+        "jalr"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Bind JAL/JALR link writeback, target computation, PC units, delay slot and supported control-flow domains."
+      ]
+    },
+    {
+      "id": "rule.Delay",
+      "op_class": "Delay",
+      "mnemonics": [
+        "delay"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve encoded count, attempted versus successful issue and actual frontend stall duration."
+      ]
+    },
+    {
+      "id": "rule.Halt",
+      "op_class": "Halt",
+      "mnemonics": [
+        "ecall",
+        "ebreak"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Bind ECALL/EBREAK stop behavior with pending scalar, vector and DMA writes and subsequent restart/output observation."
+      ]
+    },
+    {
+      "id": "rule.Fence",
+      "op_class": "Fence",
+      "mnemonics": [
+        "fence"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Determine actual memory/engine ordering effects; an empty current footprint does not prove all outstanding work drained."
+      ]
+    },
+    {
+      "id": "rule.ScaleImm",
+      "op_class": "ScaleImm",
+      "mnemonics": [
+        "seli"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve exponent immediate decoding and EReg write/capture timing with consumers."
+      ]
+    },
+    {
+      "id": "rule.ScalarLoad",
+      "op_class": "ScalarLoad",
+      "mnemonics": [
+        "lb",
+        "lh",
+        "lw",
+        "lbu",
+        "lhu"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve signed/unsigned byte/halfword/word address transform, alignment, enables, VMEM arbitration and shared scalar writeback.",
+        "Track pending effects across halt; distinguish address and completion observations from a guessed drain delay."
+      ]
+    },
+    {
+      "id": "rule.ScalarStore",
+      "op_class": "ScalarStore",
+      "mnemonics": [
+        "sb",
+        "sh",
+        "sw"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve byte/halfword/word effective addresses, byte enables, data capture, VMEM arbitration and last visible write."
+      ]
+    },
+    {
+      "id": "rule.ScaleLoad",
+      "op_class": "ScaleLoad",
+      "mnemonics": [
+        "seld"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve effective VMEM address, width, bank/port arbitration, EReg writeback and pending completion."
+      ]
+    },
+    {
+      "id": "rule.VLoad",
+      "op_class": "VLoad",
+      "mnemonics": [
+        "vload"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [
+        {
+          "id": "VLoad.immediate_width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VLoad.immediate_signed",
+          "value": null,
+          "unit": "boolean",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VLoad.immediate_scale",
+          "value": null,
+          "unit": "words",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VLoad.word_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VLoad.line_address_bits",
+          "value": null,
+          "unit": "inclusive_alu_result_bit_indices",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VLoad.line_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "requirements": [
+        "Resolve base/immediate units and truncation, VMEM line and MREG row streams, shared bank/path grants and destination release.",
+        "Bind effective base/immediate units and line truncation to selected RTL; qualify valid-bank admission, alignment domains and timed arbitration."
+      ]
+    },
+    {
+      "id": "rule.VStore",
+      "op_class": "VStore",
+      "mnemonics": [
+        "vstore"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [
+        {
+          "id": "VStore.immediate_width",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VStore.immediate_signed",
+          "value": null,
+          "unit": "boolean",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VStore.immediate_scale",
+          "value": null,
+          "unit": "words",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VStore.word_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VStore.line_address_bits",
+          "value": null,
+          "unit": "inclusive_alu_result_bit_indices",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "VStore.line_bytes",
+          "value": null,
+          "unit": "bytes",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "requirements": [
+        "Resolve base/immediate units and truncation, MREG row and VMEM line streams, bank/path grants and source release.",
+        "Bind effective base/immediate units and line truncation to selected RTL; qualify valid-bank admission, alignment domains and timed arbitration."
+      ]
+    },
+    {
+      "id": "rule.WeightPush",
+      "op_class": "WeightPush",
+      "mnemonics": [
+        "vmatpush.weight.mxu0",
+        "vmatpush.weight.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, weight-slot ownership, source/weight row streams, source capture/release and overlap with compute."
+      ]
+    },
+    {
+      "id": "rule.AccPushFp8",
+      "op_class": "AccPushFp8",
+      "mnemonics": [
+        "vmatpush.acc.fp8.mxu0",
+        "vmatpush.acc.fp8.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, FP8-to-accumulator layout, slot lifetime, row streams, source release and physical port alternatives."
+      ]
+    },
+    {
+      "id": "rule.AccPushBf16",
+      "op_class": "AccPushBf16",
+      "mnemonics": [
+        "vmatpush.acc.bf16.mxu0",
+        "vmatpush.acc.bf16.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, BF16 pair-to-accumulator layout, slot lifetime, row streams, source release and physical port alternatives."
+      ]
+    },
+    {
+      "id": "rule.PopFp8",
+      "op_class": "PopFp8",
+      "mnemonics": [
+        "vmatpop.fp8.acc.mxu0",
+        "vmatpop.fp8.acc.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, accumulator-to-FP8/scales layout, slot and port choices, read/write streams and release."
+      ]
+    },
+    {
+      "id": "rule.PopBf16",
+      "op_class": "PopBf16",
+      "mnemonics": [
+        "vmatpop.bf16.acc.mxu0",
+        "vmatpop.bf16.acc.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, accumulator-to-BF16 pair layout, slot and port choices, read/write streams and release."
+      ]
+    },
+    {
+      "id": "rule.MatMul",
+      "op_class": "MatMul",
+      "mnemonics": [
+        "vmatmul.mxu0",
+        "vmatmul.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, source and weight rows, accumulator overwrite, output stream, compute capacity and physical ports.",
+        "Establish whether an overwrite needs the accumulator read-port reservation present in the current model."
+      ]
+    },
+    {
+      "id": "rule.MatMulAcc",
+      "op_class": "MatMulAcc",
+      "mnemonics": [
+        "vmatmul.acc.mxu0",
+        "vmatmul.acc.mxu1"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve both MXUs, accumulator read/modify/write, source and weight rows, output streams, capacities and same-cycle conflicts."
+      ]
+    },
+    {
+      "id": "rule.VpuElementwise",
+      "op_class": "VpuElementwise",
+      "mnemonics": [
+        "vadd.bf16",
+        "vsub.bf16",
+        "vmul.bf16",
+        "vminimum.bf16",
+        "vmaximum.bf16",
+        "vmov",
+        "vrecip.bf16",
+        "vexp.bf16",
+        "vexp2.bf16",
+        "vrelu.bf16",
+        "vsin.bf16",
+        "vcos.bf16",
+        "vtanh.bf16",
+        "vlog2.bf16",
+        "vsqrt.bf16",
+        "vsquare.bf16",
+        "vcube.bf16"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve every unary/binary function independently, pair/scalar operands, row streams, in-place domains and shared logic groups.",
+        "Prove asymmetric cross-op overlap and slot occupancy rather than extrapolating from same-op issue spacing."
+      ]
+    },
+    {
+      "id": "rule.VpuRowReduce",
+      "op_class": "VpuRowReduce",
+      "mnemonics": [
+        "vredsum.row.bf16",
+        "vredmin.row.bf16",
+        "vredmax.row.bf16"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve each reduction function, row layout, paired operands, result placement and mode-specific release/logic occupancy."
+      ]
+    },
+    {
+      "id": "rule.VpuColReduce",
+      "op_class": "VpuColReduce",
+      "mnemonics": [
+        "vredsum.bf16",
+        "vredmin.bf16",
+        "vredmax.bf16"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve each reduction function, repeated passes, physical row/column mapping, pair operands and result placement.",
+        "Prove mode-specific logic-group/slot occupancy and same-op versus cross-op admission."
+      ]
+    },
+    {
+      "id": "rule.VpuPack",
+      "op_class": "VpuPack",
+      "mnemonics": [
+        "vpack.bf16.fp8"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve conversion layout, paired source/single destination, exponent operands, row strides, aliases and logic/slot occupancy."
+      ]
+    },
+    {
+      "id": "rule.VpuUnpack",
+      "op_class": "VpuUnpack",
+      "mnemonics": [
+        "vunpack.fp8.bf16"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve conversion layout, single source/paired destination, exponent operands, row strides, aliases and logic/slot occupancy."
+      ]
+    },
+    {
+      "id": "rule.VpuLoadImmPair",
+      "op_class": "VpuLoadImmPair",
+      "mnemonics": [
+        "vli.all",
+        "vli.row"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve immediate mode, paired destination masks, selective row/column/element writes and slot/logic occupancy."
+      ]
+    },
+    {
+      "id": "rule.VpuLoadImmSingle",
+      "op_class": "VpuLoadImmSingle",
+      "mnemonics": [
+        "vli.col",
+        "vli.one"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve immediate mode, single destination masks, selective row/column/element writes and slot/logic occupancy."
+      ]
+    },
+    {
+      "id": "rule.Transpose",
+      "op_class": "Transpose",
+      "mnemonics": [
+        "vtrpose.xlu"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Resolve permuted source/destination coordinates, in-place overlap domain, row streams, grants and next admissible issue."
+      ]
+    },
+    {
+      "id": "rule.DmaLoad",
+      "op_class": "DmaLoad",
+      "mnemonics": [
+        "dma.load.ch0",
+        "dma.load.ch1",
+        "dma.load.ch2",
+        "dma.load.ch3",
+        "dma.load.ch4",
+        "dma.load.ch5",
+        "dma.load.ch6",
+        "dma.load.ch7"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [
+        {
+          "id": "DmaLoad.effective_size_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "DmaLoad.vmem_line_address_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "requirements": [
+        "Capture effective DRAM/VMEM address and size, queue slot and channel generation; retain memory hazards through symbolic completion.",
+        "Establish admission, backpressure, response-grant and channel/slot reuse rules separately from cost estimates."
+      ]
+    },
+    {
+      "id": "rule.DmaStore",
+      "op_class": "DmaStore",
+      "mnemonics": [
+        "dma.store.ch0",
+        "dma.store.ch1",
+        "dma.store.ch2",
+        "dma.store.ch3",
+        "dma.store.ch4",
+        "dma.store.ch5",
+        "dma.store.ch6",
+        "dma.store.ch7"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [
+        {
+          "id": "DmaStore.effective_size_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "DmaStore.vmem_line_address_bits",
+          "value": null,
+          "unit": "bits",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "requirements": [
+        "Capture effective VMEM/DRAM address and size, queue slot and channel generation; retain source and destination hazards through completion.",
+        "Establish admission, backpressure, source-grant and channel/slot reuse rules separately from cost estimates."
+      ]
+    },
+    {
+      "id": "rule.DmaConfig",
+      "op_class": "DmaConfig",
+      "mnemonics": [
+        "dma.config.ch0",
+        "dma.config.ch1",
+        "dma.config.ch2",
+        "dma.config.ch3",
+        "dma.config.ch4",
+        "dma.config.ch5",
+        "dma.config.ch6",
+        "dma.config.ch7"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [
+        {
+          "id": "DmaConfig.base_scope",
+          "value": null,
+          "unit": "scope",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        },
+        {
+          "id": "DmaConfig.enqueues_transfer",
+          "value": null,
+          "unit": "boolean",
+          "basis": "unknown",
+          "coverage": "selected_target_unqualified"
+        }
+      ],
+      "requirements": [
+        "Model the global base update and config-to-launch capture order for every suffix; do not infer transfer enqueue or busy allocation."
+      ]
+    },
+    {
+      "id": "rule.DmaWait",
+      "op_class": "DmaWait",
+      "mnemonics": [
+        "dma.wait.ch0",
+        "dma.wait.ch1",
+        "dma.wait.ch2",
+        "dma.wait.ch3",
+        "dma.wait.ch4",
+        "dma.wait.ch5",
+        "dma.wait.ch6",
+        "dma.wait.ch7"
+      ],
+      "resolver": null,
+      "coverage": {
+        "admission": "selected_target_unqualified",
+        "operand_capture": "selected_target_unqualified",
+        "storage_accesses": "selected_target_unqualified",
+        "resource_occupancy": "selected_target_unqualified",
+        "release": "selected_target_unqualified",
+        "completion": "selected_target_unqualified",
+        "control_ordering": "selected_target_unqualified",
+        "cost": "selected_target_unqualified"
+      },
+      "parameters": [],
+      "requirements": [
+        "Distinguish attempted issue, successful issue and wait return; discharge only matching pending transfers once completion is established.",
+        "Preserve unresolved channel generations and captured ranges across CFG joins and loops."
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "compiler_surface",
+      "kind": "compiler_source",
+      "artifacts": [
+        {
+          "path": "../../../lib/AtlasTiming.cpp",
+          "sha256": "4d7d924bbc20bcdc86ad7f4559a6c555ac14bcc827d22e6c40d0d24a8c96be0c",
+          "role": "current compiler inventory and footprint interface; not selected RTL timing evidence"
+        },
+        {
+          "path": "../../../include/Atlas/AtlasTiming.h",
+          "sha256": "2b927c388796ba378ac95392242127015065487822b7e0badc5528337aab7028",
+          "role": "current compiler inventory and footprint interface; not selected RTL timing evidence"
+        }
+      ],
+      "locators": [
+        "buildTable",
+        "footprintOf",
+        "Access",
+        "Hold",
+        "Footprint"
+      ],
+      "scope": "Exhaustive current mnemonic/class inventory and existing compiler representation only.",
+      "limitations": [
+        "No selected-build RTL timing qualification.",
+        "An existing implementation or model constant is not an enabled RTL-derived rule."
+      ]
+    }
+  ],
+  "coverage_records": {
+    "selected_target_unqualified": {
+      "state": "unknown",
+      "qualification": "unqualified",
+      "evidence_refs": [],
+      "applies_when": [],
+      "notes": "Portable draft template only. No selected elaboration, measured/derived target parameter, timing rule, or resolver is enabled. Bind exact producer/artifact evidence before use.",
+      "predicate": null
+    }
+  }
+}

@@ -1,0 +1,828 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:rtl-timing:contract:v0",
+  "title": "Atlas RTL timing contract, draft v0",
+  "description": "Structural schema only. Semantic, identity, completeness and applicability checks are specified in README.md. Draft documents are not enabled scheduling profiles.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "document_state",
+    "target",
+    "build",
+    "catalog",
+    "conventions",
+    "policy",
+    "resources",
+    "rule_groups",
+    "evidence",
+    "coverage_records"
+  ],
+  "properties": {
+    "schema": {
+      "const": "atlas.rtl_timing.contract.v0"
+    },
+    "document_state": {
+      "enum": [
+        "draft",
+        "candidate"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "reference"
+      ],
+      "properties": {
+        "config": {
+          "const": "EE290SimConfig"
+        },
+        "reference": {
+          "const": "https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25",
+          "description": "Logical public target definition; this moving reference does not pin an elaboration identity."
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "sources",
+        "firrtl",
+        "annotations",
+        "hardware_ir",
+        "simulator",
+        "tools",
+        "command",
+        "provenance"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Actual producer configuration when bound; illustrative intended producer in a draft. target.config remains the canonical public target name."
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "firrtl": {
+          "$ref": "#/$defs/optionalArtifact"
+        },
+        "annotations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "hardware_ir": {
+          "$ref": "#/$defs/optionalArtifact"
+        },
+        "simulator": {
+          "$ref": "#/$defs/optionalArtifact"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tool"
+          }
+        },
+        "command": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Executed artifact producer argv, or null in an unbound draft example; not an illustrative command presented as execution evidence."
+        },
+        "provenance": {
+          "$ref": "#/$defs/optionalArtifact"
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "compiler_revision",
+        "decoder_reference"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "compiler_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "decoder_reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "conventions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cycle_domain",
+        "age_origin",
+        "hold_end",
+        "memory_range",
+        "unknown_value",
+        "event_mapping",
+        "events"
+      ],
+      "properties": {
+        "cycle_domain": {
+          "const": "atlas_core_clock"
+        },
+        "age_origin": {
+          "const": "instruction_issue"
+        },
+        "hold_end": {
+          "const": "inclusive"
+        },
+        "memory_range": {
+          "const": "half_open_bytes_after_effective_address_transform"
+        },
+        "unknown_value": {
+          "type": "null"
+        },
+        "event_mapping": {
+          "$ref": "#/$defs/coverageRef"
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_mismatch",
+        "missing_operation",
+        "unknown_resolver",
+        "unqualified_safety_rule",
+        "cost_estimates_affect_legality"
+      ],
+      "properties": {
+        "identity_mismatch": {
+          "const": "reject"
+        },
+        "missing_operation": {
+          "const": "reject"
+        },
+        "unknown_resolver": {
+          "const": "reject"
+        },
+        "unqualified_safety_rule": {
+          "const": "reject"
+        },
+        "cost_estimates_affect_legality": {
+          "const": false
+        }
+      }
+    },
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/resource"
+      }
+    },
+    "rule_groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/ruleGroup"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "coverage_records": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/id"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/coverage"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "optionalHash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/hash"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "role"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/optionalHash"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "optionalArtifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifact"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "revision",
+        "local_changes_sha256",
+        "selection_complete"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "local_changes_sha256": {
+          "$ref": "#/$defs/optionalHash"
+        },
+        "selection_complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "sha256",
+        "arguments"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/optionalHash"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "qualification",
+        "evidence_refs",
+        "applies_when",
+        "notes",
+        "predicate"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unknown",
+            "partial",
+            "specified",
+            "not_applicable",
+            "unsupported"
+          ]
+        },
+        "qualification": {
+          "enum": [
+            "unqualified",
+            "scoped"
+          ]
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/refs"
+        },
+        "applies_when": {
+          "$ref": "#/$defs/strings"
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "qualification": {
+                "const": "unqualified"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "qualification": {
+                "const": "scoped"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence_refs": {
+                "minItems": 1
+              },
+              "applies_when": {
+                "minItems": 1
+              },
+              "predicate": {
+                "$ref": "#/$defs/predicate"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "value",
+        "unit",
+        "basis",
+        "coverage"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "value": {
+          "description": "Resolver-specific typed parameter; never an executable expression. Null is unresolved.",
+          "type": [
+            "number",
+            "boolean",
+            "string",
+            "array",
+            "object",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basis": {
+          "enum": [
+            "unknown",
+            "compiler_assumption",
+            "model_assumption",
+            "historical_evidence",
+            "selected_rtl_source",
+            "selected_rtl_analysis",
+            "selected_rtl_execution"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverageRef"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "basis": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "element_unit",
+        "dimensions",
+        "properties",
+        "coverage"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "storage",
+            "port",
+            "capacity",
+            "queue",
+            "control"
+          ]
+        },
+        "element_unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dimensions": {
+          "$ref": "#/$defs/strings"
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverageRef"
+        }
+      }
+    },
+    "resolver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "implementation_sha256"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "implementation_sha256": {
+          "$ref": "#/$defs/optionalHash"
+        }
+      }
+    },
+    "ruleGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op_class",
+        "mnemonics",
+        "resolver",
+        "coverage",
+        "parameters",
+        "requirements"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "op_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mnemonics": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "resolver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/resolver"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "admission",
+            "operand_capture",
+            "storage_accesses",
+            "resource_occupancy",
+            "release",
+            "completion",
+            "control_ordering",
+            "cost"
+          ],
+          "properties": {
+            "admission": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "operand_capture": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "storage_accesses": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "resource_occupancy": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "release": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "completion": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "control_ordering": {
+              "$ref": "#/$defs/coverageRef"
+            },
+            "cost": {
+              "$ref": "#/$defs/coverageRef"
+            }
+          }
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "artifacts",
+        "locators",
+        "scope",
+        "limitations"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "compiler_source",
+            "model_source",
+            "rtl_source",
+            "rtl_analysis",
+            "rtl_execution",
+            "historical_report"
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "locators": {
+          "$ref": "#/$defs/strings"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limitations": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "coverageRef": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "$ref": "#/$defs/coverage"
+        }
+      ]
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "implementation_sha256",
+        "arguments"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "implementation_sha256": {
+          "$ref": "#/$defs/optionalHash"
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Typed arguments defined by this predicate version; no executable strings."
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "cycle_domain",
+        "signal",
+        "edge",
+        "condition",
+        "reference_event",
+        "relation",
+        "offset_cycles",
+        "coverage"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "cycle_domain": {
+          "const": "atlas_core_clock"
+        },
+        "signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edge": {
+          "enum": [
+            "rising",
+            "falling",
+            "combinational",
+            "unknown"
+          ]
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference_event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relation": {
+          "enum": [
+            "origin",
+            "fixed_offset",
+            "dynamic",
+            "unknown"
+          ]
+        },
+        "offset_cycles": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverageRef"
+        }
+      }
+    }
+  }
+}
