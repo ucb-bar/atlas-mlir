@@ -14,6 +14,12 @@ namespace {
 constexpr unsigned kTensorPairTemporary = 62;
 constexpr unsigned kFirstScalarValue = 10;
 constexpr unsigned kLastScalarValue = 26;
+// The DMA engine's channels. Each transfer in flight holds one, and a staging
+// window the size of a BF16 tile.
+constexpr unsigned kDMAChannels = 8;
+constexpr uint32_t kStagingWindowWords = 512;
+static_assert(kMaxPendingVirtualDMA <= kDMAChannels,
+              "each pending DMA needs its own channel");
 
 // Whether `function` has FP8 values, which keep m0-m31 and move BF16 pairs
 // above them, and a pack, which keeps x10-x17 for its relayout loop.
@@ -56,11 +62,10 @@ FixedResourcePlacement selectedResources() {
   resources.outputWindowWords = 65536;
   resources.packWord = 32768;
   resources.packRelayoutWord = 33024;
-  // Slot 0 shares the boundary channels, which never run while an explicit
-  // transfer is pending; slot 1 takes x29-x31, which nothing else uses.
-  static_assert(kMaxPendingVirtualDMA == 2,
-                "each pending DMA needs its own slot here");
-  resources.dmaSlots = {{{0, 1, 131072, 4, 7, 9}, {2, 3, 131584, 29, 30, 31}}};
+  resources.stagingWord = 131072;
+  resources.dmaBaseReg = 4;
+  resources.dmaDramReg = 7;
+  resources.dmaSizeReg = 9;
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;
@@ -163,40 +168,51 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
   return success();
 }
 
-// Each transfer takes the lowest DMA slot free from its launch to its
-// completion, so a function with one transfer pending at a time uses slot 0
-// only.
+// Each transfer holds a channel and a staging window from its launch to its
+// completion. The DMA latches its registers at launch, so every transfer
+// uses the same three. A load takes the load channel when it is free and a
+// store the store channel, as a lone transfer always has; otherwise the
+// lowest free channel. A transfer takes the lowest free window.
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                                               unsigned &nextTransfer) {
-  std::array<Value, kMaxPendingVirtualDMA> slots{};
+  std::array<Value, kDMAChannels> channels{}, windows{};
+  auto release = [](std::array<Value, kDMAChannels> &owners, Value transfer) {
+    *llvm::find(owners, transfer) = Value{};
+  };
   for (Operation &op : block) {
     if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(
             op)) {
-      *llvm::find(slots, op.getOperand(1)) = Value{};
+      release(channels, op.getOperand(1));
+      release(windows, op.getOperand(1));
       continue;
     }
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
     if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
       continue;
-    auto free = llvm::find(slots, Value{});
-    if (free == slots.end())
-      return function.emitOpError("internal DMA slot overflow");
+    unsigned channel =
+        load ? fixedResources.loadChannel : fixedResources.storeChannel;
+    if (channels[channel])
+      channel = llvm::find(channels, Value{}) - channels.begin();
+    auto window = llvm::find(windows, Value{});
+    if (channel == kDMAChannels || window == windows.end())
+      return function.emitOpError("internal DMA channel overflow");
     Value transfer = op.getResult(1);
-    *free = transfer;
-    const DMASlotPlacement &slot =
-        fixedResources.dmaSlots[free - slots.begin()];
-    unsigned channel = load ? slot.loadChannel : slot.storeChannel;
+    channels[channel] = transfer;
+    *window = transfer;
     if (!llvm::is_contained(usedDMAChannels, channel))
       usedDMAChannels.push_back(channel);
     unsigned halves =
         isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
+    uint32_t stagingWord =
+        fixedResources.stagingWord +
+        static_cast<uint32_t>(window - windows.begin()) * kStagingWindowWords;
     dmaTransfers[transfer] = {channel,
                               halves,
                               nextTransfer++,
-                              slot.stagingWord,
-                              slot.baseReg,
-                              slot.dramReg,
-                              slot.sizeReg};
+                              stagingWord,
+                              fixedResources.dmaBaseReg,
+                              fixedResources.dmaDramReg,
+                              fixedResources.dmaSizeReg};
   }
   return success();
 }

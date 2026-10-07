@@ -608,7 +608,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
 
   case OpClass::DmaLoad:
   case OpClass::DmaStore: {
-    // The model reads a DMA's registers and moves its data at completion.
+    // The DMA latches its registers at launch, into DMA.scala's command
+    // queue, and moves its data at completion.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
     // Unlike npu_model, which counts bytes, AtlasCore.scala takes the DMA VMEM
@@ -617,9 +618,9 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     if (addr)
       *addr *= 4;
     auto bytes = reg(regs, in.rs2);
-    b.x(in.rd, false, 0, true);
-    b.x(in.rs1, false, 0, true);
-    b.x(in.rs2, false, 0, true);
+    b.x(in.rd, false, 0);
+    b.x(in.rs1, false, 0);
+    b.x(in.rs2, false, 0);
     Access base{Res::DmaBase, false, 0, 1, 0, 1};
     base.atCompletion = true;
     b.f.accesses.push_back(base);

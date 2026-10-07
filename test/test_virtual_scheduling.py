@@ -470,13 +470,7 @@ class VirtualSchedulingTest(unittest.TestCase):
         def completion(op: str) -> bool:
             return "dma_await" in op or op == "atlas.virtual_dma_wait"
 
-        source = OVERLAP.read_text()
-        ops = blocks(self.scheduled(source))[0]["ops"]
-        before = blocks(run("atlas-opt", source).stdout)[0]["ops"]
-        self.assertEqual([op for op in ops if launch(op)], [op for op in before if launch(op)],
-                         "the DMA queue keeps its order")
-        self.assertEqual([op for op in ops if completion(op)],
-                         [op for op in before if completion(op)])
+        ops = blocks(self.scheduled(OVERLAP.read_text()))[0]["ops"]
         pending = peak = 0
         moved = []
         for op in ops:
@@ -489,6 +483,31 @@ class VirtualSchedulingTest(unittest.TestCase):
                 moved.append(op)
         self.assertEqual(peak, 2, "the next transfer launches before the current completes")
         self.assertIn("atlas.virtual_mxu_reset", moved)
+
+    def test_transfers_that_may_share_dram_never_overlap(self) -> None:
+        # A store to y, then a load of y and a load of z. The load of y waits
+        # for the store; the load of z may run beside either.
+        source = function("dram", [
+            start(), inp("io0", "io1", "t", 0),
+            const("y", -2147481600), const("z", -2147479552), const("size", 2048),
+            f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
+            f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
+            f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
+            dma_load("io3", "io4", "ey", "y", "size", "bf16"),
+            dma_await("io4", "io5", "u", "ey", "bf16"),
+            dma_load("io5", "io6", "ez", "z", "size", "bf16"),
+            dma_await("io6", "io7", "v", "ez", "bf16"),
+            add("w", "u", "v"), outp("io7", "o", "w", 0), f"return %o : {S}"])
+        role = {name: line_of(source, text) for name, text in (
+            ("store y", "%st ="), ("wait y", "%io3 ="), ("load y", "%ey ="),
+            ("await y", "%u ="), ("load z", "%ez ="))}
+        z_overlaps = False
+        for options in ([], *([f"random-seed={seed}"] for seed in range(24))):
+            position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
+            at = {name: position[line] for name, line in role.items()}
+            self.assertLess(at["wait y"], at["load y"], options)
+            z_overlaps |= at["load z"] < at["wait y"] or at["load z"] < at["await y"]
+        self.assertTrue(z_overlaps, "no order ran the load of z beside another transfer")
 
     def test_loop_body_dma_interval_receives_vpu_work(self) -> None:
         body = blocks(self.scheduled(cfg_cases()["C14 explicit DMA in a loop body"]))[2]["ops"]

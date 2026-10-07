@@ -13,11 +13,14 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -34,9 +37,7 @@ namespace {
 
 // Ordering obligations the IR does not express as SSA, as pseudo-registers.
 enum Pseudo : unsigned {
-  kDmaLaunch, // the DMA queue, which moves data in launch order
-  kDmaDone,   // transfer completions; implicit memory work needs none pending
-  kUnit0,     // all of MXU0 or MXU1, which a legacy matmul takes
+  kUnit0, // all of MXU0 or MXU1, which a legacy matmul takes
   kUnit1,
   kPack,    // the pack's VMEM scratch and relayout registers
   kBarrier, // read by every operation, written by unknown ones
@@ -60,20 +61,53 @@ bool isLaunch(Operation *op) {
              VirtualDMAStoreBF16Op>(op);
 }
 
+bool isCompletion(Operation *op) {
+  return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op);
+}
+
+// Boundary tiles and the pack move memory without a transfer handle, so they
+// run with no explicit transfer pending.
+bool isImplicitMemory(Operation *op) {
+  return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
+             VirtualPackFP8Op>(op);
+}
+
+// The DRAM bytes a transfer moves, [first, last), when its address and size
+// are constants.
+using DRAMRange = std::pair<uint64_t, uint64_t>;
+std::optional<DRAMRange> dramRange(Operation *launch) {
+  auto [address, size] =
+      llvm::TypeSwitch<Operation *, std::pair<Value, Value>>(launch)
+          .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
+                VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([](auto op) {
+            return std::pair{op.getDramByte(), op.getSizeBytes()};
+          })
+          .Default([](Operation *) -> std::pair<Value, Value> {
+            llvm_unreachable("not a DMA launch");
+          });
+  APInt first, bytes;
+  if (!matchPattern(address, m_ConstantInt(&first)) ||
+      !matchPattern(size, m_ConstantInt(&bytes)))
+    return std::nullopt;
+  return DRAMRange{first.getZExtValue(),
+                   first.getZExtValue() + bytes.getZExtValue()};
+}
+
+// A range that is not a constant may touch anything.
+bool mayOverlap(const std::optional<DRAMRange> &a,
+                const std::optional<DRAMRange> &b) {
+  return !a || !b || (a->first < b->second && b->first < a->second);
+}
+
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
-// and virtual_pack_fp8 are declared Pure yet have ordering obligations. Slot
-// limits are edges of their own (SlotPool).
+// and virtual_pack_fp8 are declared Pure yet have ordering obligations. DMA
+// ordering and slot limits are edges of their own (buildGraph, SlotPool).
 Effects effectsOf(Operation *op) {
   Effects e;
-  if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op)) {
-    e.reads = bit(kDmaLaunch) | bit(kDmaDone);
-  } else if (isLaunch(op)) {
-    e.writes = bit(kDmaLaunch);
-  } else if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
-                 VirtualDMAWaitOp>(op)) {
-    e.writes = bit(kDmaDone);
+  if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op) ||
+      isLaunch(op) || isCompletion(op)) {
+    // No pseudo-register.
   } else if (isa<VirtualPackFP8Op>(op)) {
-    e.reads = bit(kDmaLaunch) | bit(kDmaDone);
     e.writes = bit(kPack);
   } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     e.reads = bit(kUnit0 + unitOf(load.getWeight().getType()));
@@ -194,6 +228,36 @@ BlockGraph buildGraph(Block &block) {
       }
     }
   }
+  // Explicit transfers run at the same time unless they may touch the same
+  // DRAM bytes; then the later one launches after the earlier completes, as
+  // a verified source already orders them. Implicit memory work keeps its
+  // place among the transfers, so nothing is pending when it runs.
+  SmallVector<unsigned> launches, transfersAndCompletions, implicit;
+  for (unsigned i = 0; i < n; ++i) {
+    Operation *op = g.nodes[i];
+    if (isLaunch(op))
+      launches.push_back(i);
+    if (isLaunch(op) || isCompletion(op))
+      transfersAndCompletions.push_back(i);
+    else if (isImplicitMemory(op))
+      implicit.push_back(i);
+  }
+  for (unsigned m : implicit)
+    for (unsigned d : transfersAndCompletions)
+      edge(std::min(m, d), std::max(m, d));
+  std::vector<std::optional<DRAMRange>> ranges;
+  for (unsigned launch : launches)
+    ranges.push_back(dramRange(g.nodes[launch]));
+  for (unsigned a = 0; a < launches.size(); ++a)
+    for (unsigned b = a + 1; b < launches.size(); ++b) {
+      if (!mayOverlap(ranges[a], ranges[b]))
+        continue;
+      unsigned done =
+          index.lookup(*g.nodes[launches[a]]->getResult(1).user_begin());
+      // A source that already overlaps them keeps their launch order.
+      edge(done < launches[b] ? done : launches[a], launches[b]);
+    }
+
   // Slot limits. A transfer is last used by its completion, a weight by its
   // users, or by its load if it has none, and an accumulator chain by the
   // readout that ends it.

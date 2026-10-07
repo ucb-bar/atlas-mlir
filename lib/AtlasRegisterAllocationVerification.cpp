@@ -93,11 +93,9 @@ private:
     for (unsigned reserved :
          {fixed.scalarTemporary, fixed.oneReg, fixed.zeroReg, fixed.halfSizeReg,
           fixed.haltReg, fixed.inputBaseReg, fixed.inputDramReg,
-          fixed.outputBaseReg, fixed.outputDramReg})
+          fixed.outputBaseReg, fixed.outputDramReg, fixed.dmaBaseReg,
+          fixed.dmaDramReg, fixed.dmaSizeReg})
       if (reg == reserved)
-        return true;
-    for (const DMASlotPlacement &slot : fixed.dmaSlots)
-      if (reg == slot.baseReg || reg == slot.dramReg || reg == slot.sizeReg)
         return true;
     if (!hasPack)
       return false;

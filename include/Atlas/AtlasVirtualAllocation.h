@@ -27,17 +27,6 @@ struct DMATransferPlacement {
   unsigned sizeReg;
 };
 
-// One explicit DMA transfer in flight: a channel per direction, a staging
-// window, and the registers the DMA reads when it completes.
-struct DMASlotPlacement {
-  unsigned loadChannel;
-  unsigned storeChannel;
-  uint32_t stagingWord;
-  unsigned baseReg;
-  unsigned dramReg;
-  unsigned sizeReg;
-};
-
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;
@@ -58,7 +47,10 @@ struct FixedResourcePlacement {
   uint32_t outputWindowWords;
   uint32_t packWord;
   uint32_t packRelayoutWord;
-  std::array<DMASlotPlacement, kMaxPendingVirtualDMA> dmaSlots;
+  uint32_t stagingWord;
+  unsigned dmaBaseReg;
+  unsigned dmaDramReg;
+  unsigned dmaSizeReg;
   unsigned scaleReg;
   std::array<unsigned, 2> packSourceRegs;
   unsigned packDestinationReg;
