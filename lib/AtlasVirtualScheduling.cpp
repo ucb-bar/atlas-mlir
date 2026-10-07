@@ -12,12 +12,12 @@
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -102,11 +102,18 @@ struct BlockGraph {
   std::vector<SmallVector<unsigned, 4>> preds, succs;
 };
 
-BlockGraph buildGraph(Block &block) {
-  BlockGraph g;
+// The operations a schedule may move: all but the start and the terminator.
+SmallVector<Operation *> freeOperations(Block &block) {
+  SmallVector<Operation *> ops;
   for (Operation &op : block)
     if (!isa<VirtualStartOp>(op) && !op.hasTrait<OpTrait::IsTerminator>())
-      g.nodes.push_back(&op);
+      ops.push_back(&op);
+  return ops;
+}
+
+BlockGraph buildGraph(Block &block) {
+  BlockGraph g;
+  g.nodes = freeOperations(block);
   unsigned n = g.nodes.size();
   g.preds.assign(n, {});
   g.succs.assign(n, {});
@@ -260,6 +267,100 @@ Cost costOf(Operation *op) {
   return {Engine::Scalar, cyclesOf("addi")};
 }
 
+// Register kinds as the allocator colors them; counts are indexed by kind.
+constexpr std::array<RegisterKind, 3> kKinds = {
+    RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar};
+using KindCounts = std::array<int, kKinds.size()>;
+
+unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
+
+std::optional<RegisterKind> kindOf(Type type) {
+  if (isa<VirtualBF16Type>(type))
+    return RegisterKind::BF16;
+  if (isa<VirtualFP8Type>(type))
+    return RegisterKind::FP8;
+  if (type.isInteger(1) || type.isInteger(32))
+    return RegisterKind::Scalar;
+  return std::nullopt;
+}
+
+SmallVector<Value, 4> distinctOperands(Operation *op) {
+  SmallVector<Value, 4> values;
+  for (Value operand : op->getOperands())
+    if (!llvm::is_contained(values, operand))
+      values.push_back(operand);
+  return values;
+}
+
+// Live values of each kind as a block's operations are placed, counted as
+// the allocator's interference graph counts them: an operation's results
+// interfere with its operands.
+class Pressure {
+public:
+  Pressure(Block &block, ArrayRef<Operation *> nodes,
+           const Liveness &liveness) {
+    for (Operation *op : nodes)
+      for (Value operand : distinctOperands(op))
+        ++remaining[operand];
+    // Values the block hands on stay live throughout.
+    kept.insert(liveness.getLiveOut(&block).begin(),
+                liveness.getLiveOut(&block).end());
+    for (Value operand : block.getTerminator()->getOperands())
+      kept.insert(operand);
+    llvm::DenseSet<Value> entry(liveness.getLiveIn(&block).begin(),
+                                liveness.getLiveIn(&block).end());
+    entry.insert(block.args_begin(), block.args_end());
+    for (Value value : entry)
+      if (needed(value))
+        count(live, value, 1);
+  }
+
+  // Live values while `op` runs, if it is placed next.
+  KindCounts during(Operation *op) const {
+    KindCounts counts = live;
+    for (Value result : op->getResults())
+      count(counts, result, 1);
+    return counts;
+  }
+
+  // Live values once `op` has run, if it is placed next.
+  KindCounts after(Operation *op) const {
+    KindCounts counts = live;
+    for (Value operand : distinctOperands(op))
+      if (remaining.lookup(operand) == 1 && !kept.contains(operand))
+        count(counts, operand, -1);
+    for (Value result : op->getResults())
+      if (needed(result))
+        count(counts, result, 1);
+    return counts;
+  }
+
+  void place(Operation *op) {
+    KindCounts counts = during(op);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
+      peak[k] = std::max(peak[k], counts[k]);
+    live = after(op);
+    for (Value operand : distinctOperands(op))
+      --remaining[operand];
+  }
+
+  KindCounts peak{};
+
+private:
+  bool needed(Value value) const {
+    return kept.contains(value) || remaining.lookup(value) > 0;
+  }
+
+  static void count(KindCounts &counts, Value value, int delta) {
+    if (std::optional<RegisterKind> kind = kindOf(value.getType()))
+      counts[indexOf(*kind)] += delta;
+  }
+
+  llvm::DenseMap<Value, unsigned> remaining;
+  llvm::DenseSet<Value> kept;
+  KindCounts live{};
+};
+
 constexpr unsigned kUnits = static_cast<unsigned>(timing::Engine::Dma) + 1;
 
 // In-order issue onto functional units: an operation starts once the one
@@ -306,7 +407,8 @@ private:
 
 class BlockScheduler {
 public:
-  explicit BlockScheduler(const BlockGraph &g) : g(g) {
+  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness)
+      : block(block), g(g), liveness(liveness) {
     unsigned n = g.nodes.size();
     for (Operation *op : g.nodes)
       costs.push_back(costOf(op));
@@ -328,21 +430,42 @@ public:
     return machine.makespan;
   }
 
-  // Of the operations whose dependences are placed, take the one that starts
+  KindCounts peakPressure(ArrayRef<Operation *> order) const {
+    Pressure pressure(block, g.nodes, liveness);
+    for (Operation *op : order)
+      pressure.place(op);
+    return pressure.peak;
+  }
+
+  // Of the operations whose dependences are placed, take the one that keeps
+  // the registers in use within `capacity` and leaves one of each kind free,
+  // or overshoots least: every operation defines at most one register value,
+  // so a free register lets the next one run. Then take the one that starts
   // first; then the one that frees the frontend first, so a blocking
   // transfer waits for work that can run beside it; then the one with the
   // longest path to the block's end; then the earliest in source order.
-  std::vector<unsigned> listSchedule() const {
+  std::vector<unsigned> listSchedule(const KindCounts &capacity) const {
+    Pressure pressure(block, g.nodes, liveness);
+    auto over = [&](const KindCounts &counts, int slack) {
+      int total = 0;
+      for (unsigned k = 0; k < kKinds.size(); ++k)
+        total += std::max(0, counts[k] - (capacity[k] - slack));
+      return total;
+    };
     return build([&](const Machine &machine, ArrayRef<unsigned> ready) {
       auto key = [&](unsigned node) {
+        Operation *op = g.nodes[node];
         int start = machine.start(node);
-        return std::tuple(start, machine.frontendAfter(node, start),
-                          -heights[node], node);
+        return std::tuple(over(pressure.during(op), 0),
+                          over(pressure.after(op), 1), start,
+                          machine.frontendAfter(node, start), -heights[node],
+                          node);
       };
       unsigned best = ready.front();
       for (unsigned node : ready)
         if (key(node) < key(best))
           best = node;
+      pressure.place(g.nodes[best]);
       return best;
     });
   }
@@ -357,6 +480,7 @@ public:
   }
 
 private:
+  // Place every node in the order `pick` chooses from the ready ones.
   template <typename Pick>
   std::vector<unsigned> build(Pick pick) const {
     unsigned n = g.nodes.size();
@@ -379,83 +503,12 @@ private:
     return order;
   }
 
+  Block &block;
   const BlockGraph &g;
+  const Liveness &liveness;
   std::vector<Cost> costs;
   std::vector<int> heights;
 };
-
-// Register kinds as the allocator colors them; counts are indexed by kind.
-constexpr std::array<RegisterKind, 3> kKinds = {
-    RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar};
-using KindCounts = std::array<int, kKinds.size()>;
-
-unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
-
-std::optional<RegisterKind> kindOf(Type type) {
-  if (isa<VirtualBF16Type>(type))
-    return RegisterKind::BF16;
-  if (isa<VirtualFP8Type>(type))
-    return RegisterKind::FP8;
-  if (type.isInteger(1) || type.isInteger(32))
-    return RegisterKind::Scalar;
-  return std::nullopt;
-}
-
-const char *kindName(RegisterKind kind) {
-  switch (kind) {
-  case RegisterKind::BF16:
-    return "BF16";
-  case RegisterKind::FP8:
-    return "FP8";
-  case RegisterKind::Scalar:
-    return "scalar";
-  }
-  llvm_unreachable("unknown register kind");
-}
-
-// The most values of each kind live at once while `block` runs `order`,
-// counted as the allocator's interference graph counts them: an operation's
-// results interfere with its operands.
-KindCounts peakPressure(Block &block, ArrayRef<Operation *> order,
-                        const Liveness &liveness) {
-  llvm::DenseMap<Value, unsigned> lastUse;
-  for (auto [i, op] : llvm::enumerate(order))
-    for (Value operand : op->getOperands())
-      lastUse[operand] = i;
-  // Values the block hands on stay live throughout.
-  llvm::DenseSet<Value> kept(liveness.getLiveOut(&block).begin(),
-                             liveness.getLiveOut(&block).end());
-  for (Value operand : block.getTerminator()->getOperands())
-    kept.insert(operand);
-
-  KindCounts live{}, peak{};
-  auto count = [](KindCounts &counts, Value value, int delta) {
-    if (std::optional<RegisterKind> kind = kindOf(value.getType()))
-      counts[indexOf(*kind)] += delta;
-  };
-  llvm::DenseSet<Value> entry(liveness.getLiveIn(&block).begin(),
-                              liveness.getLiveIn(&block).end());
-  entry.insert(block.args_begin(), block.args_end());
-  for (Value value : entry)
-    if (kept.contains(value) || lastUse.count(value))
-      count(live, value, 1);
-  for (auto [i, op] : llvm::enumerate(order)) {
-    KindCounts during = live;
-    for (Value result : op->getResults())
-      count(during, result, 1);
-    for (unsigned k = 0; k < kKinds.size(); ++k)
-      peak[k] = std::max(peak[k], during[k]);
-    llvm::SmallDenseSet<Value, 4> dying;
-    for (Value operand : op->getOperands())
-      if (lastUse[operand] == i && !kept.contains(operand) &&
-          dying.insert(operand).second)
-        count(live, operand, -1);
-    for (Value result : op->getResults())
-      if (kept.contains(result) || lastUse.count(result))
-        count(live, result, 1);
-  }
-  return peak;
-}
 
 // Move `ops` before the terminator in order, and rethread the state chain
 // through the new order.
@@ -476,42 +529,51 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
   }
 }
 
-// Reorder one block when the schedule is faster than the source order and
-// needs no more registers than the allocator has, or than the source order
-// already needed. A random order skips both checks.
+// Reorder one block when the schedule is faster, or when it fits the
+// allocator's capacity and the source order does not. A random order is
+// taken as it is.
 void scheduleBlock(Block &block, unsigned index, const Liveness &liveness,
                    const KindCounts &capacity,
                    std::optional<unsigned> randomSeed) {
   BlockGraph g = buildGraph(block);
-  BlockScheduler scheduler(g);
-  std::vector<unsigned> order;
+  BlockScheduler scheduler(block, g, liveness);
+  auto opsOf = [&](ArrayRef<unsigned> order) {
+    SmallVector<Operation *> ops;
+    for (unsigned node : order)
+      ops.push_back(g.nodes[node]);
+    return ops;
+  };
   if (randomSeed) {
-    order = scheduler.randomOrder(*randomSeed + index);
-  } else {
-    std::vector<unsigned> source(g.nodes.size());
-    std::iota(source.begin(), source.end(), 0u);
-    order = scheduler.listSchedule();
-    if (scheduler.makespan(order) >= scheduler.makespan(source))
-      return;
+    reorder(block, opsOf(scheduler.randomOrder(*randomSeed + index)));
+    return;
   }
-  SmallVector<Operation *> ops;
-  for (unsigned node : order)
-    ops.push_back(g.nodes[node]);
-  if (!randomSeed) {
-    KindCounts before = peakPressure(block, g.nodes, liveness);
-    KindCounts after = peakPressure(block, ops, liveness);
-    for (RegisterKind kind : kKinds) {
-      unsigned k = indexOf(kind);
-      if (after[k] > capacity[k] && after[k] > before[k]) {
-        block.getTerminator()->emitRemark()
-            << "virtual schedule kept source order for block " << index
-            << ": " << kindName(kind) << " pressure " << after[k]
-            << " exceeds capacity " << capacity[k];
-        return;
-      }
-    }
-  }
-  reorder(block, ops);
+
+  std::vector<unsigned> source(g.nodes.size());
+  std::iota(source.begin(), source.end(), 0u);
+  std::vector<unsigned> order = scheduler.listSchedule(capacity);
+  SmallVector<Operation *> ops = opsOf(order);
+  auto fits = [&](ArrayRef<Operation *> candidate) {
+    KindCounts peak = scheduler.peakPressure(candidate);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
+      if (peak[k] > capacity[k])
+        return false;
+    return true;
+  };
+  if ((fits(ops) && !fits(g.nodes)) ||
+      scheduler.makespan(order) < scheduler.makespan(source))
+    reorder(block, ops);
+}
+
+// Whether the register allocator succeeds on `function` as it stands; `why`
+// receives its first error.
+bool allocates(func::FuncOp function, std::string &why) {
+  ScopedDiagnosticHandler handler(function.getContext(), [&](Diagnostic &d) {
+    if (d.getSeverity() == DiagnosticSeverity::Error && why.empty())
+      why = d.str();
+    return success();
+  });
+  VirtualAllocationPlan plan;
+  return succeeded(plan.allocate(function));
 }
 
 struct ScheduleAtlasVirtualPass
@@ -541,7 +603,20 @@ struct ScheduleAtlasVirtualPass
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
+    struct SourceOrder {
+      func::FuncOp function;
+      bool allocates;
+      SmallVector<std::pair<Block *, SmallVector<Operation *>>> blocks;
+    };
+    SmallVector<SourceOrder> sources;
     for (func::FuncOp function : module.getOps<func::FuncOp>()) {
+      std::string ignored;
+      SourceOrder &source = sources.emplace_back();
+      source.function = function;
+      source.allocates = !seed && allocates(function, ignored);
+      for (Block &block : function.getBody())
+        source.blocks.push_back({&block, freeOperations(block)});
+
       KindCounts capacity;
       for (RegisterKind kind : kKinds)
         capacity[indexOf(kind)] = registerCapacity(function, kind);
@@ -555,7 +630,21 @@ struct ScheduleAtlasVirtualPass
     if (failed(verifyAtlasVirtualModule(module))) {
       module.emitError("schedule-atlas-virtual produced an order that does "
                        "not verify");
-      signalPassFailure();
+      return signalPassFailure();
+    }
+    // Scheduling keeps pressure within capacity where it can, but that does
+    // not guarantee the allocator's greedy coloring succeeds. Allocation is
+    // function-wide, so a function that allocated before and no longer does
+    // keeps its source order.
+    for (SourceOrder &source : sources) {
+      std::string why;
+      if (!source.allocates || allocates(source.function, why))
+        continue;
+      for (auto &[block, ops] : source.blocks)
+        reorder(*block, ops);
+      source.function.emitRemark()
+          << "virtual schedule kept source order for @"
+          << source.function.getSymName() << ": " << why;
     }
   }
 };

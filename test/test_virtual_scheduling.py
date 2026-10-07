@@ -244,18 +244,23 @@ def cfg_cases() -> dict[str, str]:
     return cases
 
 
-def wide_return_block(tiles: int) -> str:
+def wide_return_block(tiles: int, interleaved: bool = False) -> str:
     """Entry passes `tiles` BF16 tiles to the return block, which uses each
-    twice. Source order computes everything before writing anything."""
+    twice. Source order computes everything before writing anything, or,
+    interleaved, finishes each tile before starting the next."""
     lines = [start()]
     for i in range(tiles):
         lines.append(inp(f"io{i}", f"io{i + 1}", f"t{i}", i))
     lines.append("cf.br " + edge("bb1", [f"io{tiles}", *(f"t{i}" for i in range(tiles))],
                                  [S, *([T] * tiles)]))
     lines.append(f"^bb1(%s0: {S}, " + ", ".join(f"%a{i}: {T}" for i in range(tiles)) + "):")
-    lines += [unary(f"r{i}", f"a{i}") for i in range(tiles)]
-    lines += [add(f"y{i}", f"r{i}", f"a{i}") for i in range(tiles)]
-    lines += [outp(f"s{i}", f"s{i + 1}", f"y{i}", i) for i in range(tiles)]
+    relus = [unary(f"r{i}", f"a{i}") for i in range(tiles)]
+    adds = [add(f"y{i}", f"r{i}", f"a{i}") for i in range(tiles)]
+    outputs = [outp(f"s{i}", f"s{i + 1}", f"y{i}", i) for i in range(tiles)]
+    if interleaved:
+        lines += [line for tile in zip(relus, adds, outputs) for line in tile]
+    else:
+        lines += relus + adds + outputs
     lines.append(f"return %s{tiles} : {S}")
     return function("wide", lines, attrs=(
         "atlas.input_dram_base = 2415919104 : i64, "
@@ -410,28 +415,35 @@ class VirtualSchedulingTest(unittest.TestCase):
                          "the next tile is read while the first is rectified")
         self.assertGreater(positions(ops, "output_bf16")[0], second_input)
 
-    def test_largest_schedules_within_capacity_allocate(self) -> None:
-        for source in (boundary_tiles(30), boundary_tiles(14, fp8=True)):
-            out = self.scheduled(source)
-            self.assertNotEqual(blocks(out)[0]["ops"], blocks(source)[0]["ops"])
-            self.assertTrue(lowers(out), "the pressure count matches allocation")
-
-    def test_schedule_over_capacity_keeps_source_order(self) -> None:
-        for source, remark in (
-                (boundary_tiles(31), "BF16 pressure 32 exceeds capacity 31"),
-                (boundary_tiles(15, fp8=True), "BF16 pressure 16 exceeds capacity 15")):
-            with self.subTest(remark=remark):
+    def test_schedule_stays_within_register_capacity(self) -> None:
+        # Reading ahead stops at the allocator's capacity: 31 BF16 pairs, or
+        # 15 with FP8 values present.
+        for count, fp8 in ((30, False), (31, False), (32, False),
+                           (14, True), (15, True), (16, True)):
+            with self.subTest(count=count, fp8=fp8):
+                source = boundary_tiles(count, fp8)
                 result = schedule(source)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("kept source order for block 0: " + remark, result.stderr)
-                self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
+                self.assertNotEqual(blocks(result.stdout)[0]["ops"], blocks(source)[0]["ops"])
+                self.assertNotIn("kept source order", result.stderr)
                 self.assertTrue(lowers(result.stdout))
 
-    def test_source_order_over_capacity_may_still_change(self) -> None:
-        # Pressure the source order already needs is not the schedule's doing.
-        source = wide_return_block(29)
-        self.assertFalse(lowers(source))
-        self.assertNotIn("kept source order", schedule(source).stderr)
+    def test_scheduling_recovers_a_block_over_capacity(self) -> None:
+        source = virtual_pressure(32)
+        rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+        self.assertIn("exceeds 31 physical pairs", rejected.stderr)
+        self.assertTrue(lowers(self.scheduled(source)), "scheduled order should allocate")
+
+    def test_schedule_the_allocator_rejects_keeps_source_order(self) -> None:
+        # Within capacity, the allocator's greedy coloring can still fail on
+        # an order whose source allocated.
+        source = wide_return_block(27, interleaved=True)
+        self.assertTrue(lowers(source))
+        result = schedule(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("kept source order for @wide: 'func.func' op virtual BF16 "
+                      "interference exceeds 31 physical pairs", result.stderr)
+        self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
 
     def test_dma_intervals_receive_independent_work(self) -> None:
         ops = blocks(self.scheduled(OVERLAP.read_text()))[0]["ops"]
