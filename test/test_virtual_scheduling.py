@@ -23,8 +23,9 @@ OVERLAP = EXAMPLES / "virtual_sched_overlap.mlir"
 S = "!atlas.virtual_state"
 T = "!atlas.virtual_bf16"
 F = "!atlas.virtual_fp8"
+# Room for 32 input tiles before the output window.
 ABI = ("atlas.input_dram_base = 2415919104 : i64, "
-       "atlas.output_dram_base = 2415923200 : i64")
+       "atlas.output_dram_base = 2415984640 : i64")
 SEEDS = range(8)
 
 
@@ -213,8 +214,7 @@ def cfg_cases() -> dict[str, str]:
         add("z", "h", "b"), "%j1 = arith.addi %j, %c1 : i32",
         "cf.br " + edge("bb1", ["ms3", "z", "j1"], [S, T, "i32"]),
         f"^bb3(%s3: {S}, %c: {T}):", outp("s3", "o", "c", 0),
-        f"return %o : {S}"], attrs=("atlas.input_dram_base = 2415919104 : i64, "
-                                     "atlas.output_dram_base = 2415984640 : i64"))
+        f"return %o : {S}"])
     cases["C16 pack beside an explicit DMA"] = function("c16", [
         start(), inp("io0", "io1", "t", 0), const("addr", -1879044096),
         const("size", 1024),
@@ -269,39 +269,65 @@ def wide_return_block(tiles: int) -> str:
 
 # --- IR inspection -----------------------------------------------------------
 
-OP = re.compile(r'"(atlas\.[a-z_0-9]+)"|\b(arith\.[a-z]+|cf\.[a-z_]+)\b|^\s*(return)\b')
+GENERIC_OP = re.compile(r'"([a-z_]+\.[a-z_0-9.]+)"\(')
 
 
 def blocks(text: str) -> list[dict]:
-    """Split each printed function into blocks: header types, op names, and
-    terminator successors."""
+    """Each function's blocks in MLIR's generic form: argument types, op
+    names in order, and terminator successors."""
+    generic = run("atlas-opt", text, "--mlir-print-op-generic")
+    assert generic.returncode == 0, generic.stderr
     result: list[dict] = []
     current: dict | None = None
-    for line in text.splitlines():
+    for line in generic.stdout.splitlines():
         stripped = line.strip()
-        if stripped.startswith("func.func"):
-            current = {"header": "entry", "ops": [], "succ": []}
+        if stripped.startswith('"func.func"'):
+            current = {"header": (), "ops": [], "succ": []}
             result.append(current)
             continue
         if stripped.startswith("^bb"):
-            types = re.findall(r":\s*(![\w.<>]+|i\d+)", stripped.split("//")[0])
-            current = {"header": tuple(types), "ops": [], "succ": []}
-            result.append(current)
+            types = tuple(re.findall(r":\s*(![\w.<>]+|i\d+)", stripped.split("//")[0]))
+            if current is not None and not current["ops"]:
+                current["header"] = types  # the entry block's arguments
+            else:
+                current = {"header": types, "ops": [], "succ": []}
+                result.append(current)
             continue
-        if current is None:
+        match = GENERIC_OP.search(stripped)
+        if current is None or not match:
             continue
-        match = OP.search(line)
-        if match:
-            name = next(group for group in match.groups() if group)
-            current["ops"].append(name)
-            if name in ("cf.br", "cf.cond_br"):
-                current["succ"] = re.findall(r"\^bb\d+", stripped)
+        current["ops"].append(match.group(1))
+        successors = re.search(r"\)\[([^\]]*)\]", stripped)
+        if successors:
+            current["succ"] = re.findall(r"\^bb\d+", successors.group(1))
     return result
 
 
 def structure(text: str) -> list[tuple]:
     return [(b["header"], tuple(sorted(b["ops"])), tuple(b["succ"]),
              b["ops"][-1] if b["ops"] else None) for b in blocks(text)]
+
+
+def reaches(predecessors: list[list[int]], start: int, goal: int) -> bool:
+    """Whether the dependence graph orders `start` before `goal`."""
+    successors: dict[int, list[int]] = {}
+    for node, preds in enumerate(predecessors):
+        for pred in preds:
+            successors.setdefault(pred, []).append(node)
+    stack, seen = [start], set()
+    while stack:
+        node = stack.pop()
+        if node == goal:
+            return True
+        if node not in seen:
+            seen.add(node)
+            stack.extend(successors.get(node, []))
+    return False
+
+
+def nodes_named(block: dict, name: str) -> list[int]:
+    return [i for i, label in enumerate(block["labels"])
+            if label.split(" (")[0] == name]
 
 
 def schedule(source: str, *options: str):
@@ -456,32 +482,31 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_pack_never_enters_a_dma_interval(self) -> None:
         source = cfg_cases()["C16 pack beside an explicit DMA"]
-        for seed in range(16):
-            ops = blocks(self.scheduled(source, f"random-seed={seed}"))[0]["ops"]
-            load = ops.index("atlas.virtual_dma_load_fp8")
-            await_ = ops.index("atlas.virtual_dma_await_fp8")
-            pack = ops.index("atlas.virtual_pack_fp8")
-            self.assertFalse(load < pack < await_, (seed, ops))
+        block = self.trace(source)["functions"][0]["blocks"][0]
+        preds = block["predecessors"]
+        [load] = nodes_named(block, "dma_load_fp8")
+        [await_] = nodes_named(block, "dma_await_fp8")
+        [pack] = nodes_named(block, "pack_fp8")
+        self.assertTrue(reaches(preds, await_, pack) or reaches(preds, pack, load))
 
     def test_weight_slot_dependences_are_exact(self) -> None:
         # Two chains on MXU0. A replacement weight load may rise above the
-        # previous readout, never above the reset that reads the old weight.
+        # previous readout, never above the reset that reads the old weight,
+        # and the second chain starts after the first is read out.
         source = function("weights", [
             start(), inp("io0", "io1", "x", 0, "fp8"), inp("io1", "io2", "w1", 1, "fp8"),
             inp("io2", "io3", "w2", 2, "fp8"),
             *mxu_chain("io3", 0, "w1", "x", "h1", "a"),
             *mxu_chain("as3", 0, "w2", "x", "h2", "b"),
             add("y", "h1", "h2"), outp("bs3", "o", "y", 0), f"return %o : {S}"])
-        above_readout = 0
-        for seed in range(24):
-            ops = blocks(self.scheduled(source, f"random-seed={seed}"))[0]["ops"]
-            loads = [i for i, op in enumerate(ops) if op == "atlas.virtual_mxu_load_weight"]
-            resets = [i for i, op in enumerate(ops) if op == "atlas.virtual_mxu_reset"]
-            readouts = [i for i, op in enumerate(ops) if op == "atlas.virtual_mxu_readout_bf16"]
-            self.assertLess(resets[0], loads[1], ops)
-            self.assertLess(readouts[0], resets[1], ops)
-            above_readout += loads[1] < readouts[0]
-        self.assertGreater(above_readout, 0, "the replacement load is free to rise")
+        block = self.trace(source)["functions"][0]["blocks"][0]
+        preds = block["predecessors"]
+        _, load2 = nodes_named(block, "mxu_load_weight u0")
+        reset1, reset2 = nodes_named(block, "mxu_reset u0")
+        readout1, _ = nodes_named(block, "mxu_readout_bf16 u0")
+        self.assertTrue(reaches(preds, reset1, load2))
+        self.assertFalse(reaches(preds, readout1, load2))
+        self.assertTrue(reaches(preds, readout1, reset2))
 
     def test_unit_order_is_kept_per_unit(self) -> None:
         def per_unit(text: str) -> dict[str, list[str]]:
@@ -519,9 +544,39 @@ class VirtualSchedulingTest(unittest.TestCase):
         block = data["functions"][0]["blocks"][0]
         self.assertEqual(block["source"]["cycles"], source_cycles)
         self.assertEqual(block["scheduled"]["cycles"], scheduled_cycles)
-        self.assertEqual(block["strategy"], "latency")
         self.assertEqual(sorted(block["scheduled"]["order"]),
                          list(range(len(block["labels"]))))
+
+    def test_trace_file_errors_are_reported(self) -> None:
+        result = schedule(OVERLAP.read_text(), "trace-file=/nonexistent/trace.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot write trace file", result.stderr)
+
+    def test_functions_the_lowering_rejects_keep_their_order(self) -> None:
+        source = function("unlowerable", [
+            start(), inp("io0", "io1", "t", 0), unary("r", "t", "exp"),
+            outp("io1", "io2", "r", 0), f"return %io2 : {S}"])
+        result = schedule(source, "strict=true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("kept source order for @unlowerable: the lowering cannot "
+                      "handle it", result.stderr)
+        self.assertIn("admission currently requires mov or relu", result.stderr)
+        self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
+
+    def test_model_pressure_over_a_cap_means_allocation_fails(self) -> None:
+        # The pressure model may under-approximate what greedy coloring
+        # needs, never over-approximate: an order it puts over a cap must
+        # fail allocation.
+        over = 0
+        for source in (virtual_pressure(32), wide_return_block(29)):
+            for seed in SEEDS:
+                ordered = self.scheduled(source, f"random-seed={seed}")
+                for block in self.trace(ordered)["functions"][0]["blocks"]:
+                    timeline = block["source"]
+                    if timeline and any(p > c for p, c in zip(timeline["peak"], block["caps"])):
+                        over += 1
+                        self.assertFalse(lowers(ordered), (seed, block["index"]))
+        self.assertGreater(over, 0, "some random order must exceed a cap")
 
     def test_never_models_worse_than_source(self) -> None:
         for path in sorted(EXAMPLES.glob("virtual_*.mlir")):

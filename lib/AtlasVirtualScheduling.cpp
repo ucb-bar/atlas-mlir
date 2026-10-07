@@ -1,84 +1,88 @@
-// Pre-allocation list scheduling of virtual Atlas operations. The design,
-// dependence model, and failure policy are in docs/virtual-scheduler-plan.md;
-// section numbers below refer to it.
+// Pre-allocation list scheduling of virtual Atlas operations. The design is
+// docs/virtual-scheduler-plan.md; section numbers below refer to it.
 
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
+#include "Atlas/AtlasVirtualScheduleTrace.h"
+#include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Pass/PassRegistry.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/JSON.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <climits>
+#include <memory>
+#include <numeric>
 #include <optional>
 #include <random>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
 
-//===----------------------------------------------------------------------===//
-// Register classes and caps (§7.1), as in VirtualAllocationPlan::colorValues
-//===----------------------------------------------------------------------===//
+// Register kinds as the allocator colors them (§7.1). Arrays of counts are
+// indexed by RegisterKind.
+constexpr std::array<RegisterKind, 3> kKinds = {
+    RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar};
+using KindCounts = std::array<int, kKinds.size()>;
 
-enum RegClass { kBF16, kFP8, kScalar, kNumClasses };
-using ClassCounts = std::array<int, kNumClasses>;
+unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
 
-std::optional<RegClass> classOf(Type type) {
+std::optional<RegisterKind> kindOf(Type type) {
   if (isa<VirtualBF16Type>(type))
-    return kBF16;
+    return RegisterKind::BF16;
   if (isa<VirtualFP8Type>(type))
-    return kFP8;
+    return RegisterKind::FP8;
   if (type.isInteger(1) || type.isInteger(32))
-    return kScalar;
+    return RegisterKind::Scalar;
   return std::nullopt;
 }
 
-const char *className(int k) {
-  static const char *names[] = {"BF16", "FP8", "scalar"};
-  return names[k];
+const char *kindName(RegisterKind kind) {
+  switch (kind) {
+  case RegisterKind::BF16:
+    return "BF16";
+  case RegisterKind::FP8:
+    return "FP8";
+  case RegisterKind::Scalar:
+    return "scalar";
+  }
+  llvm_unreachable("unknown register kind");
 }
 
-struct Caps {
-  ClassCounts limit;
-  bool mixedFp8;
-};
-
-Caps capsFor(func::FuncOp function) {
-  bool fp8 = false, pack = false;
-  function.walk([&](Operation *op) {
-    pack |= isa<VirtualPackFP8Op>(op);
-    for (Value result : op->getResults())
-      fp8 |= isa<VirtualFP8Type>(result.getType());
-  });
-  return {{fp8 ? 15 : 31, 32, pack ? 9 : 17}, fp8};
+// The allocator's capacity for each kind in this function.
+KindCounts capsFor(bool mixedFp8, bool hasPack) {
+  KindCounts caps;
+  for (RegisterKind kind : kKinds)
+    caps[indexOf(kind)] = registerBudget(kind, mixedFp8, hasPack).count;
+  return caps;
 }
 
-//===----------------------------------------------------------------------===//
-// Implicit resources as pseudo-registers (§5.2, E2)
-//===----------------------------------------------------------------------===//
-
+// Ordering obligations the IR does not express as SSA, as pseudo-registers
+// (§5.2, E2).
 enum Pseudo : unsigned {
   kDma,     // the single explicit-DMA pending slot
-  kWeight0, // current weight, MXU0 and MXU1
+  kWeight0, // the current weight of MXU0 and MXU1
   kWeight1,
-  kAcc0, // accumulator occupancy, MXU0 and MXU1
+  kAcc0, // the accumulator occupancy of MXU0 and MXU1
   kAcc1,
-  kPack,    // pack VMEM scratch and relayout registers
-  kBarrier, // read by every operation; written by unknown operations
+  kPack,    // the pack's VMEM scratch and relayout registers
+  kBarrier, // read by every operation, written by unknown ones
   kNumPseudo
 };
 
@@ -95,7 +99,7 @@ unsigned unitOf(Type type) {
 }
 
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
-// and virtual_pack_fp8 are declared Pure but have ordering obligations.
+// and virtual_pack_fp8 are declared Pure yet have ordering obligations.
 Effects effectsOf(Operation *op) {
   Effects e;
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op)) {
@@ -127,473 +131,23 @@ Effects effectsOf(Operation *op) {
     e.writes = bit(kWeight0 + unit) | bit(kAcc0 + unit);
   } else if (!isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
                   arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op)) {
-    e.writes = bit(kNumPseudo) - 1; // unknown: a full barrier
+    e.writes = bit(kNumPseudo) - 1;
   }
   e.reads |= bit(kBarrier);
   return e;
 }
 
-//===----------------------------------------------------------------------===//
-// Placeholder registers for timing (§8.2)
-//===----------------------------------------------------------------------===//
-
-// Tiles get registers in the allocator's partition (FP8 m0-m31 and BF16 pairs
-// m32-m62 when mixed, else BF16 pairs m0-m62), rotating so recently defined
-// values rarely share a register. Results take a register when placed; a
-// probe sees the next rotation register without committing it.
-class Placeholders {
-public:
-  explicit Placeholders(bool mixedFp8) : mixed(mixedFp8) {}
-
-  int lookup(Value value, bool commit, llvm::DenseMap<Value, int> &overlay,
-             std::array<unsigned, kNumClasses> &probeCounters) {
-    auto found = regs.find(value);
-    if (found != regs.end())
-      return found->second;
-    auto pending = overlay.find(value);
-    if (pending != overlay.end())
-      return pending->second;
-    std::optional<RegClass> k = classOf(value.getType());
-    if (!k)
-      return 0;
-    unsigned &counter = commit ? counters[*k] : probeCounters[*k];
-    int reg = pick(*k, counter++);
-    (commit ? regs : overlay)[value] = reg;
-    return reg;
-  }
-
-  std::array<unsigned, kNumClasses> counters{};
-
-private:
-  int pick(RegClass k, unsigned n) const {
-    if (k == kBF16)
-      return mixed ? 32 + 2 * static_cast<int>(n % 16)
-                   : 2 * static_cast<int>(n % 32);
-    if (k == kFP8)
-      return static_cast<int>(n % 32);
-    return 10 + static_cast<int>(n % 17);
-  }
-
-  bool mixed;
-  llvm::DenseMap<Value, int> regs;
-};
-
-//===----------------------------------------------------------------------===//
-// Machine templates (§4.4), mirroring AtlasVirtualToMachine.cpp without the
-// fixed diagnostic delays
-//===----------------------------------------------------------------------===//
-
-struct Template {
-  SmallVector<timing::Instr, 8> instrs;
-  bool pack = false; // drain, run the relayout prefix, then `instrs`
-};
-
-const FixedResourcePlacement &fixedResources() {
-  static const VirtualAllocationPlan plan;
-  return plan.fixed();
-}
-
-std::string vpuName(StringRef kind, bool binary) {
-  if (!binary && kind == "mov")
-    return "vmov";
-  if (binary && kind == "min")
-    return "vminimum.bf16";
-  if (binary && kind == "max")
-    return "vmaximum.bf16";
-  return "v" + kind.str() + ".bf16";
-}
-
-class TemplateBuilder {
-public:
-  TemplateBuilder(Placeholders &placeholders, bool commit, uint64_t inputBase,
-                  uint64_t outputBase)
-      : placeholders(placeholders), commit(commit), inputBase(inputBase),
-        outputBase(outputBase), probeCounters(placeholders.counters) {}
-
-  Template build(Operation *op);
-  static Template packPrefix();
-
-private:
-  int reg(Value value) {
-    return placeholders.lookup(value, commit, overlay, probeCounters);
-  }
-  void emit(const std::string &name, int rd = 0, int rs1 = 0, int rs2 = 0,
-            long long imm = 0) {
-    timing::Instr in;
-    in.op = timing::findOp(name);
-    if (!in.op)
-      in.op = timing::findOp("vmov"); // an unmodeled VPU kind; timing only
-    in.rd = rd;
-    in.rs1 = rs1;
-    in.rs2 = rs2;
-    in.imm = imm;
-    t.instrs.push_back(in);
-  }
-  void li(int dst, uint32_t value) {
-    uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
-    int32_t lower = static_cast<int32_t>(value & 0xfff);
-    if (lower >= 2048)
-      lower -= 4096;
-    if (upper)
-      emit("lui", dst, 0, 0, upper);
-    emit("addi", dst, upper ? dst : 0, 0, lower);
-  }
-  std::string ch(const char *kind, unsigned channel) {
-    return std::string(kind) + ".ch" + std::to_string(channel);
-  }
-  std::string mxu(const char *kind, unsigned unit) {
-    return std::string(kind) + ".mxu" + std::to_string(unit);
-  }
-  void inputHalf(int dst, uint64_t index, unsigned half);
-  void outputHalf(int src, uint64_t index, unsigned half);
-  void launch(Value dram, Value size, std::optional<int> src, unsigned halves);
-  void complete(std::optional<int> dst, unsigned halves);
-  void compare(arith::CmpIOp cmp);
-
-  Placeholders &placeholders;
-  bool commit;
-  uint64_t inputBase, outputBase;
-  llvm::DenseMap<Value, int> overlay;
-  std::array<unsigned, kNumClasses> probeCounters;
-  Template t;
-};
-
-void TemplateBuilder::inputHalf(int dst, uint64_t index, unsigned half) {
-  const FixedResourcePlacement &f = fixedResources();
-  li(f.inputBaseReg, f.inputWord + index * 512 + half * 256);
-  li(f.inputDramReg, static_cast<uint32_t>(inputBase + index * 2048 +
-                                           half * 1024));
-  emit(ch("dma.load", f.loadChannel), f.inputBaseReg, f.inputDramReg,
-       f.halfSizeReg);
-  emit(ch("dma.wait", f.loadChannel));
-  emit("vload", dst, f.inputBaseReg);
-}
-
-void TemplateBuilder::outputHalf(int src, uint64_t index, unsigned half) {
-  const FixedResourcePlacement &f = fixedResources();
-  li(f.outputBaseReg, f.outputWord + index * 512 + half * 256);
-  emit("vstore", src, f.outputBaseReg);
-  li(f.outputDramReg, static_cast<uint32_t>(outputBase + index * 2048 +
-                                            half * 1024));
-  emit(ch("dma.store", f.storeChannel), f.outputDramReg, f.outputBaseReg,
-       f.halfSizeReg);
-  emit(ch("dma.wait", f.storeChannel));
-}
-
-void TemplateBuilder::launch(Value dram, Value size, std::optional<int> src,
-                             unsigned halves) {
-  const FixedResourcePlacement &f = fixedResources();
-  emit("addi", f.dmaDramReg, reg(dram), 0, 0);
-  emit("addi", f.dmaSizeReg, reg(size), 0, 0);
-  li(f.dmaBaseReg, f.stagingWord);
-  if (src) {
-    for (unsigned half = 0; half < halves; ++half) {
-      if (half)
-        li(f.dmaBaseReg, f.stagingWord + half * 256);
-      emit("vstore", *src + half, f.dmaBaseReg);
-    }
-    if (halves > 1)
-      li(f.dmaBaseReg, f.stagingWord);
-    emit(ch("dma.store", f.storeChannel), f.dmaDramReg, f.dmaBaseReg,
-         f.dmaSizeReg);
-  } else {
-    emit(ch("dma.load", f.loadChannel), f.dmaBaseReg, f.dmaDramReg,
-         f.dmaSizeReg);
-  }
-}
-
-void TemplateBuilder::complete(std::optional<int> dst, unsigned halves) {
-  const FixedResourcePlacement &f = fixedResources();
-  emit(ch("dma.wait", dst ? f.loadChannel : f.storeChannel));
-  if (!dst)
-    return;
-  for (unsigned half = 0; half < halves; ++half) {
-    if (half)
-      li(f.dmaBaseReg, f.stagingWord + half * 256);
-    emit("vload", *dst + half, f.dmaBaseReg);
-  }
-}
-
-void TemplateBuilder::compare(arith::CmpIOp cmp) {
-  int dst = reg(cmp.getResult()), lhs = reg(cmp.getLhs()),
-      rhs = reg(cmp.getRhs());
-  using P = arith::CmpIPredicate;
-  P p = cmp.getPredicate();
-  bool swap = p == P::sgt || p == P::sle || p == P::ugt || p == P::ule;
-  bool invert = p == P::sle || p == P::sge || p == P::ule || p == P::uge;
-  if (p == P::eq || p == P::ne) {
-    emit("xor", dst, lhs, rhs);
-    if (p == P::eq)
-      emit("sltiu", dst, dst, 0, 1);
-    else
-      emit("sltu", dst, 0, dst);
-    return;
-  }
-  bool isSigned = p == P::slt || p == P::sgt || p == P::sle || p == P::sge;
-  emit(isSigned ? "slt" : "sltu", dst, swap ? rhs : lhs, swap ? lhs : rhs);
-  if (invert)
-    emit("xori", dst, dst, 0, 1);
-}
-
-Template TemplateBuilder::build(Operation *op) {
-  const FixedResourcePlacement &f = fixedResources();
-  t = Template();
-  auto index = [](IntegerAttr attr) { return attr.getValue().getZExtValue(); };
-  if (auto input = dyn_cast<VirtualInputBF16Op>(op)) {
-    int dst = reg(input.getValue());
-    for (unsigned half = 0; half < 2; ++half)
-      inputHalf(dst + half, index(input.getIndexAttr()), half);
-  } else if (auto input = dyn_cast<VirtualInputFP8Op>(op)) {
-    inputHalf(reg(input.getValue()), index(input.getIndexAttr()), 0);
-  } else if (auto output = dyn_cast<VirtualOutputBF16Op>(op)) {
-    int src = reg(output.getValue());
-    for (unsigned half = 0; half < 2; ++half)
-      outputHalf(src + half, index(output.getIndexAttr()), half);
-  } else if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
-    launch(load.getDramByte(), load.getSizeBytes(), std::nullopt, 1);
-  } else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-    launch(load.getDramByte(), load.getSizeBytes(), std::nullopt, 2);
-  } else if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-    launch(store.getDramByte(), store.getSizeBytes(), reg(store.getSrc()), 1);
-  } else if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-    launch(store.getDramByte(), store.getSizeBytes(), reg(store.getSrc()), 2);
-  } else if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op)) {
-    complete(reg(await.getValue()), 1);
-  } else if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op)) {
-    complete(reg(await.getValue()), 2);
-  } else if (isa<VirtualDMAWaitOp>(op)) {
-    complete(std::nullopt, 0);
-  } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
-    emit(mxu("vmatpush.weight", load.getUnit()), f.mxuWeightSlot,
-         reg(load.getSrc()));
-  } else if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
-    emit(mxu("vmatpush.acc.fp8", load.getUnit()), f.mxuAccSlot,
-         reg(load.getSrc()));
-  } else if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
-    emit(mxu("vmatpush.acc.bf16", load.getUnit()), f.mxuAccSlot,
-         reg(load.getSrc()));
-  } else if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
-    emit(mxu("vmatmul", unitOf(reset.getAcc().getType())), f.mxuAccSlot,
-         reg(reset.getActivation()), f.mxuWeightSlot);
-  } else if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op)) {
-    emit(mxu("vmatmul.acc", unitOf(acc.getAcc().getType())), f.mxuAccSlot,
-         reg(acc.getActivation()), f.mxuWeightSlot);
-  } else if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
-    emit(mxu("vmatpop.bf16.acc", unitOf(readout.getAcc().getType())),
-         reg(readout.getValue()), 0, f.mxuAccSlot);
-  } else if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
-    long long code = 127;
-    if (auto scale = readout.getScale().getDefiningOp<VirtualScaleConstantOp>())
-      code = scale.getCode();
-    emit("seli", f.scaleReg, 0, 0, code);
-    emit(mxu("vmatpop.fp8.acc", unitOf(readout.getAcc().getType())),
-         reg(readout.getValue()), f.scaleReg, f.mxuAccSlot);
-  } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
-    unsigned unit = matmul.getUnit();
-    emit(mxu("vmatpush.weight", unit), f.mxuWeightSlot, reg(matmul.getWeight()));
-    emit(mxu("vmatmul", unit), f.mxuAccSlot, reg(matmul.getActivation()),
-         f.mxuWeightSlot);
-    emit(mxu("vmatpop.bf16.acc", unit), reg(matmul.getResult()), 0,
-         f.mxuAccSlot);
-  } else if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op)) {
-    emit(vpuName(unary.getKind(), false), reg(unary.getDst()),
-         reg(unary.getSrc()));
-  } else if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
-    emit(vpuName(binary.getKind(), true), reg(binary.getDst()),
-         reg(binary.getLhs()), reg(binary.getRhs()));
-  } else if (auto pack = dyn_cast<VirtualPackFP8Op>(op)) {
-    reg(pack.getSrc());
-    t.pack = true;
-    li(f.inputBaseReg, f.packRelayoutWord);
-    emit("vload", reg(pack.getResult()), f.inputBaseReg);
-  } else if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
-    auto value = cast<IntegerAttr>(constant.getValue());
-    li(reg(constant.getResult()),
-       static_cast<uint32_t>(value.getValue().getSExtValue()));
-  } else if (auto add = dyn_cast<arith::AddIOp>(op)) {
-    emit("add", reg(add.getResult()), reg(add.getLhs()), reg(add.getRhs()));
-  } else if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
-    compare(cmp);
-  }
-  return std::move(t);
-}
-
-// The pack template up to its final VLOAD, with the 32-row relayout loop
-// unrolled (AtlasVirtualToMachine.cpp lowerPack).
-Template TemplateBuilder::packPrefix() {
-  const FixedResourcePlacement &f = fixedResources();
-  Placeholders none(true);
-  TemplateBuilder b(none, true, 0, 0);
-  b.emit("seli", f.scaleReg, 0, 0, 127);
-  b.emit("vpack.bf16.fp8", 0, f.scaleReg, 32);
-  b.li(f.outputBaseReg, f.packWord);
-  b.emit("vstore", 0, f.outputBaseReg);
-  b.li(f.packSourceRegs[0], f.packWord * 4);
-  b.li(f.packSourceRegs[1], f.packWord * 4 + 512);
-  b.li(f.packDestinationReg, f.packRelayoutWord * 4);
-  b.li(f.packRowReg, 0);
-  b.li(f.packRowsReg, 32);
-  for (unsigned row = 0; row < 32; ++row) {
-    for (unsigned word = 0; word < 4; ++word)
-      for (unsigned half = 0; half < 2; ++half) {
-        b.emit("lw", f.packTemporaryRegs[half], f.packSourceRegs[half], 0,
-               4 * word);
-        b.emit("sw", 0, f.packDestinationReg, f.packTemporaryRegs[half],
-               4 * word + 16 * half);
-      }
-    for (unsigned r : {f.packSourceRegs[0], f.packSourceRegs[1]})
-      b.emit("addi", r, r, 0, 16);
-    b.emit("addi", f.packDestinationReg, f.packDestinationReg, 0, 32);
-    b.emit("addi", f.packRowReg, f.packRowReg, 0, 1);
-    b.emit("blt", 0, f.packRowReg, f.packRowsReg);
-    b.emit("addi", 0, 0, 0, 0);
-  }
-  return std::move(b.t);
-}
-
-//===----------------------------------------------------------------------===//
-// Timeline: order-preserving issue of templates through AtlasTiming (§8)
-//===----------------------------------------------------------------------===//
-
-const char *engineName(timing::Engine engine) {
-  static const char *names[] = {"Scalar", "LSU", "MXU0", "MXU1",
-                                "VPU",    "XLU", "DMA"};
-  return names[static_cast<int>(engine)];
-}
-
-struct InstrSpan {
-  std::string mnemonic, engine;
-  int issue, end;
-};
-
-class Timeline {
-public:
-  Timeline() {
-    const FixedResourcePlacement &f = fixedResources();
-    regs = timing::unknownRegs();
-    regs[f.halfSizeReg] = 1024; // the prologue's values
-    regs[f.zeroReg] = 0;
-    regs[f.oneReg] = 1;
-  }
-
-  // The cycle at which `t` would issue its first instruction.
-  int probe(const Template &t) const {
-    if (t.pack)
-      return std::max(nextIssue, drain);
-    if (t.instrs.empty())
-      return nextIssue;
-    const timing::Instr &first = t.instrs.front();
-    return earliest(first, timing::footprintOf(first, regs));
-  }
-
-  // Issue `t` after everything placed so far. Returns {first issue, finish}.
-  std::pair<int, int> place(const Template &t,
-                            std::vector<InstrSpan> *spans = nullptr) {
-    int first = nextIssue, finish = nextIssue;
-    if (t.pack) {
-      first = std::max(nextIssue, drain);
-      int cycles = packPrefixCycles();
-      // The relayout loop splits the stream into blocks, which drain.
-      placed.clear();
-      table = timing::ReservationTable();
-      const FixedResourcePlacement &f = fixedResources();
-      for (unsigned r : {f.outputBaseReg, f.packSourceRegs[0],
-                         f.packSourceRegs[1], f.packDestinationReg,
-                         f.packRowReg, f.packRowsReg, f.packTemporaryRegs[0],
-                         f.packTemporaryRegs[1]})
-        regs[r] = std::nullopt;
-      nextIssue = drain = finish = first + cycles;
-      if (spans)
-        spans->push_back({"pack relayout loop", "LSU", first, finish});
-    }
-    for (size_t i = 0; i < t.instrs.size(); ++i) {
-      auto [issue, end] = placeInstr(t.instrs[i], spans);
-      if (i == 0 && !t.pack)
-        first = issue;
-      finish = std::max(finish, end);
-    }
-    return {first, finish};
-  }
-
-  int finish() const { return std::max(nextIssue, drain); }
-
-  static int packPrefixCycles() {
-    static const int cycles = [] {
-      Timeline timeline;
-      return timeline.place(TemplateBuilder::packPrefix()).second;
-    }();
-    return cycles;
-  }
-
-private:
-  struct Placed {
-    timing::Instr instr;
-    timing::Footprint footprint;
-    int issue;
-  };
-
-  int earliest(const timing::Instr &in, const timing::Footprint &f) const {
-    int cycle = nextIssue;
-    for (const Placed &p : placed) {
-      // A dependence distance never exceeds the producer's doneAge + 1.
-      if (p.issue + p.footprint.doneAge + 1 <= cycle)
-        continue;
-      timing::Dependence d = timing::dependence(p.instr, p.footprint, in, f);
-      if (d.distance > 0)
-        cycle = std::max(cycle, p.issue + d.distance);
-    }
-    if (in.op->opClass == timing::OpClass::DmaWait)
-      cycle = std::max(cycle, channelRelease[in.op->channel]);
-    for (int guard = 0; guard < 100000 && !table.conflict(in, f, cycle).empty();
-         ++guard)
-      ++cycle;
-    return cycle;
-  }
-
-  std::pair<int, int> placeInstr(const timing::Instr &in,
-                                 std::vector<InstrSpan> *spans) {
-    timing::Footprint f = timing::footprintOf(in, regs);
-    int cycle = earliest(in, f);
-    table.reserve(in, f, cycle);
-    int end = cycle + f.doneAge + 1;
-    if (f.dmaCycles > 0 && in.op->opClass != timing::OpClass::DmaConfig) {
-      // Transfers run one at a time, in issue order (AtlasScheduling.cpp).
-      int latency = f.dmaCycles;
-      dmaQueueEnd = std::max(cycle + latency - 1, dmaQueueEnd + latency);
-      channelRelease[in.op->channel] = dmaQueueEnd + 2;
-      end = channelRelease[in.op->channel];
-    }
-    placed.push_back({in, f, cycle});
-    nextIssue = cycle + timing::naturalGap(in);
-    drain = std::max(drain, end);
-    timing::applyScalar(in, regs);
-    if (spans)
-      spans->push_back({in.op->name, engineName(in.op->engine), cycle, end});
-    return {cycle, end};
-  }
-
-  std::vector<Placed> placed;
-  timing::ReservationTable table;
-  timing::RegValues regs;
-  int nextIssue = 0, drain = 0, dmaQueueEnd = -1;
-  std::array<int, 8> channelRelease{};
-};
-
-//===----------------------------------------------------------------------===//
-// Per-block dependence graph (§5)
-//===----------------------------------------------------------------------===//
-
+// The dependence graph of one block's free operations (§5). Every edge runs
+// from an earlier to a later source position.
 struct BlockGraph {
   Block *block = nullptr;
-  unsigned blockIndex = 0;
-  SmallVector<Operation *> nodes; // free operations, source order
+  SmallVector<Operation *> nodes;
   std::vector<SmallVector<unsigned, 4>> preds, succs;
 };
 
-BlockGraph buildGraph(Block &block, unsigned blockIndex) {
+BlockGraph buildGraph(Block &block) {
   BlockGraph g;
   g.block = &block;
-  g.blockIndex = blockIndex;
   for (Operation &op : block)
     if (!isa<VirtualStartOp>(op) && !op.hasTrait<OpTrait::IsTerminator>())
       g.nodes.push_back(&op);
@@ -605,21 +159,23 @@ BlockGraph buildGraph(Block &block, unsigned blockIndex) {
     index[g.nodes[i]] = i;
   llvm::DenseSet<std::pair<unsigned, unsigned>> seen;
   auto edge = [&](unsigned from, unsigned to) {
-    if (from != to && seen.insert({from, to}).second) {
+    assert(from < to && "dependences follow source order");
+    if (seen.insert({from, to}).second) {
       g.succs[from].push_back(to);
       g.preds[to].push_back(from);
     }
   };
-  // E1: data, excluding the state token.
+  // E1: data, except the state token, which records source order only.
   for (unsigned i = 0; i < n; ++i)
     for (Value operand : g.nodes[i]->getOperands()) {
       if (isa<VirtualStateType>(operand.getType()))
         continue;
       auto found = index.find(operand.getDefiningOp());
-      if (operand.getDefiningOp() && found != index.end())
+      if (found != index.end())
         edge(found->second, i);
     }
-  // E2: read-after-write, write-after-read, write-after-write per register.
+  // E2: read-after-write, write-after-read, and write-after-write on each
+  // pseudo-register.
   std::vector<Effects> effects;
   for (Operation *op : g.nodes)
     effects.push_back(effectsOf(op));
@@ -645,73 +201,72 @@ BlockGraph buildGraph(Block &block, unsigned blockIndex) {
   return g;
 }
 
-//===----------------------------------------------------------------------===//
-// Register pressure (§7)
-//===----------------------------------------------------------------------===//
-
+// Live values per register kind, counted as the allocator's interference
+// graph counts them (§7.2, §7.3).
 class Pressure {
 public:
   Pressure(const BlockGraph &g, const Liveness &liveness) {
-    Block *block = g.block;
-    for (unsigned i = 0; i < g.nodes.size(); ++i) {
+    for (Operation *op : g.nodes) {
       SmallVector<Value, 4> uses;
-      for (Value operand : g.nodes[i]->getOperands())
-        if (classOf(operand.getType()) && !llvm::is_contained(uses, operand))
+      for (Value operand : op->getOperands())
+        if (kindOf(operand.getType()) && !llvm::is_contained(uses, operand))
           uses.push_back(operand);
       for (Value use : uses)
         ++remaining[use];
       operands.push_back(uses);
       SmallVector<Value, 2> defs;
-      for (Value result : g.nodes[i]->getResults())
-        if (classOf(result.getType()))
+      for (Value result : op->getResults())
+        if (kindOf(result.getType()))
           defs.push_back(result);
       results.push_back(defs);
     }
-    // Exit set X(B): live-out plus every terminator operand (§6.2).
+    // Live at the end: live-out values and every terminator operand (§6.2).
+    Block *block = g.block;
     llvm::DenseSet<Value> exitSet(liveness.getLiveOut(block).begin(),
                                   liveness.getLiveOut(block).end());
     for (Value operand : block->getTerminator()->getOperands())
       exitSet.insert(operand);
     for (Value value : exitSet)
-      if (auto k = classOf(value.getType())) {
+      if (auto kind = kindOf(value.getType())) {
         pinned.insert(value);
-        ++exitCounts[*k];
+        ++exitCounts[indexOf(*kind)];
       }
-    // Entry set N(B): live-in plus every block argument, used or not.
+    // Live at the start: live-in values and every block argument, used or not.
     llvm::DenseSet<Value> entrySet(liveness.getLiveIn(block).begin(),
                                    liveness.getLiveIn(block).end());
     for (BlockArgument arg : block->getArguments())
       entrySet.insert(arg);
     for (Value value : entrySet)
-      if (auto k = classOf(value.getType())) {
-        ++entryCounts[*k];
+      if (auto kind = kindOf(value.getType())) {
+        ++entryCounts[indexOf(*kind)];
         if (remaining.lookup(value) > 0 || pinned.contains(value))
-          live[*k].insert(value);
+          live[indexOf(*kind)].insert(value);
       }
-    peak = entryCounts;
-    for (int k = 0; k < kNumClasses; ++k)
-      peak[k] = std::max(peak[k], exitCounts[k]);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
+      peak[k] = std::max(entryCounts[k], exitCounts[k]);
   }
 
-  ClassCounts at(unsigned node) const {
-    ClassCounts counts;
-    for (int k = 0; k < kNumClasses; ++k)
-      counts[k] = live[k].size();
-    for (Value result : results[node])
-      if (!live[*classOf(result.getType())].contains(result))
-        ++counts[*classOf(result.getType())];
+  // Live values while `node` executes: its operands interfere with its
+  // results, so both count (§7.2).
+  KindCounts at(unsigned node) const {
+    KindCounts counts = current();
+    for (Value result : results[node]) {
+      unsigned k = indexOf(*kindOf(result.getType()));
+      if (!live[k].contains(result))
+        ++counts[k];
+    }
     return counts;
   }
 
-  bool fits(unsigned node, const ClassCounts &caps) const {
-    ClassCounts counts = at(node);
-    for (int k = 0; k < kNumClasses; ++k)
+  bool fits(unsigned node, const KindCounts &caps) const {
+    KindCounts counts = at(node);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
       if (counts[k] > caps[k])
         return false;
     return true;
   }
 
-  // Net change in live values if `node` were placed now.
+  // The net change in live values if `node` were placed now.
   int delta(unsigned node) const {
     int change = 0;
     for (Value result : results[node])
@@ -724,231 +279,602 @@ public:
   }
 
   void place(unsigned node) {
-    ClassCounts counts = at(node);
-    for (int k = 0; k < kNumClasses; ++k)
+    KindCounts counts = at(node);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
       peak[k] = std::max(peak[k], counts[k]);
     for (Value operand : operands[node])
       if (--remaining[operand] == 0 && !pinned.contains(operand))
-        live[*classOf(operand.getType())].erase(operand);
+        live[indexOf(*kindOf(operand.getType()))].erase(operand);
     for (Value result : results[node])
       if (remaining.lookup(result) > 0 || pinned.contains(result))
-        live[*classOf(result.getType())].insert(result);
+        live[indexOf(*kindOf(result.getType()))].insert(result);
   }
 
-  ClassCounts current() const {
-    ClassCounts counts;
-    for (int k = 0; k < kNumClasses; ++k)
+  KindCounts current() const {
+    KindCounts counts;
+    for (unsigned k = 0; k < kKinds.size(); ++k)
       counts[k] = live[k].size();
     return counts;
   }
 
-  ClassCounts entryCounts{}, exitCounts{}, peak{};
+  KindCounts entryCounts{}, exitCounts{}, peak{};
 
 private:
-  std::array<llvm::DenseSet<Value>, kNumClasses> live;
+  std::array<llvm::DenseSet<Value>, kKinds.size()> live;
   llvm::DenseMap<Value, int> remaining;
   llvm::DenseSet<Value> pinned;
   std::vector<SmallVector<Value, 4>> operands;
   std::vector<SmallVector<Value, 2>> results;
 };
 
-//===----------------------------------------------------------------------===//
-// Scheduling (§9)
-//===----------------------------------------------------------------------===//
+// Registers for values that have none before allocation (§8.2). A value
+// takes the next location of its kind's budget, in rotation, when the first
+// operation touching it is placed, so values defined close together never
+// share a register and the timing model sees data dependences exactly.
+// Assignment depends only on placement order, so placing the same order
+// again reproduces the same costs.
+class PlaceholderRegisters {
+public:
+  PlaceholderRegisters(bool mixedFp8, bool hasPack) {
+    for (RegisterKind kind : kKinds)
+      budgets[indexOf(kind)] = registerBudget(kind, mixedFp8, hasPack);
+  }
 
-enum class Mode { Latency, Pressure, Random };
+  // Give each of `values` without a register one: into this state, or, for
+  // a probe, into `pending` only.
+  void assign(ArrayRef<Value> values, llvm::DenseMap<Value, unsigned> *pending) {
+    std::array<unsigned, kKinds.size()> probeNext = next;
+    for (Value value : values) {
+      std::optional<RegisterKind> kind = kindOf(value.getType());
+      if (!kind || regs.count(value) || (pending && pending->count(value)))
+        continue;
+      unsigned k = indexOf(*kind);
+      unsigned &n = pending ? probeNext[k] : next[k];
+      unsigned reg = budgets[k].reg(n++ % budgets[k].count);
+      (pending ? *pending : regs)[value] = reg;
+    }
+  }
 
-struct Evaluation {
-  int cycles = 0;
-  std::vector<unsigned> order;
-  std::vector<std::pair<int, int>> spans; // per node, in `order`
-  std::vector<InstrSpan> instrs;
-  std::vector<unsigned> instrNode;
-  std::vector<ClassCounts> pressure; // live values after each node
-  ClassCounts peak{};
+  std::optional<unsigned> find(Value value) const {
+    auto found = regs.find(value);
+    if (found == regs.end())
+      return std::nullopt;
+    return found->second;
+  }
+
+private:
+  std::array<RegisterBudget, kKinds.size()> budgets;
+  std::array<unsigned, kKinds.size()> next{};
+  llvm::DenseMap<Value, unsigned> regs;
 };
 
-struct ABI {
-  uint64_t inputBase = 0x90000000ULL, outputBase = 0x90010000ULL;
+// The lowering's view of placeholder registers, with the MXU, DMA, and fixed
+// placements of the real allocation policy.
+class PlaceholderPlacement : public VirtualPlacement {
+public:
+  PlaceholderPlacement(PlaceholderRegisters &registers,
+                       const VirtualAllocationPlan &resources,
+                       ArrayRef<Value> values, bool commit)
+      : registers(registers), resources(resources) {
+    registers.assign(values, commit ? nullptr : &pending);
+  }
+
+  unsigned tile(Value value) const override { return reg(value); }
+  unsigned fp8(Value value) const override { return reg(value); }
+  unsigned scalar(Value value) const override { return reg(value); }
+  MXUPlacement mxu(Value value) const override { return resources.mxu(value); }
+  const DMATransferPlacement &dma(Value value) const override {
+    return resources.dma(value);
+  }
+  const FixedResourcePlacement &fixed() const override {
+    return resources.fixed();
+  }
+
+private:
+  unsigned reg(Value value) const {
+    auto found = pending.find(value);
+    if (found != pending.end())
+      return found->second;
+    if (std::optional<unsigned> reg = registers.find(value))
+      return *reg;
+    llvm_unreachable("the lowering reads only the values it was given");
+  }
+
+  PlaceholderRegisters &registers;
+  const VirtualAllocationPlan &resources;
+  llvm::DenseMap<Value, unsigned> pending;
 };
 
+// The timing model's instructions for one virtual operation, in the order
+// the lowering emits them. A redirect's target is an instruction index.
+struct MachineTemplate {
+  std::vector<timing::Instr> instrs;
+  std::vector<std::optional<size_t>> targets;
+};
+
+SmallVector<Value> valuesOf(Operation *op) {
+  SmallVector<Value> values(op->getOperands());
+  llvm::append_range(values, op->getResults());
+  return values;
+}
+
+// Times virtual operations with the instructions the lowering emits for
+// them, without its fixed diagnostic delays: the stream phase 2 hands to
+// --insert-atlas-delays (§8.1).
+class LoweringModel : public MachineStepSink {
+public:
+  // Fails, with the lowering's first diagnostic in `why`, for a function the
+  // lowering cannot handle: no ABI, or an operation without a lowering.
+  static std::unique_ptr<LoweringModel> create(func::FuncOp function,
+                                               std::string &why);
+
+  bool mixedFp8() const { return resources.fp8Present(); }
+  bool hasPack() const { return resources.packPresent(); }
+  // Registers the prologue sets and no other code writes, known everywhere.
+  const timing::RegValues &entryRegs() const { return entry; }
+
+  std::optional<MachineTemplate> build(Operation *op,
+                                       PlaceholderRegisters &registers,
+                                       bool commit) {
+    PlaceholderPlacement placement(registers, resources, valuesOf(op), commit);
+    resetSteps();
+    if (failed(lowerVirtualOperation(*op, placement, abi, options, *this)))
+      return std::nullopt;
+    return convert();
+  }
+
+  void add(MachineStep step) override { steps.push_back(std::move(step)); }
+  unsigned newLabel() override { return nextLabel++; }
+  void mark(unsigned label) override { labels[label] = steps.size(); }
+  unsigned labelFor(Block *) override {
+    llvm_unreachable("terminators are never scheduled");
+  }
+
+private:
+  explicit LoweringModel(func::FuncOp function)
+      : scratch(ModuleOp::create(function.getLoc())) {
+    OpBuilder builder = OpBuilder::atBlockEnd(scratch->getBody());
+    OperationState start(function.getLoc(), "atlas.start");
+    start.addTypes(StateType::get(function.getContext()));
+    state = builder.create(start)->getResult(0);
+  }
+
+  void resetSteps() {
+    steps.clear();
+    labels.clear();
+    nextLabel = 0;
+  }
+
+  // Convert the steps with the converter the machine passes use, through
+  // machine operations built in a scratch module.
+  std::optional<MachineTemplate> convert() {
+    MachineTemplate t;
+    OpBuilder builder = OpBuilder::atBlockEnd(scratch->getBody());
+    for (auto [pc, step] : llvm::enumerate(steps)) {
+      OperationState machine(step.loc, step.name);
+      machine.addOperands(state);
+      machine.addTypes(StateType::get(builder.getContext()));
+      machine.addAttributes(step.attrs);
+      std::optional<size_t> target;
+      if (step.targetLabel) {
+        target = labels.lookup(*step.targetLabel);
+        int64_t offset = 2 * (static_cast<int64_t>(*target) -
+                              static_cast<int64_t>(pc));
+        machine.addAttribute(step.name == "atlas.branch" ? "offset_bytes"
+                                                         : "offset",
+                             builder.getI32IntegerAttr(offset));
+      }
+      Operation *op = builder.create(machine);
+      FailureOr<timing::Instr> in = toTimingInstr(op);
+      op->erase();
+      if (failed(in))
+        return std::nullopt;
+      t.instrs.push_back(*in);
+      t.targets.push_back(target);
+    }
+    return t;
+  }
+
+  VirtualAllocationPlan resources;
+  VirtualLoweringABI abi;
+  VirtualLoweringOptions options{/*diagnosticDelays=*/false};
+  OwningOpRef<ModuleOp> scratch;
+  Value state;
+  std::vector<MachineStep> steps;
+  llvm::DenseMap<unsigned, size_t> labels;
+  unsigned nextLabel = 0;
+  timing::RegValues entry = timing::unknownRegs();
+};
+
+// Run `fn` with diagnostics captured instead of printed; `firstError`
+// receives the first error.
+template <typename Fn>
+auto quietly(MLIRContext *context, std::string &firstError, Fn &&fn) {
+  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
+    if (diag.getSeverity() == DiagnosticSeverity::Error && firstError.empty())
+      firstError = diag.str();
+    return success();
+  });
+  return fn();
+}
+
+std::unique_ptr<LoweringModel> LoweringModel::create(func::FuncOp function,
+                                                     std::string &why) {
+  return quietly(function.getContext(), why,
+                 [&]() -> std::unique_ptr<LoweringModel> {
+    std::unique_ptr<LoweringModel> model(new LoweringModel(function));
+    if (failed(model->resources.placeResources(function)))
+      return nullptr;
+    FailureOr<VirtualLoweringABI> abi =
+        readVirtualLoweringABI(function, model->resources.fixed());
+    if (failed(abi))
+      return nullptr;
+    model->abi = *abi;
+
+    PlaceholderRegisters registers(model->mixedFp8(), model->hasPack());
+    SmallVector<Value> arguments(function.getArguments());
+    PlaceholderPlacement placement(registers, model->resources, arguments,
+                                   /*commit=*/true);
+    model->resetSteps();
+    lowerVirtualPrologue(function, placement, model->abi, model->options,
+                         *model);
+    std::optional<MachineTemplate> prologue = model->convert();
+    if (!prologue)
+      return nullptr;
+    for (const timing::Instr &in : prologue->instrs)
+      timing::applyScalar(in, model->entry);
+
+    // Every operation must lower before any order is timed.
+    for (Block &block : function.getBody())
+      for (Operation &op : block)
+        if (!isa<VirtualStartOp>(op) &&
+            !op.hasTrait<OpTrait::IsTerminator>() &&
+            !model->build(&op, registers, /*commit=*/false))
+          return nullptr;
+    return model;
+  });
+}
+
+const char *engineName(timing::Engine engine) {
+  switch (engine) {
+  case timing::Engine::Scalar:
+    return "Scalar";
+  case timing::Engine::Lsu:
+    return "LSU";
+  case timing::Engine::Mxu0:
+    return "MXU0";
+  case timing::Engine::Mxu1:
+    return "MXU1";
+  case timing::Engine::Vpu:
+    return "VPU";
+  case timing::Engine::Xlu:
+    return "XLU";
+  case timing::Engine::Dma:
+    return "DMA";
+  }
+  llvm_unreachable("unknown engine");
+}
+
+// Where a template landed: its first issue, when the frontend can issue
+// again, and when its own work ends.
+struct Placement {
+  int first;
+  int frontendFree;
+  int done;
+};
+
+// The block's modeled run: templates issue in order through the in-order
+// issue model insert-atlas-delays uses, with DMA waits released when their
+// modeled transfers end (§8.3).
+class Timeline {
+public:
+  explicit Timeline(const timing::RegValues &entry)
+      : issue(entry, timing::WaitRelease::Modeled) {}
+
+  std::optional<Placement>
+  place(const MachineTemplate &t, unsigned node,
+        std::vector<ScheduleTimeline::Instruction> *trace = nullptr);
+
+  // Where `t` would land, leaving this timeline unchanged.
+  std::optional<Placement> project(const MachineTemplate &t) const {
+    Timeline copy = *this;
+    return copy.place(t, 0);
+  }
+
+  int finish() const { return std::max(issue.nextFree(), issue.drained()); }
+
+private:
+  std::optional<std::pair<int, int>>
+  issueNext(const timing::Instr &in, int notBefore, unsigned node,
+            std::vector<ScheduleTimeline::Instruction> *trace);
+
+  timing::InOrderIssue issue;
+};
+
+std::optional<std::pair<int, int>>
+Timeline::issueNext(const timing::Instr &in, int notBefore, unsigned node,
+                    std::vector<ScheduleTimeline::Instruction> *trace) {
+  timing::Footprint f = timing::footprintOf(in, issue.regs());
+  int from = std::max(issue.earliest(in, f, issue.nextFree()), notBefore);
+  std::string why;
+  std::optional<int> cycle = timing::firstFit(
+      from, [&](int c) { return issue.table().conflict(in, f, c); }, why);
+  if (!cycle)
+    return std::nullopt;
+  issue.issue(in, f, *cycle);
+  int end = f.dmaCycles > 0 ? issue.dmaRelease(in.op->channel)
+                            : *cycle + f.doneAge + 1;
+  if (trace)
+    trace->push_back(
+        {node, in.op->name, engineName(in.op->engine), *cycle, end});
+  return std::pair{*cycle, end};
+}
+
+std::optional<Placement>
+Timeline::place(const MachineTemplate &t, unsigned node,
+                std::vector<ScheduleTimeline::Instruction> *trace) {
+  // The lowering's loops have trip counts the model evaluates; this bounds a
+  // loop whose count it cannot.
+  constexpr unsigned kMaxSteps = 1u << 16;
+  std::optional<int> first;
+  int done = issue.nextFree();
+  unsigned steps = 0;
+  for (size_t pc = 0; pc < t.instrs.size();) {
+    if (++steps > kMaxSteps)
+      return std::nullopt;
+    const timing::Instr &in = t.instrs[pc];
+    bool redirect = timing::isControlFlow(*in.op);
+    std::optional<bool> taken =
+        in.op->opClass == timing::OpClass::Jump
+            ? std::optional<bool>(true)
+            : timing::branchTaken(in, issue.regs());
+    // A branch whose outcome depends on runtime data cannot be timed.
+    if (redirect && !taken)
+      return std::nullopt;
+    // As insert-atlas-delays places a redirect: two cycles before the work
+    // in flight drains, since its successors start drained, with its delay
+    // slot next.
+    auto issued =
+        issueNext(in, redirect ? issue.drained() - 2 : INT_MIN, node, trace);
+    if (!issued)
+      return std::nullopt;
+    first = first.value_or(issued->first);
+    done = std::max(done, issued->second);
+    if (!redirect) {
+      ++pc;
+      continue;
+    }
+    if (pc + 1 >= t.instrs.size())
+      return std::nullopt;
+    auto slot = issueNext(t.instrs[pc + 1], issued->first + 1, node, trace);
+    if (!slot)
+      return std::nullopt;
+    done = std::max(done, slot->second);
+    pc = *taken ? *t.targets[pc] : pc + 2;
+  }
+  issue.retire();
+  return Placement{first.value_or(issue.nextFree()), issue.nextFree(), done};
+}
+
+enum class Priority {
+  // Minimize the bound on the block's finish (§9.2).
+  Latency,
+  // Minimize live values, for blocks the latency order cannot fit.
+  Pressure,
+};
+
+// Orders and evaluates one block.
 class BlockScheduler {
 public:
   BlockScheduler(const BlockGraph &g, const Liveness &liveness,
-                 const Caps &caps, ABI abi)
-      : g(g), liveness(liveness), caps(caps), abi(abi) {}
+                 LoweringModel *model, KindCounts caps)
+      : g(g), liveness(liveness), model(model), caps(caps) {}
 
-  // Simulate `order` and record its timing and pressure.
-  Evaluation evaluate(ArrayRef<unsigned> order) const {
-    Evaluation e;
-    Placeholders placeholders(caps.mixedFp8);
-    Timeline timeline;
-    Pressure pressure(g, liveness);
-    for (unsigned node : order) {
-      TemplateBuilder builder(placeholders, true, abi.inputBase,
-                              abi.outputBase);
-      e.spans.push_back(
-          timeline.place(builder.build(g.nodes[node]), &e.instrs));
-      e.instrNode.resize(e.instrs.size(), node);
-      pressure.place(node);
-      e.pressure.push_back(pressure.current());
-    }
-    e.order.assign(order.begin(), order.end());
-    e.cycles = timeline.finish();
-    e.peak = pressure.peak;
-    return e;
-  }
-
-  // Check the order-independent block boundaries (§6.2).
+  // Block-boundary pressure no order can change (§6.2).
   std::optional<std::string> boundaryViolation() const {
     Pressure pressure(g, liveness);
-    for (int k = 0; k < kNumClasses; ++k) {
-      if (pressure.entryCounts[k] > caps.limit[k])
-        return "entry " + std::string(className(k)) + " pressure " +
-               std::to_string(pressure.entryCounts[k]) + " exceeds cap " +
-               std::to_string(caps.limit[k]);
-      if (pressure.exitCounts[k] > caps.limit[k])
-        return "exit " + std::string(className(k)) + " pressure " +
-               std::to_string(pressure.exitCounts[k]) + " exceeds cap " +
-               std::to_string(caps.limit[k]);
+    for (RegisterKind kind : kKinds) {
+      unsigned k = indexOf(kind);
+      for (auto [where, count] : {std::pair{"entry", pressure.entryCounts[k]},
+                                  std::pair{"exit", pressure.exitCounts[k]}})
+        if (count > caps[k])
+          return std::string(where) + " " + kindName(kind) + " pressure " +
+                 std::to_string(count) + " exceeds cap " +
+                 std::to_string(caps[k]);
     }
     return std::nullopt;
   }
 
-  std::optional<std::vector<unsigned>> schedule(Mode mode, unsigned seed) {
-    unsigned n = g.nodes.size();
-    if (mode != Mode::Random && heights.empty())
-      computeHeights();
-    std::vector<unsigned> waiting(n);
-    for (unsigned i = 0; i < n; ++i)
-      waiting[i] = g.preds[i].size();
-    std::vector<bool> placedNode(n, false);
-    std::vector<unsigned> order;
-    Placeholders placeholders(caps.mixedFp8);
-    Timeline timeline;
-    Pressure pressure(g, liveness);
-    std::mt19937 rng(seed);
-    while (order.size() < n) {
-      SmallVector<unsigned> ready;
-      for (unsigned i = 0; i < n; ++i)
-        if (!placedNode[i] && waiting[i] == 0)
-          ready.push_back(i);
-      unsigned pick;
-      if (mode == Mode::Random) {
-        pick = ready[std::uniform_int_distribution<size_t>(
-            0, ready.size() - 1)(rng)];
-      } else {
-        SmallVector<unsigned> fits;
-        for (unsigned i : ready)
-          if (pressure.fits(i, caps.limit))
-            fits.push_back(i);
-        if (fits.empty())
-          return std::nullopt; // every ready operation breaks a cap
-        std::optional<unsigned> best;
-        if (mode == Mode::Pressure) {
-          for (unsigned i : fits)
-            if (!best || betterForPressure(i, *best, pressure))
-              best = i;
-        } else {
-          SmallVector<int> starts;
-          int earliest = INT_MAX;
-          for (unsigned i : fits) {
-            TemplateBuilder builder(placeholders, false, abi.inputBase,
-                                    abi.outputBase);
-            starts.push_back(timeline.probe(builder.build(g.nodes[i])));
-            earliest = std::min(earliest, starts.back());
-          }
-          for (unsigned j = 0; j < fits.size(); ++j)
-            if (starts[j] <= earliest &&
-                (!best || betterForLatency(fits[j], *best, pressure)))
-              best = fits[j];
-        }
-        pick = *best;
-      }
-      TemplateBuilder builder(placeholders, true, abi.inputBase,
-                              abi.outputBase);
-      timeline.place(builder.build(g.nodes[pick]));
-      pressure.place(pick);
-      placedNode[pick] = true;
-      order.push_back(pick);
-      for (unsigned s : g.succs[pick])
-        --waiting[s];
-    }
-    return order;
-  }
+  std::optional<ScheduleTimeline> evaluate(ArrayRef<unsigned> order);
+  std::optional<std::vector<unsigned>> listSchedule(Priority priority,
+                                                    std::string &why);
+  std::vector<unsigned> randomOrder(unsigned seed) const;
 
 private:
-  bool betterForLatency(unsigned a, unsigned b, const Pressure &p) const {
-    if (heights[a] != heights[b])
-      return heights[a] > heights[b];
-    if (p.delta(a) != p.delta(b))
-      return p.delta(a) < p.delta(b);
-    return a < b;
-  }
-
-  bool betterForPressure(unsigned a, unsigned b, const Pressure &p) const {
-    if (p.delta(a) != p.delta(b))
-      return p.delta(a) < p.delta(b);
-    if (heights[a] != heights[b])
-      return heights[a] > heights[b];
-    return a < b;
-  }
-
-  // Longest modeled path to the end of the block, including each node's own
-  // completion. Edge latencies come from placing the two templates on a fresh
-  // timeline with canonical placeholders, so they do not depend on order.
-  void computeHeights() {
-    unsigned n = g.nodes.size();
-    heights.assign(n, 0);
-    for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
-      Placeholders placeholders(caps.mixedFp8);
-      Timeline alone;
-      TemplateBuilder builder(placeholders, true, abi.inputBase,
-                              abi.outputBase);
-      auto [start, finish] = alone.place(builder.build(g.nodes[i]));
-      int height = finish - start;
-      for (unsigned s : g.succs[i]) {
-        Placeholders pair(caps.mixedFp8);
-        Timeline timeline;
-        TemplateBuilder first(pair, true, abi.inputBase, abi.outputBase);
-        int from = timeline.place(first.build(g.nodes[i])).first;
-        TemplateBuilder second(pair, true, abi.inputBase, abi.outputBase);
-        int latency = timeline.probe(second.build(g.nodes[s])) - from;
-        height = std::max(height, latency + heights[s]);
-      }
-      heights[i] = height;
-    }
-  }
+  bool computeHeights();
 
   const BlockGraph &g;
   const Liveness &liveness;
-  const Caps &caps;
-  ABI abi;
+  LoweringModel *model;
+  KindCounts caps;
   std::vector<int> heights;
 };
 
-//===----------------------------------------------------------------------===//
-// Applying an order (§5.4, §9.3) and the per-function transaction (§10)
-//===----------------------------------------------------------------------===//
-
-void applyOrder(const BlockGraph &g, ArrayRef<unsigned> order) {
-  Operation *terminator = g.block->getTerminator();
-  for (unsigned node : order)
-    g.nodes[node]->moveBefore(terminator);
+std::optional<ScheduleTimeline>
+BlockScheduler::evaluate(ArrayRef<unsigned> order) {
+  ScheduleTimeline e;
+  PlaceholderRegisters registers(model->mixedFp8(), model->hasPack());
+  Timeline timeline(model->entryRegs());
+  Pressure pressure(g, liveness);
+  for (unsigned node : order) {
+    std::optional<MachineTemplate> t =
+        model->build(g.nodes[node], registers, /*commit=*/true);
+    std::optional<Placement> placed =
+        t ? timeline.place(*t, node, &e.instructions) : std::nullopt;
+    if (!placed)
+      return std::nullopt;
+    e.spans.push_back({node, placed->first, placed->done});
+    pressure.place(node);
+    e.live.push_back(pressure.current());
+  }
+  e.order.assign(order.begin(), order.end());
+  e.cycles = timeline.finish();
+  e.peak = pressure.peak;
+  return e;
 }
 
-void rethread(Block &block) {
-  Value state;
-  if (block.isEntryBlock()) {
-    // virtual_start is pinned first; its result starts the chain.
-  } else {
-    state = block.getArgument(0);
-  }
-  for (Operation &op : block) {
-    if (isa<VirtualStartOp>(op)) {
-      state = op.getResult(0);
-      continue;
+// The longest modeled path from each node to the end of the block, counting
+// its own work. Edge latencies come from placing the two templates alone, so
+// they do not depend on the order being built.
+bool BlockScheduler::computeHeights() {
+  unsigned n = g.nodes.size();
+  heights.assign(n, 0);
+  for (unsigned i = n; i-- > 0;) {
+    PlaceholderRegisters alone(model->mixedFp8(), model->hasPack());
+    Timeline timeline(model->entryRegs());
+    std::optional<MachineTemplate> t =
+        model->build(g.nodes[i], alone, /*commit=*/true);
+    std::optional<Placement> own = t ? timeline.place(*t, i) : std::nullopt;
+    if (!own)
+      return false;
+    int height = own->done - own->first;
+    for (unsigned s : g.succs[i]) {
+      PlaceholderRegisters pair(model->mixedFp8(), model->hasPack());
+      Timeline both(model->entryRegs());
+      std::optional<MachineTemplate> from =
+          model->build(g.nodes[i], pair, /*commit=*/true);
+      std::optional<Placement> start =
+          from ? both.place(*from, i) : std::nullopt;
+      std::optional<MachineTemplate> to =
+          start ? model->build(g.nodes[s], pair, /*commit=*/true)
+                : std::nullopt;
+      std::optional<Placement> next = to ? both.project(*to) : std::nullopt;
+      if (!next)
+        return false;
+      height = std::max(height, next->first - start->first + heights[s]);
     }
+    heights[i] = height;
+  }
+  return true;
+}
+
+std::optional<std::vector<unsigned>>
+BlockScheduler::listSchedule(Priority priority, std::string &why) {
+  if (heights.empty() && !computeHeights()) {
+    why = "the timing model cannot time this block";
+    return std::nullopt;
+  }
+  unsigned n = g.nodes.size();
+  std::vector<unsigned> waiting(n);
+  for (unsigned i = 0; i < n; ++i)
+    waiting[i] = g.preds[i].size();
+  std::vector<bool> placed(n, false);
+  std::vector<unsigned> order;
+  PlaceholderRegisters registers(model->mixedFp8(), model->hasPack());
+  Timeline timeline(model->entryRegs());
+  Pressure pressure(g, liveness);
+  while (order.size() < n) {
+    SmallVector<unsigned> fits;
+    for (unsigned i = 0; i < n; ++i)
+      if (!placed[i] && waiting[i] == 0 && pressure.fits(i, caps))
+        fits.push_back(i);
+    if (fits.empty()) {
+      why = "no order fits the register caps";
+      return std::nullopt;
+    }
+
+    // Each candidate is ranked by a key; ties go to the lower source index.
+    using Key = std::tuple<int, int, int>;
+    std::optional<std::pair<Key, unsigned>> best;
+    auto consider = [&](Key key, unsigned i) {
+      if (!best || key < best->first)
+        best = {key, i};
+    };
+    if (priority == Priority::Pressure) {
+      for (unsigned i : fits)
+        consider({pressure.delta(i), -heights[i], 0}, i);
+    } else {
+      // Every unplaced node issues after the frontend frees up, so placing
+      // `c` bounds the block's finish below by max(start(c) + height(c),
+      // frontendFree(c) + the tallest other height). Prefer the smallest
+      // bound: a template that holds the frontend, like a DMA wait, delays
+      // everything else, and a critical template should start early.
+      std::array<std::pair<int, unsigned>, 2> tallest = {
+          std::pair{INT_MIN, n}, std::pair{INT_MIN, n}};
+      for (unsigned i = 0; i < n; ++i)
+        if (!placed[i]) {
+          std::pair<int, unsigned> h{heights[i], i};
+          if (h.first > tallest[0].first)
+            tallest = {h, tallest[0]};
+          else if (h.first > tallest[1].first)
+            tallest[1] = h;
+        }
+      for (unsigned c : fits) {
+        int other = tallest[0].second == c ? tallest[1].first : tallest[0].first;
+        std::optional<MachineTemplate> t =
+            model->build(g.nodes[c], registers, /*commit=*/false);
+        std::optional<Placement> p = t ? timeline.project(*t) : std::nullopt;
+        if (!p) {
+          why = "the timing model cannot time this block";
+          return std::nullopt;
+        }
+        int bound = std::max(p->first + heights[c],
+                             other == INT_MIN ? INT_MIN
+                                              : p->frontendFree + other);
+        consider({bound, -heights[c], pressure.delta(c)}, c);
+      }
+    }
+
+    unsigned pick = best->second;
+    std::optional<MachineTemplate> t =
+        model->build(g.nodes[pick], registers, /*commit=*/true);
+    if (!t || !timeline.place(*t, pick)) {
+      why = "the timing model cannot time this block";
+      return std::nullopt;
+    }
+    pressure.place(pick);
+    placed[pick] = true;
+    order.push_back(pick);
+    for (unsigned s : g.succs[pick])
+      --waiting[s];
+  }
+  return order;
+}
+
+// A uniformly random legal order, for soundness testing (§11.3).
+std::vector<unsigned> BlockScheduler::randomOrder(unsigned seed) const {
+  unsigned n = g.nodes.size();
+  std::vector<unsigned> waiting(n);
+  for (unsigned i = 0; i < n; ++i)
+    waiting[i] = g.preds[i].size();
+  std::vector<bool> placed(n, false);
+  std::vector<unsigned> order;
+  std::mt19937 rng(seed);
+  while (order.size() < n) {
+    SmallVector<unsigned> ready;
+    for (unsigned i = 0; i < n; ++i)
+      if (!placed[i] && waiting[i] == 0)
+        ready.push_back(i);
+    unsigned pick =
+        ready[std::uniform_int_distribution<size_t>(0, ready.size() - 1)(rng)];
+    placed[pick] = true;
+    order.push_back(pick);
+    for (unsigned s : g.succs[pick])
+      --waiting[s];
+  }
+  return order;
+}
+
+// Move `ops` before the terminator in order, and rethread the state chain
+// through the new order (§5.4).
+void reorder(Block &block, ArrayRef<Operation *> ops) {
+  Operation *terminator = block.getTerminator();
+  for (Operation *op : ops)
+    op->moveBefore(terminator);
+  Value state;
+  if (!block.isEntryBlock())
+    state = block.getArgument(0);
+  for (Operation &op : block) {
     for (OpOperand &operand : op.getOpOperands())
       if (isa<VirtualStateType>(operand.get().getType()))
         operand.set(state);
@@ -958,186 +884,221 @@ void rethread(Block &block) {
   }
 }
 
-struct Snapshot {
-  explicit Snapshot(func::FuncOp function) {
-    for (Block &block : function.getBody()) {
-      std::vector<Operation *> ops;
-      for (Operation &op : block) {
-        ops.push_back(&op);
-        for (OpOperand &operand : op.getOpOperands())
-          if (isa<VirtualStateType>(operand.get().getType()))
-            operands.push_back({&op, operand.getOperandNumber(), operand.get()});
-      }
-      blocks.push_back({&block, std::move(ops)});
-    }
-  }
-
-  void restore() {
-    for (auto &[block, ops] : blocks) {
-      Operation *terminator = block->getTerminator();
-      for (Operation *op : ops)
-        if (op != terminator)
-          op->moveBefore(terminator);
-    }
-    for (auto &[op, index, value] : operands)
-      op->setOperand(index, value);
-  }
-
-  std::vector<std::pair<Block *, std::vector<Operation *>>> blocks;
-  std::vector<std::tuple<Operation *, unsigned, Value>> operands;
-};
-
-std::string labelOf(Operation *op) {
-  std::string label = op->getName().getStringRef().str();
-  StringRef name(label);
-  name.consume_front("atlas.virtual_");
-  name.consume_front("atlas.");
-  std::string out = name.str();
-  if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op))
-    out += " " + unary.getKind().str();
-  else if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op))
-    out += " " + binary.getKind().str();
-  else if (auto input = dyn_cast<VirtualInputBF16Op>(op))
-    out += " #" + std::to_string(input.getIndex());
-  else if (auto input = dyn_cast<VirtualInputFP8Op>(op))
-    out += " #" + std::to_string(input.getIndex());
-  else if (auto output = dyn_cast<VirtualOutputBF16Op>(op))
-    out += " #" + std::to_string(output.getIndex());
-  else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op))
-    out += " u" + std::to_string(matmul.getUnit());
-  else if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
-    if (auto value = dyn_cast<IntegerAttr>(constant.getValue()))
-      out += " " + std::to_string(value.getValue().getSExtValue());
-  } else {
-    SmallVector<Value> values(op->getOperands());
-    llvm::append_range(values, op->getResults());
-    for (Value v : values)
-      if (isa<VirtualMXUWeightType, VirtualMXUAccType>(v.getType())) {
-        out += " u" + std::to_string(unitOf(v.getType()));
-        break;
-      }
-  }
-  if (auto loc = dyn_cast<FileLineColLoc>(op->getLoc()))
-    out += " (L" + std::to_string(loc.getLine()) + ")";
-  return out;
-}
-
-struct BlockRecord {
-  unsigned index;
-  std::vector<std::string> labels;
-  std::optional<std::string> keptReason;
-  Evaluation source, scheduled;
-  Caps caps;
-  std::string strategy = "source";
-};
-
-struct FunctionRecord {
-  std::string name;
-  std::vector<BlockRecord> blocks;
-  std::string note;
-};
-
-// Run `fn` with its diagnostics captured instead of printed.
-template <typename Fn>
-bool quietly(MLIRContext *context, std::string &firstError, Fn &&fn) {
-  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
-    if (diag.getSeverity() == DiagnosticSeverity::Error && firstError.empty())
-      firstError = diag.str();
-    return success();
-  });
-  return fn();
-}
-
 bool lowers(ModuleOp module, std::string &why) {
   OwningOpRef<ModuleOp> clone(module.clone());
-  PassManager pm(module.getContext(), ModuleOp::getOperationName());
-  llvm::raw_null_ostream discard;
-  if (failed(parsePassPipeline("lower-atlas-virtual-to-machine", pm, discard))) {
-    // The lowering is not registered: check allocation only (§10.4).
-    return quietly(module.getContext(), why, [&] {
-      for (auto function : clone->getOps<func::FuncOp>()) {
-        VirtualAllocationPlan plan;
-        if (failed(plan.allocate(function)) || failed(plan.verify()))
-          return false;
-      }
-      return true;
-    });
-  }
   return quietly(module.getContext(), why,
-                 [&] { return succeeded(pm.run(*clone)); });
+                 [&] { return succeeded(lowerAtlasVirtualModule(*clone)); });
 }
 
-void writeEvaluation(llvm::json::OStream &j, const Evaluation &e) {
-  j.attribute("cycles", e.cycles);
-  j.attributeArray("order", [&] {
-    for (unsigned node : e.order)
-      j.value(static_cast<int64_t>(node));
-  });
-  j.attributeArray("spans", [&] {
-    for (size_t i = 0; i < e.order.size(); ++i)
-      j.object([&] {
-        j.attribute("node", static_cast<int64_t>(e.order[i]));
-        j.attribute("start", e.spans[i].first);
-        j.attribute("end", e.spans[i].second);
-      });
-  });
-  j.attributeArray("instrs", [&] {
-    for (size_t i = 0; i < e.instrs.size(); ++i)
-      j.object([&] {
-        j.attribute("node", static_cast<int64_t>(e.instrNode[i]));
-        j.attribute("mnemonic", e.instrs[i].mnemonic);
-        j.attribute("engine", e.instrs[i].engine);
-        j.attribute("issue", e.instrs[i].issue);
-        j.attribute("end", e.instrs[i].end);
-      });
-  });
-  j.attributeArray("pressure", [&] {
-    for (const ClassCounts &counts : e.pressure)
-      j.array([&] {
-        for (int count : counts)
-          j.value(count);
-      });
-  });
-  j.attributeArray("peak", [&] {
-    for (int count : e.peak)
-      j.value(count);
-  });
+struct ScheduleOptions {
+  bool report = false;
+  bool strict = false;
+  std::optional<unsigned> randomSeed;
+};
+
+// Schedules one function as a transaction (§10): every block is planned on
+// the source IR, the plans are applied, and the result must verify and,
+// when the source lowers, lower too.
+class FunctionScheduler {
+public:
+  FunctionScheduler(func::FuncOp function, ScheduleOptions options)
+      : function(function), options(options) {}
+
+  LogicalResult run(ModuleOp module, bool trialLowering,
+                    FunctionScheduleRecord &record);
+
+private:
+  struct BlockPlan {
+    BlockGraph graph;
+    std::vector<Operation *> scheduledOps;
+    int gain = 0;
+    BlockScheduleRecord record;
+  };
+
+  void plan(BlockPlan &p, const Liveness &liveness, LoweringModel *model,
+            const KindCounts &caps);
+  void chooseOrder(BlockScheduler &scheduler, const KindCounts &caps,
+                   std::vector<unsigned> &order, BlockScheduleRecord &r);
+  void restore(BlockPlan &p, std::string reason) {
+    reorder(*p.graph.block, p.graph.nodes);
+    p.scheduledOps.assign(p.graph.nodes.begin(), p.graph.nodes.end());
+    p.record.keptReason = std::move(reason);
+    p.record.strategy = "source";
+    p.record.scheduled = p.record.source;
+    p.gain = 0;
+  }
+  void remark(BlockPlan &p);
+
+  func::FuncOp function;
+  ScheduleOptions options;
+  std::vector<BlockPlan> plans;
+};
+
+void FunctionScheduler::plan(BlockPlan &p, const Liveness &liveness,
+                             LoweringModel *model, const KindCounts &caps) {
+  BlockGraph &g = p.graph;
+  BlockScheduleRecord &r = p.record;
+  for (Operation *op : g.nodes)
+    r.labels.push_back(describeVirtualOperation(op));
+  for (const auto &preds : g.preds)
+    r.predecessors.emplace_back(preds.begin(), preds.end());
+  r.caps = caps;
+
+  std::vector<unsigned> order(g.nodes.size());
+  std::iota(order.begin(), order.end(), 0u);
+  if (!g.nodes.empty()) {
+    BlockScheduler scheduler(g, liveness, model, caps);
+    if (options.randomSeed) {
+      order = scheduler.randomOrder(*options.randomSeed + r.index);
+      r.strategy = "random";
+    } else {
+      chooseOrder(scheduler, caps, order, r);
+      if (r.source && r.scheduled)
+        p.gain = r.source->cycles - r.scheduled->cycles;
+    }
+  }
+  p.scheduledOps.clear();
+  for (unsigned node : order)
+    p.scheduledOps.push_back(g.nodes[node]);
 }
 
-void writeTrace(llvm::raw_ostream &os,
-                const std::vector<FunctionRecord> &functions) {
-  llvm::json::OStream j(os, 1);
-  j.object([&] {
-    j.attributeArray("functions", [&] {
-      for (const FunctionRecord &f : functions)
-        j.object([&] {
-          j.attribute("name", f.name);
-          j.attribute("note", f.note);
-          j.attributeArray("blocks", [&] {
-            for (const BlockRecord &b : f.blocks)
-              j.object([&] {
-                j.attribute("index", static_cast<int64_t>(b.index));
-                j.attributeArray("caps", [&] {
-                  for (int cap : b.caps.limit)
-                    j.value(cap);
-                });
-                j.attribute("kept_source", b.keptReason.has_value());
-                j.attribute("reason", b.keptReason.value_or(""));
-                j.attribute("strategy", b.strategy);
-                j.attributeArray("labels", [&] {
-                  for (const std::string &label : b.labels)
-                    j.value(label);
-                });
-                j.attributeObject("source",
-                                  [&] { writeEvaluation(j, b.source); });
-                j.attributeObject("scheduled",
-                                  [&] { writeEvaluation(j, b.scheduled); });
-              });
-          });
-        });
-    });
-  });
-  os << "\n";
+// The list schedules are heuristics, but the model times whole orders
+// exactly, so keep the fastest candidate. A schedule never models slower than
+// a source order that fits the caps, and ties keep the source.
+void FunctionScheduler::chooseOrder(BlockScheduler &scheduler,
+                                    const KindCounts &caps,
+                                    std::vector<unsigned> &order,
+                                    BlockScheduleRecord &r) {
+  if (std::optional<std::string> why = scheduler.boundaryViolation()) {
+    r.keptReason = *why;
+    return;
+  }
+  r.source = scheduler.evaluate(order);
+  if (!r.source) {
+    r.keptReason = "the timing model cannot time this block";
+    return;
+  }
+  r.scheduled = r.source;
+  bool sourceFits = true;
+  for (unsigned k = 0; k < kKinds.size(); ++k)
+    sourceFits &= r.source->peak[k] <= caps[k];
+  std::optional<int> best;
+  if (sourceFits)
+    best = r.source->cycles;
+  std::string why;
+  for (auto [priority, name] : {std::pair{Priority::Latency, "latency"},
+                                std::pair{Priority::Pressure, "pressure"}}) {
+    std::optional<std::vector<unsigned>> candidate =
+        scheduler.listSchedule(priority, why);
+    if (!candidate)
+      continue;
+    std::optional<ScheduleTimeline> timeline = scheduler.evaluate(*candidate);
+    if (timeline && (!best || timeline->cycles < *best)) {
+      best = timeline->cycles;
+      order = *candidate;
+      r.scheduled = std::move(timeline);
+      r.strategy = name;
+    }
+  }
+  if (!best)
+    r.keptReason = why;
+}
+
+void FunctionScheduler::remark(BlockPlan &p) {
+  BlockScheduleRecord &r = p.record;
+  Operation *where = p.graph.block->getTerminator();
+  std::string block = "block " + std::to_string(r.index);
+  if (r.keptReason)
+    where->emitRemark("virtual schedule kept source order for " + block +
+                      ": " + *r.keptReason);
+  if (!options.report || !r.source || !r.scheduled)
+    return;
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  os << "virtual schedule " << block << ": modeled " << r.source->cycles
+     << " cycles in source order, " << r.scheduled->cycles
+     << " scheduled; peak pressure";
+  for (RegisterKind kind : kKinds) {
+    unsigned k = indexOf(kind);
+    os << (k ? "," : "") << " " << kindName(kind) << " "
+       << r.scheduled->peak[k] << "/" << r.caps[k] << " (source "
+       << r.source->peak[k] << ")";
+  }
+  where->emitRemark(text);
+}
+
+LogicalResult FunctionScheduler::run(ModuleOp module, bool trialLowering,
+                                     FunctionScheduleRecord &record) {
+  record.name = function.getSymName().str();
+  std::unique_ptr<LoweringModel> model;
+  KindCounts caps{};
+  if (!options.randomSeed) {
+    std::string why;
+    model = LoweringModel::create(function, why);
+    if (!model) {
+      record.keptReason = "the lowering cannot handle it: " + why;
+      function.emitRemark("virtual schedule kept source order for @")
+          << record.name << ": " << *record.keptReason;
+      return success();
+    }
+    caps = capsFor(model->mixedFp8(), model->hasPack());
+  }
+
+  {
+    Liveness liveness(function);
+    unsigned index = 0;
+    for (Block &block : function.getBody()) {
+      BlockPlan &p = plans.emplace_back();
+      p.graph = buildGraph(block);
+      p.record.index = index++;
+      plan(p, liveness, model.get(), caps);
+    }
+  }
+  bool changed = false;
+  for (BlockPlan &p : plans)
+    if (!llvm::equal(p.scheduledOps, p.graph.nodes)) {
+      reorder(*p.graph.block, p.scheduledOps);
+      changed = true;
+    }
+
+  if (changed) {
+    std::string why;
+    if (!quietly(module.getContext(), why, [&] {
+          return succeeded(verifyAtlasVirtualModule(module));
+        })) {
+      for (BlockPlan &p : plans)
+        restore(p, "invalid order reverted");
+      if (options.strict)
+        return function.emitError("virtual schedule produced an invalid "
+                                  "order for @")
+               << record.name << ": " << why;
+      function.emitWarning("virtual schedule produced an invalid order for @")
+          << record.name << "; reverted: " << why;
+    } else if (trialLowering) {
+      // Allocation and the word limit are function-wide, so no block can be
+      // blamed alone. Give back the smallest gains first until the function
+      // lowers again; the source order is known to lower.
+      SmallVector<BlockPlan *> scheduled;
+      for (BlockPlan &p : plans)
+        if (!llvm::equal(p.scheduledOps, p.graph.nodes))
+          scheduled.push_back(&p);
+      llvm::stable_sort(scheduled, [](BlockPlan *a, BlockPlan *b) {
+        return a->gain < b->gain;
+      });
+      for (BlockPlan *p : scheduled) {
+        std::string failure;
+        if (lowers(module, failure))
+          break;
+        restore(*p, "lowering failed after scheduling: " + failure);
+      }
+    }
+  }
+
+  for (BlockPlan &p : plans) {
+    remark(p);
+    record.blocks.push_back(std::move(p.record));
+  }
+  return success();
 }
 
 struct ScheduleAtlasVirtualPass
@@ -1163,200 +1124,49 @@ struct ScheduleAtlasVirtualPass
                       llvm::cl::init(false)};
   Option<int> randomSeed{
       *this, "random-seed",
-      llvm::cl::desc("Pick a random legal order (soundness testing); "
+      llvm::cl::desc("Pick a random legal order, for soundness testing; "
                      "negative disables"),
       llvm::cl::init(-1)};
   Option<std::string> traceFile{
       *this, "trace-file",
-      llvm::cl::desc("Write the modeled source and scheduled timelines as "
-                     "JSON"),
+      llvm::cl::desc("Write the modeled source and scheduled runs as JSON"),
       llvm::cl::init("")};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
+    ScheduleOptions options;
+    options.report = report;
+    options.strict = strict;
+    if (randomSeed >= 0)
+      options.randomSeed = static_cast<unsigned>(randomSeed);
+
     SmallVector<func::FuncOp> functions(module.getOps<func::FuncOp>());
-    bool random = randomSeed >= 0;
-    // The lowering accepts exactly one function (§10.4).
-    bool trial = functions.size() == 1 && !random;
-    std::string sourceWhy;
-    bool sourceLowers = trial && lowers(module, sourceWhy);
-    std::vector<FunctionRecord> records;
+    // A trial lowering can only blame the schedule if the source lowers, and
+    // the lowering takes exactly one function.
+    std::string ignored;
+    bool trialLowering = functions.size() == 1 && !options.randomSeed &&
+                         lowers(module, ignored);
+    std::vector<FunctionScheduleRecord> records;
     for (func::FuncOp function : functions) {
-      FunctionRecord record;
-      record.name = function.getSymName().str();
-      if (failed(scheduleFunction(module, function, random, trial,
-                                  sourceLowers, record)))
+      FunctionScheduleRecord &record = records.emplace_back();
+      if (failed(FunctionScheduler(function, options)
+                     .run(module, trialLowering, record)))
         return signalPassFailure();
-      records.push_back(std::move(record));
     }
+
     std::string path = traceFile;
-    if (!path.empty()) {
-      std::error_code error;
-      llvm::raw_fd_ostream os(path, error);
-      if (error) {
-        module.emitError("cannot write trace file ") << path << ": "
-                                                     << error.message();
-        return signalPassFailure();
-      }
-      writeTrace(os, records);
+    if (path.empty())
+      return;
+    std::error_code error;
+    llvm::raw_fd_ostream os(path, error);
+    if (error) {
+      module.emitError("cannot write trace file ")
+          << path << ": " << error.message();
+      return signalPassFailure();
     }
-  }
-
-  LogicalResult scheduleFunction(ModuleOp module, func::FuncOp function,
-                                 bool random, bool trial, bool sourceLowers,
-                                 FunctionRecord &record) {
-    Snapshot snapshot(function);
-    ABI abi;
-    if (auto attr = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base"))
-      abi.inputBase = attr.getValue().getZExtValue();
-    if (auto attr =
-            function->getAttrOfType<IntegerAttr>("atlas.output_dram_base"))
-      abi.outputBase = attr.getValue().getZExtValue();
-    SmallVector<Mode> attempts =
-        random ? SmallVector<Mode>{Mode::Random}
-               : SmallVector<Mode>{Mode::Latency, Mode::Pressure};
-    for (size_t attempt = 0; attempt < attempts.size(); ++attempt) {
-      Mode mode = attempts[attempt];
-      std::vector<BlockRecord> blocks;
-      SmallVector<std::pair<Operation *, std::string>> remarks;
-      bool changed = false;
-      {
-        Liveness liveness(function);
-        Caps caps = capsFor(function);
-        unsigned blockIndex = 0;
-        for (Block &block : function.getBody()) {
-          BlockGraph g = buildGraph(block, blockIndex);
-          BlockScheduler scheduler(g, liveness, caps, abi);
-          BlockRecord b{blockIndex, {}, std::nullopt, {}, {}, caps, "source"};
-          for (Operation *op : g.nodes)
-            b.labels.push_back(labelOf(op));
-          std::vector<unsigned> source(g.nodes.size());
-          for (unsigned i = 0; i < source.size(); ++i)
-            source[i] = i;
-          b.source = scheduler.evaluate(source);
-          std::vector<unsigned> order = source;
-          b.scheduled = b.source;
-          if (g.nodes.empty()) {
-            // Nothing to order.
-          } else if (random) {
-            order = *scheduler.schedule(Mode::Random,
-                                        static_cast<unsigned>(randomSeed) +
-                                            blockIndex);
-            b.strategy = "random";
-            b.scheduled = scheduler.evaluate(order);
-          } else if (auto why = scheduler.boundaryViolation()) {
-            b.keptReason = *why;
-          } else {
-            // Keep the fastest modeled candidate, never worse than a source
-            // order that fits the caps; ties keep the source order.
-            bool sourceFits = true;
-            for (int k = 0; k < kNumClasses; ++k)
-              sourceFits &= b.source.peak[k] <= caps.limit[k];
-            std::optional<int> best;
-            if (sourceFits) {
-              best = b.source.cycles;
-              b.strategy = "source";
-            }
-            SmallVector<std::pair<Mode, const char *>> modes;
-            if (mode == Mode::Latency)
-              modes.push_back({Mode::Latency, "latency"});
-            modes.push_back({Mode::Pressure, "pressure"});
-            for (auto [candidate, name] : modes) {
-              auto found = scheduler.schedule(candidate, 0);
-              if (!found)
-                continue;
-              Evaluation e = scheduler.evaluate(*found);
-              if (!best || e.cycles < *best) {
-                best = e.cycles;
-                order = *found;
-                b.scheduled = std::move(e);
-                b.strategy = name;
-              }
-            }
-            if (!best)
-              b.keptReason = "no order fits the register caps";
-          }
-          Operation *where = block.getTerminator();
-          if (b.keptReason)
-            remarks.push_back(
-                {where, "virtual schedule kept source order for block " +
-                            std::to_string(blockIndex) + ": " +
-                            *b.keptReason});
-          if (report) {
-            std::string text;
-            llvm::raw_string_ostream os(text);
-            os << "virtual schedule block " << blockIndex << ": modeled "
-               << b.source.cycles << " cycles in source order, "
-               << b.scheduled.cycles << " scheduled; peak pressure";
-            for (int k = 0; k < kNumClasses; ++k)
-              os << (k ? "," : "") << " " << className(k) << " "
-                 << b.scheduled.peak[k] << "/" << caps.limit[k]
-                 << " (source " << b.source.peak[k] << ")";
-            remarks.push_back({where, text});
-          }
-          if (order != source) {
-            applyOrder(g, order);
-            changed = true;
-          }
-          blocks.push_back(std::move(b));
-          ++blockIndex;
-        }
-      }
-      for (Block &block : function.getBody())
-        rethread(block);
-
-      auto accept = [&](std::string note) {
-        for (auto &[op, text] : remarks)
-          op->emitRemark(text);
-        record.blocks = std::move(blocks);
-        record.note = std::move(note);
-        return success();
-      };
-      if (!changed)
-        return accept("");
-
-      std::string why;
-      if (!quietly(module.getContext(), why, [&] {
-            return succeeded(verifyAtlasVirtualModule(module));
-          })) {
-        snapshot.restore();
-        if (strict)
-          return function.emitError("virtual schedule produced an invalid "
-                                    "order for @")
-                 << function.getSymName() << ": " << why;
-        function.emitWarning("virtual schedule produced an invalid order for @")
-            << function.getSymName() << "; reverted: " << why;
-        return keepSource(record, std::move(blocks), "invalid order reverted");
-      }
-      if (trial && sourceLowers) {
-        std::string lowerWhy;
-        if (!lowers(module, lowerWhy)) {
-          snapshot.restore();
-          if (attempt + 1 < attempts.size())
-            continue;
-          function.emitRemark("virtual schedule reverted @")
-              << function.getSymName() << ": lowering failed: " << lowerWhy;
-          return keepSource(record, std::move(blocks), "lowering failed");
-        }
-      }
-      return accept("");
-    }
-    return success();
-  }
-
-  LogicalResult keepSource(FunctionRecord &record,
-                           std::vector<BlockRecord> blocks, std::string note) {
-    for (BlockRecord &b : blocks) {
-      b.scheduled = b.source;
-      b.strategy = "source";
-      if (!b.keptReason)
-        b.keptReason = note;
-    }
-    record.blocks = std::move(blocks);
-    record.note = std::move(note);
-    return success();
+    writeScheduleTrace(os, records);
   }
 };
 

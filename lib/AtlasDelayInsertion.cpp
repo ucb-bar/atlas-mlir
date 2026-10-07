@@ -9,82 +9,52 @@ using namespace mlir::atlas::timing;
 
 namespace {
 
-struct Issued {
-  size_t index;
-  Footprint f;
-  int cycle;
-};
-
-constexpr int kMaxSearch = 100000;
-
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         std::vector<DelayInsertion> &before) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
-  RegValues regs = s.entry[block];
-  ReservationTable table;
-  std::vector<Issued> issued;
-  int nextFree = 0;
+  InOrderIssue issue(s.entry[block], WaitRelease::Unknown);
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
   auto earliest = [&](const Instr &in, const Footprint &f, int cycle,
                       std::string &reason) {
-    for (const Issued &x : issued) {
-      Dependence d = dependence(instrs[x.index], x.f, in, f);
-      if (d.distance > 0 && x.cycle + d.distance > cycle) {
-        cycle = x.cycle + d.distance;
-        reason = d.reason + " after " + name(x.index);
-      }
-    }
-    return cycle;
-  };
-  auto drained = [&] {
-    int cycle = 0;
-    for (const Issued &x : issued)
-      cycle = std::max(cycle, x.cycle + x.f.doneAge + 1);
+    std::optional<InOrderIssue::Binding> binding;
+    cycle = issue.earliest(in, f, cycle, &binding);
+    if (binding)
+      reason = binding->dependence.reason + " after " + name(binding->id);
     return cycle;
   };
   auto place = [&](size_t i, const Footprint &f, int cycle,
                    const std::string &reason) {
-    if (cycle > nextFree)
-      before[i] = {idleDelays(cycle - nextFree), false, reason};
-    const Instr &in = instrs[i];
-    table.reserve(in, f, cycle);
-    if (in.op->opClass == OpClass::DmaWait)
-      table.extendForWait(cycle);
-    issued.push_back({i, f, cycle});
-    applyScalar(in, regs);
-    nextFree = cycle + naturalGap(in);
+    if (cycle > issue.nextFree())
+      before[i] = {idleDelays(cycle - issue.nextFree()), false, reason};
+    issue.issue(instrs[i], f, cycle, i);
   };
   auto search = [&](size_t i, int &cycle, std::string &reason,
                     function_ref<std::string(int)> fits) -> LogicalResult {
-    for (int start = cycle;; ++cycle) {
-      std::string why = fits(cycle);
-      if (why.empty())
-        return success();
-      reason = why;
-      if (cycle - start > kMaxSearch)
-        return ops[i]->emitOpError("found no free issue cycle: ") << why;
-    }
+    std::optional<int> found = firstFit(cycle, fits, reason);
+    if (!found)
+      return ops[i]->emitOpError("found no free issue cycle: ") << reason;
+    cycle = *found;
+    return success();
   };
 
   for (size_t i = begin; i < end; ++i) {
     const Instr &in = instrs[i];
-    Footprint f = footprintOf(in, regs);
+    Footprint f = footprintOf(in, issue.regs());
     std::string reason;
-    int cycle = earliest(in, f, nextFree, reason);
+    int cycle = earliest(in, f, issue.nextFree(), reason);
 
     if (in.op->opClass == OpClass::Halt) {
       // A halt neither drains in-flight work nor waits for a delay, so its
       // stall ends on a NOP, reusing one that is already there.
-      for (const Issued &x : issued)
-        if (x.cycle + x.f.doneAge > cycle) {
-          cycle = x.cycle + x.f.doneAge;
-          reason = "halt waits for " + name(x.index) + " to finish";
-        }
-      int idle = cycle - nextFree;
+      if (auto last = issue.lastToFinish(cycle)) {
+        cycle = last->second;
+        reason = "halt waits for " + name(last->first) + " to finish";
+      }
+      int idle = cycle - issue.nextFree();
       if (idle > 0) {
         size_t prev = i - 1;
         bool reuse =
@@ -93,9 +63,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
           before[prev] = {idleDelays(idle), false, reason};
         else
           before[i] = {idleDelays(idle - 1), true, reason};
-        nextFree = cycle;
       }
-      place(i, f, cycle, reason);
+      issue.issue(in, f, cycle, i);
       continue;
     }
 
@@ -103,15 +72,15 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       // The slot issues next; the successors start drained two cycles later.
       size_t slotIndex = i + 1;
       const Instr &slot = instrs[slotIndex];
-      RegValues after = regs;
+      RegValues after = issue.regs();
       applyScalar(in, after);
       Footprint sf = footprintOf(slot, after);
-      if (drained() - 2 > cycle) {
-        cycle = drained() - 2;
+      if (issue.drained() - 2 > cycle) {
+        cycle = issue.drained() - 2;
         reason = "this block finishes before the branch's successors start";
       }
       auto fits = [&](int c) -> std::string {
-        std::string why = table.conflict(in, f, c);
+        std::string why = issue.table().conflict(in, f, c);
         if (!why.empty())
           return why;
         std::string slotReason;
@@ -123,7 +92,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         }
         if (slotCycle > c + 1)
           return "delay slot: " + slotReason;
-        ReservationTable withBranch = table;
+        ReservationTable withBranch = issue.table();
         withBranch.reserve(in, f, c);
         why = withBranch.conflict(slot, sf, c + 1);
         return why.empty() ? why : "delay slot: " + why;
@@ -136,14 +105,15 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       continue;
     }
 
-    if (failed(search(i, cycle, reason,
-                      [&](int c) { return table.conflict(in, f, c); })))
+    if (failed(search(i, cycle, reason, [&](int c) {
+          return issue.table().conflict(in, f, c);
+        })))
       return failure();
     place(i, f, cycle, reason);
   }
 
-  if (s.fallsThrough(block) && drained() > nextFree)
-    before[end] = {idleDelays(drained() - nextFree), false,
+  if (s.fallsThrough(block) && issue.drained() > issue.nextFree())
+    before[end] = {idleDelays(issue.drained() - issue.nextFree()), false,
                    "this block finishes before the next one starts"};
   return success();
 }
