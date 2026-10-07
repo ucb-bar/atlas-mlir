@@ -128,7 +128,11 @@ private:
     blockLabels[block] = label;
     return label;
   }
-  void mark(unsigned label) { labelPC[label] = planned.size(); }
+  void mark(unsigned label) {
+    labelPC[label] = planned.size();
+    // Control can arrive here from elsewhere.
+    stagingAddress.reset();
+  }
 
   std::optional<uint32_t> constantAddress(Value value) {
     auto [entry, inserted] = constantAddresses.try_emplace(value, std::nullopt);
@@ -389,24 +393,30 @@ private:
     add("atlas.dma_wait", loc, {{"channel", i32(fixed().storeChannel)}});
   }
 
+  // Point the staging register, which every transfer shares, at `word`.
+  void setStaging(const DMATransferPlacement &placement, uint32_t word,
+                  Location loc) {
+    materializeScalar(placement.stagingReg, word, loc);
+    stagingAddress = word;
+  }
+
   void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
                  std::optional<unsigned> src, Location loc) {
     const DMATransferPlacement &placement = allocation.dma(transfer);
     emitCopy(placement.dramReg, scalar(dramByte), false, loc);
     emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
-    materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    setStaging(placement, placement.stagingWord, loc);
     if (src) {
       for (unsigned half = 0; half < placement.halves; ++half) {
         if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
+          setStaging(placement, placement.stagingWord + half * 256, loc);
         add("atlas.vstore", loc,
             {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
         delay(loc, "vstore_completion");
       }
       if (placement.halves > 1)
-        materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+        setStaging(placement, placement.stagingWord, loc);
     }
     add("atlas.dma", loc,
         {{"direction", str(src ? "store" : "load")},
@@ -423,10 +433,12 @@ private:
         {{"channel", i32(placement.channel)},
          {"atlas.virtual_dma_transfer", i32(placement.id)}});
     if (dst) {
+      // The DMA latched its own copy of the staging address at launch; the
+      // VLOADs read the register now, which a later launch may have moved.
       for (unsigned half = 0; half < placement.halves; ++half) {
-        if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
+        uint32_t word = placement.stagingWord + half * 256;
+        if (stagingAddress != word)
+          setStaging(placement, word, loc);
         add("atlas.vload", loc,
             {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
@@ -785,6 +797,8 @@ private:
   llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
+  // What the shared staging register holds, while the planner knows.
+  std::optional<uint32_t> stagingAddress;
   std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
   uint64_t inputBase = 0, outputBase = 0;
