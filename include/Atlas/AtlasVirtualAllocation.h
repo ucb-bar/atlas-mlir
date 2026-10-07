@@ -60,59 +60,28 @@ struct FixedResourcePlacement {
   unsigned mxuAccSlot;
 };
 
-// The physical location of every virtual value the lowering reads. The
-// allocation plan answers with allocated registers; the scheduler answers
-// with placeholder registers before allocation exists.
-class VirtualPlacement {
-public:
-  virtual ~VirtualPlacement() = default;
-  virtual unsigned tile(Value value) const = 0;
-  virtual unsigned fp8(Value value) const = 0;
-  virtual unsigned scalar(Value value) const = 0;
-  virtual MXUPlacement mxu(Value value) const = 0;
-  virtual const DMATransferPlacement &dma(Value value) const = 0;
-  virtual const FixedResourcePlacement &fixed() const = 0;
-};
-
 enum class RegisterKind { BF16, FP8, Scalar };
 
-// The registers one kind of virtual value may occupy: `count` locations from
-// `first`, `stride` apart. A BF16 tile's location is an even/odd pair.
-struct RegisterBudget {
-  unsigned first;
-  unsigned count;
-  unsigned stride;
+// How many values of `kind` can hold registers at once in `function`, as
+// allocate colors them: BF16 pairs, FP8 registers, or scalars.
+unsigned registerCapacity(func::FuncOp function, RegisterKind kind);
 
-  unsigned reg(unsigned color) const { return first + stride * color; }
-};
-
-// With FP8 values present, FP8 tiles keep m0-m31 and BF16 pairs move above
-// them; a pack keeps x10-x17 for its relayout loop.
-RegisterBudget registerBudget(RegisterKind kind, bool mixedFp8, bool hasPack);
-
-class VirtualAllocationPlan : public VirtualPlacement {
+class VirtualAllocationPlan {
 public:
   VirtualAllocationPlan();
 
-  // Place MXU handles and DMA transfers without coloring registers. Requires
-  // a verified virtual CFG.
-  LogicalResult placeResources(func::FuncOp function);
-  // placeResources, then color every register value. Rebuild after changing
-  // the CFG's values or order; placement accessors require successful
-  // allocation and live source IR. Query only mapped value kinds; placement
-  // references/views expire on rebuild.
+  // Requires a verified virtual CFG. Rebuild after changing its values or order;
+  // placement accessors require successful allocation and live source IR.
+  // Query only mapped value kinds; placement references/views expire on rebuild.
   LogicalResult allocate(func::FuncOp function);
   LogicalResult verify() const;
-  unsigned tile(Value value) const override;
-  unsigned fp8(Value value) const override;
-  unsigned scalar(Value value) const override;
-  MXUPlacement mxu(Value value) const override;
-  const DMATransferPlacement &dma(Value value) const override;
+  unsigned tile(Value value) const;
+  unsigned fp8(Value value) const;
+  unsigned scalar(Value value) const;
+  MXUPlacement mxu(Value value) const;
+  const DMATransferPlacement &dma(Value value) const;
   llvm::ArrayRef<int32_t> scalarArguments() const;
-  const FixedResourcePlacement &fixed() const override;
-  // The function facts that select register budgets.
-  bool fp8Present() const { return mixedFp8; }
-  bool packPresent() const { return hasPack; }
+  const FixedResourcePlacement &fixed() const;
 
 private:
   LogicalResult colorValues(RegisterKind kind);

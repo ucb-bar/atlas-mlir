@@ -14,9 +14,7 @@ namespace {
 
 int64_t signedValue(IntegerAttr attr) { return attr.getValue().getSExtValue(); }
 
-} // namespace
-
-FailureOr<Instr> mlir::atlas::toTimingInstr(Operation *op) {
+FailureOr<Instr> toInstr(Operation *op) {
   Instr in;
   std::string name;
   auto mxu = [](uint32_t unit) { return ".mxu" + std::to_string(unit); };
@@ -143,6 +141,8 @@ FailureOr<Instr> mlir::atlas::toTimingInstr(Operation *op) {
   return in;
 }
 
+} // namespace
+
 bool mlir::atlas::isNop(Operation *op) {
   if (auto alu = dyn_cast<ALUImmOp>(op))
     return alu.getDst() == 0;
@@ -249,7 +249,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
   std::vector<Instr> &instrs = s.instrs;
   for (auto [index, op] : llvm::enumerate(ops)) {
     indexOf[op] = index;
-    auto in = toTimingInstr(op);
+    auto in = toInstr(op);
     if (failed(in))
       return failure();
     instrs.push_back(*in);

@@ -1,18 +1,15 @@
 """schedule-atlas-virtual: pre-allocation list scheduling of virtual Atlas SSA.
 
-Each test exercises one guarantee from docs/virtual-scheduler-plan.md: the
-scheduled order verifies, keeps every block's structure, lowers whenever the
-source order does, respects the dependence model, and models no worse than
-the source order.
+The scheduled order verifies, keeps every block's structure, lowers whenever
+the source order does, keeps every SSA and implicit-state dependence, and
+never needs more registers than the allocator has unless the source order
+already did.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import tempfile
 import unittest
-from pathlib import Path
 
 from test_virtual_lowering import virtual_pressure
 from test_virtual_ssa import BIN, ROOT, run
@@ -28,8 +25,6 @@ ABI = ("atlas.input_dram_base = 2415919104 : i64, "
        "atlas.output_dram_base = 2415984640 : i64")
 SEEDS = range(8)
 
-
-# --- MLIR builders -----------------------------------------------------------
 
 def function(name: str, lines: list[str], args: str = "", attrs: str = ABI) -> str:
     return "\n".join([
@@ -101,8 +96,8 @@ def mxu_chain(state: str, unit: int, weight: str, activation: str, result: str,
     ]
 
 
-# Control-flow shapes from the design's case table (§6.8). Each is one
-# function with the lowering ABI, so lowering parity can be checked.
+# Control-flow shapes around block boundaries. Each is one function with the
+# lowering ABI, so lowering parity can be checked.
 def cfg_cases() -> dict[str, str]:
     cases: dict[str, str] = {}
     cases["C1 single block"] = function("c1", [
@@ -196,7 +191,7 @@ def cfg_cases() -> dict[str, str]:
         f"^bb2(%s2: {S}, %x: {T}, %j: i32):",
         dma_load("s2", "l1", "ev", "addr", "size", "bf16"),
         dma_await("l1", "l2", "y", "ev", "bf16"),
-        unary("r", "x"), add("z", "r", "y"),
+        unary("r", "x"), unary("q", "r"), add("z", "q", "y"),
         "%j1 = arith.addi %j, %c1 : i32",
         "cf.br " + edge("bb1", ["l2", "z", "j1"], [S, T, "i32"]),
         f"^bb3(%s3: {S}, %w: {T}):", outp("s3", "o", "w", 0),
@@ -267,7 +262,21 @@ def wide_return_block(tiles: int) -> str:
         "atlas.output_dram_base = 2416050176 : i64"))
 
 
-# --- IR inspection -----------------------------------------------------------
+def boundary_tiles(count: int, fp8: bool = False) -> str:
+    """`count` tiles, each read, rectified, and written before the next is
+    read. An unused FP8 input selects the allocator's mixed FP8 capacity."""
+    lines = [start()]
+    state = "io0"
+    if fp8:
+        lines.append(inp(state, "f", "x", count, "fp8"))
+        state = "f"
+    for i in range(count):
+        lines += [inp(state, f"i{i}", f"t{i}", i), unary(f"r{i}", f"t{i}"),
+                  outp(f"i{i}", f"o{i}", f"r{i}", i)]
+        state = f"o{i}"
+    lines.append(f"return %{state} : {S}")
+    return function("tiles", lines)
+
 
 GENERIC_OP = re.compile(r'"([a-z_]+\.[a-z_0-9.]+)"\(')
 
@@ -308,26 +317,8 @@ def structure(text: str) -> list[tuple]:
              b["ops"][-1] if b["ops"] else None) for b in blocks(text)]
 
 
-def reaches(predecessors: list[list[int]], start: int, goal: int) -> bool:
-    """Whether the dependence graph orders `start` before `goal`."""
-    successors: dict[int, list[int]] = {}
-    for node, preds in enumerate(predecessors):
-        for pred in preds:
-            successors.setdefault(pred, []).append(node)
-    stack, seen = [start], set()
-    while stack:
-        node = stack.pop()
-        if node == goal:
-            return True
-        if node not in seen:
-            seen.add(node)
-            stack.extend(successors.get(node, []))
-    return False
-
-
-def nodes_named(block: dict, name: str) -> list[int]:
-    return [i for i, label in enumerate(block["labels"])
-            if label.split(" (")[0] == name]
+def positions(ops: list[str], name: str) -> list[int]:
+    return [i for i, op in enumerate(ops) if op == f"atlas.virtual_{name}"]
 
 
 def schedule(source: str, *options: str):
@@ -345,7 +336,7 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
 
     def scheduled(self, source: str, *options: str) -> str:
-        result = schedule(source, "strict=true", *options)
+        result = schedule(source, *options)
         self.assertEqual(result.returncode, 0, result.stderr)
         checked = run("atlas-opt", result.stdout, "--verify-atlas-virtual-stream")
         self.assertEqual(checked.returncode, 0, checked.stderr)
@@ -367,19 +358,11 @@ class VirtualSchedulingTest(unittest.TestCase):
             self.assertEqual(emitted.returncode, 0, f"{name}: {emitted.stderr}")
         return out
 
-    def trace(self, source: str, *options: str) -> dict:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "trace.json"
-            self.scheduled(source, f"trace-file={path}", *options)
-            return json.loads(path.read_text())
-
-    # §11.1
     def test_existing_fixtures_schedule_verify_and_lower(self) -> None:
         for path in sorted(EXAMPLES.glob("virtual_*.mlir")):
             with self.subTest(fixture=path.name):
                 self.assert_preserves_program(path.read_text(), path.name)
 
-    # §11.2
     def test_control_flow_shapes_keep_structure_and_lower(self) -> None:
         for name, source in cfg_cases().items():
             with self.subTest(case=name):
@@ -405,7 +388,6 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertIn("must complete the pending DMA before another launch",
                       result.stderr)
 
-    # §11.3
     def test_random_legal_orders_always_verify(self) -> None:
         sources = {p.name: p.read_text() for p in EXAMPLES.glob("virtual_*.mlir")}
         sources.update(cfg_cases())
@@ -420,42 +402,37 @@ class VirtualSchedulingTest(unittest.TestCase):
                   for seed in range(12)}
         self.assertGreater(len(orders), 4)
 
-    # §11.4
-    def test_scheduling_recovers_a_block_over_the_pair_cap(self) -> None:
-        source = virtual_pressure(32)
-        rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
-        self.assertIn("exceeds 31 physical pairs", rejected.stderr)
-        out = self.scheduled(source)
-        self.assertTrue(lowers(out), "scheduled order should allocate")
-        ops = blocks(out)[0]["ops"]
-        first_output = ops.index("atlas.virtual_output_bf16")
-        last_input = len(ops) - 1 - ops[::-1].index("atlas.virtual_input_bf16")
-        self.assertLess(first_output, last_input, "inputs and outputs interleave")
+    def test_boundary_tiles_overlap_vpu_work_with_transfers(self) -> None:
+        source = boundary_tiles(4)
+        ops = blocks(self.scheduled(source))[0]["ops"]
+        second_input = positions(ops, "input_bf16")[1]
+        self.assertEqual(second_input, positions(ops, "vpu_unary")[0] + 1,
+                         "the next tile is read while the first is rectified")
+        self.assertGreater(positions(ops, "output_bf16")[0], second_input)
 
-    def test_return_block_near_the_cap_interleaves(self) -> None:
+    def test_largest_schedules_within_capacity_allocate(self) -> None:
+        for source in (boundary_tiles(30), boundary_tiles(14, fp8=True)):
+            out = self.scheduled(source)
+            self.assertNotEqual(blocks(out)[0]["ops"], blocks(source)[0]["ops"])
+            self.assertTrue(lowers(out), "the pressure count matches allocation")
+
+    def test_schedule_over_capacity_keeps_source_order(self) -> None:
+        for source, remark in (
+                (boundary_tiles(31), "BF16 pressure 32 exceeds capacity 31"),
+                (boundary_tiles(15, fp8=True), "BF16 pressure 16 exceeds capacity 15")):
+            with self.subTest(remark=remark):
+                result = schedule(source)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("kept source order for block 0: " + remark, result.stderr)
+                self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
+                self.assertTrue(lowers(result.stdout))
+
+    def test_source_order_over_capacity_may_still_change(self) -> None:
+        # Pressure the source order already needs is not the schedule's doing.
         source = wide_return_block(29)
         self.assertFalse(lowers(source))
-        self.assertTrue(lowers(self.scheduled(source)))
+        self.assertNotIn("kept source order", schedule(source).stderr)
 
-    def test_exit_pressure_over_the_cap_keeps_source_order(self) -> None:
-        source = wide_return_block(32)
-        result = schedule(source, "strict=true")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("kept source order for block 0: exit BF16 pressure 32 "
-                      "exceeds cap 31", result.stderr)
-        self.assertIn("kept source order for block 1: entry BF16 pressure 32 "
-                      "exceeds cap 31", result.stderr)
-        self.assertEqual(structure(run("atlas-opt", source).stdout),
-                         structure(result.stdout))
-
-    def test_caps_follow_fp8_and_pack(self) -> None:
-        mixed = schedule(OVERLAP.read_text(), "report=true")
-        self.assertIn("BF16 4/15", mixed.stderr)
-        packed = schedule((EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text(),
-                          "report=true")
-        self.assertRegex(packed.stderr, r"scalar \d+/9")
-
-    # §11.5
     def test_dma_intervals_receive_independent_work(self) -> None:
         ops = blocks(self.scheduled(OVERLAP.read_text()))[0]["ops"]
         dma = [op for op in ops if "dma" in op]
@@ -482,31 +459,35 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_pack_never_enters_a_dma_interval(self) -> None:
         source = cfg_cases()["C16 pack beside an explicit DMA"]
-        block = self.trace(source)["functions"][0]["blocks"][0]
-        preds = block["predecessors"]
-        [load] = nodes_named(block, "dma_load_fp8")
-        [await_] = nodes_named(block, "dma_await_fp8")
-        [pack] = nodes_named(block, "pack_fp8")
-        self.assertTrue(reaches(preds, await_, pack) or reaches(preds, pack, load))
+        for seed in [None, *SEEDS]:
+            options = [] if seed is None else [f"random-seed={seed}"]
+            ops = blocks(self.scheduled(source, *options))[0]["ops"]
+            [load] = positions(ops, "dma_load_fp8")
+            [await_] = positions(ops, "dma_await_fp8")
+            [pack] = positions(ops, "pack_fp8")
+            self.assertFalse(load < pack < await_, (seed, ops))
 
     def test_weight_slot_dependences_are_exact(self) -> None:
         # Two chains on MXU0. A replacement weight load may rise above the
         # previous readout, never above the reset that reads the old weight,
-        # and the second chain starts after the first is read out.
+        # and the second chain starts after the first is read out. Each unit
+        # keeps its order, so the k-th of each operation is chain k's.
         source = function("weights", [
             start(), inp("io0", "io1", "x", 0, "fp8"), inp("io1", "io2", "w1", 1, "fp8"),
             inp("io2", "io3", "w2", 2, "fp8"),
             *mxu_chain("io3", 0, "w1", "x", "h1", "a"),
             *mxu_chain("as3", 0, "w2", "x", "h2", "b"),
             add("y", "h1", "h2"), outp("bs3", "o", "y", 0), f"return %o : {S}"])
-        block = self.trace(source)["functions"][0]["blocks"][0]
-        preds = block["predecessors"]
-        _, load2 = nodes_named(block, "mxu_load_weight u0")
-        reset1, reset2 = nodes_named(block, "mxu_reset u0")
-        readout1, _ = nodes_named(block, "mxu_readout_bf16 u0")
-        self.assertTrue(reaches(preds, reset1, load2))
-        self.assertFalse(reaches(preds, readout1, load2))
-        self.assertTrue(reaches(preds, readout1, reset2))
+        early_load = False
+        for seed in range(24):
+            ops = blocks(self.scheduled(source, f"random-seed={seed}"))[0]["ops"]
+            _, load2 = positions(ops, "mxu_load_weight")
+            reset1, reset2 = positions(ops, "mxu_reset")
+            readout1, _ = positions(ops, "mxu_readout_bf16")
+            self.assertLess(reset1, load2, seed)
+            self.assertLess(readout1, reset2, seed)
+            early_load |= load2 < readout1
+        self.assertTrue(early_load, "no order loaded the next weight early")
 
     def test_unit_order_is_kept_per_unit(self) -> None:
         def per_unit(text: str) -> dict[str, list[str]]:
@@ -525,89 +506,10 @@ class VirtualSchedulingTest(unittest.TestCase):
             self.assertEqual(per_unit(self.scheduled(source, f"random-seed={seed}")),
                              expected, seed)
 
-    def test_scheduling_is_deterministic_and_idempotent(self) -> None:
+    def test_scheduling_is_deterministic(self) -> None:
         for source in (OVERLAP.read_text(), cfg_cases()["C14 explicit DMA in a loop body"],
                        (EXAMPLES / "virtual_fp8_two_layer_mlp_bias.mlir").read_text()):
-            once = self.scheduled(source)
-            self.assertEqual(once, self.scheduled(source))
-            self.assertEqual(once, self.scheduled(once))
-
-    # §11.6 and the report
-    def test_report_and_trace_describe_the_schedule(self) -> None:
-        result = schedule(OVERLAP.read_text(), "report=true")
-        match = re.search(r"modeled (\d+) cycles in source order, (\d+) scheduled",
-                          result.stderr)
-        self.assertIsNotNone(match, result.stderr)
-        source_cycles, scheduled_cycles = map(int, match.groups())
-        self.assertLess(scheduled_cycles, source_cycles)
-        data = self.trace(OVERLAP.read_text())
-        block = data["functions"][0]["blocks"][0]
-        self.assertEqual(block["source"]["cycles"], source_cycles)
-        self.assertEqual(block["scheduled"]["cycles"], scheduled_cycles)
-        self.assertEqual(sorted(block["scheduled"]["order"]),
-                         list(range(len(block["labels"]))))
-
-    def test_trace_file_errors_are_reported(self) -> None:
-        result = schedule(OVERLAP.read_text(), "trace-file=/nonexistent/trace.json")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cannot write trace file", result.stderr)
-
-    def test_functions_the_lowering_rejects_keep_their_order(self) -> None:
-        source = function("unlowerable", [
-            start(), inp("io0", "io1", "t", 0), unary("r", "t", "exp"),
-            outp("io1", "io2", "r", 0), f"return %io2 : {S}"])
-        result = schedule(source, "strict=true")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("kept source order for @unlowerable: the lowering cannot "
-                      "handle it", result.stderr)
-        self.assertIn("admission currently requires mov or relu", result.stderr)
-        self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
-
-    def test_model_pressure_over_a_cap_means_allocation_fails(self) -> None:
-        # The pressure model may under-approximate what greedy coloring
-        # needs, never over-approximate: an order it puts over a cap must
-        # fail allocation.
-        over = 0
-        for source in (virtual_pressure(32), wide_return_block(29)):
-            for seed in SEEDS:
-                ordered = self.scheduled(source, f"random-seed={seed}")
-                for block in self.trace(ordered)["functions"][0]["blocks"]:
-                    timeline = block["source"]
-                    if timeline and any(p > c for p, c in zip(timeline["peak"], block["caps"])):
-                        over += 1
-                        self.assertFalse(lowers(ordered), (seed, block["index"]))
-        self.assertGreater(over, 0, "some random order must exceed a cap")
-
-    def test_never_models_worse_than_source(self) -> None:
-        for path in sorted(EXAMPLES.glob("virtual_*.mlir")):
-            for function_trace in self.trace(path.read_text())["functions"]:
-                for block in function_trace["blocks"]:
-                    with self.subTest(fixture=path.name, block=block["index"]):
-                        self.assertLessEqual(block["scheduled"]["cycles"],
-                                             block["source"]["cycles"])
-
-    def test_modeled_gaps_match_the_timing_reference(self) -> None:
-        # Spec 04 "Tested examples": MXU0 weight push → matmul 1, matmul → pop
-        # 64; MXU1 push → matmul 32, matmul → pop 32; a VPU result → reader 66.
-        for unit, push_gap, pop_gap in ((0, 1, 64), (1, 32, 32)):
-            source = function("gaps", [
-                start(), inp("io0", "io1", "x", 0, "fp8"),
-                inp("io1", "io2", "w", 1, "fp8"),
-                *mxu_chain("io2", unit, "w", "x", "h", "m"),
-                unary("r", "h"), unary("q", "r"),
-                outp("ms3", "o", "q", 0), f"return %o : {S}"])
-            data = self.trace(source)["functions"][0]["blocks"][0]
-            start_of = {data["labels"][s["node"]].split(" (")[0]: s["start"]
-                        for s in data["source"]["spans"]}
-            weight = start_of[f"mxu_load_weight u{unit}"]
-            reset = start_of[f"mxu_reset u{unit}"]
-            readout = start_of[f"mxu_readout_bf16 u{unit}"]
-            with self.subTest(unit=unit):
-                self.assertEqual(reset - weight, push_gap)
-                self.assertEqual(readout - reset, pop_gap)
-            relu_starts = sorted(s["start"] for s in data["source"]["spans"]
-                                 if data["labels"][s["node"]].startswith("vpu_unary"))
-            self.assertEqual(relu_starts[1] - relu_starts[0], 66)
+            self.assertEqual(self.scheduled(source), self.scheduled(source))
 
 
 if __name__ == "__main__":

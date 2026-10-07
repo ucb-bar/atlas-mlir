@@ -31,8 +31,6 @@ struct DelayInsertion {
   std::string reason;
 };
 
-// The timing model's view of one machine operation.
-FailureOr<timing::Instr> toTimingInstr(Operation *op);
 FailureOr<AtlasStream> readAtlasStream(ModuleOp module);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
 LogicalResult checkAtlasStream(const AtlasStream &stream);

@@ -47,8 +47,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
 
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
-  DmaQueue dma;
-  auto release = [&](int i) { return dma.release[nodes[i].op->channel]; };
+  int channelRelease[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  int dmaQueueEnd = 0;
+  auto release = [&](int i) { return channelRelease[nodes[i].op->channel]; };
   auto isWait = [&](int i) {
     return nodes[i].op->opClass == OpClass::DmaWait;
   };
@@ -134,8 +135,12 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
     table.reserve(nodes[best], g.footprints[best], cycle);
     if (isWait(best))
       table.extendForWait(cycle);
-    if (g.footprints[best].dmaCycles > 0)
-      dma.launch(cycle, g.footprints[best].dmaCycles, nodes[best].op->channel);
+    if (g.footprints[best].dmaCycles > 0) {
+      // Transfers run one at a time, in issue order.
+      int latency = g.footprints[best].dmaCycles;
+      dmaQueueEnd = std::max(cycle + latency - 1, dmaQueueEnd + latency);
+      channelRelease[nodes[best].op->channel] = dmaQueueEnd + 2;
+    }
     for (int e : g.out[best]) {
       const Edge &ed = g.edges[e];
       if (cycle + ed.distance > earliest[ed.to]) {

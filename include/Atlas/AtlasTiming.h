@@ -5,7 +5,6 @@
 // 3ae2b5d (src/core) with its names. DMA VMEM addresses count words, as in
 // Atlas RTL. An age counts cycles after an instruction issues.
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -40,8 +39,6 @@ struct OpInfo {
 };
 
 const OpInfo *findOp(const std::string &name);
-// Every operation the model knows, in table order.
-const std::vector<OpInfo> &allOps();
 bool hasOperand(const OpInfo &op, const std::string &token);
 bool isControlFlow(const OpInfo &op);
 
@@ -59,8 +56,6 @@ using RegValues = std::array<std::optional<uint32_t>, 32>;
 RegValues unknownRegs();
 std::optional<uint32_t> aluResult(const Instr &in, const RegValues &regs);
 void applyScalar(const Instr &in, RegValues &regs);
-// Whether a conditional branch is taken, when both of its registers are known.
-std::optional<bool> branchTaken(const Instr &in, const RegValues &regs);
 
 const int kVmemBytes = 1536 * 1024;
 const int kVmemBankBytes = 256 * 1024;
@@ -165,18 +160,6 @@ int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
 int dmaTransferCycles(long long bytes);
 
-// npu_model's DMA unit: transfers run one at a time in issue order, and a
-// channel's dma.wait can issue two cycles after its transfer ends.
-struct DmaQueue {
-  int end = 0;
-  std::array<int, 8> release{};
-
-  void launch(int cycle, int transferCycles, int channel) {
-    end = std::max(cycle + transferCycles - 1, end + transferCycles);
-    release[channel] = end + 2;
-  }
-};
-
 class ReservationTable {
 public:
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
@@ -184,9 +167,6 @@ public:
   void reserve(const Instr &in, const Footprint &f, int cycle);
   // A wait releases at an unknown cycle, so reservations extend back to it.
   void extendForWait(int cycle);
-  // Forget every reservation before `cycle`. Later queries at or after
-  // `cycle` give the same answers, and copies stay small.
-  void retire(int cycle);
 
 private:
   struct PortUse {
@@ -207,87 +187,6 @@ private:
                                         int cycle) const;
   bool unitFree(Unit u, int index, int from, int to) const;
   int chooseIndex(const Hold &h, int cycle) const;
-};
-
-// A cycle search gives up after this many cycles.
-constexpr int kMaxSearch = 100000;
-
-// The first cycle at or after `from` for which `fits` returns no conflict.
-// `reason` receives each conflict found on the way; nullopt means none of
-// kMaxSearch cycles fit.
-template <typename Fits>
-std::optional<int> firstFit(int from, Fits &&fits, std::string &reason) {
-  for (int cycle = from;; ++cycle) {
-    std::string why = fits(cycle);
-    if (why.empty())
-      return cycle;
-    reason = why;
-    if (cycle - from > kMaxSearch)
-      return std::nullopt;
-  }
-}
-
-// When a dma.wait may issue.
-enum class WaitRelease {
-  // At an unknown cycle, so reservations extend back to the wait. This is
-  // what insert-atlas-delays assumes, since it cannot rely on transfer times.
-  Unknown,
-  // When its channel's transfer ends in the DmaQueue model.
-  Modeled,
-};
-
-// In-order issue of one straight-line block, as insert-atlas-delays times it:
-// each instruction issues at the first cycle that keeps its dependences on
-// everything issued before it. Structural conflicts are searched by the
-// caller with firstFit and table(), since delay slots need a joint check.
-class InOrderIssue {
-public:
-  struct Binding {
-    size_t id;
-    Dependence dependence;
-  };
-
-  InOrderIssue(const RegValues &entry, WaitRelease waits)
-      : regs_(entry), waits_(waits) {}
-
-  // The first cycle at or after `from` that keeps every dependence on issued
-  // work and, for a dma.wait under WaitRelease::Modeled, its transfer's end.
-  // `binding` receives the issued instruction that decided the cycle, if any.
-  int earliest(const Instr &in, const Footprint &f, int from,
-               std::optional<Binding> *binding = nullptr) const;
-  // Issue `in` at `cycle`; `id` is the caller's name for it in a Binding.
-  void issue(const Instr &in, const Footprint &f, int cycle, size_t id = 0);
-  // The issued instruction whose work ends last, as {id, cycle of its last
-  // access}, if that is after `after`. A halt waits for it: halts do not drain.
-  std::optional<std::pair<size_t, int>> lastToFinish(int after) const;
-  // Forget issued work that can no longer constrain an issue at nextFree().
-  // A dependence distance never exceeds the producer's doneAge + 1, which
-  // atlas-timing-test checks for every pair of operations.
-  void retire();
-
-  const ReservationTable &table() const { return table_; }
-  const RegValues &regs() const { return regs_; }
-  int nextFree() const { return nextFree_; }
-  // The first cycle at which all issued fixed-latency work has finished.
-  int drained() const { return drained_; }
-  // When a dma.wait on `channel` may issue under WaitRelease::Modeled.
-  int dmaRelease(int channel) const { return dma_.release[channel]; }
-
-private:
-  struct Issued {
-    size_t id;
-    Instr instr;
-    Footprint footprint;
-    int cycle;
-  };
-
-  std::vector<Issued> issued_;
-  ReservationTable table_;
-  RegValues regs_;
-  WaitRelease waits_;
-  DmaQueue dma_;
-  int nextFree_ = 0;
-  int drained_ = 0;
 };
 
 } // namespace mlir::atlas::timing

@@ -4,7 +4,6 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 
 using namespace mlir;
@@ -12,10 +11,28 @@ using namespace mlir::atlas;
 
 namespace {
 constexpr unsigned kTensorPairTemporary = 62;
-constexpr unsigned kFp8Registers = 32; // m0-m31 when FP8 values are present
 constexpr unsigned kFirstScalarValue = 10;
-constexpr unsigned kFirstScalarValueWithPack = 18; // x10-x17 serve the pack
 constexpr unsigned kLastScalarValue = 26;
+
+// Whether `function` has FP8 values, which keep m0-m31 and move BF16 pairs
+// above them, and a pack, which keeps x10-x17 for its relayout loop.
+void findReservations(func::FuncOp function, bool &mixedFp8, bool &hasPack) {
+  mixedFp8 = false;
+  hasPack = false;
+  function.walk([&](Operation *op) {
+    hasPack |= isa<VirtualPackFP8Op>(op);
+    for (Type type : op->getResultTypes())
+      mixedFp8 |= isa<VirtualFP8Type>(type);
+  });
+}
+
+unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
+  unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
+  return kind == RegisterKind::BF16
+             ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
+             : kind == RegisterKind::FP8 ? 32
+                                         : kLastScalarValue - firstScalar + 1;
+}
 
 FixedResourcePlacement selectedResources() {
   FixedResourcePlacement resources;
@@ -54,27 +71,17 @@ FixedResourcePlacement selectedResources() {
 }
 } // namespace
 
-RegisterBudget mlir::atlas::registerBudget(RegisterKind kind, bool mixedFp8,
-                                          bool hasPack) {
-  switch (kind) {
-  case RegisterKind::BF16: {
-    unsigned first = mixedFp8 ? kFp8Registers : 0;
-    return {first, (kTensorPairTemporary - first) / 2, 2};
-  }
-  case RegisterKind::FP8:
-    return {0, kFp8Registers, 1};
-  case RegisterKind::Scalar: {
-    unsigned first = hasPack ? kFirstScalarValueWithPack : kFirstScalarValue;
-    return {first, kLastScalarValue - first + 1, 1};
-  }
-  }
-  llvm_unreachable("unknown register kind");
+unsigned mlir::atlas::registerCapacity(func::FuncOp function,
+                                       RegisterKind kind) {
+  bool mixedFp8, hasPack;
+  findReservations(function, mixedFp8, hasPack);
+  return capacity(kind, mixedFp8, hasPack);
 }
 
 VirtualAllocationPlan::VirtualAllocationPlan()
     : fixedResources(selectedResources()) {}
 
-LogicalResult VirtualAllocationPlan::placeResources(func::FuncOp function) {
+LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   this->function = function;
   tileRegs.clear();
   fp8Regs.clear();
@@ -82,12 +89,9 @@ LogicalResult VirtualAllocationPlan::placeResources(func::FuncOp function) {
   mxuResources.clear();
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
-  mixedFp8 = false;
-  hasPack = false;
+  findReservations(function, mixedFp8, hasPack);
   function.walk([&](Operation *op) {
-    hasPack |= isa<VirtualPackFP8Op>(op);
     for (Value result : op->getResults()) {
-      mixedFp8 |= isa<VirtualFP8Type>(result.getType());
       // Verified lifetimes permit slot 0 in each unit's weight/accumulator bank.
       if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
         mxuResources[result] = {weight.getUnit(), fixedResources.mxuWeightSlot};
@@ -95,6 +99,12 @@ LogicalResult VirtualAllocationPlan::placeResources(func::FuncOp function) {
         mxuResources[result] = {acc.getUnit(), fixedResources.mxuAccSlot};
     }
   });
+  if (failed(colorValues(RegisterKind::BF16)) ||
+      failed(colorValues(RegisterKind::FP8)) ||
+      failed(colorValues(RegisterKind::Scalar)))
+    return failure();
+  for (BlockArgument arg : function.getArguments())
+    scalarArgumentRegs.push_back(scalar(arg));
 
   unsigned nextTransfer = 0;
   for (Block &block : function.getBody()) {
@@ -122,17 +132,6 @@ LogicalResult VirtualAllocationPlan::placeResources(func::FuncOp function) {
             fixedResources.dmaSizeReg};
     }
   }
-  return success();
-}
-
-LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
-  if (failed(placeResources(function)) ||
-      failed(colorValues(RegisterKind::BF16)) ||
-      failed(colorValues(RegisterKind::FP8)) ||
-      failed(colorValues(RegisterKind::Scalar)))
-    return failure();
-  for (BlockArgument arg : function.getArguments())
-    scalarArgumentRegs.push_back(scalar(arg));
   return success();
 }
 
@@ -287,10 +286,11 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     return neighbors[a].size() > neighbors[b].size();
   });
   llvm::DenseMap<Value, unsigned> colors;
-  RegisterBudget budget = registerBudget(kind, mixedFp8, hasPack);
+  unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
+  unsigned count = capacity(kind, mixedFp8, hasPack);
   for (Value value : values) {
     bool assigned = false;
-    for (unsigned color = 0; color < budget.count; ++color) {
+    for (unsigned color = 0; color < count; ++color) {
       bool conflict = llvm::any_of(neighbors[value], [&](Value other) {
         auto found = colors.find(other);
         return found != colors.end() && found->second == color;
@@ -316,13 +316,12 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     for (Value other : neighbors[value])
       if (colors[value] == colors[other])
         return function.emitOpError("internal register-coloring overlap");
-    unsigned reg = budget.reg(colors[value]);
     if (kind == RegisterKind::BF16)
-      tileRegs[value] = reg;
+      tileRegs[value] = (mixedFp8 ? 32 : 0) + 2 * colors[value];
     else if (kind == RegisterKind::FP8)
-      fp8Regs[value] = reg;
+      fp8Regs[value] = colors[value];
     else
-      scalarRegs[value] = reg;
+      scalarRegs[value] = firstScalar + colors[value];
   }
   return success();
 }

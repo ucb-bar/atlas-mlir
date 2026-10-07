@@ -1,5 +1,4 @@
 #include "Atlas/AtlasTiming.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <algorithm>
 #include <cctype>
@@ -92,15 +91,11 @@ static std::vector<OpInfo> buildTable() {
   return t;
 }
 
-const std::vector<OpInfo> &mlir::atlas::timing::allOps() {
-  static const std::vector<OpInfo> table = buildTable();
-  return table;
-}
-
 const OpInfo *mlir::atlas::timing::findOp(const std::string &name) {
+  static const std::vector<OpInfo> table = buildTable();
   static const std::map<std::string, const OpInfo *> byName = [] {
     std::map<std::string, const OpInfo *> m;
-    for (const OpInfo &op : allOps())
+    for (const OpInfo &op : table)
       m[op.name] = &op;
     return m;
   }();
@@ -205,22 +200,6 @@ void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
   if (!writesX || in.rd == 0)
     return;
   regs[in.rd] = c == OpClass::Alu ? aluResult(in, regs) : std::nullopt;
-}
-
-std::optional<bool> mlir::atlas::timing::branchTaken(const Instr &in,
-                                                    const RegValues &regs) {
-  if (in.op->opClass != OpClass::Branch || !regs[in.rs1] || !regs[in.rs2])
-    return std::nullopt;
-  uint32_t a = *regs[in.rs1], b = *regs[in.rs2];
-  int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
-  return llvm::StringSwitch<std::optional<bool>>(in.op->name)
-      .Case("beq", a == b)
-      .Case("bne", a != b)
-      .Case("blt", sa < sb)
-      .Case("bge", sa >= sb)
-      .Case("bltu", a < b)
-      .Case("bgeu", a >= b)
-      .Default(std::nullopt);
 }
 
 int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
@@ -1154,65 +1133,4 @@ void ReservationTable::extendForWait(int cycle) {
       ports_[w.key][c] = PortUse{};
     w.from = std::min(w.from, cycle);
   }
-}
-
-void ReservationTable::retire(int cycle) {
-  auto dropBefore = [&](auto &perCycle) {
-    perCycle.erase(perCycle.begin(), perCycle.lower_bound(cycle));
-  };
-  for (auto &[key, cycles] : units_)
-    dropBefore(cycles);
-  for (auto &[key, cycles] : ports_)
-    dropBefore(cycles);
-  dropBefore(vpu_);
-  // extendForWait only extends windows that end at or after its cycle.
-  llvm::erase_if(unitWindows_, [&](const UnitWindow &w) { return w.to < cycle; });
-  llvm::erase_if(portWindows_, [&](const PortWindow &w) { return w.to < cycle; });
-}
-
-int InOrderIssue::earliest(const Instr &in, const Footprint &f, int from,
-                           std::optional<Binding> *binding) const {
-  int cycle = from;
-  for (const Issued &x : issued_) {
-    Dependence d = dependence(x.instr, x.footprint, in, f);
-    if (d.distance > 0 && x.cycle + d.distance > cycle) {
-      cycle = x.cycle + d.distance;
-      if (binding)
-        *binding = Binding{x.id, d};
-    }
-  }
-  if (waits_ == WaitRelease::Modeled && in.op->opClass == OpClass::DmaWait)
-    cycle = std::max(cycle, dma_.release[in.op->channel]);
-  return cycle;
-}
-
-void InOrderIssue::issue(const Instr &in, const Footprint &f, int cycle,
-                         size_t id) {
-  table_.reserve(in, f, cycle);
-  if (in.op->opClass == OpClass::DmaWait && waits_ == WaitRelease::Unknown)
-    table_.extendForWait(cycle);
-  if (f.dmaCycles > 0 && waits_ == WaitRelease::Modeled)
-    dma_.launch(cycle, f.dmaCycles, in.op->channel);
-  issued_.push_back({id, in, f, cycle});
-  applyScalar(in, regs_);
-  nextFree_ = cycle + naturalGap(in);
-  drained_ = std::max(drained_, cycle + f.doneAge + 1);
-}
-
-std::optional<std::pair<size_t, int>>
-InOrderIssue::lastToFinish(int after) const {
-  std::optional<std::pair<size_t, int>> last;
-  for (const Issued &x : issued_) {
-    int finish = x.cycle + x.footprint.doneAge;
-    if (finish > (last ? last->second : after))
-      last = {x.id, finish};
-  }
-  return last;
-}
-
-void InOrderIssue::retire() {
-  llvm::erase_if(issued_, [&](const Issued &x) {
-    return x.cycle + x.footprint.doneAge + 1 <= nextFree_;
-  });
-  table_.retire(nextFree_);
 }

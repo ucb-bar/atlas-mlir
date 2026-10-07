@@ -11,7 +11,6 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
 #include <cstdint>
@@ -28,136 +27,21 @@ constexpr uint64_t kTileBytes = 2048;
 constexpr uint64_t kHalfBytes = 1024;
 constexpr unsigned kDiagnosticDelay = 256;
 
-// A DMA address proven from i32 constants and wrapping additions.
-std::optional<uint32_t>
-constantAddress(Value value,
-                llvm::DenseMap<Value, std::optional<uint32_t>> &known) {
-  auto [entry, inserted] = known.try_emplace(value, std::nullopt);
-  if (!inserted)
-    return entry->second;
-  std::optional<uint32_t> result;
-  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
-    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
-      result = static_cast<uint32_t>(integer.getValue().getZExtValue());
-  } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
-    auto lhs = constantAddress(add.getLhs(), known);
-    auto rhs = constantAddress(add.getRhs(), known);
-    if (lhs && rhs)
-      result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
-  }
-  known[value] = result;
-  return result;
-}
+struct PlannedOp {
+  std::string name;
+  SmallVector<NamedAttribute> attrs;
+  Location loc;
+  std::optional<unsigned> targetLabel;
+};
 
-LogicalResult readABI(func::FuncOp function, const FixedResourcePlacement &fixed,
-                      VirtualLoweringABI &abi) {
-  llvm::DenseMap<Value, std::optional<uint32_t>> known;
-  auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
-  auto output = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
-  if (!input || !output)
-    return function.emitOpError(
-        "lowering requires explicit atlas.input_dram_base and atlas.output_dram_base");
-  int64_t in = input.getValue().getSExtValue();
-  int64_t out = output.getValue().getSExtValue();
-  if (in < 0x80000000LL || out < 0x80000000LL ||
-      in > std::numeric_limits<uint32_t>::max() ||
-      out > std::numeric_limits<uint32_t>::max() ||
-      (in % kHalfBytes) || (out % kHalfBytes))
-    return function.emitOpError("DRAM bases must be aligned 32-bit selected-memory addresses");
-  abi.inputBase = static_cast<uint64_t>(in);
-  abi.outputBase = static_cast<uint64_t>(out);
-
-  uint64_t maxInput = 0, maxOutput = 0;
-  bool hasPack = false;
-  function.walk([&](Operation *op) {
-    if (auto x = dyn_cast<VirtualInputBF16Op>(op))
-      maxInput = std::max(maxInput,
-                          static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-    if (auto x = dyn_cast<VirtualInputFP8Op>(op))
-      maxInput = std::max(maxInput,
-                          static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-    if (auto x = dyn_cast<VirtualOutputBF16Op>(op))
-      maxOutput = std::max(maxOutput,
-                           static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-    hasPack |= isa<VirtualPackFP8Op>(op);
-  });
-  if (maxInput >= fixed.inputWindowWords * 4 / kTileBytes ||
-      maxOutput >= fixed.outputWindowWords * 4 / kTileBytes)
-    return function.emitOpError("input or output tile index exceeds its VMEM bank");
-  if (hasPack && maxInput >= (fixed.packWord - fixed.inputWord) / 512)
-    return function.emitOpError(
-        "FP8 pack scratch window requires input indexes below 64");
-  uint64_t inputEnd = abi.inputBase + (maxInput + 1) * kTileBytes;
-  uint64_t outputEnd = abi.outputBase + (maxOutput + 1) * kTileBytes;
-  if (inputEnd > (1ULL << 32) || outputEnd > (1ULL << 32) ||
-      (abi.inputBase < outputEnd && abi.outputBase < inputEnd))
-    return function.emitOpError("input and output DRAM spans overlap or overflow");
-  if (function.getNumArguments()) {
-    auto control =
-        function->getAttrOfType<IntegerAttr>("atlas.control_dram_base");
-    if (!control)
-      return function.emitOpError(
-          "scalar arguments require atlas.control_dram_base mailbox binding");
-    int64_t address = control.getValue().getSExtValue();
-    if (address < 0x80000000LL ||
-        address > std::numeric_limits<uint32_t>::max() ||
-        address % kHalfBytes)
-      return function.emitOpError(
-          "control mailbox must have an aligned 32-bit DRAM address");
-    abi.controlBase = static_cast<uint64_t>(address);
-    uint64_t controlEnd = *abi.controlBase + kHalfBytes;
-    if (controlEnd > (1ULL << 32) ||
-        (*abi.controlBase < inputEnd && abi.inputBase < controlEnd) ||
-        (*abi.controlBase < outputEnd && abi.outputBase < controlEnd))
-      return function.emitOpError(
-          "control mailbox overlaps a tensor buffer or overflows DRAM");
-    WalkResult checked = function.walk([&](Operation *op) {
-      bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
-      bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-      if (!fp8 && !load && !isa<VirtualDMAStoreBF16Op>(op))
-        return WalkResult::advance();
-      auto address = constantAddress(op->getOperand(load ? 1 : 2), known);
-      if (!address) {
-        op->emitOpError("DMA address is not statically known");
-        return WalkResult::interrupt();
-      }
-      uint64_t end = static_cast<uint64_t>(*address) +
-                     (fp8 ? kHalfBytes : kTileBytes);
-      if (*address < controlEnd && *abi.controlBase < end) {
-        op->emitOpError("explicit DMA span overlaps the control mailbox");
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (checked.wasInterrupted())
-      return failure();
-  }
-  return success();
-}
-} // namespace
-
-FailureOr<VirtualLoweringABI>
-mlir::atlas::readVirtualLoweringABI(func::FuncOp function,
-                                    const FixedResourcePlacement &fixed) {
-  VirtualLoweringABI abi;
-  if (failed(readABI(function, fixed, abi)))
-    return failure();
-  return abi;
-}
-
-namespace {
-// Emits the machine steps of virtual operations into a sink, reading
-// physical locations from a VirtualPlacement.
-class OperationLowering {
+class VirtualPlanner {
 public:
-  OperationLowering(MLIRContext *context, const VirtualPlacement &placement,
-                    const VirtualLoweringABI &abi,
-                    VirtualLoweringOptions options, MachineStepSink &sink)
-      : attrs(context), placement(placement), abi(abi), options(options),
-        sink(sink) {}
+  VirtualPlanner(ModuleOp module, func::FuncOp function)
+      : module(module), function(function), attrs(module.getContext()) {}
 
-  // Constant registers, DMA channel bases, and staged scalar arguments.
-  void prologue(func::FuncOp function) {
+  LogicalResult plan() {
+    if (failed(readABI()) || failed(allocation.allocate(function)) || failed(allocation.verify()))
+      return failure();
     Location loc = function.getLoc();
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().oneReg)}, {"src", i32(0)},
@@ -169,11 +53,455 @@ public:
       add("atlas.dma_config", loc,
           {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
     materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
-    if (abi.controlBase)
-      stageScalarArguments(function, loc);
+    if (controlBase)
+      stageScalarArguments(loc);
+
+    for (Block &block : function.getBody()) {
+      mark(labelFor(&block));
+      for (Operation &op : block) {
+        if (failed(lowerOperation(op)))
+          return failure();
+      }
+    }
+    if (planned.size() > 2048)
+      return function.emitOpError("lowered program exceeds the 2048-word policy limit");
+    return resolveTargets();
   }
 
-  LogicalResult lower(Operation &op) {
+  LogicalResult materialize() {
+    for (Operation &op : llvm::make_early_inc_range(
+             llvm::reverse(module.getBody()->getOperations())))
+      op.erase();
+    OpBuilder builder(module.getContext());
+    builder.setInsertionPointToEnd(module.getBody());
+    OperationState startState(module.getLoc(), "atlas.start");
+    startState.addTypes(StateType::get(module.getContext()));
+    Value state = builder.create(startState)->getResult(0);
+    for (const PlannedOp &step : planned) {
+      OperationState machineState(step.loc, step.name);
+      machineState.addOperands(state);
+      machineState.addTypes(StateType::get(module.getContext()));
+      machineState.addAttributes(step.attrs);
+      state = builder.create(machineState)->getResult(0);
+    }
+    module->setAttr("atlas.generated_from_virtual", builder.getUnitAttr());
+    module->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
+    module->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
+    module->setAttr("atlas.scalar_arg_regs",
+                    builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
+    if (controlBase)
+      module->setAttr("atlas.control_dram_base",
+                      builder.getI64IntegerAttr(*controlBase));
+    if (failed(verify(module)))
+      return failure();
+    llvm::SmallVector<uint32_t> words;
+    return collectAtlasWords(module, words, /*llvmBlock=*/true);
+  }
+
+private:
+  using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
+
+  IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
+  StringAttr str(StringRef value) { return attrs.getStringAttr(value); }
+  BoolAttr boolean(bool value) { return attrs.getBoolAttr(value); }
+
+  void add(StringRef name, Location loc, Fields fields = {},
+           std::optional<unsigned> target = std::nullopt) {
+    PlannedOp step{name.str(), {}, loc, target};
+    for (const auto &[key, value] : fields)
+      step.attrs.emplace_back(StringAttr::get(module.getContext(), key), value);
+    planned.push_back(std::move(step));
+  }
+
+  unsigned newLabel() { return nextLabel++; }
+  unsigned labelFor(Block *block) {
+    auto it = blockLabels.find(block);
+    if (it != blockLabels.end())
+      return it->second;
+    unsigned label = newLabel();
+    blockLabels[block] = label;
+    return label;
+  }
+  void mark(unsigned label) { labelPC[label] = planned.size(); }
+
+  std::optional<uint32_t> constantAddress(Value value) {
+    auto [entry, inserted] = constantAddresses.try_emplace(value, std::nullopt);
+    if (!inserted)
+      return entry->second;
+    std::optional<uint32_t> result;
+    if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+      if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+        result = static_cast<uint32_t>(integer.getValue().getZExtValue());
+    } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
+      auto lhs = constantAddress(add.getLhs());
+      auto rhs = constantAddress(add.getRhs());
+      if (lhs && rhs)
+        result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
+    }
+    constantAddresses[value] = result;
+    return result;
+  }
+
+  LogicalResult readABI() {
+    auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
+    auto output = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
+    if (!input || !output)
+      return function.emitOpError(
+          "lowering requires explicit atlas.input_dram_base and atlas.output_dram_base");
+    int64_t in = input.getValue().getSExtValue();
+    int64_t out = output.getValue().getSExtValue();
+    if (in < 0x80000000LL || out < 0x80000000LL ||
+        in > std::numeric_limits<uint32_t>::max() ||
+        out > std::numeric_limits<uint32_t>::max() ||
+        (in % kHalfBytes) || (out % kHalfBytes))
+      return function.emitOpError("DRAM bases must be aligned 32-bit selected-memory addresses");
+    inputBase = static_cast<uint64_t>(in);
+    outputBase = static_cast<uint64_t>(out);
+
+    uint64_t maxInput = 0, maxOutput = 0;
+    bool hasPack = false;
+    function.walk([&](Operation *op) {
+      if (auto x = dyn_cast<VirtualInputBF16Op>(op))
+        maxInput = std::max(maxInput,
+                            static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
+      if (auto x = dyn_cast<VirtualInputFP8Op>(op))
+        maxInput = std::max(maxInput,
+                            static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
+      if (auto x = dyn_cast<VirtualOutputBF16Op>(op))
+        maxOutput = std::max(maxOutput,
+                             static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
+      hasPack |= isa<VirtualPackFP8Op>(op);
+    });
+    if (maxInput >= fixed().inputWindowWords * 4 / kTileBytes ||
+        maxOutput >= fixed().outputWindowWords * 4 / kTileBytes)
+      return function.emitOpError("input or output tile index exceeds its VMEM bank");
+    if (hasPack && maxInput >= (fixed().packWord - fixed().inputWord) / 512)
+      return function.emitOpError(
+          "FP8 pack scratch window requires input indexes below 64");
+    uint64_t inputEnd = inputBase + (maxInput + 1) * kTileBytes;
+    uint64_t outputEnd = outputBase + (maxOutput + 1) * kTileBytes;
+    if (inputEnd > (1ULL << 32) || outputEnd > (1ULL << 32) ||
+        (inputBase < outputEnd && outputBase < inputEnd))
+      return function.emitOpError("input and output DRAM spans overlap or overflow");
+    if (function.getNumArguments()) {
+      auto control =
+          function->getAttrOfType<IntegerAttr>("atlas.control_dram_base");
+      if (!control)
+        return function.emitOpError(
+            "scalar arguments require atlas.control_dram_base mailbox binding");
+      int64_t address = control.getValue().getSExtValue();
+      if (address < 0x80000000LL ||
+          address > std::numeric_limits<uint32_t>::max() ||
+          address % kHalfBytes)
+        return function.emitOpError(
+            "control mailbox must have an aligned 32-bit DRAM address");
+      controlBase = static_cast<uint64_t>(address);
+      uint64_t controlEnd = *controlBase + kHalfBytes;
+      if (controlEnd > (1ULL << 32) ||
+          (*controlBase < inputEnd && inputBase < controlEnd) ||
+          (*controlBase < outputEnd && outputBase < controlEnd))
+        return function.emitOpError(
+            "control mailbox overlaps a tensor buffer or overflows DRAM");
+      WalkResult checked = function.walk([&](Operation *op) {
+        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
+        bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+        if (!fp8 && !load && !isa<VirtualDMAStoreBF16Op>(op))
+          return WalkResult::advance();
+        auto address = constantAddress(op->getOperand(load ? 1 : 2));
+        if (!address) {
+          op->emitOpError("DMA address is not statically known");
+          return WalkResult::interrupt();
+        }
+        uint64_t end = static_cast<uint64_t>(*address) +
+                       (fp8 ? kHalfBytes : kTileBytes);
+        if (*address < controlEnd && *controlBase < end) {
+          op->emitOpError("explicit DMA span overlaps the control mailbox");
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (checked.wasInterrupted())
+        return failure();
+    }
+    return success();
+  }
+
+  const FixedResourcePlacement &fixed() const { return allocation.fixed(); }
+  unsigned tile(Value value) const { return allocation.tile(value); }
+  unsigned fp8(Value value) const { return allocation.fp8(value); }
+  unsigned scalar(Value value) const { return allocation.scalar(value); }
+  MXUPlacement mxu(Value value) const { return allocation.mxu(value); }
+
+  void materializeScalar(unsigned dst, uint32_t value, Location loc) {
+    uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
+    int32_t lower = static_cast<int32_t>(value & 0xfff);
+    if (lower >= 2048)
+      lower -= 4096;
+    if (upper)
+      add("atlas.upper", loc,
+          {{"kind", str("lui")}, {"dst", i32(dst)},
+           {"immediate", i32(upper)}});
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(dst)},
+         {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
+  }
+
+  void delay(Location loc, StringRef reason) {
+    add("atlas.delay", loc,
+        {{"cycles", i32(kDiagnosticDelay)},
+         {"atlas.delay_reason", str(reason)}});
+  }
+
+  void stageScalarArguments(Location loc) {
+    // The first 1-KiB VMEM window is a temporary mailbox. Tensor input DMA
+    // may reuse it only after every asynchronous scalar LW has completed.
+    materializeScalar(fixed().inputBaseReg, fixed().mailboxWord, loc);
+    materializeScalar(fixed().inputDramReg, static_cast<uint32_t>(*controlBase), loc);
+    add("atlas.dma", loc,
+        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
+         {"reg", i32(fixed().inputBaseReg)},
+         {"dram", i32(fixed().inputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
+    for (auto [index, arg] : llvm::enumerate(function.getArguments())) {
+      unsigned reg = scalar(arg);
+      add("atlas.scalar_load", loc,
+          {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
+           {"offset", i32(4 * (fixed().mailboxWord + index))}});
+      add("atlas.delay", loc,
+          {{"cycles", i32(8)},
+           {"atlas.delay_reason", str("scalar_load_completion")}});
+      if (arg.getType().isInteger(1))
+        add("atlas.alu_imm", loc,
+            {{"kind", str("andi")}, {"dst", i32(reg)},
+             {"src", i32(reg)}, {"immediate", i32(1)}});
+    }
+  }
+
+  void emitCopy(unsigned dst, unsigned src, bool tensor, Location loc) {
+    if (dst == src)
+      return;
+    if (tensor) {
+      add("atlas.vpu_unary", loc,
+          {{"kind", str("mov")}, {"dst", i32(dst)}, {"src", i32(src)}});
+      delay(loc, "cfg_tensor_copy");
+    } else {
+      add("atlas.alu_imm", loc,
+          {{"kind", str("addi")}, {"dst", i32(dst)},
+           {"src", i32(src)}, {"immediate", i32(0)}});
+    }
+  }
+
+  void parallelCopies(SmallVector<std::pair<unsigned, unsigned>> copies,
+                      bool tensor, Location loc) {
+    copies.erase(std::remove_if(copies.begin(), copies.end(),
+                                [](auto copy) { return copy.first == copy.second; }),
+                 copies.end());
+    while (!copies.empty()) {
+      bool progressed = false;
+      for (size_t i = 0; i < copies.size(); ++i) {
+        unsigned dst = copies[i].first;
+        bool neededAsSource = llvm::any_of(copies, [&](auto copy) {
+          return copy.second == dst;
+        });
+        if (!neededAsSource) {
+          emitCopy(dst, copies[i].second, tensor, loc);
+          copies.erase(copies.begin() + i);
+          progressed = true;
+          break;
+        }
+      }
+      if (progressed)
+        continue;
+      unsigned saved = copies.front().first;
+      unsigned temporary =
+          tensor ? fixed().tensorTemporary : fixed().scalarTemporary;
+      emitCopy(temporary, saved, tensor, loc);
+      for (auto &copy : copies)
+        if (copy.second == saved)
+          copy.second = temporary;
+    }
+  }
+
+  void edgeCopies(Block *dest, ValueRange operands, Location loc) {
+    SmallVector<std::pair<unsigned, unsigned>> tensors, scalars;
+    for (auto [arg, incoming] : llvm::zip(dest->getArguments(), operands)) {
+      if (isa<VirtualStateType>(arg.getType()))
+        continue;
+      if (isa<VirtualBF16Type>(arg.getType()))
+        tensors.emplace_back(tile(arg), tile(incoming));
+      else
+        scalars.emplace_back(scalar(arg), scalar(incoming));
+    }
+    parallelCopies(std::move(tensors), true, loc);
+    parallelCopies(std::move(scalars), false, loc);
+  }
+
+  void jump(unsigned target, Location loc) {
+    add("atlas.jump", loc,
+        {{"kind", str("jal")}, {"dst", i32(0)}, {"base", i32(0)}}, target);
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
+         {"immediate", i32(0)}});
+  }
+
+  void inputHalf(unsigned dst, uint64_t index, unsigned half, Location loc) {
+    uint32_t scratchWord = static_cast<uint32_t>(
+        fixed().inputWord + index * 512 + half * 256);
+    uint32_t dramByte = static_cast<uint32_t>(inputBase + index * kTileBytes +
+                                              half * kHalfBytes);
+    materializeScalar(fixed().inputBaseReg, scratchWord, loc);
+    materializeScalar(fixed().inputDramReg, dramByte, loc);
+    add("atlas.dma", loc,
+        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
+         {"reg", i32(fixed().inputBaseReg)},
+         {"dram", i32(fixed().inputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
+    add("atlas.vload", loc,
+        {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
+         {"format", str("raw")}});
+    delay(loc, "vload_completion");
+  }
+
+  void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
+    uint32_t scratchWord = static_cast<uint32_t>(fixed().outputWord +
+                                                 index * 512 + half * 256);
+    uint32_t dramByte = static_cast<uint32_t>(outputBase + index * kTileBytes +
+                                              half * kHalfBytes);
+    materializeScalar(fixed().outputBaseReg, scratchWord, loc);
+    add("atlas.vstore", loc,
+        {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
+         {"format", str("raw")}});
+    delay(loc, "vstore_completion");
+    materializeScalar(fixed().outputDramReg, dramByte, loc);
+    add("atlas.dma", loc,
+        {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
+         {"reg", i32(fixed().outputBaseReg)},
+         {"dram", i32(fixed().outputDramReg)},
+         {"size", i32(fixed().halfSizeReg)}});
+    add("atlas.dma_wait", loc, {{"channel", i32(fixed().storeChannel)}});
+  }
+
+  void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
+                 std::optional<unsigned> src, Location loc) {
+    const DMATransferPlacement &placement = allocation.dma(transfer);
+    emitCopy(placement.dramReg, scalar(dramByte), false, loc);
+    emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
+    materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    if (src) {
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        if (half)
+          materializeScalar(placement.stagingReg,
+                            placement.stagingWord + half * 256, loc);
+        add("atlas.vstore", loc,
+            {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vstore_completion");
+      }
+      if (placement.halves > 1)
+        materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    }
+    add("atlas.dma", loc,
+        {{"direction", str(src ? "store" : "load")},
+         {"channel", i32(placement.channel)}, {"reg", i32(placement.stagingReg)},
+         {"dram", i32(placement.dramReg)}, {"size", i32(placement.sizeReg)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+  }
+
+  LogicalResult completeDMA(Value transfer, std::optional<unsigned> dst,
+                            Operation &op) {
+    const DMATransferPlacement &placement = allocation.dma(transfer);
+    Location loc = op.getLoc();
+    add("atlas.dma_wait", loc,
+        {{"channel", i32(placement.channel)},
+         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+    if (dst) {
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        if (half)
+          materializeScalar(placement.stagingReg,
+                            placement.stagingWord + half * 256, loc);
+        add("atlas.vload", loc,
+            {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
+             {"offset", i32(0)}, {"format", str("raw")}});
+        delay(loc, "vload_completion");
+      }
+    }
+    return success();
+  }
+
+  LogicalResult lowerPack(VirtualPackFP8Op pack) {
+    if (pack.getScaleCode() != 127)
+      return pack.emitOpError(
+          "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
+    Location loc = pack.getLoc();
+    add("atlas.scalar_load", loc,
+        {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
+         {"offset", i32(pack.getScaleCode())}});
+    add("atlas.vpu_pack", loc,
+        {{"direction", str("bf16_to_fp8")},
+         {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
+         {"scale_reg", i32(fixed().scaleReg)}});
+    delay(loc, "vpu_pack_completion");
+
+    // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
+    // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
+    // in the free upper half of input VMEM and interleave its two 512-byte
+    // halves through a bounded 32-row scalar loop.
+    materializeScalar(fixed().outputBaseReg, fixed().packWord, loc);
+    add("atlas.vstore", loc,
+        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
+         {"offset", i32(0)}, {"format", str("raw")}});
+    delay(loc, "pack_vstore_completion");
+    materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
+    materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
+    materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
+    materializeScalar(fixed().packRowReg, 0, loc);
+    materializeScalar(fixed().packRowsReg, 32, loc);
+    unsigned loop = newLabel();
+    mark(loop);
+    for (unsigned word = 0; word < 4; ++word) {
+      for (unsigned half = 0; half < 2; ++half) {
+        unsigned source = fixed().packSourceRegs[half];
+        unsigned temp = fixed().packTemporaryRegs[half];
+        add("atlas.scalar_load", loc,
+            {{"kind", str("lw")}, {"dst", i32(temp)},
+             {"base", i32(source)}, {"offset", i32(4 * word)}});
+        add("atlas.delay", loc,
+            {{"cycles", i32(8)},
+             {"atlas.delay_reason", str("scalar_load_completion")}});
+        add("atlas.scalar_store", loc,
+            {{"kind", str("sw")}, {"src", i32(temp)},
+             {"base", i32(fixed().packDestinationReg)},
+             {"offset", i32(4 * word + 16 * half)}});
+      }
+    }
+    for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
+                         fixed().packDestinationReg})
+      add("atlas.alu_imm", loc,
+          {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
+           {"immediate", i32(reg == fixed().packDestinationReg ? 32 : 16)}});
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(fixed().packRowReg)},
+         {"src", i32(fixed().packRowReg)},
+         {"immediate", i32(1)}});
+    add("atlas.branch", loc,
+        {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
+         {"rhs", i32(fixed().packRowsReg)}},
+        loop);
+    add("atlas.alu_imm", loc,
+        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
+         {"immediate", i32(0)}});
+    delay(loc, "scalar_relayout_completion");
+    materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
+    add("atlas.vload", loc,
+        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
+         {"offset", i32(0)}, {"format", str("raw")}});
+    delay(loc, "pack_relayout_vload_completion");
+    return success();
+  }
+
+  LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
@@ -356,11 +684,11 @@ public:
       return lowerCompare(cmp);
     if (auto branch = dyn_cast<cf::BranchOp>(op)) {
       edgeCopies(branch.getDest(), branch.getDestOperands(), loc);
-      jump(sink.labelFor(branch.getDest()), loc);
+      jump(labelFor(branch.getDest()), loc);
       return success();
     }
     if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
-      unsigned trueEdge = sink.newLabel();
+      unsigned trueEdge = newLabel();
       add("atlas.branch", loc,
           {{"kind", str("bne")}, {"lhs", i32(scalar(branch.getCondition()))},
            {"rhs", i32(0)}}, trueEdge);
@@ -368,10 +696,10 @@ public:
           {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
            {"immediate", i32(0)}});
       edgeCopies(branch.getFalseDest(), branch.getFalseDestOperands(), loc);
-      jump(sink.labelFor(branch.getFalseDest()), loc);
-      sink.mark(trueEdge);
+      jump(labelFor(branch.getFalseDest()), loc);
+      mark(trueEdge);
       edgeCopies(branch.getTrueDest(), branch.getTrueDestOperands(), loc);
-      jump(sink.labelFor(branch.getTrueDest()), loc);
+      jump(labelFor(branch.getTrueDest()), loc);
       return success();
     }
     if (isa<func::ReturnOp>(op)) {
@@ -383,297 +711,6 @@ public:
       return success();
     }
     return op.emitOpError("has no virtual-to-machine lowering");
-  }
-
-private:
-  using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
-
-  IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
-  StringAttr str(StringRef value) { return attrs.getStringAttr(value); }
-  BoolAttr boolean(bool value) { return attrs.getBoolAttr(value); }
-
-  void add(StringRef name, Location loc, Fields fields = {},
-           std::optional<unsigned> target = std::nullopt) {
-    MachineStep step{name.str(), {}, loc, target};
-    for (const auto &[key, value] : fields)
-      step.attrs.emplace_back(attrs.getStringAttr(key), value);
-    sink.add(std::move(step));
-  }
-
-  const FixedResourcePlacement &fixed() const { return placement.fixed(); }
-  unsigned tile(Value value) const { return placement.tile(value); }
-  unsigned fp8(Value value) const { return placement.fp8(value); }
-  unsigned scalar(Value value) const { return placement.scalar(value); }
-  MXUPlacement mxu(Value value) const { return placement.mxu(value); }
-  const DMATransferPlacement &dma(Value value) const {
-    return placement.dma(value);
-  }
-
-  void materializeScalar(unsigned dst, uint32_t value, Location loc) {
-    uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
-    int32_t lower = static_cast<int32_t>(value & 0xfff);
-    if (lower >= 2048)
-      lower -= 4096;
-    if (upper)
-      add("atlas.upper", loc,
-          {{"kind", str("lui")}, {"dst", i32(dst)},
-           {"immediate", i32(upper)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(dst)},
-         {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
-  }
-
-  void delay(Location loc, StringRef reason,
-             unsigned cycles = kDiagnosticDelay) {
-    if (!options.diagnosticDelays)
-      return;
-    add("atlas.delay", loc,
-        {{"cycles", i32(cycles)}, {"atlas.delay_reason", str(reason)}});
-  }
-
-  void stageScalarArguments(func::FuncOp function, Location loc) {
-    // The first 1-KiB VMEM window is a temporary mailbox. Tensor input DMA
-    // may reuse it only after every asynchronous scalar LW has completed.
-    materializeScalar(fixed().inputBaseReg, fixed().mailboxWord, loc);
-    materializeScalar(fixed().inputDramReg, static_cast<uint32_t>(*abi.controlBase), loc);
-    add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
-         {"reg", i32(fixed().inputBaseReg)},
-         {"dram", i32(fixed().inputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
-    for (auto [index, arg] : llvm::enumerate(function.getArguments())) {
-      unsigned reg = scalar(arg);
-      add("atlas.scalar_load", loc,
-          {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
-           {"offset", i32(4 * (fixed().mailboxWord + index))}});
-      delay(loc, "scalar_load_completion", 8);
-      if (arg.getType().isInteger(1))
-        add("atlas.alu_imm", loc,
-            {{"kind", str("andi")}, {"dst", i32(reg)},
-             {"src", i32(reg)}, {"immediate", i32(1)}});
-    }
-  }
-
-  void emitCopy(unsigned dst, unsigned src, bool tensor, Location loc) {
-    if (dst == src)
-      return;
-    if (tensor) {
-      add("atlas.vpu_unary", loc,
-          {{"kind", str("mov")}, {"dst", i32(dst)}, {"src", i32(src)}});
-      delay(loc, "cfg_tensor_copy");
-    } else {
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(dst)},
-           {"src", i32(src)}, {"immediate", i32(0)}});
-    }
-  }
-
-  void parallelCopies(SmallVector<std::pair<unsigned, unsigned>> copies,
-                      bool tensor, Location loc) {
-    copies.erase(std::remove_if(copies.begin(), copies.end(),
-                                [](auto copy) { return copy.first == copy.second; }),
-                 copies.end());
-    while (!copies.empty()) {
-      bool progressed = false;
-      for (size_t i = 0; i < copies.size(); ++i) {
-        unsigned dst = copies[i].first;
-        bool neededAsSource = llvm::any_of(copies, [&](auto copy) {
-          return copy.second == dst;
-        });
-        if (!neededAsSource) {
-          emitCopy(dst, copies[i].second, tensor, loc);
-          copies.erase(copies.begin() + i);
-          progressed = true;
-          break;
-        }
-      }
-      if (progressed)
-        continue;
-      unsigned saved = copies.front().first;
-      unsigned temporary =
-          tensor ? fixed().tensorTemporary : fixed().scalarTemporary;
-      emitCopy(temporary, saved, tensor, loc);
-      for (auto &copy : copies)
-        if (copy.second == saved)
-          copy.second = temporary;
-    }
-  }
-
-  void edgeCopies(Block *dest, ValueRange operands, Location loc) {
-    SmallVector<std::pair<unsigned, unsigned>> tensors, scalars;
-    for (auto [arg, incoming] : llvm::zip(dest->getArguments(), operands)) {
-      if (isa<VirtualStateType>(arg.getType()))
-        continue;
-      if (isa<VirtualBF16Type>(arg.getType()))
-        tensors.emplace_back(tile(arg), tile(incoming));
-      else
-        scalars.emplace_back(scalar(arg), scalar(incoming));
-    }
-    parallelCopies(std::move(tensors), true, loc);
-    parallelCopies(std::move(scalars), false, loc);
-  }
-
-  void jump(unsigned target, Location loc) {
-    add("atlas.jump", loc,
-        {{"kind", str("jal")}, {"dst", i32(0)}, {"base", i32(0)}}, target);
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
-         {"immediate", i32(0)}});
-  }
-
-  void inputHalf(unsigned dst, uint64_t index, unsigned half, Location loc) {
-    uint32_t scratchWord = static_cast<uint32_t>(
-        fixed().inputWord + index * 512 + half * 256);
-    uint32_t dramByte = static_cast<uint32_t>(abi.inputBase + index * kTileBytes +
-                                              half * kHalfBytes);
-    materializeScalar(fixed().inputBaseReg, scratchWord, loc);
-    materializeScalar(fixed().inputDramReg, dramByte, loc);
-    add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
-         {"reg", i32(fixed().inputBaseReg)},
-         {"dram", i32(fixed().inputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
-    add("atlas.vload", loc,
-        {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
-         {"format", str("raw")}});
-    delay(loc, "vload_completion");
-  }
-
-  void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
-    uint32_t scratchWord = static_cast<uint32_t>(fixed().outputWord +
-                                                 index * 512 + half * 256);
-    uint32_t dramByte = static_cast<uint32_t>(abi.outputBase + index * kTileBytes +
-                                              half * kHalfBytes);
-    materializeScalar(fixed().outputBaseReg, scratchWord, loc);
-    add("atlas.vstore", loc,
-        {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
-         {"format", str("raw")}});
-    delay(loc, "vstore_completion");
-    materializeScalar(fixed().outputDramReg, dramByte, loc);
-    add("atlas.dma", loc,
-        {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
-         {"reg", i32(fixed().outputBaseReg)},
-         {"dram", i32(fixed().outputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().storeChannel)}});
-  }
-
-  void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
-                 std::optional<unsigned> src, Location loc) {
-    const DMATransferPlacement &placement = dma(transfer);
-    emitCopy(placement.dramReg, scalar(dramByte), false, loc);
-    emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
-    materializeScalar(placement.stagingReg, placement.stagingWord, loc);
-    if (src) {
-      for (unsigned half = 0; half < placement.halves; ++half) {
-        if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
-        add("atlas.vstore", loc,
-            {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
-             {"offset", i32(0)}, {"format", str("raw")}});
-        delay(loc, "vstore_completion");
-      }
-      if (placement.halves > 1)
-        materializeScalar(placement.stagingReg, placement.stagingWord, loc);
-    }
-    add("atlas.dma", loc,
-        {{"direction", str(src ? "store" : "load")},
-         {"channel", i32(placement.channel)}, {"reg", i32(placement.stagingReg)},
-         {"dram", i32(placement.dramReg)}, {"size", i32(placement.sizeReg)},
-         {"atlas.virtual_dma_transfer", i32(placement.id)}});
-  }
-
-  LogicalResult completeDMA(Value transfer, std::optional<unsigned> dst,
-                            Operation &op) {
-    const DMATransferPlacement &placement = dma(transfer);
-    Location loc = op.getLoc();
-    add("atlas.dma_wait", loc,
-        {{"channel", i32(placement.channel)},
-         {"atlas.virtual_dma_transfer", i32(placement.id)}});
-    if (dst) {
-      for (unsigned half = 0; half < placement.halves; ++half) {
-        if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
-        add("atlas.vload", loc,
-            {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
-             {"offset", i32(0)}, {"format", str("raw")}});
-        delay(loc, "vload_completion");
-      }
-    }
-    return success();
-  }
-
-  LogicalResult lowerPack(VirtualPackFP8Op pack) {
-    if (pack.getScaleCode() != 127)
-      return pack.emitOpError(
-          "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
-    Location loc = pack.getLoc();
-    add("atlas.scalar_load", loc,
-        {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
-         {"offset", i32(pack.getScaleCode())}});
-    add("atlas.vpu_pack", loc,
-        {{"direction", str("bf16_to_fp8")},
-         {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
-         {"scale_reg", i32(fixed().scaleReg)}});
-    delay(loc, "vpu_pack_completion");
-
-    // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
-    // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
-    // in the free upper half of input VMEM and interleave its two 512-byte
-    // halves through a bounded 32-row scalar loop.
-    materializeScalar(fixed().outputBaseReg, fixed().packWord, loc);
-    add("atlas.vstore", loc,
-        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
-         {"offset", i32(0)}, {"format", str("raw")}});
-    delay(loc, "pack_vstore_completion");
-    materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
-    materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
-    materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
-    materializeScalar(fixed().packRowReg, 0, loc);
-    materializeScalar(fixed().packRowsReg, 32, loc);
-    unsigned loop = sink.newLabel();
-    sink.mark(loop);
-    for (unsigned word = 0; word < 4; ++word) {
-      for (unsigned half = 0; half < 2; ++half) {
-        unsigned source = fixed().packSourceRegs[half];
-        unsigned temp = fixed().packTemporaryRegs[half];
-        add("atlas.scalar_load", loc,
-            {{"kind", str("lw")}, {"dst", i32(temp)},
-             {"base", i32(source)}, {"offset", i32(4 * word)}});
-        delay(loc, "scalar_load_completion", 8);
-        add("atlas.scalar_store", loc,
-            {{"kind", str("sw")}, {"src", i32(temp)},
-             {"base", i32(fixed().packDestinationReg)},
-             {"offset", i32(4 * word + 16 * half)}});
-      }
-    }
-    for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
-                         fixed().packDestinationReg})
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
-           {"immediate", i32(reg == fixed().packDestinationReg ? 32 : 16)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(fixed().packRowReg)},
-         {"src", i32(fixed().packRowReg)},
-         {"immediate", i32(1)}});
-    add("atlas.branch", loc,
-        {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
-         {"rhs", i32(fixed().packRowsReg)}},
-        loop);
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
-         {"immediate", i32(0)}});
-    delay(loc, "scalar_relayout_completion");
-    materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
-    add("atlas.vload", loc,
-        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
-         {"offset", i32(0)}, {"format", str("raw")}});
-    delay(loc, "pack_relayout_vload_completion");
-    return success();
   }
 
   LogicalResult lowerCompare(arith::CmpIOp cmp) {
@@ -714,87 +751,9 @@ private:
     return cmp.emitOpError("unsupported integer comparison predicate");
   }
 
-  Builder attrs;
-  const VirtualPlacement &placement;
-  const VirtualLoweringABI &abi;
-  VirtualLoweringOptions options;
-  MachineStepSink &sink;
-};
-
-// Lowers one function: reads its ABI, allocates registers, lowers every
-// block in order, and resolves labels into redirect offsets.
-class VirtualPlanner : public MachineStepSink {
-public:
-  VirtualPlanner(ModuleOp module, func::FuncOp function)
-      : module(module), function(function) {}
-
-  LogicalResult plan() {
-    FailureOr<VirtualLoweringABI> read =
-        readVirtualLoweringABI(function, allocation.fixed());
-    if (failed(read) || failed(allocation.allocate(function)) ||
-        failed(allocation.verify()))
-      return failure();
-    abi = *read;
-    OperationLowering lowering(module.getContext(), allocation, abi, {}, *this);
-    lowering.prologue(function);
-    for (Block &block : function.getBody()) {
-      mark(labelFor(&block));
-      for (Operation &op : block) {
-        if (failed(lowering.lower(op)))
-          return failure();
-      }
-    }
-    if (planned.size() > 2048)
-      return function.emitOpError("lowered program exceeds the 2048-word policy limit");
-    return resolveTargets();
-  }
-
-  LogicalResult materialize() {
-    for (Operation &op : llvm::make_early_inc_range(
-             llvm::reverse(module.getBody()->getOperations())))
-      op.erase();
-    OpBuilder builder(module.getContext());
-    builder.setInsertionPointToEnd(module.getBody());
-    OperationState startState(module.getLoc(), "atlas.start");
-    startState.addTypes(StateType::get(module.getContext()));
-    Value state = builder.create(startState)->getResult(0);
-    for (const MachineStep &step : planned) {
-      OperationState machineState(step.loc, step.name);
-      machineState.addOperands(state);
-      machineState.addTypes(StateType::get(module.getContext()));
-      machineState.addAttributes(step.attrs);
-      state = builder.create(machineState)->getResult(0);
-    }
-    module->setAttr("atlas.generated_from_virtual", builder.getUnitAttr());
-    module->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(abi.inputBase));
-    module->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(abi.outputBase));
-    module->setAttr("atlas.scalar_arg_regs",
-                    builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
-    if (abi.controlBase)
-      module->setAttr("atlas.control_dram_base",
-                      builder.getI64IntegerAttr(*abi.controlBase));
-    if (failed(verify(module)))
-      return failure();
-    llvm::SmallVector<uint32_t> words;
-    return collectAtlasWords(module, words, /*llvmBlock=*/true);
-  }
-
-  void add(MachineStep step) override { planned.push_back(std::move(step)); }
-  unsigned newLabel() override { return nextLabel++; }
-  void mark(unsigned label) override { labelPC[label] = planned.size(); }
-  unsigned labelFor(Block *block) override {
-    auto it = blockLabels.find(block);
-    if (it != blockLabels.end())
-      return it->second;
-    unsigned label = newLabel();
-    blockLabels[block] = label;
-    return label;
-  }
-
-private:
   LogicalResult resolveTargets() {
     for (size_t pc = 0; pc < planned.size(); ++pc) {
-      MachineStep &step = planned[pc];
+      PlannedOp &step = planned[pc];
       if (!step.targetLabel)
         continue;
       auto found = labelPC.find(*step.targetLabel);
@@ -808,19 +767,22 @@ private:
         return function.emitOpError("virtual CFG target exceeds selected branch range");
       step.attrs.emplace_back(
           StringAttr::get(module.getContext(), branch ? "offset_bytes" : "offset"),
-          Builder(module.getContext()).getI32IntegerAttr(offset));
+          i32(offset));
     }
     return success();
   }
 
   ModuleOp module;
   func::FuncOp function;
+  Builder attrs;
   VirtualAllocationPlan allocation;
-  VirtualLoweringABI abi;
+  llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
-  std::vector<MachineStep> planned;
+  std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
+  uint64_t inputBase = 0, outputBase = 0;
+  std::optional<uint64_t> controlBase;
 };
 
 struct LowerAtlasVirtualToMachinePass
@@ -833,44 +795,24 @@ struct LowerAtlasVirtualToMachinePass
   }
 
   void runOnOperation() override {
-    if (failed(lowerAtlasVirtualModule(getOperation())))
+    ModuleOp module = getOperation();
+    if (failed(verifyAtlasVirtualModule(module)))
+      return signalPassFailure();
+    if (!llvm::hasSingleElement(module.getBody()->getOperations())) {
+      module.emitError("virtual-to-machine lowering requires exactly one function");
+      return signalPassFailure();
+    }
+    auto function = dyn_cast<func::FuncOp>(module.getBody()->front());
+    if (!function) {
+      module.emitError("virtual-to-machine lowering requires func.func CFG form");
+      return signalPassFailure();
+    }
+    VirtualPlanner planner(module, function);
+    if (failed(planner.plan()) || failed(planner.materialize()))
       signalPassFailure();
   }
 };
 } // namespace
-
-void mlir::atlas::lowerVirtualPrologue(func::FuncOp function,
-                                       const VirtualPlacement &placement,
-                                       const VirtualLoweringABI &abi,
-                                       VirtualLoweringOptions options,
-                                       MachineStepSink &sink) {
-  OperationLowering(function.getContext(), placement, abi, options, sink)
-      .prologue(function);
-}
-
-LogicalResult mlir::atlas::lowerVirtualOperation(
-    Operation &op, const VirtualPlacement &placement,
-    const VirtualLoweringABI &abi, VirtualLoweringOptions options,
-    MachineStepSink &sink) {
-  return OperationLowering(op.getContext(), placement, abi, options, sink)
-      .lower(op);
-}
-
-LogicalResult mlir::atlas::lowerAtlasVirtualModule(ModuleOp module) {
-  if (failed(verifyAtlasVirtualModule(module)))
-    return failure();
-  if (!llvm::hasSingleElement(module.getBody()->getOperations()))
-    return module.emitError(
-        "virtual-to-machine lowering requires exactly one function");
-  auto function = dyn_cast<func::FuncOp>(module.getBody()->front());
-  if (!function)
-    return module.emitError(
-        "virtual-to-machine lowering requires func.func CFG form");
-  VirtualPlanner planner(module, function);
-  if (failed(planner.plan()))
-    return failure();
-  return planner.materialize();
-}
 
 void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
   PassRegistration<LowerAtlasVirtualToMachinePass>();
