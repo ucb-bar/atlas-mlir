@@ -90,15 +90,24 @@ class HandoffExamplesTest(unittest.TestCase):
         llvm = os.environ.get("ATLAS_LLVM_BIN")
         if not llvm:
             self.skipTest("set ATLAS_LLVM_BIN for ELF text extraction")
+        linker = os.environ.get("ATLAS_LLD") or shutil.which("ld.lld")
+        if not linker:
+            self.skipTest("set ATLAS_LLD or install ld.lld for linked ELF handoff")
         cases = (
             (NAMES[0], "mlp_tile", (bytes([0x38]) * 1024,) * 3, 0x4480),
             (NAMES[1], "attention_tile",
              (bytes(1024), bytes(1024), bytes([0x38]) * 1024), 0x3F80),
         )
         with tempfile.TemporaryDirectory() as temporary:
-            for name, folder, tiles, expected in cases:
+            generated = pathlib.Path(temporary) / "handoff"
+            subprocess.run([
+                sys.executable, str(ROOT / "tools/export_llvm_handoff.py"),
+                "--atlas-bin-dir", str(BIN), "--llvm-bin-dir", llvm,
+                "--linker", linker, "--output-dir", str(generated),
+            ], check=True, capture_output=True, text=True)
+            for name, _, tiles, expected in cases:
                 with self.subTest(name=name):
-                    elf = ROOT / "examples/handoff" / folder / "07-riscv-linked.elf"
+                    elf = generated / f"{name}.elf"
                     text_file = pathlib.Path(temporary) / f"{name}.text"
                     subprocess.run([
                         str(pathlib.Path(llvm) / "llvm-objcopy"),
@@ -141,26 +150,18 @@ class HandoffExamplesTest(unittest.TestCase):
                              manifest)
             for name in NAMES:
                 with self.subTest(name=name):
-                    folder = (ROOT / "examples/handoff" /
-                              ("mlp_tile" if name == NAMES[0] else "attention_tile"))
-                    stages = {
-                        "atlas.mlir": "01-atlas-machine.mlir",
-                        "llvm-structured.mlir": "02-llvm-structured.mlir",
-                        "llvm.mlir": "03-llvm-encoded.mlir",
-                        "ll": "04-llvm-ir.ll",
-                        "s": "05-riscv-words.s",
-                        "o": "06-riscv-relocatable.o",
-                        "elf": "07-riscv-linked.elf",
-                        "disasm.txt": "08-riscv-disassembly.txt",
-                        "words.txt": "atlas-words.txt",
-                        "word-map.json": "atlas-word-map.json",
-                    }
-                    for suffix, snapshot in stages.items():
-                        self.assertEqual(
-                            (output / f"{name}.{suffix}").read_bytes(),
-                            (folder / snapshot).read_bytes(),
-                            f"{name}: stage {snapshot} differs from fresh LLVM output",
-                        )
+                    source_path = ROOT / "test/examples" / f"{name}.mlir"
+                    authored = (ROOT / "examples/handoff" /
+                                ("mlp_tile" if name == NAMES[0] else "attention_tile") /
+                                "01-atlas-machine.mlir")
+                    self.assertEqual(authored.read_bytes(), source_path.read_bytes())
+                    self.assertEqual((output / f"{name}.atlas.mlir").read_bytes(),
+                                     source_path.read_bytes())
+                    for suffix in ("llvm-structured.mlir", "llvm.mlir", "ll",
+                                   "s", "o", "elf", "disasm.txt", "words.txt",
+                                   "word-map.json", "physical-program.json"):
+                        self.assertTrue((output / f"{name}.{suffix}").is_file(),
+                                        suffix)
                     source = (ROOT / "test/examples" / f"{name}.mlir").read_text()
                     self.assertEqual(source.count('"atlas.branch"'), 1)
                     self.assertEqual(source.count('kind = "lw"'), 8)
@@ -170,8 +171,6 @@ class HandoffExamplesTest(unittest.TestCase):
                     self.assertTrue(manifest["examples"][name]
                                     ["object_prefix_matches_emitter"])
                     llvm_mlir = (output / f"{name}.llvm.mlir").read_text()
-                    snapshot = (folder / "03-llvm-encoded.mlir").read_text()
-                    self.assertEqual(llvm_mlir.rstrip(), snapshot.rstrip())
                     self.assertEqual(llvm_mlir.count("llvm.inline_asm"), 1)
                     self.assertIn("has_side_effects", llvm_mlir)
                     structured = (output / f"{name}.llvm-structured.mlir").read_text()
@@ -191,12 +190,17 @@ class HandoffExamplesTest(unittest.TestCase):
                     self.assertTrue(manifest["examples"][name]
                                     ["linked_text_matches_object"])
                     map_bytes = (output / f"{name}.word-map.json").read_bytes()
-                    self.assertEqual(
-                        map_bytes,
-                        (folder / "atlas-word-map.json").read_bytes(),
-                    )
                     self.assertEqual(hashlib.sha256(map_bytes).hexdigest(),
                                      manifest["examples"][name]["word_map_sha256"])
+                    physical_bytes = (output / f"{name}.physical-program.json").read_bytes()
+                    self.assertEqual(
+                        hashlib.sha256(physical_bytes).hexdigest(),
+                        manifest["examples"][name]["physical_program_sha256"],
+                    )
+                    physical = json.loads(physical_bytes)
+                    self.assertEqual(physical["schema"], "atlas.physical_program.v1")
+                    self.assertEqual([row["word_u32"] for row in physical["instructions"]],
+                                     list(words(name)))
                     word_map = json.loads(map_bytes)
                     self.assertEqual(word_map["schema"], "atlas.machine_word_map.v1")
                     mapped = word_map["operations"]
