@@ -1,506 +1,121 @@
-# Atlas MLIR hand-authored reference candidate
+# Atlas MLIR handwritten implementation
 
-See the [MLP and attention source examples](examples/handoff/README.md) and
-their regeneration commands for Atlas machine MLIR, LLVM MLIR, LLVM IR,
-RISC-V assembly, objects, linked ELFs, disassembly, and per-word maps. The
-[handoff notes](docs/llvm-handoff-examples.md) cover the fixed-shape VMEM
-relayout and selected-core diagnostic evidence.
-The [dialect reference](docs/dialect-reference.md) lists every current
-operation, its checked physical fields, and the implemented pass inventory.
-The [virtual SSA interpreter contract](docs/virtual-ssa-interpreter-contract.md)
-explains block arguments, loop visits, state tokens, and the checks needed by
-an independent interpreter.
-The [physical program contract](docs/functional-stream-contract.md) gives a
-separate instruction-level functional model exact words, typed fields, and
-control-flow metadata without making it interpret virtual SSA.
-The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
-parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
-linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
+Atlas MLIR is an out-of-tree MLIR dialect and lowering path for the selected
+[Atlas RTL revision](docs/source-discrepancies.md). It provides a handwritten
+reference for comparing target dialect generation in Merlin. It does not import
+or invoke ACT.
 
-This is an out-of-tree ODS/C++ dialect with a bounded virtual BF16/FP8 SSA slice
-and a selected-encoding **machine stage** for one Atlas RTL revision. It is a
-reviewable reference candidate for comparing Merlin's
-generated dialect against an implementation written directly from the selected
-RTL and the `npu_model` sources. It was authored with Codex assistance and is
-not a clean-room or certified reference. It is not a Merlin compiler, a qualified
-executable target dialect, or an Atlas hardware certificate.
+The package has two Atlas stages: virtual SSA values before physical placement,
+and typed machine operations with selected instruction fields. It can lower a
+checked machine stream through the LLVM MLIR dialect to RISC-V object words
+using unmodified LLVM. The resulting function is a reset-entry program body,
+not a C-callable Atlas function.
 
-The physical stage has a typed `!atlas.state` token and 26 parameterized operation
-classes covering the **99 selected RTL BitPat rows**: tensor load/store,
-DMA load/store/config/wait, both MXUs, VPU arithmetic/reduction/pack/immediate,
-XLU transpose, scalar ALU/load/store, CSR, branch/jump/delay, and termination.
-It deliberately does not create one MLIR class per channel, unit, or mode.
-Verifiers check known physical register, pair, slot, channel, CSR-address,
-immediate, and mode limits. Machine operations declare conservative physical
-state read/write effects. `atlas-emit` requires a linear state chain and
-checks that branches/jumps have a non-redirecting delay-slot instruction.
-The separate [`virtual_bf16_ssa.mlir`](test/examples/virtual_bf16_ssa.mlir)
-fixture uses `%t` SSA tensor values before physical register assignment;
-`--verify-atlas-virtual-stream` checks its boundary state chain and output
-identities. A [CFG fixture](test/examples/virtual_bf16_cfg.mlir) uses MLIR
-block arguments for a branch merge and a loop-carried tile/state; the virtual
-verifier checks state handoffs across `cf` edges and requires boundary outputs
-in the single return block. `--lower-atlas-virtual-to-machine` now lowers this
-bounded CFG form to a physical stream: it colors live BF16 pairs and scalar
-controls, resolves block-argument edge copies and branches, stages external
-tiles through DMA/VMEM, and emits serial waits. The
-[`virtual_bf16_loop_program.mlir`](test/examples/virtual_bf16_loop_program.mlir)
-and related branch, swap, and dynamic-control fixtures exercise that path.
-This is a narrow VPU/CFG lowering slice, not a general Atlas allocator or
-model compiler.
-The [`virtual_fp8_two_layer_mlp.mlir`](test/examples/virtual_fp8_two_layer_mlp.mlir)
-fixture now adds two virtual MXU contractions around BF16 ReLU and unit-scale
-FP8 pack. The same virtual-to-machine pass assigns separate FP8 and BF16
-physical register ranges, stages runtime tiles, relayouts packed FP8 rows in
-VMEM, and emits a checked selected instruction stream. Tests translate that
-stream through unmodified LLVM to object words and execute it on the selected
-standalone AtlasCore with two different runtime weight sets. This is one fixed
-32×32 quantized tile without bias, tails, or a Linalg/PyTorch importer; it is
-not a complete captured-model MLP or a general native instruction selector.
+## What is implemented
 
-`atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
-eight-digit hexadecimal 32-bit word per instruction, after checking the whole
-flat stream. It uses the RTL decoder's six-bit VR field layout and the selected
-RTL's DMA config encoding. The registered `--verify-atlas-machine-stream`
-pass checks the full physical stream without changing Atlas MLIR. The
-registered `--convert-atlas-to-llvm-calls` pass preserves each checked
-instruction as a separate LLVM-dialect call with its operation fields and
-word index. `--finalize-atlas-llvm-calls` rechecks those calls and lowers to
-`llvm.func @atlas_program` with one side-effecting `llvm.inline_asm` block
-containing the selected words in order. The older direct
-`--convert-atlas-to-llvm` pass remains available and emits the same final block.
-One block keeps direct branch targets and the next delay-slot instruction
-adjacent through LLVM lowering. The pass accepts JALR only when a restricted
-straight-line scalar prefix proves its register-indirect word-index target
-remains in that block. It rejects unresolved targets and direct targets
-outside the block; it does not provide a general dynamic-control ABI.
+| Area | Current scope |
+| --- | --- |
+| Machine dialect | 26 parameterized operation classes cover the 99 selected RTL decoder rows; verifiers and `atlas-emit` check fields and source-level word encodings. |
+| Virtual dialect | Bounded BF16/FP8 SSA tiles, state, CFG edges, DMA handles, and MXU resource handles; virtual-to-machine lowering assigns the currently supported physical resources. |
+| LLVM handoff | Per-instruction LLVM call markers are checked and finalized into one ordered inline-assembly word block. |
+| Execution evidence | Bounded instruction programs ran on a selected-source-linked standalone `AtlasCore` ARC model. No integrated SoC or general host runtime result is claimed. |
 
-This is physical instruction lowering for the selected Atlas RISC-V target.
-The inline assembly words are **not executable on a generic host CPU** and an
-ELF object is **not a qualified Atlas end-to-end runtime**. The void function
-has no C-callable Atlas ABI, register-save policy, or general completion/drain
-protocol. A bounded [reset-entry capsule](docs/atlas-launch-abi-gap.md)
-declares checked IMEM words and DRAM regions. A separate
-[mailbox-call test](docs/mailbox-call-observation.md) supplies runtime input
-and output pointers and restarts the same standalone core with new data; it
-does not make the LLVM function C-callable. Multiple test programs have diagnostic
-execution evidence on a CIRCT ARC model of `AtlasCore` rebuilt from a fresh
-elaboration of the selected Atlas source copy.
-The tests load the extracted instruction words through ModeLIR's existing
-TileLink driver; they do not call the void function using a C ABI.
-In particular, fixed scalar-register instructions may alter the return-address
-or other ABI registers if called as an ordinary RISC-V function. Atlas's PC
-uses an instruction index and shifts encoded branch byte displacements by one;
-ordinary RISC-V object linking or execution does not certify equivalent
-branch behavior. No ACT compiler package or executable is used by this repo.
+The [mode census](docs/selected-variant-census.md) reports **99/99 represented
+and word-emitted decoder modes, 69/99 with bounded standalone-core semantic
+tests, and 0/99 admitted for a full software target**. These counts concern
+decoder modes, not every field combination, numerical input, or temporal
+interaction. All 99 retain full-qualification blockers. The census and
+[observation index](docs/README.md) carry the evidence and remaining work.
+
+## Compiler stages
+
+`Atlas virtual SSA` → `Atlas machine IR` → `LLVM call markers` →
+`LLVM inline-assembly block` → `RISC-V object / ELF`
+
+- `--verify-atlas-virtual-stream` checks virtual SSA, state, and CFG edges.
+  `--lower-atlas-virtual-to-machine` performs the bounded placement and emits
+  typed machine operations.
+- `--verify-atlas-generated-schedule` checks the generated stream's chosen
+  delay and DMA-wait policy. `--verify-atlas-machine-stream` checks the physical
+  state chain, encoding, and control targets.
+- `--convert-atlas-to-llvm-calls` retains operation fields as LLVM-dialect call
+  markers. `--finalize-atlas-llvm-calls` rechecks them and emits one ordered
+  inline-assembly block. Those markers are compiler IR, not runtime calls.
+- `mlir-translate` and `llc` produce ordinary RISC-V artifacts containing the
+  selected Atlas instruction words. A generic RISC-V CPU cannot execute the
+  custom tensor instructions.
+
+The physical `--insert-atlas-delays` and `--schedule-atlas-stream` passes use a
+ported timing model. They are separate from virtual-to-machine lowering and
+do not establish an RTL-qualified schedule. The
+[dialect reference](docs/dialect-reference.md) lists every operation, pass,
+tool, allocation limit, and pass extension point. The
+[functional-stream format](docs/functional-stream-contract.md) is the separate
+instruction-level input for a functional model.
+
+## Build and test
+
+Use MLIR and LLVM tools from the same installation. The recorded local build
+used LLVM/MLIR 23.0.0git; see [source selection](#source-selection).
+
+```sh
+cmake -S . -B build -G Ninja \
+  -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
+build/bin/atlas-opt test/examples/mxu.mlir
+build/bin/atlas-emit test/examples/mxu.mlir
+```
+
+CTest runs the portable tests without hardware. Tests that require the selected
+RTL, assembler, or standalone core need their corresponding `ATLAS_RTL_ROOT`,
+`ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
+`ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN` paths. A skip is
+not execution evidence. For a direct Python test run with another build tree,
+set `ATLAS_OOT_BIN_DIR` to its `bin` directory. The source-bound inventory
+check and its required source pins are documented in the
+[mode census](docs/selected-variant-census.md).
+
+## Examples
+
+| Example | Starting point | What it shows |
+| --- | --- | --- |
+| [MLP tile](examples/handoff/mlp_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed 32×32 instruction stream through LLVM, assembly, and ELF. |
+| [Attention tile](examples/handoff/attention_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed attention-like tile stream through the same stages. |
+| [Virtual MLP tile](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir) | Atlas virtual SSA | Placement and lowering before LLVM emission. |
+| [Captured MLP diagnostic](examples/handoff/captured_mlp/00-linalg.mlir) | Parsed Linalg IR | A bounded Linalg-to-ELF route with an explicit FP8/BF16 policy. |
+
+The [handoff guide](examples/handoff/README.md) gives the exact regeneration
+commands and names every generated Atlas, LLVM, assembly, object, ELF, map, and
+manifest file. Generated outputs belong under `out/` or another invocation
+output directory. The examples are fixed, bounded fixtures; they do not
+establish general MLP or attention model compilation.
 
 ## Source selection
 
 | Role | Revision |
 | --- | --- |
 | Selected RTL | `ucb-bar/atlas-npu` `0079c0541111197741a231c002e3843fa6f545b2` |
-| Model source examined | local `npu_model-atlas` `5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d` |
-| MLIR/LLVM used for local build | LLVM `a47bddccec30255619bb8c37fa59700e661d4e66`, 23.0.0git |
-| Packaging precedents | `ucb-bar/gemmini-mlir` `baseline` `7e7a883` and `stable/agent_spec_v1_mlir_oot` `9e18b840` |
+| Examined model | local `npu_model-atlas` `5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d` |
+| Recorded LLVM/MLIR build | `a47bddccec30255619bb8c37fa59700e661d4e66` (23.0.0git) |
 
-The selected source files are `Instructions.scala`, `IDecode.scala`,
-`ScalarDecoder.scala`, and `ScalarCore.scala` under
-`src/main/scala/atlas/scalar/`; the model files are
-`npu_model/configs/isa_definition.py` and `npu_model/isa.py`. The precise model
-revision is a later local branch than the original Merlin v2 plan's inspected
-`6c86010` and must be qualified separately. See
-[source discrepancies](docs/source-discrepancies.md). The source-bound
-[selected variant census](docs/selected-variant-census.md) tracks all 99
-decoder modes and separate required, admitted, represented, emitted, bounded
-semantic, standalone execution, and blocker counts.
+The RTL and inspected model disagree on several encodings, arithmetic paths,
+layouts, and control rules. The [source comparison](docs/source-discrepancies.md)
+records those differences. For this selected RTL, the
+[column-reduction compatibility decision](docs/selected-rtl-column-reduction-contract.md)
+uses the executing 64×16 physical layout while retaining the 32×32
+architectural intent as a discrepancy.
 
-## Build and test
+## Limits and documentation
 
-Use an MLIR and LLVM installation from the same build. The following commands
-were run with LLVM/MLIR 23.0.0git:
+This is a handwritten comparison implementation, not a clean-room oracle or a
+Merlin-generated compiler.
+Selected-core results are bounded diagnostics. Full numerical, timing,
+physical-effect, legality, and integrated execution evidence is still needed
+for a complete target compiler. This repository has no general instruction
+selector, whole-model compiler, or C-callable Atlas function ABI.
 
-```sh
-cmake -S . -B build -G Ninja -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir \
-  -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=/path/to/test-python
-cmake --build build --parallel 2
-build/bin/atlas-opt test/examples/mxu.mlir
-build/bin/atlas-emit test/examples/mxu.mlir
-build/bin/atlas-opt --convert-atlas-to-llvm test/examples/mxu.mlir > build/mxu-llvm.mlir
-mlir-translate --mlir-to-llvmir build/mxu-llvm.mlir > build/mxu.ll
-llc -mtriple=riscv32-unknown-elf -filetype=obj build/mxu.ll -o build/mxu.o
-llvm-readelf -h build/mxu.o
-llvm-objdump -d build/mxu.o
-python -m unittest discover -s test -v
-ctest --test-dir build --output-on-failure
-ATLAS_RTL_ROOT=/path/to/atlas-npu ATLAS_MODEL_ROOT=/path/to/npu_model-atlas \
-ATLAS_LLVM_BIN=/path/to/llvm-install/bin \
-ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal \
-  python -m unittest discover -s test -v
-```
-
-CTest binds the Python tests to the `atlas-opt` and `atlas-emit` binaries in
-its own CMake build directory. For a direct Python invocation against another
-build tree, set `ATLAS_OOT_BIN_DIR` to that tree's `bin` directory.
-
-The generated virtual-CFG path runs in this order:
-
-```sh
-build/bin/atlas-opt --verify-atlas-virtual-stream \
-  test/examples/virtual_bf16_loop_program.mlir
-build/bin/atlas-opt --lower-atlas-virtual-to-machine \
-  test/examples/virtual_bf16_loop_program.mlir > build/loop.machine.mlir
-build/bin/atlas-opt --verify-atlas-generated-schedule \
-  --verify-atlas-machine-stream build/loop.machine.mlir
-build/bin/atlas-opt --convert-atlas-to-llvm-calls \
-  build/loop.machine.mlir > build/loop.structured-llvm.mlir
-build/bin/atlas-opt --finalize-atlas-llvm-calls \
-  build/loop.structured-llvm.mlir > build/loop.llvm.mlir
-build/bin/atlas-emit build/loop.machine.mlir > build/loop.words
-```
-
-For the bounded quantized MLP tile, replace the loop source with
-`test/examples/virtual_fp8_two_layer_mlp.mlir`. The first pass produces a
-109-word physical stream, and the same verification and LLVM handoff commands
-apply. The [virtual MLP source](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir)
-can generate each stage, including RISC-V assembly and an inspectable ELF.
-Run `tools/export_llvm_handoff.py` using the arguments shown in the
-[handoff README](examples/handoff/README.md).
-
-The generated delay rule is a conservative diagnostic policy: 256 cycles
-after each VLOAD/VSTORE/VPU operation, a channel-specific DMA wait, and eight
-cycles after each asynchronous scalar LW. The selected-core tests pass for
-MOV/ReLU, a two-step loop, a value-swap backedge, static branches, and a
-runtime i1 branch read from a DRAM control mailbox. They do not qualify a
-mode-wide completion bound, integrated EE290 execution, a callable ABI, or
-other VPU numerical modes. The same compiled dynamic-branch words execute
-for several mailbox values; tensor contents are runtime inputs.
-
-To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
-selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
-`ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. An earlier diagnostic run passed 66/66 Python test
-methods with these paths supplied: the typed branch program executed one
-delay slot, while a changed branch target produced a different checked state;
-the typed DMA loopback performed four reads and four writes, matched 32/32
-output words, and preserved all 32 input words and three guard words. Both
-programs' object words matched the emitter and independent selected assembler.
-For the current standalone-core diagnostic, all 69 shared Atlas Scala files
-in the selected checkout and the Chipyard generator copy matched byte for
-byte. Fresh elaboration produced FIRRTL SHA-256
-`fefa711dba44498317573ee5af2cfd82edb674cdfff1505318ea93e896fc123d`,
-equal to the FIRRTL used to extract the 78-module `AtlasCore` closure. A
-fresh ARC build from that closure produced state JSON SHA-256
-`db2d8ae3c8a4ce6a417b0c691be1d446f1c0be95efe5607a251a6946a80de9e3`.
-All 26 Python tests passed again against the rebuilt shared library. This
-links the diagnostic standalone core to the selected Atlas source bytes; it
-does not qualify the full integrated SoC, all Chipyard dependencies, or
-physical RTL simulation.
-The selected Atlas commit records submodule revisions `9a0cc09c` for
-`sp26-fp-units` (which supplies `E4M3FMA`) and `ab0cf6f5` for `fpex`.
-Fresh checkouts at those pins matched all 45 tracked `sp26-fp-units` files
-and all 26 `fpex` files present in the Chipyard copy byte for byte; the three
-absent `fpex` files are tests. Numerical claims remain scoped to the exact
-rebuilt model and tested inputs. Other Chipyard dependencies and full SoC
-behavior have not been qualified.
-The optional ModeLIR driver imports NumPy; configure CTest with the Python
-environment that contains it when enabling the core-model checks.
-
-The source-linked test checks all 99 emitted words against the selected
-RTL BitPats and records known model/RTL encoding disagreements. The portable
-test also checks exact operand positions, parser/printer round trips, 33
-negative verifier cases, and rejection of an invalid state/delay-slot stream. A BitPat
-match checks fixed encoding bits; it does not establish hardware legality or
-semantic correctness.
-
-The LLVM conversion tests check a single ordered side-effecting assembly
-block, 98 unconstrained selected pattern variants and one JALR variant with
-a proven in-block target. They reject unresolved JALR and escaping targets,
-unsupported nested operations,
-and broken state/delay-slot chains. A smoke test translates the MXU example to
-LLVM IR and assembles an ELF32 RISC-V object whose disassembly contains the
-four selected words. A separate hand-authored 35-word MXU0 stream also
-matched the selected assembler and LLVM object words, then executed on the
-selected-source-linked standalone core for four sparse/control input cases.
-A 42-word variant stored both BF16 register halves; a weight at logical output
-column 20 appeared in the second half at checked halfword index 4.
-The hand-authored 36-word VRELU stream matched the independent selected
-assembler and the RISC-V object bytes, then executed two dense BF16 panels
-through both register halves on the same selected-source-linked standalone
-core. All 1,024 cells per panel matched a small independent finite-value
-reference; an otherwise identical VMOV-mode program produced distinguishable
-negative-value output. See [the bounded VPU observation](docs/vpu-relu-observation.md).
-An independent exact-rational oracle additionally checked 43 vectors
-of length 2–32 at one MXU0 output cell: 40 seeded vectors across the finite
-normal E4M3 domain plus three directed cases to include every normal input
-encoding at least once. All 43 selected-source-linked
-standalone-core results matched ordered per-product BF16 round-to-nearest-even
-under this bound. The oracle also checks the positive tie and negative
-half-ULP cases. This is a bounded MXU0 observation, not general numerical
-qualification; subnormals, NaNs, overflow, initial accumulators, MXU1, and
-the other output cells in that single-tile numerical corpus still need
-independent checks.
-The separate [two-K-tile MXU0 check](docs/mxu0-k-continuation-observation.md)
-compares reset and continuation on a 57-word typed stream. Four
-selected-source-linked standalone-core runs checked every output cell in both
-BF16 register halves against the independent ordered-BF16 oracle, including
-a reset mutation that yields the second tile alone. The tested finite FP8
-set, timing and launch scope remain bounded as described in that note.
-The separate [MXU1 anchor-tree check](docs/mxu1-anchor-observation.md) uses
-a 42-word typed stream and an independent exact-rational round-once reference.
-Three MXU1 standalone-core runs checked both BF16 register halves across
-1,024 output cells each. A tie case produced `0x3f81` on MXU1 and `0x3f80`
-on the separately executed MXU0 path, demonstrating a numerical-policy
-distinction on that input. Broader MXU1 ranges and state remain open.
-The [MXU arithmetic discriminator](docs/mxu-arithmetic-discriminator-observation.md)
-uses two exact bit-level witnesses to compare MXU0 ordered BF16 steps,
-MXU1's bounded single-rounding path, and the inspected model's FP16-then-BF16
-expression. Four standalone-core runs found a model mismatch for each unit
-on a different witness; no full-domain numerical contract follows.
-The [MXU0 signed-zero discriminator](docs/mxu0-signed-zero-observation.md)
-ran eight reset programs with finite-normal weight panels and `+0`/`-0`
-FP8 activation encodings. All 2,048 output bytes, both input panels, and a
-guard matched the bounded expected values in each standalone-core run.
-The [two-K-tile MXU1 continuation check](docs/mxu1-continuation-observation.md)
-compares a rounded prior tile plus the second tile against reset and a
-single 64-product rounding. Six bounded standalone-core runs checked all
-1,024 output cells in both halves, input preservation, and a guard. General
-anchor alignment and temporal qualification remain open.
-The [E8M0 pack/unpack check](docs/vpu-e8m0-pack-observation.md) uses non-unit
-scale codes 128 and 126. Two selected-core runs checked packed FP8 bytes,
-unpacked BF16 halves, and downstream MXU1 output. The packed row order
-follows consecutive physical BF16 rows and differs from the inspected model's
-same-row concatenation; neither conversion mode is fully admitted.
-The [DMA pointer-lifetime check](docs/dma-pointer-lifetime-observation.md)
-checks a launch-time scalar-address snapshot followed by two waited transfers
-that reuse VMEM. It compares typed, assembled, and LLVM-object words and
-checks guarded outputs and internal busy/marker order on the selected
-standalone core. It does not establish an unrestricted DMA timing contract.
-The [JALR word-target check](docs/jalr-word-target-observation.md) validates
-an odd register-indirect word target, signed offset, link value, and one
-delay slot against selected standalone-core execution. General dynamic
-targets and a callable LLVM/Atlas ABI remain unqualified.
-The [direct JAL check](docs/jal-direct-target-observation.md) validates
-the selected RTL's byte-displacement-to-word-target conversion, link value,
-one delay slot, and two skipped instructions on the standalone core.
-The [DELAY counter check](docs/delay-timing-observation.md) compares zero
-and four-cycle forms through typed IR, selected assembly, LLVM object words,
-and standalone-core PC/CSR traces.
-The [FENCE no-wait check](docs/fence-no-wait-observation.md) binds a
-canonical typed FENCE to selected assembly and LLVM object words, then
-checks one-step scalar progression and the existing scalar-load no-wait case.
-The [scalar-load/JALR timing check](docs/jalr-load-delay-observation.md)
-distinguishes a fixed `DELAY` from `FENCE` and zero delay after a scalar LW.
-The loaded target remains rejected by LLVM lowering because its value is not
-statically proven.
-The separate [XLU transpose check](docs/xlu-transpose-observation.md) uses a
-29-word typed stream and an independent raw-byte index reference. Three
-selected-source-linked standalone-core executions checked all 1,024 bytes
-for an all-encoding panel, a nonsymmetric finite panel, and a same-register
-source/destination variant. Each preserved the DRAM input and guard; the
-different-register runs also preserved the source matrix register. These
-cases do not establish general XLU scheduling or completion bounds.
-The separate [VPU BF16 addition check](docs/vpu-add-observation.md) uses a
-49-word typed stream and an exact-rational reference on a restricted finite
-domain. Two full 1,024-element BF16 pair panels matched the selected
-standalone core. A directed sum distinguishes the RTL's final bit chop from
-BF16 round-to-nearest-even. Wider numerical and temporal behavior remains
-unqualified.
-The [VPU BF16 multiply check](docs/vpu-mul-observation.md) uses a 49-word
-typed stream and an exact-rational BF16 nearest-even reference. Two complete
-1,024-element panels matched the selected standalone core, including
-halfway rounding in both directions and signed products. Exceptional
-values and broader temporal behavior remain unqualified.
-The [VPU BF16 subtraction check](docs/vpu-sub-observation.md) uses a 49-word
-typed stream and an exact-rational reference on an FP32-exact finite-normal
-subset. Two complete 1,024-element panels matched the selected standalone
-core, including a case that distinguishes the RTL's final BF16 bit chop from
-nearest-even rounding. Other arithmetic and temporal behavior remains
-unqualified.
-The [VPU BF16 pairwise maximum check](docs/vpu-max-observation.md) uses a
-49-word typed stream and a separate raw-bit ordering calculation. Two
-complete 1,024-element panels matched the selected standalone core, including
-signed-zero and NaN encoding cases that a generic floating-point maximum
-cannot explain. General timing and integrated execution remain unqualified.
-The [VPU BF16 square check](docs/vpu-square-observation.md) uses a 36-word
-typed stream and an independent raw-bit reference for exact powers of two and
-special encodings. Two complete 1,024-element panels matched the selected
-standalone core, including its NaN-to-positive-zero behavior. The selected
-funct7 `0x46` differs from the inspected model class's `0x4e`; full-domain
-arithmetic and timing remain unqualified.
-The [VPU BF16 reciprocal check](docs/vpu-recip-observation.md) uses a 36-word
-typed stream and an independent exact-power exponent reference with explicit
-selected-RTL boundary rules. Two complete 1,024-element panels matched the
-selected standalone core across both register halves, including signed
-zero/subnormal/infinity/NaN cases. A later source-derived all-code diagnostic
-matched all 65,536 BF16 encodings on one persistent selected standalone core;
-arbitrary register pairs and general timing remain unqualified.
-The fresh reciprocal-branch build passed 141/141 source-linked Python methods
-through CTest, with no skips; the source-bound ledger counts 54/99 bounded
-modes and 0 software-admitted modes.
-The [VSQRT BF16 check](docs/vpu-sqrt-observation.md) adds a typed 36-word
-stream and a source-derived integer LUT oracle. Two complete BF16 pair panels
-and a separate 65,536-code selected-core sweep matched exact expected bits.
-The selected lane box ignores input signs and maps NaNs to positive zero;
-the inspected model calls `torch.sqrt`. Mathematical software compatibility,
-arbitrary register pairs, overlap, and timing remain open.
-The fresh square-root branch passed 150/150 source-linked Python methods
-through CTest with no skips; the ledger counts 55/99 bounded modes, 0
-software-admitted modes, and 99 full-qualification blockers.
-The [VEXP2 BF16 check](docs/vpu-exp2-observation.md) adds a typed 36-word
-program and an exact-power reference for directed integer and special
-inputs. Two selected-core panels checked both BF16 halves, including the
-RTL's early positive overflow at 89. Fractional, subnormal, and NaN inputs
-remain outside this bounded oracle.
-The fresh VEXP2 build passed 154/154 source-linked Python methods through
-CTest with no skips. The checked ledger counts 56/99 bounded modes, 0
-software-admitted modes, and 99 full-qualification blockers.
-The [bounded VLOAD/VSTORE check](docs/vload-vstore-observation.md) uses a
-hand-authored 29-word program and three 1 KiB raw-byte panels. It checks
-selected assembler and LLVM object words, both copied outputs, original
-input, and guard memory on the selected standalone core. The ledger now counts
-58/99 bounded modes, 0 software-admitted modes, and 99 full-qualification
-blockers; full address and temporal qualification remains open.
-The [VPU BF16 cube check](docs/vpu-cube-observation.md) uses the same physical
-pair shape and a separate exact-power raw-bit oracle. Two complete
-1,024-element panels matched the selected standalone core, including signed
-NaN-to-signed-zero behavior. The selected funct7 `0x47` differs from the
-inspected model class's `0x4f`; normal non-power fractions and general timing
-remain unqualified.
-The [VPU BF16 pairwise-minimum check](docs/vpu-min-observation.md) compares
-all 1,024 raw BF16 words in each of two panels against an independent ordering
-oracle. Signed zeros, NaN encodings, and infinities distinguish the selected
-RTL's bit ordering from conventional numerical minimum. Both input pairs and
-guard memory were preserved on the standalone core; in-place use and general
-timing remain unqualified.
-The separate [LLVM boot-entry check](docs/llvm-boot-entry-observation.md)
-loaded all 37 words of one LLVM-produced `atlas_program` function into the
-selected standalone core and executed it to ECALL halt. It checked the ELF
-symbol, executable section, and absence of text relocations; the complete
-output matched the independent VSQUARE reference. This is a fixed-address
-diagnostic entry, not a callable Atlas ABI or an ELF runtime loader.
-The [mailbox-call check](docs/mailbox-call-observation.md) uses one 40-word
-LLVM-produced reset-entry capsule and a declared pair of runtime DRAM
-pointers. Two starts in one selected standalone core instance with changed
-pointers and tensor bytes matched the independent VSQUARE reference while
-preserving inputs, prior output, and guard. It is a bounded custom launch ABI,
-not a C-callable function or integrated SoC runtime.
-The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
-uses a 16-word typed stream and a before/after-launch mutation. On the
-selected standalone core, changing the address register immediately after
-the load launch preserved the original DRAM source; changing it before launch
-selected the other source. This bounds one scalar-lifetime observation, not
-general DMA timing or overlap.
-The [VLI.ALL raw-bit check](docs/vli-all-observation.md) uses a 36-word typed
-stream. Its selected assembler, OOT emitter, and LLVM-object words agreed.
-Four selected standalone-core runs filled both BF16 register halves with the
-raw immediate, including negative zero and a NaN encoding; all 1,024 cells
-per run matched an independent bit-repetition reference. Unrelated loaded
-input memory and a guard were preserved. General availability bounds remain
-unqualified.
-The [VLI.ROW/COL/ONE raw-bit check](docs/vli-selective-observation.md) uses a
-second 36-word typed stream. Six selected-core runs at two raw immediates
-matched all 2,048 output bytes per run, including ROW in both pair halves and
-preservation of the unselected half for COL/ONE. All six selected-assembler,
-OOT emitter, and LLVM-object streams agreed; full-domain and temporal behavior
-remain unqualified.
-The separate [VPU BF16 row-sum check](docs/vpu-row-sum-observation.md) uses a
-36-word typed stream and an exact-rational FP32 tree reference. Two full
-32-row panels matched the selected standalone core, including a row that
-distinguishes adjacent-tree reduction from serial addition and rows that
-check final BF16 rounding. Other reductions and exceptional values remain
-unqualified.
-The [VPU BF16 row-minimum check](docs/vpu-row-min-observation.md) uses a
-36-word typed stream and an independent exact finite-normal reference.
-Two complete 32-row panels matched both broadcast result halves on the
-selected standalone core, including rows whose minimum resides in the
-second source register. Input and guard memory were preserved; general
-temporal qualification remains pending.
-The [VPU BF16 row-maximum check](docs/vpu-row-max-observation.md) uses a
-36-word typed stream and an independent raw-bit ordering reference. Two
-complete 32-row panels matched both broadcast result halves on the selected
-standalone core. Directed signed-zero, NaN, infinity, and second-half winners
-distinguish the selected RTL behavior; general temporal qualification remains
-pending.
-The [VPU BF16 column-minimum check](docs/vpu-col-min-observation.md) found a
-layout disagreement: the selected standalone core reduces 64 physical rows
-of 16 lanes across the BF16 register pair and broadcasts those 16 minima to
-both halves, while the architectural/model view expects separate minima for
-32 logical columns. Two panels made the high and low halves win in turn and
-matched the selected RTL's 64-by-16 result. The intended 32-by-32 behavior
-remains blocked pending a reviewed compatibility decision.
-The [VPU BF16 column-maximum check](docs/vpu-col-max-observation.md) likewise
-matched a 64-by-16 physical-lane maximum and disagreed with separate maxima
-for 32 logical columns. Two finite-normal panels made opposite register halves
-win; the layout difference remains unresolved for admission.
-
-The seeded encoding check uses seed `0xA71A5`, 12 passes over the 99 selected
-patterns, and 1,188 positive words (1,135 distinct pattern/word pairs in the
-local Python 3.12 run). It varies register fields, slots, channels, and
-immediates within the verifier's declared domain. This is source-level
-encoding coverage, not 1,188 hardware-executed instruction cases.
-
-## Scope of this candidate
-
-| Obligation | Current evidence |
-| --- | --- |
-| Custom RTL pattern representation | 50/50 selected custom BitPat rows have a typed parameterized MLIR operation route |
-| Scalar/control/CSR representation | 49/49 selected BitPat rows have a typed parameterized MLIR operation route |
-| Source-level word emission | 99/99 selected BitPat rows crosschecked at fixed-bit level; valid fields and integrated decode remain unqualified |
-| Exact numerical semantics | Bounded MXU0 ordered-BF16 and MXU1 anchor-tree cases executed separately on selected-source-linked standalone core, including a tie that distinguishes the units; full MXU/VPU and scale semantics remain unqualified |
-| Temporal validity and DMA completion | Not qualified; the token conservatively orders issue only |
-| Branch/control behavior | Typed branch program and changed-target mutation ran on the rebuilt selected-source-linked standalone `AtlasCore` ARC model; integrated SoC behavior remains unqualified |
-| Branch delay positions and backward loop | A second 14-word typed BEQ/BLT stream matched selected assembler and LLVM object words. Selected standalone core executed the first taken-branch CSR side effect, skipped the second, and completed a three-iteration backward loop; the architectural spec's two-slot rule remains discrepant. Negative target/slot checks pass; integrated timing remains unqualified |
-| Direct JAL target and link | Typed eight-word stream matched selected assembler and LLVM object words; selected standalone core executed one delay slot, skipped two words, wrote link word index 2, and distinguished a changed direct target. General control flow, callable ABI, and integrated execution remain open |
-| DELAY frontend hold | Typed six-word stream matched selected assembler and LLVM object words for counts 0 and 4. Selected standalone core held the successor for four counter cycles only in the latter run; pre/post CSR markers and DRAM guards were preserved. Full delay-domain, asynchronous-resource interaction, and integrated timing remain open |
-| FENCE scalar progression | Typed six-word stream matched selected assembler and LLVM object bytes. Selected standalone core fired the successor on the next cycle and matched NOP's scalar markers; a separate typed FENCE substitution did not wait for scalar LW before JALR. Memory-ordering and integrated effects remain open |
-| Scalar ALU | All 19 register/immediate modes matched the selected assembler and LLVM object words, then produced the independent RV32 result on the selected-source-linked standalone core for two directed operand panels each. Full operand/register domains and integrated timing remain open |
-| Scalar memory | LB/LBU/LH/LHU/LW/SB/SH/SW matched the selected assembler, LLVM object words, and independent byte/halfword/word expectations on two selected-core panels. A direct DELAY-to-ECALL ending halted with the last load pending; an intervening instruction let it retire. See the [observation](docs/scalar-memory-halt-observation.md). Full address/register domains and integrated timing remain open |
-| Scalar upper immediate | LUI and AUIPC matched the selected assembler, LLVM object words, and standalone core for two directed upper immediates. AUIPC adds the selected RTL's instruction word index, unlike the inspected model's byte-PC formulation; see the [source-linked observation](docs/scalar-upper-pc-observation.md) |
-| LLVM dialect/object lowering | Registered pass and ELF32 RISC-V smoke test for statically bounded flat streams; JALR accepted only with a proven in-block register target |
-| LLVM-produced function boot entry | One full 37-word ELF `.text` function executed on selected standalone core with fixed DRAM preload and ECALL halt; PC trace excluded LLVM RET. No general call ABI or ELF loader |
-| DMA movement | Typed loopback ran on the rebuilt selected-source-linked standalone core model with 32/32 output words and input/guard preservation; general DMA timing and integrated behavior remain unqualified |
-| DMA scalar pointer capture | Typed 16-word stream matched selected assembler and LLVM object bytes; selected standalone core chose A when the address register changed to B after issue and B when changed before issue, with complete 128-byte output/input/guard checks. General queueing, timing and integrated behavior remain open |
-| MXU0 arithmetic | Hand-authored typed 35-word program lowered through LLVM to object bytes matching the selected assembler; four sparse/control cases and 43 finite-normal vectors executed with first-cell checks. A 42-word typed variant checked the second BF16 register half. A 57-word two-K-tile stream checked reset versus continuation across all 1,024 output cells on dense and mixed inputs. General arithmetic and scheduling remain open |
-| MXU1 arithmetic | Hand-authored typed 42-word reset and 57-word two-K-tile continuation programs matched selected assembler and LLVM object bytes; nine bounded MXU1 runs checked all 1,024 output cells per run, with three continuation panels also reset-mutated. A paired MXU0 tie comparison distinguished the units. General anchor precision, seeded accumulators, and scheduling remain open |
-| VPU E8M0 pack/unpack | Hand-authored typed 65-word stream matched selected assembler and LLVM object bytes at code 128, with a code-126 object mutation changing only SELI. Two selected-core runs checked 1,024 packed FP8 bytes, 2,048 unpacked BF16 bytes, and 2,048 downstream MXU1 output bytes each. Full numerical domain and timing remain open |
-| VPU BF16 ReLU | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two dense 32-by-32 finite panels executed on the selected-source-linked standalone core with both register halves checked. Other VPU modes and exceptional values remain open |
-| VPU BF16 addition | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two bounded 1,024-element panels executed with both output halves, all inputs, and guard checked. FP32-inexact sums and exceptional values remain open |
-| VPU BF16 multiply | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two finite-normal 1,024-element panels checked BF16 nearest-even ties, signs, both output halves, inputs and guard on selected standalone core. Exceptional values and general timing remain open |
-| VPU BF16 subtraction | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two FP32-exact finite-normal 1,024-element panels checked subtraction order, signs, final BF16 bit chop, both output halves, inputs and guard on selected standalone core. FP32-inexact differences, exceptional values, and general timing remain open |
-| VPU BF16 pairwise maximum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
-| VPU BF16 pairwise minimum | Hand-authored typed 49-word program matched selected assembler and LLVM object bytes; two sampled raw-encoding 1,024-element panels checked signed zeros, NaN bit ordering, both output halves, inputs and guard on selected standalone core. General timing and in-place use remain open |
-| VPU BF16 square | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked exact powers, signed NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
-| VPU BF16 reciprocal | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked an independent exact-power oracle. A source-derived LUT checker then matched all 65,536 BF16 raw encodings across both register halves on one persistent selected standalone core. Arbitrary register pairs, overlapping use, and general timing remain open |
-| VPU BF16 square root | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels and a source-derived full-code checker matched selected standalone core, including negative finite and special input encodings. Mathematical software compatibility, arbitrary register pairs, overlap, and timing remain open |
-| VPU BF16 base-two exponential | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element selected-core panels checked exact integer powers, signed zeros, infinities, and early overflow at positive input 89 across both BF16 halves. Fractional/NaN/subnormal semantics and timing remain open |
-| VPU BF16 cube | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-element panels checked signed exact powers, NaNs/zeros, subnormals, infinities, underflow and overflow across both register halves on selected standalone core. Nonzero normal fractions and general timing remain open |
-| VPU BF16 row sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row panels checked both broadcast result halves, a tree-order witness, final BF16 rounding, input and guard on selected standalone core. Other reduction modes and exceptional values remain open |
-| VPU BF16 row minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row finite-normal panels checked both broadcast result halves, input and guard on selected standalone core. Exceptional values and general timing remain open |
-| VPU BF16 row maximum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 32-row raw-bit panels checked both broadcast result halves, signed zeros, NaNs, infinities, input and guard on selected standalone core. Other encodings and general timing remain open |
-| VPU BF16 column minimum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two finite-normal panels checked the selected core's 64-by-16 physical-column result and demonstrated disagreement with the 32-by-32 architectural/model result. The selected-RTL compatibility decision uses the executing layout; full-domain semantics and timing remain open |
-| VPU BF16 column maximum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two finite-normal panels checked the selected core's 64-by-16 physical-column result and demonstrated disagreement with the 32-by-32 architectural/model result. The selected-RTL compatibility decision uses the executing layout; full-domain semantics and timing remain open |
-| VPU BF16 column sum | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; two 1,024-cell panels matched independent serial widened binary32 addition and final upper-bit chop over 64-by-16 physical columns on selected standalone core. Model-style 32-by-32 layout, exceptional values, arbitrary pairs, and timing remain open |
-| VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
-| VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
-| XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
-| Program binary, ABI, execution | One checked 40-word capsule uses a bounded reset-entry mailbox ABI with runtime input/output pointers and two starts in the same standalone core; no C-callable or integrated SoC runtime claim |
-| Bounded reset-entry capsule | ACT-independent `atlas-boot-pack` binds checked Atlas source words to one complete ELF `.text`, writes `program.bin`, and records fixed DRAM regions or the bounded mailbox pointer contract; packaging alone does not prove program-to-mailbox binding |
-
-No row in the **99 selected RTL BitPat-row inventory** lacks a typed operation
-route or source-level emitter: the count of unrepresented BitPat rows is 0/99.
-This is not gate D. A frozen executable software configuration has not been
-qualified here, and BitPat coverage does not establish every legality,
-semantic, physical-effect, timing, or execution variant. In particular,
-FP8 scale/pack paths, full-domain VLI qualification, many unary/reduction and
-scalar/control variants, and cross-family temporal effects still lack the
-independent execution and reference evidence required to close D.
-
-This package should become a golden *comparison reference* only after independent
-semantic and hardware tests pass. Merlin's generated dialect and this hand
-implementation should consume the same frozen selected target contract; this
-repository must not become a hidden second authority for numerical semantics.
-
-No `.merlin` certification or release manifest is included because the
-required backend and execution evidence do not yet exist. The
-`handwritten-implementation` branch is published on `ucb-bar/atlas-mlir`;
-its tests remain bounded diagnostic evidence.
+Start with the [documentation index](docs/README.md) for the dialect,
+pass-development guidance, examples, source decisions, execution observations,
+and launch limitations.

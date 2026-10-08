@@ -1,4 +1,4 @@
-# Atlas launch ABI gap after the LLVM boot-entry check
+# Atlas reset-entry capsule and launch limits
 
 The hand OOT dialect can lower a validated flat Atlas stream to an LLVM
 function containing the exact selected instruction words. The
@@ -6,7 +6,7 @@ function containing the exact selected instruction words. The
 VSQUARE function body from IMEM word zero on the selected standalone
 `AtlasCore`. `atlas-boot-pack` makes that narrow reset-entry contract explicit
 and reproducible. A separate [mailbox-call observation](mailbox-call-observation.md)
-now executes the same LLVM-produced program twice on one standalone core
+executed the same LLVM-produced program twice on one standalone core
 with changed runtime pointers and data. This is a bounded custom launch ABI;
 it does not establish a C-callable function ABI or integrated Atlas runtime.
 
@@ -51,10 +51,10 @@ build/bin/atlas-boot-pack \
   --out out/square-boot-capsule
 ```
 
-The current diagnostic artifact is under
-`out/qualifications/oot-boot-capsule-r1/`; the bounded mailbox-call artifact
-is under `out/qualifications/oot-mailbox-call-r1/`. Output paths belong to the
-invocation, not the source tree.
+Earlier local diagnostic runs wrote to
+`out/qualifications/oot-boot-capsule-r1/` and
+`out/qualifications/oot-mailbox-call-r1/`. These ignored outputs are not
+included in a fresh checkout; each invocation must regenerate its artifacts.
 
 ## Remaining obligations
 

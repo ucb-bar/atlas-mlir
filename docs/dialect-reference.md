@@ -1,4 +1,4 @@
-# Atlas machine dialect reference
+# Atlas dialect and pass reference
 
 This hand-authored OOT dialect targets selected RTL
 `0079c0541111197741a231c002e3843fa6f545b2`. Its source of truth is
@@ -9,7 +9,7 @@ This hand-authored OOT dialect targets selected RTL
 modes to decoder rows. Encoding coverage does not establish full arithmetic,
 timing, or integrated SoC qualification.
 
-## Common contract
+## IR stages and verification
 
 The dialect has two checked stages. `!atlas.virtual_bf16` and
 `!atlas.virtual_fp8` are unallocated 32×32 tiles. A name such as `%t1` identifies an MLIR SSA *value*;
@@ -183,7 +183,7 @@ Accumulator initialization emits `atlas.mxu_push` with `kind=acc_fp8` or `acc_bf
 
 The original reset-only lowering remains unchanged. General slot allocation, handles across blocks, numerical execution qualification of these new virtual chains, and asynchronous lifetime qualification remain future work. The generated-schedule check enforces the conservative serial-delay convention; it does not establish a minimal or fully qualified hardware schedule.
 
-## Every current operation
+## Machine operations
 
 All machine rows take and return `!atlas.state`. The fields shown are typed
 attributes. Their verifier checks the listed forms, with mode-specific
@@ -302,7 +302,9 @@ one-slot control rule and asynchronous scalar/transfer lifetimes. Its result
 needs stream verification, fresh mapping, and selected-core checks. The final
 inline-assembly block no longer exposes individual operations.
 
-To add a pass, place its declaration under `include/Atlas/`, its implementation
+### Adding a pass
+
+Place the pass declaration under `include/Atlas/`, its implementation
 under `lib/`, list the new source in `lib/CMakeLists.txt`, and register it in
 `tools/atlas-opt.cpp`. `AtlasStreamVerification.cpp` is a minimal example of
 that wiring. Operation definitions and local legality belong in
