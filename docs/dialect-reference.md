@@ -302,7 +302,9 @@ one-slot control rule and asynchronous scalar/transfer lifetimes. Its result
 needs stream verification, fresh mapping, and selected-core checks. The final
 inline-assembly block no longer exposes individual operations.
 
-To add a pass, place its declaration under `include/Atlas/`, its implementation
+### Adding a pass
+
+Place the pass declaration under `include/Atlas/`, its implementation
 under `lib/`, list the new source in `lib/CMakeLists.txt`, and register it in
 `tools/atlas-opt.cpp`. `AtlasStreamVerification.cpp` is a minimal example of
 that wiring. Operation definitions and local legality belong in
