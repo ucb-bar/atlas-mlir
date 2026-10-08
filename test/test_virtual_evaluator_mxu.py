@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
 import sys
 import unittest
 
@@ -104,6 +106,16 @@ def reset_program():
     return stream.program()
 
 
+def rtl_arithmetic_cases():
+    import npu_model.configs.numerics as numerics
+    path = Path(numerics.__file__).resolve().parents[2] / "tests/rtl/arithmetic.json"
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != "8b2ebb3cb98b4c9e7c7c0f4cb71e86d8a6675c698abec0c3e0525bc693736840":
+        raise AssertionError("pinned MXU RTL arithmetic fixture changed")
+    cases = json.loads(data)
+    return tuple(cases[index] for index in (1, 127, 129, 255))
+
+
 class VirtualEvaluatorMxuTest(unittest.TestCase):
     def test_legacy_and_explicit_reset_use_n_by_k_weights_and_fresh_inputs(self):
         x = sparse({(0, 0): 0x38, (0, 1): 0x40, (1, 0): 0x44, (1, 1): 0x48})
@@ -162,9 +174,38 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
         stream.readout("continued", "seed_result")
         stream.output("seed_result", 1)
         seed = repeated((0x0000, 0x8000))
-        zero = repeated((0x00, 0x80), "fp8")
+        zero = repeated(tuple(range(8)) + tuple(range(0x80, 0x88)), "fp8")
         self.assertEqual(dict(evaluate(stream.program(), inputs(zero, repeated((0xB8,), "fp8"), seed)).outputs),
                          {0: repeated((0,)), 1: seed})
+
+    def test_raw_fp8_products_flush_exponent_zero_but_reserved_codes_multiply_as_480(self):
+        codes = tuple(range(8)) + tuple(range(0x80, 0x88)) + (0x7F, 0xFF)
+        x = sparse({(row, 0): code for row, code in enumerate(codes)})
+        w = sparse({(col, 0): code for col, code in enumerate((0x38, 0xB8, 0x7F, 0xFF))})
+        # +/-480 * (+1, -1, +480, -480), including exact +/-230400.
+        wanted = {(16, 0): 0x43F0, (16, 1): 0xC3F0, (16, 2): 0x4861, (16, 3): 0xC861,
+                  (17, 0): 0xC3F0, (17, 1): 0x43F0, (17, 2): 0xC861, (17, 3): 0x4861}
+        for program in (legacy_program(), reset_program()):
+            for acts, weights, expected in ((x, w, wanted), (w, x, {(col, row): bits for (row, col), bits in wanted.items()})):
+                with self.subTest(explicit=len(program.operations) > 6, swapped=acts is w):
+                    runtime = inputs(acts, weights)
+                    self.assertEqual(evaluate(program, runtime).outputs[0], sparse(expected, "bf16"))
+                    self.assertEqual(dict(runtime.tiles), dict(inputs(acts, weights).tiles))
+
+    def test_exceptional_fp8_single_mac_matches_pinned_rtl_outputs(self):
+        stream = Stream()
+        stream.weight()
+        stream.seed()
+        stream.accumulate("acc", "continued")
+        stream.readout("continued", "result")
+        stream.output("result")
+        program = stream.program()
+        # The RTL harness's FMA output uses only A[0], W[0], and partial.
+        for case in rtl_arithmetic_cases():
+            with self.subTest(raw=hex(case["a"][0])):
+                runtime = inputs(sparse({(0, 0): case["a"][0]}), sparse({(0, 0): case["w"][0]}),
+                                 sparse({(0, 0): case["partial"]}, "bf16"))
+                self.assertEqual(evaluate(program, runtime).outputs[0], sparse({(0, 0): case["fma"]}, "bf16"))
 
     def test_bf16_seed_and_readout_preserve_every_raw_encoding(self):
         stream = Stream()
@@ -213,15 +254,8 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
                 self.assertEqual(evaluate(stream.program(), runtime).outputs[0], repeated(expected))
                 self.assertEqual(runtime.tiles[2], seed)
 
-    def test_mac_rejects_excluded_fp8_and_bf16_classes_when_executed(self):
+    def test_mac_rejects_excluded_bf16_accumulator_classes_when_executed(self):
         ones = repeated((0x38,), "fp8")
-        for bits in (0x01, 0x07, 0x81, 0x87, 0x7F, 0xFF):
-            bad = sparse({(17, 23): bits})
-            for x, w in ((bad, ones), (ones, bad)):
-                for program in (legacy_program(), reset_program()):
-                    with self.subTest(fp8=hex(bits), x_bad=x is bad):
-                        with self.assertRaises(UnsupportedVirtualMode):
-                            evaluate(program, inputs(x, w))
         stream = Stream()
         stream.weight()
         stream.seed()
@@ -239,8 +273,11 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
             {PREFIX}
             cf.cond_br %take, ^compute(%s3 : {STATE}), ^copy(%s3 : {STATE})
           ^compute(%cs: {STATE}):
-            %result = "atlas.virtual_mxu_matmul"(%x, %w) {{unit = 0 : i32}} : ({FP8}, {FP8}) -> {BF16}
-            %out = "atlas.virtual_output_bf16"(%cs, %result) {{index = 0 : i32}} : ({STATE}, {BF16}) -> {STATE}
+            %c1, %weight = "atlas.virtual_mxu_load_weight"(%cs, %w) {{unit = 0 : i32}} : ({STATE}, {FP8}) -> ({STATE}, {WEIGHT})
+            %c2, %acc = "atlas.virtual_mxu_load_acc_bf16"(%c1, %seed) {{unit = 0 : i32}} : ({STATE}, {BF16}) -> ({STATE}, {ACC})
+            %c3, %continued = "atlas.virtual_mxu_accumulate"(%c2, %x, %weight, %acc) : ({STATE}, {FP8}, {WEIGHT}, {ACC}) -> ({STATE}, {ACC})
+            %c4, %result = "atlas.virtual_mxu_readout_bf16"(%c3, %continued) : ({STATE}, {ACC}) -> ({STATE}, {BF16})
+            %out = "atlas.virtual_output_bf16"(%c4, %result) {{index = 0 : i32}} : ({STATE}, {BF16}) -> {STATE}
             return %out : {STATE}
           ^copy(%ss: {STATE}):
             %copy_out = "atlas.virtual_output_bf16"(%ss, %seed) {{index = 1 : i32}} : ({STATE}, {BF16}) -> {STATE}

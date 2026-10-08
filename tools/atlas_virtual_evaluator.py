@@ -401,14 +401,11 @@ def _mxu_unit(op: Operation) -> int:
 
 def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127, *, unit: int = 0) -> Tile:
     if kind == "matmul":
-        # The selected custom FMA documents normal finite inputs and signed zero.
+        # E4M3Mul flushes exponent-zero products and treats raw 7f/ff as +/-480.
+        # Keep the addend within the selected MAC's clean BF16 input domain.
         for tile in operands:
-            if tile.format == "fp8":
-                supported = all((bits & 0x7F) == 0 or 8 <= (bits & 0x7F) <= 0x7E for bits in tile.bits)
-            else:
-                supported = all((bits & 0x7FFF) == 0 or 0x0080 <= (bits & 0x7FFF) <= 0x7F7F for bits in tile.bits)
-            if not supported:
-                raise UnsupportedVirtualMode(f"MXU{unit} contraction requires finite normal inputs or signed zero")
+            if tile.format == "bf16" and not all((bits & 0x7FFF) == 0 or 0x0080 <= (bits & 0x7FFF) <= 0x7F7F for bits in tile.bits):
+                raise UnsupportedVirtualMode(f"MXU{unit} contraction requires finite normal BF16 accumulators or signed zero")
     try:
         import torch
         from npu_model.configs.numerics import RtlNumerics

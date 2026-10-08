@@ -272,8 +272,10 @@ and BF16 rounding after every MAC. MXU1 uses `inner_product_matmul` with anchor
 alignment, integer accumulation, and BF16 rounding at each contraction's output.
 Only BF16 contents persist between operations; no hidden anchor is carried.
 Zero products preserve a negative-zero MXU0 seed, while MXU1 produces positive
-zero. Contractions currently admit
-finite normal operands and signed zero; other encodings fail explicitly.
+zero. Contractions admit all raw FP8 multiply encodings: exponent-zero operands
+produce zero products, while `0x7f/0xff` multiply as ±480 in the selected RTL.
+This differs from their accumulator-seed conversion below. BF16 accumulator
+inputs remain limited to finite normal values and signed zero.
 Raw BF16 seed/readout copies and FP8 seed/readout conversions admit all encodings.
 FP8 seeds flush subnormals and NaNs to signed zero. MXU FP8 readout multiplies by
 the scale, clamps code 255 to exponent +127, and can emit reserved `0x7f/0xff`

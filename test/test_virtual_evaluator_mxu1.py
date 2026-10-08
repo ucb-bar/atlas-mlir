@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import unittest
 
+from test_virtual_evaluator_mxu import rtl_arithmetic_cases, sparse as matrix
 from test_virtual_evaluator_mxu_handles import A, W, S, TILES, accumulate, diagonal, function, legacy, output, program, read, reset, seed, weight
 from atlas_virtual_evaluator import RuntimeInputs, Tile, UnsupportedVirtualMode, VirtualInterfaceError, evaluate, parse_program
 
@@ -131,7 +132,8 @@ class VirtualEvaluatorMXU1Test(unittest.TestCase):
 
     def test_signed_zero_seed_copy_and_zero_product_continuation_differ(self) -> None:
         negative_zero = Tile("bf16", (0x8000,) * 1024)
-        tiles = {**TILES, 0: Tile("fp8", (0x80,) * 1024), 1: Tile("fp8", (0x38,) * 1024), 3: negative_zero}
+        zero_codes = tuple(range(8)) + tuple(range(0x80, 0x88))
+        tiles = {**TILES, 0: Tile("fp8", zero_codes * 64), 1: Tile("fp8", (0x38,) * 1024), 3: negative_zero}
         body = (on_unit(seed("s4", "t0", "copy"), 1), on_unit(read("t0", "t1", "raw", "copy"), 1),
                 weight("t1", "t2", "sw"), seed("t2", "t3", "sa_acc0"), accumulate("t3", "t4", "sa_acc1", "sa_acc0", "sw"), read("t4", "t5", "sa", "sa_acc1"),
                 on_unit(weight("t5", "t6", "iw"), 1), on_unit(seed("t6", "t7", "i0"), 1),
@@ -166,12 +168,32 @@ class VirtualEvaluatorMXU1Test(unittest.TestCase):
         scaled = on_unit(kernel((source.replace("code = 127", "code = 128"),), "t3", ("y",)), 1)
         self.assert_outputs(scaled, tiles, {0: diagonal("bf16", 0x4000)})
 
-    def test_mxu1_contractions_keep_the_clean_input_domain(self) -> None:
-        source = on_unit(kernel((legacy("y"),), "s4", ("y",)), 1)
-        for index in (0, 1):
-            for code in (0x01, 0x81, 0x7F, 0xFF):
-                with self.subTest(index=index, code=hex(code)):
-                    self.reject(source, {**TILES, index: sparse("fp8", (code,))}, UnsupportedVirtualMode)
+    def test_raw_fp8_products_use_multiplier_semantics_on_mxu1(self) -> None:
+        codes = tuple(range(8)) + tuple(range(0x80, 0x88)) + (0x7F, 0xFF)
+        acts = matrix({(row, 0): code for row, code in enumerate(codes)})
+        weights = matrix({(col, 0): code for col, code in enumerate((0x38, 0xB8, 0x7F, 0xFF))})
+        wanted = {(16, 0): 0x43F0, (16, 1): 0xC3F0, (16, 2): 0x4861, (16, 3): 0xC861,
+                  (17, 0): 0xC3F0, (17, 1): 0x43F0, (17, 2): 0xC861, (17, 3): 0x4861}
+        programs = (kernel((legacy("y"),), "s4", ("y",)),
+                    kernel((weight("s4", "t0", "w0"), reset("t0", "t1", "a0"), read("t1", "t2", "y", "a0")), "t2", ("y",)))
+        for index, program in enumerate(programs):
+            source = on_unit(program, 1)
+            for x, w, expected in ((acts, weights, wanted), (weights, acts, {(col, row): bits for (row, col), bits in wanted.items()})):
+                with self.subTest(explicit=bool(index), swapped=x is weights):
+                    self.assert_outputs(source, {**TILES, 0: x, 1: w}, {0: matrix(expected, "bf16")})
+
+    def test_exceptional_fp8_anchor_sum_matches_pinned_rtl_outputs(self) -> None:
+        body = (weight("s4", "t0", "w0"), seed("t0", "t1", "a0"),
+                accumulate("t1", "t2", "a1", "a0"), read("t2", "t3", "y", "a1"))
+        source = on_unit(kernel(body, "t3", ("y",)), 1)
+        # The independent RTL lane sums all 32 products with this partial.
+        for case in rtl_arithmetic_cases():
+            with self.subTest(raw=hex(case["a"][0])):
+                tiles = {**TILES, 0: sparse("fp8", tuple(case["a"])), 1: sparse("fp8", tuple(case["w"])),
+                         3: sparse("bf16", (case["partial"],))}
+                self.assert_outputs(source, tiles, {0: sparse("bf16", (case["ipt"],))})
+
+    def test_mxu1_contractions_keep_the_clean_bf16_accumulator_domain(self) -> None:
         continued = on_unit(kernel((weight("s4", "t0", "w0"), seed("t0", "t1", "a0"),
                                    accumulate("t1", "t2", "a1", "a0"), read("t2", "t3", "y", "a1")), "t3", ("y",)), 1)
         for code in (0x0001, 0x8001, 0x7F80, 0x7FC0):
