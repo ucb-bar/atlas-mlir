@@ -84,7 +84,7 @@ check and its required source pins are documented in the
 | [MLP tile](examples/handoff/mlp_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed 32×32 instruction stream through LLVM, assembly, and ELF. |
 | [Attention tile](examples/handoff/attention_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed attention-like tile stream through the same stages. |
 | [Virtual MLP tile](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir) | Atlas virtual SSA | Placement and lowering before LLVM emission. |
-| [Captured MLP diagnostic](examples/handoff/captured_mlp/00-linalg.mlir) | Parsed Linalg IR | A bounded capture-to-ELF route with an explicit FP8/BF16 policy. |
+| [Captured MLP diagnostic](examples/handoff/captured_mlp/00-linalg.mlir) | Parsed Linalg IR | A bounded Linalg-to-ELF route with an explicit FP8/BF16 policy. |
 
 The [handoff guide](examples/handoff/README.md) gives the exact regeneration
 commands and names every generated Atlas, LLVM, assembly, object, ELF, map, and
@@ -113,9 +113,8 @@ This is a handwritten comparison implementation, not a clean-room oracle or a
 Merlin-generated compiler.
 Selected-core results are bounded diagnostics. Full numerical, timing,
 physical-effect, legality, and integrated execution evidence is still needed
-before treating the selected configuration as a complete target dialect.
-There is no general instruction selector, whole-model compiler, callable Atlas
-ABI, or full D/F/M/N qualification in this repository.
+for a complete target compiler. This repository has no general instruction
+selector, whole-model compiler, or C-callable Atlas function ABI.
 
 Start with the [documentation index](docs/README.md) for the dialect,
 pass-development guidance, examples, source decisions, execution observations,

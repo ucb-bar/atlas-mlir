@@ -15,12 +15,12 @@ assembly, and ELF artifacts. Generated files belong under `out/`.
 | [Captured MLP diagnostic](captured-mlp-compiler.md) | The bounded Linalg-to-Atlas path and its explicit precision policy. |
 | [Reset-entry launch limits](atlas-launch-abi-gap.md) | Capsule layout, mailbox example, and remaining host/SoC ABI work. |
 
-The machine IR is the place to change instruction order or insert physical
-delays. The structured LLVM calls expose checked instruction fields for
-analysis. After finalization, LLVM sees one inline-assembly block; it cannot
-schedule individual Atlas operations. The
+The implemented physical timing and scheduling passes operate on machine IR
+before LLVM conversion. Structured LLVM calls expose checked instruction
+fields for analysis. After finalization, LLVM sees one inline-assembly block;
+it cannot schedule individual Atlas operations. The
 [pass inventory](dialect-reference.md#pass-and-tool-inventory) identifies the
-implemented passes and their limits; [adding a pass](dialect-reference.md#adding-a-pass)
+implemented passes and their limits. [Adding a pass](dialect-reference.md#adding-a-pass)
 shows where to wire one into the OOT build.
 
 ## Selected source and qualification
