@@ -242,9 +242,10 @@ static FailureOr<uint32_t> proveJalrTarget(
 }
 
 LogicalResult mlir::atlas::collectAtlasWords(
-    ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock) {
+    ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock,
+    bool skipGeneratedCheck) {
   if (failed(verify(module))) return failure();
-  if (module->hasAttr("atlas.generated_from_virtual") &&
+  if (!skipGeneratedCheck && module->hasAttr("atlas.generated_from_virtual") &&
       failed(verifyAtlasGeneratedSchedule(module)))
     return failure();
   llvm::SmallVector<uint32_t> collected;

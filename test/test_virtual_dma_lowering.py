@@ -98,7 +98,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                          registers[fields["size"]], fields[MARKER]))
                         self.assertEqual((fields["reg"], fields["dram"], fields["size"]), (4, 7, 9))
                     elif operation in vector_addresses:
-                        vector_addresses[operation].append(registers[fields["base"]] + fields["offset"] * 8)
+                        vector_addresses[operation].append(registers[fields["base"]] + fields["offset"] * 32)
                         wait = entries[index + 1]
                         self.assertEqual(wait["operation"], "atlas.delay")
                         self.assertEqual(wait["fields"]["cycles"], 256)
@@ -209,7 +209,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 for entry, registers in snapshots:
                     if entry["operation"] in addresses:
                         fields = entry["fields"]
-                        addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 8)
+                        addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 32)
                 self.assertEqual(addresses["atlas.vload"], [STAGING_WORD] * 2)
                 self.assertEqual(addresses["atlas.vstore"],
                                  [STAGING_WORD + 256 * half for half in range(halves)])

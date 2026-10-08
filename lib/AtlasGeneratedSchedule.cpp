@@ -1,4 +1,5 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
@@ -65,7 +66,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
       pending.reset();
     } else if (pending) {
       std::optional<unsigned> scalarDst;
-      bool allowed = isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp>(op);
+      bool allowed = isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp, VLoadOp, VStoreOp>(op);
       if (auto alu = dyn_cast<ALURegOp>(op))
         scalarDst = alu.getDst();
       else if (auto alu = dyn_cast<ALUImmOp>(op))
@@ -133,7 +134,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
                 "generated redirect target enters a pending DMA interval");
     }
   }
-  return success();
+  return verifyAtlasGeneratedDMAMemory(module);
 }
 
 namespace {

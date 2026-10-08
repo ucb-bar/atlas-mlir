@@ -74,7 +74,7 @@ class DMACaptureVerificationTest(unittest.TestCase):
                      ("branch", (("branch", 'kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = 2 : i32'), NOP)))
         for name, work in forbidden:
             with self.subTest(name=name):
-                message = "pending" if name.startswith("VMEM") else "unexpected instruction while DMA is pending"
+                message = "DMA memory conflict" if name.startswith("VMEM") else "unexpected instruction while DMA is pending"
                 self.rejected(artifact(work), message)
 
     def test_same_channel_cannot_be_relaunched_before_its_completion(self) -> None:

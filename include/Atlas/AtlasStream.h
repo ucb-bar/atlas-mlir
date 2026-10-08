@@ -9,7 +9,7 @@
 
 namespace mlir::atlas {
 
-// A flat Atlas stream without delays, in basic blocks. A block ending in a
+// A flat Atlas stream in basic blocks. A block ending in a
 // branch or jump ends with its delay slot.
 struct AtlasStream {
   llvm::SmallVector<Operation *> ops;
@@ -31,7 +31,11 @@ struct DelayInsertion {
   std::string reason;
 };
 
-FailureOr<AtlasStream> readAtlasStream(ModuleOp module);
+enum class AtlasStreamReadMode { Scheduling, Verification };
+// Verification reads emitted delays and treats PC-dependent scalar values as
+// unknown. It skips only the generated verifier hook to avoid recursive checks.
+FailureOr<AtlasStream> readAtlasStream(
+    ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
 LogicalResult checkAtlasStream(const AtlasStream &stream);
 // Rewrites the module as the ops in `order`, each after its insertion, and

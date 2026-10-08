@@ -122,6 +122,9 @@ FailureOr<Instr> toInstr(Operation *op) {
     in.imm = x.getAddress();
   } else if (auto x = dyn_cast<TrapOp>(op)) {
     name = x.getKind().str();
+  } else if (auto x = dyn_cast<DelayOp>(op)) {
+    name = "delay";
+    in.imm = x.getCycles();
   } else if (isa<FenceOp>(op)) {
     name = "fence";
   } else if (auto x = dyn_cast<ScalarLoadOp>(op)) {
@@ -199,9 +202,12 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
-FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
+FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module,
+                                                 AtlasStreamReadMode mode) {
+  bool verification = mode == AtlasStreamReadMode::Verification;
   SmallVector<uint32_t> words;
-  if (failed(collectAtlasWords(module, words, /*llvmBlock=*/false)))
+  if (failed(collectAtlasWords(module, words, /*llvmBlock=*/false,
+                               /*skipGeneratedCheck=*/verification)))
     return failure();
   AtlasStream s;
   SmallVector<Operation *> &ops = s.ops;
@@ -210,17 +216,19 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
       ops.push_back(&op);
 
   for (Operation *op : ops) {
-    if (isa<DelayOp>(op))
+    if (!verification && isa<DelayOp>(op))
       return op->emitOpError(
           "is not allowed in the input; delays come from the timing model");
-    if (auto upper = dyn_cast<UpperOp>(op); upper && upper.getKind() == "auipc")
+    if (auto upper = dyn_cast<UpperOp>(op);
+        !verification && upper && upper.getKind() == "auipc")
       return op->emitOpError(
           "reads its own instruction index, which inserting delays changes");
     if (auto jump = dyn_cast<JumpOp>(op)) {
       if (jump.getKind() == "jalr")
         return op->emitOpError(
-            "has a register target that inserting delays could invalidate");
-      if (jump.getDst() != 0)
+            verification ? "has an unproven JALR target for DMA memory verification"
+                         : "has a register target that inserting delays could invalidate");
+      if (!verification && jump.getDst() != 0)
         return op->emitOpError(
             "writes a link value that inserting delays changes");
     }
@@ -276,6 +284,8 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
     if (leader < n)
       starts.push_back(leader);
   size_t blocks = starts.size();
+  if (!blocks)
+    return s;
   std::vector<size_t> blockAt(n);
   for (size_t b = 0; b < blocks; ++b)
     blockAt[starts[b]] = b;
@@ -431,4 +441,3 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   SmallVector<uint32_t> words;
   return collectAtlasWords(module, words, /*llvmBlock=*/false);
 }
-
