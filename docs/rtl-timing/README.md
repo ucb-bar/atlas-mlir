@@ -6,6 +6,8 @@ The [admission audit](admission.md) distinguishes command presentation, capture,
 
 The implemented [selected-evidence workflow](selected-evidence.md) separately loads `atlas.conditional_vls_hw_check.v0` replay receipts through `atlas.vls.conservative.v1`. Explicitly selected conditional rules now feed scheduling, delay insertion and an independent final timed verifier for a small straight-line subset. This backend rejects the broad draft bundle and unsupported instances; it does not qualify integrated EE290SimConfig execution or the full operation catalog.
 
+The [handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) distinguishes fresh selected-source/CIRCT correspondence, passing EE290 system numerical witnesses, and actual selected-AtlasCore/SRAM timing observations. These results support the bounded work while preserving the missing full-system build/trace and qualified-consumer acceptance steps.
+
 ## Scope and ownership
 
 The contract target is named **`EE290SimConfig`**, referring to [bringup-chipyard's system configuration](https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25). `target.config` and `target.reference` identify that public configuration, independent of local checkout or input filenames. The helper receives explicit paths and never translates a hidden local configuration name. A run records its actual producer label, if supplied, in provenance and `build.config`; local input mappings and measured bundles stay in ignored artifacts. A shared logical target does not establish equality of sources, parameters or generated hardware.
