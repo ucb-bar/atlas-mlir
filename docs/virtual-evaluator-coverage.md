@@ -1,6 +1,6 @@
 # Virtual evaluator coverage
 
-[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has execution for `start`, BF16/FP8 boundary inputs, BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, MXU0 legacy/explicit operations and scale constants, and the scalar/CFG forms below. MXU1 and DMA execution remain unsupported. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
+[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has execution for `start`, BF16/FP8 boundary inputs, BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, unit-specific MXU legacy/explicit operations and scale constants, and the scalar/CFG forms below. Explicit DMA execution remains unsupported. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
 
 ## Baselines and evidence
 
@@ -75,8 +75,8 @@ Current model [numerics and layouts](../../../../../npu-model/docs/rtl-timing.md
 | --- | --- | --- |
 | V1 | MOV raw copy and ReLU sign-bit rule checked across all 65,536 encodings; historical [ReLU](vpu-relu-observation.md) | Selected-core comparison across special encodings |
 | V2 | Selected FP32 RNE/BF16 chop path; directed signed-zero, subnormal, overflow, infinity, and canonical-NaN cases; [addition](vpu-add-observation.md) | Selected-core comparison; `1 + 3/512` distinguishes chop `0x3f80` from BF16 nearest-even `0x3f81` |
-| P | Scale-127 converter checked for ties, carry, saturation, underflow, specials, and logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | Physical converter/transport and PACK→MXU0 comparisons await core execution |
-| M | MXU0 per-MAC adapter: orientation, ordered rounding, reset/continuation, raw seeds, and handle tests; [discriminator](mxu-arithmetic-discriminator-observation.md), [MXU0 continuation](mxu0-k-continuation-observation.md) | Selected-core comparisons; MXU1 [anchor/continuation](mxu1-continuation-observation.md) implementation; exceptional contraction encodings |
+| P | Scale-127 converter checked for ties, carry, saturation, underflow, specials, and logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | Physical converter/transport and PACK→MXU comparisons await core execution |
+| M | Separate per-MAC MXU0 and anchor MXU1 adapters; orientation, rounding, reset/continuation, seeds, and handles; [discriminator](mxu-arithmetic-discriminator-observation.md), [MXU0](mxu0-k-continuation-observation.md) and [MXU1 continuation](mxu1-continuation-observation.md) | Selected-core comparisons; exceptional contraction encodings |
 | R | MXU converter, special scale codes and reserved rounded ±480 tested through reseeding; [explicit MXU reference](dialect-reference.md) | Selected-core comparisons; VPU pack divides by scale while MXU pop multiplies |
 | D | Model DMA; [pointer lifetime](dma-pointer-lifetime-observation.md) | Little-endian serialization, source stability, snapshots, conflicting ranges, visibility, two-transfer ordering |
 
@@ -92,4 +92,6 @@ The [shared-input comparison](../test/test_virtual_evaluator_core.py) includes t
 
 [MXU0 numerical tests](../test/test_virtual_evaluator_mxu.py) distinguish per-MAC BF16 rounding from final-only rounding and check asymmetric W[N,K] orientation. Contractions currently admit finite normal inputs and signed zero; raw copies and converters have broader domains. [Handle tests](../test/test_virtual_evaluator_mxu_handles.py) cover independent chains, remaining weight uses, consumed versions, capacity, block boundaries, and fresh loop visits. These follow the pinned target's two-handle admission rather than the older local single-handle policy.
 
-[MXU0/core comparisons](../test/test_virtual_evaluator_mxu_core.py) cover observable PACK consumers, continuation, both seed formats, FP8 readout/reseed, fresh inputs, and preserved buffers. Their lowering/LLVM checks run without the bundle; core execution is pending. MXU1, explicit DMA completion, exceptional contraction domains, and original/scheduled comparisons remain future work. These checks do not qualify physical resource release or timing.
+[MXU1 tests](../test/test_virtual_evaluator_mxu1.py) distinguish anchor alignment and per-contraction rounding from MXU0's per-MAC policy, including instruction boundaries, cancellation, and signed zero. Both units store BF16 between operations and maintain independent handle sets.
+
+[MXU/core comparisons](../test/test_virtual_evaluator_mxu_core.py) cover both units' observable PACK consumers, continuation, seed formats, FP8 readout/reseed, fresh inputs, and preserved buffers. Their lowering/LLVM checks run without the bundle; core execution is pending. Explicit DMA completion, exceptional contraction domains, and original/scheduled comparisons remain future work. These checks do not qualify physical resource release or timing.

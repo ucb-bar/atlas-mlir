@@ -1,7 +1,8 @@
-"""MXU0 virtual semantics versus independent literals and the selected core."""
+"""Both MXUs' virtual semantics versus independent literals and selected core."""
 
 from __future__ import annotations
 
+from itertools import product
 import unittest
 
 from test_virtual_evaluator_core import compare_result, selected_core, tile_bytes
@@ -49,6 +50,12 @@ SOURCES = {"legacy_pack": LEGACY, "continuation": CONTINUED,
            "seed_bf16": seeded_chain(0, "bf16", 127), "seed_fp8": seeded_chain(0, "fp8", 127)}
 
 
+def source_for_unit(name: str, unit: int) -> str:
+    return (SOURCES[name].replace("unit = 0 : i32", f"unit = {unit} : i32")
+            .replace("virtual_mxu_weight<0>", f"virtual_mxu_weight<{unit}>")
+            .replace("virtual_mxu_acc<0>", f"virtual_mxu_acc<{unit}>"))
+
+
 def inputs_with_guards(tiles: dict[int, Tile], output_count: int) -> RuntimeInputs:
     regions = []
     for index, tile in tiles.items():
@@ -70,15 +77,15 @@ def identity_weight(shift: int = 0) -> Tile:
     return Tile("fp8", tuple(0x38 if k == (column + shift) % 32 else 0 for column in range(32) for k in range(32)))
 
 
-def case(name: str, phase: int):
+def case(name: str, phase: int, unit: int = 0):
     if name == "legacy_pack":
         x, shift = panel(phase), phase % 7
         first = Tile("bf16", tuple(FP8_TO_BF16[x.bits[row * 32 + (col + shift) % 32]] for row in range(32) for col in range(32)))
         final = Tile("bf16", tuple(0 if (code := x.bits[row * 32 + (col + 2 * shift) % 32]) == 0xB8 else FP8_TO_BF16[code] for row in range(32) for col in range(32)))
         return inputs_with_guards({0: x, 1: identity_weight(shift)}, 2), {0: first, 1: final}, (64, 128)
     if name == "continuation":
-        # +1 followed by +half-ULP and -half-ULP becomes 0x3f7f under
-        # ordered BF16 RNE; rounding the final exact sum once gives 0x3f80.
+        # MXU0 rounds each FMA: +1, +half-ULP, -half-ULP becomes 0x3f7f.
+        # MXU1 rounds once per operation, preserving +1 (0x3f80) here.
         k0, columns = (phase % 10) * 3, (3 + phase, 20 + phase)
         first, next_x, weight, expected = ([0] * 1024 for _ in range(4))
         for row in range(32):
@@ -87,7 +94,7 @@ def case(name: str, phase: int):
             next_x[row * 32 + k0 + 1] = 0x98 if negative else 0x18
             next_x[row * 32 + k0 + 2] = 0x18 if negative else 0x98
             for col in columns:
-                expected[row * 32 + col] = 0xBF7F if negative else 0x3F7F
+                expected[row * 32 + col] = (0x3F7F if unit == 0 else 0x3F80) | (0x8000 if negative else 0)
         for col in columns:
             weight[col * 32 + k0:col * 32 + k0 + 3] = (0x38, 0x18, 0x18)
         tiles = {0: Tile("fp8", first), 1: Tile("fp8", weight), 2: Tile("fp8", next_x)}
@@ -101,25 +108,25 @@ def case(name: str, phase: int):
 
 
 class VirtualEvaluatorMXUCoreTest(unittest.TestCase):
-    def literal_result(self, name: str, phase: int):
-        inputs, outputs, traffic = case(name, phase)
+    def literal_result(self, name: str, phase: int, unit: int = 0):
+        inputs, outputs, traffic = case(name, phase, unit)
         original = dict(inputs.tiles)
-        result = evaluate(parse_program(SOURCES[name]), inputs)
+        result = evaluate(parse_program(source_for_unit(name, unit)), inputs)
         self.assertEqual(dict(result.outputs), outputs)
         self.assertEqual(result.memory, inputs.memory)
         self.assertEqual(dict(inputs.tiles), original)
         return inputs, result, traffic
 
     def test_evaluator_matches_whole_tile_literals_on_fresh_panels(self) -> None:
-        for name in SOURCES:
+        for unit, name in product((0, 1), SOURCES):
             for phase in (0, 3):
-                with self.subTest(name=name, phase=phase):
-                    self.literal_result(name, phase)
+                with self.subTest(unit=unit, name=name, phase=phase):
+                    self.literal_result(name, phase, unit)
 
     def test_lowering_and_emission_cover_pack_continuation_and_seeds(self) -> None:
-        for name, source in SOURCES.items():
-            with self.subTest(name=name):
-                machine = lower(source)
+        for unit, name in product((0, 1), SOURCES):
+            with self.subTest(unit=unit, name=name):
+                machine = lower(source_for_unit(name, unit))
                 self.assertNotIn("atlas.virtual_", machine)
                 self.assertTrue(emitted(machine))
                 if name == "legacy_pack":
@@ -135,20 +142,20 @@ class VirtualEvaluatorMXUCoreTest(unittest.TestCase):
                     self.assertIn('format = "bf16"', machine)
 
     def test_llvm_object_words_match_emission_for_all_forms(self) -> None:
-        for name, source in SOURCES.items():
-            with self.subTest(name=name):
-                machine = lower(source)
+        for unit, name in product((0, 1), SOURCES):
+            with self.subTest(unit=unit, name=name):
+                machine = lower(source_for_unit(name, unit))
                 self.assertEqual(object_words(machine), emitted(machine))
 
     def test_selected_core_matches_evaluator_and_preserves_inputs_padding_guards(self) -> None:
         with selected_core(max_cycles=100000) as run:
-            for name, source in SOURCES.items():
-                machine = lower(source)
+            for unit, name in product((0, 1), SOURCES):
+                machine = lower(source_for_unit(name, unit))
                 words = object_words(machine)
                 self.assertEqual(words, emitted(machine))
                 for phase in (0, 3):
-                    with self.subTest(name=name, phase=phase):
-                        inputs, expected, traffic = self.literal_result(name, phase)
+                    with self.subTest(unit=unit, name=name, phase=phase):
+                        inputs, expected, traffic = self.literal_result(name, phase, unit)
                         preload = [(region.address, region.data) for region in inputs.memory]
                         preload.append((OUTPUT_BASE, b"\xA5" * (len(expected.outputs) * 2048)))
                         observed = run(words, preload)

@@ -215,11 +215,10 @@ class VirtualEvaluatorMXUHandleTest(unittest.TestCase):
         '''
         self.reject(function(body, "%choose: i1"), (Scalar(1, 1),))
 
-    def test_mxu1_remains_explicitly_unsupported(self) -> None:
+    def test_mxu1_seed_and_readout_are_admitted(self) -> None:
         source = program(seed("s4", "t0", "a0"), read("t0", "t1", "y", "a0"), final_state="t1")
         source = source.replace(A, "!atlas.virtual_mxu_acc<1>").replace("unit = 0 : i32", "unit = 1 : i32")
-        self.reject(source, error=UnsupportedVirtualMode)
-        self.reject(program(legacy().replace("unit = 0", "unit = 1"), final_state="s4"), error=UnsupportedVirtualMode)
+        self.assert_outputs(source, {0: TILES[3]})
 
 
 if __name__ == "__main__":

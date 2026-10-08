@@ -54,8 +54,8 @@ argument order.
 `evaluate(program, inputs, max_steps=10000)` executes BF16/FP8 boundary inputs,
 BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, i1/i32 controls/constants,
 wrapping i32 addition, all ten integer comparisons, branches, and returns.
-MXU0 legacy matmul and explicit weight/reset/seed/accumulate/readout operations
-also execute, including immutable scale constants. MXU1 remains unsupported.
+Both MXU units execute legacy matmul and explicit weight/reset/seed/accumulate/
+readout operations, including immutable scale constants, with separate arithmetic.
 It checks SSA dominance, edge types/arity, and state flow before execution;
 branch arguments bind simultaneously. Each executed
 operation, including branches and returns, consumes one step. Exhaustion raises
@@ -75,7 +75,7 @@ restrictions still apply separately.
 and its tuple of immutable tiles. Pack uses `RtlNumerics.to_fp8` with scale 127:
 nearest-even rounding, signed saturation to 448, and positive zero for NaNs,
 subnormals, and underflow. It preserves logical row-major order. This helper
-exposes FP8 results directly. Full-program tests observe FP8 through MXU0
+exposes FP8 results directly. Full-program tests observe FP8 through MXU
 consumers; the dialect has no FP8 boundary-output operation.
 
 ```python
@@ -124,10 +124,10 @@ ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtua
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
 the [README](../README.md). Required mode fails on missing core prerequisites;
-ordinary discovery skips those checks. The shared-input, scalar/CFG, VPU, MXU0,
+ordinary discovery skips those checks. The shared-input, scalar/CFG, VPU, MXU,
 and physical pack comparisons have not executed against a selected-core
 artifact. The physical pack probe checks converter/transport behavior;
-virtual pack lowering with an MXU0 consumer has a separate pending comparison. See the
+virtual pack lowering with MXU consumers has separate pending comparisons. See the
 [coverage inventory](virtual-evaluator-coverage.md) for evidence and limits.
 
 ## Recommended interpreter state
@@ -215,8 +215,12 @@ audited `RtlNumerics` components while preserving MXU0's per-MAC BF16 arithmetic
 and MXU1's distinct anchor accumulator/readout; a generic matmul or shared
 rounding shortcut is insufficient.
 
-MXU0 execution uses `RtlNumerics.systolic_matmul(A, W.T, C)` with ascending-K
-custom FMA and BF16 rounding after every MAC. Contractions currently admit
+MXU0 uses `RtlNumerics.systolic_matmul(A, W.T, C)` with ascending-K custom FMA
+and BF16 rounding after every MAC. MXU1 uses `inner_product_matmul` with anchor
+alignment, integer accumulation, and BF16 rounding at each contraction's output.
+Only BF16 contents persist between operations; no hidden anchor is carried.
+Zero products preserve a negative-zero MXU0 seed, while MXU1 produces positive
+zero. Contractions currently admit
 finite normal operands and signed zero; other encodings fail explicitly.
 Raw BF16 seed/readout copies and FP8 seed/readout conversions admit all encodings.
 FP8 seeds flush subnormals and NaNs to signed zero. MXU FP8 readout multiplies by
@@ -259,8 +263,8 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer, scalar/CFG, admitted VPU/pack, and MXU0 execution
+The parser/input layer, scalar/CFG, admitted VPU/pack, and both MXU units
 are implemented in this repository's Python verification tooling. Their
-selected-core comparisons are implemented but unexecuted; MXU1 and DMA
-execution remain future work. These partial checks do not complete
+selected-core comparisons are implemented but unexecuted; explicit DMA
+execution remains future work. These partial checks do not complete
 [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).
