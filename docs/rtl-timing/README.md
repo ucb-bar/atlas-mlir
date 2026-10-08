@@ -12,6 +12,8 @@ The [resolved timing export](resolved-export.md) exposes the existing shared pro
 
 The [bounded applicability checker](bounded-applicability.md) binds those exports to independently selected source/build/program evidence and recomputed component boundary/SRAM events. It reports finite observed applicability and the remaining assumptions explicitly; it does not promote the conditional provider or replace transformation verification.
 
+The [integrated VCS observation workflow](vcs-observation.md) reuses a captured simulator and successful numerical witness to record internal events through native VPD capture and an explicit VCD conversion. It preserves simulator, program, capture and conversion identities; actual system timing and arbitration validation remain separate from preparation.
+
 ## Scope and ownership
 
 The contract target is named **`EE290SimConfig`**, referring to [bringup-chipyard's system configuration](https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25). `target.config` and `target.reference` identify that public configuration, independent of local checkout or input filenames. The helper receives explicit paths and never translates a hidden local configuration name. A run records its actual producer label, if supplied, in provenance and `build.config`; local input mappings and measured bundles stay in ignored artifacts. A shared logical target does not establish equality of sources, parameters or generated hardware.
