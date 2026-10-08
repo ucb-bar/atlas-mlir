@@ -27,6 +27,27 @@ The tool copies selected sources, JARs and helper executables, compiles `compile
 
 Java receives an explicit environment with output-owned temporary and home directories. The remaining Chipyard classes and resources are a pinned opaque binary dependency. This is a bounded selected-source build; it does not reconstruct that JAR's source history or every Java/native runtime dependency. The successful receipt is `source_elaboration_captured`, with full-Chipyard-source, simulator-link and scheduling-qualification flags false.
 
+## Compare the fresh source build with selected CIRCT hardware
+
+[`check-ee290-source-correspondence.py`](../../tools/check-ee290-source-correspondence.py) validates the bounded source-build recipe, lowers its fresh FIRRTL and compares the AtlasCore module closure with an independently selected retention manifest.
+
+```bash
+python3 tools/check-ee290-source-correspondence.py \
+  --source-report build/rtl-timing/source-build-001/report.json \
+  --expected-source-report-sha256 SOURCE_REPORT_SHA256 \
+  --selected-manifest /path/to/selected-retention/manifest.json \
+  --expected-selected-manifest-sha256 MANIFEST_SHA256 \
+  --output build/rtl-timing/source-correspondence-001
+```
+
+The checker reconstructs the selected compile/elaboration arguments, environment, source snapshots, overlay inputs and phase outputs, and recomputes class-origin checks. Historical producer identities are checked against retained executed snapshots; updating today's tool source does not substitute it for the implementation recorded in an earlier phase.
+
+Fresh Chisel annotations must equal the selected baseline. The admitted final-annotation policy preserves that exact prefix and adds only MarkDUT plus two hierarchy-output annotations in the reviewed order. The existing retention helper then performs a fresh FIRRTL-to-HW lowering and CIRCT verification with the selected tools and lowering policy.
+
+All 123 definitions in the selected AtlasCore instance closure must match. The existing fingerprint normalizer removes only horizontal whitespace preceding debug-location alias references outside strings, together with those references; other bytes and semantic attributes remain significant. A mismatch rejects the result without updating compiler trust. External memory declarations are part of this comparison, but their implementation bodies and simulation behavior require separate evidence.
+
+`selected_source_correspondence_captured` establishes this bounded source-to-CIRCT correspondence. It does not establish full upstream-source equivalence, the historical simulator build, or timing qualification. The selected evidence's original artifact identity remains distinct from the freshly lowered artifact even when every admitted module fingerprint matches.
+
 ## Simulator preparation and compilation
 
 [`build-ee290-simulator.py`](../../tools/build-ee290-simulator.py) starts from an independently selected successful witness receipt and its recorded VCS command. It parses an admitted command recipe without executing saved shell text. Preparation checks source/file-list identities, resolves literal SystemVerilog includes, discovers actual C++ headers, copies selected inputs, then checks dependency discovery again after relocation.
@@ -69,6 +90,7 @@ Focused regressions exercise mismatched identities, restricted paths, failed com
 ```bash
 python3 -m unittest discover -s test -p test_ee290_build_capture.py -v
 python3 -m unittest discover -s test -p test_ee290_source_elaboration.py -v
+python3 -m unittest discover -s test -p test_ee290_source_correspondence.py -v
 python3 -m unittest discover -s test -p test_ee290_simulator_build.py -v
 ```
 
