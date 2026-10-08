@@ -10,7 +10,8 @@ struct VirtualDMAAssignment {
   DMATransferPlacement placement;
 };
 
-// Requires a verified, admitted virtual CFG and live source IR. Independently
+// Requires live source IR with verified SSA and typed virtual DMA operations.
+// Admission and state-flow verification remain separate. Independently
 // checks assignment completeness, unique nonnegative i32 transfer ids, geometry,
 // and logical channel/window ownership
 // from each launch through its matching block-local completion. Does not prove

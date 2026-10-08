@@ -14,6 +14,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasVirtualAllocation.cpp
   AtlasRegisterAllocationVerification.cpp
   AtlasDMAAllocationVerification.cpp
+  AtlasMXUAllocationVerification.cpp
   AtlasDMAMemoryVerification.cpp
   AtlasGeneratedSchedule.cpp
   DEPENDS MLIRAtlasOpsIncGen

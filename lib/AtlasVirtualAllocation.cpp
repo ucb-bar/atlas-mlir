@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasDMAAllocationVerification.h"
+#include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -321,7 +322,12 @@ LogicalResult VirtualAllocationPlan::verify() const {
   SmallVector<VirtualDMAAssignment> dmaAssignments;
   for (const auto &[transfer, placement] : dmaTransfers)
     dmaAssignments.push_back({transfer, placement});
-  return verifyAtlasDMAAllocation(function, dmaAssignments);
+  if (failed(verifyAtlasDMAAllocation(function, dmaAssignments)))
+    return failure();
+  SmallVector<VirtualMXUAssignment> mxuAssignments;
+  for (const auto &[handle, placement] : mxuResources)
+    mxuAssignments.push_back({handle, placement});
+  return verifyAtlasMXUAllocation(function, mxuAssignments, fixedResources);
 }
 
 unsigned VirtualAllocationPlan::tile(Value value) const {
