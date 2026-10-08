@@ -2,6 +2,8 @@
 
 **Draft v0; no compiler loader or qualified target profile is implemented by these files.** This document specifies the handoff from RTL analysis to Atlas scheduling, delay insertion, allocation constraints, and final hazard verification. The [operation coverage table](operation-coverage.md), [machine mnemonic catalog](operation-catalog.json), [JSON Schema](contract.schema.json), and [draft bundle](examples/contract.json) accompany it. The draft covers the operation surface while leaving unavailable evidence explicit; schema validity is not timing qualification.
 
+The [admission audit](admission.md) distinguishes command presentation, capture, assertions and stalls across all engines. The [bounded VLOAD/VSTORE analysis](vls-timing.md) maps a selected LSU slice into the existing timing API and provides a conditional hardware replay and compiler comparison.
+
 ## Scope and ownership
 
 The contract target is named **`EE290SimConfig`**, referring to [bringup-chipyard's system configuration](https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25). `target.config` and `target.reference` identify that public configuration, independent of local checkout or input filenames. The helper receives explicit paths and never translates a hidden local configuration name. A run records its actual producer label, if supplied, in provenance and `build.config`; local input mappings and measured bundles stay in ignored artifacts. A shared logical target does not establish equality of sources, parameters or generated hardware.

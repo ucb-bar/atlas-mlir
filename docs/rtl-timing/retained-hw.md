@@ -38,6 +38,8 @@ Debug locations and output attributes can contain absolute paths, so identical d
 
 ## Evidence to inspect next
 
+The [hardware evidence index](hw-evidence.md) provides a manifest-bound hierarchy, storage and candidate-event starting point for this inspection.
+
 Inspect the AtlasCore transitive hierarchy, distinguishing module definitions from their unit-specific instances. Registers should retain clock/reset/next-value structure. Memories may retain `seq.firmem` operations or external/generated declarations with OM geometry and latency metadata under the selected replacement policy. External/inline blackbox behavior, arbitration and whole-instruction timing require separate analysis; a declared one-cycle memory read latency is not a one-cycle instruction latency.
 
 The [operation coverage table](operation-coverage.md) records the compiler mappings and unresolved rules. Useful first facts include logical register geometry versus physical bank/port sharing, VMEM bank layout, MXU-local storage ownership, scalar issue and engine acceptance predicates, DMA operand capture/configuration, and address-unit transforms. Bind each fact to exact source/IR locators and applicability before enabling a resolver. Register depth, queue capacity and same-operation spacing are not interchangeable with complete instruction timing or admission.
