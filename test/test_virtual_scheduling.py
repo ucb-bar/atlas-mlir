@@ -509,24 +509,33 @@ class VirtualSchedulingTest(unittest.TestCase):
             z_overlaps |= at["load z"] < at["wait y"] or at["load z"] < at["await y"]
         self.assertTrue(z_overlaps, "no order ran the load of z beside another transfer")
 
-    def test_computed_dram_addresses_never_overlap_a_store(self) -> None:
-        # The scheduler reads constant addresses only. One built by
-        # arith.addi may touch anything, so a load from it never runs beside
-        # a store, though the two ranges here are disjoint.
-        store = (f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
-                 f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)')
-        source = function("computed", [
-            start(), inp("io0", "io1", "t", 0), const("y", -2147481600),
-            const("base", -2147479552), const("zero", 0),
-            "%z = arith.addi %base, %zero : i32", const("size", 2048), store,
-            f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
-            dma_load("io3", "io4", "ez", "z", "size", "bf16"),
-            dma_await("io4", "io5", "v", "ez", "bf16"),
-            add("w", "t", "v"), outp("io5", "o", "w", 0), f"return %o : {S}"])
-        wait, load = line_of(source, "%io3 ="), line_of(source, "%ez =")
-        for options in ([], *([f"random-seed={seed}"] for seed in range(16))):
-            position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
-            self.assertLess(position[wait], position[load], options)
+    def test_computed_dram_addresses_are_as_exact_as_constants(self) -> None:
+        # The scheduler proves addresses built by arith.addi as the verifier
+        # does: after a store to y, a load of y computed as (y - 2048) + 2048
+        # waits for the store, while a load of z computed as z + 0 may run
+        # beside it.
+        def store_then_load(base: int, offset: int) -> str:
+            return function("computed", [
+                start(), inp("io0", "io1", "t", 0), const("y", -2147481600),
+                const("base", base), const("offset", offset),
+                "%address = arith.addi %base, %offset : i32", const("size", 2048),
+                f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
+                f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
+                f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
+                dma_load("io3", "io4", "e", "address", "size", "bf16"),
+                dma_await("io4", "io5", "v", "e", "bf16"),
+                add("w", "t", "v"), outp("io5", "o", "w", 0), f"return %o : {S}"])
+
+        def loads_before_the_wait(source: str) -> list[bool]:
+            wait, load = line_of(source, "%io3 ="), line_of(source, "%e =")
+            before = []
+            for options in ([], *([f"random-seed={seed}"] for seed in range(24))):
+                position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
+                before.append(position[load] < position[wait])
+            return before
+
+        self.assertNotIn(True, loads_before_the_wait(store_then_load(-2147483648, 2048)))
+        self.assertIn(True, loads_before_the_wait(store_then_load(-2147479552, 0)))
 
     def test_loads_of_the_same_dram_may_overlap(self) -> None:
         # Only a store makes overlapping DRAM a hazard.

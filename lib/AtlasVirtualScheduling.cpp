@@ -13,7 +13,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -76,8 +75,8 @@ bool isImplicitMemory(Operation *op) {
              VirtualPackFP8Op>(op);
 }
 
-// The DRAM bytes a transfer moves, [first, last), when its address and size
-// are constants.
+// The DRAM bytes a transfer moves, [first, last), proven as the transfer's
+// verifier proves them, so a verified transfer always has one.
 using DRAMRange = std::pair<uint64_t, uint64_t>;
 std::optional<DRAMRange> dramRange(Operation *launch) {
   auto [address, size] =
@@ -89,15 +88,13 @@ std::optional<DRAMRange> dramRange(Operation *launch) {
           .Default([](Operation *) -> std::pair<Value, Value> {
             llvm_unreachable("not a DMA launch");
           });
-  APInt first, bytes;
-  if (!matchPattern(address, m_ConstantInt(&first)) ||
-      !matchPattern(size, m_ConstantInt(&bytes)))
+  std::optional<uint32_t> first = provenI32(address), bytes = provenI32(size);
+  if (!first || !bytes)
     return std::nullopt;
-  return DRAMRange{first.getZExtValue(),
-                   first.getZExtValue() + bytes.getZExtValue()};
+  return DRAMRange{*first, static_cast<uint64_t>(*first) + *bytes};
 }
 
-// A range that is not a constant may touch anything.
+// A range that cannot be proven may touch anything.
 bool mayOverlap(const std::optional<DRAMRange> &a,
                 const std::optional<DRAMRange> &b) {
   return !a || !b || (a->first < b->second && b->first < a->second);
@@ -866,23 +863,26 @@ struct ScheduleAtlasVirtualPass
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
-    struct SourceOrder {
-      func::FuncOp function;
-      bool allocates;
-      SmallVector<std::pair<Block *, SmallVector<Operation *>>> blocks;
-    };
-    SmallVector<SourceOrder> sources;
-    for (func::FuncOp function : module.getOps<func::FuncOp>()) {
-      std::string ignored;
-      SourceOrder &source = sources.emplace_back();
-      source.function = function;
-      source.allocates = !seed && allocates(function, ignored);
+    // Each block's free operations in their current order, to put back.
+    using BlockOrders =
+        SmallVector<std::pair<Block *, SmallVector<Operation *>>>;
+    auto ordersOf = [](func::FuncOp function) {
+      BlockOrders orders;
       for (Block &block : function.getBody())
-        source.blocks.push_back({&block, freeOperations(block)});
-
+        orders.push_back({&block, freeOperations(block)});
+      return orders;
+    };
+    auto restore = [](const BlockOrders &orders) {
+      for (const auto &[block, ops] : orders)
+        reorder(*block, ops);
+    };
+    SmallVector<std::pair<func::FuncOp, BlockOrders>> sources;
+    for (func::FuncOp function : module.getOps<func::FuncOp>()) {
+      sources.push_back({function, ordersOf(function)});
       KindCounts capacity;
+      RegisterCapacities capacities = registerCapacities(function);
       for (RegisterKind kind : kKinds)
-        capacity[indexOf(kind)] = registerCapacity(function, kind);
+        capacity[indexOf(kind)] = capacities[indexOf(kind)];
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
@@ -896,19 +896,25 @@ struct ScheduleAtlasVirtualPass
                        "not verify");
       return signalPassFailure();
     }
+    if (seed)
+      return;
     // Scheduling keeps pressure within capacity where it can, but that does
     // not guarantee the allocator's greedy coloring succeeds. Allocation is
-    // function-wide, so a function that allocated before and no longer does
-    // keeps its source order.
-    for (SourceOrder &source : sources) {
-      std::string why;
-      if (!source.allocates || allocates(source.function, why))
+    // function-wide, so a function whose schedule does not allocate goes back
+    // to its source order when that does.
+    for (auto &[function, source] : sources) {
+      std::string why, ignored;
+      if (allocates(function, why))
         continue;
-      for (auto &[block, ops] : source.blocks)
-        reorder(*block, ops);
-      source.function.emitRemark()
-          << "virtual schedule kept source order for @"
-          << source.function.getSymName() << ": " << why;
+      BlockOrders scheduled = ordersOf(function);
+      restore(source);
+      if (!allocates(function, ignored)) {
+        // Neither order allocates; the lowering reports why.
+        restore(scheduled);
+        continue;
+      }
+      function.emitRemark() << "virtual schedule kept source order for @"
+                            << function.getSymName() << ": " << why;
     }
   }
 };

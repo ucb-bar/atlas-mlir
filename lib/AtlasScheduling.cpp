@@ -16,7 +16,7 @@ constexpr int kMaxIdle = 100000;
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
-                            uint32_t dmaRegs, std::vector<size_t> &order,
+                            std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
   size_t begin = s.starts[block];
@@ -31,7 +31,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs);
+  DepGraph g = buildGraph(nodes, s.entry[block]);
   for (int i = 0; i < n; i++) {
     std::string alone =
         ReservationTable().conflict(nodes[i], g.footprints[i], 0);
@@ -224,12 +224,11 @@ LogicalResult scheduleStream(ModuleOp module) {
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream)))
     return failure();
-  uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b])))
+    if (failed(scheduleBlock(*stream, b, order, before, tailIdle[b])))
       return failure();
   // A block that falls through finishes before the next block's first op.
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {

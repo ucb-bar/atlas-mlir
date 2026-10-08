@@ -49,8 +49,9 @@ public:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    // A configured channel must see a DMA.WAIT before the halt, so only the
-    // channels transfers use are configured.
+    // A configured channel must see a DMA.WAIT before the halt. Every program
+    // reads a tile and writes an output, using the load and store channels;
+    // another channel is configured only when an explicit transfer takes it.
     SmallVector<unsigned> channels = {fixed().loadChannel, fixed().storeChannel};
     for (unsigned channel : allocation.dmaChannels())
       if (!llvm::is_contained(channels, channel))

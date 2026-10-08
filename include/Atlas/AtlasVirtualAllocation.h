@@ -62,10 +62,12 @@ struct FixedResourcePlacement {
 };
 
 enum class RegisterKind { BF16, FP8, Scalar };
+using RegisterCapacities = std::array<unsigned, 3>;
 
-// How many values of `kind` can hold registers at once in `function`, as
-// allocate colors them: BF16 pairs, FP8 registers, or scalars.
-unsigned registerCapacity(func::FuncOp function, RegisterKind kind);
+// How many values of each kind, indexed by RegisterKind, can hold registers
+// at once in `function`, as allocate colors them: BF16 pairs, FP8 registers,
+// and scalars.
+RegisterCapacities registerCapacities(func::FuncOp function);
 
 class VirtualAllocationPlan {
 public:

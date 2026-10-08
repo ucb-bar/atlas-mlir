@@ -850,19 +850,6 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
   return false;
 }
 
-uint32_t
-mlir::atlas::timing::dmaOperandRegisters(const std::vector<Instr> &instrs) {
-  uint32_t mask = 0;
-  for (const Instr &in : instrs) {
-    if (in.op->engine != Engine::Dma || in.op->opClass == OpClass::DmaWait)
-      continue;
-    if (in.op->opClass != OpClass::DmaConfig)
-      mask |= 1u << in.rd | 1u << in.rs2;
-    mask |= 1u << in.rs1;
-  }
-  return mask & ~1u;
-}
-
 namespace {
 // Adds an edge, or raises the distance of an existing edge between the nodes.
 struct EdgeSet {
@@ -884,7 +871,6 @@ struct EdgeSet {
 
 DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
-                                         uint32_t dmaRegs,
                                          const IncomingDma *incomingDma) {
   DepGraph g;
   g.nodes = instrs;
@@ -953,12 +939,11 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
           guarded |= conflictsAtCompletion(dma, g.footprints[k], kind);
         }
       } else {
-        for (const Access &a : g.footprints[k].accesses) {
+        // The transfer latched its registers at launch, so only the VMEM it
+        // moves at completion may conflict.
+        for (const Access &a : g.footprints[k].accesses)
           if (a.res == Res::Vmem)
             guarded = true;
-          if (a.res == Res::XReg && a.write && (dmaRegs >> a.first & 1))
-            guarded = true;
-        }
       }
       if (guarded)
         edges.add(w, k, 1, EdgeKind::Order,

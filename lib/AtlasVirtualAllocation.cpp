@@ -78,11 +78,15 @@ FixedResourcePlacement selectedResources() {
 }
 } // namespace
 
-unsigned mlir::atlas::registerCapacity(func::FuncOp function,
-                                       RegisterKind kind) {
+RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
   bool mixedFp8, hasPack;
   findReservations(function, mixedFp8, hasPack);
-  return capacity(kind, mixedFp8, hasPack);
+  RegisterCapacities capacities;
+  for (RegisterKind kind :
+       {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
+    capacities[static_cast<unsigned>(kind)] =
+        capacity(kind, mixedFp8, hasPack);
+  return capacities;
 }
 
 VirtualAllocationPlan::VirtualAllocationPlan()
