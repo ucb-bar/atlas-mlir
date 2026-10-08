@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import unittest
 
 from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, without_delays
@@ -22,6 +23,26 @@ MARKER = ("csr", 'kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3088 
 
 def delay(n):
     return ("delay", f"cycles = {n} : i32")
+
+
+def lui(dst, immediate):
+    return ("upper", f'kind = "lui", dst = {dst} : i32, immediate = {immediate} : i32')
+
+
+def vls(kind, mreg=4, base=6, offset=0):
+    register = "dst" if kind == "vload" else "src"
+    return (kind, f'{register} = {mreg} : i32, base = {base} : i32, '
+                  f'offset = {offset} : i32, format = "raw"')
+
+
+def word_base(dst, words):
+    # Ordinary RV32 LUI/ADDI materialization; compensate for ADDI's signed
+    # low 12 bits. These are encoded scalar instructions, not timing queries.
+    low = words & 4095
+    if low >= 2048:
+        low -= 4096
+    high = ((words - low) >> 12) & 0xfffff
+    return [lui(dst, high), addi(dst, dst, low)]
 
 
 @unittest.skipUnless(REPORT and OPT.is_file() and EMIT.is_file(),
@@ -96,12 +117,106 @@ class SelectedRTLTimingTest(unittest.TestCase):
             self.assertIn(diagnostic, checked.stderr)
 
     def test_exact_serialized_admission_boundary(self):
-        # Load issues at 2. DELAY at 3 occupies N+1 cycles, so store gap=N+2.
-        for gap in (34, 35, 36):
-            ops = [addi(6, 0, 256), addi(8, 0, 768), VLOAD, delay(gap - 2),
-                   VSTORE, delay(33), nop(), HALT]
-            checked = self.selected(program(ops), "--verify-atlas-rtl-timing")
-            self.assertEqual(checked.returncode == 0, gap >= 35, checked.stderr)
+        # DELAY occupies N+1 cycles, so the two VLS instructions have gap=N+2.
+        # Exercise all path transitions, independently varying VMEM bank and
+        # logical MREG reuse; serialization applies even without a RAW edge.
+        for first in ("vload", "vstore"):
+            for second in ("vload", "vstore"):
+                for other_mreg in (4, 63):
+                    for other_words in (768, 65792):  # VMEM lines 96 and 8224.
+                        for gap in (34, 35, 36):
+                            with self.subTest(first=first, second=second, mreg=other_mreg,
+                                              bank=other_words >> 16, gap=gap):
+                                ops = [addi(6, 0, 256), *word_base(8, other_words),
+                                       vls(first), delay(gap - 2),
+                                       vls(second, other_mreg, 8), delay(33), nop(), HALT]
+                                checked = self.selected(program(ops), "--verify-atlas-rtl-timing")
+                                self.assertEqual(checked.returncode == 0, gap >= 35, checked.stderr)
+                                if gap == 34:
+                                    self.assertIn("serialized VLS admission", checked.stderr)
+
+    def check_operand_admission(self, setup, instruction, accepted, encoded_immediate=None):
+        for consumer in ("--insert-atlas-delays", "--schedule-atlas-stream"):
+            with self.subTest(consumer=consumer):
+                checked = self.selected(program([*setup, instruction, HALT]), consumer,
+                                        "--verify-atlas-rtl-timing")
+                self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
+                if accepted:
+                    emitted = run(EMIT, checked.stdout)
+                    self.assertEqual(emitted.returncode, 0, emitted.stderr)
+                    if encoded_immediate is not None:
+                        words = [int(word, 16) for word in re.findall(r"^([0-9a-fA-F]{8})$", emitted.stdout, re.M)]
+                        vector_words = [word for word in words if word & 0x7f == 0x07]
+                        self.assertEqual(len(vector_words), 1, emitted.stdout)
+                        self.assertEqual(vector_words[0] >> 20, encoded_immediate)
+                else:
+                    self.assertIn("VLS effective tile", checked.stderr)
+
+    def test_each_vmem_bank_first_and_last_legal_tile(self):
+        # Six physical banks each hold 8192 32-byte rows. A 32-row tile may
+        # begin at row 0 or 8160; the final tile ends at global row 49151.
+        for bank in range(6):
+            for row in (0, 8160):
+                line = bank * 8192 + row
+                for kind in ("vload", "vstore"):
+                    with self.subTest(bank=bank, row=row, kind=kind):
+                        self.check_operand_admission(word_base(6, line * 8),
+                                                     vls(kind, 0 if row == 0 else 63), True)
+        # One row past the last legal starting tile is unaligned; the first
+        # line beyond the six banks is aligned but outside the VMEM aperture.
+        for line in (49121, 49152):
+            with self.subTest(rejected_line=line):
+                self.check_operand_admission(word_base(6, line * 8), vls("vload"), False)
+
+    def test_signed_and_raw_immediate_extremes_have_legal_effective_tiles(self):
+        # RTL adds sign-extended imm12 << 5 to the word base, then selects
+        # bits 18:3. These explicit operands yield L=0 or L=8192:
+        # 65536 + (-2048)*32 = 0; 32 + 2047*32 = 65536;
+        # 32 + (-1)*32 = 0. MLIR uses signed offsets; verify the actual raw
+        # emitted fields independently (0x800, 0x7ff and 0xfff).
+        # Also place negative encodings at the aperture's last legal tile:
+        # signed -2048/-1 yields line49120, whereas incorrectly treating the
+        # raw encodings as unsigned would yield out-of-range line65504.
+        for offset, words, expected_line, encoded in ((-2048, 65536, 0, 0x800),
+                                                     (2047, 32, 8192, 0x7ff), (-1, 32, 0, 0xfff),
+                                                     (-2048, 458496, 49120, 0x800),
+                                                     (-1, 392992, 49120, 0xfff)):
+            for kind in ("vload", "vstore"):
+                with self.subTest(offset=offset, words=words, line=expected_line, kind=kind):
+                    self.check_operand_admission(word_base(6, words), vls(kind, offset=offset), True,
+                                                 encoded_immediate=encoded)
+        # Positive maximum without the four-row compensation gives line 8188,
+        # not a tile-aligned address; the raw negative maximum at B=0 wraps to
+        # an effective masked line 57344, outside all six banks.
+        for offset in (2047, -2048):
+            with self.subTest(rejected_offset=offset):
+                self.check_operand_admission([addi(6, 0, 0)], vls("vload", offset=offset), False)
+        for offset in (-2049, 2048, 4095, 4096):
+            for kind in ("vload", "vstore"):
+                with self.subTest(unencoded_mlir_offset=offset, kind=kind):
+                    source = program([*word_base(6, 65536), vls(kind, offset=offset), HALT])
+                    for consumer in ("--insert-atlas-delays", "--schedule-atlas-stream"):
+                        checked = self.selected(source, consumer)
+                        self.assertNotEqual(checked.returncode, 0)
+                        self.assertIn("must be in [-2048, 2047]", checked.stderr)
+
+    def test_known_base_wrap_alias_and_hardwired_zero(self):
+        # fffff000 + 2047 + 2047 = fffffffe; adding 258 wraps to 00000100
+        # (VMEM line 32). Adding 266 instead produces unaligned line 33.
+        prefix = [lui(6, 0xfffff), addi(6, 6, 2047), addi(6, 6, 2047)]
+        for increment, accepted in ((258, True), (266, False)):
+            with self.subTest(wrap_increment=increment):
+                self.check_operand_admission([*prefix, addi(6, 6, increment)], vls("vload"), accepted)
+        # A self-update changes the tracked value; another register's update
+        # must not change the source register. Writes to x0 must be ignored.
+        cases = [([addi(6, 0, 256), addi(6, 6, 8)], 6, False),
+                 ([addi(6, 0, 256), addi(6, 6, 8), addi(6, 6, -8)], 6, True),
+                 ([addi(6, 0, 0), addi(8, 6, 8)], 6, True),
+                 ([addi(6, 0, 0), addi(8, 6, 8)], 8, False),
+                 ([addi(0, 0, 8)], 0, True)]
+        for setup, base, accepted in cases:
+            with self.subTest(setup=setup, base=base):
+                self.check_operand_admission(setup, vls("vload", base=base), accepted)
 
     def test_early_marker_and_terminal_are_rejected(self):
         for suffix, diagnostic in (([MARKER, HALT], "asynchronous writes"),
