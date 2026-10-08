@@ -13,6 +13,14 @@ an independent interpreter.
 The [physical program contract](docs/functional-stream-contract.md) gives a
 separate instruction-level functional model exact words, typed fields, and
 control-flow metadata without making it interpret virtual SSA.
+`tools/atlas_direct_pack.py` packages one closed reset-entry physical stream
+directly from `atlas-emit --program-json` into a checked little-endian IMEM
+image. It verifies PC targets, delay slots, capacity, the terminal ECALL,
+and the selected RTL revision. `test/examples/vpu_square_pair.mlir` produced
+36 direct words that matched the first 36 words of the existing LLVM object
+exactly; the object's extra unreachable RET is not part of the direct image.
+The direct image does not establish a callable ABI or initialize live-in
+registers by itself; the separate host must provide the pinned launch layout.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
