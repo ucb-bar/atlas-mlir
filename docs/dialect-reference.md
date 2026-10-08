@@ -99,20 +99,27 @@ Generated VPU execution currently admits unary `mov`/`relu` and binary `add`;
 other virtual modes receive an explicit
 qualification error. `add` uses the selected VPU's FP32 sum followed by a
 BF16 bit chop; it is not a generic BF16 round-to-nearest-even operation.
-With FP8 values present, it reserves tensor registers 0..31 for FP8 and pairs 32..60
-for BF16, with pair 62 as a temporary. A pack reserves scalar x10..x17 for
+FP8 and BF16 values color one shared tensor register file: an FP8 value
+uses one register, a BF16 value uses an even-based pair, and pair 62:63 stays
+reserved for edge copies. Interference across both types is computed from
+the current virtual operation order and CFG, so dead values of different
+types may reuse storage. The independent checker rejects overlapping live
+views. This is deterministic greedy coloring; it does not spill or search
+alternate instruction orders. A pack reserves scalar x10..x17 for
 its VMEM relayout and colors runtime controls in x18..x26. The external input
 ABI uses 2,048-byte slots; a 32×32 FP8 tile occupies the first 1,024 bytes of
 its slot. Pack scratch uses VMEM words 32768..33279 and currently requires
-input indexes below 64. These are conservative, explicit physical partitions,
-not a general alias-aware allocator. Changing issue order would require
-recomputing live ranges and checking the physical assignment again.
+input indexes below 64. Virtual scheduling must run before allocation;
+changing the virtual issue order requires rebuilding the plan and checking
+the physical assignment again. The current machine scheduler is a separate
+physical-stream pass and is not a virtual scheduler.
 
 [`virtual_fp8_two_layer_mlp.mlir`](../test/examples/virtual_fp8_two_layer_mlp.mlir)
 is a fixed 32×32 virtual SSA example: MXU0, BF16 ReLU, unit-scale pack,
-MXU1, BF16 output. Its output is checked through selected standalone-core
-execution with changed runtime weights. It has no bias, tails, Linalg import,
-or captured model precision transformation.
+MXU1, BF16 output. An earlier fixed-register allocation of this fixture ran
+on the selected standalone core with changed runtime weights. The joint
+allocator has portable tests but needs a new selected-core run. The fixture
+has no bias, tails, or captured model precision transformation.
 [`virtual_fp8_two_layer_mlp_bias.mlir`](../test/examples/virtual_fp8_two_layer_mlp_bias.mlir)
 adds BF16 VPU bias addition after each MXU. Its boundary biases are already
 broadcast into physical 32×32 tiles; capturing a vector bias and preparing
@@ -122,7 +129,13 @@ that tile are separate frontend/ABI obligations.
 
 [`VirtualAllocationPlan`](../include/Atlas/AtlasVirtualAllocation.h) computes placements before machine instruction emission. Its [implementation](../lib/AtlasVirtualAllocation.cpp) owns the existing CFG interference coloring, MXU handle slots, explicit DMA transfer placements and IDs, and fixed scratch registers, channels, and VMEM windows. [`AtlasVirtualToMachine.cpp`](../lib/AtlasVirtualToMachine.cpp) reads these placements to materialize values and emit instructions; it no longer colors registers or assigns DMA resources while emitting them.
 
-The plan preserves the existing bounded placement policy, instruction order, and delays. It is an internal C++ allocation plan, not another dialect stage or standalone pass. It refers to verified source SSA values and must be rebuilt after changing that IR or its order.
+The plan keeps the current bounded placement policy, instruction order, and
+delays. It is an internal C++ allocation plan, not another dialect stage or
+standalone pass. It records the source block and operation identities and a
+printed copy of the function. `verify()` rejects an assignment if the virtual
+IR changes after allocation, including operation order, types, and attributes.
+A virtual scheduler must run before allocation. The physical stream scheduler
+is separate and needs its own lifetime checks before reordering generated code.
 
 Before emitting instructions, lowering calls `VirtualAllocationPlan::verify()`. The independent [register-assignment checker](../lib/AtlasRegisterAllocationVerification.cpp) recomputes CFG liveness from the source operations and edges, without using the allocator's interference graph. It checks complete, unique assignments, physical register ranges, even BF16 pairs, shared BF16/FP8 storage, reserved scratch registers, and entry-argument staging. Conflicts report the physical register span and the two source values. Scalar and tensor registers occupy separate banks; scale-register numbers do not reserve same-numbered scalar registers.
 

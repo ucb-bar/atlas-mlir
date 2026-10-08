@@ -56,7 +56,7 @@ class VirtualMXUTest(unittest.TestCase):
         text = (EXAMPLES / "virtual_fp8_matmul_program.mlir").read_text()
         return text.replace("unit = 0 : i32", f"unit = {unit} : i32")
 
-    def test_one_layer_has_checked_words_and_physical_alias_partition(self) -> None:
+    def test_one_layer_has_checked_words_and_shared_tensor_file(self) -> None:
         machine = lower(self.source())
         self.assertIn('"atlas.mxu_push"', machine)
         self.assertIn('"atlas.mxu_matmul"', machine)
@@ -69,9 +69,10 @@ class VirtualMXUTest(unittest.TestCase):
             r'"atlas.vload"[^\n]*dst = (\d+) : i32', machine)]
         readout = re.search(r'"atlas.mxu_pop"[^\n]*dst = (\d+) : i32', machine)
         self.assertEqual(len(fp8_registers), 2)
-        self.assertTrue(all(reg < 32 for reg in fp8_registers))
+        self.assertTrue(all(reg < 62 for reg in fp8_registers))
         self.assertIsNotNone(readout)
-        self.assertGreaterEqual(int(readout.group(1)), 32)
+        self.assertLess(int(readout.group(1)), 62)
+        self.assertEqual(int(readout.group(1)) % 2, 0)
         bad_unit = run("atlas-opt", self.source(2),
                        "--lower-atlas-virtual-to-machine")
         self.assertNotEqual(bad_unit.returncode, 0)

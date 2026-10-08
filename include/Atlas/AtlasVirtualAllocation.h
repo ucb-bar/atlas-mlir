@@ -8,6 +8,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace mlir::atlas {
 
@@ -78,15 +79,21 @@ public:
   const FixedResourcePlacement &fixed() const;
 
 private:
-  enum class RegisterKind { BF16, FP8, Scalar };
+  enum class RegisterKind { Tensor, Scalar };
   LogicalResult colorValues(RegisterKind kind);
+  void captureSourceSnapshot();
+  LogicalResult verifySourceSnapshot() const;
 
   func::FuncOp function;
+  // Keep identities to detect replacement and printed IR to detect in-place
+  // edits to types, operands, attributes, or control flow.
+  llvm::SmallVector<Block *> sourceBlocks;
+  llvm::SmallVector<Operation *> sourceOperations;
+  std::string sourceIR;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
   llvm::DenseMap<Value, MXUPlacement> mxuResources;
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
   llvm::SmallVector<int32_t> scalarArgumentRegs;
-  bool mixedFp8 = false;
   bool hasPack = false;
   const FixedResourcePlacement fixedResources;
 };

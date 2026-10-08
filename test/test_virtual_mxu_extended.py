@@ -95,23 +95,23 @@ class VirtualMXUExtendedTest(unittest.TestCase):
             self.assertIn(fields["unit"], (0, 1))
             if op == "atlas.mxu_matmul":
                 self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
-                self.assertLess(fields["src"], 32)
+                self.assertLess(fields["src"], 62)
                 reason = "mxu_matmul_completion"
             elif op == "atlas.mxu_push":
                 self.assertEqual(fields["slot"], 0)
                 if fields["kind"] == "acc_bf16":
-                    self.assertGreaterEqual(fields["src"], 32)
+                    self.assertLess(fields["src"], 62)
                     self.assertEqual(fields["src"] % 2, 0)
                 else:
                     self.assertIn(fields["kind"], ("weight_fp8", "acc_fp8"))
-                    self.assertLess(fields["src"], 32)
+                    self.assertLess(fields["src"], 62)
                 reason = ("mxu_weight_completion" if fields["kind"] == "weight_fp8"
                           else "mxu_accumulator_completion")
             else:
                 self.assertEqual(op, "atlas.mxu_pop")
                 self.assertEqual(fields["slot"], 0)
                 if fields["format"] == "fp8":
-                    self.assertLess(fields["dst"], 32)
+                    self.assertLess(fields["dst"], 62)
                     self.assertEqual(fields["scale_reg"], 3)
                     preceding = entries[index - 1]
                     self.assertEqual(preceding["operation"], "atlas.scalar_load")
@@ -119,7 +119,7 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                     self.assertEqual(preceding["fields"]["dst"], 3)
                 else:
                     self.assertEqual(fields["format"], "bf16")
-                    self.assertGreaterEqual(fields["dst"], 32)
+                    self.assertLess(fields["dst"], 62)
                     self.assertEqual(fields["dst"] % 2, 0)
                     self.assertEqual(fields["scale_reg"], 0)
                 reason = "mxu_readout_completion"

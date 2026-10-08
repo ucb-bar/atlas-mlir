@@ -40,23 +40,22 @@ fixture uses `%t` SSA tensor values before physical register assignment;
 identities. A [CFG fixture](test/examples/virtual_bf16_cfg.mlir) uses MLIR
 block arguments for a branch merge and a loop-carried tile/state; the virtual
 verifier checks state handoffs across `cf` edges and requires boundary outputs
-in the single return block. `--lower-atlas-virtual-to-machine` now lowers this
-bounded CFG form to a physical stream: it colors live BF16 pairs and scalar
-controls, resolves block-argument edge copies and branches, stages external
-tiles through DMA/VMEM, and emits serial waits. The
+in the single return block. `--lower-atlas-virtual-to-machine` lowers this
+bounded CFG form to a physical stream: it assigns BF16 pairs, FP8 values, and
+scalar controls, resolves block-argument edge copies and branches, stages
+external tiles through DMA/VMEM, and emits serial waits. The
 [`virtual_bf16_loop_program.mlir`](test/examples/virtual_bf16_loop_program.mlir)
 and related branch, swap, and dynamic-control fixtures exercise that path.
 This is a narrow VPU/CFG lowering slice, not a general Atlas allocator or
 model compiler.
 The [`virtual_fp8_two_layer_mlp.mlir`](test/examples/virtual_fp8_two_layer_mlp.mlir)
-fixture now adds two virtual MXU contractions around BF16 ReLU and unit-scale
-FP8 pack. The same virtual-to-machine pass assigns separate FP8 and BF16
-physical register ranges, stages runtime tiles, relayouts packed FP8 rows in
-VMEM, and emits a checked selected instruction stream. Tests translate that
-stream through unmodified LLVM to object words and execute it on the selected
-standalone AtlasCore with two different runtime weight sets. This is one fixed
-32×32 quantized tile without bias, tails, or a Linalg/PyTorch importer; it is
-not a complete captured-model MLP or a general native instruction selector.
+fixture has two virtual MXU contractions around BF16 ReLU and unit-scale FP8
+pack. The pass assigns FP8 and BF16 values in their shared tensor register
+file, stages runtime tiles, relayouts packed FP8 rows in VMEM, and emits a
+checked instruction stream. The fixed 32×32 fixture has no bias or tails; it
+is not a complete captured-model MLP or a general instruction selector. The
+joint register assignment has portable tests but has not been rerun against
+the selected standalone core in this branch.
 
 `atlas-opt` uses MLIR's parser/printer and verifiers. `atlas-emit` emits one
 eight-digit hexadecimal 32-bit word per instruction, after checking the whole

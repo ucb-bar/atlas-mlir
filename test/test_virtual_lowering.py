@@ -210,7 +210,8 @@ class VirtualLoweringTest(unittest.TestCase):
         rejected = run('atlas-opt', virtual_pressure(32),
                        '--lower-atlas-virtual-to-machine')
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn('interference exceeds 31 physical pairs', rejected.stderr)
+        self.assertIn('greedy placement failed in 62-register file (31 BF16 pairs)',
+                      rejected.stderr)
         unqualified = virtual_chain(1).replace('kind = "relu"',
                                                 'kind = "exp"')
         rejected = run('atlas-opt', unqualified,

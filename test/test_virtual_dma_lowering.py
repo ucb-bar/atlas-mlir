@@ -190,7 +190,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 pop = mxu[-1]
                 self.assertEqual(pop["format"], fmt)
                 if fmt == "bf16":
-                    self.assertGreaterEqual(pop["dst"], 32)
+                    self.assertLess(pop["dst"], 62)
                     self.assertEqual(pop["dst"] % 2, 0)
                     self.assertEqual(pop["scale_reg"], 0)
                 pop_index = next(index for index, entry in enumerate(entries)

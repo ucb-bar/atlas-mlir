@@ -211,6 +211,20 @@ module {
   }
 })mlir";
 
+constexpr StringLiteral scheduledMixed = R"mlir(
+module {
+  func.func @scheduled_mixed() -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %s1, %a = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %b = "atlas.virtual_vpu_unary"(%a) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %s2, %p = "atlas.virtual_input_fp8"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    %y = "atlas.virtual_mxu_matmul"(%p, %p) {unit = 0 : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16
+    %s3 = "atlas.virtual_output_bf16"(%s2, %y) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    %s4 = "atlas.virtual_output_bf16"(%s3, %b) {index = 1 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    return %s4 : !atlas.virtual_state
+  }
+})mlir";
+
 constexpr StringLiteral liveThrough = R"mlir(
 module {
   func.func @live_through() -> !atlas.virtual_state {
@@ -387,6 +401,100 @@ void testMixedTensorBanks(MLIRContext &context) {
   setReg(candidate, q, 64);
   expectInvalid(fixture, "FP8 outside bank", candidate,
                 {"outside tensor register bank", "tensor", "%"});
+
+  // The two types share the same physical file. The first FP8 value overlaps
+  // the live BF16 input, while the second is introduced after that input dies.
+  unsigned aReg = fixture.plan.tile(a);
+  unsigned pReg = fixture.plan.fp8(p);
+  check(pReg < aReg || pReg > aReg + 1, "mixed live tensor views are disjoint");
+  check(succeeded(fixture.plan.verify()), "joint tensor allocation verifies");
+}
+
+void testFP8UsesWholeTensorFile(MLIRContext &context) {
+  std::string source = R"mlir(module {
+  func.func @many_fp8() -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+)mlir";
+  for (unsigned i = 0; i < 33; ++i)
+    source += "    %s" + std::to_string(i + 1) + ", %v" +
+              std::to_string(i) + " = \"atlas.virtual_input_fp8\"(%s" +
+              std::to_string(i) + ") {index = " + std::to_string(i) +
+              " : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)\n";
+  for (unsigned i = 0; i < 33; ++i) {
+    source += "    %r" + std::to_string(i) +
+              " = \"atlas.virtual_mxu_matmul\"(%v" + std::to_string(i) +
+              ", %v" + std::to_string(i) +
+              ") {unit = 0 : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16\n";
+    source += "    %s" + std::to_string(i + 34) +
+              " = \"atlas.virtual_output_bf16\"(%s" +
+              std::to_string(i + 33) + ", %r" + std::to_string(i) +
+              ") {index = " + std::to_string(i) +
+              " : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state\n";
+  }
+  source += "    return %s66 : !atlas.virtual_state\n  }\n}";
+  Fixture fixture;
+  if (!fixture.initialize(context, source, "33-live-FP8 fixture"))
+    return;
+  expectValid(fixture, "33-live-FP8 allocation", fixture.assignments);
+  unsigned high = 0;
+  for (unsigned i = 0; i < 33; ++i)
+    high = std::max(high, fixture.plan.fp8(
+                              fixture.result("atlas.virtual_input_fp8", 1, i)));
+  check(high >= 32 && high < 62, "FP8 can use register above old 32-register partition");
+}
+
+void testScheduledOrderChangesLifetime(MLIRContext &context) {
+  Fixture before, after;
+  if (!before.initialize(context, mixed, "before virtual scheduling") ||
+      !after.initialize(context, scheduledMixed, "after virtual scheduling"))
+    return;
+  auto beforeAssignments = before.assignments;
+  Value beforeA = before.result("atlas.virtual_input_bf16", 1);
+  Value beforeP = before.result("atlas.virtual_input_fp8", 1);
+  setReg(beforeAssignments, beforeP, regFor(beforeAssignments, beforeA));
+  expectInvalid(before, "live BF16 blocks pre-schedule FP8 reuse",
+                beforeAssignments, {"register allocation overlap", "tensor"});
+
+  auto afterAssignments = after.assignments;
+  Value afterA = after.result("atlas.virtual_input_bf16", 1);
+  Value afterP = after.result("atlas.virtual_input_fp8", 1);
+  setReg(afterAssignments, afterP, regFor(afterAssignments, afterA));
+  setReg(afterAssignments, after.result("atlas.virtual_mxu_matmul"), 8);
+  expectValid(after, "last BF16 read before FP8 load permits reuse",
+              afterAssignments);
+  check(succeeded(after.plan.verify()), "post-schedule allocation verifies");
+
+  // A later scheduler cannot silently reuse the old physical assignment.
+  Operation *lastRead = after.result("atlas.virtual_vpu_unary").getDefiningOp();
+  Operation *fp8Load = afterP.getDefiningOp();
+  lastRead->moveAfter(fp8Load);
+  std::string diagnostics;
+  llvm::raw_string_ostream stream(diagnostics);
+  ScopedDiagnosticHandler handler(&context, [&](Diagnostic &diagnostic) {
+    diagnostic.print(stream);
+    stream << '\n';
+    return success();
+  });
+  check(failed(after.plan.verify()), "stale allocation rejects reordered virtual ops");
+  stream.flush();
+  check(StringRef(diagnostics).contains("stale after source change"),
+        "stale allocation explains required reallocation", diagnostics);
+  check(succeeded(verifyAtlasVirtualModule(*after.module)),
+        "reordered virtual stream remains legal");
+  check(succeeded(after.plan.allocate(after.function)) &&
+            succeeded(after.plan.verify()),
+        "reallocate and recheck after virtual schedule");
+  lastRead->setAttr("kind", StringAttr::get(&context, "mov"));
+  check(failed(after.plan.verify()), "changed instruction attribute stales allocation");
+  check(succeeded(after.plan.allocate(after.function)) &&
+            succeeded(after.plan.verify()),
+        "reallocate and recheck after source change");
+  Value result = after.result("atlas.virtual_vpu_unary");
+  Type originalType = result.getType();
+  result.setType(IntegerType::get(&context, 32));
+  check(failed(after.plan.verify()), "changed result type stales allocation");
+  result.setType(originalType);
+  check(succeeded(after.plan.verify()), "restored source matches allocation");
 }
 
 void testCFG(MLIRContext &context) {
@@ -440,6 +548,8 @@ int main() {
   testTensorAndCoverage(context);
   testScalars(context);
   testMixedTensorBanks(context);
+  testFP8UsesWholeTensorFile(context);
+  testScheduledOrderChangesLifetime(context);
   testCFG(context);
   llvm::outs() << checks << " checks, " << failures << " failures\n";
   return failures == 0 ? 0 : 1;

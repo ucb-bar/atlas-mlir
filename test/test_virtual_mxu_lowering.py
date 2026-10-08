@@ -76,18 +76,18 @@ class VirtualMXULoweringTest(unittest.TestCase):
             self.assertIn(fields["unit"], (0, 1))
             if operation == "atlas.mxu_matmul":
                 self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
-                self.assertLess(fields["src"], 32)
+                self.assertLess(fields["src"], 62)
                 reason = "mxu_matmul_completion"
             else:
                 self.assertEqual(fields["slot"], 0)
                 if operation == "atlas.mxu_push":
                     self.assertEqual(fields["kind"], "weight_fp8")
-                    self.assertLess(fields["src"], 32)
+                    self.assertLess(fields["src"], 62)
                     reason = "mxu_weight_completion"
                 else:
                     self.assertEqual(operation, "atlas.mxu_pop")
                     self.assertEqual(fields["format"], "bf16")
-                    self.assertGreaterEqual(fields["dst"], 32)
+                    self.assertLess(fields["dst"], 62)
                     self.assertEqual(fields["dst"] % 2, 0)
                     self.assertEqual(fields["scale_reg"], 0)
                     reason = "mxu_readout_completion"
@@ -97,7 +97,7 @@ class VirtualMXULoweringTest(unittest.TestCase):
             self.assertEqual(following["fields"]["atlas.delay_reason"], reason)
         return machine, entries
 
-    def test_reset_only_matches_legacy_matmul_words_on_both_units(self) -> None:
+    def test_reset_only_matches_legacy_matmul_structure_on_both_units(self) -> None:
         for unit in (0, 1):
             with self.subTest(unit=unit):
                 explicit = source(
@@ -110,8 +110,30 @@ class VirtualMXULoweringTest(unittest.TestCase):
                     f'{{unit = {unit} : i32}} : ({FP8}, {FP8}) -> {BF16}',
                     final_state="io2",
                 )
-                machine, _ = self.checked(explicit)
-                self.assertEqual(emitted(machine), emitted(lower(legacy)))
+                machine, explicit_entries = self.checked(explicit)
+                legacy_entries = instructions(lower(legacy))
+                self.assertEqual(len(explicit_entries), len(legacy_entries))
+                # Equivalent virtual forms can choose different physical
+                # registers. Compare the encoded operation sequence and all
+                # non-register fields, then check each form's source wiring.
+                for left, right in zip(explicit_entries, legacy_entries):
+                    self.assertEqual(left["operation"], right["operation"])
+                    lhs, rhs = dict(left["fields"]), dict(right["fields"])
+                    if left["operation"] == "atlas.vload":
+                        lhs.pop("dst")
+                        rhs.pop("dst")
+                    elif left["operation"] in ("atlas.mxu_push", "atlas.mxu_matmul"):
+                        lhs.pop("src")
+                        rhs.pop("src")
+                    self.assertEqual(lhs, rhs)
+                for entries in (explicit_entries, legacy_entries):
+                    loads = [entry["fields"]["dst"] for entry in entries
+                             if entry["operation"] == "atlas.vload"]
+                    weight = next(entry["fields"]["src"] for entry in entries
+                                  if entry["operation"] == "atlas.mxu_push")
+                    activation = next(entry["fields"]["src"] for entry in entries
+                                      if entry["operation"] == "atlas.mxu_matmul")
+                    self.assertEqual((activation, weight), tuple(loads))
 
     def test_continuation_and_live_weight_reload_on_both_units(self) -> None:
         for unit in (0, 1):

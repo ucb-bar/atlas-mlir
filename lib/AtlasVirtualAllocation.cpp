@@ -4,6 +4,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 
 using namespace mlir;
@@ -62,12 +63,13 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   mxuResources.clear();
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
-  mixedFp8 = false;
+  sourceBlocks.clear();
+  sourceOperations.clear();
+  sourceIR.clear();
   hasPack = false;
   function.walk([&](Operation *op) {
     hasPack |= isa<VirtualPackFP8Op>(op);
     for (Value result : op->getResults()) {
-      mixedFp8 |= isa<VirtualFP8Type>(result.getType());
       // Verified lifetimes permit slot 0 in each unit's weight/accumulator bank.
       if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
         mxuResources[result] = {weight.getUnit(), fixedResources.mxuWeightSlot};
@@ -75,8 +77,7 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
         mxuResources[result] = {acc.getUnit(), fixedResources.mxuAccSlot};
     }
   });
-  if (failed(colorValues(RegisterKind::BF16)) ||
-      failed(colorValues(RegisterKind::FP8)) ||
+  if (failed(colorValues(RegisterKind::Tensor)) ||
       failed(colorValues(RegisterKind::Scalar)))
     return failure();
   for (BlockArgument arg : function.getArguments())
@@ -108,6 +109,44 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
             fixedResources.dmaSizeReg};
     }
   }
+  captureSourceSnapshot();
+  return success();
+}
+
+void VirtualAllocationPlan::captureSourceSnapshot() {
+  for (Block &block : function.getBody()) {
+    sourceBlocks.push_back(&block);
+    for (Operation &op : block)
+      sourceOperations.push_back(&op);
+  }
+  llvm::raw_string_ostream stream(sourceIR);
+  function.print(stream);
+}
+
+LogicalResult VirtualAllocationPlan::verifySourceSnapshot() const {
+  func::FuncOp current = function;
+  unsigned blockIndex = 0, opIndex = 0;
+  for (Block &block : current.getBody()) {
+    if (blockIndex >= sourceBlocks.size() || sourceBlocks[blockIndex++] != &block)
+      return current.emitOpError(
+          "virtual allocation plan is stale after source change; rerun allocation");
+    for (Operation &op : block) {
+      if (opIndex >= sourceOperations.size() || sourceOperations[opIndex] != &op)
+        return current.emitOpError(
+            "virtual allocation plan is stale after source change; rerun allocation");
+      ++opIndex;
+    }
+  }
+  if (blockIndex != sourceBlocks.size() || opIndex != sourceOperations.size())
+    return current.emitOpError(
+        "virtual allocation plan is stale after source change; rerun allocation");
+  std::string currentIR;
+  llvm::raw_string_ostream stream(currentIR);
+  current.print(stream);
+  stream.flush();
+  if (currentIR != sourceIR)
+    return current.emitOpError(
+        "virtual allocation plan is stale after source change; rerun allocation");
   return success();
 }
 
@@ -115,10 +154,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) {
     Type type = value.getType();
-    if (kind == RegisterKind::BF16)
-      return isa<VirtualBF16Type>(type);
-    if (kind == RegisterKind::FP8)
-      return isa<VirtualFP8Type>(type);
+    if (kind == RegisterKind::Tensor)
+      return isa<VirtualBF16Type, VirtualFP8Type>(type);
     return type.isInteger(1) || type.isInteger(32);
   };
   SmallVector<Value> values;
@@ -259,21 +296,36 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   // Stable degree-first coloring reduces pressure without depending on
   // textual SSA names. Any coloring is checked against the graph below.
   std::stable_sort(values.begin(), values.end(), [&](Value a, Value b) {
-    return neighbors[a].size() > neighbors[b].size();
+    if (neighbors[a].size() != neighbors[b].size())
+      return neighbors[a].size() > neighbors[b].size();
+    // Wider values have fewer legal placements. Preserve source order within
+    // a width so unrelated SSA names do not affect placement.
+    return isa<VirtualBF16Type>(a.getType()) &&
+           !isa<VirtualBF16Type>(b.getType());
   });
   llvm::DenseMap<Value, unsigned> colors;
   unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
-  unsigned count = kind == RegisterKind::BF16
-                       ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
-                       : kind == RegisterKind::FP8
-                             ? 32
-                             : kLastScalarValue - firstScalar + 1;
+  unsigned count = kLastScalarValue - firstScalar + 1;
+  auto lastReg = [](Value value, unsigned base) {
+    return base + unsigned(isa<VirtualBF16Type>(value.getType()));
+  };
   for (Value value : values) {
     bool assigned = false;
-    for (unsigned color = 0; color < count; ++color) {
+    unsigned limit = kind == RegisterKind::Tensor ? kTensorPairTemporary : count;
+    for (unsigned color = 0; color < limit; ++color) {
+      if (kind == RegisterKind::Tensor &&
+          isa<VirtualBF16Type>(value.getType()) && (color & 1))
+        continue;
+      if (kind == RegisterKind::Tensor && lastReg(value, color) >= limit)
+        continue;
       bool conflict = llvm::any_of(neighbors[value], [&](Value other) {
         auto found = colors.find(other);
-        return found != colors.end() && found->second == color;
+        if (found == colors.end())
+          return false;
+        if (kind == RegisterKind::Scalar)
+          return found->second == color;
+        return color <= lastReg(other, found->second) &&
+               found->second <= lastReg(value, color);
       });
       if (!conflict) {
         colors[value] = color;
@@ -283,22 +335,22 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     }
     if (!assigned)
       return function.emitOpError(
-          kind == RegisterKind::BF16
-              ? (mixedFp8 ? "mixed virtual BF16 interference exceeds 15 physical pairs"
-                          : "virtual BF16 interference exceeds 31 physical pairs")
-              : kind == RegisterKind::FP8
-                    ? "virtual FP8 interference exceeds 32 physical registers"
-                    : (hasPack
+          kind == RegisterKind::Tensor
+              ? "virtual tensor greedy placement failed in 62-register file (31 BF16 pairs)"
+              : (hasPack
                            ? "virtual control interference exceeds 9 scalar registers with FP8 pack"
                            : "virtual control interference exceeds 17 scalar registers"));
   }
   for (Value value : values) {
     for (Value other : neighbors[value])
-      if (colors[value] == colors[other])
+      if (kind == RegisterKind::Scalar
+              ? colors[value] == colors[other]
+              : colors[value] <= lastReg(other, colors[other]) &&
+                    colors[other] <= lastReg(value, colors[value]))
         return function.emitOpError("internal register-coloring overlap");
-    if (kind == RegisterKind::BF16)
-      tileRegs[value] = (mixedFp8 ? 32 : 0) + 2 * colors[value];
-    else if (kind == RegisterKind::FP8)
+    if (kind == RegisterKind::Tensor && isa<VirtualBF16Type>(value.getType()))
+      tileRegs[value] = colors[value];
+    else if (kind == RegisterKind::Tensor)
       fp8Regs[value] = colors[value];
     else
       scalarRegs[value] = firstScalar + colors[value];
@@ -307,6 +359,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
 }
 
 LogicalResult VirtualAllocationPlan::verify() const {
+  if (!function || failed(verifySourceSnapshot()))
+    return failure();
   SmallVector<VirtualRegisterAssignment> assignments;
   for (const auto &[value, reg] : tileRegs)
     assignments.push_back({value, reg});
