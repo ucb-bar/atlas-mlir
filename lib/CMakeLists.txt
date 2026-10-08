@@ -13,6 +13,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasVirtualToMachine.cpp
   AtlasVirtualAllocation.cpp
   AtlasRegisterAllocationVerification.cpp
+  AtlasDMAAllocationVerification.cpp
   AtlasGeneratedSchedule.cpp
   DEPENDS MLIRAtlasOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRArithDialect
