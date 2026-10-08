@@ -98,8 +98,19 @@ These layers have different scopes. Keep their selected identities and applicabi
 | Selected AtlasCore to observed events | The [component replay and SRAM observer](vls-observation.md#selected-atlascore-replay-with-behavioral-srams) bind the compiled model, executed words and trace. Both arms pass numerical checks and actual frontend/LSU/SRAM events; observed VLOAD-to-VSTORE gaps are 257 and 35 cycles. | Finite bank-0 copy operands and selected behavioral SRAMs, direct TileLink host, two-state Verilator. This is separate from full EE290 CPU/system execution. |
 | Resolved compiler export | `atlas-emit --rtl-timing-json` reruns final timing verification and exports the shared provider's exact footprints, encoded words, identities and applicability. See [resolved export](resolved-export.md). | Conditional model facts; the export does not qualify the hardware or widen the provider's domain. |
 | Finite component applicability | The [bounded checker](bounded-applicability.md) recomputes boundary/SRAM observations and binds operands, issue gaps, accesses, release and completion to the selected compiler export. | Recorded finite operands/windows only; source-to-simulation completeness, competing-request assumptions and full-system timing remain explicit. |
+| Finite integrated applicability | The [integrated checker](integrated-observation-check.md) revalidates the captured pair, source/HW content correspondence and fresh shared-provider exports. Both arms pass physical memory, clock-transition and competing-request checks throughout their observed entry-to-halt windows. | Exact captured programs and operands; host fixture assumptions, opaque dependencies, the unrecorded Verilog-generation execution edge and general domain qualification remain explicit. |
 | Qualified compiler acceptance | Not yet implemented. Existing selection remains explicitly conditional. | Establish the admitted scope and validate its build/trace/domain evidence before changing qualification policy. |
 
 The [walkthrough](extraction-walkthrough.md) connects the observed event sequence to the shared footprint; [VLS timing](vls-timing.md) specifies the exact ages and boundaries. Extending qualification beyond the finite observations requires targeted checks or a reviewed structural-equivalence argument for address/bank mapping, MREG selection and admitted transitions. Compiler rejection tests remain separate from hardware coverage.
 
 A bounded delivery can retain the conditional consumer while supplying these artifacts and their reproduction tools. A future qualified path must validate the evidence rather than trust a copied qualification flag. Extend the existing resolver and final checker once that acceptance policy is established; do not create a second independent timing table for Merlin or silently enable the draft rule groups.
+
+## Bounded handoff
+
+The current deliverable is the conditional VLS provider together with independently validated observations of the captured baseline and scheduled programs. To reproduce and review it:
+
+1. Select the reviewed replay, manifest and hardware identities, then compile and verify the final stream using the commands above.
+2. Export its resolved facts with [`--rtl-timing-json`](resolved-export.md). Keep the final program, encoded words and selected artifact identities together.
+3. Run the [integrated checker](integrated-observation-check.md) with its source, fresh-export and system-memory options. All five `coverage` fields must be true for this combined handoff; a run without those options establishes a narrower result.
+
+Supply the selected evidence, final programs, exports and aggregate report with their referenced artifacts. Keep `allow-conditional=true`: the validated finite cases do not establish every operand admitted by the provider. Extending operation coverage and connecting Merlin can reuse this interface without another scheduler or timing table.

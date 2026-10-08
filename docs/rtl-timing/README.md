@@ -9,6 +9,7 @@ Start with [From Atlas RTL to compiler timing](extraction-walkthrough.md): one V
 | [Hardware retention](retained-hw.md) and [evidence index](hw-evidence.md) | Select and retain the hardware, then inspect hierarchy and event connections. |
 | [Admission audit](admission.md) and [VLS timing](vls-timing.md) | Review engine conditions, supported domains, exact timing rules and replay cases. |
 | [Selected evidence](selected-evidence.md) and [resolved export](resolved-export.md) | Compile with the conditional provider and expose its operand-specific facts. |
+| [Integrated observation check](integrated-observation-check.md) | Bind captured system execution and memory events to those compiler facts. |
 | [Handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) | See what each source, component and system validation layer establishes. |
 
 The implemented provider covers a bounded straight-line VLS subset and preserves conditional status. The broader contract below describes the intended operation surface; it is not an accepted full-ISA profile.
@@ -17,7 +18,7 @@ The implemented provider covers a bounded straight-line VLS subset and preserves
 
 The contract target is named **`EE290SimConfig`**, referring to [bringup-chipyard's system configuration](https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25). `target.config` and `target.reference` identify that public configuration, independent of local checkout or input filenames. The helper receives explicit paths and never translates a hidden local configuration name. A run records its actual producer label, if supplied, in provenance and `build.config`; local input mappings and measured bundles stay in ignored artifacts. A shared logical target does not establish equality of sources, parameters or generated hardware.
 
-Atlas-mlir owns the compiler-facing contract, versioned interpretation of its rules, and resolved footprint API. Merlin's Atlas adapter consumes the exported facts and compiler checks for candidate evaluation; it must preserve their coverage and identities. The permanent home of the extraction implementation remains to be coordinated with Agustin. Reuse the historical profiles and evidence where applicable, with explicit conversion from their schemas and hardware identities.
+Atlas-mlir owns the compiler-facing contract, versioned interpretation of its rules, and resolved footprint API. The planned Merlin adapter will consume the exported facts and compiler checks for candidate evaluation while preserving their coverage and identities. The permanent home of the extraction implementation remains to be coordinated with Agustin. Reuse the historical profiles and evidence where applicable, with explicit conversion from their schemas and hardware identities.
 
 This contract concerns cycle-level instruction behavior and resource availability. Functional numerical semantics, encoding, and runtime launch protocols retain their own specifications, with references and compatibility requirements here. A timing profile cannot certify numerical correctness, a callable host ABI, physical propagation delays, or a maximum chip frequency.
 
