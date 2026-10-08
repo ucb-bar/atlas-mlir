@@ -1,5 +1,7 @@
 # Retaining hardware IR for EE290SimConfig
 
+The [extraction walkthrough](extraction-walkthrough.md) explains the HW-stage boundary and follows retained hardware into compiler timing footprints. This reference specifies the retention inputs, provenance and verification requirements.
+
 `EE290SimConfig` means the configuration defined by [bringup-chipyard's AtlasConfigs.scala](https://github.com/ucb-ee194-tapeout/bringup-chipyard/blob/main/generators/chipyard/src/main/scala/config/AtlasConfigs.scala#L12-L25). This is the public target reference, not a substitute for an exact source revision and elaboration identity. The [contract example](examples/contract.json) is an unbound template and does not claim that a build of this reference has been executed or qualified.
 
 ## Explicit inputs
@@ -38,12 +40,10 @@ Debug locations and output attributes can contain absolute paths, so identical d
 
 ## Evidence to inspect next
 
-The [hardware evidence index](hw-evidence.md) provides a manifest-bound hierarchy, storage and candidate-event starting point for this inspection.
-
-Inspect the AtlasCore transitive hierarchy, distinguishing module definitions from their unit-specific instances. Registers should retain clock/reset/next-value structure. Memories may retain `seq.firmem` operations or external/generated declarations with OM geometry and latency metadata under the selected replacement policy. External/inline blackbox behavior, arbitration and whole-instruction timing require separate analysis; a declared one-cycle memory read latency is not a one-cycle instruction latency.
+Use the [hardware evidence index](hw-evidence.md) for manifest-bound hierarchy, storage and candidate events, and the [extraction walkthrough](extraction-walkthrough.md) for a worked traversal. Under the selected replacement policy, memories may retain `seq.firmem` operations or external/generated declarations with OM geometry and latency metadata. External/inline blackbox behavior, arbitration and whole-instruction timing require separate analysis; a declared one-cycle memory read latency is not a one-cycle instruction latency.
 
 The [operation coverage table](operation-coverage.md) records the compiler mappings and unresolved rules. Useful first facts include logical register geometry versus physical bank/port sharing, VMEM bank layout, MXU-local storage ownership, scalar issue and engine acceptance predicates, DMA operand capture/configuration, and address-unit transforms. Bind each fact to exact source/IR locators and applicability before enabling a resolver. Register depth, queue capacity and same-operation spacing are not interchangeable with complete instruction timing or admission.
 
-For example, the current [`vectorAddress`](../../lib/AtlasTiming.cpp#L349) convention is `(((base_word + sext12(offset) * 32) >> 3) & 0xffff) * 32`: a word-addressed base, immediate in 32-word units and a 32-byte line projection. A selected-RTL audit must establish that transform, valid-bank admission and truncation/alignment behavior; timed arbitration and row visibility remain separate obligations. This document records the compiler convention without attaching an unpublished build's evidence to the public example.
+The [VLS timing reference](vls-timing.md) specifies the effective-address transform, memory geometry and supported operand domain used by the current example.
 
-The [conditional compiler provider](selected-evidence.md) now rejects incompatible evidence and has passing emitted-program witnesses on the selected integrated simulator with output and guard checks. Those bounded results address part of [issue #11](https://github.com/ucb-bar/atlas-mlir/issues/11); internal timing and original source/build linkage remain open. The [provenance checker](build-provenance.md) audits the saved retention/execution links without treating current source hashes as proof of a historical build.
+The [handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) records compiler compatibility and captured execution results. The [provenance checker](build-provenance.md) audits the saved retention/execution links without treating current source hashes as proof of a historical build.

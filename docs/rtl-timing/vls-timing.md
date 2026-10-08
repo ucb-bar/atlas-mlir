@@ -1,6 +1,6 @@
 # Bounded VLOAD/VSTORE timing and compiler mapping
 
-This slice relates selected LSU hardware events to the current `AtlasTiming` API. The [admission audit](admission.md) covers the other engines and shared obligations; the [operation catalog](operation-catalog.json) remains the full instruction denominator. The separate [selected-evidence backend](selected-evidence.md) consumes this conditional replay for conservative serialized VLS scheduling and final verification. Neither the replay nor that compiler integration establishes integrated EE290SimConfig execution.
+This reference records the bounded LSU domain, event ages, compiler mapping and replay checks. The [extraction walkthrough](extraction-walkthrough.md) explains how the issue, capture and sequential access chain produces these ages. The [admission audit](admission.md) covers other engines and shared obligations; the [operation catalog](operation-catalog.json) remains the full instruction denominator. The [selected-evidence backend](selected-evidence.md) consumes this replay for conservative serialized VLS scheduling and final verification, and records passing captured EE290 VCS baseline/scheduled numerical and boundary observations. These bounded results do not establish broad execution qualification.
 
 ## Event origin and applicable domain
 
@@ -14,7 +14,7 @@ VMEM and MREG SRAM bodies are opaque in the retained IR. Their declared one-cycl
 
 ## Derived streams and releases
 
-For both paths, an idle command enters Run, issues rows 0 through 31 on successive cycles, enters Drain for one cycle, and reaches idle state while the final write is still pending. The busy output includes pending stages, so testing the FSM's idle state alone is insufficient for legal launch.
+The [extraction walkthrough](extraction-walkthrough.md) follows the Run/Drain and pending-stage chain. Legal launch requires the complete busy output to clear; FSM idle alone excludes neither a pending response nor the final write.
 
 | Event or resource | VLOAD | VSTORE |
 | --- | --- | --- |
@@ -87,4 +87,4 @@ The evidence-consumer regressions require no compiler build. They test missing o
 python3 test/test_vls_timing_evidence.py
 ```
 
-This validates a conditional module slice and its compiler mapping. Explicit compiler consumption is implemented in the [selected-evidence workflow](selected-evidence.md), while broad contract loading, other-engine arbitration, overlapping physical aliases, scalar-memory overlap, selected SRAM implementation behavior, complete frontend execution, reset/restart and integrated emitted-program output/guard validation remain open.
+This validates a conditional module slice and its compiler mapping. The [selected-evidence workflow](selected-evidence.md) adds explicit compiler consumption and captured integrated emitted-program output/guard and boundary checks. Broad contract loading, other-engine arbitration, overlapping physical aliases, scalar-memory overlap, selected SRAM implementation behavior, complete frontend coverage and reset/restart remain open.

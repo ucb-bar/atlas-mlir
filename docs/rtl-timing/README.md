@@ -2,17 +2,16 @@
 
 **Draft v0; the broad contract has no compiler loader or qualified target profile.** This document specifies the handoff from RTL analysis to Atlas scheduling, delay insertion, allocation constraints, and final hazard verification. The [operation coverage table](operation-coverage.md), [machine mnemonic catalog](operation-catalog.json), [JSON Schema](contract.schema.json), and [draft bundle](examples/contract.json) accompany it. The draft covers the operation surface while leaving unavailable evidence explicit; schema validity is not timing qualification.
 
-The [admission audit](admission.md) distinguishes command presentation, capture, assertions and stalls across all engines. The [bounded VLOAD/VSTORE analysis](vls-timing.md) maps a selected LSU slice into the existing timing API and provides a conditional hardware replay and compiler comparison.
+Start with [From Atlas RTL to compiler timing](extraction-walkthrough.md): one VLOAD traced from Chisel and retained CIRCT IR to a shared compiler footprint and execution checks.
 
-The implemented [selected-evidence workflow](selected-evidence.md) separately loads `atlas.conditional_vls_hw_check.v0` replay receipts through `atlas.vls.conservative.v1`. Explicitly selected conditional rules now feed scheduling, delay insertion and an independent final timed verifier for a small straight-line subset. This backend rejects the broad draft bundle and unsupported instances; it does not qualify integrated EE290SimConfig execution or the full operation catalog.
+| Reference | Purpose |
+| --- | --- |
+| [Hardware retention](retained-hw.md) and [evidence index](hw-evidence.md) | Select and retain the hardware, then inspect hierarchy and event connections. |
+| [Admission audit](admission.md) and [VLS timing](vls-timing.md) | Review engine conditions, supported domains, exact timing rules and replay cases. |
+| [Selected evidence](selected-evidence.md) and [resolved export](resolved-export.md) | Compile with the conditional provider and expose its operand-specific facts. |
+| [Handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) | See what each source, component and system validation layer establishes. |
 
-The [handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) distinguishes fresh selected-source/CIRCT correspondence, passing EE290 system numerical witnesses, and actual selected-AtlasCore/SRAM timing observations. These results support the bounded work while preserving the remaining full-system trace and aggregate acceptance steps.
-
-The [resolved timing export](resolved-export.md) exposes the existing shared provider's operand-specific accesses, holds, completion policy and applicability after final verification. It preserves conditional status.
-
-The [bounded applicability checker](bounded-applicability.md) binds those exports to independently selected source/build/program evidence and recomputed component boundary/SRAM events. It reports finite observed applicability and the remaining assumptions explicitly; it does not promote the conditional provider or replace transformation verification.
-
-The [integrated VCS observation workflow](vcs-observation.md) reuses a captured simulator and successful numerical witness to record internal events through native VPD capture and an explicit VCD conversion. It preserves simulator, program, capture and conversion identities; actual system timing and arbitration validation remain separate from preparation.
+The implemented provider covers a bounded straight-line VLS subset and preserves conditional status. The broader contract below describes the intended operation surface; it is not an accepted full-ISA profile.
 
 ## Scope and ownership
 
@@ -24,20 +23,9 @@ This contract concerns cycle-level instruction behavior and resource availabilit
 
 ## Hardware input versus simulation output
 
-The intended extraction path is:
+The [walkthrough](extraction-walkthrough.md) explains the extraction boundary and its relationship to simulation. Retained FIRRTL, CIRCT hardware IR, generated SystemVerilog and simulator bytes have different identities; a contract must bind the relevant relationships instead of substituting one hash for another.
 
-```text
-selected Chisel/configuration
-  -> FIRRTL + annotations
-  -> retained CIRCT HW/Comb/Seq MLIR
-  -> hardware graph / RTL analysis and evidence
-  -> target contract + operand-resolved footprints
-  -> atlas-mlir scheduling, delay insertion, and verification
-```
-
-The VCS Makefile instead retains generated SystemVerilog and builds a simulator after firtool lowering. It does not currently save the required HW/Comb/Seq MLIR snapshot. The separate [retention helper](retained-hw.md) produces that snapshot from explicit input paths and records its lowering command, tool identity and verification result, preserving the sequential boundaries needed by extraction. FIRRTL, lowered hardware MLIR, generated SV, and simulator bytes have different identities; none of their hashes substitutes for another. Existing adopted historical HW IR has incomplete lowering provenance.
-
-The simulator is a separate validation tool: it can exercise emitted instructions and check results, guards, and timing observations as required by [issue #11](https://github.com/ucb-bar/atlas-mlir/issues/11). A simulator build alone establishes neither extraction nor execution coverage. Contract design and source audit can proceed before hardware-MLIR extraction or simulation is ready.
+The simulator validates emitted instructions, results and events for [issue #11](https://github.com/ucb-bar/atlas-mlir/issues/11). A simulator build alone establishes neither execution coverage nor timing qualification. The [retention guide](retained-hw.md) records the separate hardware-IR derivation and its input requirements.
 
 ## Inventory and completeness
 

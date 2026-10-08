@@ -1,6 +1,6 @@
 # Indexing retained hardware evidence
 
-The [hardware retention step](retained-hw.md) supplies verified HW/Comb/Seq IR. The next step indexes its hierarchy, storage declarations, port connections and candidate event expressions. This is structural evidence for the [timing contract](README.md), not an enabled timing profile or an instruction latency model.
+This reference specifies the index produced from [retained HW/Comb/Seq IR](retained-hw.md), its supported syntax and its analysis boundaries. The [extraction walkthrough](extraction-walkthrough.md) shows how to follow the indexed hierarchy and event cones into a timing rule. The index supplies structural evidence for the [timing contract](README.md); it does not enable a timing profile or establish instruction latency.
 
 ## Select an artifact
 
@@ -29,9 +29,9 @@ The text reader supports constrained firtool custom assembly: one-line module he
 
 ## Using the result
 
-Choose a candidate event and follow its connections into the relevant engine and storage. Establish capture, grant, first/last access and release conditions, including stalls and competing users, before assigning issue-relative ages. Bind each resulting rule to its source identity, operand domain and unresolved conditions. The [operation coverage table](operation-coverage.md) remains the denominator for instruction coverage; an index spanning every engine does not establish every operation's rules.
+Follow the worked event traversal in the [extraction walkthrough](extraction-walkthrough.md), then bind each rule to its source identity, operand domain and unresolved conditions. The [operation coverage table](operation-coverage.md) remains the denominator for instruction coverage; an index spanning every engine does not establish every operation's rules.
 
-The [all-engine admission audit](admission.md) follows those boundaries into capture and software obligations. The [bounded VLOAD/VSTORE replay](vls-timing.md) derives and checks an initial conditional access/release mapping. The [selected-evidence backend](selected-evidence.md) consumes that replay separately with explicit identity selection and conditional opt-in. The index and replay alone establish neither integrated execution nor full instruction coverage; preserve unsupported rules and assumptions explicitly.
+Use the [admission audit](admission.md) for engine capture and software obligations, [VLS timing](vls-timing.md) for the replay reference, and [selected evidence](selected-evidence.md) for compiler consumption and validation status.
 
 The focused indexer regressions run independently of a compiler build:
 

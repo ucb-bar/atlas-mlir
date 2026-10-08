@@ -13,9 +13,10 @@ an independent interpreter.
 The [physical program contract](docs/functional-stream-contract.md) gives a
 separate instruction-level functional model exact words, typed fields, and
 control-flow metadata without making it interpret virtual SSA.
-The [draft RTL timing contract](docs/rtl-timing/README.md) defines the
-EE290SimConfig evidence handoff, complete operation inventory, and unresolved
-resource/timing obligations; it does not yet enable a compiler timing provider.
+The [RTL timing walkthrough](docs/rtl-timing/extraction-walkthrough.md) follows
+one VLOAD from retained CIRCT hardware to the shared compiler timing provider.
+The [draft contract](docs/rtl-timing/README.md) records the broader operation
+coverage and obligations; implemented evidence selection remains conditional.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
