@@ -37,8 +37,12 @@ def compare_result(expected: EvaluationResult, captured, *, output_base: int = O
                 if bits != wanted:
                     raise AssertionError(f"output {index} tile[{row},{col}]: expected 0x{wanted:04x}, got 0x{bits:04x}")
     for region in expected.memory:
-        if captured(region.address, len(region.data)) != region.data:
-            raise AssertionError(f"preserved memory changed at 0x{region.address:08x}")
+        observed = captured(region.address, len(region.data))
+        if len(observed) != len(region.data):
+            raise AssertionError(f"memory at 0x{region.address:08x}: expected {len(region.data)} bytes, got {len(observed)}")
+        for offset, (wanted, actual) in enumerate(zip(region.data, observed)):
+            if wanted != actual:
+                raise AssertionError(f"memory at 0x{region.address + offset:08x}: expected 0x{wanted:02x}, got 0x{actual:02x}")
 
 
 def runtime_inputs(phase: int) -> RuntimeInputs:
@@ -118,7 +122,7 @@ class VirtualEvaluatorCoreTest(unittest.TestCase):
         buffers[OUTPUT_BASE + 2048] = original
         for region in inputs.memory:
             buffers[region.address] = b"\x00" * len(region.data)
-            with self.assertRaisesRegex(AssertionError, "preserved memory changed"):
+            with self.assertRaisesRegex(AssertionError, "memory at 0x"):
                 compare_result(expected, captured)
             buffers[region.address] = region.data
 

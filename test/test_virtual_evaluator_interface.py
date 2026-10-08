@@ -199,6 +199,20 @@ class VirtualParserInterfaceTest(unittest.TestCase):
                 with self.assertRaisesRegex(VirtualInterfaceError, message):
                     parse_program(source)
 
+    def test_atlas_canonical_properties_preserve_fields_and_reject_duplicates(self) -> None:
+        from atlas_virtual_evaluator import compare_results, evaluate
+
+        source = example("virtual_bf16_shared_relu.mlir")
+        canonical = source.replace('{index = 0 : i32}', '<{index = 0 : i32}>').replace('{index = 1 : i32}', '<{index = 1 : i32}>').replace('{kind = "relu"}', '<{kind = "relu"}>')
+        inputs = RuntimeInputs({0: Tile("bf16", (0xBF80, 0x3F80) * 512)})
+        compare_results(evaluate(parse_program(source), inputs), evaluate(parse_program(canonical), inputs))
+        duplicate = canonical.replace('<{index = 0 : i32}>', '<{index = 0 : i32}> {index = 1 : i32}', 1)
+        with self.assertRaisesRegex(VirtualInterfaceError, "duplicate attribute/property"):
+            parse_program(duplicate)
+        unknown = canonical.replace('<{index = 0 : i32}>', '<{index = 0 : i32, invented = 1 : i32}>', 1)
+        with self.assertRaisesRegex(VirtualInterfaceError, "expected attributes"):
+            parse_program(unknown)
+
     def test_malformed_mlir_has_interface_diagnostic(self) -> None:
         for source in ("module { %x =", FLAT.replace("(%t0)", "(%undefined)", 1)):
             with self.subTest(source=source[:30]):

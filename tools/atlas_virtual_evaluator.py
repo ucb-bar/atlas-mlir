@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from types import MappingProxyType
 from typing import Literal
 
@@ -129,6 +130,29 @@ class EvaluationResult:
         object.__setattr__(self, "memory", _memory_regions(self.memory))
 
 
+def compare_results(expected: EvaluationResult, actual: EvaluationResult) -> None:
+    """Compare visible bits and mapped bytes, independent of event or region order."""
+    if expected.outputs.keys() != actual.outputs.keys():
+        raise AssertionError(f"output indices: expected {sorted(expected.outputs)}, got {sorted(actual.outputs)}")
+    for index in sorted(expected.outputs):
+        for element, (wanted, observed) in enumerate(zip(expected.outputs[index].bits, actual.outputs[index].bits)):
+            if wanted != observed:
+                row, col = divmod(element, 32)
+                raise AssertionError(f"output {index} tile[{row},{col}]: expected 0x{wanted:04x}, got 0x{observed:04x}")
+
+    def bytes_at(regions):
+        for region in sorted(regions, key=lambda region: region.address):
+            yield from ((region.address + offset, value) for offset, value in enumerate(region.data))
+
+    for wanted, observed in zip_longest(bytes_at(expected.memory), bytes_at(actual.memory)):
+        if wanted is None or observed is None or wanted[0] != observed[0]:
+            address = min(item[0] for item in (wanted, observed) if item is not None)
+            side = "actual" if wanted is not None and wanted[0] == address else "expected"
+            raise AssertionError(f"memory mapping at 0x{address:08x}: byte missing from {side} result")
+        if wanted[1] != observed[1]:
+            raise AssertionError(f"memory at 0x{wanted[0]:08x}: expected 0x{wanted[1]:02x}, got 0x{observed[1]:02x}")
+
+
 def operation_name(op: Operation) -> str:
     return op.op_name.data if isinstance(op, builtin.UnregisteredOp) else op.name
 
@@ -186,8 +210,15 @@ _STANDARD_PROPERTIES = {
 }
 
 
+def _atlas_fields(op: Operation) -> dict[str, Attribute]:
+    # MLIR canonical printing moves inherent fields into <{properties}>.
+    attributes = {name: value for name, value in op.attributes.items() if name != "op_name__"}
+    _require(not attributes.keys() & op.properties.keys(), f"{operation_name(op)}: duplicate attribute/property")
+    return attributes | op.properties
+
+
 def _integer_attribute(op: Operation, name: str) -> int:
-    value = op.attributes.get(name)
+    value = _atlas_fields(op).get(name)
     _require(isinstance(value, builtin.IntegerAttr) and value.type == builtin.i32, f"{operation_name(op)} requires {name} : i32")
     assert isinstance(value, builtin.IntegerAttr)
     return value.value.data
@@ -198,14 +229,15 @@ def _check_atlas_operation(op: Operation) -> None:
     short = name.removeprefix("atlas.virtual_")
     if not name.startswith("atlas.virtual_") or short not in _SIGNATURES:
         raise UnsupportedVirtualMode(f"unsupported virtual operation: {name}")
-    _require(not op.regions and not op.successors and not op.properties, f"{name}: regions, successors, and properties are unsupported")
+    _require(not op.regions and not op.successors, f"{name}: regions and successors are unsupported")
+    fields = _atlas_fields(op)
     operands, results, attributes = _SIGNATURES[short]
     types = [_type_kind(value.type) for value in (*op.operands, *op.results)]
     _require(
         tuple(kind for kind, _ in types[:len(op.operands)]) == operands and tuple(kind for kind, _ in types[len(op.operands):]) == results,
         f"{name}: incorrect operand/result signature",
     )
-    _require(set(op.attributes) - {"op_name__"} == set(attributes), f"{name}: expected attributes {attributes}")
+    _require(set(fields) == set(attributes), f"{name}: expected attributes {attributes}")
     units = {unit for _, unit in types if unit is not None}
     if "unit" in attributes:
         unit = _integer_attribute(op, "unit")
@@ -217,7 +249,7 @@ def _check_atlas_operation(op: Operation) -> None:
     if "code" in attributes:
         _require(0 <= _integer_attribute(op, "code") <= 255, f"{name}: scale code must be in 0..255")
     if "kind" in attributes:
-        kind = op.attributes["kind"]
+        kind = fields["kind"]
         allowed = ("mov", "relu") if short == "vpu_unary" else ("add",)
         if not isinstance(kind, builtin.StringAttr) or kind.data not in allowed:
             raise UnsupportedVirtualMode(f"{name}: supported kinds are {allowed}")
@@ -335,7 +367,7 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     _require(isinstance(operands, tuple) and all(isinstance(tile, Tile) for tile in operands), "tile operation operands must be a tuple of Tile values")
     formats = tuple(_type_kind(value.type)[0] for value in op.operands)
     _require(tuple(tile.format for tile in operands) == formats, f"{name}: expected tile operand formats {formats}")
-    kind = op.attributes["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
+    kind = _atlas_fields(op)["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
     if kind == "mov":
         return operands[0]
     try:
@@ -362,7 +394,7 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
 
 
 def _mxu_unit(op: Operation) -> int:
-    if "unit" in op.attributes:
+    if "unit" in _atlas_fields(op):
         return _integer_attribute(op, "unit")
     return next(unit for value in op.operands for kind, unit in (_type_kind(value.type),) if kind in ("mxu_weight", "mxu_acc"))
 

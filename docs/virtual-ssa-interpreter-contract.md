@@ -73,6 +73,11 @@ snapshots at their matching waits. The evaluator can interpret
 multiple returns and path-dependent outputs; the compiler's narrower lowering
 restrictions still apply separately.
 
+`compare_results(expected, actual)` checks identical output indices, raw BF16
+bits, and mapped memory bytes. It ignores output/region ordering and adjacent
+region partitioning, but distinguishes unmapped bytes from zero. Failures report
+the first differing tile coordinate or byte address and expected/actual bits.
+
 `evaluate_tile_operation(op, operands)` checks a parsed pure VPU/pack operation
 and its tuple of immutable tiles. Pack uses `RtlNumerics.to_fp8` with scale 127:
 nearest-even rounding, signed saturation to 448, and positive zero for NaNs,
@@ -122,6 +127,15 @@ environment with Torch and the model source root on `PYTHONPATH`:
 python -m unittest discover -s test -p 'test_virtual_evaluator_*.py' -v
 ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtual_evaluator*core.py' -v
 ```
+
+To check the pinned scheduler, select its compiler with `ATLAS_OOT_BIN_DIR`:
+
+```sh
+ATLAS_REQUIRE_VIRTUAL_SCHEDULER=1 python -m unittest discover -s test -p 'test_virtual_evaluator_scheduling.py' -v
+```
+
+The tests compare original and default/randomized schedules from identical inputs.
+Requiring both scheduler and core flags makes scheduled-machine comparison mandatory.
 
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
