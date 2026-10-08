@@ -75,12 +75,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
       else if (auto load = dyn_cast<ScalarLoadOp>(op))
         allowed = load.getKind() == "seli";
       if (scalarDst) {
-        auto launch = pending->launch;
-        if (*scalarDst != 0 &&
-            (*scalarDst == launch.getReg() ||
-             *scalarDst == launch.getDram() ||
-             *scalarDst == launch.getSize()))
-          return op.emitOpError("scalar write clobbers a pending DMA operand");
+        // ScalarCore forms every DMA operand at launch; DMA queues the command.
+        // Reusing those scalar registers does not change the captured transfer.
         allowed = true;
       }
       if (!allowed)

@@ -310,11 +310,6 @@ class VirtualDMALoweringTest(unittest.TestCase):
             ("extra DMA", scalar, replace_operation(lines[scalar], "dma", 'direction = "load", channel = 0 : i32, reg = 4 : i32, dram = 7 : i32, size = 9 : i32')),
             ("DMA configuration", scalar, replace_operation(lines[scalar], "dma_config", 'channel = 0 : i32, base_reg = 5 : i32')),
         ]
-        for reg in (4, 7, 9):
-            replacements.append((f"ALU clobber x{reg}", scalar,
-                                 re.sub(r"dst = \d+ : i32", f"dst = {reg} : i32", lines[scalar])))
-            replacements.append((f"upper clobber x{reg}", scalar,
-                                 replace_operation(lines[scalar], "upper", f'kind = "lui", dst = {reg} : i32, immediate = 32 : i32')))
         for index in (launch, wait):
             replacements.append((f"missing marker at {index}", index,
                                  re.sub(rf" \{{{re.escape(MARKER)} = \d+ : i32\}}", "", lines[index])))
