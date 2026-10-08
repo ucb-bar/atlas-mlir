@@ -13,6 +13,8 @@ FailureOr<ArrayAttr> buildAtlasDMAContract(
     func::FuncOp function, llvm::ArrayRef<VirtualDMAAssignment> assignments);
 
 // Checks v1 source expectations against captured tagged machine DMA operands.
+// Requires separate structural and DMA lifecycle checks (the generated-schedule
+// entry point runs those first); correspondence alone does not prove ordering.
 // Legacy UnitAttr markers require no contract. This does not prove tensor
 // contents, untagged DMA correspondence, or source-to-emitted CFG correspondence.
 LogicalResult verifyAtlasGeneratedDMAContract(ModuleOp module);

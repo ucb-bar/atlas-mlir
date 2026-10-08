@@ -1,11 +1,15 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include <array>
+#include <deque>
+#include <optional>
 #include <string>
 
 using namespace mlir;
@@ -13,6 +17,8 @@ using namespace mlir::atlas;
 
 namespace {
 using ValueSet = llvm::DenseSet<Value>;
+using HelperRegisters = std::array<std::optional<uint32_t>, 32>;
+using HelperWriters = std::array<Operation *, 32>;
 
 bool isScalar(Value value) {
   return value.getType().isInteger(1) || value.getType().isInteger(32);
@@ -65,7 +71,7 @@ public:
       if (failed(verifyBlock(block)))
         return failure();
     }
-    return success();
+    return verifyHelperContents();
   }
 
 private:
@@ -342,6 +348,245 @@ private:
     if (writesBase)
       return checkHelperWrite(op, transfer, dmaPlacements.lookup(transfer)->stagingReg, live,
                               "await staging materialization");
+    return success();
+  }
+
+  LogicalResult helperRead(Operation &op, const HelperRegisters &contents,
+                           unsigned reg, uint32_t expected, StringRef message,
+                           const HelperWriters *writers, Value handle = {}) {
+    if (reg == 0 || reg >= contents.size())
+      return op.emitOpError(message) << ": helper must be in x1..x31";
+    if (contents[reg] && *contents[reg] == expected)
+      return success();
+    auto diagnostic = op.emitOpError(message);
+    diagnostic << ": x" << reg << " requires " << expected << ", got ";
+    if (contents[reg])
+      diagnostic << *contents[reg];
+    else
+      diagnostic << "unknown";
+    if (handle)
+      noteValue(diagnostic, handle, "pending load transfer");
+    if (writers && (*writers)[reg])
+      diagnostic.attachNote((*writers)[reg]->getLoc())
+          << "last source operation writing x" << reg;
+    return failure();
+  }
+
+  std::optional<uint32_t> boundaryAddress(StringRef attribute, uint64_t offset) {
+    auto base = function->getAttrOfType<IntegerAttr>(attribute);
+    if (!base || base.getValue().getBitWidth() > 64)
+      return std::nullopt;
+    return uint32_t(base.getValue().getZExtValue() + offset);
+  }
+
+  // These are scalar effects of the current lowering, not hardware timing:
+  // launch copies DRAM, then size, then materializes staging; an await reads
+  // its first half before materializing the second. SELI writes the E bank.
+  LogicalResult helperEffects(Operation &op, HelperRegisters &contents,
+                              bool diagnose, HelperWriters *writers = nullptr) {
+    auto write = [&](unsigned reg, std::optional<uint32_t> value) {
+      if (reg == 0 || reg >= contents.size())
+        return;
+      contents[reg] = value;
+      if (writers)
+        (*writers)[reg] = &op;
+    };
+    auto halfSizeRead = [&]() {
+      return diagnose ? helperRead(op, contents, fixed.halfSizeReg, 1024,
+          "persistent DMA half-size helper is not preserved", writers) : success();
+    };
+    Value transfer, dram, size;
+    bool store = false;
+    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
+      transfer = load.getTransfer(); dram = load.getDramByte(); size = load.getSizeBytes();
+    } else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
+      transfer = load.getTransfer(); dram = load.getDramByte(); size = load.getSizeBytes();
+    } else if (auto launch = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
+      transfer = launch.getTransfer(); dram = launch.getDramByte(); size = launch.getSizeBytes(); store = true;
+    } else if (auto launch = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
+      transfer = launch.getTransfer(); dram = launch.getDramByte(); size = launch.getSizeBytes(); store = true;
+    }
+    if (transfer) {
+      const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
+      if (p.dramReg != registers.lookup(dram))
+        write(p.dramReg, contents[registers.lookup(dram)]);
+      if (p.sizeReg != registers.lookup(size))
+        write(p.sizeReg, contents[registers.lookup(size)]);
+      write(p.stagingReg, p.stagingWord);
+      if (store && p.halves > 1) {
+        write(p.stagingReg, p.stagingWord + 256);
+        write(p.stagingReg, p.stagingWord);
+      }
+      return success();
+    }
+    if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
+      transfer = await.getTransfer();
+    else if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op))
+      transfer = await.getTransfer();
+    if (transfer) {
+      const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
+      if (awaitBasePolicy == DMAAwaitBasePolicy::Rematerialized)
+        write(p.stagingReg, p.stagingWord);
+      else if (diagnose && failed(helperRead(op, contents, p.stagingReg,
+                   p.stagingWord, "pending DMA staging base is not preserved",
+                   writers, transfer)))
+        return failure();
+      if (p.halves > 1)
+        write(p.stagingReg, p.stagingWord + 256);
+      return success();
+    }
+
+    bool input = isa<VirtualInputFP8Op, VirtualInputBF16Op>(op);
+    bool output = isa<VirtualOutputBF16Op>(op);
+    if (input || output) {
+      uint64_t index = cast<IntegerAttr>(op.getAttr("index")).getValue().getZExtValue();
+      unsigned halves = isa<VirtualInputFP8Op>(op) ? 1 : 2;
+      for (unsigned half = 0; half < halves; ++half) {
+        write(input ? fixed.inputBaseReg : fixed.outputBaseReg,
+              uint32_t((input ? fixed.inputWord : fixed.outputWord) + index * 512 + half * 256));
+        write(input ? fixed.inputDramReg : fixed.outputDramReg,
+              boundaryAddress(input ? "atlas.input_dram_base" : "atlas.output_dram_base",
+                              index * 2048 + half * 1024));
+        if (failed(halfSizeRead()))
+          return failure();
+      }
+      return success();
+    }
+    if (isa<VirtualPackFP8Op>(op)) {
+      write(fixed.outputBaseReg, fixed.packWord);
+      write(fixed.packSourceRegs[0], fixed.packWord * 4);
+      write(fixed.packSourceRegs[1], fixed.packWord * 4 + 512);
+      write(fixed.packDestinationReg, fixed.packRelayoutWord * 4);
+      write(fixed.packRowReg, 0);
+      write(fixed.packRowsReg, 32);
+      // The relayout loop loads unknown memory and advances its pointers and
+      // row counter. Do not assume a fixed iteration count for aliased helpers.
+      for (unsigned reg : {fixed.packSourceRegs[0], fixed.packSourceRegs[1],
+                           fixed.packDestinationReg, fixed.packRowReg,
+                           fixed.packTemporaryRegs[0], fixed.packTemporaryRegs[1]})
+        write(reg, std::nullopt);
+      write(fixed.inputBaseReg, fixed.packRelayoutWord);
+      return success();
+    }
+    if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+      auto integer = dyn_cast<IntegerAttr>(constant.getValue());
+      write(registers.lookup(constant.getResult()), integer
+          ? std::optional<uint32_t>(uint32_t(integer.getValue().getSExtValue()))
+          : std::nullopt);
+    } else if (auto add = dyn_cast<arith::AddIOp>(op)) {
+      auto lhs = contents[registers.lookup(add.getLhs())];
+      auto rhs = contents[registers.lookup(add.getRhs())];
+      write(registers.lookup(add.getResult()), lhs && rhs
+          ? std::optional<uint32_t>(uint32_t(uint64_t(*lhs) + *rhs)) : std::nullopt);
+    } else if (isa<func::ReturnOp>(op)) {
+      write(fixed.haltReg, 1);
+    } else {
+      for (Value result : op.getResults())
+        if (isScalar(result))
+          write(registers.lookup(result), std::nullopt);
+    }
+    return success();
+  }
+
+  FailureOr<HelperRegisters> helperEdge(Operation *terminator,
+      Block *destination, ValueRange operands, HelperRegisters contents) {
+    SmallVector<std::pair<unsigned, unsigned>> copies;
+    for (auto [argument, incoming] : llvm::zip(destination->getArguments(), operands))
+      if (isScalar(argument) && registers.lookup(argument) != registers.lookup(incoming))
+        copies.emplace_back(registers.lookup(argument), registers.lookup(incoming));
+    while (!copies.empty()) {
+      bool copied = false;
+      for (unsigned i = 0; i < copies.size(); ++i) {
+        unsigned dst = copies[i].first;
+        if (llvm::any_of(copies, [&](auto copy) { return copy.second == dst; }))
+          continue;
+        contents[dst] = contents[copies[i].second];
+        copies.erase(copies.begin() + i);
+        copied = true;
+        break;
+      }
+      if (copied)
+        continue;
+      unsigned saved = copies.front().first;
+      // Exactly the cycle-breaking write emitted by scalar parallel copies.
+      if (fixed.scalarTemporary == 0 || fixed.scalarTemporary >= contents.size()) {
+        terminator->emitOpError("scalar parallel-copy helper requires x1..x31");
+        return failure();
+      }
+      contents[fixed.scalarTemporary] = contents[saved];
+      for (auto &copy : copies)
+        if (copy.second == saved)
+          copy.second = fixed.scalarTemporary;
+    }
+    return contents;
+  }
+
+  LogicalResult verifyHelperContents() {
+    // Existing non-DMA callers need not provide a complete fixed-helper ABI.
+    if (dmaAssignments.empty() || function.getBody().empty())
+      return success();
+    HelperRegisters initial{};
+    initial[0] = 0;
+    if (fixed.oneReg > 0 && fixed.oneReg < 32)
+      initial[fixed.oneReg] = 1;
+    if (fixed.zeroReg > 0 && fixed.zeroReg < 32)
+      initial[fixed.zeroReg] = 0;
+    if (fixed.halfSizeReg > 0 && fixed.halfSizeReg < 32)
+      initial[fixed.halfSizeReg] = 1024;
+    if (function.getNumArguments()) {
+      if (fixed.inputBaseReg > 0 && fixed.inputBaseReg < 32)
+        initial[fixed.inputBaseReg] = fixed.mailboxWord;
+      if (fixed.inputDramReg > 0 && fixed.inputDramReg < 32)
+        initial[fixed.inputDramReg] = boundaryAddress("atlas.control_dram_base", 0);
+      if (failed(helperRead(*function.getOperation(), initial, fixed.halfSizeReg,
+              1024, "persistent DMA half-size helper is not preserved", nullptr)))
+        return failure();
+      for (BlockArgument argument : function.getArguments())
+        initial[registers.lookup(argument)].reset();
+    }
+
+    llvm::DenseMap<Block *, HelperRegisters> entries;
+    Block *entry = &function.getBody().front();
+    entries[entry] = initial;
+    std::deque<Block *> work = {entry};
+    while (!work.empty()) {
+      Block *block = work.front();
+      work.pop_front();
+      HelperRegisters contents = entries.lookup(block);
+      for (Operation &op : *block)
+        (void)helperEffects(op, contents, false);
+      LogicalResult edges = success();
+      forEachEdge(block->getTerminator(), [&](Block *next, ValueRange operands) {
+        if (failed(edges))
+          return;
+        auto incoming = helperEdge(block->getTerminator(), next, operands, contents);
+        if (failed(incoming)) {
+          edges = failure();
+          return;
+        }
+        auto [found, inserted] = entries.try_emplace(next, *incoming);
+        bool changed = inserted;
+        if (!inserted)
+          for (unsigned reg = 0; reg < incoming->size(); ++reg)
+            if (found->second[reg] && found->second[reg] != (*incoming)[reg]) {
+              found->second[reg].reset();
+              changed = true;
+            }
+        if (changed)
+          work.push_back(next);
+      });
+      if (failed(edges))
+        return failure();
+    }
+    for (Block &block : function.getBody()) {
+      if (!entries.contains(&block))
+        continue;
+      HelperRegisters contents = entries.lookup(&block);
+      HelperWriters writers{};
+      for (Operation &op : block)
+        if (failed(helperEffects(op, contents, true, &writers)))
+          return failure();
+    }
     return success();
   }
 

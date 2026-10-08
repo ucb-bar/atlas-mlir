@@ -130,7 +130,14 @@ The checker rejects operand/result aliasing under the current no-in-place policy
 
 The independent [DMA placement checker](../include/Atlas/AtlasDMAAllocationVerification.h) also runs before emission for [issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10). It recomputes block-local handle ownership and checks complete assignments, unique bounded IDs, channels, 1 KiB staging alignment, VMEM bounds, helper-register geometry, and simultaneous staging overlaps. Shared captured helpers and reuse after the matching completion are allowed. [Direct corruption tests](../test/dma-allocation-verification.cpp) supply placements independently of the allocator.
 
-[DMA helper checks](../test/dma-helper-verification.cpp) protect live scalars and the size operand during ordered setup copies, allowing self-copies and dead-operand reuse. The await policy must match lowering: preserved first-half base here, rematerialized per half in [PR #13](https://github.com/ucb-bar/atlas-mlir/pull/13). Persistent helper/base contents, emitted correspondence, and post-await VLOAD completion remain separate obligations.
+[DMA helper checks](../test/dma-helper-verification.cpp) protect live scalars and the size operand during ordered setup copies, allowing self-copies and dead-operand reuse. The await policy must match lowering: preserved first-half base here, rematerialized per half in [PR #13](https://github.com/ucb-bar/atlas-mlir/pull/13).
+
+For explicit-DMA functions, source-effect analysis also checks the retained
+staging base at await and the persistent 1024-byte helper at implicit DMA reads.
+It propagates contents through CFG joins and loops, allowing known restoration
+and reuse after the last read. PACK's uncertain helper effects lose constant
+proofs. Other fixed helpers, general buffer preservation, emitted helper effects,
+and post-await VLOAD completion remain separate obligations.
 
 The independent [MXU placement checker](../include/Atlas/AtlasMXUAllocationVerification.h) checks complete assignments, both units' separate weight/accumulator banks, source-derived weight uses, live-slot overwrite, and in-place accumulator continuation. Readout consumes its version; legacy matmul checks its actual fixed slots. [Direct tests](../test/mxu-allocation-verification.cpp) inject wrong placements and allow alternative legal ones. These placement APIs are independent of admission capacity policy; the lowering pipeline still runs admission/state-flow checks first. Last source use or readout releases logical ownership, without proving hardware completion.
 

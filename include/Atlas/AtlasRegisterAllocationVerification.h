@@ -19,9 +19,11 @@ enum class DMAAwaitBasePolicy {
 // supplied assignments independently of the allocator's interference graph.
 // DMA assignments must cover every source transfer. Checks ordered DMA helper
 // writes against virtual scalar liveness and preserves operands until capture.
-// Choose the await policy to match the lowering being checked.
-// Does not establish persistent fixed-helper contents, pending staging-base
-// contents, emitted correspondence, or physical completion/timing.
+// For functions with explicit DMA, checks pending first-half staging bases
+// under Preserved and the persistent 1024-byte helper at implicit DMA reads,
+// using source lowering effects and conservative CFG constant propagation.
+// Choose the await policy to match lowering. Other fixed-helper contents,
+// emitted correspondence, and physical completion/timing remain separate.
 LogicalResult verifyAtlasRegisterAllocation(
     func::FuncOp function,
     llvm::ArrayRef<VirtualRegisterAssignment> assignments,
