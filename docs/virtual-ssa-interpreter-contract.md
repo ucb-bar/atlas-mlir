@@ -27,8 +27,8 @@ control-flow examples.
 
 Contract version `atlas.virtual-evaluator.v1` provides a
 [parser and typed runtime records](../tools/atlas_virtual_evaluator.py).
-Operation execution is not implemented. Parsing checks supported signatures,
-types, attributes, and modes; it does not prove state flow, dominance, handle
+Parsing checks supported signatures, types, attributes, and modes;
+it does not prove state flow, dominance, handle
 lifetimes, DMA ranges, or hardware legality. The
 [coverage inventory](virtual-evaluator-coverage.md) lists the admitted operations,
 source revisions, and remaining numerical questions for
@@ -50,6 +50,14 @@ multi-function modules. It retains xDSL SSA/block identities and boundary/contro
 declarations. Reparse after mutating its IR. `validate_inputs` requires exactly
 the declared indices/formats, including untaken paths, and controls in entry
 argument order.
+
+`evaluate(program, inputs)` executes single-block BF16 boundary I/O and ReLU,
+checking SSA bindings and the current state token. It rejects scalar controls,
+CFG, and other operation modes. ReLU uses the model's `RtlNumerics.unary` with
+bit-preserving BF16 conversion; its initial domain is finite normal values and
+positive zero. Boundary-only copies preserve all encodings. Logical outputs
+are separate from the supplied memory snapshots, which remain unchanged until
+explicit DMA execution is implemented.
 
 ```python
 from tools.atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, parse_program
@@ -86,9 +94,20 @@ python -m pip install -r tools/requirements-virtual-evaluator.txt
 python -m unittest discover -s test -p test_virtual_evaluator_interface.py -v
 ```
 
-The parser pins xDSL 0.65.0 and was tested with Python 3.12. Numerical integration
-requires the selected model's Python >=3.14 environment. Its source/configuration
-must be reconciled with the selected-core artifact before numerical comparison.
+The parser pins xDSL 0.65.0. Execution tests use the selected model's Python 3.14
+environment with Torch and the model source root on `PYTHONPATH`:
+
+```sh
+python -m unittest discover -s test -p test_virtual_evaluator_execution.py -v
+ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p test_virtual_evaluator_core.py -v
+```
+
+The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
+`ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
+the [README](../README.md). Required mode fails on missing core prerequisites;
+ordinary discovery skips that check. The comparison is implemented but has
+not executed against a selected-core artifact. See the
+[coverage inventory](virtual-evaluator-coverage.md) for evidence and limits.
 
 ## Recommended interpreter state
 
@@ -204,7 +223,8 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer is implemented in this repository's Python verification
-tooling. Operation execution and selected-core comparisons remain future work;
-input admission alone does not complete
+The parser/input layer and bounded BF16/ReLU execution are implemented in this
+repository's Python verification tooling. The first selected-core comparison
+is implemented but unexecuted; broader operation/CFG coverage remains future
+work. These partial checks do not complete
 [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).

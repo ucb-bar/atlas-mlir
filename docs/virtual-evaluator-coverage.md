@@ -1,6 +1,6 @@
 # Virtual evaluator coverage
 
-[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) currently provides a parser/input interface. **No listed operation executes yet.** Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and intended execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
+[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has single-block execution for `start`, BF16 boundary input/output, ReLU, and `func.return`, alongside the broader parser/input interface. Other execution forms fail explicitly. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
 
 ## Baselines and evidence
 
@@ -14,7 +14,7 @@
 | Current `npu-model` | `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6` | Numerical source to audit/reuse |
 | Surrounding RTL checkout | `2ae0bef209df6db78c3de18e8f651bb43855cce9` | Distinct current source baseline |
 
-Selected RTL/artifact configuration and its relationship to the current model remain unresolved before numerical comparison. Historical observations qualify only their recorded inputs/configuration; parser tests establish no hardware behavior. The scoped tracked-status check of current model numerics, timing docs, requirements, and specifications was clean.
+The current ReLU LUT and lane/vector-engine source hashes match the model's [RTL provenance](../../../../../npu-model/tests/rtl/provenance.json). The adapter preserves raw bits through `RtlNumerics.unary`; execution currently admits finite normal BF16 values and positive zero. Special encodings remain unsupported by ReLU, while boundary-only copies preserve them. Matching the selected-core executable to this source evidence remains outstanding; historical observations qualify only their recorded inputs/configuration.
 
 Schemas: [AtlasOps.td](../include/Atlas/AtlasOps.td), [AtlasTypes.td](../include/Atlas/AtlasTypes.td). Checks: [AtlasOps.cpp](../lib/AtlasOps.cpp), [AtlasVirtualVerification.cpp](../lib/AtlasVirtualVerification.cpp), and [AtlasVirtualToMachine.cpp](../lib/AtlasVirtualToMachine.cpp).
 
@@ -67,11 +67,11 @@ The contract details DMA address proof/alignment/range and handle rules. Both co
 
 ## Numerical sources to audit
 
-Current model [numerics and layouts](../../../../../npu-model/docs/rtl-timing.md#numerical-behavior-and-layouts) supply reusable components. Establish target/configuration compatibility and raw-bit adapter behavior before executing comparisons.
+Current model [numerics and layouts](../../../../../npu-model/docs/rtl-timing.md#numerical-behavior-and-layouts) supply reusable components. ReLU's raw-bit adapter is tested; target/configuration compatibility remains required for selected-core comparison.
 
 | ID | Existing evidence | Remaining audit |
 | --- | --- | --- |
-| V1 | RTL-generated unary tables; [ReLU](vpu-relu-observation.md) | Table provenance; signed zero/NaN/infinity; bit-exact `mov` |
+| V1 | Provenance-matched ReLU table and raw-bit adapter; historical [ReLU](vpu-relu-observation.md) | Selected-core comparison; negative zero/subnormals/NaN/infinity; bit-exact `mov` |
 | V2 | FP32 add/BF16 chop; [addition](vpu-add-observation.md) | Canonical NaN and raw-bit adapter; `1 + 3/512` distinguishes chop `0x3f80` from nearest-even `0x3f81` |
 | P | Model pack converter; [E8M0 pack](vpu-e8m0-pack-observation.md) | Rounding/saturation/underflow/special codes; logical output versus physical PACK permutation |
 | M | Unit-specific integer numerics; [discriminator](mxu-arithmetic-discriminator-observation.md), [MXU0 continuation](mxu0-k-continuation-observation.md), [MXU1 continuation](mxu1-continuation-observation.md) | MXU0 per-MAC versus MXU1 anchor behavior; geometry, seeds, product order, continuation/readout, exceptional encodings, W[N,K] orientation |
@@ -82,4 +82,6 @@ At the current model pin, relevant specifications are [parameters](../../../../.
 
 ## Validation boundary
 
-[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. Execution must subsequently check simultaneous CFG binding/loops, untaken effects, scalar predicates, state/handle freshness, unit-local chains, DMA snapshots/completion, and numerical edge cases. Compare the same source with fresh inputs across original/scheduled/machine execution, checking outputs, preserved inputs, and guards against independent expectations. No numerical or timing qualification follows from this inventory.
+[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. [Execution tests](../test/test_virtual_evaluator_execution.py) check shared-input preservation, fresh inputs, finite BF16 ReLU, state/SSA identity, and unsupported modes. The [machine comparison](../test/test_virtual_evaluator_core.py) checks two outputs, input/guard preservation, and a ReLU-to-MOV mutation using the [shared-input fixture](../test/examples/virtual_bf16_shared_relu.mlir). Lowering/LLVM word agreement and comparison diagnostics passed; actual core execution is pending external ARC/ModeLIR assets. A skipped core test does not complete this comparison.
+
+CFG/scalars, remaining VPU/pack modes, MXU chains, DMA completion, and original/scheduled comparisons remain future work. This pointwise ReLU case does not qualify matrix layout, resource release, or timing.

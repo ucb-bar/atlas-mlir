@@ -1,4 +1,4 @@
-"""Atlas virtual IR parsing and immutable runtime data; operation execution is not implemented."""
+"""Atlas virtual IR parsing and bounded reference execution over immutable tiles."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Literal
 try:
     from xdsl.context import Context
     from xdsl.dialects import arith, builtin, cf, func
-    from xdsl.ir import Attribute, Block, Operation
+    from xdsl.ir import Attribute, Block, Operation, SSAValue
     from xdsl.parser import Parser
     from xdsl.utils.exceptions import ParseError, VerifyException
 except ModuleNotFoundError as error:
@@ -322,3 +322,58 @@ def parse_program(source: str, *, function: str | None = None) -> ParsedProgram:
                 _require(index not in outputs, f"duplicate output index {index}")
                 outputs.append(index)
     return ParsedProgram(module, selected, blocks, MappingProxyType(inputs), tuple(outputs), controls)
+
+
+def _relu(tile: Tile) -> Tile:
+    for index, bits in enumerate(tile.bits):
+        if bits != 0 and not 1 <= ((bits >> 7) & 255) <= 254:
+            raise UnsupportedVirtualMode(f"ReLU element {index}: 0x{bits:04x} is outside finite normal BF16 and positive zero")
+    try:
+        import torch
+        from npu_model.configs.numerics import RtlNumerics
+    except ModuleNotFoundError as error:
+        raise ImportError("ReLU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+    # Reinterpret owned raw bits: floating-point conversion would lose encodings.
+    owned = torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16)
+    result = RtlNumerics.unary("relu", owned)
+    return Tile("bf16", tuple(result.contiguous().view(torch.uint16).flatten().tolist()))
+
+
+def evaluate(program: ParsedProgram, inputs: RuntimeInputs) -> EvaluationResult:
+    """Execute single-block BF16 boundary I/O and ReLU; reject every other mode."""
+    if len(program.blocks) != 1 or program.control_widths:
+        raise UnsupportedVirtualMode("execution requires one block without scalar controls")
+    program.validate_inputs(inputs)
+    supported = {"atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_output_bf16", "atlas.virtual_vpu_unary", "func.return"}
+    for op in program.operations:
+        name = operation_name(op)
+        if name not in supported:
+            raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
+        if name == "atlas.virtual_vpu_unary" and op.attributes["kind"].data != "relu":
+            raise UnsupportedVirtualMode("virtual VPU execution currently supports only relu")
+
+    values: dict[SSAValue, Tile] = {}
+    outputs: dict[int, Tile] = {}
+    state: SSAValue | None = None
+
+    def tile(value: SSAValue) -> Tile:
+        _require(value in values, "tile operand has no executed SSA definition")
+        return values[value]
+
+    for op in program.operations:
+        name = operation_name(op)
+        if name == "atlas.virtual_start":
+            _require(state is None, "virtual_start must occur exactly once")
+            state = op.results[0]
+        elif name == "atlas.virtual_vpu_unary":
+            values[op.results[0]] = _relu(tile(op.operands[0]))
+        else:
+            _require(state is not None and op.operands[0] is state, f"{name}: expected current state token")
+            if name == "atlas.virtual_input_bf16":
+                values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
+            elif name == "atlas.virtual_output_bf16":
+                outputs[_integer_attribute(op, "index")] = tile(op.operands[1])
+            if name != "func.return":
+                state = op.results[0]
+    _require(state is not None, "execution requires virtual_start")
+    return EvaluationResult(outputs, inputs.memory)
