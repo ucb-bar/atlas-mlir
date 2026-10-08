@@ -316,13 +316,11 @@ LogicalResult VirtualAllocationPlan::verify() const {
     assignments.push_back({value, reg});
   for (const auto &[value, reg] : scalarRegs)
     assignments.push_back({value, reg});
-  if (failed(verifyAtlasRegisterAllocation(function, assignments, fixedResources,
-                                         scalarArgumentRegs)))
-    return failure();
   SmallVector<VirtualDMAAssignment> dmaAssignments;
   for (const auto &[transfer, placement] : dmaTransfers)
     dmaAssignments.push_back({transfer, placement});
-  if (failed(verifyAtlasDMAAllocation(function, dmaAssignments)))
+  if (failed(verifyAtlasRegisterAllocation(function, assignments, fixedResources,
+                                         scalarArgumentRegs, dmaAssignments, DMAAwaitBasePolicy::Preserved)))
     return failure();
   SmallVector<VirtualMXUAssignment> mxuAssignments;
   for (const auto &[handle, placement] : mxuResources)

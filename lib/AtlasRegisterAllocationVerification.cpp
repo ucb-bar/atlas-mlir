@@ -28,11 +28,18 @@ public:
   AllocationVerifier(func::FuncOp function,
                      llvm::ArrayRef<VirtualRegisterAssignment> assignments,
                      const FixedResourcePlacement &fixed,
-                     llvm::ArrayRef<int32_t> scalarArgumentRegs)
+                     llvm::ArrayRef<int32_t> scalarArgumentRegs,
+                     llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments,
+                     DMAAwaitBasePolicy awaitBasePolicy)
       : function(function), assignments(assignments), fixed(fixed),
-        scalarArgumentRegs(scalarArgumentRegs), assemblyState(function) {}
+        scalarArgumentRegs(scalarArgumentRegs), dmaAssignments(dmaAssignments),
+        awaitBasePolicy(awaitBasePolicy), assemblyState(function) {}
 
   LogicalResult verify() {
+    if (failed(verifyAtlasDMAAllocation(function, dmaAssignments)))
+      return failure();
+    for (const VirtualDMAAssignment &assignment : dmaAssignments)
+      dmaPlacements[assignment.transfer] = &assignment.placement;
     for (Block &block : function.getBody()) {
       for (BlockArgument arg : block.getArguments())
         collect(arg);
@@ -271,6 +278,73 @@ private:
     return success();
   }
 
+  LogicalResult checkHelperWrite(Operation &op, Value transfer, unsigned reg, const ValueSet &live, StringRef phase) {
+    for (Value value : ordered(live)) {
+      if (!isScalar(value) || registers.lookup(value) != reg)
+        continue;
+      auto diagnostic = op.emitOpError("DMA helper write clobbers live scalar value");
+      diagnostic << ": " << phase << " writes x" << reg;
+      noteValue(diagnostic, transfer, "assigned transfer");
+      noteValue(diagnostic, value, "live-after scalar value");
+      return failure();
+    }
+    return success();
+  }
+
+  LogicalResult verifyDMAWrites(Operation &op, const ValueSet &live) {
+    Value transfer, dram, size;
+    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
+      transfer = load.getTransfer();
+      dram = load.getDramByte();
+      size = load.getSizeBytes();
+    } else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
+      transfer = load.getTransfer();
+      dram = load.getDramByte();
+      size = load.getSizeBytes();
+    } else if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
+      transfer = store.getTransfer();
+      dram = store.getDramByte();
+      size = store.getSizeBytes();
+    } else if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
+      transfer = store.getTransfer();
+      dram = store.getDramByte();
+      size = store.getSizeBytes();
+    }
+    if (transfer) {
+      const DMATransferPlacement &placement = *dmaPlacements.lookup(transfer);
+      // Lowering captures DRAM before size, then materializes staging. A
+      // self-copy emits no write.
+      if (placement.dramReg != registers.lookup(dram)) {
+        if (placement.dramReg == registers.lookup(size) && dram != size) {
+          auto diagnostic = op.emitOpError("DMA DRAM helper write clobbers size operand before capture");
+          diagnostic << ": writes x" << placement.dramReg;
+          noteValue(diagnostic, transfer, "assigned transfer");
+          noteValue(diagnostic, size, "uncaptured size operand");
+          return failure();
+        }
+        if (failed(checkHelperWrite(op, transfer, placement.dramReg, live, "DRAM capture")))
+          return failure();
+      }
+      if (placement.sizeReg != registers.lookup(size) &&
+          failed(checkHelperWrite(op, transfer, placement.sizeReg, live, "size capture")))
+        return failure();
+      return checkHelperWrite(op, transfer, placement.stagingReg, live, "launch staging materialization");
+    }
+
+    bool writesBase = false;
+    if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op)) {
+      transfer = await.getTransfer();
+      writesBase = true; // Both policies materialize the second half's base.
+    } else if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op)) {
+      transfer = await.getTransfer();
+      writesBase = awaitBasePolicy == DMAAwaitBasePolicy::Rematerialized;
+    }
+    if (writesBase)
+      return checkHelperWrite(op, transfer, dmaPlacements.lookup(transfer)->stagingReg, live,
+                              "await staging materialization");
+    return success();
+  }
+
   LogicalResult verifyBlock(Block &block) {
     ValueSet live = liveOut[&block];
     if (failed(checkClique(ordered(live), block.getTerminator()->getLoc(),
@@ -298,6 +372,8 @@ private:
       return failure();
 
     for (Operation &op : llvm::reverse(block.getOperations())) {
+      if (failed(verifyDMAWrites(op, live)))
+        return failure();
       if (!isa<cf::BranchOp, cf::CondBranchOp>(op)) {
         SmallVector<Value> results, operands;
         for (Value result : op.getResults())
@@ -345,6 +421,9 @@ private:
   llvm::ArrayRef<VirtualRegisterAssignment> assignments;
   const FixedResourcePlacement &fixed;
   llvm::ArrayRef<int32_t> scalarArgumentRegs;
+  llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments;
+  DMAAwaitBasePolicy awaitBasePolicy;
+  llvm::DenseMap<Value, const DMATransferPlacement *> dmaPlacements;
   AsmState assemblyState;
   bool hasPack = false;
   ValueSet known;
@@ -358,7 +437,10 @@ LogicalResult mlir::atlas::verifyAtlasRegisterAllocation(
     func::FuncOp function,
     llvm::ArrayRef<VirtualRegisterAssignment> assignments,
     const FixedResourcePlacement &fixed,
-    llvm::ArrayRef<int32_t> scalarArgumentRegs) {
-  return AllocationVerifier(function, assignments, fixed, scalarArgumentRegs)
+    llvm::ArrayRef<int32_t> scalarArgumentRegs,
+    llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments,
+    DMAAwaitBasePolicy awaitBasePolicy) {
+  return AllocationVerifier(function, assignments, fixed, scalarArgumentRegs,
+                            dmaAssignments, awaitBasePolicy)
       .verify();
 }

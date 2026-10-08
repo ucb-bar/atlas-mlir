@@ -27,3 +27,13 @@ target_link_libraries(atlas-mxu-allocation-test PRIVATE
 mlir_check_all_link_libraries(atlas-mxu-allocation-test)
 add_test(NAME atlas-mxu-allocation
   COMMAND atlas-mxu-allocation-test)
+
+add_llvm_executable(atlas-dma-helper-test
+  dma-helper-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-dma-helper-test)
+target_link_libraries(atlas-dma-helper-test PRIVATE
+  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-dma-helper-test)
+add_test(NAME atlas-dma-helper
+  COMMAND atlas-dma-helper-test)
