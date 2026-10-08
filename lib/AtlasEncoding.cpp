@@ -245,7 +245,8 @@ LogicalResult mlir::atlas::collectAtlasWords(
     ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock,
     bool skipGeneratedCheck) {
   if (failed(verify(module))) return failure();
-  if (!skipGeneratedCheck && module->hasAttr("atlas.generated_from_virtual") &&
+  if (!skipGeneratedCheck &&
+      (module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract")) &&
       failed(verifyAtlasGeneratedSchedule(module)))
     return failure();
   llvm::SmallVector<uint32_t> collected;

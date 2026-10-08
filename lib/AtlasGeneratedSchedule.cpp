@@ -1,4 +1,5 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/Pass/Pass.h"
@@ -134,7 +135,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
                 "generated redirect target enters a pending DMA interval");
     }
   }
-  return verifyAtlasGeneratedDMAMemory(module);
+  if (failed(verifyAtlasGeneratedDMAMemory(module)))
+    return failure();
+  return verifyAtlasGeneratedDMAContract(module);
 }
 
 namespace {

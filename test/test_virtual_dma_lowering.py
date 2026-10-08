@@ -75,7 +75,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
     def checked(self, source: str) -> tuple[str, list[dict]]:
         machine = lower(source)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine.replace(MARKER, ""))
+        self.assertNotIn('"atlas.virtual_', machine)
         for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -352,8 +352,12 @@ class VirtualDMALoweringTest(unittest.TestCase):
         scalar = next(i for i in range(launch + 1, len(lines)) if '"atlas.alu_imm"' in lines[i])
         for reg in (4, 7, 9):
             changed = lines.copy()
-            changed[scalar] = replace_operation(lines[scalar], "scalar_load",
-                f'kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32')
+            state = re.search(r'"atlas.alu_imm"\((%\w+)\)', lines[scalar])[1]
+            changed[scalar] = lines[scalar].replace(f"({state})", "(%seli_probe)", 1)
+            changed.insert(scalar,
+                f'  %seli_probe = "atlas.scalar_load"({state}) '
+                f'{{kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32}} '
+                ': (!atlas.state) -> !atlas.state')
             self.assertNotEqual(changed[scalar], lines[scalar])
             for tool, options in (("atlas-emit", ()),
                                   ("atlas-opt", ("--verify-atlas-generated-schedule",))):

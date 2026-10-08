@@ -82,7 +82,7 @@ class VirtualMXUExtendedTest(unittest.TestCase):
         self.assertEqual(roundtrip.stdout, verified.stdout)
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine)
+        self.assertNotIn('"atlas.virtual_', machine)
         for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -2,7 +2,6 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include <algorithm>
-#include <deque>
 #include <optional>
 #include <string>
 #include <vector>
@@ -55,37 +54,6 @@ LogicalResult compare(Operation *op, const Span &a, const Span &b,
   return success();
 }
 
-// DMA_CONFIG writes one shared ScalarCore register, irrespective of channel.
-// Its value, like the scalar operands, must agree on every incoming CFG edge.
-std::vector<std::optional<uint32_t>> baseEntries(const AtlasStream &s) {
-  std::vector<std::optional<uint32_t>> entry(s.starts.size());
-  std::vector<bool> reached(s.starts.size(), false);
-  reached[0] = true;
-  std::deque<size_t> work = {0};
-  while (!work.empty()) {
-    size_t block = work.front();
-    work.pop_front();
-    RegValues regs = s.entry[block];
-    auto base = entry[block];
-    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
-      if (auto config = dyn_cast<DMAConfigOp>(s.ops[i]))
-        base = regs[config.getBaseReg()];
-      applyScalar(s.instrs[i], regs);
-    }
-    for (size_t next : s.succs[block]) {
-      if (!reached[next]) {
-        reached[next] = true;
-        entry[next] = base;
-        work.push_back(next);
-      } else if (entry[next] && entry[next] != base) {
-        entry[next].reset();
-        work.push_back(next);
-      }
-    }
-  }
-  return entry;
-}
-
 } // namespace
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
@@ -98,7 +66,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
   if (failed(stream))
     return failure();
   const AtlasStream &s = *stream;
-  auto bases = baseEntries(s);
+  auto bases = atlasDMAUpperWordEntries(s);
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];

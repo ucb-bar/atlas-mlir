@@ -127,7 +127,7 @@ class VirtualEvaluatorMXUCoreTest(unittest.TestCase):
         for unit, name in product((0, 1), SOURCES):
             with self.subTest(unit=unit, name=name):
                 machine = lower(source_for_unit(name, unit))
-                self.assertNotIn("atlas.virtual_", machine)
+                self.assertNotIn('"atlas.virtual_', machine)
                 self.assertTrue(emitted(machine))
                 if name == "legacy_pack":
                     self.assertEqual(machine.count('"atlas.mxu_matmul"'), 2)

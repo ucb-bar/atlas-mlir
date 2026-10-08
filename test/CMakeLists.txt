@@ -37,3 +37,12 @@ target_link_libraries(atlas-dma-helper-test PRIVATE
 mlir_check_all_link_libraries(atlas-dma-helper-test)
 add_test(NAME atlas-dma-helper
   COMMAND atlas-dma-helper-test)
+
+add_llvm_executable(atlas-dma-contract-test
+  dma-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-dma-contract-test)
+target_link_libraries(atlas-dma-contract-test PRIVATE
+  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-dma-contract-test)
+add_test(NAME atlas-dma-contract
+  COMMAND atlas-dma-contract-test)

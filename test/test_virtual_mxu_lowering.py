@@ -60,7 +60,7 @@ class VirtualMXULoweringTest(unittest.TestCase):
     def checked(self, virtual: str) -> tuple[str, list[dict]]:
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine)
+        self.assertNotIn('"atlas.virtual_', machine)
         for option in ("--verify-atlas-machine-stream",
                        "--verify-atlas-generated-schedule"):
             result = run("atlas-opt", machine, option)

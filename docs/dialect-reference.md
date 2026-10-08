@@ -163,6 +163,16 @@ Generated explicit launches and waits carry matching `atlas.virtual_dma_transfer
 
 The independent [DMA memory check](../include/Atlas/AtlasDMAMemoryVerification.h) recomputes CFG scalar constants and captures effective byte ranges from emitted operands. It applies RTL address/length masks and signed VLS offsets, permits read/read sharing, and requires proof for accesses involving a write until the matching wait. It uses neither scheduler dependencies nor allocation summaries. DRAM proofs require the bounded zero-upper ABI and spans within 32 bits; other addresses remain unproven. [Directed tests](../test/test_dma_memory_verification.py) cover register reuse, aliases, offsets, masks, CFG joins/backedges, and concurrent transfers on the compatible scheduler target. This does not qualify hardware cycles or general post-vector resource release.
 
+The [DMA correspondence checker](../include/Atlas/AtlasDMAContractVerification.h)
+derives explicit-transfer expectations from source SSA and checked placements
+before lowering replaces the source. Generated artifacts retain these records
+in `atlas.virtual_dma_contract` under marker `"dma-contract-v1"`. Emission and
+both LLVM paths compare actual launch-time operands and completion identities
+against them, rejecting missing or malformed contracts. Legacy unit markers
+retain their earlier checks. [Mutation tests](../test/test_dma_contract_verification.py)
+cover changed commands and lost metadata; this does not yet check implicit DMA,
+tile payloads/layouts, source-to-machine CFG correspondence, or physical release.
+
 ### Explicit virtual MXU resources
 
 `!atlas.virtual_mxu_weight<unit>` identifies a resident FP8 weight, and `!atlas.virtual_mxu_acc<unit>` identifies one accumulator version. Units are `0` or `1` and remain part of the selected arithmetic semantics. These handles have no physical register or slot numbers. This first slice allows one resident weight and one live accumulator per unit within a block.

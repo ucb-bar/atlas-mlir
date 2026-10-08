@@ -38,6 +38,10 @@ FailureOr<AtlasStream> readAtlasStream(
     ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
 LogicalResult checkAtlasStream(const AtlasStream &stream);
+// DMA_CONFIG updates one shared upper address word, irrespective of channel.
+// Entry values are known only when all reachable incoming CFG edges agree.
+std::vector<std::optional<uint32_t>>
+atlasDMAUpperWordEntries(const AtlasStream &stream);
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions.

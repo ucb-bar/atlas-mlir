@@ -128,7 +128,7 @@ class VirtualEvaluatorDMACoreTest(unittest.TestCase):
         for name, source in SOURCES.items():
             with self.subTest(name=name):
                 machine = lower(source)
-                self.assertNotIn("atlas.virtual_", machine.replace(MARKER, ""))
+                self.assertNotIn('"atlas.virtual_', machine)
                 self.assertTrue(emitted(machine))
         entries = instructions(lower(SOURCES["pending_work"]))
         launches = [index for index, entry in enumerate(entries) if entry["operation"] == "atlas.dma" and MARKER in entry["fields"]]

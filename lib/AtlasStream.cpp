@@ -330,6 +330,40 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module,
   return s;
 }
 
+// DMA_CONFIG writes one shared ScalarCore register, irrespective of channel.
+// Its value, like the scalar operands, must agree on every incoming CFG edge.
+std::vector<std::optional<uint32_t>>
+mlir::atlas::atlasDMAUpperWordEntries(const AtlasStream &s) {
+  std::vector<std::optional<uint32_t>> entry(s.starts.size());
+  std::vector<bool> reached(s.starts.size(), false);
+  if (s.starts.empty())
+    return entry;
+  reached[0] = true;
+  std::deque<size_t> work = {0};
+  while (!work.empty()) {
+    size_t block = work.front();
+    work.pop_front();
+    RegValues regs = s.entry[block];
+    auto base = entry[block];
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      if (auto config = dyn_cast<DMAConfigOp>(s.ops[i]))
+        base = regs[config.getBaseReg()];
+      applyScalar(s.instrs[i], regs);
+    }
+    for (size_t next : s.succs[block]) {
+      if (!reached[next]) {
+        reached[next] = true;
+        entry[next] = base;
+        work.push_back(next);
+      } else if (entry[next] && entry[next] != base) {
+        entry[next].reset();
+        work.push_back(next);
+      }
+    }
+  }
+  return entry;
+}
+
 LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();

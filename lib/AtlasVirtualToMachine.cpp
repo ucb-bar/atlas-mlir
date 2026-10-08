@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualToMachine.h"
+#include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
@@ -69,11 +70,20 @@ public:
   }
 
   LogicalResult materialize() {
-    for (Operation &op : llvm::make_early_inc_range(
-             llvm::reverse(module.getBody()->getOperations())))
-      op.erase();
+    SmallVector<VirtualDMAAssignment> assignments;
+    for (Block &block : function.getBody())
+      for (Operation &op : block)
+        if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+          Value handle = op.getResult(1);
+          assignments.push_back({handle, allocation.dma(handle)});
+        }
+    auto contract = buildAtlasDMAContract(function, assignments);
+    if (failed(contract))
+      return failure();
+    OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
+    (*emitted)->setAttrs(module->getAttrs());
     OpBuilder builder(module.getContext());
-    builder.setInsertionPointToEnd(module.getBody());
+    builder.setInsertionPointToEnd(emitted->getBody());
     OperationState startState(module.getLoc(), "atlas.start");
     startState.addTypes(StateType::get(module.getContext()));
     Value state = builder.create(startState)->getResult(0);
@@ -84,18 +94,19 @@ public:
       machineState.addAttributes(step.attrs);
       state = builder.create(machineState)->getResult(0);
     }
-    module->setAttr("atlas.generated_from_virtual", builder.getUnitAttr());
-    module->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
-    module->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
-    module->setAttr("atlas.scalar_arg_regs",
-                    builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
+    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("dma-contract-v1"));
+    (*emitted)->setAttr("atlas.virtual_dma_contract", *contract);
+    (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
+    (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
+    (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
-      module->setAttr("atlas.control_dram_base",
-                      builder.getI64IntegerAttr(*controlBase));
-    if (failed(verify(module)))
-      return failure();
+      (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
     llvm::SmallVector<uint32_t> words;
-    return collectAtlasWords(module, words, /*llvmBlock=*/true);
+    if (failed(collectAtlasWords(*emitted, words, /*llvmBlock=*/true)))
+      return failure();
+    module->setAttrs((*emitted)->getAttrs());
+    module.getBodyRegion().takeBody(emitted->getBodyRegion());
+    return success();
   }
 
 private:
