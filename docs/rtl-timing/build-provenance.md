@@ -43,7 +43,7 @@ A fresh FIRRTL-to-Verilog derivation with the selected tool, annotations and low
 
 Where historical records are insufficient, capture the needed build relationship prospectively: selected inputs and relevant dependencies before execution, exact command/tool/options, successful execution and outputs, and input stability checks. A fresh VCS build can establish the simulation-source edge; it cannot by itself establish the earlier Chisel-to-FIRRTL edge. Keep unreconstructed relationships explicit and define the qualified scope accordingly. Full pinning of unrelated host runtime libraries is not a prerequisite for recording this narrower evidence.
 
-The current checker deliberately does not accept a generic user-authored build-success receipt. A future build-capture producer and its validation rules must be implemented together before such an edge can be promoted. Internal timing capture and boundary checks remain separate work even after build provenance is established.
+The current checker deliberately does not accept a generic user-authored build-success receipt. The separate [captured-build workflow](captured-builds.md) records prospective source elaboration and simulator compilation; those phase records still need recipe-specific validation and explicit output crosslinks before an edge can be promoted. Internal timing capture and boundary checks remain separate work even after build provenance is established.
 
 Run the focused synthetic regressions without rebuilding the compiler or launching VCS:
 
