@@ -11,6 +11,7 @@ try:
     from xdsl.context import Context
     from xdsl.dialects import arith, builtin, cf, func
     from xdsl.ir import Attribute, Block, Operation, SSAValue
+    from xdsl.irdl.dominance import DominanceInfo
     from xdsl.parser import Parser
     from xdsl.utils.exceptions import ParseError, VerifyException
 except ModuleNotFoundError as error:
@@ -339,41 +340,142 @@ def _relu(tile: Tile) -> Tile:
     return Tile("bf16", tuple(result.contiguous().view(torch.uint16).flatten().tolist()))
 
 
-def evaluate(program: ParsedProgram, inputs: RuntimeInputs) -> EvaluationResult:
-    """Execute single-block BF16 boundary I/O and ReLU; reject every other mode."""
-    if len(program.blocks) != 1 or program.control_widths:
-        raise UnsupportedVirtualMode("execution requires one block without scalar controls")
+def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
+    if isinstance(op, cf.BranchOp):
+        return ((op.successor, tuple(op.arguments)),)
+    if isinstance(op, cf.ConditionalBranchOp):
+        return ((op.then_block, tuple(op.then_arguments)), (op.else_block, tuple(op.else_arguments)))
+    return ()
+
+
+def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...]]:
+    """Validate CFG/SSA and state flow independently of compiler pass decisions."""
+    blocks = {block: tuple(block.ops) for block in program.blocks}
+    entry = program.blocks[0]
+    starts = [op for op in program.operations if operation_name(op) == "atlas.virtual_start"]
+    _require(len(starts) == 1 and bool(blocks[entry]) and blocks[entry][0] is starts[0], "virtual_start must be the unique first entry operation")
+    supported = {
+        "atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_output_bf16", "atlas.virtual_vpu_unary",
+        "arith.constant", "arith.addi", "arith.cmpi", "cf.br", "cf.cond_br", "func.return",
+    }
+    definitions = {}
+    for block, operations in blocks.items():
+        definitions.update((arg, (block, -1)) for arg in block.args)
+        current = None if block is entry else block.args[0]
+        if program.function is not None:
+            _require(bool(operations) and isinstance(operations[-1], (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)), "function block requires a branch or return terminator")
+        for position, op in enumerate(operations):
+            name = operation_name(op)
+            if name not in supported:
+                raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
+            if name == "atlas.virtual_vpu_unary" and op.attributes["kind"].data != "relu":
+                raise UnsupportedVirtualMode("virtual VPU execution currently supports only relu")
+            if isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)):
+                _require(position == len(operations) - 1, f"{name}: terminator must be last in its block")
+            for target, arguments in _edges(op):
+                _require(target in blocks and target is not entry, f"{name}: successor must be a non-entry block in the selected function")
+                _require(len(arguments) == len(target.args), f"{name}: successor argument arity mismatch")
+                _require(all(value.type == arg.type for value, arg in zip(arguments, target.args)), f"{name}: successor argument type mismatch")
+            for operand in op.operands:
+                if _type_kind(operand.type)[0] == "state":
+                    _require(current is not None and operand is current, f"{name}: expected current state token")
+            for result in op.results:
+                definitions[result] = (block, position)
+                if _type_kind(result.type)[0] == "state":
+                    current = result
+
+    reachable: set[Block] = set()
+    pending = [entry]
+    while pending:
+        block = pending.pop()
+        if block not in reachable:
+            reachable.add(block)
+            pending.extend(target for op in blocks[block] for target, _ in _edges(op))
+    _require(reachable == set(blocks), "virtual CFG contains an unreachable block")
+    region = program.function.body if program.function is not None else program.module.body
+    dominance = DominanceInfo(region)
+    for block, operations in blocks.items():
+        for position, op in enumerate(operations):
+            for operand in op.operands:
+                _require(operand in definitions, f"{operation_name(op)}: operand has no SSA definition in the selected program")
+                owner, defined_at = definitions[operand]
+                available = defined_at < position if owner is block else dominance.dominates(owner, block)
+                _require(available, f"{operation_name(op)}: operand definition does not dominate its use")
+    return blocks
+
+
+def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 10000) -> EvaluationResult:
+    """Execute scalar/CFG operations and BF16 boundary I/O/ReLU within a step budget."""
+    _require(type(max_steps) is int and max_steps > 0, "max_steps must be a positive integer")
     program.validate_inputs(inputs)
-    supported = {"atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_output_bf16", "atlas.virtual_vpu_unary", "func.return"}
-    for op in program.operations:
-        name = operation_name(op)
-        if name not in supported:
-            raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
-        if name == "atlas.virtual_vpu_unary" and op.attributes["kind"].data != "relu":
-            raise UnsupportedVirtualMode("virtual VPU execution currently supports only relu")
-
-    values: dict[SSAValue, Tile] = {}
+    blocks = _check_execution(program)
+    values: dict[SSAValue, object] = {}
     outputs: dict[int, Tile] = {}
-    state: SSAValue | None = None
+    state: object | None = None
+    steps = 0
 
-    def tile(value: SSAValue) -> Tile:
-        _require(value in values, "tile operand has no executed SSA definition")
-        return values[value]
+    def value(operand: SSAValue) -> object:
+        _require(operand in values, "operand has no executed SSA definition")
+        return values[operand]
 
-    for op in program.operations:
-        name = operation_name(op)
-        if name == "atlas.virtual_start":
-            _require(state is None, "virtual_start must occur exactly once")
-            state = op.results[0]
-        elif name == "atlas.virtual_vpu_unary":
-            values[op.results[0]] = _relu(tile(op.operands[0]))
+    def scalar(operand: SSAValue) -> Scalar:
+        result = value(operand)
+        _require(isinstance(result, Scalar), "expected a scalar runtime value")
+        assert isinstance(result, Scalar)
+        return result
+
+    def tile(operand: SSAValue) -> Tile:
+        result = value(operand)
+        _require(isinstance(result, Tile), "expected a tile runtime value")
+        assert isinstance(result, Tile)
+        return result
+
+    block = program.blocks[0]
+    bindings: tuple[object, ...] = inputs.controls
+    while True:
+        values.update(zip(block.args, bindings))
+        for op in blocks[block]:
+            for result in op.results:
+                values.pop(result, None)
+        for position, op in enumerate(blocks[block]):
+            name = operation_name(op)
+            _require(steps < max_steps, f"step budget {max_steps} exhausted at block {program.blocks.index(block)}, operation {position} ({name})")
+            steps += 1
+            if isinstance(op, arith.ConstantOp):
+                width = op.result.type.width.data
+                values[op.result] = Scalar(width, op.value.value.data & ((1 << width) - 1))
+            elif isinstance(op, arith.AddiOp):
+                values[op.result] = Scalar(32, (scalar(op.lhs).bits + scalar(op.rhs).bits) & 0xFFFFFFFF)
+            elif isinstance(op, arith.CmpiOp):
+                left, right = scalar(op.lhs).bits, scalar(op.rhs).bits
+                signed_left = left - (1 << 32) if left & (1 << 31) else left
+                signed_right = right - (1 << 32) if right & (1 << 31) else right
+                predicates = (
+                    left == right, left != right, signed_left < signed_right, signed_left <= signed_right,
+                    signed_left > signed_right, signed_left >= signed_right, left < right, left <= right, left > right, left >= right,
+                )
+                values[op.result] = Scalar(1, int(predicates[op.predicate.value.data]))
+            elif isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp)):
+                edge = 0 if isinstance(op, cf.BranchOp) or scalar(op.cond).bits else 1
+                target, arguments = _edges(op)[edge]
+                # Snapshot every source before rebinding a backedge's destinations.
+                bindings = tuple(value(argument) for argument in arguments)
+                _require(bindings[0] is state, f"{name}: expected current dynamic state token")
+                block = target
+                break
+            elif name == "atlas.virtual_start":
+                _require(state is None, "virtual_start cannot execute twice")
+                state = values[op.results[0]] = object()
+            elif name == "atlas.virtual_vpu_unary":
+                values[op.results[0]] = _relu(tile(op.operands[0]))
+            else:
+                _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
+                if isinstance(op, func.ReturnOp):
+                    return EvaluationResult(outputs, inputs.memory)
+                if name == "atlas.virtual_input_bf16":
+                    values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
+                elif name == "atlas.virtual_output_bf16":
+                    outputs[_integer_attribute(op, "index")] = tile(op.operands[1])
+                state = values[op.results[0]] = object()
         else:
-            _require(state is not None and op.operands[0] is state, f"{name}: expected current state token")
-            if name == "atlas.virtual_input_bf16":
-                values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
-            elif name == "atlas.virtual_output_bf16":
-                outputs[_integer_attribute(op, "index")] = tile(op.operands[1])
-            if name != "func.return":
-                state = op.results[0]
-    _require(state is not None, "execution requires virtual_start")
-    return EvaluationResult(outputs, inputs.memory)
+            return EvaluationResult(outputs, inputs.memory)

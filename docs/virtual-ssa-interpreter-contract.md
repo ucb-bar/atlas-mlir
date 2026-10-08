@@ -23,7 +23,7 @@ This fragment omits a return terminator; the checked fixtures under
 `test/examples/virtual_bf16_cfg.mlir` have executable syntax and complete
 control-flow examples.
 
-## Parser interface
+## Evaluator interface
 
 Contract version `atlas.virtual-evaluator.v1` provides a
 [parser and typed runtime records](../tools/atlas_virtual_evaluator.py).
@@ -51,13 +51,20 @@ declarations. Reparse after mutating its IR. `validate_inputs` requires exactly
 the declared indices/formats, including untaken paths, and controls in entry
 argument order.
 
-`evaluate(program, inputs)` executes single-block BF16 boundary I/O and ReLU,
-checking SSA bindings and the current state token. It rejects scalar controls,
-CFG, and other operation modes. ReLU uses the model's `RtlNumerics.unary` with
-bit-preserving BF16 conversion; its initial domain is finite normal values and
-positive zero. Boundary-only copies preserve all encodings. Logical outputs
-are separate from the supplied memory snapshots, which remain unchanged until
-explicit DMA execution is implemented.
+`evaluate(program, inputs, max_steps=10000)` executes BF16 boundary I/O, ReLU,
+i1/i32 controls/constants, wrapping i32 addition, all ten integer comparisons,
+branches, and returns. It checks SSA dominance, edge types/arity, and state
+flow before execution; branch arguments bind simultaneously. Each executed
+operation, including branches and returns, consumes one step. Exhaustion raises
+`VirtualInterfaceError` with the block and operation position.
+
+Unsupported operation modes are rejected even on untaken paths. Effects and
+numerical checks run only on the chosen path. ReLU uses `RtlNumerics.unary`
+with bit-preserving BF16 conversion over finite normal values and positive zero;
+boundary-only copies preserve all encodings. Only executed outputs appear in
+the result. Memory snapshots remain unchanged until explicit DMA execution is
+implemented. The evaluator can interpret multiple returns and path-dependent
+outputs; the compiler's narrower lowering restrictions still apply separately.
 
 ```python
 from tools.atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, parse_program
@@ -98,15 +105,16 @@ The parser pins xDSL 0.65.0. Execution tests use the selected model's Python 3.1
 environment with Torch and the model source root on `PYTHONPATH`:
 
 ```sh
-python -m unittest discover -s test -p test_virtual_evaluator_execution.py -v
-ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p test_virtual_evaluator_core.py -v
+python -m unittest discover -s test -p 'test_virtual_evaluator_*.py' -v
+ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtual_evaluator*core.py' -v
 ```
 
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
 the [README](../README.md). Required mode fails on missing core prerequisites;
-ordinary discovery skips that check. The comparison is implemented but has
-not executed against a selected-core artifact. See the
+ordinary discovery skips those checks. The shared-input and scalar/CFG
+comparisons are implemented but have not executed against a selected-core
+artifact. See the
 [coverage inventory](virtual-evaluator-coverage.md) for evidence and limits.
 
 ## Recommended interpreter state
@@ -140,10 +148,11 @@ block, operation_index = chosen_block, 0
 
 The environment can be per dynamic block visit. A global map is also possible
 if block arguments and operation results are rebound on every visit and no
-stale binding can be read. MLIR's verifier supplies static dominance and type
-checks; an interpreter still needs dynamic arity, type, current-token, and
-step-limit checks. The existing virtual stream verifier additionally requires
-the current state token on each CFG edge and one return block for outputs.
+stale binding can be read. xDSL parsing does not establish SSA dominance or
+edge arity/types, so the evaluator checks those independently. It also checks
+static current-state identities on both branch edges and fresh runtime tokens
+on the chosen path. The existing compiler verifier additionally confines
+outputs to one return block; this is a lowering restriction.
 
 ## Explicit DMA completion and scalar values
 
@@ -223,8 +232,8 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer and bounded BF16/ReLU execution are implemented in this
-repository's Python verification tooling. The first selected-core comparison
-is implemented but unexecuted; broader operation/CFG coverage remains future
-work. These partial checks do not complete
+The parser/input layer, scalar/CFG execution, and bounded BF16/ReLU execution
+are implemented in this repository's Python verification tooling. Their
+selected-core comparisons are implemented but unexecuted; remaining VPU, pack,
+MXU, and DMA execution remain future work. These partial checks do not complete
 [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).

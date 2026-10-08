@@ -24,9 +24,9 @@ def tile_bytes(tile: Tile) -> bytes:
     return b"".join(tile.bits[row * 32 + col].to_bytes(2, "little") for half in (0, 16) for row in range(32) for col in range(half, half + 16))
 
 
-def compare_result(expected: EvaluationResult, captured) -> None:
+def compare_result(expected: EvaluationResult, captured, *, output_base: int = OUTPUT_BASE) -> None:
     for index, tile in expected.outputs.items():
-        observed = captured(OUTPUT_BASE + index * 2048, 2048)
+        observed = captured(output_base + index * 2048, 2048)
         if len(observed) != 2048:
             raise AssertionError(f"output {index}: expected 2048 bytes, got {len(observed)}")
         for row in range(32):

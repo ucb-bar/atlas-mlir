@@ -135,22 +135,9 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
             '"atlas.virtual_vpu_unary"(%original) {kind = "relu"} : (!atlas.virtual_bf16)',
             '"atlas.virtual_vpu_binary"(%original, %original) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16)',
         )
-        cfg = '''module { func.func @forward() -> !atlas.virtual_state {
-          %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-          %s1, %tile = "atlas.virtual_input_bf16"(%s0) {index = 11 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-          cf.br ^exit(%s1, %tile : !atlas.virtual_state, !atlas.virtual_bf16)
-        ^exit(%state: !atlas.virtual_state, %value: !atlas.virtual_bf16):
-          %done = "atlas.virtual_output_bf16"(%state, %value) {index = 23 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
-          func.return %done : !atlas.virtual_state
-        } }'''
-        controlled = FUNCTION.replace('@relu_pair()', '@relu_pair(%control: i32)')
-        scalar = FLAT.replace('  %s0 =', '  %value = arith.constant 0 : i32\n  %s0 =')
         cases = (
             (FLAT.replace('kind = "relu"', 'kind = "mov"'), RuntimeInputs({11: patterned_tile()})),
             (binary, RuntimeInputs({11: patterned_tile()})),
-            (cfg, RuntimeInputs({11: patterned_tile()})),
-            (controlled, RuntimeInputs({11: patterned_tile()}, (Scalar(32, 0),))),
-            (scalar, RuntimeInputs({11: patterned_tile()})),
         )
         for index, (source, inputs) in enumerate(cases):
             with self.subTest(case=index):

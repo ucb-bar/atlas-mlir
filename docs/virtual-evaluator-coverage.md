@@ -1,6 +1,6 @@
 # Virtual evaluator coverage
 
-[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has single-block execution for `start`, BF16 boundary input/output, ReLU, and `func.return`, alongside the broader parser/input interface. Other execution forms fail explicitly. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
+[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has execution for `start`, BF16 boundary input/output, ReLU, and the scalar/CFG forms below, alongside the broader parser/input interface. Other execution forms fail explicitly. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
 
 ## Baselines and evidence
 
@@ -59,9 +59,11 @@ The dialect also recognizes unary `recip`, `exp`, `exp2`, `square`, `cube`, `sin
 | `arith.cmpi` | `i32, i32 → i1`; `eq/ne/slt/sgt/sle/sge/ult/ugt/ule/uge` |
 | `cf.br` | Current state first on edge; simultaneous argument binding |
 | `cf.cond_br` | i1 condition; select one edge, both statically carry current state |
-| `func.return` | Return exactly current state; unique return block |
+| `func.return` | Return exactly current state; lowering additionally requires a unique return block |
 
 Parsing accepts flat IR or a selected function; physical lowering requires exactly one function returning state with i1/i32 entry controls. Non-entry arguments are state followed by BF16/i1/i32, excluding FP8, scales, and resource handles. Compiler verification requires reachable blocks and one return block containing CFG outputs/stores/waits. Dominating tensor/scale definitions remain allowed independently of block-argument restrictions.
+
+Execution independently checks reachable blocks, SSA dominance/order, edge arity/types, and current-state identities on both conditional edges. It binds arguments simultaneously and evaluates only the chosen path, with a positive `max_steps` budget counting every executed operation. Unsupported operation modes are rejected before execution; numerical-domain checks occur only when the operation executes. Multiple returns and path-dependent outputs are meaningful to the evaluator even when outside the compiler's lowering subset.
 
 The contract details DMA address proof/alignment/range and handle rules. Both compiler snapshots expose all 23 forms; local bounds are one pending DMA and one weight/live accumulator per unit, while the target uses `kMaxPendingVirtualDMA = 2` and `kVirtualMXUSlots = 2`. Completion/version tracking is logical and block-local; physical placement is not an input. `atlas.input_dram_base`, `atlas.output_dram_base`, and optional `atlas.control_dram_base` govern compiler materialization, not logical boundary indices.
 
@@ -82,6 +84,8 @@ At the current model pin, relevant specifications are [parameters](../../../../.
 
 ## Validation boundary
 
-[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. [Execution tests](../test/test_virtual_evaluator_execution.py) check shared-input preservation, fresh inputs, finite BF16 ReLU, state/SSA identity, and unsupported modes. The [machine comparison](../test/test_virtual_evaluator_core.py) checks two outputs, input/guard preservation, and a ReLU-to-MOV mutation using the [shared-input fixture](../test/examples/virtual_bf16_shared_relu.mlir). Lowering/LLVM word agreement and comparison diagnostics passed; actual core execution is pending external ARC/ModeLIR assets. A skipped core test does not complete this comparison.
+[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. [Execution tests](../test/test_virtual_evaluator_execution.py) check shared-input preservation, fresh inputs, finite BF16 ReLU, state/SSA identity, and unsupported modes. [CFG tests](../test/test_virtual_evaluator_cfg.py) cover integer boundaries, diamonds, untaken effects, loops, simultaneous swaps, malformed SSA/edges, and step limits.
 
-CFG/scalars, remaining VPU/pack modes, MXU chains, DMA completion, and original/scheduled comparisons remain future work. This pointwise ReLU case does not qualify matrix layout, resource release, or timing.
+The [shared-input comparison](../test/test_virtual_evaluator_core.py) includes two outputs, input/guard preservation, and a ReLU-to-MOV mutation. The [CFG comparisons](../test/test_virtual_evaluator_cfg_core.py) reuse compiled words across fresh tiles and controls for branches, all ten predicates, wrapping addition, and loops. Evaluator expectations and lowering/LLVM word agreement passed for 16 CFG programs; actual core execution is pending external ARC/ModeLIR assets. Skipped core tests do not complete these comparisons.
+
+Remaining VPU/pack modes, MXU chains, DMA completion, and original/scheduled comparisons remain future work. These checks do not qualify matrix layout, resource release, or timing.
