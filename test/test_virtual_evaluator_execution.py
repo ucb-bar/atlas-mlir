@@ -76,14 +76,15 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
         self.assertEqual(result.outputs[23].bits, bits)
         self.assertEqual(inputs.tiles[11].bits, bits)
 
-    def test_relu_rejects_excluded_bf16_classes(self) -> None:
+    def test_relu_preserves_positive_encodings_and_clears_negative_encodings(self) -> None:
         program = parse_program(FLAT)
         for encoding in SPECIAL_BF16:
             with self.subTest(encoding=hex(encoding)):
                 bits = [0x3F80] * 1024
                 bits[731] = encoding
-                with self.assertRaises(UnsupportedVirtualMode):
-                    evaluate(program, RuntimeInputs({11: Tile("bf16", bits)}))
+                result = evaluate(program, RuntimeInputs({11: Tile("bf16", bits)}))
+                self.assertEqual(result.outputs[23].bits, tuple(bits))
+                self.assertEqual(result.outputs[29].bits[731], 0 if encoding & 0x8000 else encoding)
 
     def test_execution_preserves_memory_inputs_and_publishes_immutable_outputs(self) -> None:
         tile = patterned_tile()
@@ -131,19 +132,10 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
             evaluate(program, RuntimeInputs({11: patterned_tile()}))
 
     def test_parser_admitted_operations_outside_execution_subset_fail_explicitly(self) -> None:
-        binary = FLAT.replace(
-            '"atlas.virtual_vpu_unary"(%original) {kind = "relu"} : (!atlas.virtual_bf16)',
-            '"atlas.virtual_vpu_binary"(%original, %original) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16)',
-        )
-        cases = (
-            (FLAT.replace('kind = "relu"', 'kind = "mov"'), RuntimeInputs({11: patterned_tile()})),
-            (binary, RuntimeInputs({11: patterned_tile()})),
-        )
-        for index, (source, inputs) in enumerate(cases):
-            with self.subTest(case=index):
-                program = parse_program(source)
-                with self.assertRaises(UnsupportedVirtualMode):
-                    evaluate(program, inputs)
+        scale = '%scale = "atlas.virtual_scale_constant"() {code = 127 : i32} : () -> !atlas.virtual_scale\n'
+        program = parse_program(FLAT.replace('  %rectified =', scale + '  %rectified ='))
+        with self.assertRaises(UnsupportedVirtualMode):
+            evaluate(program, RuntimeInputs({11: patterned_tile()}))
 
     def test_evaluate_enforces_exact_input_indices_formats_and_controls(self) -> None:
         program, tile = parse_program(FLAT), patterned_tile()

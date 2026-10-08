@@ -51,20 +51,30 @@ declarations. Reparse after mutating its IR. `validate_inputs` requires exactly
 the declared indices/formats, including untaken paths, and controls in entry
 argument order.
 
-`evaluate(program, inputs, max_steps=10000)` executes BF16 boundary I/O, ReLU,
-i1/i32 controls/constants, wrapping i32 addition, all ten integer comparisons,
-branches, and returns. It checks SSA dominance, edge types/arity, and state
-flow before execution; branch arguments bind simultaneously. Each executed
+`evaluate(program, inputs, max_steps=10000)` executes BF16/FP8 boundary inputs,
+BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, i1/i32 controls/constants,
+wrapping i32 addition, all ten integer comparisons, branches, and returns.
+It checks SSA dominance, edge types/arity, and state flow before execution;
+branch arguments bind simultaneously. Each executed
 operation, including branches and returns, consumes one step. Exhaustion raises
 `VirtualInterfaceError` with the block and operation position.
 
 Unsupported operation modes are rejected even on untaken paths. Effects and
-numerical checks run only on the chosen path. ReLU uses `RtlNumerics.unary`
-with bit-preserving BF16 conversion over finite normal values and positive zero;
-boundary-only copies preserve all encodings. Only executed outputs appear in
-the result. Memory snapshots remain unchanged until explicit DMA execution is
-implemented. The evaluator can interpret multiple returns and path-dependent
-outputs; the compiler's narrower lowering restrictions still apply separately.
+numerical checks run only on the chosen path. MOV preserves every raw encoding;
+ReLU returns positive zero for sign-set inputs and otherwise preserves bits.
+ADD uses FP32 nearest-even addition followed by BF16 truncation and canonical
+NaN, rejecting host arithmetic that flushes subnormals or changes rounding.
+Only executed outputs appear in the result. Memory snapshots remain unchanged
+until explicit DMA execution is implemented. The evaluator can interpret
+multiple returns and path-dependent outputs; the compiler's narrower lowering
+restrictions still apply separately.
+
+`evaluate_tile_operation(op, operands)` checks a parsed pure VPU/pack operation
+and its tuple of immutable tiles. Pack uses `RtlNumerics.to_fp8` with scale 127:
+nearest-even rounding, signed saturation to 448, and positive zero for NaNs,
+subnormals, and underflow. It preserves logical row-major order. This helper
+exposes FP8 results directly; full-program FP8 observation awaits MXU/DMA
+consumers because the dialect has no FP8 boundary-output operation.
 
 ```python
 from tools.atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, parse_program
@@ -112,9 +122,10 @@ ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtua
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
 the [README](../README.md). Required mode fails on missing core prerequisites;
-ordinary discovery skips those checks. The shared-input and scalar/CFG
-comparisons are implemented but have not executed against a selected-core
-artifact. See the
+ordinary discovery skips those checks. The shared-input, scalar/CFG, VPU,
+and physical pack comparisons have not executed against a selected-core
+artifact. The physical pack probe checks converter/transport behavior;
+virtual pack lowering with an observable consumer remains unqualified. See the
 [coverage inventory](virtual-evaluator-coverage.md) for evidence and limits.
 
 ## Recommended interpreter state
@@ -232,8 +243,8 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer, scalar/CFG execution, and bounded BF16/ReLU execution
+The parser/input layer, scalar/CFG execution, and admitted VPU/pack execution
 are implemented in this repository's Python verification tooling. Their
-selected-core comparisons are implemented but unexecuted; remaining VPU, pack,
-MXU, and DMA execution remain future work. These partial checks do not complete
+selected-core comparisons are implemented but unexecuted; MXU and DMA
+execution remain future work. These partial checks do not complete
 [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).

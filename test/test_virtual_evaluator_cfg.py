@@ -103,7 +103,7 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         renamed = source.replace("%a", "%first").replace("%b", "%second").replace("%js", "%joined_state")
         self.assertEqual(evaluate(parse_program(source), RuntimeInputs(TILES, (Scalar(1, 1), Scalar(32, 10)))), evaluate(parse_program(renamed), RuntimeInputs(TILES, (Scalar(1, 1), Scalar(32, 10)))))
 
-    def test_untaken_paths_have_no_outputs_or_numerical_checks(self) -> None:
+    def test_untaken_paths_have_no_outputs(self) -> None:
         source = function('''
           %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
           cf.cond_br %choose, ^take(%s0 : !atlas.virtual_state), ^skip(%s0 : !atlas.virtual_state)
@@ -117,14 +117,15 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         ''', "%choose: i1")
         special = Tile("bf16", (0x7FC1,) * 1024)
         self.assertEqual(dict(evaluate(parse_program(source), RuntimeInputs({0: special}, (Scalar(1, 0),))).outputs), {})
-        with self.assertRaises(UnsupportedVirtualMode):
-            evaluate(parse_program(source), RuntimeInputs({0: special}, (Scalar(1, 1),)))
+        self.assertEqual(dict(evaluate(parse_program(source), RuntimeInputs({0: special}, (Scalar(1, 1),))).outputs), {7: special})
         # Declarations still define the input interface even when not executed.
         with self.assertRaises(VirtualInterfaceError):
             evaluate(parse_program(source), RuntimeInputs(controls=(Scalar(1, 0),)))
 
     def test_unsupported_operation_rejects_even_an_untaken_path(self) -> None:
         source = example("virtual_bf16_dynamic_branch_program.mlir")
+        scale = '%scale = "atlas.virtual_scale_constant"() {code = 127 : i32} : () -> !atlas.virtual_scale\n'
+        source = source.replace('    %right_result =', scale + '    %right_result =')
         for choice in (0, 1):
             with self.subTest(choice=choice):
                 with self.assertRaises(UnsupportedVirtualMode):

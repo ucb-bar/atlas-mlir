@@ -325,19 +325,40 @@ def parse_program(source: str, *, function: str | None = None) -> ParsedProgram:
     return ParsedProgram(module, selected, blocks, MappingProxyType(inputs), tuple(outputs), controls)
 
 
-def _relu(tile: Tile) -> Tile:
-    for index, bits in enumerate(tile.bits):
-        if bits != 0 and not 1 <= ((bits >> 7) & 255) <= 254:
-            raise UnsupportedVirtualMode(f"ReLU element {index}: 0x{bits:04x} is outside finite normal BF16 and positive zero")
+def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
+    """Evaluate a pure VPU/pack operation, including FP8 results without boundary I/O."""
+    _require(isinstance(op, Operation), "expected a parsed virtual operation")
+    _check_atlas_operation(op)
+    name = operation_name(op)
+    if name not in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
+        raise UnsupportedVirtualMode(f"not a supported pure tile operation: {name}")
+    _require(isinstance(operands, tuple) and all(isinstance(tile, Tile) for tile in operands), "tile operation operands must be a tuple of Tile values")
+    formats = tuple(_type_kind(value.type)[0] for value in op.operands)
+    _require(tuple(tile.format for tile in operands) == formats, f"{name}: expected tile operand formats {formats}")
+    kind = op.attributes["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
+    if kind == "mov":
+        return operands[0]
     try:
         import torch
         from npu_model.configs.numerics import RtlNumerics
     except ModuleNotFoundError as error:
-        raise ImportError("ReLU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+        raise ImportError("VPU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
     # Reinterpret owned raw bits: floating-point conversion would lose encodings.
-    owned = torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16)
-    result = RtlNumerics.unary("relu", owned)
-    return Tile("bf16", tuple(result.contiguous().view(torch.uint16).flatten().tolist()))
+    owned = tuple(torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16).reshape(32, 32) for tile in operands)
+    if kind == "add":
+        # Host FP32 must preserve subnormals and round before the BF16 bit chop.
+        probe_a = torch.tensor((0x0001, 0x0080, 0x3F80, 0xBF80), dtype=torch.uint16).view(torch.bfloat16)
+        probe_b = torch.tensor((0x0001, 0x8081, 0x8001, 0x0001), dtype=torch.uint16).view(torch.bfloat16)
+        if tuple(RtlNumerics.add(probe_a, probe_b).view(torch.uint16).tolist()) != (0x0002, 0x8001, 0x3F80, 0xBF80):
+            raise UnsupportedVirtualMode("BF16 add requires FP32 round-to-nearest-even with gradual underflow")
+        result = RtlNumerics.add(*owned)
+    elif kind == "pack_fp8":
+        result = RtlNumerics.to_fp8(owned[0], _integer_attribute(op, "scale_code"))
+    else:
+        result = RtlNumerics.unary(kind, owned[0])
+    format: TileFormat = "fp8" if kind == "pack_fp8" else "bf16"
+    raw = result.contiguous().view(torch.uint8 if format == "fp8" else torch.uint16)
+    return Tile(format, tuple(raw.flatten().tolist()))
 
 
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
@@ -355,7 +376,8 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
     starts = [op for op in program.operations if operation_name(op) == "atlas.virtual_start"]
     _require(len(starts) == 1 and bool(blocks[entry]) and blocks[entry][0] is starts[0], "virtual_start must be the unique first entry operation")
     supported = {
-        "atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_output_bf16", "atlas.virtual_vpu_unary",
+        "atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_input_fp8", "atlas.virtual_output_bf16",
+        "atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8",
         "arith.constant", "arith.addi", "arith.cmpi", "cf.br", "cf.cond_br", "func.return",
     }
     definitions = {}
@@ -368,8 +390,6 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
             name = operation_name(op)
             if name not in supported:
                 raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
-            if name == "atlas.virtual_vpu_unary" and op.attributes["kind"].data != "relu":
-                raise UnsupportedVirtualMode("virtual VPU execution currently supports only relu")
             if isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)):
                 _require(position == len(operations) - 1, f"{name}: terminator must be last in its block")
             for target, arguments in _edges(op):
@@ -405,7 +425,7 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
 
 
 def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 10000) -> EvaluationResult:
-    """Execute scalar/CFG operations and BF16 boundary I/O/ReLU within a step budget."""
+    """Execute scalar/CFG operations, boundary I/O, and admitted VPU modes within a step budget."""
     _require(type(max_steps) is int and max_steps > 0, "max_steps must be a positive integer")
     program.validate_inputs(inputs)
     blocks = _check_execution(program)
@@ -466,13 +486,13 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             elif name == "atlas.virtual_start":
                 _require(state is None, "virtual_start cannot execute twice")
                 state = values[op.results[0]] = object()
-            elif name == "atlas.virtual_vpu_unary":
-                values[op.results[0]] = _relu(tile(op.operands[0]))
+            elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
+                values[op.results[0]] = evaluate_tile_operation(op, tuple(tile(operand) for operand in op.operands))
             else:
                 _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
                 if isinstance(op, func.ReturnOp):
                     return EvaluationResult(outputs, inputs.memory)
-                if name == "atlas.virtual_input_bf16":
+                if name in ("atlas.virtual_input_bf16", "atlas.virtual_input_fp8"):
                     values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
                 elif name == "atlas.virtual_output_bf16":
                     outputs[_integer_attribute(op, "index")] = tile(op.operands[1])

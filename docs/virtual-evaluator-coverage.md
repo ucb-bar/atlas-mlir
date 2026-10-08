@@ -1,6 +1,6 @@
 # Virtual evaluator coverage
 
-[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has execution for `start`, BF16 boundary input/output, ReLU, and the scalar/CFG forms below, alongside the broader parser/input interface. Other execution forms fail explicitly. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
+[Issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) now has execution for `start`, BF16/FP8 boundary inputs, BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, and the scalar/CFG forms below, alongside the broader parser/input interface. Other execution forms fail explicitly. Recognition, compiler admission, and numerical qualification are separate claims. Runtime ownership and execution rules are in the [interpreter contract](virtual-ssa-interpreter-contract.md).
 
 ## Baselines and evidence
 
@@ -14,7 +14,7 @@
 | Current `npu-model` | `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6` | Numerical source to audit/reuse |
 | Surrounding RTL checkout | `2ae0bef209df6db78c3de18e8f651bb43855cce9` | Distinct current source baseline |
 
-The current ReLU LUT and lane/vector-engine source hashes match the model's [RTL provenance](../../../../../npu-model/tests/rtl/provenance.json). The adapter preserves raw bits through `RtlNumerics.unary`; execution currently admits finite normal BF16 values and positive zero. Special encodings remain unsupported by ReLU, while boundary-only copies preserve them. Matching the selected-core executable to this source evidence remains outstanding; historical observations qualify only their recorded inputs/configuration.
+The selected MOV/ReLU, `AddSubSumVec`, FP8Pack, and vector-engine sources match the model's [RTL provenance](../../../../../npu-model/tests/rtl/provenance.json); both RTL pins use fp-units `9a0cc09c41ab918a3548580185f39cca8d559e0d`. MOV and boundary copies preserve raw bits; ReLU uses the matched exhaustive LUT. ADD uses `RtlNumerics.add` with a runtime check for FP32 nearest-even and gradual underflow. Matching the selected-core executable to this source evidence remains outstanding; historical observations qualify only their recorded inputs/configuration.
 
 Schemas: [AtlasOps.td](../include/Atlas/AtlasOps.td), [AtlasTypes.td](../include/Atlas/AtlasTypes.td). Checks: [AtlasOps.cpp](../lib/AtlasOps.cpp), [AtlasVirtualVerification.cpp](../lib/AtlasVirtualVerification.cpp), and [AtlasVirtualToMachine.cpp](../lib/AtlasVirtualToMachine.cpp).
 
@@ -69,13 +69,13 @@ The contract details DMA address proof/alignment/range and handle rules. Both co
 
 ## Numerical sources to audit
 
-Current model [numerics and layouts](../../../../../npu-model/docs/rtl-timing.md#numerical-behavior-and-layouts) supply reusable components. ReLU's raw-bit adapter is tested; target/configuration compatibility remains required for selected-core comparison.
+Current model [numerics and layouts](../../../../../npu-model/docs/rtl-timing.md#numerical-behavior-and-layouts) supply reusable components. VPU/pack adapters have independent bit-pattern expectations; target/configuration compatibility remains required for selected-core comparison.
 
 | ID | Existing evidence | Remaining audit |
 | --- | --- | --- |
-| V1 | Provenance-matched ReLU table and raw-bit adapter; historical [ReLU](vpu-relu-observation.md) | Selected-core comparison; negative zero/subnormals/NaN/infinity; bit-exact `mov` |
-| V2 | FP32 add/BF16 chop; [addition](vpu-add-observation.md) | Canonical NaN and raw-bit adapter; `1 + 3/512` distinguishes chop `0x3f80` from nearest-even `0x3f81` |
-| P | Model pack converter; [E8M0 pack](vpu-e8m0-pack-observation.md) | Rounding/saturation/underflow/special codes; logical output versus physical PACK permutation |
+| V1 | MOV raw copy and ReLU sign-bit rule checked across all 65,536 encodings; historical [ReLU](vpu-relu-observation.md) | Selected-core comparison across special encodings |
+| V2 | Selected FP32 RNE/BF16 chop path; directed signed-zero, subnormal, overflow, infinity, and canonical-NaN cases; [addition](vpu-add-observation.md) | Selected-core comparison; `1 + 3/512` distinguishes chop `0x3f80` from BF16 nearest-even `0x3f81` |
+| P | Scale-127 converter checked for ties, carry, saturation, underflow, specials, and logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | Physical converter/transport test unexecuted; full virtual lowering needs an observable MXU/DMA consumer |
 | M | Unit-specific integer numerics; [discriminator](mxu-arithmetic-discriminator-observation.md), [MXU0 continuation](mxu0-k-continuation-observation.md), [MXU1 continuation](mxu1-continuation-observation.md) | MXU0 per-MAC versus MXU1 anchor behavior; geometry, seeds, product order, continuation/readout, exceptional encodings, W[N,K] orientation |
 | R | Model MXU converter; [explicit MXU reference](dialect-reference.md) | Special scale codes; VPU pack divides by scale, MXU pop multiplies; distinct treatment of rounded FP8 `0x7f` |
 | D | Model DMA; [pointer lifetime](dma-pointer-lifetime-observation.md) | Little-endian serialization, source stability, snapshots, conflicting ranges, visibility, two-transfer ordering |
@@ -84,8 +84,10 @@ At the current model pin, relevant specifications are [parameters](../../../../.
 
 ## Validation boundary
 
-[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. [Execution tests](../test/test_virtual_evaluator_execution.py) check shared-input preservation, fresh inputs, finite BF16 ReLU, state/SSA identity, and unsupported modes. [CFG tests](../test/test_virtual_evaluator_cfg.py) cover integer boundaries, diamonds, untaken effects, loops, simultaneous swaps, malformed SSA/edges, and step limits.
+[Interface tests](../test/test_virtual_evaluator_interface.py) cover parsing and immutable inputs. [Execution tests](../test/test_virtual_evaluator_execution.py) check shared-input preservation, fresh inputs, raw BF16 ReLU, state/SSA identity, and unsupported modes. [CFG tests](../test/test_virtual_evaluator_cfg.py) cover integer boundaries, diamonds, untaken effects, loops, simultaneous swaps, malformed SSA/edges, and step limits. [VPU tests](../test/test_virtual_evaluator_vpu.py) cover independent numerical expectations, immutable logical tiles, FP8 input, helper validation, and incompatible host arithmetic.
 
 The [shared-input comparison](../test/test_virtual_evaluator_core.py) includes two outputs, input/guard preservation, and a ReLU-to-MOV mutation. The [CFG comparisons](../test/test_virtual_evaluator_cfg_core.py) reuse compiled words across fresh tiles and controls for branches, all ten predicates, wrapping addition, and loops. Evaluator expectations and lowering/LLVM word agreement passed for 16 CFG programs; actual core execution is pending external ARC/ModeLIR assets. Skipped core tests do not complete these comparisons.
 
-Remaining VPU/pack modes, MXU chains, DMA completion, and original/scheduled comparisons remain future work. These checks do not qualify matrix layout, resource release, or timing.
+[VPU/core tests](../test/test_virtual_evaluator_vpu_core.py) compare four MOV/ADD/ReLU outputs and provide a separate physical pack probe with input/guard preservation. That probe derives FP8 physical ordering from VectorFSM/FP8Pack source rather than compiler relayout; it does not qualify virtual pack lowering. The current model ISA follows this physical order, while `evaluate_tile_operation` preserves logical row-major tiles. Fresh-panel core execution remains pending the same external assets.
+
+MXU chains, DMA completion, observable full-program FP8 consumers, and original/scheduled comparisons remain future work. These checks do not qualify matrix layout, resource release, or timing.
