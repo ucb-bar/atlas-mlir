@@ -120,6 +120,9 @@ FailureOr<Instr> toInstr(Operation *op) {
     in.rd = x.getDst();
     in.rs1 = x.getSource();
     in.imm = x.getAddress();
+  } else if (auto x = dyn_cast<DelayOp>(op)) {
+    name = "delay";
+    in.imm = x.getCycles();
   } else if (auto x = dyn_cast<TrapOp>(op)) {
     name = x.getKind().str();
   } else if (isa<FenceOp>(op)) {
@@ -142,6 +145,10 @@ FailureOr<Instr> toInstr(Operation *op) {
 }
 
 } // namespace
+
+FailureOr<Instr> mlir::atlas::atlasInstruction(Operation *op) {
+  return toInstr(op);
+}
 
 bool mlir::atlas::isNop(Operation *op) {
   if (auto alu = dyn_cast<ALUImmOp>(op))
@@ -320,7 +327,8 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
   return s;
 }
 
-LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
+LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
+                                           const FootprintResolver &resolver) {
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
@@ -330,7 +338,7 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
-      Footprint f = footprintOf(in, regs);
+      Footprint f = resolver ? resolver(in, regs) : footprintOf(in, regs);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
       if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
@@ -431,4 +439,3 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   SmallVector<uint32_t> words;
   return collectAtlasWords(module, words, /*llvmBlock=*/false);
 }
-

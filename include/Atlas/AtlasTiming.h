@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -112,6 +113,7 @@ struct Footprint {
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
+using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
 const char *edgeKindName(EdgeKind k);
@@ -148,7 +150,8 @@ struct DepGraph {
 using IncomingDma = std::array<std::vector<Footprint>, 8>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
                     uint32_t dmaRegs = 0xFFFFFFFE,
-                    const IncomingDma *incomingDma = nullptr);
+                    const IncomingDma *incomingDma = nullptr,
+                    const FootprintResolver &resolver = {});
 uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);

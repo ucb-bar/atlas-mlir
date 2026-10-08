@@ -32,8 +32,11 @@ struct DelayInsertion {
 };
 
 FailureOr<AtlasStream> readAtlasStream(ModuleOp module);
+// Decode a validated physical operation, including explicit DELAY, for timing.
+FailureOr<timing::Instr> atlasInstruction(Operation *op);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
-LogicalResult checkAtlasStream(const AtlasStream &stream);
+LogicalResult checkAtlasStream(const AtlasStream &stream,
+                               const timing::FootprintResolver &resolver = {});
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions.

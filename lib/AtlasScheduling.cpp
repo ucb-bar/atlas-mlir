@@ -1,5 +1,6 @@
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasRTLSelection.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
 #include <climits>
@@ -18,7 +19,7 @@ constexpr int kMaxIdle = 100000;
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
                             uint32_t dmaRegs, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
-                            int &tailIdle) {
+                            int &tailIdle, const FootprintResolver &resolver) {
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   bool branch = s.endsInBranch(block);
@@ -31,7 +32,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs);
+  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs, nullptr, resolver);
   for (int i = 0; i < n; i++) {
     std::string alone =
         ReservationTable().conflict(nodes[i], g.footprints[i], 0);
@@ -221,15 +222,34 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
 }
 
 LogicalResult scheduleStream(ModuleOp module) {
+  auto evidence = getSelectedRTLEvidence(module);
+  if (failed(evidence))
+    return failure();
+  if (*evidence && failed(checkSelectedRTLProgramSize(module)))
+    return failure();
+  FootprintResolver resolver;
+  if (*evidence)
+    resolver = [selected = *evidence](const Instr &in, const RegValues &regs) {
+      return selected->resolve(in, regs);
+    };
   FailureOr<AtlasStream> stream = readAtlasStream(module);
-  if (failed(stream) || failed(checkAtlasStream(*stream)))
+  if (failed(stream))
+    return failure();
+  if (resolver) {
+    if (stream->starts.size() != 1 || !stream->endsInHalt(0))
+      return module.emitError("selected RTL timing requires one straight-line stream ending in ECALL");
+    for (Instr &in : stream->instrs)
+      if (in.op->opClass == OpClass::Csr)
+        in.release = true;
+  }
+  if (failed(checkAtlasStream(*stream, resolver)))
     return failure();
   uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b])))
+    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b], resolver)))
       return failure();
   // A block that falls through finishes before the next block's first op.
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {
@@ -242,7 +262,9 @@ LogicalResult scheduleStream(ModuleOp module) {
     std::string reason = "this block finishes before the next one starts";
     next.reason = next.reason.empty() ? reason : reason + "; " + next.reason;
   }
-  return writeAtlasStream(module, *stream, order, before);
+  if (failed(writeAtlasStream(module, *stream, order, before)))
+    return failure();
+  return resolver ? checkSelectedRTLProgramSize(module) : success();
 }
 
 struct ScheduleAtlasStreamPass

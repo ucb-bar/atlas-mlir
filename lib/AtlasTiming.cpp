@@ -883,13 +883,14 @@ struct EdgeSet {
 DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
                                          uint32_t dmaRegs,
-                                         const IncomingDma *incomingDma) {
+                                         const IncomingDma *incomingDma,
+                                         const FootprintResolver &resolver) {
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
   RegValues regs = entry;
   for (const Instr &in : instrs) {
-    g.footprints.push_back(footprintOf(in, regs));
+    g.footprints.push_back(resolver ? resolver(in, regs) : footprintOf(in, regs));
     applyScalar(in, regs);
   }
 
