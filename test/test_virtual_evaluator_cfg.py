@@ -124,8 +124,11 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
 
     def test_unsupported_operation_rejects_even_an_untaken_path(self) -> None:
         source = example("virtual_bf16_dynamic_branch_program.mlir")
-        scale = '%scale = "atlas.virtual_scale_constant"() {code = 127 : i32} : () -> !atlas.virtual_scale\n'
-        source = source.replace('    %right_result =', scale + '    %right_result =')
+        dma = '''%address = arith.constant 0 : i32
+          %length = arith.constant 2048 : i32
+          %pending_state, %pending = "atlas.virtual_dma_load_bf16"(%right_io, %address, %length) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
+        '''
+        source = source.replace('    %right_result =', dma + '    %right_result =').replace('^join(%right_io,', '^join(%pending_state,')
         for choice in (0, 1):
             with self.subTest(choice=choice):
                 with self.assertRaises(UnsupportedVirtualMode):

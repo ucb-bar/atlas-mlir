@@ -132,8 +132,12 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
             evaluate(program, RuntimeInputs({11: patterned_tile()}))
 
     def test_parser_admitted_operations_outside_execution_subset_fail_explicitly(self) -> None:
-        scale = '%scale = "atlas.virtual_scale_constant"() {code = 127 : i32} : () -> !atlas.virtual_scale\n'
-        program = parse_program(FLAT.replace('  %rectified =', scale + '  %rectified ='))
+        dma = '''%address = arith.constant 0 : i32
+          %length = arith.constant 2048 : i32
+          %pending_state, %pending = "atlas.virtual_dma_load_bf16"(%s1, %address, %length) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
+        '''
+        source = FLAT.replace('  %rectified =', dma + '  %rectified =').replace('output_bf16"(%s1,', 'output_bf16"(%pending_state,')
+        program = parse_program(source)
         with self.assertRaises(UnsupportedVirtualMode):
             evaluate(program, RuntimeInputs({11: patterned_tile()}))
 

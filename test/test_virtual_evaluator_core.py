@@ -51,7 +51,7 @@ def runtime_inputs(phase: int) -> RuntimeInputs:
 
 
 @contextmanager
-def selected_core():
+def selected_core(*, max_cycles: int = 20000):
     keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT", "ATLAS_LLVM_BIN")
     missing = [key for key in keys if not os.environ.get(key)]
     if missing:
@@ -81,7 +81,7 @@ def selected_core():
 
         cosim_atlas.CosimCore = SelectedCore
         try:
-            yield lambda words, preload: cosim_atlas.run_program(model, state, words, preload=preload, max_cycles=20000)
+            yield lambda words, preload: cosim_atlas.run_program(model, state, words, preload=preload, max_cycles=max_cycles)
         finally:
             cosim_atlas.CosimCore = original
     finally:

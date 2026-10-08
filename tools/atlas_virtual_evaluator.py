@@ -361,6 +361,75 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     return Tile(format, tuple(raw.flatten().tolist()))
 
 
+def _mxu_unit(op: Operation) -> int:
+    if "unit" in op.attributes:
+        return _integer_attribute(op, "unit")
+    return next(unit for value in op.operands for kind, unit in (_type_kind(value.type),) if kind in ("mxu_weight", "mxu_acc"))
+
+
+def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127) -> Tile:
+    if kind == "matmul":
+        # The selected custom FMA documents normal finite inputs and signed zero.
+        for tile in operands:
+            if tile.format == "fp8":
+                supported = all((bits & 0x7F) == 0 or 8 <= (bits & 0x7F) <= 0x7E for bits in tile.bits)
+            else:
+                supported = all((bits & 0x7FFF) == 0 or 0x0080 <= (bits & 0x7FFF) <= 0x7F7F for bits in tile.bits)
+            if not supported:
+                raise UnsupportedVirtualMode("MXU0 contraction requires finite normal inputs or signed zero")
+    try:
+        import torch
+        from npu_model.configs.numerics import RtlNumerics
+    except ModuleNotFoundError as error:
+        raise ImportError("MXU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+    tensors = tuple(torch.tensor(tile.bits, dtype=torch.uint8 if tile.format == "fp8" else torch.uint16)
+                    .view(torch.float8_e4m3fn if tile.format == "fp8" else torch.bfloat16).reshape(32, 32) for tile in operands)
+    if kind == "matmul":
+        # Stored weights are W[N,K], while the numerical helper consumes B[K,N].
+        result = RtlNumerics.systolic_matmul(tensors[0], tensors[1].T.contiguous(), tensors[2])
+    elif kind == "seed_fp8":
+        result = RtlNumerics.from_fp8(tensors[0], 127)
+    else:
+        result = RtlNumerics.acc_to_fp8(tensors[0], scale)
+    format: TileFormat = "fp8" if kind == "readout_fp8" else "bf16"
+    raw = result.contiguous().view(torch.uint8 if format == "fp8" else torch.uint16)
+    return Tile(format, tuple(raw.flatten().tolist()))
+
+
+def _check_mxu_handles(operations: tuple[Operation, ...]) -> None:
+    """Recompute block-local resource identities; no physical slot assignments."""
+    remaining: dict[SSAValue, int] = {}
+    for op in operations:
+        for operand in op.operands:
+            if _type_kind(operand.type)[0] == "mxu_weight":
+                remaining[operand] = remaining.get(operand, 0) + 1
+    weights: set[SSAValue] = set()
+    accumulators: set[SSAValue] = set()
+    for op in operations:
+        name = operation_name(op).removeprefix("atlas.virtual_")
+        if not name.startswith("mxu_"):
+            continue
+        weights = {handle for handle in weights if remaining.get(handle, 0)}
+        if name == "mxu_matmul":
+            _require(not weights and not accumulators, "legacy matmul cannot overlap live explicit MXU handles on its unit")
+        elif name == "mxu_load_weight":
+            _require(len(weights) < 2, "at most two live MXU weights per unit are admitted")
+            weights.add(op.results[1])
+        else:
+            if name in ("mxu_accumulate", "mxu_readout_bf16", "mxu_readout_fp8"):
+                handle = op.operands[3] if name == "mxu_accumulate" else op.operands[1]
+                _require(handle in accumulators, f"{name}: expected a current, unconsumed accumulator version")
+                accumulators.remove(handle)
+            if name in ("mxu_reset", "mxu_accumulate"):
+                weight = op.operands[2]
+                _require(weight in weights, f"{name}: expected a live weight handle")
+                remaining[weight] -= 1
+            if name in ("mxu_load_acc_bf16", "mxu_load_acc_fp8", "mxu_reset", "mxu_accumulate"):
+                _require(len(accumulators) < 2, "at most two live MXU accumulators per unit are admitted")
+                accumulators.add(op.results[1])
+    _require(not accumulators, "every MXU accumulator must be read out before block exit")
+
+
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
     if isinstance(op, cf.BranchOp):
         return ((op.successor, tuple(op.arguments)),)
@@ -378,6 +447,9 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
     supported = {
         "atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_input_fp8", "atlas.virtual_output_bf16",
         "atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8",
+        "atlas.virtual_scale_constant", "atlas.virtual_mxu_matmul", "atlas.virtual_mxu_load_weight",
+        "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_load_acc_fp8", "atlas.virtual_mxu_reset",
+        "atlas.virtual_mxu_accumulate", "atlas.virtual_mxu_readout_bf16", "atlas.virtual_mxu_readout_fp8",
         "arith.constant", "arith.addi", "arith.cmpi", "cf.br", "cf.cond_br", "func.return",
     }
     definitions = {}
@@ -390,6 +462,8 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
             name = operation_name(op)
             if name not in supported:
                 raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
+            if name.startswith("atlas.virtual_mxu_") and _mxu_unit(op) != 0:
+                raise UnsupportedVirtualMode("MXU1 execution requires its separate arithmetic implementation")
             if isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)):
                 _require(position == len(operations) - 1, f"{name}: terminator must be last in its block")
             for target, arguments in _edges(op):
@@ -421,11 +495,14 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
                 owner, defined_at = definitions[operand]
                 available = defined_at < position if owner is block else dominance.dominates(owner, block)
                 _require(available, f"{operation_name(op)}: operand definition does not dominate its use")
+                if _type_kind(operand.type)[0] in ("mxu_weight", "mxu_acc"):
+                    _require(owner is block, "MXU handles cannot cross block boundaries")
+        _check_mxu_handles(operations)
     return blocks
 
 
 def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 10000) -> EvaluationResult:
-    """Execute scalar/CFG operations, boundary I/O, and admitted VPU modes within a step budget."""
+    """Execute admitted scalar/CFG, boundary, VPU, and MXU0 operations within a step budget."""
     _require(type(max_steps) is int and max_steps > 0, "max_steps must be a positive integer")
     program.validate_inputs(inputs)
     blocks = _check_execution(program)
@@ -488,6 +565,11 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                 state = values[op.results[0]] = object()
             elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
                 values[op.results[0]] = evaluate_tile_operation(op, tuple(tile(operand) for operand in op.operands))
+            elif name == "atlas.virtual_scale_constant":
+                values[op.results[0]] = _integer_attribute(op, "code")
+            elif name == "atlas.virtual_mxu_matmul":
+                operands = tuple(tile(operand) for operand in op.operands) + (Tile("bf16", (0,) * 1024),)
+                values[op.results[0]] = _mxu_tile("matmul", operands)
             else:
                 _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
                 if isinstance(op, func.ReturnOp):
@@ -496,6 +578,17 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
                 elif name == "atlas.virtual_output_bf16":
                     outputs[_integer_attribute(op, "index")] = tile(op.operands[1])
+                elif name in ("atlas.virtual_mxu_load_weight", "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_readout_bf16"):
+                    values[op.results[1]] = tile(op.operands[1])
+                elif name == "atlas.virtual_mxu_load_acc_fp8":
+                    values[op.results[1]] = _mxu_tile("seed_fp8", (tile(op.operands[1]),))
+                elif name in ("atlas.virtual_mxu_reset", "atlas.virtual_mxu_accumulate"):
+                    accumulator = tile(op.operands[3]) if name.endswith("accumulate") else Tile("bf16", (0,) * 1024)
+                    values[op.results[1]] = _mxu_tile("matmul", (tile(op.operands[1]), tile(op.operands[2]), accumulator))
+                elif name == "atlas.virtual_mxu_readout_fp8":
+                    scale = value(op.operands[2])
+                    _require(type(scale) is int and 0 <= scale <= 255, "MXU readout requires a raw constant scale code")
+                    values[op.results[1]] = _mxu_tile("readout_fp8", (tile(op.operands[1]),), scale)
                 state = values[op.results[0]] = object()
         else:
             return EvaluationResult(outputs, inputs.memory)
