@@ -548,6 +548,43 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLEvidence(
   return result;
 }
 
+llvm::json::Object RTLEvidence::applicability() const {
+  return Object{
+      {"scope", "straight_line_serialized_vls_with_scalar_setup_and_completion"},
+      {"supported_operations", Array{"addi", "lui", "vload", "vstore", "delay",
+                                     "csrrw", "ecall"}},
+      {"operand_domain", Object{
+          {"scalar_registers", Object{{"first", 0}, {"count", 32}}},
+          {"mreg_registers", Object{{"first", 0}, {"count", 64}}},
+          {"vmem_banks", kVmemBanks}, {"vmem_bank_bytes", kVmemBankBytes},
+          {"vmem_line_bytes", kLineBytes}, {"tile_rows", load.rows},
+          {"vmem_start_line_alignment", 32},
+          {"vmem_last_start_line", kVmemBytes / kLineBytes - 32},
+          {"base_unit", "32_bit_word"},
+          {"effective_line", "(((base + 32 * sext12(offset)) mod 2^32) >> 3) & 0xffff"},
+          {"known_base_required", true}, {"single_bank_required", true},
+          {"mlir_offset_min", -2048}, {"mlir_offset_max", 2047},
+          {"csr_constraint", "csrrw x0,0xC10,rs"},
+          {"release_annotation_supported", false}}},
+      {"environment_assumptions", Array{
+          "reset_deasserted", "accelerator_quiescent_at_entry",
+          "other_engines_and_competing_memory_requesters_quiescent",
+          "sram_read_response_one_cycle_after_request",
+          "instructions_immutable_during_execution",
+          "host_does_not_access_vmem_or_rewrite_dbg0_during_execution",
+          "caller_supplies_required_initial_operand_data"}},
+      {"admission", Object{
+          {"vls_paths_serialized", true},
+          {"minimum_vls_issue_gap", std::max(load.busyLast, store.busyLast) + 1},
+          {"marker_and_terminal_require_prior_writes_complete", true},
+          {"delay_immediately_before_terminal_supported", false},
+          {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
+      {"unsupported", Array{"dma_and_dynamic_completion", "other_compute_engines",
+          "branches_and_loops", "concurrent_engine_or_host_memory_traffic",
+          "alternative_memory_implementations_without_review"}},
+      {"domain_qualification", "conditional; finite_observations_do_not_qualify_entire_domain"}};
+}
+
 Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   Footprint f;
   auto reject = [&](const char *why) { f.error = std::string(resolverID()) + ": " + why; };

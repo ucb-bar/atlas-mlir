@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasRTLExport.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
@@ -16,16 +17,24 @@ using namespace mlir::atlas;
 int main(int argc, char **argv) {
   bool mapJson = argc == 3 && llvm::StringRef(argv[1]) == "--map-json";
   bool programJson = argc == 3 && llvm::StringRef(argv[1]) == "--program-json";
-  if ((argc != 2 && !mapJson && !programJson) ||
+  bool timingJson = argc == 3 && llvm::StringRef(argv[1]) == "--rtl-timing-json";
+  if ((argc != 2 && !mapJson && !programJson && !timingJson) ||
       (argc == 2 && llvm::StringRef(argv[1]).starts_with("--"))) {
-    llvm::errs() << "usage: atlas-emit [--map-json|--program-json] <flat-mlir-module>\n";
+    llvm::errs() << "usage: atlas-emit [--map-json|--program-json|--rtl-timing-json] <flat-mlir-module>\n";
     return 2;
   }
   DialectRegistry registry;
   registry.insert<AtlasDialect>();
   MLIRContext context(registry);
-  auto module = parseSourceFile<ModuleOp>(argv[mapJson || programJson ? 2 : 1], &context);
+  auto module = parseSourceFile<ModuleOp>(argv[mapJson || programJson || timingJson ? 2 : 1], &context);
   if (!module || failed(verify(*module))) return 1;
+
+  if (timingJson) {
+    auto facts = exportAtlasRTLTiming(*module);
+    if (failed(facts)) return 1;
+    llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(*facts)));
+    return 0;
+  }
 
   llvm::SmallVector<uint32_t> words;
   if (failed(collectAtlasWords(*module, words, mapJson || programJson))) return 1;

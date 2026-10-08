@@ -6,7 +6,9 @@ The [admission audit](admission.md) distinguishes command presentation, capture,
 
 The implemented [selected-evidence workflow](selected-evidence.md) separately loads `atlas.conditional_vls_hw_check.v0` replay receipts through `atlas.vls.conservative.v1`. Explicitly selected conditional rules now feed scheduling, delay insertion and an independent final timed verifier for a small straight-line subset. This backend rejects the broad draft bundle and unsupported instances; it does not qualify integrated EE290SimConfig execution or the full operation catalog.
 
-The [handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) distinguishes fresh selected-source/CIRCT correspondence, passing EE290 system numerical witnesses, and actual selected-AtlasCore/SRAM timing observations. These results support the bounded work while preserving the missing full-system build/trace and qualified-consumer acceptance steps.
+The [handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) distinguishes fresh selected-source/CIRCT correspondence, passing EE290 system numerical witnesses, and actual selected-AtlasCore/SRAM timing observations. These results support the bounded work while preserving the remaining full-system trace and aggregate acceptance steps.
+
+The [resolved timing export](resolved-export.md) exposes the existing shared provider's operand-specific accesses, holds, completion policy and applicability after final verification. It preserves conditional status.
 
 ## Scope and ownership
 
@@ -58,7 +60,7 @@ The inventory is compiler-wide; evidence may initially support only a bounded su
 
 ## Bundle structure
 
-The proposed JSON format is `atlas.rtl_timing.contract.v0`. V0 is a review draft, not compatible input to the historical `atlas.rtlgraph.contract.v1` importer. The schema describes a target profile; a future compiler separately exports program-specific resolved footprints tied to that profile's hash.
+The proposed JSON format is `atlas.rtl_timing.contract.v0`. V0 is a review draft, not compatible input to the historical `atlas.rtlgraph.contract.v1` importer. The schema describes a target profile. The separate implemented `atlas.resolved_rtl_timing.v0` export describes program-specific footprints for the selected conditional VLS provider and its evidence identities; it does not accept this broad draft profile.
 
 | Field | Meaning |
 | --- | --- |

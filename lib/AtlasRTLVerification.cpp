@@ -15,13 +15,12 @@ namespace {
 // Keep explicit DELAY streams bounded before allocating reservation entries.
 constexpr int kMaximumIssueCycle = 1000000;
 
-struct IssuedInstruction {
-  Instr instruction;
-  Footprint footprint;
-  int cycle;
-};
+} // namespace
 
-LogicalResult verifyRTLTiming(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
+                                              ResolvedRTLProgram *resolved) {
+  if (resolved)
+    *resolved = {};
   SmallVector<uint32_t> words;
   if (failed(collectAtlasWords(module, words, /*llvmBlock=*/false)))
     return failure();
@@ -35,7 +34,7 @@ LogicalResult verifyRTLTiming(ModuleOp module) {
 
   RegValues registers = unknownRegs();
   ReservationTable reservations;
-  std::vector<IssuedInstruction> issued;
+  std::vector<ResolvedRTLInstruction> issued;
   int cycle = 0;
   int vlsAvailable = 0;
   int asynchronousDone = -1;
@@ -75,7 +74,7 @@ LogicalResult verifyRTLTiming(ModuleOp module) {
              << ": issue cycle " << cycle << ", first permitted cycle "
              << asynchronousDone + 1;
 
-    for (const IssuedInstruction &prior : issued) {
+    for (const ResolvedRTLInstruction &prior : issued) {
       Dependence dependency = dependence(prior.instruction, prior.footprint,
                                          instruction, footprint);
       if (cycle - prior.cycle < dependency.distance)
@@ -103,9 +102,15 @@ LogicalResult verifyRTLTiming(ModuleOp module) {
   }
   if (!halted)
     return module.emitError("selected RTL timing stream requires a terminal instruction");
+  if (resolved) {
+    resolved->evidence = *selected;
+    resolved->words.assign(words.begin(), words.end());
+    resolved->instructions = std::move(issued);
+  }
   return success();
 }
 
+namespace {
 struct VerifyAtlasRTLTimingPass
     : PassWrapper<VerifyAtlasRTLTimingPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VerifyAtlasRTLTimingPass)
@@ -115,7 +120,7 @@ struct VerifyAtlasRTLTimingPass
     return "Verify final straight-line machine timing against selected bounded RTL evidence";
   }
   void runOnOperation() override {
-    if (failed(verifyRTLTiming(getOperation())))
+    if (failed(verifyAtlasRTLTiming(getOperation())))
       signalPassFailure();
   }
 };

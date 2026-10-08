@@ -4,6 +4,7 @@
 #include "Atlas/AtlasTiming.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/JSON.h"
 
 namespace mlir::atlas::timing {
 
@@ -30,6 +31,8 @@ public:
   // Resolves the explicit bounded subset. Unsupported instances carry error.
   // Every VLS reserves BOTH paths, deliberately serializing all vector memory.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
+  // Describes resolver policy and assumptions, not newly qualified domains.
+  llvm::json::Object applicability() const;
   Footprint footprintOf(const Instr &in, const RegValues &regs) const {
     return resolve(in, regs);
   }

@@ -9,6 +9,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasRTLEvidence.cpp
   AtlasRTLSelection.cpp
   AtlasRTLVerification.cpp
+  AtlasRTLExport.cpp
   AtlasStream.cpp
   AtlasDelayInsertion.cpp
   AtlasScheduling.cpp
