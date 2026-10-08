@@ -120,13 +120,20 @@ python -m pip install -r tools/requirements-virtual-evaluator.txt
 python -m unittest discover -s test -p test_virtual_evaluator_interface.py -v
 ```
 
-The parser pins xDSL 0.65.0. Execution tests use the selected model's Python 3.14
-environment with Torch and the model source root on `PYTHONPATH`:
+The parser pins xDSL 0.65.0. Use a test environment compatible with the pinned
+model (Python 3.14, Torch 2.11.0 and NumPy 2.4.4 in this session), install the
+parser requirement there, and place the model source root on `PYTHONPATH`.
+The combined suite also checks compiler lowering and LLVM object words:
 
 ```sh
+export PYTHONPATH=/path/to/npu-model${PYTHONPATH:+:$PYTHONPATH}
+export ATLAS_OOT_BIN_DIR=/path/to/atlas-build/bin
+export ATLAS_LLVM_BIN=/path/to/llvm-build/bin
 python -m unittest discover -s test -p 'test_virtual_evaluator_*.py' -v
-ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtual_evaluator*core.py' -v
 ```
+
+Normal unittest discovery and the existing `atlas-dialect` CTest entry include
+these files. Configure `Python3_EXECUTABLE` to the same test environment.
 
 To check the pinned scheduler, select its compiler with `ATLAS_OOT_BIN_DIR`:
 
@@ -136,6 +143,13 @@ ATLAS_REQUIRE_VIRTUAL_SCHEDULER=1 python -m unittest discover -s test -p 'test_v
 
 The tests compare original and default/randomized schedules from identical inputs.
 Requiring both scheduler and core flags makes scheduled-machine comparison mandatory.
+
+Once the core prerequisites below are available, require both gates across the
+entire suite, including scheduling:
+
+```sh
+ATLAS_REQUIRE_VIRTUAL_CORE=1 ATLAS_REQUIRE_VIRTUAL_SCHEDULER=1 python -m unittest discover -s test -p 'test_virtual_evaluator_*.py' -v
+```
 
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
