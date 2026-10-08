@@ -173,9 +173,9 @@ std::vector<uint32_t> mlir::atlas::idleDelays(int idle) {
   return out;
 }
 
-static bool mergeInto(RegValues &into, const RegValues &from) {
+static bool mergeInto(RegValues &into, const RegValues &from, int first = 1) {
   bool changed = false;
-  for (int r = 1; r < 32; r++) {
+  for (int r = first; r < 32; r++) {
     if (into[r] && (!from[r] || *from[r] != *into[r])) {
       into[r].reset();
       changed = true;
@@ -357,6 +357,40 @@ mlir::atlas::atlasDMAUpperWordEntries(const AtlasStream &s) {
         work.push_back(next);
       } else if (entry[next] && entry[next] != base) {
         entry[next].reset();
+        work.push_back(next);
+      }
+    }
+  }
+  return entry;
+}
+
+void mlir::atlas::applyAtlasScaleRegister(const Instr &in, RegValues &regs) {
+  if (in.op->opClass == OpClass::ScaleImm)
+    regs[in.rd] = static_cast<uint32_t>(in.imm) & 0xff;
+  else if (in.op->opClass == OpClass::ScaleLoad)
+    regs[in.rd].reset();
+}
+
+std::vector<RegValues>
+mlir::atlas::atlasScaleRegisterEntries(const AtlasStream &s) {
+  std::vector<RegValues> entry(s.starts.size());
+  std::vector<bool> reached(s.starts.size(), false);
+  if (s.starts.empty())
+    return entry;
+  reached[0] = true;
+  std::deque<size_t> work = {0};
+  while (!work.empty()) {
+    size_t block = work.front();
+    work.pop_front();
+    RegValues regs = entry[block];
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i)
+      applyAtlasScaleRegister(s.instrs[i], regs);
+    for (size_t next : s.succs[block]) {
+      if (!reached[next]) {
+        reached[next] = true;
+        entry[next] = regs;
+        work.push_back(next);
+      } else if (mergeInto(entry[next], regs, /*first=*/0)) {
         work.push_back(next);
       }
     }

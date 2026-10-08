@@ -17,6 +17,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasMXUAllocationVerification.cpp
   AtlasDMAMemoryVerification.cpp
   AtlasDMAContractVerification.cpp
+  AtlasMXUContractVerification.cpp
   AtlasGeneratedSchedule.cpp
   DEPENDS MLIRAtlasOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRArithDialect

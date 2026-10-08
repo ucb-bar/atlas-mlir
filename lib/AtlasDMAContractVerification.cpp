@@ -170,11 +170,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
     return success();
   }
   auto version = dyn_cast_or_null<StringAttr>(marker);
-  if (!version || version.getValue() != kVersion)
-    return module.emitOpError("expected generated marker version dma-contract-v1 or legacy unit");
+  if (!version || (version.getValue() != kVersion && version.getValue() != "resource-contract-v1"))
+    return module.emitOpError("expected generated marker version resource-contract-v1, dma-contract-v1 or legacy unit");
   auto array = dyn_cast_or_null<ArrayAttr>(contract);
   if (!array)
-    return module.emitOpError("dma-contract-v1 requires an atlas.virtual_dma_contract array");
+    return module.emitOpError("generated resource contract requires an atlas.virtual_dma_contract array");
   llvm::DenseMap<uint32_t, Record> records;
   std::optional<uint32_t> previous;
   for (Attribute attr : array) {

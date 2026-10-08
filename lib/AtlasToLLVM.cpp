@@ -178,7 +178,7 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
-    for (StringRef name : {"atlas.generated_from_virtual", "atlas.virtual_dma_contract"})
+    for (StringRef name : {"atlas.generated_from_virtual", "atlas.virtual_dma_contract", "atlas.virtual_mxu_contract"})
       if (Attribute value = module->getAttr(name))
         reconstructed->setAttr(name, value);
     builder.setInsertionPointToStart(reconstructed.getBody());

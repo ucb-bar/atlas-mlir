@@ -42,6 +42,12 @@ LogicalResult checkAtlasStream(const AtlasStream &stream);
 // Entry values are known only when all reachable incoming CFG edges agree.
 std::vector<std::optional<uint32_t>>
 atlasDMAUpperWordEntries(const AtlasStream &stream);
+// Instruction-order ERF facts: e0 is writable and starts unknown too. SELI
+// defines a raw code, SELD invalidates it, and reachable joins must agree.
+// These facts alone do not establish completion of an asynchronous SELD.
+std::vector<timing::RegValues>
+atlasScaleRegisterEntries(const AtlasStream &stream);
+void applyAtlasScaleRegister(const timing::Instr &in, timing::RegValues &regs);
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions.

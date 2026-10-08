@@ -2,6 +2,7 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/Verifier.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
@@ -246,7 +247,10 @@ LogicalResult mlir::atlas::collectAtlasWords(
     bool skipGeneratedCheck) {
   if (failed(verify(module))) return failure();
   if (!skipGeneratedCheck &&
-      (module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract")) &&
+      (module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
+       module->hasAttr("atlas.virtual_mxu_contract") || llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
+         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer");
+       })) &&
       failed(verifyAtlasGeneratedSchedule(module)))
     return failure();
   llvm::SmallVector<uint32_t> collected;

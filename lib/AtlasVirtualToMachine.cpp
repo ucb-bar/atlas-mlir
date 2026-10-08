@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
@@ -70,15 +71,32 @@ public:
   }
 
   LogicalResult materialize() {
-    SmallVector<VirtualDMAAssignment> assignments;
-    for (Block &block : function.getBody())
-      for (Operation &op : block)
+    SmallVector<VirtualDMAAssignment> dmaAssignments;
+    SmallVector<VirtualMXUAssignment> mxuAssignments;
+    SmallVector<VirtualRegisterAssignment> registers;
+    auto recordPlacement = [&](Value value) {
+      if (isa<VirtualBF16Type>(value.getType()))
+        registers.push_back({value, allocation.tile(value)});
+      else if (isa<VirtualFP8Type>(value.getType()))
+        registers.push_back({value, allocation.fp8(value)});
+      else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(value.getType()))
+        mxuAssignments.push_back({value, allocation.mxu(value)});
+    };
+    for (Block &block : function.getBody()) {
+      for (Value argument : block.getArguments())
+        recordPlacement(argument);
+      for (Operation &op : block) {
+        for (Value result : op.getResults())
+          recordPlacement(result);
         if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
           Value handle = op.getResult(1);
-          assignments.push_back({handle, allocation.dma(handle)});
+          dmaAssignments.push_back({handle, allocation.dma(handle)});
         }
-    auto contract = buildAtlasDMAContract(function, assignments);
-    if (failed(contract))
+      }
+    }
+    auto dmaContract = buildAtlasDMAContract(function, dmaAssignments);
+    auto mxuContract = buildAtlasMXUContract(function, registers, mxuAssignments, fixed());
+    if (failed(dmaContract) || failed(mxuContract))
       return failure();
     OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
     (*emitted)->setAttrs(module->getAttrs());
@@ -94,8 +112,9 @@ public:
       machineState.addAttributes(step.attrs);
       state = builder.create(machineState)->getResult(0);
     }
-    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("dma-contract-v1"));
-    (*emitted)->setAttr("atlas.virtual_dma_contract", *contract);
+    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v1"));
+    (*emitted)->setAttr("atlas.virtual_dma_contract", *dmaContract);
+    (*emitted)->setAttr("atlas.virtual_mxu_contract", *mxuContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
@@ -121,6 +140,8 @@ private:
     PlannedOp step{name.str(), {}, loc, target};
     for (const auto &[key, value] : fields)
       step.attrs.emplace_back(StringAttr::get(module.getContext(), key), value);
+    if (name == "atlas.mxu_push" || name == "atlas.mxu_matmul" || name == "atlas.mxu_pop")
+      step.attrs.emplace_back(StringAttr::get(module.getContext(), "atlas.virtual_mxu_command"), i32(nextMXUCommand++));
     planned.push_back(std::move(step));
   }
 
@@ -792,6 +813,7 @@ private:
   llvm::DenseMap<unsigned, size_t> labelPC;
   std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
+  unsigned nextMXUCommand = 0;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
 };

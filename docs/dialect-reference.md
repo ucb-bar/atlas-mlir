@@ -173,10 +173,11 @@ The independent [DMA memory check](../include/Atlas/AtlasDMAMemoryVerification.h
 The [DMA correspondence checker](../include/Atlas/AtlasDMAContractVerification.h)
 derives explicit-transfer expectations from source SSA and checked placements
 before lowering replaces the source. Generated artifacts retain these records
-in `atlas.virtual_dma_contract` under marker `"dma-contract-v1"`. Emission and
+in `atlas.virtual_dma_contract` under marker `"resource-contract-v1"`. Emission and
 both LLVM paths compare actual launch-time operands and completion identities
 against them, rejecting missing or malformed contracts. Legacy unit markers
-retain their earlier checks. [Mutation tests](../test/test_dma_contract_verification.py)
+retain their earlier checks, and `"dma-contract-v1"` retains DMA-only correspondence.
+[Mutation tests](../test/test_dma_contract_verification.py)
 cover changed commands and lost metadata; this does not yet check implicit DMA,
 tile payloads/layouts, source-to-machine CFG correspondence, or physical release.
 
@@ -207,6 +208,19 @@ The existing reset-only `virtual_mxu_matmul` remains supported. Within a mixed s
 Accumulator initialization emits `atlas.mxu_push` with `kind=acc_fp8` or `acc_bf16`, followed by the same diagnostic delay. FP8 readout emits `SELI` to scratch scale register e3 immediately before `atlas.mxu_pop format=fp8`, followed by the readout delay. The scale code is rematerialized at every use, allowing different readouts and existing VPU pack lowering to share e3 without stale scale contents. Scale constants do not consume scalar or tensor registers. This is a bounded rematerialization policy, not general scale-register allocation. The selected MXU readout produces a logical row-major FP8 tile directly; the VPU pack relayout sequence is not needed. [`virtual_mxu_seeded_fp8.mlir`](../test/examples/virtual_mxu_seeded_fp8.mlir) demonstrates accumulator initialization and FP8 readout.
 
 The original reset-only lowering remains unchanged. General slot allocation, handles across blocks, numerical execution qualification of these new virtual chains, and asynchronous lifetime qualification remain future work. The generated-schedule check enforces the conservative serial-delay convention; it does not establish a minimal or fully qualified hardware schedule.
+
+The [MXU correspondence checker](../include/Atlas/AtlasMXUContractVerification.h)
+derives command expectations from live source and checked placements. New
+`"resource-contract-v1"` artifacts require both DMA and MXU contract arrays,
+including empty arrays. `atlas.virtual_mxu_contract` and per-command
+`atlas.virtual_mxu_command` identities retain expected operands, formats, slots
+and logical weight/accumulator versions, including legacy matmul expansion.
+Emission and both LLVM paths check every MXU command against these expectations
+and recompute scale-register contents at FP8 readout. Independent chains may
+reorder; conflicting ownership or stale versions fail. SELD writes to registers
+used by FP8 readouts remain unsupported without a completion proof; current
+lowering uses SELI. These checks do not prove tensor contents, source-to-machine
+CFG paths, or physical completion.
 
 ## Machine operations
 

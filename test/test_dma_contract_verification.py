@@ -13,7 +13,7 @@ from test_virtual_lowering import BIN, lower, run, virtual_chain
 
 
 CONTRACT = "atlas.virtual_dma_contract"
-VERSION = 'atlas.generated_from_virtual = "dma-contract-v1"'
+VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_dma_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -60,7 +60,7 @@ def contract_artifact(work: tuple[tuple[str, str], ...] = (), direction: str = "
               'dram_byte = -1879048192 : i32, dram_reg = 7 : i32, id = 0 : i32, '
               'size_bytes = 1024 : i32, size_reg = 9 : i32, staging_reg = 4 : i32, '
               'staging_word = 131072 : i32}]')
-    machine = machine.replace("atlas.generated_from_virtual", VERSION + f", {CONTRACT} = {record}", 1)
+    machine = machine.replace("atlas.generated_from_virtual", VERSION + f", {CONTRACT} = {record}, atlas.virtual_mxu_contract = []", 1)
     machine = machine.replace('"atlas.upper"(%s0)', '"atlas.upper"(%config)', 1)
     return machine.replace('%s1 = "atlas.upper"',
         '%config = "atlas.dma_config"(%s0) {base_reg = 0 : i32, channel = 0 : i32} '
@@ -173,7 +173,7 @@ class DMAContractVerificationTest(unittest.TestCase):
         mutations = [
             ("missing contract", CONTRACT_RE.sub("", machine).replace(", ,", ",").replace(", }", "}")),
             ("missing version", machine.replace(VERSION + ", ", "")),
-            ("unknown version", machine.replace('"dma-contract-v1"', '"dma-contract-v2"', 1)),
+            ("unknown version", machine.replace('"resource-contract-v1"', '"resource-contract-v2"', 1)),
             ("malformed version", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32")),
             ("legacy with contract", machine.replace(VERSION, "atlas.generated_from_virtual")),
             ("nonarray", replace_contract(machine, '"bad"')),
@@ -199,6 +199,8 @@ class DMAContractVerificationTest(unittest.TestCase):
         legacy = artifact()
         self.assertNotIn(CONTRACT, legacy)
         self.accepted(legacy)
+        dma_only = contract_artifact().replace('"resource-contract-v1"', '"dma-contract-v1"').replace(", atlas.virtual_mxu_contract = []", "")
+        self.accepted(dma_only)
 
     def test_unknown_captured_addresses_are_rejected(self) -> None:
         machine = contract_artifact()
