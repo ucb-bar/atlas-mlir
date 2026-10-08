@@ -212,6 +212,7 @@ def capture_phase(output_dir, kind, argv, inputs, outputs, environment,
     (output / "check-ee290-provenance.dependency.py").write_bytes(dependency_bytes)
     stdout, stderr = output / "command.stdout.log", output / "command.stderr.log"
     started, timed_out, code, launch_error = time.monotonic(), False, None, None
+    child, interrupted, descendants = None, None, False
     with stdout.open("wb") as out, stderr.open("wb") as err:
         try:
             child = subprocess.Popen(expanded, cwd=working, env=dict(environment),
@@ -221,13 +222,31 @@ def capture_phase(output_dir, kind, argv, inputs, outputs, environment,
                 code = child.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                code = child.wait()
+            except BaseException as error:
+                interrupted = error
         except OSError as error:
             launch_error = str(error)
+        finally:
+            if child is not None:
+                # Reaping the leader does not prove its inherited-log writers
+                # exited. Stop the whole session before inspecting outputs.
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    descendants = code is not None and not timed_out and interrupted is None
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                # Preserve an already observed leader exit code. poll() may
+                # itself reap a killed leader before wait() is needed.
+                polled = child.poll()
+                if polled is None:
+                    polled = child.wait()
+                if code is None:
+                    code = polled
     after, failures = [], []
     for entry in inputs:
         try:
@@ -239,6 +258,10 @@ def capture_phase(output_dir, kind, argv, inputs, outputs, environment,
     stable = before == after
     if launch_error:
         failures.append("command launch failed: " + launch_error)
+    if interrupted is not None:
+        failures.append("command interrupted: " + type(interrupted).__name__)
+    if descendants:
+        failures.append("command left process-group descendants after leader exit")
     if code != 0 or timed_out:
         failures.append("command failed or timed out")
     if not stable:
@@ -268,4 +291,6 @@ def capture_phase(output_dir, kind, argv, inputs, outputs, environment,
                                "Input-selection completeness, hidden tool inputs, subprocess tool closure and system runtime require separate scoped review.",
                                "A dedicated recipe checker must bind phase semantics and parent/output relationships before promoting any build-link edge."]}
     (output / "phase.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if interrupted is not None:
+        raise interrupted
     return receipt

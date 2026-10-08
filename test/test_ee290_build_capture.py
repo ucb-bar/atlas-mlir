@@ -1,10 +1,13 @@
 """Exercise the phase recorder with tiny Python commands, never a build."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -78,6 +81,61 @@ class CaptureTest(unittest.TestCase):
         self.assertTrue(timed["command"]["timed_out"])
         self.assertNotEqual(timed["command"]["returncode"], 0)
         self.assertTrue((self.directory / "timeout/phase.json").is_file())
+
+    def test_interruption_cleans_process_group_and_retains_failed_receipt(self):
+        child = mock.Mock(pid=123456789)
+        child.wait.side_effect = [KeyboardInterrupt(), -signal.SIGKILL]
+        child.poll.return_value = None
+        actual_popen = CAP.subprocess.Popen
+
+        def selected_popen(argv, *args, **kwargs):
+            return child if argv[0] == self.inputs[0]["identity"]["path"] else actual_popen(argv, *args, **kwargs)
+
+        with mock.patch.object(CAP.subprocess, "Popen", side_effect=selected_popen), \
+                mock.patch.object(CAP.os, "killpg") as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_phase()
+        killpg.assert_any_call(child.pid, signal.SIGKILL)
+        self.assertEqual(child.wait.call_count, 2)
+        retained = json.loads((self.directory / "phase/phase.json").read_text())
+        self.assertEqual(retained["state"], "phase_failed")
+        self.assertIn("interrupted", " ".join(retained["failures"]))
+        self.assertEqual(retained["command"]["returncode"], -signal.SIGKILL)
+
+    def test_leader_exit_with_live_child_fails_and_prevents_late_output(self):
+        # A successful leader must not leave an inherited-log writer alive
+        # while the recorder hashes its outputs and closes its logs.
+        worker = ("from pathlib import Path; import sys,time; p=Path(sys.argv[1]); "
+                  "(p/'worker-ready').write_text('ready'); time.sleep(1); "
+                  "(p/'classes/late.class').write_bytes(b'late output'); "
+                  "print('late log',flush=True)")
+        script = ("from pathlib import Path; import os,subprocess,sys,time; "
+                  "p=Path(sys.argv[1]); (p/'classes').mkdir(); "
+                  "(p/'classes/Fixture.class').write_bytes(b'initial output'); "
+                  "(p/'leader-pgid').write_text(str(os.getpid())); "
+                  "subprocess.Popen([sys.executable,'-c',sys.argv[2],str(p)]); "
+                  "deadline=time.monotonic()+3\n"
+                  "while not (p/'worker-ready').exists():\n"
+                  " if time.monotonic()>deadline: raise RuntimeError('worker did not start')\n"
+                  " time.sleep(0.01)\n")
+        phase = self.directory / "phase"
+        try:
+            receipt = self.run_phase(script, argv=[sys.executable, "-c", script, "{output}", worker])
+            self.assertEqual(receipt["command"]["returncode"], 0)
+            self.assertEqual(receipt["state"], "phase_failed")
+            self.assertIn("process-group descendants", " ".join(receipt["failures"]))
+            stdout = Path(receipt["command"]["stdout"]["path"])
+            recorded_stdout = stdout.read_bytes()
+            time.sleep(1.1)
+            self.assertFalse((phase / "classes/late.class").exists())
+            self.assertEqual(stdout.read_bytes(), recorded_stdout)
+        finally:
+            # Keep this regression safe even against the unfixed recorder.
+            if (phase / "leader-pgid").exists():
+                try:
+                    os.killpg(int((phase / "leader-pgid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_input_mutation_is_recorded_and_never_completed(self):
         script = self.script + "; Path(sys.argv[2]).write_text('changed selected source')"
