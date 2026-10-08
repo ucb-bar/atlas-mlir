@@ -384,6 +384,12 @@ pointers. Two starts in one selected standalone core instance with changed
 pointers and tensor bytes matched the independent VSQUARE reference while
 preserving inputs, prior output, and guard. It is a bounded custom launch ABI,
 not a C-callable function or integrated SoC runtime.
+[`atlas-launch-plan`](tools/atlas_launch_plan.py) binds each invocation to
+the capsule manifest and writes a mailbox handoff. Its `read_launch` helper
+rechecks the program, manifest, plan, and mailbox before a driver loads them.
+The selected-core test can consume this handoff when the ARC dependencies are
+available. A host/SoC loader is still needed. See the
+[launch ABI guide](docs/atlas-launch-abi-gap.md) for the fields and limits.
 The [DMA scalar-pointer capture check](docs/dma-pointer-capture-observation.md)
 uses a 16-word typed stream and a before/after-launch mutation. On the
 selected standalone core, changing the address register immediately after
@@ -483,7 +489,7 @@ encoding coverage, not 1,188 hardware-executed instruction cases.
 | VLI.ALL raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes; four raw immediates checked all 1,024 BF16 cells across both register halves on selected standalone core, with unrelated input and guard preservation. General timing remains open |
 | VLI.ROW/COL/ONE raw fill | Hand-authored typed 36-word program matched selected assembler and LLVM object bytes for six mode/immediate combinations; selected standalone core matched all 2,048 output bytes per run and preserved input/guard. Full-domain and general timing remain open |
 | XLU transpose | Hand-authored typed 29-word program matched selected assembler and LLVM object bytes; three 32-by-32 byte panels executed on the selected-source-linked standalone core, including all byte encodings and in-place transpose. General timing and cross-family overlap remain open |
-| Program binary, ABI, execution | One checked 40-word capsule uses a bounded reset-entry mailbox ABI with runtime input/output pointers and two starts in the same standalone core; no C-callable or integrated SoC runtime claim |
+| Program binary, ABI, execution | One 40-word capsule uses a bounded reset-entry mailbox ABI with runtime input/output pointers and two starts in the same standalone core. `atlas-launch-plan` prepares and rechecks each call's loader handoff; no C-callable or integrated SoC runtime claim |
 | Bounded reset-entry capsule | ACT-independent `atlas-boot-pack` binds checked Atlas source words to one complete ELF `.text`, writes `program.bin`, and records fixed DRAM regions or the bounded mailbox pointer contract; packaging alone does not prove program-to-mailbox binding |
 
 No row in the **99 selected RTL BitPat-row inventory** lacks a typed operation

@@ -20,3 +20,5 @@ mlir_check_all_link_libraries(atlas-emit)
 # independent of ACT and is deliberately narrower than an ELF loader/ABI.
 configure_file(atlas_boot_pack.py ${CMAKE_BINARY_DIR}/bin/atlas-boot-pack COPYONLY)
 install(PROGRAMS atlas_boot_pack.py DESTINATION bin RENAME atlas-boot-pack)
+configure_file(atlas_launch_plan.py ${CMAKE_BINARY_DIR}/bin/atlas-launch-plan COPYONLY)
+install(PROGRAMS atlas_launch_plan.py DESTINATION bin RENAME atlas-launch-plan)

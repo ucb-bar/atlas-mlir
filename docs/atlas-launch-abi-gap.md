@@ -38,6 +38,78 @@ matched the independent reference, preserved input and guard memory, and
 observed 64 DMA reads and 64 writes on the selected standalone core.
 `test/test_boot_capsule.py` checks both the package and actual execution.
 
+## Mailbox call handoff
+
+For a v2 mailbox capsule, `atlas-launch-plan` checks the program hash and
+word count against the manifest, the ECALL/RET completion, and the declared
+argument and result fields. It compares the manifest's RTL revision with the
+revision supplied by the caller before binding one call's runtime pointers. It
+writes `launch.json` and `mailbox.bin` to a fresh output directory. A driver
+loads the capsule's `program.bin` into IMEM, writes the invocation's mailbox
+bytes to the declared DRAM address, issues the start CSR write, waits for the
+declared ECALL halt, and reads the output buffer. The tool does not perform
+those hardware actions or prove that arbitrary program words read the declared
+mailbox fields.
+
+After configuring and building the OOT project, the public mailbox example
+can be packaged and bound to one call with the installed LLVM tools:
+
+```sh
+ATLAS_LLVM_BIN=/path/to/llvm-install/bin
+mkdir -p out
+build/bin/atlas-opt --convert-atlas-to-llvm \
+  test/examples/vpu_square_mailbox.mlir |
+  "$ATLAS_LLVM_BIN/mlir-translate" --mlir-to-llvmir |
+  "$ATLAS_LLVM_BIN/llc" -mtriple=riscv32-unknown-elf -mattr=-c \
+    -filetype=obj -o out/square-mailbox.o
+build/bin/atlas-boot-pack \
+  --object out/square-mailbox.o \
+  --source test/examples/vpu_square_mailbox.mlir \
+  --atlas-emit build/bin/atlas-emit \
+  --layout test/examples/vpu_square_mailbox_layout.json \
+  --llvm-bin "$ATLAS_LLVM_BIN" --out out/square-mailbox-capsule
+```
+
+```sh
+build/bin/atlas-launch-plan \
+  --capsule out/square-mailbox-capsule \
+  --input-address 0x90002000 --output-address 0x90006000 \
+  --expected-rtl-revision 0079c0541111197741a231c002e3843fa6f545b2 \
+  --out out/square-call-1
+build/bin/atlas-launch-plan \
+  --capsule out/square-mailbox-capsule --verify-launch out/square-call-1 \
+  --expected-rtl-revision 0079c0541111197741a231c002e3843fa6f545b2
+```
+
+`launch.json` is `atlas.mailbox-launch.v1`. The loader uses these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `capsule_manifest_sha256`, `program_sha256`, `program_file`, `program_words` | Bind the selected capsule and exact IMEM words. `program_file` is relative to the capsule directory. |
+| `imem_tl_byte_base`, `entry_pc_word` | IMEM placement and reset entry. |
+| `mailbox_tl_byte_address`, `mailbox_file`, `mailbox_sha256` | Descriptor location and bytes. `mailbox_file` is relative to the launch directory. |
+| `input_address`, `output_address`, `tensor_bytes` | One fixed-size input and one output inside the declared DRAM pools. |
+| `start_csr_tl_byte_address`, `start_csr_value`, `completion` | Start write and expected ECALL halt word. |
+| `selected_rtl_revision`, `program_mailbox_binding_proved` | Target identity and the explicit unproved mailbox-dataflow obligation. |
+
+The output records the program and descriptor hashes, IMEM/CSR addresses,
+completion word, and the selected buffer addresses. A second invocation can
+reuse the same capsule with different pointers. Runtime tensor contents stay
+outside the launch package. A loader should call `read_launch(capsule,
+launch_directory, selected_rtl_revision)` immediately before loading. It
+rechecks the capsule and returns the plan, program bytes, and mailbox bytes;
+modified program, manifest, plan, or mailbox data fails. The selected-core
+mailbox test consumes those returned bytes and plan fields for its IMEM load,
+DRAM descriptor, CSR start, and completion check. `test/test_launch_plan.py`
+checks valid repeated calls and rejects modified code, manifest fields,
+target revision, pointers, stale destinations, and post-preparation changes.
+The `--verify-launch` CLI performs the same check for a driver that consumes
+the JSON and binary files outside Python; that driver must load those bytes
+and independently confirm its hardware revision. These checks establish
+consistency among local files, not the origin of an untrusted capsule.
+This remains a standalone reset-entry handoff; a system loader,
+mailbox-dataflow qualification, and C ABI are separate work.
+
 Example invocation after `atlas-opt`, `mlir-translate`, and `llc` produce
 `square.o`:
 

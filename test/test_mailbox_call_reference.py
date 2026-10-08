@@ -38,6 +38,11 @@ assert spec and spec.loader
 boot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(boot)
 ABI = boot.validate_layout(json.loads(LAYOUT.read_text()))
+launch_spec = importlib.util.spec_from_file_location(
+    "atlas_launch_plan_source", ROOT / "tools/atlas_launch_plan.py")
+assert launch_spec and launch_spec.loader
+launch_tool = importlib.util.module_from_spec(launch_spec)
+launch_spec.loader.exec_module(launch_tool)
 
 
 def _compile_object(obj: pathlib.Path) -> None:
@@ -139,6 +144,34 @@ class MailboxCallReferenceTest(unittest.TestCase):
             self.assertNotIn(_panel(0)[0], code)
             self.assertNotIn(_descriptor(INPUT_A, OUTPUT_A), code)
 
+            # Bind two calls from the same actual LLVM-produced capsule. The
+            # source/object check belongs to the packer; the launch tool checks
+            # the packaged bytes and the per-call mailbox before handoff.
+            for name, input_address, output_address in (
+                    ("call_a", INPUT_A, OUTPUT_A),
+                    ("call_b", INPUT_B, OUTPUT_B)):
+                launch = directory / name
+                prepared = subprocess.run(
+                    [str(BIN / "atlas-launch-plan"), "--capsule", str(output),
+                     "--input-address", hex(input_address),
+                     "--output-address", hex(output_address),
+                     "--expected-rtl-revision", ABI["selected_rtl_revision"],
+                     "--out", str(launch)],
+                    text=True, capture_output=True)
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+                self.assertEqual(json.loads(prepared.stdout)["status"], "PASS")
+                plan = json.loads((launch / "launch.json").read_text())
+                self.assertEqual(plan["program_sha256"], manifest["program_sha256"])
+                self.assertEqual(plan["program_words"], manifest["program_words"])
+                self.assertEqual((plan["input_address"], plan["output_address"]),
+                                 (input_address, output_address))
+                self.assertEqual((launch / "mailbox.bin").read_bytes(),
+                                 _descriptor(input_address, output_address))
+                checked_plan, checked_code, checked_mailbox = launch_tool.read_launch(
+                    output, launch, ABI["selected_rtl_revision"])
+                self.assertEqual((checked_plan, checked_code, checked_mailbox),
+                                 (plan, code, _descriptor(input_address, output_address)))
+
     def test_same_core_restarts_with_changed_runtime_pointers_and_data(self) -> None:
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT",
                 "ATLAS_LLVM_BIN")
@@ -146,7 +179,33 @@ class MailboxCallReferenceTest(unittest.TestCase):
             self.skipTest("set selected-source-linked ARC, ModeLIR, and LLVM paths")
         model, state, modelir = (pathlib.Path(os.environ[key]).resolve(strict=True)
                                  for key in keys[:3])
-        words = _object_words()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = pathlib.Path(temporary.name)
+        obj, capsule = directory / "atlas_program.o", directory / "capsule"
+        _compile_object(obj)
+        subprocess.run(
+            [str(BIN / "atlas-boot-pack"), "--object", str(obj),
+             "--source", str(SOURCE), "--atlas-emit", str(BIN / "atlas-emit"),
+             "--layout", str(LAYOUT), "--out", str(capsule),
+             "--llvm-bin", os.environ["ATLAS_LLVM_BIN"]],
+            text=True, capture_output=True, check=True)
+        launches = []
+        for name, input_address, output_address in (
+                ("call_a", INPUT_A, OUTPUT_A), ("call_b", INPUT_B, OUTPUT_B)):
+            launch_dir = directory / name
+            subprocess.run(
+                [str(BIN / "atlas-launch-plan"), "--capsule", str(capsule),
+                 "--input-address", hex(input_address),
+                 "--output-address", hex(output_address),
+                 "--expected-rtl-revision", ABI["selected_rtl_revision"],
+                 "--out", str(launch_dir)],
+                text=True, capture_output=True, check=True)
+            launches.append(launch_tool.read_launch(
+                capsule, launch_dir, ABI["selected_rtl_revision"]))
+        self.assertEqual(launches[0][1], launches[1][1])
+        code = launches[0][1]
+        words = struct.unpack(f"<{len(code) // 4}I", code)
         self.assertEqual(words[:-1], _emitted(SOURCE))
         source_a, expected_a = _panel(0)
         source_b, expected_b = _panel(5)
@@ -180,7 +239,8 @@ class MailboxCallReferenceTest(unittest.TestCase):
                 csr = TileLinkAdapter(core, "csrTL")
                 slave = TileLinkSlave(core, "dmaTL", size_bytes=1 << 20, beat_bytes=32)
                 for index, word in enumerate(words):
-                    imem.put(0x20000 + 4 * index, word, size=2)
+                    imem.put(launches[0][0]["imem_tl_byte_base"] + 4 * index,
+                             word, size=2)
                 slave.preload(INPUT_A, source_a)
                 slave.preload(INPUT_B, b"\xA3" * 2048)
                 slave.preload(OUTPUT_A, b"\xA5" * 2048)
@@ -188,14 +248,16 @@ class MailboxCallReferenceTest(unittest.TestCase):
                 slave.preload(GUARD, b"\x5A" * 32)
 
                 observations = []
-                for input_address, output_address, replacement in (
-                        (INPUT_A, OUTPUT_A, None),
-                        (INPUT_B, OUTPUT_B, source_b)):
+                for (plan, _, descriptor), replacement in zip(
+                        launches, (None, source_b)):
+                    input_address = plan["input_address"]
+                    output_address = plan["output_address"]
                     if replacement is not None:
                         slave.preload(input_address, replacement)
-                    slave.preload(MAILBOX, _descriptor(input_address, output_address))
+                    slave.preload(plan["mailbox_tl_byte_address"], descriptor)
                     old_reads, old_writes = slave.reads, slave.writes
-                    csr.put(0x18, 1, size=2)
+                    csr.put(plan["start_csr_tl_byte_address"],
+                            plan["start_csr_value"], size=2)
                     started = False
                     halted = False
                     seen_pcs = set()
@@ -241,9 +303,10 @@ class MailboxCallReferenceTest(unittest.TestCase):
         self.assertEqual(second["input_b"], source_b)
         self.assertEqual(first["guard"], b"\x5A" * 32)
         self.assertEqual(second["guard"], b"\x5A" * 32)
-        for run in (first, second):
-            self.assertIn(38, run["pcs"])  # ECALL
-            self.assertNotIn(39, run["pcs"])  # LLVM RET
+        for run, (plan, _, _) in zip((first, second), launches):
+            self.assertIn(plan["completion"]["ecall_pc_word"], run["pcs"])
+            self.assertNotIn(plan["completion"]["unreachable_llvm_ret_pc_word"],
+                             run["pcs"])
         receipt_path = os.environ.get("ATLAS_MAILBOX_RECEIPT")
         if receipt_path:
             receipt = {
