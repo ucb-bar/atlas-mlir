@@ -56,6 +56,8 @@ BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, i1/i32 controls/constants,
 wrapping i32 addition, all ten integer comparisons, branches, and returns.
 Both MXU units execute legacy matmul and explicit weight/reset/seed/accumulate/
 readout operations, including immutable scale constants, with separate arithmetic.
+Explicit DMA load/await and store/wait operations execute with owned snapshots
+and completion-visible memory effects.
 It checks SSA dominance, edge types/arity, and state flow before execution;
 branch arguments bind simultaneously. Each executed
 operation, including branches and returns, consumes one step. Exhaustion raises
@@ -66,8 +68,8 @@ numerical checks run only on the chosen path. MOV preserves every raw encoding;
 ReLU returns positive zero for sign-set inputs and otherwise preserves bits.
 ADD uses FP32 nearest-even addition followed by BF16 truncation and canonical
 NaN, rejecting host arithmetic that flushes subnormals or changes rounding.
-Only executed outputs appear in the result. Memory snapshots remain unchanged
-until explicit DMA execution is implemented. The evaluator can interpret
+Only executed outputs appear in the result. DMA stores update final memory
+snapshots at their matching waits. The evaluator can interpret
 multiple returns and path-dependent outputs; the compiler's narrower lowering
 restrictions still apply separately.
 
@@ -124,7 +126,7 @@ ATLAS_REQUIRE_VIRTUAL_CORE=1 python -m unittest discover -s test -p 'test_virtua
 The core comparison additionally needs `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`,
 `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, and `ATLAS_MODELIR_ROOT` as described in
 the [README](../README.md). Required mode fails on missing core prerequisites;
-ordinary discovery skips those checks. The shared-input, scalar/CFG, VPU, MXU,
+ordinary discovery skips those checks. The shared-input, scalar/CFG, VPU, MXU, DMA,
 and physical pack comparisons have not executed against a selected-core
 artifact. The physical pack probe checks converter/transport behavior;
 virtual pack lowering with MXU consumers has separate pending comparisons. See the
@@ -188,6 +190,28 @@ launch does not release source memory; physical ownership and release belong to
 does not establish RTL completion order.
 
 The environment must keep external load sources stable and exclude conflicting accesses to transfer ranges until completion. The IR checks do not prove host-side synchronization.
+
+Execution proves complete-tile lengths and addresses from i32 constants/wrapping
+additions, requires 32-byte alignment and addresses at or above `0x80000000`,
+and checks the widened end against `2^32`. Every executed transfer span must be
+covered by supplied memory regions; adjacent regions are allowed, holes are not.
+Load issue captures owned bytes and await exposes the tile; store issue captures
+serialized tile bytes and wait publishes them. Results retain region addresses,
+extents, order, and untouched bytes. BF16 uses pair-halves transport; FP8 uses
+raw row-major bytes. No numerical conversion occurs during DMA.
+
+Preflight checks two pending identities, one matching completion each, block
+confinement, and completion before implicit I/O/pack or exit. Read/read overlap
+is allowed. Pending overlap involving a write is explicitly unqualified.
+Known ABI aliases between explicit DMA and implicit boundary writes, or explicit
+stores and implicit inputs, are also unsupported, even after completion.
+Supplied memory snapshots must exclude known implicit output spans. These alias
+limits preserve the current separate boundary/memory interfaces; they are not
+claims about compiler rejection. No ABI mapping is invented when bases are absent.
+Where a known input buffer overlaps supplied initial memory, its raw bytes must
+agree with the corresponding boundary tile, including partially supplied spans.
+Memory availability is checked only on executed paths; static proof and lifetime
+checks also cover untaken paths. No channels, VMEM windows, or cycles are simulated.
 
 ## Explicit MXU handle extension
 
@@ -263,8 +287,8 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer, scalar/CFG, admitted VPU/pack, and both MXU units
+The parser/input layer, scalar/CFG, admitted VPU/pack, both MXU units, and DMA
 are implemented in this repository's Python verification tooling. Their
-selected-core comparisons are implemented but unexecuted; explicit DMA
-execution remains future work. These partial checks do not complete
+selected-core comparisons are implemented but unexecuted; original/scheduled
+comparisons and numerical/alias qualification gaps remain. These checks do not complete
 [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).

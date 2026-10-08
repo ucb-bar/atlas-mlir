@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
+from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
 
 
 OPERATIONS = '''
@@ -129,16 +129,6 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
         # A same-typed, similarly named value is still a distinct SSA identity.
         program.operations[2].operands = (other.operations[1].results[1],)
         with self.assertRaises(VirtualInterfaceError):
-            evaluate(program, RuntimeInputs({11: patterned_tile()}))
-
-    def test_parser_admitted_operations_outside_execution_subset_fail_explicitly(self) -> None:
-        dma = '''%address = arith.constant 0 : i32
-          %length = arith.constant 2048 : i32
-          %pending_state, %pending = "atlas.virtual_dma_load_bf16"(%s1, %address, %length) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-        '''
-        source = FLAT.replace('  %rectified =', dma + '  %rectified =').replace('output_bf16"(%s1,', 'output_bf16"(%pending_state,')
-        program = parse_program(source)
-        with self.assertRaises(UnsupportedVirtualMode):
             evaluate(program, RuntimeInputs({11: patterned_tile()}))
 
     def test_evaluate_enforces_exact_input_indices_formats_and_controls(self) -> None:

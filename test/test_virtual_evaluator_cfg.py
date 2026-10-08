@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
+from atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
 
 
 INPUTS = '''
@@ -121,18 +121,6 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         # Declarations still define the input interface even when not executed.
         with self.assertRaises(VirtualInterfaceError):
             evaluate(parse_program(source), RuntimeInputs(controls=(Scalar(1, 0),)))
-
-    def test_unsupported_operation_rejects_even_an_untaken_path(self) -> None:
-        source = example("virtual_bf16_dynamic_branch_program.mlir")
-        dma = '''%address = arith.constant 0 : i32
-          %length = arith.constant 2048 : i32
-          %pending_state, %pending = "atlas.virtual_dma_load_bf16"(%right_io, %address, %length) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-        '''
-        source = source.replace('    %right_result =', dma + '    %right_result =').replace('^join(%right_io,', '^join(%pending_state,')
-        for choice in (0, 1):
-            with self.subTest(choice=choice):
-                with self.assertRaises(UnsupportedVirtualMode):
-                    evaluate(parse_program(source), RuntimeInputs({0: TILES[0]}, (Scalar(1, choice),)))
 
     def test_loop_reexecutes_local_definitions_and_carries_changed_tiles(self) -> None:
         source = example("virtual_bf16_loop_program.mlir")

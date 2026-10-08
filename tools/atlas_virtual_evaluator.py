@@ -433,6 +433,138 @@ def _check_mxu_handles(operations: tuple[Operation, ...]) -> None:
     _require(not any(accumulators), "every MXU accumulator must be read out before block exit")
 
 
+def _constant_i32(value: SSAValue, cache: dict[SSAValue, int | None]) -> int | None:
+    """Evaluate admitted constant expressions without a Python recursion-depth limit."""
+    pending = [(value, False)]
+    while pending:
+        current, expanded = pending.pop()
+        owner = current.owner
+        if expanded:
+            left, right = cache[owner.lhs], cache[owner.rhs]
+            if left is not None and right is not None:
+                cache[current] = (left + right) & 0xFFFFFFFF
+        elif current not in cache:
+            cache[current] = None
+            if current.type == builtin.i32 and isinstance(owner, arith.ConstantOp):
+                cache[current] = owner.value.value.data & 0xFFFFFFFF
+            elif current.type == builtin.i32 and isinstance(owner, arith.AddiOp) and not owner.overflow_flags.data:
+                pending.append((current, True))
+                pending.extend((operand, False) for operand in owner.operands)
+    return cache[value]
+
+
+def _dma_span(op: Operation, constants: dict[SSAValue, int | None]) -> tuple[int, int, TileFormat, bool]:
+    name = operation_name(op)
+    store = "dma_store_" in name
+    format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
+    address, length = (_constant_i32(value, constants) for value in op.operands[-2:])
+    _require(address is not None and length is not None, "DMA address/length require i32 constant/wrapping-add proof")
+    assert address is not None and length is not None
+    _require(length == (1024 if format == "fp8" else 2048), "DMA length must equal the complete tile size")
+    _require(address >= 0x80000000 and address % 32 == 0, "DMA address must be selected DRAM aligned to 32 bytes")
+    _require(address + length <= 1 << 32, "DMA span exceeds the 32-bit address space")
+    return address, length, format, store
+
+
+def _overlaps(address: int, length: int, other: int, size: int) -> bool:
+    return address < other + size and other < address + length
+
+
+def _boundary_ranges(program: ParsedProgram) -> tuple[tuple[int, int, str], ...]:
+    if program.function is None:
+        return ()
+    ranges = []
+    for kind, indices in (("input", program.input_formats), ("output", program.output_indices), ("control", (0,) if program.control_widths else ())):
+        attribute = program.function.attributes.get(f"atlas.{kind}_dram_base")
+        if attribute is None:
+            continue
+        _require(isinstance(attribute, builtin.IntegerAttr), f"{kind} DRAM base must be an integer attribute")
+        for index in indices:
+            address = attribute.value.data + (index * 2048 if kind != "control" else 0)
+            size = 4 * len(program.control_widths) if kind == "control" else (1024 if kind == "input" and program.input_formats[index] == "fp8" else 2048)
+            _require(0 <= address and address + size <= 1 << 32, f"{kind} boundary span exceeds 32-bit DRAM")
+            ranges.append((address, size, kind))
+    return tuple(ranges)
+
+
+def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
+    pending: dict[SSAValue, tuple[int, int, TileFormat, bool]] = {}
+    for op in operations:
+        name = operation_name(op).removeprefix("atlas.virtual_")
+        if name.startswith(("dma_load_", "dma_store_")):
+            address, length, format, store = span = _dma_span(op, constants)
+            _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
+            for other, size, _, writing in pending.values():
+                if (store or writing) and _overlaps(address, length, other, size):
+                    raise UnsupportedVirtualMode("overlapping pending DMA ranges involving a write are unqualified")
+            for other, size, kind in boundaries:
+                if not _overlaps(address, length, other, size):
+                    continue
+                _require(kind != "control", "DMA must not overlap the control mailbox")
+                if store or kind == "output":
+                    raise UnsupportedVirtualMode("explicit DMA aliases an implicit boundary buffer with a write")
+            pending[op.results[1]] = span
+        elif name.startswith("dma_await_") or name == "dma_wait":
+            _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
+            del pending[op.operands[1]]
+        elif name in ("input_bf16", "input_fp8", "output_bf16", "pack_fp8"):
+            _require(not pending, f"{name}: pending DMA must complete before implicit I/O or pack")
+    _require(not pending, "every pending DMA transfer must complete before block exit")
+
+
+def _tile_bytes(tile: Tile) -> bytes:
+    if tile.format == "fp8":
+        return bytes(tile.bits)
+    return b"".join(tile.bits[row * 32 + col].to_bytes(2, "little") for half in (0, 16) for row in range(32) for col in range(half, half + 16))
+
+
+def _tile_from_bytes(data: bytes, format: TileFormat) -> Tile:
+    if format == "fp8":
+        return Tile("fp8", tuple(data))
+    words = tuple(int.from_bytes(data[index:index + 2], "little") for index in range(0, len(data), 2))
+    return Tile("bf16", tuple(words[(col // 16) * 512 + row * 16 + col % 16] for row in range(32) for col in range(32)))
+
+
+class _Memory:
+    def __init__(self, regions: tuple[MemoryRegion, ...]):
+        self.regions = regions
+        self.buffers = [bytearray(region.data) for region in regions]
+        self.order = sorted(range(len(regions)), key=lambda index: regions[index].address)
+
+    def chunks(self, address: int, size: int) -> tuple[tuple[int, int, int], ...]:
+        chunks = []
+        cursor, end = address, address + size
+        for index in self.order:
+            region = self.regions[index]
+            first, last = max(address, region.address), min(end, region.address + len(region.data))
+            if first < last:
+                _require(first == cursor, f"DMA span has unmapped memory at 0x{cursor:08x}")
+                chunks.append((index, first - region.address, last - region.address))
+                cursor = last
+        _require(cursor == end, f"DMA span has unmapped memory at 0x{cursor:08x}")
+        return tuple(chunks)
+
+    def read(self, address: int, size: int) -> bytes:
+        return b"".join(self.buffers[index][first:last] for index, first, last in self.chunks(address, size))
+
+    def write(self, address: int, data: bytes) -> None:
+        offset = 0
+        # Validate the entire span before modifying any region.
+        for index, first, last in self.chunks(address, len(data)):
+            self.buffers[index][first:last] = data[offset:offset + last - first]
+            offset += last - first
+
+    def snapshots(self) -> tuple[MemoryRegion, ...]:
+        return tuple(MemoryRegion(region.address, data) for region, data in zip(self.regions, self.buffers))
+
+
+@dataclass(frozen=True)
+class _Transfer:
+    address: int
+    data: bytes
+    format: TileFormat
+
+
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
     if isinstance(op, cf.BranchOp):
         return ((op.successor, tuple(op.arguments)),)
@@ -444,6 +576,8 @@ def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
 def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...]]:
     """Validate CFG/SSA and state flow independently of compiler pass decisions."""
     blocks = {block: tuple(block.ops) for block in program.blocks}
+    boundaries = _boundary_ranges(program)
+    constants: dict[SSAValue, int | None] = {}
     entry = program.blocks[0]
     starts = [op for op in program.operations if operation_name(op) == "atlas.virtual_start"]
     _require(len(starts) == 1 and bool(blocks[entry]) and blocks[entry][0] is starts[0], "virtual_start must be the unique first entry operation")
@@ -453,6 +587,8 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
         "atlas.virtual_scale_constant", "atlas.virtual_mxu_matmul", "atlas.virtual_mxu_load_weight",
         "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_load_acc_fp8", "atlas.virtual_mxu_reset",
         "atlas.virtual_mxu_accumulate", "atlas.virtual_mxu_readout_bf16", "atlas.virtual_mxu_readout_fp8",
+        "atlas.virtual_dma_load_fp8", "atlas.virtual_dma_load_bf16", "atlas.virtual_dma_await_fp8",
+        "atlas.virtual_dma_await_bf16", "atlas.virtual_dma_store_fp8", "atlas.virtual_dma_store_bf16", "atlas.virtual_dma_wait",
         "arith.constant", "arith.addi", "arith.cmpi", "cf.br", "cf.cond_br", "func.return",
     }
     definitions = {}
@@ -496,17 +632,31 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
                 owner, defined_at = definitions[operand]
                 available = defined_at < position if owner is block else dominance.dominates(owner, block)
                 _require(available, f"{operation_name(op)}: operand definition does not dominate its use")
-                if _type_kind(operand.type)[0] in ("mxu_weight", "mxu_acc"):
-                    _require(owner is block, "MXU handles cannot cross block boundaries")
+                if _type_kind(operand.type)[0] in ("mxu_weight", "mxu_acc", "dma_load_fp8", "dma_load_bf16", "dma_store"):
+                    _require(owner is block, "MXU/DMA handles cannot cross block boundaries")
         _check_mxu_handles(operations)
+        _check_dma_handles(operations, boundaries, constants)
     return blocks
 
 
 def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 10000) -> EvaluationResult:
-    """Execute admitted scalar/CFG, boundary, VPU, and unit-specific MXU operations."""
+    """Execute admitted virtual operations and completion-visible memory effects."""
     _require(type(max_steps) is int and max_steps > 0, "max_steps must be a positive integer")
     program.validate_inputs(inputs)
     blocks = _check_execution(program)
+    for address, size, kind in _boundary_ranges(program):
+        if kind == "output" and any(_overlaps(address, size, region.address, len(region.data)) for region in inputs.memory):
+            raise UnsupportedVirtualMode("memory snapshots overlapping implicit output buffers require shared boundary-memory semantics")
+        if kind == "input":
+            index = (address - program.function.attributes["atlas.input_dram_base"].value.data) // 2048
+            payload = _tile_bytes(inputs.tiles[index])
+            for region in inputs.memory:
+                first, last = max(address, region.address), min(address + size, region.address + len(region.data))
+                if first < last:
+                    actual = region.data[first - region.address:last - region.address]
+                    expected = payload[first - address:last - address]
+                    _require(actual == expected, f"boundary input {index} and initial memory disagree in span 0x{first:08x}..0x{last:08x}")
+    memory = _Memory(inputs.memory)
     values: dict[SSAValue, object] = {}
     outputs: dict[int, Tile] = {}
     state: object | None = None
@@ -574,7 +724,7 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             else:
                 _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
                 if isinstance(op, func.ReturnOp):
-                    return EvaluationResult(outputs, inputs.memory)
+                    return EvaluationResult(outputs, memory.snapshots())
                 if name in ("atlas.virtual_input_bf16", "atlas.virtual_input_fp8"):
                     values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
                 elif name == "atlas.virtual_output_bf16":
@@ -590,6 +740,22 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     scale = value(op.operands[2])
                     _require(type(scale) is int and 0 <= scale <= 255, "MXU readout requires a raw constant scale code")
                     values[op.results[1]] = _mxu_tile("readout_fp8", (tile(op.operands[1]),), scale)
+                elif name.startswith(("atlas.virtual_dma_load_", "atlas.virtual_dma_store_")):
+                    address, length = (scalar(operand).bits for operand in op.operands[-2:])
+                    format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
+                    store = name.startswith("atlas.virtual_dma_store_")
+                    memory.chunks(address, length)
+                    data = _tile_bytes(tile(op.operands[1])) if store else memory.read(address, length)
+                    values[op.results[1]] = _Transfer(address, data, format)
+                elif name.startswith("atlas.virtual_dma_await_") or name == "atlas.virtual_dma_wait":
+                    transfer = value(op.operands[1])
+                    _require(isinstance(transfer, _Transfer), "expected an executed DMA transfer")
+                    assert isinstance(transfer, _Transfer)
+                    if name == "atlas.virtual_dma_wait":
+                        memory.write(transfer.address, transfer.data)
+                    else:
+                        values[op.results[1]] = _tile_from_bytes(transfer.data, transfer.format)
+                    del values[op.operands[1]]
                 state = values[op.results[0]] = object()
         else:
-            return EvaluationResult(outputs, inputs.memory)
+            return EvaluationResult(outputs, memory.snapshots())
