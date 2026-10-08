@@ -13,7 +13,7 @@ python3 tools/index-retained-hw.py \
   --output build/rtl-timing/ee290-evidence-001
 ```
 
-The manifest must describe a verified retention run, and the selected hardware bytes must match its recorded identity. The generated report binds that manifest, hardware IR and executed indexer. This detects a changed extraction input; it is not the compiler's future contract-selection or mismatch check. Keep reports and their exact local producer metadata under ignored `build/rtl-timing/`. `EE290SimConfig` retains the public target meaning defined in the contract.
+The manifest must describe a verified retention run, and the selected hardware bytes must match its recorded identity. The generated report binds that manifest, hardware IR and executed indexer. This detects a changed extraction input; it is separate from the compiler's [selected-evidence checks](selected-evidence.md). Keep reports and their exact local producer metadata under ignored `build/rtl-timing/`. `EE290SimConfig` retains the public target meaning defined in the contract.
 
 The output contains `hw-index.json`, a `retention-manifest.json` snapshot and `index-retained-hw.executed.py`. The report uses `atlas.retained_hw_index.v0` and records module definitions, instance paths, candidate events and their source line/operation anchors. It retains the selected hardware path and hash without copying the hardware again. Keep that source artifact available; the index alone is not a self-contained hardware bundle.
 
@@ -31,7 +31,7 @@ The text reader supports constrained firtool custom assembly: one-line module he
 
 Choose a candidate event and follow its connections into the relevant engine and storage. Establish capture, grant, first/last access and release conditions, including stalls and competing users, before assigning issue-relative ages. Bind each resulting rule to its source identity, operand domain and unresolved conditions. The [operation coverage table](operation-coverage.md) remains the denominator for instruction coverage; an index spanning every engine does not establish every operation's rules.
 
-The [all-engine admission audit](admission.md) follows those boundaries into capture and software obligations. The [bounded VLOAD/VSTORE replay](vls-timing.md) derives and checks an initial conditional access/release mapping. Neither enables compiler resolver bindings or establishes integrated execution; preserve unsupported rules and assumptions explicitly.
+The [all-engine admission audit](admission.md) follows those boundaries into capture and software obligations. The [bounded VLOAD/VSTORE replay](vls-timing.md) derives and checks an initial conditional access/release mapping. The [selected-evidence backend](selected-evidence.md) consumes that replay separately with explicit identity selection and conditional opt-in. The index and replay alone establish neither integrated execution nor full instruction coverage; preserve unsupported rules and assumptions explicitly.
 
 The focused indexer regressions run independently of a compiler build:
 

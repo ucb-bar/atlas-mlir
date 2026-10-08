@@ -1,6 +1,6 @@
 # Bounded VLOAD/VSTORE timing and compiler mapping
 
-This slice relates selected LSU hardware events to the current `AtlasTiming` API. The [admission audit](admission.md) covers the other engines and shared obligations; the [operation catalog](operation-catalog.json) remains the full instruction denominator. This document does not enable a contract provider or establish integrated EE290SimConfig execution.
+This slice relates selected LSU hardware events to the current `AtlasTiming` API. The [admission audit](admission.md) covers the other engines and shared obligations; the [operation catalog](operation-catalog.json) remains the full instruction denominator. The separate [selected-evidence backend](selected-evidence.md) consumes this conditional replay for conservative serialized VLS scheduling and final verification. Neither the replay nor that compiler integration establishes integrated EE290SimConfig execution.
 
 ## Event origin and applicable domain
 
@@ -47,7 +47,7 @@ The [timing probe](../../test/vls-timing-probe.cpp) compiles the actual [AtlasTi
 | `dependence` plus `ReservationTable` | Both are needed: data hazards and resource conflicts are different constraints. Neither alone enforces a single scalar issue per cycle or all frontend assertions. |
 | Unknown operands | Existing code can return conservative footprints without an error. That does not satisfy a bound profile's required address/admission evidence. |
 
-The current VLS constants agree with the static derivation, so changing their numeric values is not justified by this audit. The missing integration is explicit evidence selection, applicability/admission enforcement and a shared final timed verifier. `verify-atlas-machine-stream` checks structural/encoding requirements; the separate generated-schedule verifier checks its diagnostic-delay policy. Neither is a complete consumer of these selected-RTL timing rules.
+The current VLS constants agree with the static derivation, so changing their numeric values is not justified by this audit. The [selected-evidence backend](selected-evidence.md) implements explicit identity selection, bounded applicability enforcement and `verify-atlas-rtl-timing`. It conservatively serializes every VLS pair at gap 35 rather than enabling the cross-path overlap boundaries below. `verify-atlas-machine-stream` still checks structural/encoding requirements; the separate generated-schedule verifier checks its diagnostic-delay policy.
 
 ## Boundary checks and reproduction
 
@@ -87,4 +87,4 @@ The evidence-consumer regressions require no compiler build. They test missing o
 python3 test/test_vls_timing_evidence.py
 ```
 
-This validates a conditional module slice and its compiler mapping. It leaves other-engine arbitration, physical alias cases, scalar-memory overlap, selected SRAM implementation behavior, complete frontend execution, reset/restart, contract loading, and integrated emitted-program output/guard validation open.
+This validates a conditional module slice and its compiler mapping. Explicit compiler consumption is implemented in the [selected-evidence workflow](selected-evidence.md), while broad contract loading, other-engine arbitration, overlapping physical aliases, scalar-memory overlap, selected SRAM implementation behavior, complete frontend execution, reset/restart and integrated emitted-program output/guard validation remain open.

@@ -1,8 +1,10 @@
 # RTL timing and resource contract for EE290SimConfig
 
-**Draft v0; no compiler loader or qualified target profile is implemented by these files.** This document specifies the handoff from RTL analysis to Atlas scheduling, delay insertion, allocation constraints, and final hazard verification. The [operation coverage table](operation-coverage.md), [machine mnemonic catalog](operation-catalog.json), [JSON Schema](contract.schema.json), and [draft bundle](examples/contract.json) accompany it. The draft covers the operation surface while leaving unavailable evidence explicit; schema validity is not timing qualification.
+**Draft v0; the broad contract has no compiler loader or qualified target profile.** This document specifies the handoff from RTL analysis to Atlas scheduling, delay insertion, allocation constraints, and final hazard verification. The [operation coverage table](operation-coverage.md), [machine mnemonic catalog](operation-catalog.json), [JSON Schema](contract.schema.json), and [draft bundle](examples/contract.json) accompany it. The draft covers the operation surface while leaving unavailable evidence explicit; schema validity is not timing qualification.
 
 The [admission audit](admission.md) distinguishes command presentation, capture, assertions and stalls across all engines. The [bounded VLOAD/VSTORE analysis](vls-timing.md) maps a selected LSU slice into the existing timing API and provides a conditional hardware replay and compiler comparison.
+
+The implemented [selected-evidence workflow](selected-evidence.md) separately loads `atlas.conditional_vls_hw_check.v0` replay receipts through `atlas.vls.conservative.v1`. Explicitly selected conditional rules now feed scheduling, delay insertion and an independent final timed verifier for a small straight-line subset. This backend rejects the broad draft bundle and unsupported instances; it does not qualify integrated EE290SimConfig execution or the full operation catalog.
 
 ## Scope and ownership
 
@@ -193,7 +195,7 @@ evidence_refs: [applicable_selected_rtl_stream_and_arbitration_evidence_pending]
 
 ## Integration and validation plan
 
-First resolve the gaps recorded in the coverage table against retained CIRCT hardware IR and selected source, keeping unsupported scopes visible. Agree on resolver/parameter interfaces with Jeremy and resource/CFG obligations with the verification work. Implement an identity-checked provider feeding the existing footprint/dependence interfaces, then update final verification to consume the same selected rules. Export profile identity and resolved instruction facts for Merlin instead of maintaining independent timing constants there.
+The [bounded selected-evidence backend](selected-evidence.md) supplies an identity-checked provider and final timed verification for serialized VLS with minimal scalar setup and completion control. Its conditional module replay does not discharge system execution, SRAM implementation or original source/build-linkage obligations. Resolve the remaining coverage gaps against retained CIRCT hardware IR and selected source, keeping unsupported scopes visible. Agree on additional resolver/parameter interfaces with Jeremy and resource/CFG obligations with the verification work. Export profile identity and resolved instruction facts for Merlin instead of maintaining independent timing constants there; that active-compiler feedback adapter remains future work.
 
 Validation should target discriminating boundaries: one cycle before/at/after availability; legal versus illegal same-register overlap; alternative-port and capacity saturation; cross-family MREG/VMEM conflicts; each VPU overlap group and reduction/VLI mode; DMA capture, config ordering, missing waits and ring reuse; branches/loops/joins with pending work; CSR publication and halt/restart. Include unknown-address and mismatched-source cases. Recheck numerical outputs and guard memory for the supported integrated program; record actual RTL cycles separately from model estimates.
 
