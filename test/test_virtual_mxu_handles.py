@@ -144,14 +144,25 @@ class VirtualMXUHandleTest(unittest.TestCase):
                     readout("s3", "s4", "y", "a1", unit),
                     final_state="s4",
                 ))
-                self.rejected(program(
+                # Two weights are resident at once: the first stays usable.
+                self.accepted(program(
                     load("io2", "s0", "weight", unit),
                     reset("s0", "s1", "a0", unit=unit),
                     load("s1", "s2", "replacement", unit),
                     accumulate("s2", "s3", "a1", "a0", unit=unit),
                     readout("s3", "s4", "y", "a1", unit),
                     final_state="s4",
-                ), "stale weight handle")
+                ))
+                self.rejected(program(
+                    load("io2", "s0", "weight", unit),
+                    reset("s0", "s1", "a0", unit=unit),
+                    load("s1", "s2", "replacement", unit),
+                    load("s2", "s3", "third", unit),
+                    accumulate("s3", "s4", "a1", "a0", unit=unit),
+                    accumulate("s4", "s5", "a2", "a1", "replacement", unit),
+                    readout("s5", "s6", "y", "a2", unit),
+                    final_state="s6",
+                ), "cannot load a weight on a unit with 2 live weights")
 
     def test_handle_parameters_and_operation_unit_types(self) -> None:
         source = chain()
@@ -202,22 +213,29 @@ class VirtualMXUHandleTest(unittest.TestCase):
                     load("io2", "s0", "weight"), reset("s0", "s1", "a0"),
                     final_state="s1", module_scope=module_scope,
                 ), "must read out the live MXU accumulator before block exit")
+        self.accepted(program(
+            load("io2", "s0", "weight"), reset("s0", "s1", "a0"),
+            reset("s1", "s2", "b0"), readout("s2", "s3", "y", "a0"),
+            readout("s3", "s4", "z", "b0"), final_state="s4",
+        ))
         self.rejected(program(
             load("io2", "s0", "weight"), reset("s0", "s1", "a0"),
-            reset("s1", "s2", "a1"),
-            readout("s2", "s3", "y", "a1"), final_state="s3",
-        ), "cannot reset a unit with a live accumulator")
+            reset("s1", "s2", "b0"), reset("s2", "s3", "c0"),
+            readout("s3", "s4", "y", "c0"), final_state="s4",
+        ), "cannot reset a unit with 2 live accumulators")
 
-    def test_stale_state_and_replaced_weights_are_rejected(self) -> None:
+    def test_stale_state_and_a_third_live_weight_are_rejected(self) -> None:
         self.rejected(chain().replace('(%s1, %x, %weight, %a0)',
                                       '(%s0, %x, %weight, %a0)'),
                       "nonlinear virtual state chain")
         self.rejected(program(
             load("io2", "s0", "weight"),
             load("s0", "s1", "replacement"),
-            reset("s1", "s2", "a0"),
-            readout("s2", "s3", "y", "a0"), final_state="s3",
-        ), "stale weight handle")
+            load("s1", "s2", "third"),
+            reset("s2", "s3", "a0"), readout("s3", "s4", "y", "a0"),
+            reset("s4", "s5", "b0", "replacement"),
+            readout("s5", "s6", "z", "b0"), final_state="s6",
+        ), "cannot load a weight on a unit with 2 live weights")
 
     def test_legacy_matmul_coexists_and_clobbers_same_unit_handles(self) -> None:
         def legacy(unit: int) -> str:
@@ -236,7 +254,7 @@ class VirtualMXUHandleTest(unittest.TestCase):
             load("io2", "s0", "weight"), legacy(0),
             reset("s0", "s1", "a0"), readout("s1", "s2", "y", "a0"),
             final_state="s2",
-        ), "stale weight handle")
+        ), "legacy virtual_mxu_matmul cannot overwrite a live weight")
         self.accepted(program(
             load("io2", "s0", "weight"), legacy(0),
             load("s0", "s1", "replacement"),

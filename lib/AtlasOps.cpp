@@ -129,6 +129,11 @@ constantI32(Value value, llvm::DenseMap<Value, std::optional<uint32_t>> &constan
   return result;
 }
 
+std::optional<uint32_t> mlir::atlas::provenI32(Value value) {
+  llvm::DenseMap<Value, std::optional<uint32_t>> constants;
+  return constantI32(value, constants);
+}
+
 static LogicalResult verifyVirtualDMAAttributes(Operation *op) {
   if (op->hasAttr("channel"))
     return op->emitOpError("virtual DMA does not select a physical channel");

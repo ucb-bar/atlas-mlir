@@ -5,6 +5,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
+#include <iterator>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -13,6 +14,32 @@ namespace {
 constexpr unsigned kTensorPairTemporary = 62;
 constexpr unsigned kFirstScalarValue = 10;
 constexpr unsigned kLastScalarValue = 26;
+// The DMA engine's channels. Each transfer in flight holds one, and a staging
+// window the size of a BF16 tile.
+constexpr unsigned kDMAChannels = 8;
+constexpr uint32_t kStagingWindowWords = 512;
+static_assert(kMaxPendingVirtualDMA <= kDMAChannels,
+              "each pending DMA needs its own channel");
+
+// Whether `function` has FP8 values, which keep m0-m31 and move BF16 pairs
+// above them, and a pack, which keeps x10-x17 for its relayout loop.
+void findReservations(func::FuncOp function, bool &mixedFp8, bool &hasPack) {
+  mixedFp8 = false;
+  hasPack = false;
+  function.walk([&](Operation *op) {
+    hasPack |= isa<VirtualPackFP8Op>(op);
+    for (Type type : op->getResultTypes())
+      mixedFp8 |= isa<VirtualFP8Type>(type);
+  });
+}
+
+unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
+  unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
+  return kind == RegisterKind::BF16
+             ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
+             : kind == RegisterKind::FP8 ? 32
+                                         : kLastScalarValue - firstScalar + 1;
+}
 
 FixedResourcePlacement selectedResources() {
   FixedResourcePlacement resources;
@@ -51,6 +78,17 @@ FixedResourcePlacement selectedResources() {
 }
 } // namespace
 
+RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
+  bool mixedFp8, hasPack;
+  findReservations(function, mixedFp8, hasPack);
+  RegisterCapacities capacities;
+  for (RegisterKind kind :
+       {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
+    capacities[static_cast<unsigned>(kind)] =
+        capacity(kind, mixedFp8, hasPack);
+  return capacities;
+}
+
 VirtualAllocationPlan::VirtualAllocationPlan()
     : fixedResources(selectedResources()) {}
 
@@ -62,19 +100,8 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   mxuResources.clear();
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
-  mixedFp8 = false;
-  hasPack = false;
-  function.walk([&](Operation *op) {
-    hasPack |= isa<VirtualPackFP8Op>(op);
-    for (Value result : op->getResults()) {
-      mixedFp8 |= isa<VirtualFP8Type>(result.getType());
-      // Verified lifetimes permit slot 0 in each unit's weight/accumulator bank.
-      if (auto weight = dyn_cast<VirtualMXUWeightType>(result.getType()))
-        mxuResources[result] = {weight.getUnit(), fixedResources.mxuWeightSlot};
-      if (auto acc = dyn_cast<VirtualMXUAccType>(result.getType()))
-        mxuResources[result] = {acc.getUnit(), fixedResources.mxuAccSlot};
-    }
-  });
+  usedDMAChannels.clear();
+  findReservations(function, mixedFp8, hasPack);
   if (failed(colorValues(RegisterKind::BF16)) ||
       failed(colorValues(RegisterKind::FP8)) ||
       failed(colorValues(RegisterKind::Scalar)))
@@ -82,32 +109,148 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   for (BlockArgument arg : function.getArguments())
     scalarArgumentRegs.push_back(scalar(arg));
 
+  // MXU and DMA state never crosses a block, so each block places its own.
   unsigned nextTransfer = 0;
-  for (Block &block : function.getBody()) {
-    for (Operation &op : block) {
-      Value transfer;
-      unsigned channel = fixedResources.loadChannel;
-      unsigned halves = 1;
-      if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op))
-        transfer = load.getTransfer();
-      else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-        transfer = load.getTransfer();
-        halves = 2;
-      } else if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-        transfer = store.getTransfer();
-        channel = fixedResources.storeChannel;
-      } else if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-        transfer = store.getTransfer();
-        channel = fixedResources.storeChannel;
-        halves = 2;
+  for (Block &block : function.getBody())
+    if (failed(placeMXU(block)) || failed(placeDMA(block, nextTransfer)))
+      return failure();
+  return success();
+}
+
+// Each weight takes the lowest slot of its unit free of live weights and
+// frees it after its last use; each accumulator chain takes the lowest free
+// accumulator slot from its start to its readout. The verifier bounds both by
+// the slot count and keeps both inside the block; the checks here state what
+// the lowering relies on.
+LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
+  using Slots = std::array<Value, kVirtualMXUSlots>;
+  std::array<Slots, 2> weightSlots{}, accSlots{};
+  llvm::DenseMap<Value, unsigned> remainingUses;
+  auto take = [&](Operation &op, Slots &slots, Value value,
+                  unsigned unit) -> LogicalResult {
+    for (unsigned slot = 0; slot < kVirtualMXUSlots; ++slot)
+      if (!slots[slot]) {
+        slots[slot] = value;
+        mxuResources[value] = {unit, slot};
+        return success();
       }
-      if (transfer)
-        dmaTransfers[transfer] = {
-            channel, halves, nextTransfer++, fixedResources.stagingWord,
-            fixedResources.dmaBaseReg, fixedResources.dmaDramReg,
-            fixedResources.dmaSizeReg};
+    return op.emitOpError("needs an MXU slot while every slot of its unit "
+                          "is live");
+  };
+  auto release = [](Slots &slots, Value value) {
+    for (Value &owner : slots)
+      if (owner == value)
+        owner = Value{};
+  };
+  // The live accumulator `acc` replaces or ends, and where it is.
+  auto liveAccumulator = [&](Operation &op,
+                             Value acc) -> FailureOr<MXUPlacement> {
+    auto placed = mxuResources.find(acc);
+    if (placed == mxuResources.end() ||
+        accSlots[placed->second.unit][placed->second.slot] != acc)
+      return op.emitOpError("uses an accumulator that is not live");
+    return placed->second;
+  };
+  for (Operation &op : block) {
+    for (Value operand : op.getOperands())
+      if (auto weight = dyn_cast<VirtualMXUWeightType>(operand.getType()))
+        if (--remainingUses[operand] == 0)
+          release(weightSlots[weight.getUnit()], operand);
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+      Value weight = load.getWeight();
+      unsigned unit = cast<VirtualMXUWeightType>(weight.getType()).getUnit();
+      if (failed(take(op, weightSlots[unit], weight, unit)))
+        return failure();
+      remainingUses[weight] =
+          std::distance(weight.use_begin(), weight.use_end());
+      if (weight.use_empty())
+        release(weightSlots[unit], weight);
+    } else if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+      // The next version stays in its chain's slot.
+      FailureOr<MXUPlacement> placement =
+          liveAccumulator(op, accumulate.getAcc());
+      if (failed(placement))
+        return failure();
+      mxuResources[accumulate.getNextAcc()] = *placement;
+      accSlots[placement->unit][placement->slot] = accumulate.getNextAcc();
+    } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
+      FailureOr<MXUPlacement> placement = liveAccumulator(op, op.getOperand(1));
+      if (failed(placement))
+        return failure();
+      accSlots[placement->unit][placement->slot] = Value{};
+    } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op,
+                   VirtualMXUResetOp>(op)) {
+      Value acc = op.getResult(1);
+      unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
+      if (failed(take(op, accSlots[unit], acc, unit)))
+        return failure();
+    } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
+      // The legacy form uses fixed slots of its unit, which must be free.
+      unsigned unit = matmul.getUnit();
+      if (weightSlots[unit][fixedResources.mxuWeightSlot] ||
+          accSlots[unit][fixedResources.mxuAccSlot])
+        return op.emitOpError("overwrites MXU slots that are live");
     }
   }
+  for (const Slots &slots : accSlots)
+    if (llvm::any_of(slots, [](Value acc) { return bool(acc); }))
+      return block.getTerminator()->emitOpError(
+          "leaves an MXU accumulator live at the block end");
+  return success();
+}
+
+// Each transfer holds a channel and a staging window from its launch to its
+// completion. The DMA latches its registers at launch, so every transfer
+// uses the same three. A load takes the load channel when it is free and a
+// store the store channel, as a lone transfer always has; otherwise the
+// lowest free channel. A transfer takes the lowest free window.
+LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
+                                              unsigned &nextTransfer) {
+  std::array<Value, kDMAChannels> channels{}, windows{};
+  for (Operation &op : block) {
+    if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(
+            op)) {
+      Value transfer = op.getOperand(1);
+      auto channel = llvm::find(channels, transfer);
+      auto window = llvm::find(windows, transfer);
+      if (channel == channels.end() || window == windows.end())
+        return op.emitOpError("completes a DMA transfer that is not in flight");
+      *channel = Value{};
+      *window = Value{};
+      continue;
+    }
+    bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+      continue;
+    unsigned channel =
+        load ? fixedResources.loadChannel : fixedResources.storeChannel;
+    if (channels[channel])
+      channel = llvm::find(channels, Value{}) - channels.begin();
+    auto window = llvm::find(windows, Value{});
+    if (channel == kDMAChannels || window == windows.end())
+      return op.emitOpError("launches a DMA transfer while every channel is "
+                            "in flight");
+    Value transfer = op.getResult(1);
+    channels[channel] = transfer;
+    *window = transfer;
+    if (!llvm::is_contained(usedDMAChannels, channel))
+      usedDMAChannels.push_back(channel);
+    unsigned halves =
+        isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
+    uint32_t stagingWord =
+        fixedResources.stagingWord +
+        static_cast<uint32_t>(window - windows.begin()) * kStagingWindowWords;
+    dmaTransfers[transfer] = {channel,
+                              halves,
+                              nextTransfer++,
+                              stagingWord,
+                              fixedResources.dmaBaseReg,
+                              fixedResources.dmaDramReg,
+                              fixedResources.dmaSizeReg};
+  }
+  if (llvm::any_of(channels, [](Value transfer) { return bool(transfer); }))
+    return block.getTerminator()->emitOpError(
+        "leaves a DMA transfer in flight at the block end");
   return success();
 }
 
@@ -263,11 +406,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   });
   llvm::DenseMap<Value, unsigned> colors;
   unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
-  unsigned count = kind == RegisterKind::BF16
-                       ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
-                       : kind == RegisterKind::FP8
-                             ? 32
-                             : kLastScalarValue - firstScalar + 1;
+  unsigned count = capacity(kind, mixedFp8, hasPack);
   for (Value value : values) {
     bool assigned = false;
     for (unsigned color = 0; color < count; ++color) {

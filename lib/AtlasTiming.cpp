@@ -608,7 +608,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
 
   case OpClass::DmaLoad:
   case OpClass::DmaStore: {
-    // The model reads a DMA's registers and moves its data at completion.
+    // The DMA latches its registers at launch, into DMA.scala's command
+    // queue, and moves its data at completion.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
     // Unlike npu_model, which counts bytes, AtlasCore.scala takes the DMA VMEM
@@ -617,9 +618,9 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     if (addr)
       *addr *= 4;
     auto bytes = reg(regs, in.rs2);
-    b.x(in.rd, false, 0, true);
-    b.x(in.rs1, false, 0, true);
-    b.x(in.rs2, false, 0, true);
+    b.x(in.rd, false, 0);
+    b.x(in.rs1, false, 0);
+    b.x(in.rs2, false, 0);
     Access base{Res::DmaBase, false, 0, 1, 0, 1};
     base.atCompletion = true;
     b.f.accesses.push_back(base);
@@ -630,7 +631,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     break;
   }
   case OpClass::DmaConfig: {
-    b.x(in.rs1, false, 0, true);
+    // ScalarCore.scala copies the base register as the config issues.
+    b.x(in.rs1, false, 0);
     Access base{Res::DmaBase, true, 0, 1, 0, 1};
     base.atCompletion = true;
     b.f.accesses.push_back(base);
@@ -848,19 +850,6 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
   return false;
 }
 
-uint32_t
-mlir::atlas::timing::dmaOperandRegisters(const std::vector<Instr> &instrs) {
-  uint32_t mask = 0;
-  for (const Instr &in : instrs) {
-    if (in.op->engine != Engine::Dma || in.op->opClass == OpClass::DmaWait)
-      continue;
-    if (in.op->opClass != OpClass::DmaConfig)
-      mask |= 1u << in.rd | 1u << in.rs2;
-    mask |= 1u << in.rs1;
-  }
-  return mask & ~1u;
-}
-
 namespace {
 // Adds an edge, or raises the distance of an existing edge between the nodes.
 struct EdgeSet {
@@ -882,7 +871,6 @@ struct EdgeSet {
 
 DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
-                                         uint32_t dmaRegs,
                                          const IncomingDma *incomingDma) {
   DepGraph g;
   g.nodes = instrs;
@@ -951,12 +939,11 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
           guarded |= conflictsAtCompletion(dma, g.footprints[k], kind);
         }
       } else {
-        for (const Access &a : g.footprints[k].accesses) {
+        // The transfer latched its registers at launch, so only the VMEM it
+        // moves at completion may conflict.
+        for (const Access &a : g.footprints[k].accesses)
           if (a.res == Res::Vmem)
             guarded = true;
-          if (a.res == Res::XReg && a.write && (dmaRegs >> a.first & 1))
-            guarded = true;
-        }
       }
       if (guarded)
         edges.add(w, k, 1, EdgeKind::Order,

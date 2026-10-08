@@ -49,7 +49,14 @@ public:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    for (unsigned channel : {fixed().loadChannel, fixed().storeChannel})
+    // A configured channel must see a DMA.WAIT before the halt. Every program
+    // reads a tile and writes an output, using the load and store channels;
+    // another channel is configured only when an explicit transfer takes it.
+    SmallVector<unsigned> channels = {fixed().loadChannel, fixed().storeChannel};
+    for (unsigned channel : allocation.dmaChannels())
+      if (!llvm::is_contained(channels, channel))
+        channels.push_back(channel);
+    for (unsigned channel : channels)
       add("atlas.dma_config", loc,
           {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
     materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
@@ -417,10 +424,12 @@ private:
         {{"channel", i32(placement.channel)},
          {"atlas.virtual_dma_transfer", i32(placement.id)}});
     if (dst) {
+      // Transfers share the staging register, and the DMA latched its own
+      // copy at launch, so another launch may have moved it since. Set it
+      // for each VLOAD, as every scratch register is set where it is read.
       for (unsigned half = 0; half < placement.halves; ++half) {
-        if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
+        materializeScalar(placement.stagingReg,
+                          placement.stagingWord + half * 256, loc);
         add("atlas.vload", loc,
             {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});

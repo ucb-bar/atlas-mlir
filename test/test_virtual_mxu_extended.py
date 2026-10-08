@@ -279,9 +279,10 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                 for fmt in ("fp8", "bf16"):
                     self.rejected(program(
                         seed("io3", "s0", "a0", unit),
-                        seed("s0", "s1", "a1", unit, fmt),
-                        readout("s1", "s3", "y", "a1", unit),
-                    ), "live accumulator")
+                        seed("s0", "s1", "b0", unit, fmt),
+                        seed("s1", "s2", "c0", unit, fmt),
+                        readout("s2", "s3", "y", "c0", unit),
+                    ), "cannot load a unit with 2 live accumulators")
                 self.rejected(program(
                     scale(), seed("io3", "s0", "a0", unit),
                     fp8_readout("s0", "s1", "packed", "a0", unit),
