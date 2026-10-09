@@ -148,5 +148,49 @@ int main() {
         xluReservations.conflict(xlu, transpose, 66).empty(),
         "XLU whole-engine reservation must release at cycle 66");
 
+  // This fixture supplies reviewed row accesses independently of the policy
+  // gate; production selected rules must come from the evidence provider.
+  TargetTiming multiplyTarget([](const Instr &in, const RegValues &values) {
+    Footprint f = captured(in, values);
+    if (in.op->name == "vmul.bf16") {
+      f.vpuLive = 0;
+      f.holds.push_back({Unit::Vpu, 0, 0, 65});
+    }
+    return f;
+  });
+  multiplyTarget.computePolicies.insert(TargetTiming::ComputePolicy::VmulBf16);
+  const Instr multiply = instruction("vmul.bf16", 4, 0, 2);
+  Footprint multiplication = multiplyTarget.resolve(multiply, regs);
+  check(!selected.resolve(multiply, regs).error.empty() &&
+        multiplication.error.empty(),
+        "VMUL policy must require an explicit opt-in");
+  for (const Instr &unsupported : {vpu, instruction("vadd.bf16", 4, 0, 2),
+                                  instruction("vpack.bf16.fp8", 4, 0, 2), mxu})
+    check(!multiplyTarget.resolve(unsupported, regs).error.empty() &&
+          !ReservationTable(multiplyTarget).conflict(unsupported, {}, 0).empty(),
+          "VMUL opt-in must not enable another VPU or MXU operation");
+  OpInfo wrongEngine = *multiply.op;
+  wrongEngine.engine = Engine::Mxu0;
+  check(!multiplyTarget.allowsOperation(wrongEngine),
+        "a VMUL mnemonic on another engine must not bypass policy admission");
+  check(unitCapacity(Unit::Vpu, 0, multiplyTarget) == 1,
+        "selected VPU whole-engine capacity must be one");
+  ReservationTable multiplyReservations(multiplyTarget);
+  multiplyReservations.reserve(multiply, multiplication, 0);
+  check(!multiplyReservations.conflict(multiply, multiplication, 65).empty() &&
+        multiplyReservations.conflict(multiply, multiplication, 66).empty(),
+        "selected VPU hold must include the final write and release at 66");
+  ReservationTable waitReservations(multiplyTarget);
+  waitReservations.reserve(multiply, multiplication, 10);
+  waitReservations.extendForWait(5);
+  check(!waitReservations.conflict(multiply, multiplication, 5).empty(),
+        "unknown wait must conservatively extend a future VPU engine hold");
+  Footprint physicalAlias = multiplyTarget.resolve(
+      instruction("vmul.bf16", 4, 0, 32), regs);
+  check(!ReservationTable(multiplyTarget)
+             .conflict(instruction("vmul.bf16", 4, 0, 32), physicalAlias, 0)
+             .empty(),
+        "selected VMUL must not inherit model sharing for aliased physical reads");
+
   std::cout << "DMA timing core checks passed\n";
 }

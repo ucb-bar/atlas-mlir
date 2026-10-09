@@ -218,13 +218,24 @@ bool TargetTiming::allowsEngine(Engine engine) const {
   case Engine::Dma:
   case Engine::Xlu:
     return true;
+  case Engine::Vpu:
+    return computePolicies.count(ComputePolicy::VmulBf16) != 0;
   default:
     return false;
   }
 }
 
+bool TargetTiming::allowsOperation(const OpInfo &op) const {
+  if (usesLegacyModelPolicies())
+    return true;
+  if (op.engine == Engine::Vpu)
+    return op.name == "vmul.bf16" &&
+           computePolicies.count(ComputePolicy::VmulBf16) != 0;
+  return allowsEngine(op.engine);
+}
+
 Footprint TargetTiming::resolve(const Instr &in, const RegValues &regs) const {
-  if (!in.op || !allowsEngine(in.op->engine)) {
+  if (!in.op || !allowsOperation(*in.op)) {
     Footprint f;
     f.error = "selected target timing lacks compute-engine pair, overlap and capacity policies";
     return f;
@@ -250,7 +261,7 @@ const char *mlir::atlas::timing::unitName(Unit u) {
       "scalar load path", "scalar write port", "VLOAD path", "VSTORE path",
       "VMEM bank", "XLU", "MXU port", "MXU in-flight matmuls",
       "accumulator read", "accumulator write", "weight push stream",
-      "accumulator push stream"};
+      "accumulator push stream", "VPU"};
   return names[static_cast<int>(u)];
 }
 
@@ -760,7 +771,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
           return access.res == Res::Vmem && !access.atCompletion;
         }) || std::any_of(fa.holds.begin(), fa.holds.end(),
         [](const Hold &hold) { return hold.unit == Unit::VmemBank; });
-    if (finiteVmem)
+    if (finiteVmem || fa.serializeWithDMA)
       consider(fa.doneAge + 1, EdgeKind::Order,
                "selected DMA launch waits for prior VMEM work to drain");
   }
@@ -875,8 +886,8 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
                                                 const Footprint &f,
                                                 EdgeKind &kind) {
   if (dma.exclusiveVmemUntilWait &&
-      std::any_of(f.accesses.begin(), f.accesses.end(),
-                  [](const Access &access) { return access.res == Res::Vmem; })) {
+      (f.serializeWithDMA || std::any_of(f.accesses.begin(), f.accesses.end(),
+                  [](const Access &access) { return access.res == Res::Vmem; }))) {
     kind = EdgeKind::Order;
     return true;
   }
@@ -1090,7 +1101,7 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
 
 std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
                                        int cycle) const {
-  if (!in.op || !target_.allowsEngine(in.op->engine))
+  if (!in.op || !target_.allowsOperation(*in.op))
     return "selected target timing lacks compute-engine reservation policies";
   for (const Hold &h : f.holds)
     if (chooseIndex(h, cycle) < 0)

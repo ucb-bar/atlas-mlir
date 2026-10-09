@@ -39,8 +39,21 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   auto resolver = attr.getAs<StringAttr>("resolver");
   if (!path || !report || !manifest || !hardware || !conditional || !resolver)
     return module.emitError("incomplete RTL evidence selection");
-  if (resolver.getValue() != RTLEvidence::resolverID())
-    return module.emitError("unsupported RTL evidence resolver");
+  auto dmaPath = attr.getAs<StringAttr>("dma_path");
+  auto dmaHash = attr.getAs<StringAttr>("dma_evidence_sha256");
+  auto xluPath = attr.getAs<StringAttr>("xlu_path");
+  auto xluHash = attr.getAs<StringAttr>("xlu_evidence_sha256");
+  if (bool(dmaPath) != bool(dmaHash) ||
+      (attr.get("dma_path") && !dmaPath) ||
+      (attr.get("dma_evidence_sha256") && !dmaHash))
+    return module.emitError("incomplete DMA evidence selection");
+  if (bool(xluPath) != bool(xluHash) ||
+      (attr.get("xlu_path") && !xluPath) ||
+      (attr.get("xlu_evidence_sha256") && !xluHash))
+    return module.emitError("incomplete XLU evidence selection");
+  const char *expectedResolver = RTLEvidence::resolverIDFor(bool(dmaPath), bool(xluPath));
+  if (resolver.getValue() != expectedResolver)
+    return module.emitError("unsupported RTL evidence resolver or DMA selection");
   ExpectedEvidenceIdentity identity{report.getValue().str(),
                                     manifest.getValue().str(),
                                     hardware.getValue().str()};
@@ -48,6 +61,14 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   if (!loaded)
     return module.emitError("RTL evidence selection failed: ")
            << llvm::toString(loaded.takeError());
+  if (dmaPath)
+    if (auto error = loadDMAEvidence(*loaded, dmaPath.getValue(), dmaHash.getValue()))
+      return module.emitError("DMA evidence selection failed: ")
+             << llvm::toString(std::move(error));
+  if (xluPath)
+    if (auto error = loadXLUEvidence(*loaded, xluPath.getValue(), xluHash.getValue()))
+      return module.emitError("XLU evidence selection failed: ")
+             << llvm::toString(std::move(error));
   return std::make_shared<RTLEvidence>(std::move(*loaded));
 }
 
@@ -62,6 +83,10 @@ struct SelectAtlasRTLEvidencePass
   Option<std::string> evidenceHash{*this, "evidence-sha256", llvm::cl::desc("Expected replay report SHA-256")};
   Option<std::string> manifestHash{*this, "manifest-sha256", llvm::cl::desc("Expected retention manifest SHA-256")};
   Option<std::string> hardwareHash{*this, "hardware-ir-sha256", llvm::cl::desc("Expected HW/Comb/Seq SHA-256")};
+  Option<std::string> dmaEvidence{*this, "dma-evidence", llvm::cl::desc("Optional selected DMA replay report")};
+  Option<std::string> dmaEvidenceHash{*this, "dma-evidence-sha256", llvm::cl::desc("Expected DMA replay SHA-256")};
+  Option<std::string> xluEvidence{*this, "xlu-evidence", llvm::cl::desc("Optional selected XLU replay report")};
+  Option<std::string> xluEvidenceHash{*this, "xlu-evidence-sha256", llvm::cl::desc("Expected XLU replay SHA-256")};
   Option<bool> allowConditional{*this, "allow-conditional", llvm::cl::init(false),
       llvm::cl::desc("Explicitly accept a conditional experimental scope")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
@@ -77,7 +102,26 @@ struct SelectAtlasRTLEvidencePass
     fields.set("manifest_sha256", builder.getStringAttr(manifestHash));
     fields.set("hardware_ir_sha256", builder.getStringAttr(hardwareHash));
     fields.set("allow_conditional", builder.getBoolAttr(allowConditional));
-    fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverID()));
+    if (dmaEvidence.empty() != dmaEvidenceHash.empty()) {
+      module.emitError("DMA evidence path and SHA-256 must be selected together");
+      signalPassFailure();
+      return;
+    }
+    if (!dmaEvidence.empty()) {
+      fields.set("dma_path", builder.getStringAttr(dmaEvidence));
+      fields.set("dma_evidence_sha256", builder.getStringAttr(dmaEvidenceHash));
+    }
+    if (xluEvidence.empty() != xluEvidenceHash.empty()) {
+      module.emitError("XLU evidence path and SHA-256 must be selected together");
+      signalPassFailure();
+      return;
+    }
+    if (!xluEvidence.empty()) {
+      fields.set("xlu_path", builder.getStringAttr(xluEvidence));
+      fields.set("xlu_evidence_sha256", builder.getStringAttr(xluEvidenceHash));
+    }
+    fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverIDFor(
+        !dmaEvidence.empty(), !xluEvidence.empty())));
     module->setAttr("atlas.rtl_evidence", fields.getDictionary(module.getContext()));
     if (failed(getSelectedRTLEvidence(module))) {
       signalPassFailure();

@@ -1,6 +1,7 @@
 #include "Atlas/AtlasToLLVM.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasRTLVerification.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -61,7 +62,8 @@ struct ConvertAtlasToLLVMPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifySelectedAtlasRTLTiming(module)) ||
+        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
       signalPassFailure();
       return;
     }
@@ -87,7 +89,8 @@ struct ConvertAtlasToLLVMCallsPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifySelectedAtlasRTLTiming(module)) ||
+        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
       signalPassFailure();
       return;
     }
@@ -178,6 +181,9 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
+    for (StringRef name : {"atlas.rtl_evidence", "atlas.rtl_qualification"})
+      if (Attribute value = module->getAttr(name))
+        reconstructed->setAttr(name, value);
     if (module->hasAttr("atlas.generated_from_virtual"))
       reconstructed->setAttr("atlas.generated_from_virtual",
                              builder.getUnitAttr());
@@ -227,6 +233,7 @@ struct FinalizeAtlasLLVMCallsPass
     }
     llvm::SmallVector<uint32_t> checked;
     if (stagedWords.empty() ||
+        failed(mlir::atlas::verifySelectedAtlasRTLTiming(reconstructed)) ||
         failed(mlir::atlas::collectAtlasWords(reconstructed, checked, true)) ||
         !llvm::equal(stagedWords, checked)) {
       module.emitError("structured Atlas LLVM calls disagree with checked encodings");

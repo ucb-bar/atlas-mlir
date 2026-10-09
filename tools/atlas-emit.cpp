@@ -2,6 +2,7 @@
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasRTLExport.h"
+#include "Atlas/AtlasRTLVerification.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
   }
 
   llvm::SmallVector<uint32_t> words;
+  if (failed(verifySelectedAtlasRTLTiming(*module))) return 1;
   if (failed(collectAtlasWords(*module, words, mapJson || programJson))) return 1;
   if (programJson) {
     // This is the physical-stream input boundary for an external functional

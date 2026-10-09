@@ -1,6 +1,19 @@
 # RTL timing operation coverage draft
 
-This companion to the [draft timing contract](README.md) inventories compiler representation at `7b1e3dab55c2d0bd05d51c8f6ec48e55bcedeb58`. It records static source inspection only: no new build, simulation, timing measurement, or operation qualification was performed. All footprints below are current model assumptions awaiting selected-RTL validation, including their event ages, release ages, capacities, port assignments, and completion estimates. The [expanded catalog](operation-catalog.json) contains names, classes, and engines without timing constants.
+This companion to the [draft timing contract](README.md) inventories the legacy compiler representation at `7b1e3dab55c2d0bd05d51c8f6ec48e55bcedeb58`. The historical tables below record static inspection and model assumptions, not selected-RTL qualification. The [expanded catalog](operation-catalog.json) contains names, classes, and engines without timing constants. The implemented conditional selections are tracked separately here and in the [selection guide](selected-evidence.md).
+
+## Selected provider coverage
+
+| Family | Selected support | Evidence and limits |
+| --- | --- | --- |
+| Scalar setup, DELAY, marker and ECALL | ADDI/LUI, exact DBG0 marker, straight-line completion protocol | Common selected frontend and VLS witnesses; other scalar/control modes remain rejected. |
+| VLOAD/VSTORE | Full raw tiles, serialized paths, bounded known addresses | [VLS derivation/replay](vls-timing.md) and finite component/system observations; whole-domain qualification remains conditional. |
+| DMA | Separately selected load/store/config/wait, channels 0–7, one pending transfer | [Captured operands and dynamic completion](dma-timing.md); no assumed external completion latency, concurrency or CFG lifetime support. |
+| XLU | Separately selected serialized byte transpose | [Source and component replay](xlu-timing.md); one-cycle MREG response assumption, no overlap admission. |
+| VPU | No selected provider yet | [BF16 multiply audit](vpu-multiply-timing.md) and explicit policy groundwork; these do not enable an operation. |
+| MXU, scalar memory and general control | Unsupported by selected timing | Legacy representation below is an inventory, not a fallback when selected evidence is missing. |
+
+Every optional receipt must match the same retained hardware identity. A family-specific pass or numerical witness does not qualify the other modes of its engine. The [consumer contract](compiler-consumers.md) describes how selection, dependencies, reservations and final checks share this boundary.
 
 ## Denominators and scope
 

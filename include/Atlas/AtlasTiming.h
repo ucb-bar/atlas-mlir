@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -93,6 +94,7 @@ enum class Unit {
   MxuAccWrite,
   MxuWeightStream,
   MxuAccStream,
+  Vpu,
 };
 
 struct Hold {
@@ -115,6 +117,9 @@ struct Footprint {
   bool dmaAsync = false;
   // Selected DMA admission serializes all VMEM work until its matching wait.
   bool exclusiveVmemUntilWait = false;
+  // Conservative mixed-engine scope: drain this finite operation before DMA,
+  // and require matching DMA completion before admitting this operation.
+  bool serializeWithDMA = false;
   int dmaCycles = 0;
   std::string error;
 };
@@ -123,12 +128,14 @@ Footprint footprintOf(const Instr &in, const RegValues &regs);
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 // Selected footprints must not silently inherit model-specific engine policy.
-// ConservativeRTL currently admits scalar, LSU, DMA and XLU only; a future
-// compute profile must supply reviewed pair, overlap and capacity policies.
+// ConservativeRTL admits scalar, LSU, DMA and XLU by default. Additional
+// compute operations require an explicit separately reviewed policy.
 struct TargetTiming {
   enum class Policy { LegacyModel, ConservativeRTL };
+  enum class ComputePolicy { VmulBf16 };
   FootprintResolver resolver;
   Policy policy = Policy::LegacyModel;
+  std::set<ComputePolicy> computePolicies;
 
   TargetTiming() = default;
   TargetTiming(FootprintResolver resolve)
@@ -140,6 +147,7 @@ struct TargetTiming {
   TargetTiming(Fn resolve) : TargetTiming(FootprintResolver(std::move(resolve))) {}
   bool usesLegacyModelPolicies() const { return policy == Policy::LegacyModel; }
   bool allowsEngine(Engine engine) const;
+  bool allowsOperation(const OpInfo &op) const;
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   explicit operator bool() const { return !usesLegacyModelPolicies(); }
 };

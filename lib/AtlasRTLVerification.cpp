@@ -17,6 +17,12 @@ constexpr int kMaximumIssueCycle = 1000000;
 
 } // namespace
 
+LogicalResult mlir::atlas::verifySelectedAtlasRTLTiming(ModuleOp module) {
+  if (module->hasAttr("atlas.rtl_evidence") || module->hasAttr("atlas.rtl_qualification"))
+    return verifyAtlasRTLTiming(module);
+  return success();
+}
+
 LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
                                               ResolvedRTLProgram *resolved) {
   if (resolved)
@@ -33,11 +39,17 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     return module.emitError("selected RTL program exceeds the 32768-word instruction memory");
 
   RegValues registers = unknownRegs();
-  ReservationTable reservations;
+  TargetTiming target([evidence = *selected](const Instr &in, const RegValues &regs) {
+    return evidence->resolve(in, regs);
+  });
+  ReservationTable reservations(target);
   std::vector<ResolvedRTLInstruction> issued;
   int cycle = 0;
   int vlsAvailable = 0;
   int asynchronousDone = -1;
+  std::optional<Footprint> pendingDMA;
+  int pendingChannel = -1;
+  int epoch = 0, epochOrigin = 0;
   bool halted = false;
   bool previousWasDelay = false;
 
@@ -50,7 +62,7 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     if (failed(decoded))
       return failure();
     const Instr &instruction = *decoded;
-    Footprint footprint = (*selected)->resolve(instruction, registers);
+    Footprint footprint = target.resolve(instruction, registers);
     if (!footprint.error.empty())
       return operation.emitOpError(footprint.error);
     if (cycle > kMaximumIssueCycle)
@@ -59,12 +71,25 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     const OpClass opClass = instruction.op->opClass;
     const bool vectorMemory =
         opClass == OpClass::VLoad || opClass == OpClass::VStore;
+    const bool fixedEngine = vectorMemory || opClass == OpClass::Transpose;
     const bool terminal = opClass == OpClass::Halt;
     const bool publication = opClass == OpClass::Csr;
+    const bool wait = opClass == OpClass::DmaWait;
+    if (pendingDMA) {
+      if (footprint.dmaAsync)
+        return operation.emitOpError("requires a matching DMA wait before another transfer");
+      if (terminal || publication)
+        return operation.emitOpError("requires a matching DMA wait before completion publication or halt");
+      EdgeKind kind;
+      if (conflictsAtCompletion(*pendingDMA, footprint, kind))
+        return operation.emitOpError("accesses memory retained by pending DMA; matching wait required");
+    }
+    if (wait && (!pendingDMA || instruction.op->channel != pendingChannel))
+      return operation.emitOpError("DMA wait has no matching pending transfer");
     if (terminal && previousWasDelay)
       return operation.emitOpError(
           "can halt while DELAY is stalled; an intervening NOP is required");
-    if (vectorMemory && cycle < vlsAvailable)
+    if (fixedEngine && cycle < vlsAvailable)
       return operation.emitOpError("violates the selected serialized VLS admission")
              << ": issue cycle " << cycle << ", first permitted cycle "
              << vlsAvailable;
@@ -76,7 +101,7 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
 
     for (const ResolvedRTLInstruction &prior : issued) {
       Dependence dependency = dependence(prior.instruction, prior.footprint,
-                                         instruction, footprint);
+                                         instruction, footprint, target);
       if (cycle - prior.cycle < dependency.distance)
         return operation.emitOpError("violates selected RTL dependence: ")
                << dependency.reason << "; gap " << cycle - prior.cycle
@@ -87,8 +112,19 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
       return operation.emitOpError("violates selected RTL reservation: ")
              << conflict;
     reservations.reserve(instruction, footprint, cycle);
-    issued.push_back({instruction, footprint, cycle});
-    if (vectorMemory) {
+    if (wait) {
+      pendingDMA.reset();
+      pendingChannel = -1;
+      reservations.extendForWait(cycle);
+      ++epoch;
+      epochOrigin = cycle;
+    }
+    issued.push_back({instruction, footprint, cycle, epoch, cycle - epochOrigin});
+    if (footprint.dmaAsync) {
+      pendingDMA = footprint;
+      pendingChannel = instruction.op->channel;
+    }
+    if (fixedEngine) {
       asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
       vlsAvailable = cycle + footprint.doneAge + 1;
     }

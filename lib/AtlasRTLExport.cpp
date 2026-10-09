@@ -31,17 +31,24 @@ Array integers(const std::vector<int> &values) {
   return result;
 }
 
-Object footprintJSON(const Footprint &footprint) {
+Object footprintJSON(const Footprint &footprint, bool dynamic) {
   Array accesses, holds;
-  for (const Access &access : footprint.accesses)
-    accesses.push_back(Object{{"resource", resourceName(access.res)},
+  for (const Access &access : footprint.accesses) {
+    Object fact{{"resource", resourceName(access.res)},
         {"write", access.write}, {"first", access.first}, {"count", access.count},
         {"age", access.age}, {"step", access.step}, {"anywhere", access.anywhere},
-        {"at_completion", access.atCompletion}});
+        {"at_completion", access.atCompletion}};
+    if (dynamic && access.atCompletion) {
+      fact["age"] = nullptr;
+      fact["step"] = nullptr;
+      fact["lifetime"] = "launch_through_matching_wait";
+    }
+    accesses.push_back(std::move(fact));
+  }
   for (const Hold &hold : footprint.holds)
     holds.push_back(Object{{"unit", unitName(hold.unit)}, {"index", hold.index},
         {"from", hold.from}, {"to", hold.to}, {"alt", hold.alt}});
-  return Object{{"accesses", std::move(accesses)}, {"holds", std::move(holds)},
+  Object result{{"accesses", std::move(accesses)}, {"holds", std::move(holds)},
       {"mreg_reads", integers(footprint.mregReads)},
       {"mreg_writes", integers(footprint.mregWrites)},
       {"read_release", footprint.readRelease},
@@ -49,6 +56,19 @@ Object footprintJSON(const Footprint &footprint) {
       {"write_during_read", footprint.writeDuringRead},
       {"vpu_live", footprint.vpuLive}, {"done_age", footprint.doneAge},
       {"dma_cycles", footprint.dmaCycles}};
+  if (dynamic) {
+    result["dma_async"] = footprint.dmaAsync;
+    result["exclusive_vmem_until_wait"] = footprint.exclusiveVmemUntilWait;
+    result["serialize_with_dma"] = footprint.serializeWithDMA;
+    if (footprint.dmaAsync) {
+      result["done_age"] = nullptr;
+      result["read_release"] = nullptr;
+      result["write_release"] = nullptr;
+      result["dma_cycles"] = nullptr;
+      result["completion"] = "matching_dma_wait";
+    }
+  }
+  return result;
 }
 } // namespace
 
@@ -65,10 +85,12 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       encoded.push_back(static_cast<uint8_t>(word >> shift));
   }
   auto hash = llvm::SHA256::hash(encoded);
+  const auto &evidence = *program.evidence;
+  const bool dynamic = evidence.hasDMAEvidence();
   for (size_t i = 0; i < program.instructions.size(); ++i) {
     const auto &entry = program.instructions[i];
     const Instr &in = entry.instruction;
-    instructions.push_back(Object{
+    Object entryJSON{
         {"word_index", static_cast<int64_t>(i)},
         {"word_u32", static_cast<int64_t>(program.words[i])},
         {"mnemonic", in.op->name},
@@ -77,15 +99,26 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
         {"logical_issue_cycle", entry.cycle},
         {"event_kind", in.op->opClass == OpClass::Halt ?
             "terminal_acceptance" : "instruction_issue"},
-        {"footprint", footprintJSON(entry.footprint)}});
+        {"footprint", footprintJSON(entry.footprint, dynamic)}};
+    if (dynamic) {
+      entryJSON.erase("logical_issue_cycle");
+      entryJSON["minimum_issue_cycle"] = entry.cycle;
+      entryJSON["issue_epoch"] = entry.epoch;
+      entryJSON["epoch_offset"] = entry.epochOffset;
+      if (in.op->opClass == OpClass::DmaWait) {
+        entryJSON["event_kind"] = "matching_wait_acceptance";
+        entryJSON["epoch_origin"] = "matching_wait_acceptance";
+        entryJSON["channel"] = in.op->channel;
+      }
+    }
+    instructions.push_back(std::move(entryJSON));
   }
-  const auto &evidence = *program.evidence;
-  return Object{
-      {"schema", "atlas.resolved_rtl_timing.v0"},
+  Object result{
+      {"schema", dynamic ? "atlas.resolved_rtl_timing.v1" : "atlas.resolved_rtl_timing.v0"},
       {"target_config", "EE290SimConfig"},
       {"qualification", evidence.qualificationStatus()},
       {"scheduling_qualified", false},
-      {"resolver", Object{{"id", RTLEvidence::resolverID()},
+      {"resolver", Object{{"id", evidence.selectedResolverID()},
                           {"version", RTLEvidence::resolverVersion()}}},
       {"evidence", Object{{"evidence_sha256", evidence.evidenceSha256()},
           {"manifest_sha256", evidence.manifestSha256()},
@@ -102,4 +135,15 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"terminal", "acceptance_not_retirement; ECALL_suppresses_scalar_fire"}}},
       {"applicability", evidence.applicability()},
       {"instructions", std::move(instructions)}};
+  if (dynamic) {
+    (*result.getObject("evidence"))["dma_evidence_sha256"] = evidence.dmaEvidenceSha256();
+    auto *conventions = result.getObject("conventions");
+    (*conventions)["cycle_origin"] = "epoch0:first_instruction; later_epochs:matching_wait_acceptance";
+    (*conventions)["timeline"] = "minimum_issue_cycle_is_lower_bound; compare_offsets_only_within_epoch";
+    (*conventions)["dynamic_completion"] = "memory_lifetime_ends_at_matching_wait; null_age_is_unknown_not_zero";
+    (*conventions)["access_elements"] = "xreg/ereg:register; mreg:register*32+row; vmem:32_byte_line; dram:conservative_anywhere";
+  }
+  if (evidence.hasXLUEvidence())
+    (*result.getObject("evidence"))["xlu_evidence_sha256"] = evidence.xluEvidenceSha256();
+  return result;
 }

@@ -8,6 +8,10 @@ struct ResolvedRTLInstruction {
   timing::Instr instruction;
   timing::Footprint footprint;
   int cycle;
+  // With dynamic waits, cycle is only a lower bound. An accepted matching
+  // wait starts a new epoch; epoch offsets never imply a fixed wait duration.
+  int epoch = 0;
+  int epochOffset = 0;
 };
 
 struct ResolvedRTLProgram {
@@ -21,6 +25,9 @@ struct ResolvedRTLProgram {
 // same check used by the pass, not an additional scheduling oracle.
 LogicalResult verifyAtlasRTLTiming(ModuleOp module,
                                   ResolvedRTLProgram *resolved = nullptr);
+// Executable output boundaries call this after transformations. Unselected
+// legacy streams retain their existing checks; partial selection must fail.
+LogicalResult verifySelectedAtlasRTLTiming(ModuleOp module);
 void registerVerifyAtlasRTLTimingPass();
 } // namespace mlir::atlas
 
