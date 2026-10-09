@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unittest
 
+import generated_fixture
+from generated_fixture import INCOMPLETE, MARKER, UNMARKED, UNSUPPORTED, branch_to, jump_to, label
 from test_virtual_lowering import BIN, lower, run, virtual_chain
 from test_virtual_mxu_extended import seeded_chain
 from test_virtual_mxu_handles import chain
@@ -13,8 +15,6 @@ from test_virtual_mxu_lowering import source
 
 CONTRACT = "atlas.virtual_mxu_contract"
 TAG = "atlas.virtual_mxu_command"
-VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
-LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_mxu_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -22,7 +22,6 @@ BOUNDARIES = (("atlas-opt", ("--verify-atlas-generated-schedule",)),
               ("atlas-emit", ()),
               ("atlas-opt", ("--convert-atlas-to-llvm",)),
               ("atlas-opt", ("--convert-atlas-to-llvm-calls",)))
-STATE = "!atlas.state"
 NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
 DELAY = ("delay", 'cycles = 256 : i32, atlas.delay_reason = "tensor_completion"')
 
@@ -90,11 +89,7 @@ def chain_fixture(unit: int = 0, *, fp8: bool = False, scale_reg: int = 3,
 
 
 def artifact(facts: list[dict], operations: list[tuple[str, str]]) -> str:
-    operations = [*operations, ("trap", 'kind = "ecall"')]
-    lines = [f'%s0 = "atlas.start"() : () -> {STATE}']
-    lines += [f'%s{i + 1} = "atlas.{name}"(%s{i}) {{{fields}}} : ({STATE}) -> {STATE}'
-              for i, (name, fields) in enumerate(operations)]
-    return f"module attributes {{{VERSION}, atlas.virtual_dma_contract = [], {CONTRACT} = {record_text(facts)}}} {{\n" + "\n".join(lines) + "\n}"
+    return generated_fixture.artifact(operations, mxu=facts)
 
 
 class MXUContractVerificationTest(unittest.TestCase):
@@ -124,7 +119,7 @@ class MXUContractVerificationTest(unittest.TestCase):
             for fmt in ("bf16", "fp8"):
                 with self.subTest(unit=unit, fmt=fmt):
                     machine = lower(seeded_chain(unit, fmt, code=173))
-                    self.assertIn(LOWERED_VERSION, machine)
+                    self.assertIn(MARKER, machine)
                     facts = records(machine)
                     self.assertEqual([r["kind"] for r in facts], ["weight_fp8", "acc_" + fmt, "accumulate", "pop_fp8", "acc_fp8", "accumulate", "pop_bf16"])
                     self.assertEqual([r["id"] for r in facts], list(range(7)))
@@ -194,9 +189,9 @@ class MXUContractVerificationTest(unittest.TestCase):
         facts, operations = chain_fixture()
         for index in (0, 2, 4, 6, 8):
             with self.subTest(missing=index):
-                self.rejected(artifact(facts, operations[:index] + operations[index + 2:]))
+                self.rejected(artifact(facts, operations[:index] + operations[index + 2:]), "MXU contract")
             with self.subTest(duplicate=index):
-                self.rejected(artifact(facts, operations[:index] + operations[index:index + 2] + operations[index:]))
+                self.rejected(artifact(facts, operations[:index] + operations[index:index + 2] + operations[index:]), "MXU contract")
             for value in (None, "999 : i32", "0 : i32", "-1 : i32", "0 : i64", '"bad"'):
                 if index == 0 and value == "0 : i32":
                     continue
@@ -205,17 +200,11 @@ class MXUContractVerificationTest(unittest.TestCase):
                     name, text = changed[index]
                     text = re.sub(rf', {TAG} = \d+ : i32', "" if value is None else f", {TAG} = {value}", text)
                     changed[index] = name, text
-                    self.rejected(artifact(facts, changed))
-        self.rejected(artifact(facts, [(*NOP[:1], NOP[1] + f", {TAG} = 0 : i32"), *operations]))
-        machine = artifact(facts, operations)
-        lines = machine.splitlines()
+                    self.rejected(artifact(facts, changed), "MXU contract")
+        self.rejected(artifact(facts, [(*NOP[:1], NOP[1] + f", {TAG} = 0 : i32"), *operations]), "MXU contract")
+        lines = artifact(facts, operations).splitlines()
         lines[0] = "module {"
-        self.rejected("\n".join(lines), "virtual-to-machine artifact")
-        for marker in ("atlas.generated_from_virtual", 'atlas.generated_from_virtual = "dma-contract-v1"'):
-            changed = CONTRACT_RE.sub("", machine).replace(", }", "}").replace(VERSION, marker)
-            if marker == "atlas.generated_from_virtual":
-                changed = changed.replace(", atlas.virtual_dma_contract = []", "")
-            self.rejected(changed)
+        self.rejected("\n".join(lines), UNMARKED)
 
     def test_identical_physical_continuations_retain_logical_order(self) -> None:
         facts, operations = chain_fixture()
@@ -270,10 +259,8 @@ class MXUContractVerificationTest(unittest.TestCase):
         facts, operations = chain_fixture(fp8=True)
         operations = [op for op in operations if op[0] != "scalar_load"]
         for code in (129, 128):
-            diamond = [("branch", 'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = 10 : i32'), NOP,
-                       scale(129), ("jump", 'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = 6 : i32'), NOP, scale(code)]
-            loop = [scale(129), ("branch", 'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = 10 : i32'), NOP,
-                    scale(code), ("jump", 'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = -6 : i32'), NOP]
+            diamond = [branch_to("right"), NOP, scale(129), jump_to("join"), NOP, label("right"), scale(code), label("join")]
+            loop = [scale(129), label("head"), branch_to("exit"), NOP, scale(code), jump_to("head"), NOP, label("exit")]
             for shape, prefix in (("diamond", diamond), ("loop", loop)):
                 with self.subTest(shape=shape, code=code):
                     if code == 129:
@@ -285,46 +272,40 @@ class MXUContractVerificationTest(unittest.TestCase):
         facts, operations = chain_fixture()
         machine = artifact(facts, operations)
         text = contract_text(machine)
-        mutations = [("missing MXU array", CONTRACT_RE.sub("", machine).replace(", }", "}")),
-                     ("missing DMA array", machine.replace("atlas.virtual_dma_contract = [], ", "")),
-                     ("missing version", machine.replace(VERSION + ", ", "")),
-                     ("unit legacy with MXU", machine.replace(VERSION, "atlas.generated_from_virtual")),
-                     ("DMA legacy with MXU", machine.replace("resource-contract-v1", "dma-contract-v1")),
-                     ("future version", machine.replace("resource-contract-v1", "resource-contract-v999")),
-                     ("bad marker type", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32")),
-                     ("nonarray", replace_contract(machine, '"bad"')),
-                     ("nondictionary", replace_contract(machine, "[0 : i32]")),
-                     ("empty with commands", replace_contract(machine, "[]")),
-                     ("foreign field", replace_contract(machine, text.replace("{", "{foreign = 0 : i32, ", 1))),
-                     ("missing field", replace_contract(machine, text.replace("block = 0 : i32, ", "", 1))),
-                     ("wrong numeric type", replace_contract(machine, text.replace("reg = 11 : i32", "reg = 11 : i64", 1))),
-                     ("wrong kind type", replace_contract(machine, text.replace('kind = "reset"', "kind = 0 : i32", 1))),
-                     ("unsorted", replace_contract(machine, record_text(list(reversed(facts)))))]
+        mutations = [("missing MXU array", CONTRACT_RE.sub("", machine).replace(", ,", ","), INCOMPLETE + " " + CONTRACT),
+                     ("missing DMA array", machine.replace("atlas.virtual_dma_contract = [], ", ""), INCOMPLETE + " atlas.virtual_dma_contract"),
+                     ("missing version", machine.replace(MARKER + ", ", ""), UNMARKED),
+                     ("unit legacy", machine.replace(MARKER, "atlas.generated_from_virtual"), UNSUPPORTED),
+                     ("DMA legacy", machine.replace("resource-contract-v3", "dma-contract-v1"), UNSUPPORTED),
+                     ("future version", machine.replace("resource-contract-v3", "resource-contract-v999"), UNSUPPORTED),
+                     ("bad marker type", machine.replace(MARKER, "atlas.generated_from_virtual = 1 : i32"), UNSUPPORTED),
+                     ("nonarray", replace_contract(machine, '"bad"'), f"requires an {CONTRACT} array"),
+                     ("nondictionary", replace_contract(machine, "[0 : i32]"), "MXU contract"),
+                     ("empty with commands", replace_contract(machine, "[]"), "MXU contract"),
+                     ("foreign field", replace_contract(machine, text.replace("{", "{foreign = 0 : i32, ", 1)), "MXU contract"),
+                     ("missing field", replace_contract(machine, text.replace("block = 0 : i32, ", "", 1)), "MXU contract"),
+                     ("wrong numeric type", replace_contract(machine, text.replace("reg = 11 : i32", "reg = 11 : i64", 1)), "MXU contract"),
+                     ("wrong kind type", replace_contract(machine, text.replace('kind = "reset"', "kind = 0 : i32", 1)), "MXU contract"),
+                     ("unsorted", replace_contract(machine, record_text(list(reversed(facts)))), "MXU contract")]
         for index, field, value in ((0, "id", 1), (0, "unit", 2), (0, "slot", 2), (0, "kind", "foreign"),
                                     (0, "scale", 0), (1, "weight", 1), (1, "weight_slot", 0),
                                     (2, "previous", 0), (2, "block", 1), (4, "reg", 41)):
             changed = [dict(r) for r in facts]
             changed[index][field] = value
-            mutations.append((f"{index}.{field}", replace_contract(machine, record_text(changed))))
-        for name, changed in mutations:
+            mutations.append((f"{index}.{field}", replace_contract(machine, record_text(changed)), "MXU contract"))
+        for name, changed, diagnostic in mutations:
             with self.subTest(mutation=name):
                 self.assertNotEqual(changed, machine)
-                self.rejected(changed)
+                self.rejected(changed, diagnostic)
 
-    def test_empty_new_contract_and_legacy_without_mxu_metadata(self) -> None:
+    def test_empty_contract_admits_no_mxu_commands(self) -> None:
         machine = lower(virtual_chain(1))
-        self.assertIn(LOWERED_VERSION, machine)
+        self.assertIn(MARKER, machine)
         self.assertEqual(contract_text(machine), "[]")
         self.accepted(machine)
         facts, operations = chain_fixture()
         untagged = [(name, re.sub(rf', {TAG} = \d+ : i32', "", fields)) for name, fields in operations]
-        legacy = artifact([], untagged).replace(f", {CONTRACT} = []", "")
-        for marker in ("atlas.generated_from_virtual", 'atlas.generated_from_virtual = "dma-contract-v1"'):
-            changed = legacy.replace(VERSION, marker)
-            if marker == "atlas.generated_from_virtual":
-                changed = changed.replace(", atlas.virtual_dma_contract = []", "")
-            self.accepted(changed)
-        self.rejected(artifact([], untagged))
+        self.rejected(artifact([], untagged), "MXU contract")
 
     def test_contract_and_tags_survive_llvm_finalization(self) -> None:
         facts, operations = chain_fixture(fp8=True)
@@ -333,7 +314,7 @@ class MXUContractVerificationTest(unittest.TestCase):
             with self.subTest(option=option):
                 result = run("atlas-opt", machine, option)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(VERSION, result.stdout)
+                self.assertIn(MARKER, result.stdout)
                 self.assertEqual(records(result.stdout), facts)
                 if option == "--convert-atlas-to-llvm-calls":
                     self.assertEqual(result.stdout.count(TAG + " ="), 5)
@@ -373,26 +354,26 @@ class MXUContractVerificationTest(unittest.TestCase):
         structured = run("atlas-opt", artifact(facts, operations), "--convert-atlas-to-llvm-calls")
         self.assertEqual(structured.returncode, 0, structured.stderr)
         text = structured.stdout
-        mutations = [("missing MXU array", CONTRACT_RE.sub("", text).replace(", ,", ",").replace(", }", "}")),
-                     ("bad MXU array", replace_contract(text, '"bad"')),
-                     ("missing DMA array", text.replace("atlas.virtual_dma_contract = [], ", "")),
-                     ("missing version", text.replace(VERSION + ", ", "")),
-                     ("unknown version", text.replace("resource-contract-v1", "resource-contract-v999")),
-                     ("legacy with MXU metadata", text.replace("resource-contract-v1", "dma-contract-v1")),
-                     ("foreign tag", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 999 : i32")),
-                     ("duplicate tag", text.replace(f"{TAG} = 3 : i32", f"{TAG} = 2 : i32")),
-                     ("wrong tag type", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 0 : i64")),
-                     ("missing tag", text.replace(f"{TAG} = 0 : i32, ", ""))]
+        mutations = [("missing MXU array", CONTRACT_RE.sub("", text).replace(", ,", ",").replace(", }", "}"), INCOMPLETE + " " + CONTRACT),
+                     ("bad MXU array", replace_contract(text, '"bad"'), f"requires an {CONTRACT} array"),
+                     ("missing DMA array", text.replace("atlas.virtual_dma_contract = [], ", ""), INCOMPLETE + " atlas.virtual_dma_contract"),
+                     ("missing version", text.replace(MARKER + ", ", ""), UNMARKED),
+                     ("unknown version", text.replace("resource-contract-v3", "resource-contract-v999"), UNSUPPORTED),
+                     ("legacy version", text.replace("resource-contract-v3", "dma-contract-v1"), UNSUPPORTED),
+                     ("foreign tag", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 999 : i32"), "MXU contract"),
+                     ("duplicate tag", text.replace(f"{TAG} = 3 : i32", f"{TAG} = 2 : i32"), "MXU contract"),
+                     ("wrong tag type", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 0 : i64"), "MXU contract"),
+                     ("missing tag", text.replace(f"{TAG} = 0 : i32, ", ""), "MXU contract")]
         lines = text.splitlines()
         lines[0] = "module attributes {atlas.structured_handoff} {"
-        mutations.append(("all resource metadata removed", "\n".join(lines)))
-        for name, changed in mutations:
+        mutations.append(("all resource metadata removed", "\n".join(lines), UNMARKED))
+        for name, changed, diagnostic in mutations:
             with self.subTest(mutation=name):
                 self.assertNotEqual(changed, text)
                 final = run("atlas-opt", changed, "--finalize-atlas-llvm-calls")
                 self.assertNotEqual(final.returncode, 0, final.stdout)
                 self.assertEqual(final.stdout, "")
-                self.assertTrue(final.stderr)
+                self.assertIn(diagnostic, final.stderr)
 
 
 if __name__ == "__main__":

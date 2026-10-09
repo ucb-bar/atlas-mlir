@@ -4,6 +4,7 @@
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -157,13 +158,13 @@ public:
       machineState.addAttributes(step.attrs);
       state = builder.create(machineState)->getResult(0);
     }
-    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v3"));
-    (*emitted)->setAttr("atlas.timing_state", builder.getStringAttr("untimed"));
-    (*emitted)->removeAttr("atlas.timing_provider");
-    (*emitted)->setAttr("atlas.virtual_cfg_contract", *cfgContract);
-    (*emitted)->setAttr("atlas.virtual_dma_contract", *dmaContract);
-    (*emitted)->setAttr("atlas.virtual_mxu_contract", *mxuContract);
-    (*emitted)->setAttr("atlas.virtual_tile_contract", *tileContract);
+    (*emitted)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
+    (*emitted)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
+    (*emitted)->removeAttr(kAtlasTimingProvider);
+    (*emitted)->setAttr(kAtlasCFGContract, *cfgContract);
+    (*emitted)->setAttr(kAtlasDMAContract, *dmaContract);
+    (*emitted)->setAttr(kAtlasMXUContract, *mxuContract);
+    (*emitted)->setAttr(kAtlasTileContract, *tileContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));

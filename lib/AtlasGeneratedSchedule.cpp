@@ -4,6 +4,7 @@
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasCFGContractVerification.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -28,10 +29,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     const AtlasVerificationContext &ctx) {
   assert(ctx.generated && "generated checks require the structural stage");
   ModuleOp module = ctx.module;
-  if (failed(verifyAtlasTimingState(module)))
+  if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)))
     return failure();
-  if (!module->hasAttr("atlas.generated_from_virtual"))
-    return module.emitOpError("expected an Atlas virtual-to-machine artifact");
   if (failed(verifyAtlasGeneratedDMAMemory(ctx)))
     return failure();
   if (failed(verifyAtlasGeneratedDMAContract(ctx)))

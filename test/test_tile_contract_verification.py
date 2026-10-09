@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unittest
 
+import generated_fixture
+from generated_fixture import CLASSIFICATION, INCOMPLETE, MARKER as LOWERED_VERSION, UNSUPPORTED, branch_to, label
 from test_virtual_dma import copy
 from test_virtual_dma_lowering import independent_work
 from test_virtual_lowering import BIN, ROOT, lower, run, virtual_chain, virtual_pressure
@@ -13,8 +15,6 @@ from test_virtual_mxu_handles import program
 
 CONTRACT = "atlas.virtual_tile_contract"
 TAG = "atlas.virtual_tile_command"
-VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
-LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_tile_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -22,7 +22,6 @@ BOUNDARIES = (("atlas-opt", ("--verify-atlas-generated-schedule",)),
               ("atlas-emit", ()),
               ("atlas-opt", ("--convert-atlas-to-llvm",)),
               ("atlas-opt", ("--convert-atlas-to-llvm-calls",)))
-STATE = "!atlas.state"
 DELAY = ("delay", 'cycles = 256 : i32, atlas.delay_reason = "tensor_completion"')
 NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
 
@@ -82,18 +81,7 @@ def materialize(reg: int, value: int) -> list[tuple[str, str]]:
 
 
 def artifact(facts: list[dict], operations: list[tuple[str, str]]) -> str:
-    lines = [f'%s0 = "atlas.start"() : () -> {STATE}']
-    lines += [f'%s{i + 1} = "atlas.{name}"(%s{i}) {{{fields}}} : ({STATE}) -> {STATE}'
-              for i, (name, fields) in enumerate([*operations, NOP, ("trap", 'kind = "ecall"')])]
-    dma = []
-    for fact in facts:
-        if fact["kind"] not in ("dma_load", "dma_store") or fact["transfer"] < 0:
-            continue
-        dma.append("{" + f'id = {fact["transfer"]} : i32, direction = "{fact["kind"][4:]}", channel = {fact["channel"]} : i32, '
-                   f'staging_word = {fact["vmem_byte"] // 4} : i32, dram_byte = {fact["dram_byte"]} : i32, '
-                   f'size_bytes = {fact["bytes"]} : i32, staging_reg = 4 : i32, dram_reg = 7 : i32, size_reg = 2 : i32' + "}")
-    return (f'module attributes {{{VERSION}, atlas.timing_state = "timed", atlas.timing_provider = "npu-model-rtl-match-v1", atlas.virtual_dma_contract = [{", ".join(dma)}], atlas.virtual_mxu_contract = [], '
-            f"{CONTRACT} = {record_text(facts)}}} {{\n" + "\n".join(lines) + "\n}")
+    return generated_fixture.artifact(operations, tile=facts)
 
 
 def vector_fixture() -> tuple[list[dict], list[tuple[str, str]]]:
@@ -176,6 +164,9 @@ class TileContractVerificationTest(unittest.TestCase):
                 self.assertTrue(result.stderr)
                 if diagnostic:
                     self.assertIn(diagnostic, result.stderr)
+                for unintended in CLASSIFICATION:
+                    if unintended not in diagnostic:
+                        self.assertNotIn(unintended, result.stderr)
 
     def test_explicit_formats_have_source_derived_halves_and_dependencies(self) -> None:
         for fmt, halves, size in (("fp8", 1, 1024), ("bf16", 2, 2048)):
@@ -257,7 +248,7 @@ class TileContractVerificationTest(unittest.TestCase):
         self.accepted(artifact(facts, operations))
         for index, before, after in ((1, "immediate = 0", "immediate = 256"),
                                     (3, "immediate = 0", "immediate = 32"),
-                                    (5, "immediate = 1024", "immediate = 2048"),
+                                    (5, "immediate = 1024", "immediate = 1023"),
                                     (7, "reg = 4", "reg = 15"),
                                     (7, "dram = 7", "dram = 15"),
                                     (7, "size = 2", "size = 15"),
@@ -358,16 +349,12 @@ class TileContractVerificationTest(unittest.TestCase):
     def test_cfg_path_must_execute_recorded_predecessors(self) -> None:
         facts = [record(0, "vstore", reg=13, vmem=0x80000, size=1024),
                  record(1, "vload", reg=13, vmem=0x80400, size=1024, after=(0,))]
-        operations = [*materialize(4, 131072),
-                      command("vstore", 'src = 13 : i32, base = 4 : i32, offset = 0 : i32, format = "raw"', 0), DELAY,
-                      command("vload", 'dst = 13 : i32, base = 4 : i32, offset = 8 : i32, format = "raw"', 1), DELAY]
-        machine = artifact(facts, operations)
-        lines = machine.splitlines()
+        store = [command("vstore", 'src = 13 : i32, base = 4 : i32, offset = 0 : i32, format = "raw"', 0), DELAY]
+        load = [command("vload", 'dst = 13 : i32, base = 4 : i32, offset = 8 : i32, format = "raw"', 1), DELAY]
+        self.accepted(artifact(facts, [*materialize(4, 131072), *store, *load]))
         # A legal forward branch skips the store and its completion delay.
-        lines[4] = ('%branch = "atlas.branch"(%s2) {kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset = 16 : i32} : (!atlas.state) -> !atlas.state\n'
-                    '%branch_nop = "atlas.alu_imm"(%branch) {kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32} : (!atlas.state) -> !atlas.state\n'
-                    + lines[4].replace("(%s2)", "(%branch_nop)"))
-        self.rejected("\n".join(lines) + "\n")
+        skipped = [*materialize(4, 131072), branch_to("load"), NOP, *store, label("load"), *load]
+        self.rejected(artifact(facts, skipped), "tile contract")
 
     def test_pack_endpoints_preserve_source_result_and_scratch_addresses(self) -> None:
         source = program('    %packed = "atlas.virtual_pack_fp8"(%seed) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8')
@@ -397,8 +384,9 @@ class TileContractVerificationTest(unittest.TestCase):
         facts, operations = vector_fixture()
         machine = artifact(facts, operations)
         text = contract_text(machine)
-        mutations = [CONTRACT_RE.sub("", machine).replace(", }", "}"),
-                     replace_contract(machine, '"bad"'), replace_contract(machine, "[0 : i32]"),
+        self.rejected(CONTRACT_RE.sub("", machine).replace(", ,", ","), f"{INCOMPLETE} {CONTRACT}")
+        self.rejected(replace_contract(machine, '"bad"'), f"requires an {CONTRACT} array")
+        mutations = [replace_contract(machine, "[0 : i32]"),
                      replace_contract(machine, "[]"),
                      replace_contract(machine, text.replace("bytes = 1024 : i32, ", "", 1)),
                      replace_contract(machine, text.replace("reg = 40 : i32", "reg = 40 : i64", 1)),
@@ -413,9 +401,9 @@ class TileContractVerificationTest(unittest.TestCase):
                      replace_contract(machine, text.replace("reg = 40 : i32", "reg = 64 : i32", 1))]
         for changed in mutations:
             self.assertNotEqual(changed, machine)
-            self.rejected(changed)
-        for marker in ('"resource-contract-v1"', '"dma-contract-v1"', "1 : i32"):
-            self.rejected(machine.replace('"resource-contract-v2"', marker, 1))
+            self.rejected(changed, "tile contract")
+        for marker in ('"resource-contract-v2"', '"dma-contract-v1"', "1 : i32"):
+            self.rejected(machine.replace('"resource-contract-v3"', marker, 1), UNSUPPORTED)
 
     def test_llvm_handoffs_preserve_contract_and_recheck_corruption(self) -> None:
         facts, operations = vector_fixture()

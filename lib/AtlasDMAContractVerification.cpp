@@ -1,4 +1,5 @@
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -14,10 +15,7 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-constexpr llvm::StringLiteral kMarker = "atlas.generated_from_virtual";
-constexpr llvm::StringLiteral kContract = "atlas.virtual_dma_contract";
 constexpr llvm::StringLiteral kTransfer = "atlas.virtual_dma_transfer";
-constexpr llvm::StringLiteral kVersion = "dma-contract-v1";
 
 struct Record {
   uint32_t id, channel, stagingWord, dramByte, sizeBytes;
@@ -165,17 +163,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
     const AtlasVerificationContext &ctx) {
   ModuleOp module = ctx.module;
-  Attribute marker = module->getAttr(kMarker);
-  Attribute contract = module->getAttr(kContract);
-  if (isa_and_nonnull<UnitAttr>(marker)) {
-    if (contract)
-      return module.emitOpError("legacy generated marker cannot carry a DMA contract");
-    return success();
-  }
-  auto version = dyn_cast_or_null<StringAttr>(marker);
-  if (!version || (version.getValue() != kVersion && version.getValue() != "resource-contract-v1" && version.getValue() != "resource-contract-v2" && version.getValue() != "resource-contract-v3"))
-    return module.emitOpError("expected generated marker version resource-contract-v1/v2/v3, dma-contract-v1 or legacy unit");
-  auto array = dyn_cast_or_null<ArrayAttr>(contract);
+  if (failed(requireAtlasGeneratedArtifact(module)))
+    return failure();
+  auto array = dyn_cast<ArrayAttr>(module->getAttr(kAtlasDMAContract));
   if (!array)
     return module.emitOpError("generated resource contract requires an atlas.virtual_dma_contract array");
   llvm::DenseMap<uint32_t, Record> records;

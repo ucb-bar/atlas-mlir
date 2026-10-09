@@ -5,11 +5,12 @@ from pathlib import Path
 import re
 import unittest
 
+from generated_fixture import INCOMPLETE
 from test_virtual_lowering import ROOT, EXAMPLES, lower, run
 
 
 class CFGContractVerificationTest(unittest.TestCase):
-    def check(self, text: str, *, accepted: bool) -> None:
+    def check(self, text: str, *, accepted: bool, diagnostic: str = "CFG contract") -> None:
         boundaries = [("atlas-opt", ("--verify-atlas-generated-schedule",))]
         if 'atlas.timing_state = "timed"' in text:
             boundaries.append(("atlas-emit", ()))
@@ -17,7 +18,7 @@ class CFGContractVerificationTest(unittest.TestCase):
             result = run(tool, text, *flags)
             self.assertEqual(result.returncode == 0, accepted, result.stderr)
             if not accepted:
-                self.assertIn("CFG contract", result.stderr)
+                self.assertIn(diagnostic, result.stderr)
 
     def changed_line(self, machine: str, predicate, change) -> str:
         lines = machine.splitlines()
@@ -173,11 +174,11 @@ class CFGContractVerificationTest(unittest.TestCase):
 
     def test_missing_contract_and_wrong_metadata_types_fail(self) -> None:
         machine = lower((EXAMPLES / "virtual_bf16_loop_program.mlir").read_text(), timed=False)
-        for before, after in (("atlas.virtual_cfg_contract", "atlas.removed_cfg_contract"),
-                              ("atlas.virtual_cfg_branch = 1 : i32", "atlas.virtual_cfg_branch = 1 : i64")):
+        for before, after, diagnostic in (("atlas.virtual_cfg_contract", "atlas.removed_cfg_contract", f"{INCOMPLETE} atlas.virtual_cfg_contract"),
+                                          ("atlas.virtual_cfg_branch = 1 : i32", "atlas.virtual_cfg_branch = 1 : i64", "CFG contract")):
             with self.subTest(before=before):
                 self.assertIn(before, machine)
-                self.check(machine.replace(before, after, 1), accepted=False)
+                self.check(machine.replace(before, after, 1), accepted=False, diagnostic=diagnostic)
 
 
 if __name__ == "__main__":

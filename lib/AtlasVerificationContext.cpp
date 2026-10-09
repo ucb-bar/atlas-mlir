@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "llvm/ADT/DenseSet.h"
 
@@ -37,15 +38,8 @@ verifyGeneratedStructure(ModuleOp module,
     if (auto dma = dyn_cast<DMAOp>(op)) {
       if (pending.count(dma.getChannel()))
         return op.emitOpError("another DMA launch while its channel is pending");
-      if (id) {
-        if (!launchIDs.insert(*id).second)
-          return op.emitOpError("duplicate virtual DMA transfer launch ID");
-      } else if (!module->hasAttr("atlas.timing_state")) {
-        auto wait = next ? dyn_cast<DMAWaitOp>(next) : DMAWaitOp{};
-        if (!wait || wait.getChannel() != dma.getChannel())
-          return op.emitOpError(
-              "generated DMA requires immediate same-channel DMA.WAIT");
-      }
+      if (id && !launchIDs.insert(*id).second)
+        return op.emitOpError("duplicate virtual DMA transfer launch ID");
       pending.try_emplace(dma.getChannel(), PendingDMA{dma, id, currentPC});
     } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
       auto transfer = pending.find(wait.getChannel());
@@ -111,7 +105,7 @@ mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
     ctx.hasDMA |= isa<DMAOp>(op);
     ctx.hasResourceTags |= op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_tile_command");
   }
-  ctx.hasCFGContract = module->hasAttr("atlas.virtual_cfg_contract");
+  ctx.hasCFGContract = module->hasAttr(kAtlasCFGContract);
   auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
   ctx.timed = state && state.getValue() == "timed";
   // The structural stage precedes decoding, which rejects every JALR.

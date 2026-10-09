@@ -1,5 +1,6 @@
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -17,10 +18,7 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-constexpr llvm::StringLiteral kMarker = "atlas.generated_from_virtual";
-constexpr llvm::StringLiteral kContract = "atlas.virtual_tile_contract";
 constexpr llvm::StringLiteral kCommand = "atlas.virtual_tile_command";
-constexpr llvm::StringLiteral kVersion = "resource-contract-v2";
 
 struct Record {
   int32_t id = -1;
@@ -464,22 +462,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
 LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     const AtlasVerificationContext &ctx) {
   ModuleOp module = ctx.module;
-  Attribute marker = module->getAttr(kMarker);
-  Attribute contract = module->getAttr(kContract);
-  bool tagged = false;
-  for (Operation &op : module.getBody()->getOperations())
-    tagged |= bool(op.getAttr(kCommand));
-  auto version = dyn_cast_or_null<StringAttr>(marker);
-  if (!version || (version.getValue() != kVersion && version.getValue() != "resource-contract-v3")) {
-    if (contract || tagged)
-      return module.emitOpError("tile metadata requires generated marker resource-contract-v2/v3");
-    if (isa_and_nonnull<UnitAttr>(marker) ||
-        (version && (version.getValue() == "dma-contract-v1" ||
-                     version.getValue() == "resource-contract-v1")))
-      return success();
-    return module.emitOpError("expected generated marker resource-contract-v2/v3 or supported legacy marker");
-  }
-  auto array = dyn_cast_or_null<ArrayAttr>(contract);
+  if (failed(requireAtlasGeneratedArtifact(module)))
+    return failure();
+  auto array = dyn_cast<ArrayAttr>(module->getAttr(kAtlasTileContract));
   if (!array)
     return module.emitOpError("generated resource contract requires an atlas.virtual_tile_contract array");
   SmallVector<Record> records;

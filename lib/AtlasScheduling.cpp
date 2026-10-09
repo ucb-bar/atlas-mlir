@@ -1,4 +1,5 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
@@ -255,13 +256,16 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays) {
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream, npuModelTimingProvider())))
     return failure();
+  auto kind = classifyAtlasGeneratedArtifact(module);
+  if (failed(kind))
+    return failure();
   uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
     if (failed(scheduleBlock(*stream, b, dmaRegs,
-                             module->hasAttr("atlas.generated_from_virtual"),
+                             *kind == AtlasArtifactKind::Generated,
                              order, before, tailIdle[b])))
       return failure();
   // A block that falls through finishes before the next block's first op.

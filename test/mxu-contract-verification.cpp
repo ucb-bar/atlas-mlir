@@ -139,14 +139,38 @@ void testSourceContract(MLIRContext &context, unsigned unit) {
 }
 
 void testStreamMetadata(MLIRContext &context) {
+  // A complete generated envelope: the pushed register needs a tile-checked
+  // origin, because the stream rewrite rechecks every contract.
   constexpr StringLiteral source = R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v1", atlas.virtual_dma_contract = [],
-    atlas.virtual_mxu_contract = [{id = 0 : i32, block = 0 : i32, kind = "weight_fp8", unit = 1 : i32, reg = 11 : i32, slot = 1 : i32, weight_slot = -1 : i32, weight = -1 : i32, previous = -1 : i32, scale_reg = -1 : i32, scale = -1 : i32}]
+    atlas.generated_from_virtual = "resource-contract-v3", atlas.timing_state = "timed",
+    atlas.timing_provider = "npu-model-rtl-match-v1", atlas.virtual_dma_contract = [],
+    atlas.virtual_mxu_contract = [{id = 0 : i32, block = 0 : i32, kind = "weight_fp8", unit = 1 : i32, reg = 11 : i32, slot = 1 : i32, weight_slot = -1 : i32, weight = -1 : i32, previous = -1 : i32, scale_reg = -1 : i32, scale = -1 : i32}],
+    atlas.virtual_tile_contract = [
+      {id = 0 : i32, kind = "dma_load", reg = -1 : i32, vmem_byte = 1310720 : i32, dram_byte = -1870659584 : i32, bytes = 1024 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32>},
+      {id = 1 : i32, kind = "dma_wait", reg = -1 : i32, vmem_byte = 0 : i32, dram_byte = 0 : i32, bytes = 0 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32: 0>},
+      {id = 2 : i32, kind = "vload", reg = 11 : i32, vmem_byte = 1310720 : i32, dram_byte = 0 : i32, bytes = 1024 : i32, channel = -1 : i32, transfer = -1 : i32, after = array<i32: 1>}],
+    atlas.virtual_cfg_contract = {
+      values = [{id = 0 : i32, block = 0 : i32, reg = 11 : i32, type = "fp8", operands = array<i32>, def = "atlas.virtual_dma_await_fp8"}],
+      blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>, live_in = array<i32>, operations = array<i32: 0, 1, 2>, edges = array<i32>}],
+      edges = [],
+      operations = [
+        {id = 0 : i32, block = 0 : i32, name = "atlas.virtual_dma_load_fp8", operands = array<i32>, results = array<i32>, tile_commands = array<i32: 0>, mxu_commands = array<i32>},
+        {id = 1 : i32, block = 0 : i32, name = "atlas.virtual_dma_await_fp8", operands = array<i32>, results = array<i32: 0>, tile_commands = array<i32: 1, 2>, mxu_commands = array<i32>},
+        {id = 2 : i32, block = 0 : i32, name = "atlas.virtual_mxu_load_weight", operands = array<i32: 0>, results = array<i32>, tile_commands = array<i32>, mxu_commands = array<i32: 0>}]}
   } {
     %s0 = "atlas.start"() : () -> !atlas.state
-    %s1 = "atlas.mxu_push"(%s0) {unit = 1 : i32, kind = "weight_fp8", src = 11 : i32, slot = 1 : i32, atlas.virtual_mxu_command = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s2 = "atlas.delay"(%s1) {cycles = 256 : i32, atlas.delay_reason = "mxu_weight_completion"} : (!atlas.state) -> !atlas.state
-    %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+    %s1 = "atlas.dma_config"(%s0) {channel = 0 : i32, base_reg = 0 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s2 = "atlas.alu_imm"(%s1) {kind = "addi", dst = 29 : i32, src = 0 : i32, immediate = 1024 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.upper"(%s2) {kind = "lui", dst = 31 : i32, immediate = 591872 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s4 = "atlas.upper"(%s3) {kind = "lui", dst = 30 : i32, immediate = 80 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s5 = "atlas.dma"(%s4) {direction = "load", channel = 0 : i32, reg = 30 : i32, dram = 31 : i32, size = 29 : i32, atlas.virtual_tile_command = 0 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 0 : i32, atlas.virtual_cfg_operation = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s6 = "atlas.dma_wait"(%s5) {channel = 0 : i32, atlas.virtual_tile_command = 1 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 1 : i32} : (!atlas.state) -> !atlas.state
+    %s7 = "atlas.vload"(%s6) {dst = 11 : i32, base = 30 : i32, offset = 0 : i32, format = "raw", atlas.virtual_tile_command = 2 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_tensor_result = 0 : i32, atlas.virtual_cfg_source = 1 : i32, atlas.virtual_cfg_operation = 1 : i32} : (!atlas.state) -> !atlas.state
+    %s8 = "atlas.delay"(%s7) {cycles = 256 : i32, atlas.delay_reason = "tensor_completion", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s9 = "atlas.mxu_push"(%s8) {unit = 1 : i32, kind = "weight_fp8", src = 11 : i32, slot = 1 : i32, atlas.virtual_mxu_command = 0 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 2 : i32, atlas.virtual_cfg_operation = 2 : i32} : (!atlas.state) -> !atlas.state
+    %s10 = "atlas.delay"(%s9) {cycles = 256 : i32, atlas.delay_reason = "mxu_weight_completion", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s11 = "atlas.alu_imm"(%s10) {kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s12 = "atlas.trap"(%s11) {kind = "ecall", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
   })mlir";
   auto module = parseSourceString<ModuleOp>(source, &context);
   check(module && succeeded(verify(*module)), "stream fixture parses");

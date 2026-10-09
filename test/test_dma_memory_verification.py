@@ -12,12 +12,17 @@ import re
 import subprocess
 import unittest
 
+import generated_fixture
 from test_dma_capture_verification import DELAY, MARKER, NOP, STATE, wait
 from test_virtual_ssa import BIN, run
 
 
 CONFLICT = "DMA memory conflict"
 UNKNOWN = "cannot prove DMA memory disjointness"
+# Generated artifacts must also match every captured operand to a source tile contract.
+# Operands no contract can describe (unknown values, non-tile lengths) still exercise the
+# memory check, which runs first; the contract check then rejects them.
+UNCONTRACTED = "DMA contract"
 
 
 def constant(reg: int, value: int) -> list[tuple[str, str]]:
@@ -48,23 +53,22 @@ def prefix(*, base: int | None = 0x2000, size: int | None = 1024, shared: bool =
 
 
 def program(operations: list[tuple[str, str] | str]) -> str:
-    labels = {}
-    pc = 0
+    """A generated artifact; strings are labels and `@label` redirect targets become source edges."""
+    stream = []
     for item in operations:
         if isinstance(item, str):
-            labels[item] = pc
+            stream.append(generated_fixture.label(item))
+        elif (target := re.search(r"@(\w+)", item[1])) is not None:
+            stream.append(generated_fixture.branch_to(target[1]) if item[0] == "branch" else generated_fixture.jump_to(target[1]))
         else:
-            pc += 1
+            stream.append(item)
+    return generated_fixture.artifact(stream)
+
+
+def hand_written(operations: list[tuple[str, str]]) -> str:
     lines = [f'%s0 = "atlas.start"() : () -> {STATE}']
-    pc = 0
-    for item in operations:
-        if isinstance(item, str):
-            continue
-        name, fields = item
-        fields = re.sub(r"@(\w+)", lambda match: str(2 * (labels[match[1]] - pc)), fields)
-        lines.append(f'%s{pc + 1} = "atlas.{name}"(%s{pc}) {{{fields}}} : ({STATE}) -> {STATE}')
-        pc += 1
-    return "module attributes {atlas.generated_from_virtual} {\n" + "\n".join(lines) + "\n}"
+    lines += [f'%s{pc + 1} = "atlas.{name}"(%s{pc}) {{{fields}}} : ({STATE}) -> {STATE}' for pc, (name, fields) in enumerate(operations)]
+    return "module {\n" + "\n".join(lines) + "\n}"
 
 
 def artifact(work=(), *, direction="load", base=0x2000, size=1024) -> str:
@@ -102,13 +106,19 @@ class DMAMemoryVerificationTest(unittest.TestCase):
             self.skipTest("baseline compiler admits one pending DMA; use the scheduler compiler for pair cases")
 
     def test_empty_generated_artifact_has_no_dma_memory_obligations(self) -> None:
-        result = run("atlas-opt", program([]), "--verify-atlas-generated-schedule")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        ops = [*constant(4, 0x2000), ("alu_reg", 'kind = "add", dst = 5 : i32, lhs = 4 : i32, rhs = 4 : i32'),
+        self.checked(program([]))
+
+    def test_hand_written_stream_without_metadata_has_no_generated_obligations(self) -> None:
+        ops = [*constant(31, 0), *constant(4, 0x2000), ("alu_reg", 'kind = "add", dst = 5 : i32, lhs = 4 : i32, rhs = 4 : i32'),
                ("jump", 'kind = "jalr", dst = 0 : i32, base = 31 : i32, offset = 0 : i32'), NOP]
-        result = run("atlas-opt", program(ops), "--verify-atlas-generated-schedule")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.checked(program([*constant(31, 0), *ops]))
+        source = hand_written(ops)
+        result = run("atlas-opt", source, "--verify-atlas-generated-schedule")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("expected an Atlas virtual-to-machine artifact", result.stderr)
+        for tool, options in (("atlas-emit", ()), ("atlas-opt", ("--convert-atlas-to-llvm",))):
+            result = run(tool, source, *options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout)
 
     def test_captured_base_can_be_overwritten_for_disjoint_vector_access(self) -> None:
         for kind in ("vload", "vstore"):
@@ -130,7 +140,7 @@ class DMAMemoryVerificationTest(unittest.TestCase):
     def test_vmem_line_mask_and_dma_length_mask_are_applied_before_comparison(self) -> None:
         self.checked(artifact([*constant(5, 0x82000), *vector()]), CONFLICT)
         self.checked(artifact([*constant(5, 0x2000), *vector()], base=0x82000), CONFLICT)
-        self.checked(artifact([*constant(5, 0x2100), *vector()], size=0x2400))
+        self.checked(artifact([*constant(5, 0x2100), *vector()], size=0x2400), UNCONTRACTED)
         self.checked(artifact([*constant(5, 0x2000), *vector()], size=0x2400), CONFLICT)
         self.checked(artifact(size=8192), "DMA memory transfer has zero complete beats")
         self.checked(artifact(base=0x5FF00))
@@ -141,8 +151,8 @@ class DMAMemoryVerificationTest(unittest.TestCase):
                 self.checked(artifact([*constant(5, base), *vector(offset=offset)]), "vector DMA memory access has invalid VMEM span")
 
     def test_unknown_operands_require_proof_only_for_potential_write_conflicts(self) -> None:
-        self.checked(artifact(base=None, size=None))
-        self.checked(artifact(vector(), direction="store", base=None, size=None))
+        self.checked(artifact(base=None, size=None), UNCONTRACTED)
+        self.checked(artifact(vector(), direction="store", base=None, size=None), UNCONTRACTED)
         self.checked(artifact(vector()), UNKNOWN)
         self.checked(artifact([*constant(5, 0x2100), *vector()], base=None), UNKNOWN)
         self.checked(artifact([*constant(5, 0x2100), *vector()], size=None), UNKNOWN)
@@ -183,13 +193,15 @@ class DMAMemoryVerificationTest(unittest.TestCase):
 
     def test_concurrent_dram_ranges_and_read_only_vmem_aliases(self) -> None:
         self.require_two_pending()
-        for direction, address, base, diagnostic in (("store", 0x90001000, 0x2000, None), ("store", 0x9000001F, 0x2000, CONFLICT + " in DRAM"), ("load", 0x90000000, 0x2100, CONFLICT + " in DRAM")):
+        # The memory check admits concurrent reads of one VMEM range; the timing provider,
+        # which runs last, still serializes them.
+        for direction, address, base, diagnostic in (("store", 0x90001000, 0x2000, "may still be in flight"), ("store", 0x9000001F, 0x2000, CONFLICT + " in DRAM"), ("load", 0x90000000, 0x2100, CONFLICT + " in DRAM")):
             with self.subTest(direction=direction, dram=address):
                 ops = [*prefix(shared=True), *constant(5, base), *constant(8, address), launch("store"),
                        launch(direction, channel=1, identity=1, base=5, dram=8), wait(channel=1, identity=1), wait()]
                 self.checked(program(ops), diagnostic)
         self.checked(program([*prefix(base=None, shared=True), launch("store"), *constant(4, 0x2100), *constant(8, 0x90001000),
-                              launch("store", channel=1, identity=1, dram=8), wait(channel=1, identity=1), wait()]))
+                              launch("store", channel=1, identity=1, dram=8), wait(channel=1, identity=1), wait()]), UNCONTRACTED)
         self.checked(program([*prefix(base=None, shared=True), launch(), *constant(4, 0x2100), *constant(8, 0x90001000),
                               launch("store", channel=1, identity=1, dram=8), wait(channel=1, identity=1), wait()]), UNKNOWN)
         # A nonzero upper DMA base depends on negotiated TileLink address width;
@@ -198,7 +210,7 @@ class DMAMemoryVerificationTest(unittest.TestCase):
                *constant(8, 0x90001000), launch("store"), *constant(4, 0x2100),
                launch("store", channel=1, identity=1, dram=8), wait(channel=1, identity=1), wait()]
         self.checked(program(ops), UNKNOWN + " in DRAM")
-        for size, diagnostic in ((32, None), (64, UNKNOWN + " in DRAM")):
+        for size, diagnostic in ((32, UNCONTRACTED), (64, UNKNOWN + " in DRAM")):
             with self.subTest(dram_end_crosses_32_bits=size == 64):
                 ops = [*prefix(size=size, shared=True), *constant(7, 0xFFFFFFE0), *constant(8, 0x90001000),
                        launch("store"), *constant(4, 0x2100), launch("store", channel=1, identity=1, dram=8),

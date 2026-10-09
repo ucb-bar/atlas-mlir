@@ -572,10 +572,6 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
   Attribute rawState = module->getAttr("atlas.timing_state");
   Attribute rawProvider = module->getAttr("atlas.timing_provider");
   if (!rawState) {
-    auto generated = module->getAttrOfType<StringAttr>("atlas.generated_from_virtual");
-    if (generated && (generated.getValue() == "resource-contract-v2" ||
-                      generated.getValue() == "resource-contract-v3"))
-      return module.emitOpError("resource-contract-v2/v3 requires an explicit timing state");
     if (rawProvider)
       return module.emitOpError("timing provider requires an explicit timing state");
     return success();

@@ -4,42 +4,36 @@ from __future__ import annotations
 
 import unittest
 
+from generated_fixture import BRANCH, JUMP, LABEL, branch_to as branch, jump_to as jump, label
 from test_mxu_contract_verification import (
     BOUNDARIES, DELAY, NOP, artifact, chain_fixture, command, record,
 )
 from test_virtual_lowering import BIN, run
 
 
-def label(name: str) -> tuple[str, str]:
-    return "label", name
-
-
-def branch(target: str) -> tuple[str, str]:
-    return "branch", target
-
-
-def jump(target: str) -> tuple[str, str]:
-    return "jump", target
-
-
 def cfg(facts: list[dict], operations: list[tuple[str, str]]) -> str:
-    """Resolve labels using Atlas byte displacements from instruction words."""
+    """Source blocks start at labels; redirects become source edges."""
+    return artifact(facts, operations)
+
+
+def raw_cfg(facts: list[dict], operations: list[tuple[str, str]]) -> str:
+    """Physical redirects at Atlas byte displacements, without source edges."""
     labels = {}
     index = 0
     for name, fields in operations:
-        if name == "label":
+        if name == LABEL:
             labels[fields] = index
         else:
             index += 1
     emitted = []
     for name, fields in operations:
-        if name == "label":
+        if name == LABEL:
             continue
-        if name in ("branch", "jump"):
+        if name in (BRANCH, JUMP):
             offset = 2 * (labels[fields] - len(emitted))
-            fields = (f'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = {offset} : i32'
-                      if name == "branch" else
-                      f'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = {offset} : i32')
+            name, fields = (("branch", f'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = {offset} : i32')
+                            if name == BRANCH else
+                            ("jump", f'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = {offset} : i32'))
         emitted.append((name, fields))
     return artifact(facts, emitted)
 
@@ -112,7 +106,7 @@ class MXUCFGContractVerificationTest(unittest.TestCase):
         changed = ([jump("producer"), NOP, label("readout")] + operations[-2:]
                    + [("trap", 'kind = "ecall"'), label("producer")]
                    + operations[:-2] + [branch("readout"), NOP])
-        machine = cfg(facts, changed)
+        machine = raw_cfg(facts, changed)
         # artifact() supplies a final trap; remove it to expose the terminal
         # conditional's implicit stream-end fallthrough rather than a halt block.
         # Retain the earlier halt, which prevents readout from falling through
@@ -175,7 +169,8 @@ class MXUCFGContractVerificationTest(unittest.TestCase):
                 for entry in second[1:4]:
                     entry["weight_slot"] = 0
                 b = [(name, fields.replace("slot = 1 : i32", "slot = 0 : i32", 1) if i == 0 else fields.replace("weight_slot = 1 : i32", "weight_slot = 0 : i32")) for i, (name, fields) in enumerate(b)]
-            interleaved = [op for pair in zip(a, b) for op in pair]
+            # Each command keeps its completion delay, which the timed envelope checks.
+            interleaved = [op for i in range(0, len(a), 2) for op in a[i:i + 2] + b[i:i + 2]]
             with self.subTest(unit=unit, slot=slot):
                 self.check(cfg(first + second, interleaved), accepted=True)
 

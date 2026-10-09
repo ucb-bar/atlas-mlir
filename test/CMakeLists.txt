@@ -83,7 +83,10 @@ add_test(NAME atlas-cfg-contract COMMAND atlas-cfg-contract-verification)
 add_llvm_executable(atlas-verification-context-test
   verification-context.cpp PARTIAL_SOURCES_INTENDED)
 llvm_update_compile_flags(atlas-verification-context-test)
+target_compile_definitions(atlas-verification-context-test PRIVATE
+  ATLAS_GENERATED_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/examples/virtual_bf16_shared_relu.mlir")
 target_link_libraries(atlas-verification-context-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR)
+  MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-context-test)
 add_test(NAME atlas-verification-context COMMAND atlas-verification-context-test)

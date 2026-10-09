@@ -19,8 +19,8 @@ FailureOr<DictionaryAttr> buildAtlasCFGContract(
 // PACK's marked internal helper is opaque here: its memory effects, iteration
 // count and finite termination require the separate helper/buffer obligation.
 // Numerical tensor semantics and physical completion remain separate checks.
-// Resource-contract-v3 requires CFG metadata; older artifacts without it retain
-// their existing verification scope.
+// Requires a generated artifact (AtlasGeneratedArtifact.h), which always
+// carries this contract.
 LogicalResult verifyAtlasGeneratedCFGContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedCFGContract(ModuleOp module);
 } // namespace mlir::atlas

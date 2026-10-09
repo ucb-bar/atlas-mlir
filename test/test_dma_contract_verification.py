@@ -6,15 +6,13 @@ from itertools import product
 import re
 import unittest
 
-from test_dma_capture_verification import artifact
+from generated_fixture import CLASSIFICATION, INCOMPLETE, MARKER as VERSION, UNMARKED, UNSUPPORTED, insert_after
 from test_virtual_dma import copy
 from test_virtual_dma_lowering import MARKER, STAGING_WORD, independent_work
 from test_virtual_lowering import BIN, lower, run, virtual_chain
 
 
 CONTRACT = "atlas.virtual_dma_contract"
-VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
-LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_dma_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -55,17 +53,12 @@ def expected_record(identity: int, direction: str, size: int, address: int = 0x8
                 staging_reg=4, dram_reg=7, size_reg=9)
 
 
-def contract_artifact(work: tuple[tuple[str, str], ...] = (), direction: str = "load") -> str:
-    machine = artifact(work, direction=direction)
-    record = ('[{channel = 0 : i32, direction = "' + direction + '", '
-              'dram_byte = -1879048192 : i32, dram_reg = 7 : i32, id = 0 : i32, '
-              'size_bytes = 1024 : i32, size_reg = 9 : i32, staging_reg = 4 : i32, '
-              'staging_word = 131072 : i32}]')
-    machine = machine.replace("atlas.generated_from_virtual", VERSION + f", {CONTRACT} = {record}, atlas.virtual_mxu_contract = []", 1)
-    machine = machine.replace('"atlas.upper"(%s0)', '"atlas.upper"(%config)', 1)
-    return machine.replace('%s1 = "atlas.upper"',
-        '%config = "atlas.dma_config"(%s0) {base_reg = 0 : i32, channel = 0 : i32} '
-        ': (!atlas.state) -> !atlas.state\n%s1 = "atlas.upper"', 1)
+def line_index(machine: str, *needles: str) -> int:
+    return next(i for i, line in enumerate(machine.splitlines()) if all(n in line for n in needles))
+
+
+def launch(machine: str, direction: str = "load") -> int:
+    return line_index(machine, '"atlas.dma"', f'direction = "{direction}"', MARKER)
 
 
 class DMAContractVerificationTest(unittest.TestCase):
@@ -89,13 +82,16 @@ class DMAContractVerificationTest(unittest.TestCase):
                 self.assertTrue(result.stderr)
                 if diagnostic:
                     self.assertIn(diagnostic, result.stderr)
+                for unintended in CLASSIFICATION:
+                    if unintended not in diagnostic:
+                        self.assertNotIn(unintended, result.stderr)
 
     def test_lowering_records_source_values_and_complete_schema(self) -> None:
         for fmt, size in (("fp8", 1024), ("bf16", 2048)):
             for address in (-2147483648, 0xfffff800):
                 with self.subTest(fmt=fmt, address=address):
                     machine = lower(copy(fmt, address=address))
-                    self.assertIn(LOWERED_VERSION, machine)
+                    self.assertIn(VERSION, machine)
                     expected = [expected_record(0, "load", size, address & 0xffffffff),
                                 expected_record(1, "store", size, address & 0xffffffff)]
                     self.assertEqual(records(machine), expected)
@@ -176,43 +172,39 @@ class DMAContractVerificationTest(unittest.TestCase):
         machine = lower(copy())
         contract = contract_text(machine)
         mutations = [
-            ("missing contract", CONTRACT_RE.sub("", machine).replace(", ,", ",").replace(", }", "}")),
-            ("missing version", machine.replace(LOWERED_VERSION + ", ", "")),
-            ("unknown version", machine.replace(LOWERED_VERSION, 'atlas.generated_from_virtual = "resource-contract-v999"')),
-            ("malformed version", machine.replace(LOWERED_VERSION, "atlas.generated_from_virtual = 1 : i32")),
-            ("legacy with contract", machine.replace(LOWERED_VERSION, "atlas.generated_from_virtual")),
-            ("nonarray", replace_contract(machine, '"bad"')),
-            ("nondictionary", replace_contract(machine, "[0 : i32]")),
-            ("empty explicit contract", replace_contract(machine, "[]")),
-            ("missing field", replace_contract(machine, contract.replace("size_reg = 9 : i32, ", "", 1))),
-            ("wrong integer type", replace_contract(machine, contract.replace("staging_word = 131072 : i32", "staging_word = 131072 : i64", 1))),
-            ("wrong direction type", replace_contract(machine, contract.replace('direction = "load"', "direction = 0 : i32", 1))),
-            ("foreign field", replace_contract(machine, contract.replace("{", "{foreign = 0 : i32, ", 1))),
-            ("duplicate record", replace_contract(machine, contract.replace("id = 1 : i32", "id = 0 : i32", 1))),
-            ("unsorted records", replace_contract(machine, "[" + ", ".join(reversed(re.findall(r'\{[^{}]*\}', contract))) + "]")),
+            ("missing contract", CONTRACT_RE.sub("", machine).replace(", ,", ",").replace(", }", "}"), f"{INCOMPLETE} {CONTRACT}"),
+            ("missing version", machine.replace(VERSION + ", ", ""), UNMARKED),
+            ("unknown version", machine.replace(VERSION, 'atlas.generated_from_virtual = "resource-contract-v999"'), UNSUPPORTED),
+            ("malformed version", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32"), UNSUPPORTED),
+            ("unit legacy", machine.replace(VERSION, "atlas.generated_from_virtual"), UNSUPPORTED),
+            ("DMA legacy", machine.replace("resource-contract-v3", "dma-contract-v1"), UNSUPPORTED),
+            ("nonarray", replace_contract(machine, '"bad"'), f"requires an {CONTRACT} array"),
+            ("nondictionary", replace_contract(machine, "[0 : i32]"), "DMA contract"),
+            ("empty explicit contract", replace_contract(machine, "[]"), "DMA contract"),
+            ("missing field", replace_contract(machine, contract.replace("size_reg = 9 : i32, ", "", 1)), "DMA contract"),
+            ("wrong integer type", replace_contract(machine, contract.replace("staging_word = 131072 : i32", "staging_word = 131072 : i64", 1)), "DMA contract"),
+            ("wrong direction type", replace_contract(machine, contract.replace('direction = "load"', "direction = 0 : i32", 1)), "DMA contract"),
+            ("foreign field", replace_contract(machine, contract.replace("{", "{foreign = 0 : i32, ", 1)), "DMA contract"),
+            ("duplicate record", replace_contract(machine, contract.replace("id = 1 : i32", "id = 0 : i32", 1)), "DMA contract"),
+            ("unsorted records", replace_contract(machine, "[" + ", ".join(reversed(re.findall(r'\{[^{}]*\}', contract))) + "]"), "DMA contract"),
         ]
-        for name, changed in mutations:
+        for name, changed, diagnostic in mutations:
             with self.subTest(mutation=name):
                 self.assertNotEqual(changed, machine)
-                self.rejected(changed)
+                self.rejected(changed, diagnostic)
 
-    def test_empty_contract_and_legacy_marker_remain_valid(self) -> None:
+    def test_empty_contract_remains_valid(self) -> None:
         machine = lower(virtual_chain(1))
-        self.assertIn(LOWERED_VERSION, machine)
+        self.assertIn(VERSION, machine)
         self.assertEqual(contract_text(machine), "[]")
         self.accepted(machine)
-        legacy = artifact()
-        self.assertNotIn(CONTRACT, legacy)
-        self.accepted(legacy)
-        dma_only = contract_artifact().replace('"resource-contract-v1"', '"dma-contract-v1"').replace(", atlas.virtual_mxu_contract = []", "")
-        self.accepted(dma_only)
 
     def test_unknown_captured_addresses_are_rejected(self) -> None:
-        machine = contract_artifact()
+        machine = lower(copy())
         for name, changed in (
-            ("DRAM upper word", machine.replace("base_reg = 0", "base_reg = 15")),
-            ("DRAM byte address", machine.replace('kind = "lui", dst = 7 : i32',
-                                                    'kind = "auipc", dst = 7 : i32')),
+            ("DRAM upper word", machine.replace("base_reg = 5 : i32", "base_reg = 15 : i32")),
+            ("DRAM byte address", machine.replace('dst = 10 : i32, immediate = 524288 : i32, kind = "lui"',
+                                                    'dst = 10 : i32, immediate = 524288 : i32, kind = "auipc"')),
         ):
             with self.subTest(capture=name):
                 self.assertNotEqual(changed, machine)
@@ -220,10 +212,12 @@ class DMAContractVerificationTest(unittest.TestCase):
                 self.rejected(changed, "DMA contract cannot prove captured " + name)
 
     def test_contract_survives_llvm_and_stream_rewrites(self) -> None:
-        machine = contract_artifact()
+        timed, untimed = lower(copy()), lower(copy(), timed=False)
         for option in (None, "--convert-atlas-to-llvm", "--convert-atlas-to-llvm-calls",
                        "--insert-atlas-delays", "--schedule-atlas-stream"):
             with self.subTest(option=option):
+                # Stream rewrites take untimed input; LLVM handoffs require timed input.
+                machine = untimed if option in ("--insert-atlas-delays", "--schedule-atlas-stream") else timed
                 result = run("atlas-opt", machine, *((option,) if option else ()))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(VERSION, result.stdout)
@@ -237,9 +231,9 @@ class DMAContractVerificationTest(unittest.TestCase):
                     self.accepted(result.stdout)
                     lines = result.stdout.splitlines()
                     address = next(i for i, line in enumerate(lines)
-                                   if '"atlas.upper"' in line and 'dst = 7 : i32' in line)
+                                   if '"atlas.upper"' in line and 'dst = 10 : i32' in line)
                     changed = replace_line(result.stdout, address, lines[address].replace(
-                        "immediate = 589824", "immediate = 589825"))
+                        "immediate = 524288", "immediate = 524289"))
                     self.assertNotEqual(changed, result.stdout)
                     self.assertEqual(contract_text(changed), contract_text(machine))
                     self.rejected(changed, "DMA contract")
@@ -265,10 +259,11 @@ class DMAContractVerificationTest(unittest.TestCase):
 
     def test_captured_scalar_register_reuse_preserves_source_contract(self) -> None:
         self.accepted(lower(independent_work()))
+        machine = lower(copy())
         for direction, register in product(("load", "store"), (4, 7, 9)):
             with self.subTest(direction=direction, register=register):
-                machine = contract_artifact((("alu_imm", f'kind = "addi", dst = {register} : i32, src = 0 : i32, immediate = 1 : i32'),), direction)
-                self.accepted(machine)
+                write = ("alu_imm", f'kind = "addi", dst = {register} : i32, src = 0 : i32, immediate = 1 : i32')
+                self.accepted(insert_after(machine, launch(machine, direction), [write]))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasOps.h"
@@ -331,18 +332,10 @@ static LogicalResult checkLLVMBlockTargets(llvm::ArrayRef<Operation *> encodedOp
 LogicalResult mlir::atlas::verifyAtlasArtifact(
     ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
   if (failed(verify(module)) || failed(verifyAtlasTimingState(module))) return failure();
-  bool generated =
-      module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
-       module->hasAttr("atlas.virtual_mxu_contract") || module->hasAttr("atlas.virtual_tile_contract") ||
-       module->hasAttr("atlas.virtual_cfg_contract") ||
-       llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
-         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_tile_command") ||
-                op.hasAttr("atlas.virtual_cfg_block") || op.hasAttr("atlas.virtual_cfg_edge") ||
-                op.hasAttr("atlas.virtual_cfg_branch") || op.hasAttr("atlas.virtual_cfg_operation") ||
-                op.hasAttr("atlas.virtual_cfg_source") ||
-                op.hasAttr("atlas.virtual_scalar_result") || op.hasAttr("atlas.virtual_tensor_result") ||
-                op.hasAttr("atlas.virtual_scalar_argument") || op.hasAttr("atlas.virtual_cfg_helper");
-       });
+  auto kind = classifyAtlasGeneratedArtifact(module);
+  if (failed(kind))
+    return failure();
+  bool generated = *kind == AtlasArtifactKind::Generated;
   auto ctx = buildAtlasVerificationContext(module, generated);
   if (failed(ctx))
     return failure();

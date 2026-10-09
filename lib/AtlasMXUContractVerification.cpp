@@ -1,4 +1,5 @@
 #include "Atlas/AtlasMXUContractVerification.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
@@ -14,8 +15,6 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-constexpr llvm::StringLiteral kMarker = "atlas.generated_from_virtual";
-constexpr llvm::StringLiteral kContract = "atlas.virtual_mxu_contract";
 constexpr llvm::StringLiteral kCommand = "atlas.virtual_mxu_command";
 
 struct Record {
@@ -436,23 +435,11 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
 LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
     const AtlasVerificationContext &ctx) {
   ModuleOp module = ctx.module;
-  Attribute marker = module->getAttr(kMarker), contract = module->getAttr(kContract);
-  auto version = dyn_cast_or_null<StringAttr>(marker);
-  bool legacy = isa_and_nonnull<UnitAttr>(marker) ||
-                (version && version.getValue() == "dma-contract-v1");
-  if (legacy) {
-    if (contract)
-      return module.emitOpError("legacy generated marker cannot carry an MXU contract");
-    for (Operation &op : module.getBody()->getOperations())
-      if (op.hasAttr(kCommand))
-        return op.emitOpError("legacy generated marker cannot carry MXU command tags");
-    return success();
-  }
-  if (!version || (version.getValue() != "resource-contract-v1" && version.getValue() != "resource-contract-v2" && version.getValue() != "resource-contract-v3"))
-    return module.emitOpError("expected resource-contract-v1/v2/v3 or a legacy generated marker");
-  auto array = dyn_cast_or_null<ArrayAttr>(contract);
-  if (!array || !isa_and_nonnull<ArrayAttr>(module->getAttr("atlas.virtual_dma_contract")))
-    return module.emitOpError("generated resource contract requires DMA and MXU contract arrays");
+  if (failed(requireAtlasGeneratedArtifact(module)))
+    return failure();
+  auto array = dyn_cast<ArrayAttr>(module->getAttr(kAtlasMXUContract));
+  if (!array)
+    return module.emitOpError("generated resource contract requires an atlas.virtual_mxu_contract array");
   SmallVector<Record> records;
   for (Attribute attr : array) {
     auto record = parseRecord(module, attr);

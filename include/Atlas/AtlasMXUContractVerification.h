@@ -24,7 +24,8 @@ FailureOr<ArrayAttr> buildAtlasMXUContract(
 // never to allocator decisions. Fresh producers are required on every
 // reachable CFG path, including loops. Source/emitted CFG correspondence,
 // tensor contents and physical engine completion remain separate obligations.
-// Legacy unit/dma-contract-v1 artifacts must carry no MXU contract or tags.
+// Requires a generated artifact (AtlasGeneratedArtifact.h); its MXU contract
+// may be empty only when the stream issues no MXU command.
 LogicalResult verifyAtlasGeneratedMXUContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedMXUContract(ModuleOp module);
 

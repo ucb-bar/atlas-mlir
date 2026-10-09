@@ -1,4 +1,5 @@
 #include "Atlas/AtlasCFGContractVerification.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -19,7 +20,6 @@
 using namespace mlir;
 using namespace mlir::atlas;
 namespace {
-constexpr StringLiteral contractName = "atlas.virtual_cfg_contract";
 constexpr StringLiteral blockTag = "atlas.virtual_cfg_block";
 constexpr StringLiteral edgeTag = "atlas.virtual_cfg_edge";
 constexpr StringLiteral branchTag = "atlas.virtual_cfg_branch";
@@ -243,17 +243,9 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
 LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     const AtlasVerificationContext &ctx) {
   ModuleOp module = ctx.module;
-  auto raw = module->getAttr(contractName);
-  bool hasTags = false;
-  for (Operation &op : module.getBody()->getOperations()) for (StringRef name : {blockTag,edgeTag,branchTag,sourceTag,operationTag,scalarTag,tensorTag,argumentTag,helperTag}) hasTags |= op.hasAttr(name);
-  if (!raw) {
-    auto version = module->getAttrOfType<StringAttr>("atlas.generated_from_virtual");
-    if (version && version.getValue() == "resource-contract-v3")
-      return module.emitOpError("CFG contract is required for resource-contract-v3");
-    if (hasTags) return module.emitOpError("CFG contract tags require independent source records");
-    return success();
-  }
-  auto contract = dyn_cast<DictionaryAttr>(raw);
+  if (failed(requireAtlasGeneratedArtifact(module)))
+    return failure();
+  auto contract = dyn_cast<DictionaryAttr>(module->getAttr(kAtlasCFGContract));
   auto bad = [&]() { return module.emitOpError("CFG contract malformed source records"); };
   if (!contract || contract.size() != 4) return bad();
   auto vr = contract.getAs<ArrayAttr>("values"), br = contract.getAs<ArrayAttr>("blocks"), er = contract.getAs<ArrayAttr>("edges");

@@ -166,7 +166,7 @@ The invocation must keep load-source memory stable and exclude conflicting exter
 
 SSA addresses and lengths use the existing bounded scalar coloring. At issue, lowering copies their values into shared x7/x9 and materializes the staging base in x4. DMA captures these operands at launch; awaits rematerialize the correct staging address before every VLOAD half. Legacy boundary I/O and its x2 half-tile length remain unchanged. Explicit DMA functions still require the existing input/output base attributes; transfers may not overlap the control mailbox used for function arguments. Runtime addresses and general spilling remain unsupported.
 
-Generated explicit launches and waits carry matching `atlas.virtual_dma_transfer` IDs. The generated-schedule checker permits independent scalar, VPU, MXU, and proven-safe vector-memory work between them, including reuse of scalar operands captured at launch. It tracks each pending channel separately and rejects channel reuse, mismatched waits, conflicting or unproven memory accesses, configuration changes, and control-flow entry or exit inside a pending interval. SELI remains allowed because it writes the separate scale-register file. Unmarked legacy DMA still requires an immediate same-channel wait. These checks enforce the bounded placement policy; they do not establish numerical or cycle-accurate execution qualification.
+Generated explicit launches and waits carry matching `atlas.virtual_dma_transfer` IDs. The generated-schedule checker permits independent scalar, VPU, MXU, and proven-safe vector-memory work between them, including reuse of scalar operands captured at launch. It tracks each pending channel separately and rejects channel reuse, mismatched waits, conflicting or unproven memory accesses, configuration changes, and control-flow entry or exit inside a pending interval. SELI remains allowed because it writes the separate scale-register file. Implicit boundary and mailbox transfers carry no ID; their wait is the next same-channel wait without an ID under the same per-channel interval policy, and the tile contract checks their operands and ordering. These checks enforce the bounded placement policy; they do not establish numerical or cycle-accurate execution qualification.
 
 The independent [DMA memory check](../include/Atlas/AtlasDMAMemoryVerification.h) recomputes CFG scalar constants and captures effective byte ranges from emitted operands. It applies RTL address/length masks and signed VLS offsets, permits read/read sharing, and requires proof for accesses involving a write until the matching wait. It uses neither scheduler dependencies nor allocation summaries. DRAM proofs require the bounded zero-upper ABI and spans within 32 bits; other addresses remain unproven. [Directed tests](../test/test_dma_memory_verification.py) cover register reuse, aliases, offsets, masks, CFG joins/backedges, and concurrent transfers on the compatible scheduler target. This does not qualify hardware cycles or general post-vector resource release.
 
@@ -175,8 +175,7 @@ derives explicit-transfer expectations from source SSA and checked placements
 before lowering replaces the source. Generated artifacts retain these records
 in `atlas.virtual_dma_contract` under marker `"resource-contract-v3"`. Emission and
 both LLVM paths compare actual launch-time operands and completion identities
-against them, rejecting missing or malformed contracts. Legacy unit markers
-retain their earlier checks, and `"dma-contract-v1"` retains DMA-only correspondence.
+against them, rejecting missing or malformed contracts.
 [Mutation tests](../test/test_dma_contract_verification.py)
 cover changed commands and lost metadata; this does not yet check implicit DMA,
 tile payloads/layouts, source-to-machine CFG correspondence, or physical release.
@@ -210,8 +209,7 @@ Accumulator initialization emits `atlas.mxu_push` with `kind=acc_fp8` or `acc_bf
 The original reset-only lowering remains unchanged. Handles across blocks, selected-core numerical qualification of these virtual chains, and RTL timing qualification remain future work. The generated checker enforces resource correspondence and logical completion; timed artifacts additionally undergo an actual issue-spacing check against their named model. This does not qualify that model against hardware.
 
 The [MXU correspondence checker](../include/Atlas/AtlasMXUContractVerification.h)
-derives command expectations from live source and checked placements. New
-artifacts require DMA, MXU and tile contract arrays, including empty arrays.
+derives command expectations from live source and checked placements.
 `atlas.virtual_mxu_contract` and per-command
 `atlas.virtual_mxu_command` identities retain expected operands, formats, slots
 and logical weight/accumulator versions, including legacy matmul expansion.
@@ -235,8 +233,7 @@ slots, explicit staging and PACK's vector endpoints. VLS addresses use signed
 offsets scaled by 32 words; exact addresses must match before hardware masking.
 Required predecessors must execute on every emitted path reaching a command.
 PACK's scalar permutation, general buffer contents and physical completion
-remain separate. Older `"resource-contract-v1"` artifacts retain DMA/MXU checks
-and cannot carry tile contracts or tags.
+remain separate.
 
 The [CFG correspondence checker](../include/Atlas/AtlasCFGContractVerification.h)
 retains source blocks, scalar definitions, tensor origins and simultaneous edge
@@ -248,8 +245,13 @@ contract through scheduling, encoding and LLVM handoff. This proves source
 control/data correspondence; PACK memory layout and buffer preservation remain
 separate obligations.
 
-Generated `"resource-contract-v2"` and `"resource-contract-v3"` artifacts require
-`atlas.timing_state`.
+Lowering marks its output `atlas.generated_from_virtual = "resource-contract-v3"`,
+the only supported version. Such an artifact must carry all four contract
+attributes (arrays may be empty) and an explicit `atlas.timing_state`. A module
+without marker, contracts or correspondence tags is a hand-written stream and
+receives no generated checks. Every consumer applies
+[one classification](../include/Atlas/AtlasGeneratedArtifact.h) that rejects all
+other combinations, including the bare unit marker and earlier versions.
 Lowering produces `"untimed"` output without fixed padding, including mailbox
 reads, PACK helpers and CFG tensor copies. Use
 `--lower-atlas-virtual-to-machine --insert-atlas-delays`, optionally inserting
@@ -259,7 +261,7 @@ preserves the bounded two-transfer policy and its permitted overlap.
 Executable emission and LLVM handoff require `"timed"` state and the named
 `atlas.timing_provider`; `atlas-emit --allow-untimed` permits inspection with
 resource/correspondence checks. Structured LLVM finalization reconstructs and
-rechecks the stream. Legacy artifacts without timing metadata retain their
+rechecks the stream. Hand-written streams without timing metadata retain their
 unqualified scope.
 
 Final timing verification reconstructs issue cycles using a complete supplied
@@ -320,7 +322,7 @@ between selected RTL, architecture text, and the inspected model.
 | `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
 | `--schedule-atlas-virtual` | `atlas-opt` module pass | Reorder virtual operations within each block before resource assignment; preserve SSA, handle and memory dependencies. Uses pressure-aware heuristic costs or a seeded random legal order. Independent verification remains active after allocation and physical scheduling. |
 | `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches and DMA waits; emit typed machine operations with resource contracts and `atlas.timing_state = "untimed"`, without fixed async, scalar-load or helper padding. |
-| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Check generated resource contracts, matching DMA waits, protected transfer intervals, memory conflicts and architectural NOP branch slots. Untimed streams receive no cycle proof; timed streams also recheck actual issue spacing. Emission and LLVM conversion invoke the checks for retained contracts or tags. The checks at one boundary share one context that encodes once and decodes the stream at most once, only when DMA, resource tags, a CFG contract or timed state require it. |
+| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Check generated resource contracts, matching DMA waits, protected transfer intervals, memory conflicts and architectural NOP branch slots. Untimed streams receive no cycle proof; timed streams also recheck actual issue spacing. Emission and LLVM conversion classify each artifact once and invoke these checks for `"resource-contract-v3"` artifacts; hand-written streams receive none of them, and any other marker or metadata combination is rejected. The checks at one boundary share one context that encodes once and decodes the stream at most once, only when DMA, resource tags, a CFG contract or timed state require it; every generated artifact carries a CFG contract and is therefore decoded once. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--insert-atlas-delays` | `atlas-opt` module pass | Reject input that contains `atlas.delay`, then time each basic block in program order and insert the minimum delays the timing model requires, each with an `atlas.reason`. Branch and jump offsets are recomputed. The model is npu_model's `rtl-match` rules ported from atlas-compiler-experiments `3ae2b5d` (`AtlasTiming.cpp`), with DMA VMEM addresses counted in words as in Atlas RTL; it is not selected-RTL timing evidence. Fixed-latency work drains at block boundaries, a DMA wait may release at any time, and a hazard only a DMA wait can fix is an error (channel reuse is a warning). AUIPC, JALR, and linking JAL are rejected. |
 | `--schedule-atlas-stream` | `atlas-opt` module pass | Same input, model, and checks as `--insert-atlas-delays`, but reorder each basic block with the greedy list scheduler ported from atlas-compiler-experiments `3ae2b5d` (`buildGraph`, `criticalHeights`, `scheduleBlock`), then insert the delays its issue cycles need. `insert-delays=false` reorders without padding and keeps the output untimed for a later `--insert-atlas-delays`. Work moves only within a block and after everything it depends on; branches are re-aimed at the new first instruction of their target block. Delay slots are not filled. |
