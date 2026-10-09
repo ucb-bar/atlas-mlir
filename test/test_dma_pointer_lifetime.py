@@ -11,6 +11,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/dma_pointer_lifetime.mlir"
@@ -128,7 +130,7 @@ class DMAPointerLifetimeTest(unittest.TestCase):
                                 "scalar/regfile/regs_1", "scalar/regfile/regs_10",
                                 "scalar/regfile/regs_11", "scalar/regfile/regs_12")))
 
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, words, preload=preload, max_cycles=5000,
                             on_cycle=on_cycle)
                         self.assertTrue(result.halted)

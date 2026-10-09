@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/vpu_relu_pair.mlir"
@@ -128,7 +130,7 @@ class VpuReluReferenceTest(unittest.TestCase):
                     with self.subTest(phase=phase):
                         source, expected = _panel(phase)
                         self.assertNotEqual(source, expected)
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, _object_words(),
                             preload=[(0x90000000, source[:1024]),
                                      (0x90000400, source[1024:]),
@@ -152,7 +154,7 @@ class VpuReluReferenceTest(unittest.TestCase):
                     changed.write_text(SOURCE.read_text().replace(
                         'kind = "relu", dst = 4 : i32, src = 0 : i32',
                         'kind = "mov", dst = 4 : i32, src = 0 : i32'))
-                    result = cosim_atlas.run_program(
+                    result = run_selected_program(cosim_atlas,
                         model, state, _object_words(changed),
                         preload=[(0x90000000, source[:1024]),
                                  (0x90000400, source[1024:]),

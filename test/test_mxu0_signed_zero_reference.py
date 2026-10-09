@@ -14,6 +14,8 @@ import unittest
 
 from test_mxu_reference import PAIR_SOURCE, _object_words
 
+from selected_core_runtime import run_selected_program
+
 
 ONE = 0x38
 MINUS_ONE = 0xB8
@@ -82,7 +84,7 @@ class MXU0SignedZeroReferenceTest(unittest.TestCase):
                 for name, weight, acts, expected_first_row in cases:
                     with self.subTest(name=name):
                         weights = bytes([weight]) * 1024
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, words,
                             preload=[(0x90000000, weights), (0x90000400, acts),
                                      (OUTPUT_BASES[0], b"\xA5" * 1024),

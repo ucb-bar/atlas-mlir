@@ -19,6 +19,8 @@ from test_virtual_mxu import bf16_bits, bf16_cell
 sys.path.insert(0, str(ROOT / "tools"))
 from compile_atlas_linalg_tile import pack_fp8_tile  # noqa: E402
 
+from selected_core_runtime import run_selected_program
+
 
 REQUIRED = (
     "ATLAS_M2M_PYTHON", "ATLAS_M2M_ROOT", "ATLAS_MERLIN_CAPTURE_WORKER",
@@ -187,7 +189,7 @@ class CapturedMLPEndToEndTest(unittest.TestCase):
                 guard = b"\x5A" * 64
                 preload += [(output_base, b"\xA5" * 2048),
                             (output_base + 0x800, guard)]
-                result = cosim_atlas.run_program(
+                result = run_selected_program(cosim_atlas,
                     paths["ATLAS_ARC_MODEL"], paths["ATLAS_ARC_STATE"],
                     words, preload=preload, max_cycles=100000,
                 )

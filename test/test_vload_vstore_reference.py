@@ -11,6 +11,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/vload_vstore.mlir"
@@ -102,7 +104,7 @@ class VLoadVStoreReferenceTest(unittest.TestCase):
                 )
                 for source in panels:
                     with self.subTest(first=source[:8].hex()):
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, _object_words(SOURCE),
                             preload=[(0x90000000, source),
                                      (0x90000400, b"\xA5" * 1024),

@@ -12,6 +12,8 @@ import unittest
 
 from test_scalar_alu_reference import MASK, _emitted, _object_words
 
+from selected_core_runtime import run_selected_program
+
 
 PANELS = (0x90000, 0xFFFFF)
 
@@ -90,7 +92,7 @@ class ScalarUpperReferenceTest(unittest.TestCase):
                                 def on_cycle(core: SelectedCore) -> None:
                                     observed["x12"] = core.peek("scalar/regfile/regs_12")
 
-                                result = cosim_atlas.run_program(
+                                result = run_selected_program(cosim_atlas,
                                     model, state, _emitted(path), max_cycles=80, on_cycle=on_cycle,
                                 )
                                 self.assertTrue(result.halted)

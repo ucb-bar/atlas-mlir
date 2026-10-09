@@ -10,6 +10,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 REGISTER_MODES = ("add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and")
@@ -166,7 +168,7 @@ class ScalarALUReferenceTest(unittest.TestCase):
                                 def on_cycle(core: SelectedCore) -> None:
                                     observed["x12"] = core.peek("scalar/regfile/regs_12")
 
-                                result = cosim_atlas.run_program(
+                                result = run_selected_program(cosim_atlas,
                                     model, state, _emitted(path), max_cycles=80, on_cycle=on_cycle,
                                 )
                                 self.assertTrue(result.halted)

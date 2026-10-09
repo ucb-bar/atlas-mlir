@@ -18,6 +18,8 @@ from test_elf_entry_reference import _compile_elf
 from test_vpu_relu_reference import _emitted
 from test_vpu_square_reference import SOURCE, _panel
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 LAYOUT = ROOT / "test/examples/vpu_square_boot_layout.json"
@@ -172,7 +174,7 @@ class BootCapsuleTest(unittest.TestCase):
 
                 cosim_atlas.CosimCore = SelectedCore
                 try:
-                    result = cosim_atlas.run_program(
+                    result = run_selected_program(cosim_atlas,
                         model, state, words,
                         preload=[(regions["input"]["address"], source),
                                  (regions["output"]["address"], b"\xA5" * 2048),

@@ -11,6 +11,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/dma_pointer_capture.mlir"
@@ -107,7 +109,7 @@ class DMAPointerCaptureTest(unittest.TestCase):
                             # Change the first LUI to B. The later LUI already
                             # clobbers x1 to B after the DMA issue point.
                             program[4] = program[7]
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, program, preload=preload, max_cycles=5000)
                         expected = source_b if clobber_before_launch else source_a
                         self.assertTrue(result.halted)

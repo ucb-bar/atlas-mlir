@@ -13,6 +13,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -62,7 +64,7 @@ def run_core(name: str, tiles: tuple[bytes, bytes, bytes],
             preloads += [(BASE + 0xC00, b"\xA5" * 1024),
                          (BASE + 0x1000, b"\xA5" * 1024),
                          (BASE + 0x1400, b"\x5A" * 32)]
-            result = cosim_atlas.run_program(model, state,
+            result = run_selected_program(cosim_atlas, model, state,
                                              words(name) if program_words is None
                                              else program_words,
                                              preload=preloads, max_cycles=20000)

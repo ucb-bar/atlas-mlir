@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/branch_delay.mlir"
@@ -119,14 +121,14 @@ class BranchReferenceTest(unittest.TestCase):
 
             try:
                 words = _object_words()
-                result = cosim_atlas.run_program(model, state, words, max_cycles=100, on_cycle=on_cycle)
+                result = run_selected_program(cosim_atlas, model, state, words, max_cycles=100, on_cycle=on_cycle)
                 correct = dict(observed)
                 # A different in-block branch target executes the second
                 # post-branch write, so the checked dbg0 value must change.
                 changed = list(words)
                 changed[1] = 0x00000263  # BEQ displacement 4 instead of 6.
                 observed.clear()
-                mutant = cosim_atlas.run_program(model, state, changed, max_cycles=100, on_cycle=on_cycle)
+                mutant = run_selected_program(cosim_atlas, model, state, changed, max_cycles=100, on_cycle=on_cycle)
                 wrong_target = dict(observed)
             finally:
                 cosim_atlas.CosimCore = original

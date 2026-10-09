@@ -12,6 +12,8 @@ import unittest
 
 from test_scalar_alu_reference import MASK, _emitted, _object_words
 
+from selected_core_runtime import run_selected_program
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -162,7 +164,7 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
                                     for register in expected
                                 })
 
-                            result = cosim_atlas.run_program(
+                            result = run_selected_program(cosim_atlas,
                                 model, state, _emitted(path), max_cycles=250, on_cycle=on_cycle,
                             )
                             self.assertTrue(result.halted)
@@ -206,7 +208,7 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
                         final["pending"] = core.peek("scalar/memLoadPending")
                         final["x17"] = core.peek("scalar/regfile/regs_17")
 
-                    result = cosim_atlas.run_program(
+                    result = run_selected_program(cosim_atlas,
                         model, state, _emitted(path), max_cycles=250, on_cycle=on_cycle,
                     )
                     self.assertTrue(result.halted)

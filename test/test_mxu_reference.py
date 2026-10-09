@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/mxu0_full.mlir"
@@ -113,7 +115,7 @@ class MXUReferenceTest(unittest.TestCase):
             try:
                 for name, (weights, acts, expected) in cases.items():
                     with self.subTest(name=name):
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, _object_words(),
                             preload=[(0x90000000, weights), (0x90000400, acts),
                                      (0x90000800, b"\xA5" * 1024), (0x90000C00, b"\x5A" * 32)],
@@ -131,7 +133,7 @@ class MXUReferenceTest(unittest.TestCase):
                                              [0x3D80, 0x3D80])
                 pair_weights = _tile(((0, 0, one), (20, 0, one)))
                 pair_acts = _tile(((0, 0, one),))
-                pair = cosim_atlas.run_program(
+                pair = run_selected_program(cosim_atlas,
                     model, state, _object_words(PAIR_SOURCE),
                     preload=[(0x90000000, pair_weights), (0x90000400, pair_acts),
                              (0x90000800, b"\xA5" * 1024), (0x90001000, b"\xA5" * 1024),

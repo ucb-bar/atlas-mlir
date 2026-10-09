@@ -13,6 +13,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/branch_two_positions_loop.mlir"
@@ -108,7 +110,7 @@ class BranchTwoPositionsLoopReferenceTest(unittest.TestCase):
                        (0x90000400, b"\x5A" * 64)]
             try:
                 words = _object_words(SOURCE)
-                result = cosim_atlas.run_program(model, state, words,
+                result = run_selected_program(cosim_atlas, model, state, words,
                                                  preload=preload, max_cycles=200,
                                                  on_cycle=on_cycle)
                 selected = dict(observed)
@@ -121,7 +123,7 @@ class BranchTwoPositionsLoopReferenceTest(unittest.TestCase):
                     changed_words = _object_words(changed)
                     self.assertNotEqual(changed_words[2], words[2])
                 observed.clear()
-                mutant = cosim_atlas.run_program(model, state, changed_words,
+                mutant = run_selected_program(cosim_atlas, model, state, changed_words,
                                                  preload=preload, max_cycles=200,
                                                  on_cycle=on_cycle)
                 changed_state = dict(observed)

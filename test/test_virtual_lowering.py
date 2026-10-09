@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")).resolve()
@@ -298,7 +300,7 @@ class VirtualLoweringTest(unittest.TestCase):
                     with self.subTest(name=name):
                         words = object_words(lower(source))
                         guard_addr = output_addr + 2048
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, words,
                             preload=[*inputs, (output_addr, b"\xA5" * 2048),
                                      (guard_addr, b"\x5A" * 64)],
@@ -318,7 +320,7 @@ class VirtualLoweringTest(unittest.TestCase):
                 for choice in (0, 1, 2):
                     with self.subTest(dynamic_choice=choice):
                         mailbox = struct.pack("<I", choice) + bytes(1020)
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, dynamic_words,
                             preload=[(0x90000000, a),
                                      (0x90001000, b"\xA5" * 2048),
@@ -339,7 +341,7 @@ class VirtualLoweringTest(unittest.TestCase):
                 # Two independent ordered outputs exercise different live
                 # inputs, VMEM staging windows, and output DRAM tile offsets.
                 two_output_words = object_words(lower(virtual_pressure(2)))
-                result = cosim_atlas.run_program(
+                result = run_selected_program(cosim_atlas,
                     model, state, two_output_words,
                     preload=[(0x90000000, a), (0x90000800, b),
                              (0x90020000, b"\xA5" * 4096),

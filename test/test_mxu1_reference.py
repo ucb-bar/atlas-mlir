@@ -14,6 +14,8 @@ import unittest
 from test_mxu_numerics import dot, fp8, round_bf16
 from test_mxu_reference import PAIR_SOURCE, _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/mxu1_pair.mlir"
@@ -143,7 +145,7 @@ class MXU1ReferenceTest(unittest.TestCase):
                     for unit in ((1, 0) if name == "tie" else (1,)):
                         with self.subTest(name=name, unit=unit):
                             source = SOURCE if unit == 1 else PAIR_SOURCE
-                            result = cosim_atlas.run_program(
+                            result = run_selected_program(cosim_atlas,
                                 model, state, _object_words(source),
                                 preload=[(0x90000000, weights), (0x90000400, acts),
                                          (0x90000800, b"\xA5" * 1024),

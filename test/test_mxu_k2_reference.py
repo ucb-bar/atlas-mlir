@@ -15,6 +15,8 @@ import unittest
 from test_mxu_numerics import dot
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/mxu0_k2.mlir"
@@ -155,7 +157,7 @@ class MXUK2ReferenceTest(unittest.TestCase):
                                        for i, value in enumerate(inputs)]
                             preload += [(0x90001000, b"\xA5" * 2048),
                                         (0x90001800, b"\x5A" * 32)]
-                            result = cosim_atlas.run_program(model, state, words,
+                            result = run_selected_program(cosim_atlas, model, state, words,
                                                              preload=preload, max_cycles=10000)
                             observed = result.slave.captured(0x90001000, 2048)
                             expected = _expected(inputs, continue_acc=continue_acc)

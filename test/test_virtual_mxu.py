@@ -15,6 +15,8 @@ import unittest
 
 from test_virtual_lowering import BIN, EXAMPLES, ROOT, emitted, lower, object_words, run
 
+from selected_core_runtime import run_selected_program
+
 
 def panel() -> bytes:
     codes = (0x00, 0x30, 0x38, 0x40, 0xB8)
@@ -182,7 +184,7 @@ class VirtualMXUTest(unittest.TestCase):
                     with self.subTest(unit=unit):
                         weights = weight(shift)
                         words = object_words(lower(self.source(unit)))
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, words,
                             preload=[(base, source_panel),
                                      (base + 0x800, weights),
@@ -217,7 +219,7 @@ class VirtualMXUTest(unittest.TestCase):
                     with self.subTest(mlp=(first_shift, second_shift)):
                         first_weight = weight(first_shift)
                         second_weight = weight(second_shift)
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, mlp_words,
                             preload=[(base, source_panel),
                                      (base + 0x800, first_weight),
@@ -265,7 +267,7 @@ class VirtualMXUTest(unittest.TestCase):
                     with self.subTest(biased_mlp=(first_shift, second_shift)):
                         first_weight = weight(first_shift)
                         second_weight = weight(second_shift)
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, biased_words,
                             preload=[(base, source_panel),
                                      (base + 0x800, first_weight),

@@ -15,6 +15,8 @@ from fractions import Fraction
 from test_mxu_numerics import bf16, fp8, round_bf16
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/vpu_e8m0_pack_chain.mlir"
@@ -202,7 +204,7 @@ class VpuE8M0PackReferenceTest(unittest.TestCase):
                         preload += [(BASE + 0x800 + 0x400 * i, b"\xA5" * 1024)
                                     for i in range(5)]
                         preload += [(BASE + 0x1C00, b"\x5A" * 32)]
-                        result = cosim_atlas.run_program(model, state, words,
+                        result = run_selected_program(cosim_atlas, model, state, words,
                                                          preload=preload, max_cycles=15000)
                         self.assertTrue(result.halted)
                         self.assertEqual((result.reads, result.writes), (64, 160))

@@ -11,6 +11,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/jal_direct_target.mlir"
@@ -121,7 +123,7 @@ class JALReferenceTest(unittest.TestCase):
                                          "csrfile/reg_dbg0"):
                                 observed[name] = core.peek(name) & 0xFFFFFFFF
 
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, program, preload=guards,
                             max_cycles=100, on_cycle=on_cycle)
                         self.assertTrue(result.halted)

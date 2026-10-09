@@ -13,6 +13,8 @@ import unittest
 
 from test_vpu_relu_reference import _emitted, _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/vli_selective_pair.mlir"
@@ -172,7 +174,7 @@ class VliSelectiveReferenceTest(unittest.TestCase):
                                 source.write_text(_source(mode, dst, code))
                                 words = _object_words(source)
                                 self.assertEqual(words, _emitted(source))
-                            result = cosim_atlas.run_program(
+                            result = run_selected_program(cosim_atlas,
                                 model, state, words,
                                 preload=[(0x90000000, noise[:1024]),
                                          (0x90000400, noise[1024:]),

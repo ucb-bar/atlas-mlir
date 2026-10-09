@@ -17,6 +17,8 @@ import unittest
 
 from test_mxu_reference import _object_words
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCES = {0: ROOT / "test/examples/mxu0_pair.mlir",
@@ -188,7 +190,7 @@ class MXUArithmeticDiscriminatorTest(unittest.TestCase):
                                              _bf16(sum(products, start=Fraction(0))))
                             expected = (expected_bits.to_bytes(2, "little") +
                                         bytes(1022) + bytes(1024))
-                            result = cosim_atlas.run_program(
+                            result = run_selected_program(cosim_atlas,
                                 model, state, words[unit],
                                 preload=[(0x90000000, weight_bytes),
                                          (0x90000400, activation_bytes),

@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from selected_core_runtime import run_selected_program
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/dma_loopback.mlir"
@@ -138,7 +140,7 @@ class DMAReferenceTest(unittest.TestCase):
                 observed["dbg0"] = core.peek("csrfile/reg_dbg0")
 
             try:
-                result = cosim_atlas.run_program(model, state, _object_words(),
+                result = run_selected_program(cosim_atlas, model, state, _object_words(),
                                                  preload=preload, max_cycles=5000,
                                                  on_cycle=on_cycle)
             finally:

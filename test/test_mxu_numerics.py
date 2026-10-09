@@ -15,6 +15,8 @@ from fractions import Fraction
 
 from test_mxu_reference import _object_words, _tile
 
+from selected_core_runtime import run_selected_program
+
 
 def power2(exponent):
     return Fraction(2**exponent) if exponent >= 0 else Fraction(1, 2 ** -exponent)
@@ -124,7 +126,7 @@ class MXUNumericsTest(unittest.TestCase):
                 for case, (weights, acts) in enumerate(cases):
                     expected = dot(weights, acts)
                     with self.subTest(case=case, weights=weights, acts=acts):
-                        result = cosim_atlas.run_program(
+                        result = run_selected_program(cosim_atlas,
                             model, state, _object_words(),
                             preload=[(0x90000000, _tile(tuple((0, j, value) for j, value in enumerate(weights)))),
                                      (0x90000400, _tile(tuple((0, j, value) for j, value in enumerate(acts)))),
