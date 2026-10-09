@@ -129,7 +129,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
     return failure();
   auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
   if (state && state.getValue() == "timed")
-    return verifyAtlasTiming(module, timing::footprintOf);
+    return verifyAtlasTiming(module);
   return success();
 }
 

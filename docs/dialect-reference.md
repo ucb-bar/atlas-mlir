@@ -250,12 +250,15 @@ resource/correspondence checks. Structured LLVM finalization reconstructs and
 rechecks the stream. Legacy artifacts without timing metadata retain their
 unqualified scope.
 
-Final timing verification reconstructs issue cycles, dependencies and reservations.
-The current provider, `"npu-model-rtl-match-v1"`, includes built-in dependence,
-capacity and overlap policies; its footprint callback alone is not a complete
-provider-independent interface. DMA waits establish completion regardless of
-estimated duration. This checks the selected model, not its RTL qualification;
-full provider integration remains separate work.
+Final timing verification reconstructs issue cycles using a complete supplied
+`TimingProvider`: program coverage, operand footprints/completion, dependencies,
+DMA conflicts, issue gaps and reservation/WAIT behavior. Missing rules fail
+explicitly; externally supplied policies must match retained provider identity.
+The command-line passes currently select `"npu-model-rtl-match-v1"`; that adapter
+preserves existing model rules without claiming RTL qualification. The current
+CIRCT vector-memory evidence lacks a complete policy and cannot silently borrow
+model rules. DMA waits establish completion regardless of estimated duration;
+fixed-latency work must drain at CFG boundaries and before host publication.
 
 ## Machine operations
 

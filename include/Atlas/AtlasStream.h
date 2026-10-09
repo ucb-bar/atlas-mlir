@@ -1,7 +1,7 @@
 #ifndef ATLAS_STREAM_H
 #define ATLAS_STREAM_H
 
-#include "Atlas/AtlasTiming.h"
+#include "Atlas/AtlasTimingProvider.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/DenseMap.h"
@@ -36,17 +36,18 @@ enum class AtlasStreamReadMode { Scheduling, Verification };
 // unknown. It skips only the generated verifier hook to avoid recursive checks.
 FailureOr<AtlasStream> readAtlasStream(
     ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling);
-// Rejects illegal delay slots and DMA hazards that no delay can cover.
+// Rejects illegal delay slots and DMA hazards using complete supplied rules.
 LogicalResult checkAtlasStream(
-    const AtlasStream &stream, const timing::FootprintResolver &resolver = {});
+    const AtlasStream &stream, const timing::TimingProvider &provider);
 // Checks actual issue spacing, reservations and drained CFG boundaries without
-// using a scheduler dependency graph. Footprints are supplied; dependence,
-// capacities, VPU overlap and reservation policy remain the named npu-model
-// rtl-match model. This is not a complete provider-independent RTL verifier.
+// consulting a scheduler graph or implicitly using any model timing policy.
 LogicalResult verifyAtlasTimedStream(
-    const AtlasStream &stream, const timing::FootprintResolver &resolver);
+    const AtlasStream &stream, const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(
-    ModuleOp module, const timing::FootprintResolver &resolver);
+    ModuleOp module, const timing::TimingProvider &provider);
+// Dispatches the explicitly retained complete provider. Legacy streams without
+// timing metadata select the named model for compatibility.
+LogicalResult verifyAtlasTiming(ModuleOp module);
 // Validates explicit timing metadata. Legacy streams without a timing state
 // keep their existing scope; requireTimed rejects explicitly untimed streams.
 LogicalResult verifyAtlasTimingState(ModuleOp module, bool requireTimed = false);

@@ -5,6 +5,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <deque>
+#include <limits>
 #include <set>
 
 using namespace mlir;
@@ -411,7 +412,15 @@ mlir::atlas::atlasScaleRegisterEntries(const AtlasStream &s) {
 }
 
 LogicalResult mlir::atlas::checkAtlasStream(
-    const AtlasStream &s, const FootprintResolver &resolver) {
+    const AtlasStream &s, const TimingProvider &provider) {
+  if (s.ops.empty())
+    return failure();
+  std::string missing = validateTimingProvider(provider);
+  if (!missing.empty())
+    return s.ops.front()->emitOpError(missing);
+  std::string scope = provider.validateScope(s);
+  if (!scope.empty())
+    return s.ops.front()->emitOpError(scope);
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
@@ -421,9 +430,11 @@ LogicalResult mlir::atlas::checkAtlasStream(
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
-      Footprint f = resolver ? resolver(in, regs) : footprintOf(in, regs);
+      Footprint f = provider.footprint(in, regs);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
+      if (f.doneAge < 0)
+        return s.ops[i]->emitOpError("timing provider returned a negative completion age");
       if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
           (f.doneAge > 0 || op.opClass == OpClass::Halt))
         return s.ops[i]->emitOpError(
@@ -434,10 +445,12 @@ LogicalResult mlir::atlas::checkAtlasStream(
             return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
       for (int ch = 0; ch < 8; ++ch)
         for (const auto &[k, dma] : pending[ch]) {
-          EdgeKind kind;
-          if (conflictsAtCompletion(dma, f, kind))
+          auto conflict = provider.dmaConflict(dma, f);
+          if (!conflict.error.empty())
+            return s.ops[i]->emitOpError(conflict.error);
+          if (conflict.value.conflict)
             return s.ops[i]->emitOpError()
-                   << edgeKindName(kind) << " conflict with " << name(k)
+                   << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
                    << " on channel " << ch
                    << ", which may still be in flight; a delay cannot cover "
                       "a DMA transfer, so add atlas.dma_wait first";
@@ -554,8 +567,8 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
     return module.emitOpError("unknown Atlas timing state");
   if (rawProvider) {
     auto provider = dyn_cast<StringAttr>(rawProvider);
-    if (!provider || provider.getValue() != "npu-model-rtl-match-v1")
-      return module.emitOpError("unknown Atlas timing provider");
+    if (!provider || provider.getValue().empty())
+      return module.emitOpError("Atlas timing provider must be a nonempty string");
   }
   if (state.getValue() == "timed" && !rawProvider)
     return module.emitOpError("timed Atlas stream requires its timing provider");
@@ -565,46 +578,65 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
 }
 
 LogicalResult mlir::atlas::verifyAtlasTimedStream(
-    const AtlasStream &s, const FootprintResolver &resolver) {
+    const AtlasStream &s, const TimingProvider &provider) {
   if (s.ops.empty())
     return failure();
-  if (!resolver)
-    return s.ops.front()->emitOpError("timing verification requires supplied footprint rules");
-  if (failed(checkAtlasStream(s, resolver)))
+  if (failed(checkAtlasStream(s, provider)))
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
-    ReservationTable table;
+    auto reservations = provider.createReservations();
+    if (!reservations.error.empty())
+      return s.ops[s.starts[block]]->emitOpError(reservations.error);
+    if (!reservations.value)
+      return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
+    TimingReservations &table = *reservations.value;
     std::vector<Issued> issued;
     std::array<Operation *, 8> pendingDMA{};
     int cycle = 0;
     int drained = 0;
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
       const Instr &in = s.instrs[i];
-      Footprint f = resolver(in, regs);
+      Footprint f = provider.footprint(in, regs);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
+      if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
+        return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
       for (const Issued &prior : issued) {
-        Dependence d = dependence(s.instrs[prior.index], prior.footprint, in, f);
+        auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
+        if (!rule.error.empty())
+          return s.ops[i]->emitOpError(rule.error);
+        const Dependence &d = rule.value;
+        if (d.distance < 0)
+          return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
         if (cycle - prior.cycle < d.distance)
           return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
                  << "; requires " << d.distance << ", got " << cycle - prior.cycle;
       }
-      std::string conflict = table.conflict(in, f, cycle);
-      if (!conflict.empty())
-        return s.ops[i]->emitOpError("timing resource conflict: ") << conflict;
+      auto conflict = table.conflict(in, f, cycle);
+      if (!conflict.error.empty())
+        return s.ops[i]->emitOpError(conflict.error);
+      if (!conflict.value.empty())
+        return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
+      if (in.release && cycle < drained)
+        return s.ops[i]->emitOpError("completion publication precedes fixed-latency completion");
       if (in.op->opClass == OpClass::Halt) {
         if (i > 0 && isa<DelayOp>(s.ops[i - 1]))
           return s.ops[i]->emitOpError("halt does not wait for a preceding DELAY; require a scalar guard instruction");
         if (cycle < drained)
           return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
       }
-      if (isControlFlow(*in.op) && cycle + 2 < drained)
+      if (isControlFlow(*in.op) && int64_t(cycle) + 2 < drained)
         return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
-      table.reserve(in, f, cycle);
-      if (in.op->opClass == OpClass::DmaWait)
-        table.extendForWait(cycle);
+      std::string reservationError = table.reserve(in, f, cycle);
+      if (!reservationError.empty())
+        return s.ops[i]->emitOpError(reservationError);
+      if (in.op->opClass == OpClass::DmaWait) {
+        std::string waitError = table.onWait(in, cycle);
+        if (!waitError.empty())
+          return s.ops[i]->emitOpError(waitError);
+      }
       if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
         pendingDMA[in.op->channel] = s.ops[i];
       else if (in.op->opClass == OpClass::DmaWait)
@@ -612,7 +644,12 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       issued.push_back({i, f, cycle});
       drained = std::max(drained, cycle + f.doneAge + 1);
       applyScalar(in, regs);
-      cycle += naturalGap(in);
+      auto gap = provider.issueGap(in);
+      if (!gap.error.empty())
+        return s.ops[i]->emitOpError(gap.error);
+      if (gap.value <= 0 || cycle > std::numeric_limits<int>::max() - gap.value)
+        return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
+      cycle += gap.value;
     }
     for (Operation *launch : pendingDMA)
       if (launch)
@@ -620,9 +657,15 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
       int idle = 0;
       if (s.fallsThrough(block))
-        for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i)
-          idle += naturalGap(s.instrs[i]);
-      if (drained > cycle + idle)
+        for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i) {
+          auto gap = provider.issueGap(s.instrs[i]);
+          if (!gap.error.empty())
+            return s.ops[i]->emitOpError(gap.error);
+          if (gap.value <= 0 || idle > std::numeric_limits<int>::max() - gap.value)
+            return s.ops[i]->emitOpError("timing provider boundary gap exceeds positive cycle domain");
+          idle += gap.value;
+        }
+      if (int64_t(drained) > int64_t(cycle) + idle)
         return s.ops[s.blockEnd(block) - 1]->emitOpError("fixed-latency work remains live across a block boundary or stream end");
     }
   }
@@ -630,13 +673,26 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
 }
 
 LogicalResult mlir::atlas::verifyAtlasTiming(
-    ModuleOp module, const FootprintResolver &resolver) {
+    ModuleOp module, const TimingProvider &provider) {
   if (failed(verifyAtlasTimingState(module)))
     return failure();
+  if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider");
+      selected && selected.getValue() != provider.id)
+    return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
   if (failed(stream))
     return failure();
-  return verifyAtlasTimedStream(*stream, resolver);
+  return verifyAtlasTimedStream(*stream, provider);
+}
+
+LogicalResult mlir::atlas::verifyAtlasTiming(ModuleOp module) {
+  std::string id = "npu-model-rtl-match-v1";
+  if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider"))
+    id = selected.getValue().str();
+  auto provider = lookupTimingProvider(id);
+  if (!provider.error.empty())
+    return module.emitOpError(provider.error);
+  return verifyAtlasTiming(module, provider.value);
 }
 
 namespace {
@@ -651,7 +707,7 @@ struct VerifyAtlasTimingPass
     ModuleOp module = getOperation();
     SmallVector<uint32_t> words;
     if (failed(collectAtlasWords(module, words, false)) ||
-        failed(verifyAtlasTiming(module, footprintOf))) {
+        failed(verifyAtlasTiming(module, npuModelTimingProvider()))) {
       signalPassFailure();
       return;
     }

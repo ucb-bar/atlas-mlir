@@ -253,7 +253,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
 
 LogicalResult scheduleStream(ModuleOp module, bool insertDelays) {
   FailureOr<AtlasStream> stream = readAtlasStream(module);
-  if (failed(stream) || failed(checkAtlasStream(*stream)))
+  if (failed(stream) || failed(checkAtlasStream(*stream, npuModelTimingProvider())))
     return failure();
   uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;

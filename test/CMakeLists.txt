@@ -62,3 +62,11 @@ target_link_libraries(atlas-tile-contract-test PRIVATE
   MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-tile-contract-test)
 add_test(NAME atlas-tile-contract COMMAND atlas-tile-contract-test)
+
+add_llvm_executable(atlas-timing-provider-test
+  timing-provider-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-timing-provider-test)
+target_link_libraries(atlas-timing-provider-test PRIVATE
+  MLIRAtlas MLIRParser MLIRIR)
+mlir_check_all_link_libraries(atlas-timing-provider-test)
+add_test(NAME atlas-timing-provider COMMAND atlas-timing-provider-test)

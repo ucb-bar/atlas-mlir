@@ -259,7 +259,7 @@ LogicalResult mlir::atlas::collectAtlasWords(
   auto timingState = module->getAttrOfType<StringAttr>("atlas.timing_state");
   if (!skipGeneratedCheck && !generated && timingState &&
       timingState.getValue() == "timed" &&
-      failed(verifyAtlasTiming(module, timing::footprintOf)))
+      failed(verifyAtlasTiming(module)))
     return failure();
   llvm::SmallVector<uint32_t> collected;
   llvm::SmallVector<Operation *> encodedOps;

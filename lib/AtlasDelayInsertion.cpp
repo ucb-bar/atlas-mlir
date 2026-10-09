@@ -150,7 +150,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
 LogicalResult insertDelays(ModuleOp module) {
   FailureOr<AtlasStream> stream = readAtlasStream(module);
-  if (failed(stream) || failed(checkAtlasStream(*stream)))
+  if (failed(stream) || failed(checkAtlasStream(*stream, npuModelTimingProvider())))
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
   for (size_t b = 0; b < stream->starts.size(); ++b)
