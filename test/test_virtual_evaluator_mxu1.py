@@ -12,7 +12,7 @@ import unittest
 
 from test_virtual_evaluator_mxu import rtl_arithmetic_cases, sparse as matrix
 from test_virtual_evaluator_mxu_handles import A, W, S, TILES, accumulate, diagonal, function, legacy, output, program, read, reset, seed, weight
-from atlas_virtual_evaluator import RuntimeInputs, Tile, UnsupportedVirtualMode, VirtualInterfaceError, evaluate, parse_program
+from atlas_virtual_evaluator import RuntimeInputs, Tile, VirtualInterfaceError, evaluate, parse_program
 
 
 def on_unit(text: str, unit: int) -> str:
@@ -141,7 +141,7 @@ class VirtualEvaluatorMXU1Test(unittest.TestCase):
         self.assert_outputs(kernel(body, "t9", ("raw", "sa", "ipt")), tiles,
                             {0: negative_zero, 1: negative_zero, 2: Tile("bf16", (0,) * 1024)})
 
-    def test_full_raw_seed_and_readout_paths_remain_separate_from_contraction_domain(self) -> None:
+    def test_raw_seed_and_readout_preserve_their_conversion_rules(self) -> None:
         raw_bf16 = (0x8000, 0xFFA1, 0x7F80, 0x0001)
         raw_fp8 = (0x80, 0x81, 0xFF, 0x38, 0xB8, 0x7E, 0xFE, 0x7F)
         decoded = (0x8000, 0x8000, 0x8000, 0x3F80, 0xBF80, 0x43E0, 0xC3E0, 0x0000)
@@ -193,12 +193,40 @@ class VirtualEvaluatorMXU1Test(unittest.TestCase):
                          3: sparse("bf16", (case["partial"],))}
                 self.assert_outputs(source, tiles, {0: sparse("bf16", (case["ipt"],))})
 
-    def test_mxu1_contractions_keep_the_clean_bf16_accumulator_domain(self) -> None:
+    def test_mxu1_exceptional_bf16_seeds_are_anchor_integers(self) -> None:
         continued = on_unit(kernel((weight("s4", "t0", "w0"), seed("t0", "t1", "a0"),
                                    accumulate("t1", "t2", "a1", "a0"), read("t2", "t3", "y", "a1")), "t3", ("y",)), 1)
-        for code in (0x0001, 0x8001, 0x7F80, 0x7FC0):
-            with self.subTest(seed=hex(code)):
-                self.reject(continued, {**TILES, 3: sparse("bf16", (code,))}, UnsupportedVirtualMode)
+        raw = (0x0001, 0x007F, 0x8001, 0x807F, 0x7F80, 0xFF80, 0x7FC1, 0xFFA1, 0x7FFF, 0xFFFF)
+        initial = matrix({(row, 0): code for row, code in enumerate(raw)}, "bf16")
+        weights = matrix({(0, 0): 0x38})
+        # With zero products, subnormal seeds convert below the normal range
+        # and are sanitized to +0. Raw exponent-255 seeds clamp by sign.
+        large = (0x7F7F, 0xFF7F, 0x7F7F, 0xFF7F, 0x7F7F, 0xFF7F)
+        wanted = matrix({(row + 4, 0): code for row, code in enumerate(large)}, "bf16")
+        self.assert_outputs(continued, {**TILES, 0: matrix({}), 1: weights, 3: initial}, {0: wanted})
+        for act, product in ((0x38, 0x3F80), (0xB8, 0xBF80)):
+            with self.subTest(activation=hex(act)):
+                acts = matrix({(row, 0): act for row in range(len(raw))})
+                expected = (product,) * 4 + large
+                wanted = matrix({(row, 0): code for row, code in enumerate(expected)}, "bf16")
+                self.assert_outputs(continued, {**TILES, 0: acts, 1: weights, 3: initial}, {0: wanted})
+
+    def test_all_pinned_rtl_anchor_cases_including_raw_bf16_seeds(self) -> None:
+        body = (weight("s4", "t0", "w0"), seed("t0", "t1", "a0"),
+                accumulate("t1", "t2", "a1", "a0"), read("t2", "t3", "y", "a1"))
+        source = parse_program(on_unit(kernel(body, "t3", ("y",)), 1))
+        cases = rtl_arithmetic_cases(all_cases=True)
+        for first in range(0, len(cases), 32):
+            batch = cases[first:first + 32]
+            acts = matrix({(row, k): code for row, case in enumerate(batch) for k, code in enumerate(case["a"])})
+            weights = matrix({(row, k): code for row, case in enumerate(batch) for k, code in enumerate(case["w"])})
+            initial = matrix({(row, row): case["partial"] for row, case in enumerate(batch)}, "bf16")
+            runtime = RuntimeInputs({**TILES, 0: acts, 1: weights, 3: initial})
+            result = evaluate(source, runtime).outputs[0]
+            for row, case in enumerate(batch):
+                with self.subTest(case=first + row, seed=hex(case["partial"])):
+                    self.assertEqual(result.bits[row * 32 + row], case["ipt"])
+            self.assertEqual(runtime.tiles[3], initial)
 
 
 if __name__ == "__main__":

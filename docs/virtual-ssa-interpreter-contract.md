@@ -274,8 +274,12 @@ Only BF16 contents persist between operations; no hidden anchor is carried.
 Zero products preserve a negative-zero MXU0 seed, while MXU1 produces positive
 zero. Contractions admit all raw FP8 multiply encodings: exponent-zero operands
 produce zero products, while `0x7f/0xff` multiply as ±480 in the selected RTL.
-This differs from their accumulator-seed conversion below. BF16 accumulator
-inputs remain limited to finite normal values and signed zero.
+This differs from their accumulator-seed conversion below. All raw BF16
+accumulator encodings are admitted using these integer datapath rules, not
+IEEE host arithmetic. Zero-product MXU0 preserves the raw addend; MXU1
+converts it through the anchor representation, sanitizing subnormal-only
+results and clamping exponent-255 seeds by sign. Directed literals and pinned
+RTL arithmetic fixtures cover these cases; selected-core execution is pending.
 Raw BF16 seed/readout copies and FP8 seed/readout conversions admit all encodings.
 FP8 seeds flush subnormals and NaNs to signed zero. MXU FP8 readout multiplies by
 the scale, clamps code 255 to exponent +127, and can emit reserved `0x7f/0xff`

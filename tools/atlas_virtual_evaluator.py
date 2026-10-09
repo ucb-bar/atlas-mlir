@@ -400,12 +400,6 @@ def _mxu_unit(op: Operation) -> int:
 
 
 def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127, *, unit: int = 0) -> Tile:
-    if kind == "matmul":
-        # E4M3Mul flushes exponent-zero products and treats raw 7f/ff as +/-480.
-        # Keep the addend within the selected MAC's clean BF16 input domain.
-        for tile in operands:
-            if tile.format == "bf16" and not all((bits & 0x7FFF) == 0 or 0x0080 <= (bits & 0x7FFF) <= 0x7F7F for bits in tile.bits):
-                raise UnsupportedVirtualMode(f"MXU{unit} contraction requires finite normal BF16 accumulators or signed zero")
     try:
         import torch
         from npu_model.configs.numerics import RtlNumerics
@@ -414,6 +408,8 @@ def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127, *, unit: 
     tensors = tuple(torch.tensor(tile.bits, dtype=torch.uint8 if tile.format == "fp8" else torch.uint16)
                     .view(torch.float8_e4m3fn if tile.format == "fp8" else torch.bfloat16).reshape(32, 32) for tile in operands)
     if kind == "matmul":
+        # These integer datapaths interpret every raw addend, including IEEE
+        # special encodings; using a host BF16 matmul would change their bits.
         # Stored weights are W[N,K], while the numerical helper consumes B[K,N].
         matmul = RtlNumerics.systolic_matmul if unit == 0 else RtlNumerics.inner_product_matmul
         result = matmul(tensors[0], tensors[1].T.contiguous(), tensors[2])

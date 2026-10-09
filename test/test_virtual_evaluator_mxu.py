@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, evaluate, parse_program  # noqa: E402
+from atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, _mxu_tile, evaluate, parse_program  # noqa: E402
 
 STATE = "!atlas.virtual_state"
 FP8 = "!atlas.virtual_fp8"
@@ -106,14 +106,14 @@ def reset_program():
     return stream.program()
 
 
-def rtl_arithmetic_cases():
+def rtl_arithmetic_cases(*, all_cases=False):
     import npu_model.configs.numerics as numerics
     path = Path(numerics.__file__).resolve().parents[2] / "tests/rtl/arithmetic.json"
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != "8b2ebb3cb98b4c9e7c7c0f4cb71e86d8a6675c698abec0c3e0525bc693736840":
         raise AssertionError("pinned MXU RTL arithmetic fixture changed")
     cases = json.loads(data)
-    return tuple(cases[index] for index in (1, 127, 129, 255))
+    return tuple(cases) if all_cases else tuple(cases[index] for index in (1, 127, 129, 255))
 
 
 class VirtualEvaluatorMxuTest(unittest.TestCase):
@@ -254,8 +254,20 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
                 self.assertEqual(evaluate(stream.program(), runtime).outputs[0], repeated(expected))
                 self.assertEqual(runtime.tiles[2], seed)
 
-    def test_mac_rejects_excluded_bf16_accumulator_classes_when_executed(self):
-        ones = repeated((0x38,), "fp8")
+    def test_all_pinned_rtl_mxu_converter_cases_cover_every_scale(self):
+        cases = rtl_arithmetic_cases(all_cases=True)
+        self.assertEqual({case["scale"] for case in cases}, set(range(256)))
+        for code in range(256):
+            batch = tuple(case for case in cases if case["scale"] == code)
+            raw = tuple(case["partial"] for case in batch)
+            wanted = tuple(case["quant"] for case in batch)
+            with self.subTest(scale=code):
+                # Inspect the raw adapter result: reseeding would erase reserved
+                # 7f/ff encodings and could hide an incorrect converter result.
+                result = _mxu_tile("readout_fp8", (repeated(raw),), code)
+                self.assertEqual(result, repeated(wanted, "fp8"))
+
+    def test_exceptional_bf16_seeds_follow_custom_mac_zero_and_nonzero_paths(self):
         stream = Stream()
         stream.weight()
         stream.seed()
@@ -263,11 +275,45 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
         stream.readout("continued", "result")
         stream.output("result")
         program = stream.program()
-        for bits in (0x0001, 0x007F, 0x8001, 0x807F, 0x7F80, 0xFF80, 0x7FC1, 0xFFA1):
-            with self.subTest(bf16=hex(bits)), self.assertRaises(UnsupportedVirtualMode):
-                evaluate(program, inputs(ones, ones, sparse({(17, 23): bits}, "bf16")))
+        raw = (0x0001, 0x007F, 0x8001, 0x807F, 0x7F80, 0xFF80, 0x7FC1, 0xFFA1, 0x7FFF, 0xFFFF)
+        seed = sparse({(row, 0): code for row, code in enumerate(raw)}, "bf16")
+        weights = sparse({(0, 0): 0x38})
+        # A zero product bypasses even Inf/NaN unchanged. Any nonzero product
+        # replaces an exponent-zero addend; exponent-255 addends clamp finite.
+        self.assertEqual(evaluate(program, inputs(w=weights, seed=seed)).outputs[0], seed)
+        for act, product in ((0x38, 0x3F80), (0xB8, 0xBF80)):
+            with self.subTest(activation=hex(act)):
+                expected = (product,) * 4 + (0x7F7F, 0xFF7F, 0x7F7F, 0xFF7F, 0x7F7F, 0xFF7F)
+                acts = sparse({(row, 0): act for row in range(len(raw))})
+                wanted = sparse({(row, 0): code for row, code in enumerate(expected)}, "bf16")
+                runtime = inputs(acts, weights, seed)
+                self.assertEqual(evaluate(program, runtime).outputs[0], wanted)
+                self.assertEqual(runtime.tiles[2], seed)
 
-    def test_untaken_mac_does_not_apply_numerical_domain_checks(self):
+    def test_all_pinned_rtl_single_mac_cases_including_raw_bf16_seeds(self):
+        stream = Stream()
+        stream.weight()
+        stream.seed()
+        stream.accumulate("acc", "continued")
+        stream.readout("continued", "result")
+        stream.output("result")
+        program = stream.program()
+        cases = rtl_arithmetic_cases(all_cases=True)
+        # Batch unrelated harness cases on the diagonal; off-diagonal outputs
+        # are intentionally unconstrained and do not provide expected values.
+        for first in range(0, len(cases), 32):
+            batch = cases[first:first + 32]
+            acts = sparse({(row, 0): case["a"][0] for row, case in enumerate(batch)})
+            weights = sparse({(row, 0): case["w"][0] for row, case in enumerate(batch)})
+            seed = sparse({(row, row): case["partial"] for row, case in enumerate(batch)}, "bf16")
+            runtime = inputs(acts, weights, seed)
+            result = evaluate(program, runtime).outputs[0]
+            for row, case in enumerate(batch):
+                with self.subTest(case=first + row, seed=hex(case["partial"])):
+                    self.assertEqual(result.bits[row * 32 + row], case["fma"])
+            self.assertEqual(runtime.tiles[2], seed)
+
+    def test_cfg_executes_only_selected_raw_seed_copy_or_contraction(self):
         source = f'''module {{
           func.func @choose(%take: i1) -> {STATE} {{
             {PREFIX}
@@ -285,11 +331,11 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
           }}
         }}'''
         program = parse_program(source)
-        bad = repeated((0x7F,), "fp8")
+        acts = repeated((0x7F,), "fp8")
         seed = repeated((0x7FC1, 0x8001))
-        self.assertEqual(dict(evaluate(program, inputs(bad, seed=seed, controls=(Scalar(1, 0),))).outputs), {1: seed})
-        with self.assertRaises(UnsupportedVirtualMode):
-            evaluate(program, inputs(bad, seed=seed, controls=(Scalar(1, 1),)))
+        self.assertEqual(dict(evaluate(program, inputs(acts, seed=seed, controls=(Scalar(1, 0),))).outputs), {1: seed})
+        # Default weights are zero: the custom MAC's bypass preserves raw seeds.
+        self.assertEqual(dict(evaluate(program, inputs(acts, seed=seed, controls=(Scalar(1, 1),))).outputs), {0: seed})
 
 
 if __name__ == "__main__":
