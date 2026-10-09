@@ -224,31 +224,44 @@ class VirtualDMATest(unittest.TestCase):
             self.rejected(source.replace("\n" + dma_wait(), "").replace("return %io4", "return %io3"),
                           "must complete pending DMA before block exit")
 
-    def test_one_pending_transfer_is_global_across_formats_and_directions(self) -> None:
+    def test_two_pending_transfers_complete_in_any_order_across_formats_and_directions(self) -> None:
         source = copy()
         for fmt in ("fp8", "bf16"):
-            inserted = "    %other_size = arith.constant " + str(1024 if fmt == "fp8" else 2048) + " : i32\n"
-            inserted += dma_load(fmt, before="io1", after="extra_io", handle="extra", size="other_size")
-            changed = source.replace(dma_await("bf16"), inserted + "\n" + dma_await("bf16", before="extra_io"))
-            self.rejected(changed, "must complete the pending DMA before another launch")
-        changed = source.replace(dma_wait(), dma_load("bf16", before="io3", after="extra_io", handle="extra")
-                                 + "\n" + dma_wait(before="extra_io"))
-        self.rejected(changed, "must complete the pending DMA before another launch")
-        changed = source.replace(dma_wait(), dma_store("bf16", before="io3", after="extra_io", handle="extra")
-                                 + "\n" + dma_wait(before="extra_io"))
-        self.rejected(changed, "must complete the pending DMA before another launch")
+            with self.subTest(fmt=fmt):
+                second = ("    %other_size = arith.constant " + str(1024 if fmt == "fp8" else 2048)
+                          + " : i32\n" + dma_load(fmt, before="io1", after="extra_io",
+                                                   handle="extra", size="other_size"))
+                completion = dma_await(fmt, before="extra_io", after="done_io", handle="extra",
+                                       result="extra_tile")
+                # The second load completes first.
+                self.accepted(source.replace(dma_await("bf16"), second + "\n" + completion + "\n"
+                                             + dma_await("bf16", before="done_io")))
+                third = dma_load(fmt, before="extra_io", after="third_io", handle="third",
+                                 size="other_size")
+                self.rejected(source.replace(dma_await("bf16"), second + "\n" + third + "\n"
+                                             + dma_await("bf16", before="third_io")),
+                              "must complete a pending DMA before another launch; at most 2 may be pending")
+        # A load may overlap a store, and the store may complete first.
+        self.accepted(source.replace(dma_wait(), dma_load("bf16", before="io3", after="extra_io", handle="extra")
+                                     + "\n" + dma_wait(before="extra_io", after="done_io") + "\n"
+                                     + dma_await("bf16", before="done_io", after="io4", handle="extra",
+                                                 result="extra_tile")))
+        stores = (dma_store("bf16", before="io3", after="extra_io", handle="extra") + "\n"
+                  + dma_store("bf16", before="extra_io", after="third_io", handle="third"))
+        self.rejected(source.replace(dma_wait(), stores + "\n" + dma_wait(before="third_io")),
+                      "must complete a pending DMA before another launch; at most 2 may be pending")
 
     def test_completion_handles_cannot_be_reused_or_mismatched(self) -> None:
         source = copy()
         self.rejected(source.replace(dma_store("bf16"), dma_await("bf16", before="io2", after="again_io", result="again")
                                      + "\n" + dma_store("bf16", before="again_io")),
-                      "must consume the current pending DMA transfer")
+                      "must consume a pending DMA transfer")
         self.rejected(source.replace("return %io4", dma_wait(before="io4", after="again_io") + "\n    return %again_io"),
-                      "must consume the current pending DMA transfer")
+                      "must consume a pending DMA transfer")
         changed = source.replace(dma_store("bf16"), dma_load("bf16", before="io2", after="next_io", handle="next")
                                  + "\n" + dma_await("bf16", before="next_io", after="ready_io", result="next_tile")
                                  + "\n" + dma_store("bf16", before="ready_io"))
-        self.rejected(changed, "must consume the current pending DMA transfer")
+        self.rejected(changed, "must consume a pending DMA transfer")
 
     def test_pending_dma_preserves_the_linear_virtual_state_chain(self) -> None:
         source = copy()

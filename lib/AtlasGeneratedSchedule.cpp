@@ -7,6 +7,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include <cstdint>
@@ -38,7 +39,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
     std::optional<int32_t> id;
     int64_t pc;
   };
-  std::optional<PendingDMA> pending;
+  llvm::DenseMap<unsigned, PendingDMA> pending;
   llvm::DenseSet<int32_t> launchIDs;
   llvm::SmallVector<std::pair<int64_t, int64_t>> intervals;
   int64_t pc = 0;
@@ -54,15 +55,15 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
       id = static_cast<int32_t>(integer.getValue().getSExtValue());
     }
     if (isa<StartOp>(op)) {
-      if (pending)
+      if (!pending.empty())
         return op.emitOpError("unexpected instruction while DMA is pending");
       continue;
     }
     int64_t currentPC = pc++;
     Operation *next = op.getNextNode();
     if (auto dma = dyn_cast<DMAOp>(op)) {
-      if (pending)
-        return op.emitOpError("another DMA launch while DMA is pending");
+      if (pending.count(dma.getChannel()))
+        return op.emitOpError("another DMA launch while its channel is pending");
       if (id) {
         if (!launchIDs.insert(*id).second)
           return op.emitOpError("duplicate virtual DMA transfer launch ID");
@@ -72,17 +73,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
           return op.emitOpError(
               "generated DMA requires immediate same-channel DMA.WAIT");
       }
-      pending = PendingDMA{dma, id, currentPC};
+      pending.try_emplace(dma.getChannel(), PendingDMA{dma, id, currentPC});
     } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
-      if (!pending)
+      auto transfer = pending.find(wait.getChannel());
+      if (transfer == pending.end())
         return op.emitOpError("DMA.WAIT has no pending DMA transfer");
-      if (wait.getChannel() != pending->launch.getChannel() ||
-          id != pending->id)
+      if (id != transfer->second.id)
         return op.emitOpError(
             "DMA.WAIT must match the pending DMA channel and transfer ID");
-      intervals.emplace_back(pending->pc, currentPC);
-      pending.reset();
-    } else if (pending) {
+      intervals.emplace_back(transfer->second.pc, currentPC);
+      pending.erase(transfer);
+    } else if (!pending.empty()) {
       if (!canOverlapAtlasGeneratedDMA(&op))
         return op.emitOpError("unexpected instruction while DMA is pending");
     }
@@ -94,8 +95,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
             "generated redirect requires a nonredirecting x0 NOP delay slot");
     }
   }
-  if (pending)
-    return pending->launch.emitOpError("generated DMA has no matching DMA.WAIT");
+  if (!pending.empty())
+    return pending.begin()->second.launch.emitOpError("generated DMA has no matching DMA.WAIT");
   if (!intervals.empty()) {
     pc = 0;
     for (Operation &op : module.getBody()->getOperations()) {

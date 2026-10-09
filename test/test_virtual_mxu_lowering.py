@@ -57,7 +57,7 @@ class VirtualMXULoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
-    def checked(self, virtual: str) -> tuple[str, list[dict]]:
+    def checked(self, virtual: str, slots: int = 1) -> tuple[str, list[dict]]:
         untimed = lower(virtual, timed=False)
         self.assertIn('atlas.timing_state = "untimed"', untimed)
         self.assertNotIn('"atlas.delay"', untimed)
@@ -78,10 +78,10 @@ class VirtualMXULoweringTest(unittest.TestCase):
             fields = entry["fields"]
             self.assertIn(fields["unit"], (0, 1))
             if operation == "atlas.mxu_matmul":
-                self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
+                self.assertLess(max(fields["weight_slot"], fields["acc_slot"]), slots)
                 self.assertLess(fields["src"], 32)
             else:
-                self.assertEqual(fields["slot"], 0)
+                self.assertLess(fields["slot"], slots)
                 if operation == "atlas.mxu_push":
                     self.assertEqual(fields["kind"], "weight_fp8")
                     self.assertLess(fields["src"], 32)
@@ -156,6 +156,22 @@ class VirtualMXULoweringTest(unittest.TestCase):
                               if entry["operation"] == "atlas.mxu_matmul"],
                              [False, True])
 
+    def test_two_live_weights_and_accumulators_take_separate_slots(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                _, entries = self.checked(source(
+                    load("io2", "s0", "w0", unit), load("s0", "s1", "w1", unit),
+                    reset("s1", "r0", "a0", "w0", unit), reset("r0", "r1", "b0", "w1", unit),
+                    accumulate("r1", "r2", "a1", "a0", "w1", unit),
+                    readout("r2", "r3", "y", "a1", unit), readout("r3", "s3", "z", "b0", unit),
+                ), slots=2)
+                fields = [entry["fields"] for entry in entries
+                          if entry["operation"].startswith("atlas.mxu_")]
+                self.assertEqual([f["slot"] for f in fields[:2]], [0, 1])
+                self.assertEqual([(f["weight_slot"], f["acc_slot"]) for f in fields[2:5]],
+                                 [(0, 0), (1, 1), (1, 0)])
+                self.assertEqual([f["slot"] for f in fields[5:]], [0, 1])
+
     def test_fp8_sources_can_be_reused_after_push_and_matmul(self) -> None:
         for unit in (0, 1):
             with self.subTest(unit=unit):
@@ -217,19 +233,25 @@ class VirtualMXULoweringTest(unittest.TestCase):
     def test_lowering_enforces_handle_and_state_verification(self) -> None:
         for unit in (0, 1):
             valid = continuation(unit)
-            refreshed = continuation(unit, reload_weight=True)
             cases = [
                 (valid.replace('(%s2, %a1)', '(%s2, %a0)'), "stale accumulator handle"),
                 (valid.replace('(%s1, %x, %weight, %a0)',
                                '(%s0, %x, %weight, %a0)'), "nonlinear virtual state chain"),
-                (refreshed.replace('(%refresh, %x, %replacement, %a0)',
-                                   '(%refresh, %x, %weight, %a0)'), "stale weight handle"),
+                (source(load("io2", "s0", "weight", unit),
+                        reset("s0", "s1", "a0", unit=unit),
+                        load("s1", "r0", "replacement", unit),
+                        load("r0", "r1", "third", unit),
+                        accumulate("r1", "s2", "a1", "a0", "weight", unit),
+                        accumulate("s2", "r2", "a2", "a1", "replacement", unit),
+                        readout("r2", "s3", "y", "a2", unit)),
+                 "cannot load a weight on a unit with 2 live weights"),
                 (valid.replace(acc(unit), acc(1 - unit)), "unit"),
                 (source(load("io2", "s0", "weight", unit),
                         reset("s0", "s1", "a0", unit=unit),
-                        reset("s1", "s2", "a1", unit=unit),
-                        readout("s2", "s3", "y", "a1", unit)),
-                 "cannot reset a unit with a live accumulator"),
+                        reset("s1", "r0", "b0", unit=unit),
+                        reset("r0", "s2", "c0", unit=unit),
+                        readout("s2", "s3", "y", "c0", unit)),
+                 "cannot reset a unit with 2 live accumulators"),
                 (source(load("io2", "s0", "weight", unit),
                         f"    cf.br ^next(%s0 : {STATE})",
                         f"  ^next(%next_state: {STATE}):",

@@ -1,6 +1,7 @@
 #ifndef ATLAS_VIRTUAL_ALLOCATION_H
 #define ATLAS_VIRTUAL_ALLOCATION_H
 
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -60,6 +61,14 @@ struct FixedResourcePlacement {
   unsigned mxuAccSlot;
 };
 
+enum class RegisterKind { BF16, FP8, Scalar };
+using RegisterCapacities = std::array<unsigned, 3>;
+
+// How many values of each kind, indexed by RegisterKind, can hold registers
+// at once in `function`, as allocate colors them: BF16 pairs, FP8 registers,
+// and scalars.
+RegisterCapacities registerCapacities(func::FuncOp function);
+
 class VirtualAllocationPlan {
 public:
   VirtualAllocationPlan();
@@ -76,10 +85,13 @@ public:
   const DMATransferPlacement &dma(Value value) const;
   llvm::ArrayRef<int32_t> scalarArguments() const;
   const FixedResourcePlacement &fixed() const;
+  // The channels the function's explicit transfers use, in first use order.
+  llvm::ArrayRef<unsigned> dmaChannels() const { return usedDMAChannels; }
 
 private:
-  enum class RegisterKind { BF16, FP8, Scalar };
   LogicalResult colorValues(RegisterKind kind);
+  LogicalResult placeMXU(Block &block);
+  LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
 
   func::FuncOp function;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
@@ -88,6 +100,7 @@ private:
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   bool mixedFp8 = false;
   bool hasPack = false;
+  llvm::SmallVector<unsigned, 4> usedDMAChannels;
   const FixedResourcePlacement fixedResources;
 };
 

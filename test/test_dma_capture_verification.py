@@ -78,12 +78,14 @@ class DMACaptureVerificationTest(unittest.TestCase):
                 self.rejected(artifact(work), message)
 
     def test_same_channel_cannot_be_relaunched_before_its_completion(self) -> None:
-        self.rejected(artifact((dma(identity=1),)), "another DMA launch while DMA is pending")
+        self.rejected(artifact((dma(identity=1),)), "another DMA launch while its channel is pending")
 
     def test_completion_channel_and_identity_must_match_the_pending_transfer(self) -> None:
-        for completion in (wait(channel=1), wait(identity=1), wait(identity=None)):
+        for completion, expected in ((wait(channel=1), "DMA.WAIT has no pending DMA transfer"),
+                                     (wait(identity=1), "DMA.WAIT must match"),
+                                     (wait(identity=None), "DMA.WAIT must match")):
             with self.subTest(completion=completion):
-                self.rejected(artifact(completion=completion), "DMA.WAIT must match")
+                self.rejected(artifact(completion=completion), expected)
 
     def test_capture_rule_does_not_relax_unmarked_immediate_wait_or_missing_completion(self) -> None:
         self.accepted(artifact(identity=None))

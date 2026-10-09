@@ -68,7 +68,11 @@ public:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    for (unsigned channel : {fixed().loadChannel, fixed().storeChannel})
+    SmallVector<unsigned> dmaChannels{fixed().loadChannel, fixed().storeChannel};
+    for (unsigned channel : allocation.dmaChannels())
+      if (!llvm::is_contained(dmaChannels, channel))
+        dmaChannels.push_back(channel);
+    for (unsigned channel : dmaChannels)
       add("atlas.dma_config", loc,
           {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
     materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
@@ -501,9 +505,8 @@ private:
          {"atlas.virtual_dma_transfer", i32(placement.id)}});
     if (dst) {
       for (unsigned half = 0; half < placement.halves; ++half) {
-        if (half)
-          materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
+        materializeScalar(placement.stagingReg,
+                          placement.stagingWord + half * 256, loc);
         add("atlas.vload", loc,
             {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
