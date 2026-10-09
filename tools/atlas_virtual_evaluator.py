@@ -118,7 +118,7 @@ class RuntimeInputs:
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """Logical outputs and final snapshots of the input memory regions, including guards."""
+    """Final externally visible BF16 tiles and supplied-region snapshots, including guards."""
 
     outputs: Mapping[int, Tile]
     memory: tuple[MemoryRegion, ...] = ()
@@ -512,6 +512,11 @@ def _boundary_ranges(program: ParsedProgram) -> tuple[tuple[int, int, str], ...]
     return tuple(ranges)
 
 
+def _boundary_address(program: ParsedProgram, kind: str, index: int) -> int | None:
+    attribute = program.function.attributes.get(f"atlas.{kind}_dram_base") if program.function is not None else None
+    return None if attribute is None else attribute.value.data + index * 2048
+
+
 def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
     pending: dict[SSAValue, tuple[int, int, TileFormat, bool]] = {}
     for op in operations:
@@ -519,15 +524,10 @@ def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tupl
         if name.startswith(("dma_load_", "dma_store_")):
             address, length, format, store = span = _dma_span(op, constants)
             _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
-            for other, size, _, writing in pending.values():
-                if (store or writing) and _overlaps(address, length, other, size):
-                    raise UnsupportedVirtualMode("overlapping pending DMA ranges involving a write are unqualified")
             for other, size, kind in boundaries:
                 if not _overlaps(address, length, other, size):
                     continue
                 _require(kind != "control", "DMA must not overlap the control mailbox")
-                if store or kind == "output":
-                    raise UnsupportedVirtualMode("explicit DMA aliases an implicit boundary buffer with a write")
             pending[op.results[1]] = span
         elif name.startswith("dma_await_") or name == "dma_wait":
             _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
@@ -551,36 +551,32 @@ def _tile_from_bytes(data: bytes, format: TileFormat) -> Tile:
 
 
 class _Memory:
-    def __init__(self, regions: tuple[MemoryRegion, ...]):
+    def __init__(self, regions: tuple[MemoryRegion, ...], mappings: tuple[tuple[int, int], ...] = ()):
         self.regions = regions
-        self.buffers = [bytearray(region.data) for region in regions]
-        self.order = sorted(range(len(regions)), key=lambda index: regions[index].address)
+        self.spans = sorted((*mappings, *((region.address, len(region.data)) for region in regions)))
+        self.data = {region.address + offset: value for region in regions for offset, value in enumerate(region.data)}
 
-    def chunks(self, address: int, size: int) -> tuple[tuple[int, int, int], ...]:
-        chunks = []
+    def check_span(self, address: int, size: int) -> None:
         cursor, end = address, address + size
-        for index in self.order:
-            region = self.regions[index]
-            first, last = max(address, region.address), min(end, region.address + len(region.data))
-            if first < last:
-                _require(first == cursor, f"DMA span has unmapped memory at 0x{cursor:08x}")
-                chunks.append((index, first - region.address, last - region.address))
-                cursor = last
+        for start, length in self.spans:
+            if start <= cursor < start + length:
+                cursor = min(end, start + length)
+            if cursor == end:
+                return
         _require(cursor == end, f"DMA span has unmapped memory at 0x{cursor:08x}")
-        return tuple(chunks)
 
     def read(self, address: int, size: int) -> bytes:
-        return b"".join(self.buffers[index][first:last] for index, first, last in self.chunks(address, size))
+        self.check_span(address, size)
+        for byte in range(address, address + size):
+            _require(byte in self.data, f"memory read has undefined bytes at 0x{byte:08x}")
+        return bytes(self.data[byte] for byte in range(address, address + size))
 
     def write(self, address: int, data: bytes) -> None:
-        offset = 0
-        # Validate the entire span before modifying any region.
-        for index, first, last in self.chunks(address, len(data)):
-            self.buffers[index][first:last] = data[offset:offset + last - first]
-            offset += last - first
+        self.check_span(address, len(data))
+        self.data.update(zip(range(address, address + len(data)), data))
 
     def snapshots(self) -> tuple[MemoryRegion, ...]:
-        return tuple(MemoryRegion(region.address, data) for region, data in zip(self.regions, self.buffers))
+        return tuple(MemoryRegion(region.address, self.read(region.address, len(region.data))) for region in self.regions)
 
 
 @dataclass(frozen=True)
@@ -588,6 +584,7 @@ class _Transfer:
     address: int
     data: bytes
     format: TileFormat
+    store: bool
 
 
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
@@ -669,9 +666,9 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
     _require(type(max_steps) is int and max_steps > 0, "max_steps must be a positive integer")
     program.validate_inputs(inputs)
     blocks = _check_execution(program)
-    for address, size, kind in _boundary_ranges(program):
-        if kind == "output" and any(_overlaps(address, size, region.address, len(region.data)) for region in inputs.memory):
-            raise UnsupportedVirtualMode("memory snapshots overlapping implicit output buffers require shared boundary-memory semantics")
+    boundaries = _boundary_ranges(program)
+    memory = _Memory(inputs.memory, tuple((address, size) for address, size, kind in boundaries if kind != "control"))
+    for address, size, kind in boundaries:
         if kind == "input":
             index = (address - program.function.attributes["atlas.input_dram_base"].value.data) // 2048
             payload = _tile_bytes(inputs.tiles[index])
@@ -681,11 +678,21 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     actual = region.data[first - region.address:last - region.address]
                     expected = payload[first - address:last - address]
                     _require(actual == expected, f"boundary input {index} and initial memory disagree in span 0x{first:08x}..0x{last:08x}")
-    memory = _Memory(inputs.memory)
+            memory.write(address, payload)
     values: dict[SSAValue, object] = {}
     outputs: dict[int, Tile] = {}
+    pending: dict[SSAValue, _Transfer] = {}
     state: object | None = None
     steps = 0
+
+    def final_result() -> EvaluationResult:
+        # Mapped outputs observe final host bytes, while SSA tiles stay immutable.
+        observed = dict(outputs)
+        for index in outputs:
+            address = _boundary_address(program, "output", index)
+            if address is not None:
+                observed[index] = _tile_from_bytes(memory.read(address, 2048), "bf16")
+        return EvaluationResult(observed, memory.snapshots())
 
     def value(operand: SSAValue) -> object:
         _require(operand in values, "operand has no executed SSA definition")
@@ -749,11 +756,19 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             else:
                 _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
                 if isinstance(op, func.ReturnOp):
-                    return EvaluationResult(outputs, memory.snapshots())
+                    return final_result()
                 if name in ("atlas.virtual_input_bf16", "atlas.virtual_input_fp8"):
-                    values[op.results[1]] = inputs.tiles[_integer_attribute(op, "index")]
+                    index = _integer_attribute(op, "index")
+                    address = _boundary_address(program, "input", index)
+                    original = inputs.tiles[index]
+                    size = 1024 if original.format == "fp8" else 2048
+                    values[op.results[1]] = original if address is None else _tile_from_bytes(memory.read(address, size), original.format)
                 elif name == "atlas.virtual_output_bf16":
-                    outputs[_integer_attribute(op, "index")] = tile(op.operands[1])
+                    index = _integer_attribute(op, "index")
+                    outputs[index] = tile(op.operands[1])
+                    address = _boundary_address(program, "output", index)
+                    if address is not None:
+                        memory.write(address, _tile_bytes(outputs[index]))
                 elif name in ("atlas.virtual_mxu_load_weight", "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_readout_bf16"):
                     values[op.results[1]] = tile(op.operands[1])
                 elif name == "atlas.virtual_mxu_load_acc_fp8":
@@ -769,9 +784,11 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     address, length = (scalar(operand).bits for operand in op.operands[-2:])
                     format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
                     store = name.startswith("atlas.virtual_dma_store_")
-                    memory.chunks(address, length)
+                    for transfer in pending.values():
+                        _require(not (store or transfer.store) or not _overlaps(address, length, transfer.address, len(transfer.data)), "DMA access conflicts with an overlapping pending write or read")
+                    memory.check_span(address, length)
                     data = _tile_bytes(tile(op.operands[1])) if store else memory.read(address, length)
-                    values[op.results[1]] = _Transfer(address, data, format)
+                    values[op.results[1]] = pending[op.results[1]] = _Transfer(address, data, format, store)
                 elif name.startswith("atlas.virtual_dma_await_") or name == "atlas.virtual_dma_wait":
                     transfer = value(op.operands[1])
                     _require(isinstance(transfer, _Transfer), "expected an executed DMA transfer")
@@ -781,6 +798,7 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     else:
                         values[op.results[1]] = _tile_from_bytes(transfer.data, transfer.format)
                     del values[op.operands[1]]
+                    del pending[op.operands[1]]
                 state = values[op.results[0]] = object()
         else:
-            return EvaluationResult(outputs, memory.snapshots())
+            return final_result()

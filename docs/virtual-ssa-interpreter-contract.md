@@ -222,24 +222,28 @@ The environment must keep external load sources stable and exclude conflicting a
 Execution proves complete-tile lengths and addresses from i32 constants/wrapping
 additions, requires 32-byte alignment and addresses at or above `0x80000000`,
 and checks the widened end against `2^32`. Every executed transfer span must be
-covered by supplied memory regions; adjacent regions are allowed, holes are not.
+covered by supplied regions or known ABI payload mappings; adjacent spans are
+allowed, holes are not. Loads additionally require initialized bytes.
 Load issue captures owned bytes and await exposes the tile; store issue captures
 serialized tile bytes and wait publishes them. Results retain region addresses,
 extents, order, and untouched bytes. BF16 uses pair-halves transport; FP8 uses
 raw row-major bytes. No numerical conversion occurs during DMA.
 
 Preflight checks two pending identities, one matching completion each, block
-confinement, and completion before implicit I/O/pack or exit. Read/read overlap
-is allowed. Pending overlap involving a write is explicitly unqualified.
-Known ABI aliases between explicit DMA and implicit boundary writes, or explicit
-stores and implicit inputs, are also unsupported, even after completion.
-Supplied memory snapshots must exclude known implicit output spans. These alias
-limits preserve the current separate boundary/memory interfaces; they are not
-claims about compiler rejection. No ABI mapping is invented when bases are absent.
-Where a known input buffer overlaps supplied initial memory, its raw bytes must
-agree with the corresponding boundary tile, including partially supplied spans.
-Memory availability is checked only on executed paths; static proof and lifetime
-checks also cover untaken paths. No channels, VMEM windows, or cycles are simulated.
+confinement, and completion before implicit I/O/pack or exit. Executed transfers
+may share read ranges; overlap involving a pending write is rejected. Serial
+sharing after completion is supported. Static proof and handle checks also cover
+untaken paths, while untaken writes have no memory effects or runtime conflicts.
+
+Known ABI boundaries and explicit DMA share execution-owned bytes. Initial input
+payloads must agree with overlapping supplied memory. Boundary inputs snapshot
+current bytes, and boundary outputs publish synchronously; existing SSA tiles
+remain immutable. Returned mapped outputs reflect final host-visible bytes,
+including later completed DMA overwrites. Only executed output indices appear.
+Supplied snapshots retain their original geometry and order. Unwritten output
+bytes and FP8 slot padding are undefined unless supplied by the caller; reads
+never invent zeros. Without ABI bases, boundary tiles retain separate logical
+input/output behavior. No channels, VMEM windows, or cycles are simulated.
 
 ## Explicit MXU handle extension
 

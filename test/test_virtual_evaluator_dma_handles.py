@@ -12,7 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
+from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
 
 
 S, B, F = "!atlas.virtual_state", "!atlas.virtual_bf16", "!atlas.virtual_fp8"
@@ -272,7 +272,7 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
                 result = self.accepted(source, RuntimeInputs({0: BF16}, memory=regions()))
                 self.assertEqual(dict(result.outputs), {0: BF16})
 
-    def test_overlapping_pending_ranges_involving_a_store_are_unqualified(self) -> None:
+    def test_executed_overlapping_pending_ranges_involving_a_store_conflict(self) -> None:
         for first, second in (("load", "store"), ("store", "load"), ("store", "store")):
             op0 = load("bf16", "io", "s1", "h0") if first == "load" else store("bf16", "io", "s1", "h0")
             op1 = load("bf16", "s1", "s2", "h1") if second == "load" else store("bf16", "s1", "s2", "h1")
@@ -280,10 +280,11 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
             complete1 = ready("bf16", "s3", "s4", "h1", "v1") if second == "load" else wait("s3", "s4", "h1")
             source = wrap(input_tile("bf16"), *constants(), op0, op1, complete0, complete1, final="s4")
             with self.subTest(first=first, second=second):
-                self.rejected(source, RuntimeInputs({0: BF16}, memory=regions()), UnsupportedVirtualMode)
+                self.rejected(source, RuntimeInputs({0: BF16}, memory=regions()))
         source = wrap(input_tile("bf16"), *constants(), f"cf.cond_br %choose, ^good(%io : {S}), ^bad(%io : {S})", f"^good(%gs: {S}):", f"func.return %gs : {S}",
                       f"^bad(%bs: {S}):", load("bf16", "bs", "s1", "h0"), store("bf16", "s1", "s2", "h1"), ready("bf16", "s2", "s3", "h0"), wait("s3", "s4", "h1"), final="s4", arguments="%choose: i1")
-        self.rejected(source, RuntimeInputs({0: BF16}, (Scalar(1, 1),)), UnsupportedVirtualMode)
+        self.accepted(source, RuntimeInputs({0: BF16}, (Scalar(1, 1),)))
+        self.rejected(source, RuntimeInputs({0: BF16}, (Scalar(1, 0),), regions()))
 
     def test_completed_serial_store_then_load_of_the_same_range_is_allowed(self) -> None:
         source = wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "write"), wait("s1", "s2", "write"),
@@ -291,13 +292,14 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         result = self.accepted(source, RuntimeInputs({0: BF16}, memory=(MemoryRegion(ADDRESS, bytes(2048)),)))
         self.assertEqual(dict(result.outputs), {0: BF16})
 
-    def test_known_mixed_boundary_aliases_are_explicitly_unqualified(self) -> None:
+    def test_completed_mixed_boundary_aliases_share_memory(self) -> None:
         for direction, address in (("store", INPUT_BASE), ("store", OUTPUT_BASE), ("load", OUTPUT_BASE)):
             launch = store("bf16", "io", "s1", "h") if direction == "store" else load("bf16", "io", "s1", "h")
             completion = wait("s1", "s2", "h") if direction == "store" else ready("bf16", "s1", "s2", "h")
             source = wrap(input_tile("bf16"), *constants(address=address), launch, completion, output("s2", "done"), final="done", attributes=ABI)
             with self.subTest(direction=direction, address=address):
-                self.rejected(source, RuntimeInputs({0: BF16}), UnsupportedVirtualMode)
+                memory = (MemoryRegion(OUTPUT_BASE, RAW),) if direction == "load" else ()
+                self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=memory)).outputs), {0: BF16})
 
     def test_explicit_and_implicit_reads_can_alias_and_absent_bases_are_not_invented(self) -> None:
         source = wrap(input_tile("bf16"), *constants(address=INPUT_BASE), load("bf16", "io", "s1", "h"), ready("bf16", "s1", "s2", "h"), output("s2", "done", "loaded"), final="done", attributes=ABI)
@@ -306,9 +308,10 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         source = wrap(input_tile("bf16"), *constants(address=INPUT_BASE), store("bf16", "io", "s1", "h"), wait("s1", "s2", "h"), output("s2", "done"), final="done")
         self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(INPUT_BASE)))
 
-    def test_supplied_regions_overlapping_known_implicit_outputs_are_unqualified(self) -> None:
+    def test_supplied_regions_overlapping_known_implicit_outputs_observe_writes(self) -> None:
         source = wrap(input_tile("bf16"), output("io", "done"), final="done", attributes=ABI)
-        self.rejected(source, RuntimeInputs({0: BF16}, memory=regions(OUTPUT_BASE)), UnsupportedVirtualMode)
+        memory = (MemoryRegion(OUTPUT_BASE, bytes(2048)),)
+        self.assertEqual(self.accepted(source, RuntimeInputs({0: BF16}, memory=memory)).memory, regions(OUTPUT_BASE))
         self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(OUTPUT_BASE + 2048)))
 
     def test_long_constant_add_chain_is_an_admitted_address_proof(self) -> None:
