@@ -20,6 +20,7 @@ const char *resourceName(Res resource) {
   case Res::Weight: return "weight";
   case Res::Vmem: return "vmem";
   case Res::DmaBase: return "dma_base";
+  case Res::Dram: return "dram";
   }
   llvm_unreachable("unhandled timing resource");
 }

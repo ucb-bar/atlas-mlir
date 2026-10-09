@@ -20,21 +20,23 @@ constexpr int kMaxSearch = 100000;
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         std::vector<DelayInsertion> &before,
-                        const FootprintResolver &resolver) {
+                        const TargetTiming &target) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   RegValues regs = s.entry[block];
-  ReservationTable table;
+  ReservationTable table(target);
   std::vector<Issued> issued;
+  // A matching DMA wait may add an unknown stall. Subsequent coordinates are
+  // lower bounds; finite reservations extend conservatively across the wait.
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
   auto earliest = [&](const Instr &in, const Footprint &f, int cycle,
                       std::string &reason) {
     for (const Issued &x : issued) {
-      Dependence d = dependence(instrs[x.index], x.f, in, f);
+      Dependence d = dependence(instrs[x.index], x.f, in, f, target);
       if (d.distance > 0 && x.cycle + d.distance > cycle) {
         cycle = x.cycle + d.distance;
         reason = d.reason + " after " + name(x.index);
@@ -74,7 +76,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
   for (size_t i = begin; i < end; ++i) {
     const Instr &in = instrs[i];
-    Footprint f = resolver ? resolver(in, regs) : footprintOf(in, regs);
+    Footprint f = target.resolve(in, regs);
     std::string reason;
     int cycle = earliest(in, f, nextFree, reason);
 
@@ -82,8 +84,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       // A halt neither drains in-flight work nor waits for a delay, so its
       // stall ends on a NOP, reusing one that is already there.
       for (const Issued &x : issued)
-        if (x.cycle + x.f.doneAge + bool(resolver) > cycle) {
-          cycle = x.cycle + x.f.doneAge + bool(resolver);
+        if (x.cycle + x.f.doneAge + bool(target) > cycle) {
+          cycle = x.cycle + x.f.doneAge + bool(target);
           reason = "halt waits for " + name(x.index) + " to finish";
         }
       int idle = cycle - nextFree;
@@ -107,7 +109,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       const Instr &slot = instrs[slotIndex];
       RegValues after = regs;
       applyScalar(in, after);
-      Footprint sf = resolver ? resolver(slot, after) : footprintOf(slot, after);
+      Footprint sf = target.resolve(slot, after);
       if (drained() - 2 > cycle) {
         cycle = drained() - 2;
         reason = "this block finishes before the branch's successors start";
@@ -118,7 +120,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
           return why;
         std::string slotReason;
         int slotCycle = earliest(slot, sf, c + 1, slotReason);
-        Dependence d = dependence(in, f, slot, sf);
+        Dependence d = dependence(in, f, slot, sf, target);
         if (c + d.distance > slotCycle) {
           slotCycle = c + d.distance;
           slotReason = d.reason + " after " + name(i);
@@ -156,32 +158,32 @@ LogicalResult insertDelays(ModuleOp module) {
     return failure();
   if (*evidence && failed(checkSelectedRTLProgramSize(module)))
     return failure();
-  FootprintResolver resolver;
+  TargetTiming target;
   if (*evidence)
-    resolver = [selected = *evidence](const Instr &in, const RegValues &regs) {
+    target = TargetTiming([selected = *evidence](const Instr &in, const RegValues &regs) {
       return selected->resolve(in, regs);
-    };
+    });
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream))
     return failure();
-  if (resolver) {
+  if (target) {
     if (stream->starts.size() != 1 || !stream->endsInHalt(0))
       return module.emitError("selected RTL timing requires one straight-line stream ending in ECALL");
     for (Instr &in : stream->instrs)
       if (in.op->opClass == OpClass::Csr)
         in.release = true; // Publish the completion marker only after draining.
   }
-  if (failed(checkAtlasStream(*stream, resolver)))
+  if (failed(checkAtlasStream(*stream, target)))
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(timeBlock(*stream, b, before, resolver)))
+    if (failed(timeBlock(*stream, b, before, target)))
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);
   if (failed(writeAtlasStream(module, *stream, order, before)))
     return failure();
-  return resolver ? checkSelectedRTLProgramSize(module) : success();
+  return target ? checkSelectedRTLProgramSize(module) : success();
 }
 
 struct InsertAtlasDelaysPass

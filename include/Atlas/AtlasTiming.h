@@ -11,6 +11,8 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace mlir::atlas::timing {
@@ -63,7 +65,7 @@ const int kVmemBankBytes = 256 * 1024;
 const int kVmemBanks = kVmemBytes / kVmemBankBytes;
 const int kLineBytes = 32;
 
-enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase };
+enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase, Dram };
 
 // Elements are register numbers, reg*32+row for MReg, (mxu*2+slot)*32+row for
 // Acc and Weight, and 32-byte lines for Vmem; element i is touched at
@@ -108,12 +110,39 @@ struct Footprint {
   bool writeDuringRead = false;
   int vpuLive = 0;
   int doneAge = 0;
+  // A command whose completion must be observed by a matching channel wait.
+  // This is separate from dmaCycles, which is only a legacy scheduling hint.
+  bool dmaAsync = false;
+  // Selected DMA admission serializes all VMEM work until its matching wait.
+  bool exclusiveVmemUntilWait = false;
   int dmaCycles = 0;
   std::string error;
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
+
+// Selected footprints must not silently inherit model-specific engine policy.
+// ConservativeRTL currently admits scalar, LSU, DMA and XLU only; a future
+// compute profile must supply reviewed pair, overlap and capacity policies.
+struct TargetTiming {
+  enum class Policy { LegacyModel, ConservativeRTL };
+  FootprintResolver resolver;
+  Policy policy = Policy::LegacyModel;
+
+  TargetTiming() = default;
+  TargetTiming(FootprintResolver resolve)
+      : resolver(std::move(resolve)),
+        policy(resolver ? Policy::ConservativeRTL : Policy::LegacyModel) {}
+  template <typename Fn,
+            std::enable_if_t<std::is_constructible_v<FootprintResolver, Fn>,
+                             int> = 0>
+  TargetTiming(Fn resolve) : TargetTiming(FootprintResolver(std::move(resolve))) {}
+  bool usesLegacyModelPolicies() const { return policy == Policy::LegacyModel; }
+  bool allowsEngine(Engine engine) const;
+  Footprint resolve(const Instr &in, const RegValues &regs) const;
+  explicit operator bool() const { return !usesLegacyModelPolicies(); }
+};
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
 const char *edgeKindName(EdgeKind k);
@@ -126,7 +155,7 @@ struct Dependence {
 
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
-                      const Footprint &fb);
+                      const Footprint &fb, const TargetTiming &target = {});
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
@@ -151,7 +180,7 @@ using IncomingDma = std::array<std::vector<Footprint>, 8>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
                     uint32_t dmaRegs = 0xFFFFFFFE,
                     const IncomingDma *incomingDma = nullptr,
-                    const FootprintResolver &resolver = {});
+                    const TargetTiming &target = {});
 uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
@@ -159,12 +188,13 @@ std::vector<int> criticalHeights(const DepGraph &g);
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
-int unitCapacity(Unit u, int index);
+int unitCapacity(Unit u, int index, const TargetTiming &target = {});
 const char *unitName(Unit u);
 int dmaTransferCycles(long long bytes);
 
 class ReservationTable {
 public:
+  ReservationTable(const TargetTiming &target = {}) : target_(target) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);
@@ -172,6 +202,7 @@ public:
   void extendForWait(int cycle);
 
 private:
+  TargetTiming target_;
   struct PortUse {
     int reg = -1, row = -1;
     bool shareable = false;

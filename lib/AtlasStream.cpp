@@ -328,7 +328,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
 }
 
 LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
-                                           const FootprintResolver &resolver) {
+                                           const TargetTiming &target) {
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
@@ -338,7 +338,7 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
-      Footprint f = resolver ? resolver(in, regs) : footprintOf(in, regs);
+      Footprint f = target.resolve(in, regs);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
       if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
@@ -355,7 +355,20 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
                    << ", which may still be in flight; a delay cannot cover "
                       "a DMA transfer, so add atlas.dma_wait first";
         }
-      bool command = op.engine == Engine::Dma && op.opClass != OpClass::DmaWait;
+      bool command = f.dmaAsync;
+      if (command && f.exclusiveVmemUntilWait)
+        for (int ch = 0; ch < 8; ++ch)
+          if (!pending[ch].empty())
+            return s.ops[i]->emitOpError()
+                   << "selected DMA admission allows one pending transfer; "
+                   << "channel " << ch << " requires atlas.dma_wait first";
+      if (in.release)
+        for (int ch = 0; ch < 8; ++ch)
+          if (!pending[ch].empty() &&
+              pending[ch].back().second.exclusiveVmemUntilWait)
+            return s.ops[i]->emitOpError()
+                   << "completion publication requires atlas.dma_wait for "
+                   << "pending DMA channel " << ch;
       if (command && !pending[op.channel].empty())
         s.ops[i]->emitWarning()
             << "reuses DMA channel " << op.channel << " while "
@@ -368,6 +381,12 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
             return s.ops[i]->emitOpError()
                    << "halts while DMA channel " << ch
                    << " may still be in flight; add atlas.dma_wait first";
+      if (op.opClass == OpClass::DmaWait && target &&
+          pending[op.channel].empty())
+        return s.ops[i]->emitOpError()
+               << "selected DMA wait has no pending transfer on channel "
+               << op.channel << "; empty, wrong-channel, and stale waits are "
+               << "outside the admitted domain";
       if (op.opClass == OpClass::DmaWait)
         pending[op.channel].clear();
       if (command)

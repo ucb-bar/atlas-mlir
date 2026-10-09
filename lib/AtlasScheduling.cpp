@@ -19,7 +19,7 @@ constexpr int kMaxIdle = 100000;
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
                             uint32_t dmaRegs, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
-                            int &tailIdle, const FootprintResolver &resolver) {
+                            int &tailIdle, const TargetTiming &target) {
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   bool branch = s.endsInBranch(block);
@@ -32,10 +32,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs, nullptr, resolver);
+  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs, nullptr, target);
   for (int i = 0; i < n; i++) {
     std::string alone =
-        ReservationTable().conflict(nodes[i], g.footprints[i], 0);
+        ReservationTable(target).conflict(nodes[i], g.footprints[i], 0);
     if (!alone.empty())
       return op(i)->emitOpError("can never issue: ") << alone;
   }
@@ -55,7 +55,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
     return nodes[i].op->opClass == OpClass::DmaWait;
   };
 
-  ReservationTable table;
+  ReservationTable table(target);
+  // Across a DMA wait these coordinates are lower bounds: the actual wait
+  // duration is unknown. Dependencies keep all users after its matching wait.
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -87,7 +89,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
       for (int e : g.out[bestWait]) {
         int t = g.edges[e].to;
         if (t < nb && waitingPreds[t] == 1 && earliest[t] <= cycle + 1 &&
-            nodes[t].op->engine == Engine::Dma && !isWait(t))
+            g.footprints[t].dmaAsync)
           unlocksDma = true;
       }
     bool readyCriticalWait =
@@ -136,7 +138,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
     table.reserve(nodes[best], g.footprints[best], cycle);
     if (isWait(best))
       table.extendForWait(cycle);
-    if (g.footprints[best].dmaCycles > 0) {
+    if (g.footprints[best].dmaAsync && g.footprints[best].dmaCycles > 0) {
       // Transfers run one at a time, in issue order.
       int latency = g.footprints[best].dmaCycles;
       dmaQueueEnd = std::max(cycle + latency - 1, dmaQueueEnd + latency);
@@ -227,29 +229,29 @@ LogicalResult scheduleStream(ModuleOp module) {
     return failure();
   if (*evidence && failed(checkSelectedRTLProgramSize(module)))
     return failure();
-  FootprintResolver resolver;
+  TargetTiming target;
   if (*evidence)
-    resolver = [selected = *evidence](const Instr &in, const RegValues &regs) {
+    target = TargetTiming([selected = *evidence](const Instr &in, const RegValues &regs) {
       return selected->resolve(in, regs);
-    };
+    });
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream))
     return failure();
-  if (resolver) {
+  if (target) {
     if (stream->starts.size() != 1 || !stream->endsInHalt(0))
       return module.emitError("selected RTL timing requires one straight-line stream ending in ECALL");
     for (Instr &in : stream->instrs)
       if (in.op->opClass == OpClass::Csr)
         in.release = true;
   }
-  if (failed(checkAtlasStream(*stream, resolver)))
+  if (failed(checkAtlasStream(*stream, target)))
     return failure();
   uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b], resolver)))
+    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b], target)))
       return failure();
   // A block that falls through finishes before the next block's first op.
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {
@@ -264,7 +266,7 @@ LogicalResult scheduleStream(ModuleOp module) {
   }
   if (failed(writeAtlasStream(module, *stream, order, before)))
     return failure();
-  return resolver ? checkSelectedRTLProgramSize(module) : success();
+  return target ? checkSelectedRTLProgramSize(module) : success();
 }
 
 struct ScheduleAtlasStreamPass

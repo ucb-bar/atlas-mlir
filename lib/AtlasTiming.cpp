@@ -209,8 +209,38 @@ int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
   return static_cast<int>(std::max(1LL, std::max(offchip, vmem)));
 }
 
-int mlir::atlas::timing::unitCapacity(Unit u, int index) {
-  if (u == Unit::MxuCompute)
+bool TargetTiming::allowsEngine(Engine engine) const {
+  if (usesLegacyModelPolicies())
+    return true;
+  switch (engine) {
+  case Engine::Scalar:
+  case Engine::Lsu:
+  case Engine::Dma:
+  case Engine::Xlu:
+    return true;
+  default:
+    return false;
+  }
+}
+
+Footprint TargetTiming::resolve(const Instr &in, const RegValues &regs) const {
+  if (!in.op || !allowsEngine(in.op->engine)) {
+    Footprint f;
+    f.error = "selected target timing lacks compute-engine pair, overlap and capacity policies";
+    return f;
+  }
+  if (resolver)
+    return resolver(in, regs);
+  if (usesLegacyModelPolicies())
+    return footprintOf(in, regs);
+  Footprint f;
+  f.error = "selected target timing requires supplied footprint rules";
+  return f;
+}
+
+int mlir::atlas::timing::unitCapacity(Unit u, int index,
+                                     const TargetTiming &target) {
+  if (target.usesLegacyModelPolicies() && u == Unit::MxuCompute)
     return index == 0 ? 3 : 2;
   return 1;
 }
@@ -608,6 +638,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
 
   case OpClass::DmaLoad:
   case OpClass::DmaStore: {
+    b.f.dmaAsync = true;
     // The model reads a DMA's registers and moves its data at completion.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
@@ -630,6 +661,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     break;
   }
   case OpClass::DmaConfig: {
+    b.f.dmaAsync = true;
     b.x(in.rs1, false, 0, true);
     Access base{Res::DmaBase, true, 0, 1, 0, 1};
     base.atCompletion = true;
@@ -672,6 +704,8 @@ static std::string elementName(Res res, int element) {
   }
   case Res::DmaBase:
     return "dma.base";
+  case Res::Dram:
+    return "DRAM";
   }
   return "?";
 }
@@ -702,7 +736,8 @@ static bool contains(const std::vector<int> &v, int x) {
 
 Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
                                            const Instr &b,
-                                           const Footprint &fb) {
+                                           const Footprint &fb,
+                                           const TargetTiming &target) {
   Dependence best;
   auto consider = [&](int d, EdgeKind kind, const std::string &why) {
     if (d > best.distance)
@@ -718,6 +753,17 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
   if (b.release)
     consider(fa.doneAge + 1, EdgeKind::Order,
              "atlas.complete waits for prior fixed-latency work to complete");
+
+  if (fb.dmaAsync && fb.exclusiveVmemUntilWait) {
+    bool finiteVmem = std::any_of(fa.accesses.begin(), fa.accesses.end(),
+        [](const Access &access) {
+          return access.res == Res::Vmem && !access.atCompletion;
+        }) || std::any_of(fa.holds.begin(), fa.holds.end(),
+        [](const Hold &hold) { return hold.unit == Unit::VmemBank; });
+    if (finiteVmem)
+      consider(fa.doneAge + 1, EdgeKind::Order,
+               "selected DMA launch waits for prior VMEM work to drain");
+  }
 
   if (A.engine == Engine::Dma && B.engine == Engine::Dma) {
     bool aWait = A.opClass == OpClass::DmaWait,
@@ -765,7 +811,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
                      std::to_string(fa.readRelease));
 
   // npu_model mxu.py sequencer rules.
-  if (A.mxu >= 0 && A.mxu == B.mxu) {
+  if (target.usesLegacyModelPolicies() && A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
     std::string mx = "MXU" + std::to_string(m) + ": ";
     auto isCompute = [](const OpInfo &o) {
@@ -828,6 +874,12 @@ static bool overlaps(const Access &x, const Access &y) {
 bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
                                                 const Footprint &f,
                                                 EdgeKind &kind) {
+  if (dma.exclusiveVmemUntilWait &&
+      std::any_of(f.accesses.begin(), f.accesses.end(),
+                  [](const Access &access) { return access.res == Res::Vmem; })) {
+    kind = EdgeKind::Order;
+    return true;
+  }
   for (const Access &x : dma.accesses) {
     if (!x.atCompletion)
       continue;
@@ -884,13 +936,13 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
                                          uint32_t dmaRegs,
                                          const IncomingDma *incomingDma,
-                                         const FootprintResolver &resolver) {
+                                         const TargetTiming &target) {
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
   RegValues regs = entry;
   for (const Instr &in : instrs) {
-    g.footprints.push_back(resolver ? resolver(in, regs) : footprintOf(in, regs));
+    g.footprints.push_back(target.resolve(in, regs));
     applyScalar(in, regs);
   }
 
@@ -898,7 +950,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
       Dependence d =
-          dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
+          dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b], target);
       if (d.distance > 0)
         edges.add(a, b, d.distance, d.kind, d.reason);
     }
@@ -907,7 +959,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
   // conflicting accesses wait for that dma.wait.
   for (int d = 0; d < n; d++) {
     const OpInfo &op = *g.nodes[d].op;
-    if (op.engine != Engine::Dma || op.opClass == OpClass::DmaWait)
+    if (!g.footprints[d].dmaAsync)
       continue;
     int wait = -1;
     for (int k = d + 1; k < n && wait < 0; k++)
@@ -937,14 +989,13 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
       continue;
     bool local = false;
     for (int d = 0; d < w; d++)
-      if (g.nodes[d].op->engine == Engine::Dma &&
+      if (g.footprints[d].dmaAsync &&
           g.nodes[d].op->channel == op.channel)
         local = true;
     if (local)
       continue;
     for (int k = w + 1; k < n; k++) {
-      bool guarded = g.nodes[k].op->engine == Engine::Dma &&
-                     g.nodes[k].op->opClass != OpClass::DmaWait;
+      bool guarded = g.footprints[k].dmaAsync;
       if (incomingDma) {
         guarded = guarded && g.nodes[k].op->channel == op.channel;
         for (const Footprint &dma : (*incomingDma)[op.channel]) {
@@ -985,6 +1036,7 @@ std::vector<int> mlir::atlas::timing::criticalHeights(const DepGraph &g) {
       // A dma.wait holds the frontend until the transfer completes.
       const Instr &to = g.nodes[ed.to];
       if (to.op->opClass == OpClass::DmaWait &&
+          g.footprints[i].dmaAsync && g.footprints[i].dmaCycles > 0 &&
           to.op->channel == g.nodes[i].op->channel)
         d = std::max(d, g.footprints[i].dmaCycles + 2);
       height[i] = std::max(height[i], d + height[ed.to]);
@@ -1001,7 +1053,7 @@ bool ReservationTable::unitFree(Unit u, int index, int from, int to) const {
   auto it = units_.find(unitKey(u, index));
   if (it == units_.end())
     return true;
-  int cap = unitCapacity(u, index);
+  int cap = unitCapacity(u, index, target_);
   for (auto c = it->second.lower_bound(from);
        c != it->second.end() && c->first <= to; ++c)
     if (c->second >= cap)
@@ -1027,7 +1079,8 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
     for (int i = 0; i < a.count; i++) {
       int element = a.first + i;
       int reg = element / 32, row = element % 32;
-      bool shareable = !a.write && in.op->engine == Engine::Vpu;
+      bool shareable = target_.usesLegacyModelPolicies() && !a.write &&
+                       in.op->engine == Engine::Vpu;
       out.push_back({(reg % 32) * 2 + (a.write ? 1 : 0),
                      cycle + a.age + i * a.step, reg, row, shareable});
     }
@@ -1037,6 +1090,8 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
 
 std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
                                        int cycle) const {
+  if (!in.op || !target_.allowsEngine(in.op->engine))
+    return "selected target timing lacks compute-engine reservation policies";
   for (const Hold &h : f.holds)
     if (chooseIndex(h, cycle) < 0)
       return std::string(unitName(h.unit)) + " " + std::to_string(h.index) +
@@ -1048,7 +1103,8 @@ std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
       if (it->second.size() >= 2)
         return "both VPU slots busy";
       for (const OpInfo *other : it->second)
-        if (!vpuCanOverlap(*other, *in.op))
+        if (!target_.usesLegacyModelPolicies() ||
+            !vpuCanOverlap(*other, *in.op))
           return "VPU busy with " + other->name;
     }
   }
