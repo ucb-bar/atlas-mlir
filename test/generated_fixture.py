@@ -1,8 +1,8 @@
-"""Fixtures for generated (resource-contract-v3) artifacts.
+"""Fixtures for generated (resource-contract-v4) artifacts.
 
 Lowering is the only producer of generated artifacts, and every consumer requires the
-whole envelope: the marker, a timing state, the DMA/MXU/tile contracts and a CFG contract
-that owns each instruction. Prefer mutating lowered output (`insert_after`, `remove_line`).
+whole envelope: the marker, a timing state, the DMA/MXU/tile contracts, a CFG contract
+that owns each instruction and a source memory contract. Prefer mutating lowered output (`insert_after`, `remove_line`).
 Where one checker needs a hand-built stream, `artifact` wraps it in a timed envelope and
 derives the rest so that only the checker under test can reject the fixture:
 
@@ -15,10 +15,12 @@ derives the rest so that only the checker under test can reject the fixture:
 - CFG scaffolding: one source block per fixture block (see `structured` for labels), one
   synthetic source operation per issued command, one single-register tensor value per
   VLOAD/POP destination, and an `arith.constant` condition for conditional terminators.
+  DMA launches are owned by source operations named after a one-launch virtual DMA.
+- Source memory effects mirror the checker's derivation from the tile and CFG records.
 
 The scaffolding is not an oracle for CFG correspondence (test_cfg_contract_verification.py
 covers that on lowered artifacts). Checks run in the order schedule, DMA memory, DMA, MXU,
-tile, CFG, timing, so a negative fixture may leave the scaffolding inconsistent as long as
+tile, CFG, source memory, timing, so a negative fixture may leave the scaffolding inconsistent as long as
 its test asserts the intended diagnostic. Registers written by VPU/XLU/VLI/PACK are only
 killed, never redefined; a fixture that reads such a result needs real CFG records.
 """
@@ -30,11 +32,11 @@ import re
 
 
 STATE = "!atlas.state"
-MARKER = 'atlas.generated_from_virtual = "resource-contract-v3"'
+MARKER = 'atlas.generated_from_virtual = "resource-contract-v4"'
 # Classification diagnostics (lib/AtlasGeneratedArtifact.cpp).
 UNSUPPORTED = "unsupported Atlas virtual-to-machine artifact marker"
 UNMARKED = "generated resource metadata requires an Atlas virtual-to-machine artifact marked"
-INCOMPLETE = "resource-contract-v3 artifact requires"
+INCOMPLETE = "resource-contract-v4 artifact requires"
 CLASSIFICATION = (UNSUPPORTED, UNMARKED, INCOMPLETE)
 TIMED = 'atlas.timing_state = "timed", atlas.timing_provider = "npu-model-rtl-match-v1"'
 NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
@@ -43,6 +45,8 @@ TRAP = ("trap", 'kind = "ecall"')
 TILE_TAG = "atlas.virtual_tile_command"
 MXU_TAG = "atlas.virtual_mxu_command"
 TRANSFER_TAG = "atlas.virtual_dma_transfer"
+# The source memory contract counts each source operation's DMA launches by its name.
+DMA_SOURCE = {"load": "atlas.virtual_dma_load_fp8", "store": "atlas.virtual_dma_store_fp8"}
 LABEL, BRANCH, JUMP = "@label", "@branch", "@jump"
 FIELD_RE = re.compile(r'([\w.]+) = (?:(-?\d+) : i32|"([^"]*)"|(true|false))')
 
@@ -138,6 +142,7 @@ class _Emitted:
     tags: list = field(default_factory=list)
     target: int | None = None  # block index for redirects
     tile: int | None = None
+    condition: int | None = None  # the branch-condition value this ALU op defines
 
 
 def tile_id(op: _Emitted) -> int | None:
@@ -301,10 +306,8 @@ class _Builder:
 
         if block.branch is not None:
             condition = self.add_value(index, CONDITION_REG, "i1", "arith.constant", constant=1)
-            source = self.add_source(index, "arith.constant", results=[condition])
             self.emitted.append(_Emitted("alu_imm", f'kind = "addi", dst = {CONDITION_REG} : i32, src = 0 : i32, immediate = 1 : i32', index,
-                                         [f"atlas.virtual_cfg_source = {source} : i32", f"atlas.virtual_cfg_operation = {source} : i32",
-                                          f"atlas.virtual_scalar_result = {condition} : i32"]))
+                                         [f"atlas.virtual_scalar_result = {condition} : i32"], condition=condition))
             true, false = block.branch
             true_edge, false_edge = edge(true), edge(false)
             # target -1 resolves to the true-edge jump after the false-edge jump pair.
@@ -329,10 +332,10 @@ class _Builder:
         self.values.append(dict(id=len(self.values), block=block, reg=reg, type=type_, def_=def_, operands=(), **extra))
         return self.values[-1]["id"]
 
-    def add_source(self, block: int, name: str, operands=(), results=(), tile=(), mxu=()) -> int:
+    def add_source(self, block: int, name: str, operands=(), results=(), tile=(), mxu=()) -> dict:
         self.sources.append(dict(id=len(self.sources), block=block, name=name, operands=tuple(operands),
                                  results=tuple(results), tile_commands=tuple(tile), mxu_commands=tuple(mxu)))
-        return self.sources[-1]["id"]
+        return self.sources[-1]
 
     def derive_tile_records(self) -> None:
         scalars = _Scalars()
@@ -402,6 +405,25 @@ class _Builder:
                                          staging_reg=f["reg"], dram_reg=f["dram"], size_reg=f["size"])
         return [result[key] for key in sorted(result)]
 
+    def source_memory_records(self) -> list[dict]:
+        """deriveEffects (lib/AtlasSourceMemoryEffectContract.cpp): an unowned launch is the mailbox."""
+        owners = {command: source for source in self.sources for command in source["tile_commands"]}
+        effects: list[dict] = []
+        for r in self.records:
+            if r["kind"] not in ("dma_load", "dma_store"):
+                continue
+            owner = owners.get(r["id"])
+            waits = [w["id"] for w in self.records if w["kind"] == "dma_wait" and tuple(w["after"]) == (r["id"],)]
+            effect = dict(id=len(effects), source=owner["id"] if owner else -1, block=owner["block"] if owner else -1,
+                          launch=r["id"], completion=waits[0] if waits else -1, dram_byte=r["dram_byte"] & MASK,
+                          bytes=r["bytes"], write=r["kind"] == "dma_store")
+            effect["predecessors"] = tuple(
+                e["id"] for e in effects
+                if (e["block"] == effect["block"] or e["source"] == -1) and (e["write"] or effect["write"])
+                and e["dram_byte"] < effect["dram_byte"] + effect["bytes"] and effect["dram_byte"] < e["dram_byte"] + e["bytes"])
+            effects.append(effect)
+        return effects
+
     def scaffold(self) -> None:
         writes: dict[int, int] = {}
         for op in self.emitted:
@@ -411,6 +433,7 @@ class _Builder:
                           and fields(op.text).get("kind") == "lw" and tile_id(op) is not None), key=tile_id)
         arguments = {id(op): self.add_value(0, fields(op.text)["dst"], "i32", "argument") for op in mailbox}
         origin: dict[int, int] = {}
+        owned: list[tuple[_Emitted, dict]] = []
         for op in self.emitted:
             f = fields(op.text)
             op.tags.insert(0, f"atlas.virtual_cfg_block = {op.block} : i32")
@@ -419,6 +442,10 @@ class _Builder:
             if id(op) in arguments:
                 value = arguments[id(op)]
                 op.tags += [f"atlas.virtual_scalar_argument = {value} : i32", f"atlas.virtual_scalar_result = {value} : i32"]
+                continue
+            # Source operations follow block order, as lowering numbers them.
+            if op.condition is not None:
+                owned.append((op, self.add_source(op.block, "arith.constant", results=[op.condition])))
                 continue
             # Malformed tags stay in the stream for their checker but bind no source record.
             tile, mxu = tile_id(op), integer_tag(f, MXU_TAG)
@@ -441,9 +468,19 @@ class _Builder:
                 for reg in written:
                     origin.pop(reg, None)
             if tile is not None or mxu is not None or results:
-                source = self.add_source(op.block, f"fixture.{op.name}", operands, results,
-                                         [tile] if tile is not None else [], [mxu] if mxu is not None else [])
-                op.tags += [f"atlas.virtual_cfg_source = {source} : i32", f"atlas.virtual_cfg_operation = {source} : i32"]
+                name = DMA_SOURCE[f["direction"]] if op.name == "dma" else f"fixture.{op.name}"
+                owned.append((op, self.add_source(op.block, name, operands, results,
+                                                  [tile] if tile is not None else [], [mxu] if mxu is not None else [])))
+        # Lowering numbers tile commands in source order, which the source memory contract requires;
+        # authored records and the appended prologue may be issued out of id order, so number by tile id.
+        for block in range(len(self.blocks)):
+            slots = [n for n, s in enumerate(self.sources) if s["block"] == block and s["tile_commands"]]
+            for n, source in zip(slots, sorted((self.sources[n] for n in slots), key=lambda s: s["tile_commands"])):
+                self.sources[n] = source
+        for n, source in enumerate(self.sources):
+            source["id"] = n
+        for op, source in owned:
+            op.tags += [f"atlas.virtual_cfg_source = {source['id']} : i32", f"atlas.virtual_cfg_operation = {source['id']} : i32"]
         for index, record in enumerate(self.block_records):
             stable = [v["id"] for v in self.values if v["type"] in ("bf16", "fp8") and v["block"] < index
                       and all(writes.get(v["reg"] + half, 0) == 1 for half in range(2 if v["type"] == "bf16" else 1))]
@@ -485,7 +522,8 @@ class _Builder:
                f"edges = {record_text(self.edges)}, operations = {record_text(self.sources)}}}")
         attributes = (f"{MARKER}, {TIMED}, atlas.virtual_dma_contract = {record_text(self.dma_records())}, "
                       f"atlas.virtual_mxu_contract = {record_text(self.mxu)}, atlas.virtual_tile_contract = {record_text(self.records)}, "
-                      f"atlas.virtual_cfg_contract = {cfg}")
+                      f"atlas.virtual_cfg_contract = {cfg}, "
+                      f"atlas.virtual_source_memory_contract = {{effects = {record_text(self.source_memory_records())}}}")
         return f"module attributes {{{attributes}}} {{\n" + "\n".join(lines) + "\n}\n"
 
 

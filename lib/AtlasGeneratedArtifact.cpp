@@ -14,11 +14,12 @@ constexpr llvm::StringRef kTags[] = {
     "atlas.virtual_cfg_helper", "atlas.virtual_scalar_result",
     "atlas.virtual_tensor_result", "atlas.virtual_scalar_argument"};
 constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
-                                          kAtlasTileContract, kAtlasCFGContract};
+                                          kAtlasTileContract, kAtlasCFGContract,
+                                          kAtlasSourceMemoryContract};
 constexpr llvm::StringRef kPreserved[] = {
     kAtlasGeneratedMarker, kAtlasDMAContract, kAtlasMXUContract,
-    kAtlasTileContract, kAtlasCFGContract, kAtlasTimingState,
-    kAtlasTimingProvider};
+    kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract,
+    kAtlasTimingState, kAtlasTimingProvider};
 } // namespace
 
 ArrayRef<StringRef> mlir::atlas::atlasPreservedModuleAttrs() { return kPreserved; }

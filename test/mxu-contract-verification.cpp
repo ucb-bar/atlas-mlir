@@ -142,13 +142,14 @@ void testStreamMetadata(MLIRContext &context) {
   // A complete generated envelope: the pushed register needs a tile-checked
   // origin, because the stream rewrite rechecks every contract.
   constexpr StringLiteral source = R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v3", atlas.timing_state = "timed",
+    atlas.generated_from_virtual = "resource-contract-v4", atlas.timing_state = "timed",
     atlas.timing_provider = "npu-model-rtl-match-v1", atlas.virtual_dma_contract = [],
     atlas.virtual_mxu_contract = [{id = 0 : i32, block = 0 : i32, kind = "weight_fp8", unit = 1 : i32, reg = 11 : i32, slot = 1 : i32, weight_slot = -1 : i32, weight = -1 : i32, previous = -1 : i32, scale_reg = -1 : i32, scale = -1 : i32}],
     atlas.virtual_tile_contract = [
       {id = 0 : i32, kind = "dma_load", reg = -1 : i32, vmem_byte = 1310720 : i32, dram_byte = -1870659584 : i32, bytes = 1024 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32>},
       {id = 1 : i32, kind = "dma_wait", reg = -1 : i32, vmem_byte = 0 : i32, dram_byte = 0 : i32, bytes = 0 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32: 0>},
       {id = 2 : i32, kind = "vload", reg = 11 : i32, vmem_byte = 1310720 : i32, dram_byte = 0 : i32, bytes = 1024 : i32, channel = -1 : i32, transfer = -1 : i32, after = array<i32: 1>}],
+    atlas.virtual_source_memory_contract = {effects = [{id = 0 : i32, source = 0 : i32, block = 0 : i32, launch = 0 : i32, completion = 1 : i32, dram_byte = -1870659584 : i32, bytes = 1024 : i32, write = false, predecessors = array<i32>}]},
     atlas.virtual_cfg_contract = {
       values = [{id = 0 : i32, block = 0 : i32, reg = 11 : i32, type = "fp8", operands = array<i32>, def = "atlas.virtual_dma_await_fp8"}],
       blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>, live_in = array<i32>, operations = array<i32: 0, 1, 2>, edges = array<i32>}],

@@ -90,3 +90,12 @@ target_link_libraries(atlas-verification-context-test PRIVATE
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-context-test)
 add_test(NAME atlas-verification-context COMMAND atlas-verification-context-test)
+
+add_llvm_executable(atlas-source-memory-contract-verification
+  source-memory-effect-contract.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-source-memory-contract-verification)
+target_link_libraries(atlas-source-memory-contract-verification PRIVATE
+  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-source-memory-contract-verification)
+add_test(NAME atlas-source-memory-contract COMMAND atlas-source-memory-contract-verification)

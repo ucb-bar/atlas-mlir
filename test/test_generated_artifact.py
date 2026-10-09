@@ -1,6 +1,6 @@
 """Every consumer classifies generated artifacts by one rule (lib/AtlasGeneratedArtifact.cpp).
 
-Only the resource-contract-v3 marker with all four contracts and a timing state is a generated
+Only the resource-contract-v4 marker with all five contracts and a timing state is a generated
 artifact; a module without marker, contracts or tags is a hand-written stream; anything else
 fails with one diagnostic.
 """
@@ -15,15 +15,16 @@ from test_virtual_lowering import BIN, lower, run
 
 
 CONTRACTS = ("atlas.virtual_dma_contract", "atlas.virtual_mxu_contract",
-             "atlas.virtual_tile_contract", "atlas.virtual_cfg_contract")
+             "atlas.virtual_tile_contract", "atlas.virtual_cfg_contract",
+             "atlas.virtual_source_memory_contract")
 TIMED_BOUNDARIES = (("atlas-opt", ("--verify-atlas-generated-schedule",)),
                     ("atlas-emit", ()),
                     ("atlas-opt", ("--convert-atlas-to-llvm",)),
                     ("atlas-opt", ("--convert-atlas-to-llvm-calls",)))
 UNTIMED_BOUNDARIES = (("atlas-opt", ("--insert-atlas-delays",)),
                       ("atlas-opt", ("--schedule-atlas-stream",)))
-MARKERS = ('"resource-contract-v1"', '"resource-contract-v2"', '"dma-contract-v1"',
-           '"resource-contract-v999"', '"resource-contract-v3 "', "1 : i32", "unit")
+MARKERS = ('"resource-contract-v1"', '"resource-contract-v2"', '"resource-contract-v3"', '"dma-contract-v1"',
+           '"resource-contract-v999"', '"resource-contract-v4 "', "1 : i32", "unit")
 
 
 def drop_attribute(machine: str, name: str) -> str:
@@ -73,7 +74,7 @@ class GeneratedArtifactClassificationTest(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
                     self.assertIn(diagnostic, result.stderr)
 
-    def test_lowered_resource_contract_v3_is_accepted_everywhere(self) -> None:
+    def test_lowered_resource_contract_v4_is_accepted_everywhere(self) -> None:
         for source, boundaries in ((self.timed, TIMED_BOUNDARIES), (self.untimed, UNTIMED_BOUNDARIES)):
             for tool, options in boundaries:
                 with self.subTest(tool=tool, options=options):

@@ -403,7 +403,7 @@ class TileContractVerificationTest(unittest.TestCase):
             self.assertNotEqual(changed, machine)
             self.rejected(changed, "tile contract")
         for marker in ('"resource-contract-v2"', '"dma-contract-v1"', "1 : i32"):
-            self.rejected(machine.replace('"resource-contract-v3"', marker, 1), UNSUPPORTED)
+            self.rejected(machine.replace('"resource-contract-v4"', marker, 1), UNSUPPORTED)
 
     def test_llvm_handoffs_preserve_contract_and_recheck_corruption(self) -> None:
         facts, operations = vector_fixture()

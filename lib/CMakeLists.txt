@@ -23,6 +23,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasMXUContractVerification.cpp
   AtlasTileContractVerification.cpp
   AtlasCFGContractVerification.cpp
+  AtlasSourceMemoryEffectContract.cpp
   AtlasGeneratedArtifact.cpp
   AtlasGeneratedSchedule.cpp
   AtlasVerificationContext.cpp
