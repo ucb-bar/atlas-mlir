@@ -2,6 +2,7 @@
 #define ATLAS_TIMING_PROVIDER_H
 
 #include "Atlas/AtlasTiming.h"
+#include "llvm/ADT/StringRef.h"
 #include <memory>
 
 namespace mlir::atlas {
@@ -52,6 +53,7 @@ struct TimingProvider {
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
+constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
 // Explicit adapter for existing unqualified npu-model rtl-match rules.
 TimingProvider npuModelTimingProvider();
 // Only complete policies are returned. Unknown ids and the current CIRCT

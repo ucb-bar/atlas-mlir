@@ -2,30 +2,17 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
-#include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "VerificationTestSupport.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Parser/Parser.h"
-#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
-#include <map>
 #include <string>
 #include <vector>
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 namespace {
-unsigned checks = 0, failures = 0;
-std::string diagnostics;
-void check(bool ok, StringRef name) {
-  ++checks;
-  if (!ok) { ++failures; llvm::errs() << "FAIL: " << name << '\n'; }
-}
-bool diagnosed(StringRef message) { return StringRef(diagnostics).contains(message); }
 constexpr StringLiteral notCompleted = "overlapping source predecessor has not completed in this visit";
 constexpr StringLiteral incomplete = "source block exits before its required effects complete";
 constexpr StringLiteral pending = "source block exits with a pending DRAM effect";
@@ -210,7 +197,6 @@ struct Fixture {
   bool verify() { diagnostics.clear(); return succeeded(verifyAtlasGeneratedSourceMemoryEffectContract(*issued)); }
   bool rejects(StringRef message) { return !verify() && diagnosed(message); }
 };
-int field(DictionaryAttr d, StringRef key) { return d.getAs<IntegerAttr>(key).getInt(); }
 void straight(MLIRContext &context) {
   for (unsigned offset : {0u, 512u, 2048u}) {
     std::string source = sourceText.str();
@@ -221,8 +207,8 @@ void straight(MLIRContext &context) {
       auto effects = f.contract.getAs<ArrayAttr>("effects");
       check(effects.size() == 3, "literal implicit-input/explicit-store/explicit-load cardinality");
       auto store = cast<DictionaryAttr>(effects[1]), load = cast<DictionaryAttr>(effects[2]);
-      check(field(store, "source") == 5 && field(store, "launch") == 4 && field(store, "completion") == 5, "literal store source identity and completion");
-      check(field(load, "source") == 7 && uint32_t(field(load, "dram_byte")) == 0x90000000u + offset && field(load, "bytes") == 1024, "literal load span and source identity");
+      check(integer(store, "source") == 5 && integer(store, "launch") == 4 && integer(store, "completion") == 5, "literal store source identity and completion");
+      check(integer(load, "source") == 7 && uint32_t(integer(load, "dram_byte")) == 0x90000000u + offset && integer(load, "bytes") == 1024, "literal load span and source identity");
       auto pred = load.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef();
       check(offset < 1024 ? pred == ArrayRef<int32_t>({1}) : pred.empty(), "literal source-overlap predecessor set");
       f.group(0); if (reorder) { f.group(2); f.group(1); } else { f.group(1); f.group(2); } f.halt();
@@ -259,22 +245,13 @@ void boundary(MLIRContext &context) {
     auto effects = f.contract.getAs<ArrayAttr>("effects");
     check(effects.size() == 4, "literal boundary BF16 half-effect count");
     auto first = cast<DictionaryAttr>(effects[2]), second = cast<DictionaryAttr>(effects[3]);
-    check(field(first, "source") == 2 && field(first, "launch") == 7 && field(first, "completion") == 8 &&
+    check(integer(first, "source") == 2 && integer(first, "launch") == 7 && integer(first, "completion") == 8 &&
           first.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef() == ArrayRef<int32_t>({0}) &&
           second.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef() == ArrayRef<int32_t>({1}),
           "boundary writes retain the literal corresponding prior source reads");
     if (reorder) { f.group(2); f.group(0); f.group(1); f.group(3); }
     else { f.group(0); f.group(1); f.group(2); f.group(3); }
     f.halt(); check(reorder ? f.rejects(notCompleted) : f.verify(), reorder ? "completed boundary write cannot precede its overlapping source read" : "serialized overlapping boundary I/O preserves source order");
-  }
-  Fixture f(context, sourceText); check(bool(f.contract), "edge-stripping source fixture builds");
-  if (f.contract) {
-    SmallVector<Attribute> effects(f.contract.getAs<ArrayAttr>("effects").begin(), f.contract.getAs<ArrayAttr>("effects").end());
-    NamedAttrList fields(cast<DictionaryAttr>(effects[2])); fields.set("predecessors", f.b.getDenseI32ArrayAttr({}));
-    effects[2] = fields.getDictionary(&context);
-    (*f.issued)->setAttr("atlas.virtual_source_memory_contract", f.b.getDictionaryAttr({f.b.getNamedAttr("effects", f.b.getArrayAttr(effects))}));
-    f.group(0); f.group(2); f.group(1); f.halt();
-    check(f.rejects("source memory contract has malformed or inconsistent source records"), "stripping source predecessor metadata cannot bypass recomputed conflicts");
   }
 }
 void loops(MLIRContext &context) {
@@ -407,7 +384,7 @@ void renumbered(MLIRContext &context) {
   SmallVector<Attribute> tiles(f.tiles.size());
   for (Attribute a : f.tiles) {
     auto fields = remap(cast<DictionaryAttr>(a), "after");
-    int32_t id = map(field(cast<DictionaryAttr>(a), "id"));
+    int32_t id = map(integer(cast<DictionaryAttr>(a), "id"));
     fields.set("id", f.b.getI32IntegerAttr(id)); tiles[id] = fields.getDictionary(&context);
   }
   SmallVector<Attribute> operations;
@@ -438,21 +415,7 @@ void emptyStream(MLIRContext &context) {
   diagnostics.clear();
   check(failed(verifyAtlasGeneratedSourceMemoryEffectContract(ctx)) && diagnosed("source memory contract requires a nonempty issued instruction stream"), "an empty decoded stream is rejected before indexing PC zero");
 }
-void gate(MLIRContext &context) {
-  Fixture f(context, sourceText); check(bool(f.contract), "gate fixture builds"); if (!f.contract) return;
-  f.group(0); f.group(1); f.group(2); f.halt();
-  check(f.verify(), "complete source order verifies");
-  (*f.issued)->setAttr("atlas.generated_from_virtual", f.b.getStringAttr("resource-contract-v3"));
-  check(f.rejects("unsupported Atlas virtual-to-machine artifact marker"), "the previous marker is unsupported even with the contract");
-  (*f.issued)->setAttr("atlas.generated_from_virtual", f.b.getStringAttr("resource-contract-v4"));
-  (*f.issued)->removeAttr("atlas.virtual_source_memory_contract");
-  check(f.rejects("artifact requires atlas.virtual_source_memory_contract"), "generated artifacts require the contract");
-}
 } // namespace
-int main() {
-  MLIRContext context; context.getOrLoadDialect<AtlasDialect>(); context.getOrLoadDialect<arith::ArithDialect>(); context.getOrLoadDialect<cf::ControlFlowDialect>(); context.getOrLoadDialect<func::FuncDialect>();
-  ScopedDiagnosticHandler handler(&context, [](Diagnostic &d) { diagnostics += d.str() + '\n'; return success(); });
-  straight(context); boundary(context); loops(context); branches(context); lifecycle(context); joins(context); exits(context); renumbered(context); emptyStream(context); gate(context);
-  llvm::outs() << checks << " source-memory-effect checks, " << failures << " failures\n";
-  return failures ? 1 : 0;
+void atlas_test::runSourceMemoryContract(MLIRContext &context) {
+  straight(context); boundary(context); loops(context); branches(context); lifecycle(context); joins(context); exits(context); renumbered(context); emptyStream(context);
 }

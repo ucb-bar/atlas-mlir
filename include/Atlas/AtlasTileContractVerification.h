@@ -7,9 +7,15 @@
 namespace mlir::atlas {
 struct AtlasVerificationContext;
 
-// Requires admitted, verified live virtual SSA, independently checked register
-// placement claims and valid boundary ABI bindings. Derives static transfer
-// expectations without consulting the lowering's planned commands.
+// Tile commands and DMA launches that one source operation expands to, keyed
+// by operation name. The scalar-argument mailbox prelude (DMA launch and wait)
+// precedes the per-argument LW commands and every operation's commands.
+struct AtlasTileExpansion { unsigned commands, launches; };
+AtlasTileExpansion atlasTileExpansion(llvm::StringRef sourceOp);
+constexpr int32_t kMailboxPreludeCommands = 2;
+
+// Builds static transfer records from live source, checked placements and the
+// boundary ABI, without consulting the lowering's planned commands.
 FailureOr<ArrayAttr> buildAtlasTileContract(
     func::FuncOp function,
     llvm::ArrayRef<VirtualRegisterAssignment> tensorRegisters,
@@ -17,13 +23,9 @@ FailureOr<ArrayAttr> buildAtlasTileContract(
     const FixedResourcePlacement &fixed,
     llvm::ArrayRef<int32_t> scalarArgumentRegs);
 
-// Checks all generated VLOAD/VSTORE/DMA/WAIT commands and tagged mailbox LW
-// against source records, including required predecessor commands on emitted
-// paths. Requires separate structural/lifecycle and DMA/MXU contract checks.
-// Excludes tensor contents, PACK's scalar relayout, source/emitted CFG
-// correspondence, dynamic execution counts, and physical completion/release.
+// Checks a generated artifact's VLOAD/VSTORE/DMA/WAIT and mailbox LW commands
+// and their emitted-path predecessors. See docs/dialect-reference.md.
 LogicalResult verifyAtlasGeneratedTileContract(const AtlasVerificationContext &ctx);
-LogicalResult verifyAtlasGeneratedTileContract(ModuleOp module);
 
 } // namespace mlir::atlas
 

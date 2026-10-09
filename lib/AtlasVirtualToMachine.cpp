@@ -90,17 +90,17 @@ public:
           return failure();
         if (planned.size() != first && !op.hasTrait<OpTrait::IsTerminator>()) {
           for (size_t n = first; n < planned.size(); ++n)
-            planned[n].attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_source"), i32(cfgOperations.lookup(&op)));
-          planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_operation"), i32(cfgOperations.lookup(&op)));
+            planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(cfgOperations.lookup(&op)));
+          planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGOperation), i32(cfgOperations.lookup(&op)));
           for (Value result : op.getResults()) {
             if (!cfgTracked(result)) continue;
             StringRef name = result.getType().isInteger(1) || result.getType().isInteger(32)
-                ? "atlas.virtual_scalar_result" : "atlas.virtual_tensor_result";
+                ? kAtlasTagScalarResult : kAtlasTagTensorResult;
             planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
           }
           if (isa<VirtualPackFP8Op>(op))
             for (size_t n = first; n < planned.size(); ++n)
-              planned[n].attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_helper"), str("pack"));
+              planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGHelper), str("pack"));
         }
       }
     }
@@ -197,20 +197,20 @@ private:
   void add(StringRef name, Location loc, Fields fields = {},
            std::optional<unsigned> target = std::nullopt) {
     PlannedOp step{name.str(), {}, loc, target};
-    step.attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_block"), i32(currentCFGBlock));
+    step.attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBlock), i32(currentCFGBlock));
     if (currentCFGEdge)
-      step.attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_edge"), i32(*currentCFGEdge));
+      step.attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGEdge), i32(*currentCFGEdge));
     for (const auto &[key, value] : fields)
       step.attrs.emplace_back(StringAttr::get(module.getContext(), key), value);
     if (name == "atlas.mxu_push" || name == "atlas.mxu_matmul" || name == "atlas.mxu_pop")
-      step.attrs.emplace_back(StringAttr::get(module.getContext(), "atlas.virtual_mxu_command"), i32(nextMXUCommand++));
+      step.attrs.emplace_back(StringAttr::get(module.getContext(), kAtlasTagMXUCommand), i32(nextMXUCommand++));
     planned.push_back(std::move(step));
     if (name == "atlas.vload" || name == "atlas.vstore" || name == "atlas.dma" || name == "atlas.dma_wait")
       tagTileCommand();
   }
 
   void tagTileCommand() {
-    planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_tile_command"), i32(nextTileCommand++));
+    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTileCommand), i32(nextTileCommand++));
   }
 
   unsigned newLabel() { return nextLabel++; }
@@ -363,12 +363,12 @@ private:
           {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
            {"offset", i32(4 * (fixed().mailboxWord + index))}});
       tagTileCommand();
-      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_scalar_argument"), i32(cfgValues.lookup(arg)));
+      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagScalarArgument), i32(cfgValues.lookup(arg)));
       if (arg.getType().isInteger(1))
         add("atlas.alu_imm", loc,
             {{"kind", str("andi")}, {"dst", i32(reg)},
              {"src", i32(reg)}, {"immediate", i32(1)}});
-      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_scalar_result"), i32(cfgValues.lookup(arg)));
+      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagScalarResult), i32(cfgValues.lookup(arg)));
     }
   }
 
@@ -782,7 +782,7 @@ private:
       add("atlas.branch", loc,
           {{"kind", str("bne")}, {"lhs", i32(scalar(branch.getCondition()))},
            {"rhs", i32(0)}}, trueEdge);
-      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_branch"), i32(currentCFGBlock));
+      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBranch), i32(currentCFGBlock));
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
            {"immediate", i32(0)}});

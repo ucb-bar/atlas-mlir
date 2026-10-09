@@ -6,46 +6,27 @@ import re
 import unittest
 
 import generated_fixture
-from generated_fixture import CLASSIFICATION, INCOMPLETE, MARKER as LOWERED_VERSION, UNSUPPORTED, branch_to, label
+from generated_fixture import branch_to, label
 from test_virtual_dma import copy
 from test_virtual_dma_lowering import independent_work
-from test_virtual_lowering import BIN, ROOT, lower, run, virtual_chain, virtual_pressure
+from test_virtual_lowering import ROOT, lower, run, virtual_chain, virtual_pressure
 from test_virtual_mxu_handles import program
-
+from verification_support import (
+    DELAY, INCOMPLETE, MARKER as LOWERED_VERSION, NOP, UNSUPPORTED, assert_boundaries, checked, contract_text,
+    drop_attribute, finalize_rejects, line_index, records as contract_records, replace_contract as replace, rewrite_line,
+    structured_word,
+)
 
 CONTRACT = "atlas.virtual_tile_contract"
 TAG = "atlas.virtual_tile_command"
-CONTRACT_RE = re.compile(r'atlas\.virtual_tile_contract = (\[[^\]]*\])')
-RECORD_RE = re.compile(r'\{([^{}]*)\}')
-FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
-BOUNDARIES = (("atlas-opt", ("--verify-atlas-generated-schedule",)),
-              ("atlas-emit", ()),
-              ("atlas-opt", ("--convert-atlas-to-llvm",)),
-              ("atlas-opt", ("--convert-atlas-to-llvm-calls",)))
-DELAY = ("delay", 'cycles = 256 : i32, atlas.delay_reason = "tensor_completion"')
-NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
-
-
-def contract_text(machine: str) -> str:
-    match = CONTRACT_RE.search(machine)
-    if match is None:
-        raise AssertionError("lowering must retain the source tile contract")
-    return match[1]
 
 
 def records(machine: str) -> list[dict]:
-    result = []
-    for text in RECORD_RE.findall(contract_text(machine)):
-        entry = {name: int(integer) if integer else string
-                 for name, integer, string in FIELD_RE.findall(text)}
-        for address in ("vmem_byte", "dram_byte"):
-            entry[address] &= 0xffffffff
-        after = re.search(r'after = array<i32(?:: ([^>]*))?>', text)
-        if after is None:
-            raise AssertionError("tile dependencies must be a dense i32 array")
-        entry["after"] = tuple(int(value.strip()) for value in after[1].split(",")) if after[1] else ()
-        result.append(entry)
-    return result
+    return contract_records(machine, "tile")
+
+
+def replace_contract(machine: str, text: str) -> str:
+    return replace(machine, "tile", text)
 
 
 def record(identity: int, kind: str, *, reg: int = -1, vmem: int = 0,
@@ -53,19 +34,6 @@ def record(identity: int, kind: str, *, reg: int = -1, vmem: int = 0,
            transfer: int = -1, after: tuple[int, ...] = ()) -> dict:
     return dict(id=identity, kind=kind, reg=reg, vmem_byte=vmem,
                 dram_byte=dram, bytes=size, channel=channel, transfer=transfer, after=after)
-
-
-def record_text(entries: list[dict]) -> str:
-    def field(key: str, value) -> str:
-        if key == "after":
-            return f'{key} = array<i32' + (": " + ", ".join(map(str, value)) if value else "") + ">"
-        return f'{key} = "{value}"' if isinstance(value, str) else f"{key} = {value} : i32"
-    return "[" + ", ".join("{" + ", ".join(field(key, value) for key, value in entry.items()) + "}"
-                            for entry in entries) + "]"
-
-
-def replace_contract(machine: str, text: str) -> str:
-    return CONTRACT_RE.sub(lambda _: f"{CONTRACT} = {text}", machine, count=1)
 
 
 def command(name: str, fields: str, identity: int) -> tuple[str, str]:
@@ -144,29 +112,11 @@ def store_fixture() -> tuple[list[dict], list[tuple[str, str]]]:
 
 
 class TileContractVerificationTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
-        self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
-
     def accepted(self, machine: str) -> None:
-        for tool, options in BOUNDARIES:
-            with self.subTest(tool=tool, options=options):
-                result = run(tool, machine, *options)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout)
+        assert_boundaries(self, machine)
 
     def rejected(self, machine: str, diagnostic: str = "") -> None:
-        for tool, options in BOUNDARIES:
-            with self.subTest(tool=tool, options=options):
-                result = run(tool, machine, *options)
-                self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertEqual(result.stdout, "")
-                self.assertTrue(result.stderr)
-                if diagnostic:
-                    self.assertIn(diagnostic, result.stderr)
-                for unintended in CLASSIFICATION:
-                    if unintended not in diagnostic:
-                        self.assertNotIn(unintended, result.stderr)
+        assert_boundaries(self, machine, rejects=diagnostic)
 
     def test_explicit_formats_have_source_derived_halves_and_dependencies(self) -> None:
         for fmt, halves, size in (("fp8", 1, 1024), ("bf16", 2, 2048)):
@@ -383,8 +333,8 @@ class TileContractVerificationTest(unittest.TestCase):
     def test_strict_schema_versions_and_dependencies(self) -> None:
         facts, operations = vector_fixture()
         machine = artifact(facts, operations)
-        text = contract_text(machine)
-        self.rejected(CONTRACT_RE.sub("", machine).replace(", ,", ","), f"{INCOMPLETE} {CONTRACT}")
+        text = contract_text(machine, "tile")
+        self.rejected(drop_attribute(machine, CONTRACT), f"{INCOMPLETE} {CONTRACT}")
         self.rejected(replace_contract(machine, '"bad"'), f"requires an {CONTRACT} array")
         mutations = [replace_contract(machine, "[0 : i32]"),
                      replace_contract(machine, "[]"),
@@ -405,34 +355,13 @@ class TileContractVerificationTest(unittest.TestCase):
         for marker in ('"resource-contract-v2"', '"dma-contract-v1"', "1 : i32"):
             self.rejected(machine.replace('"resource-contract-v4"', marker, 1), UNSUPPORTED)
 
-    def test_llvm_handoffs_preserve_contract_and_recheck_corruption(self) -> None:
+    def test_structured_fields_and_words_cannot_jointly_bypass_contract(self) -> None:
         facts, operations = vector_fixture()
-        machine = artifact(facts, operations)
-        for option in ("--convert-atlas-to-llvm", "--convert-atlas-to-llvm-calls"):
-            with self.subTest(option=option):
-                result = run("atlas-opt", machine, option)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(records(result.stdout), facts)
-                if option == "--convert-atlas-to-llvm-calls":
-                    self.assertEqual(result.stdout.count(TAG + " ="), len(facts))
-        structured = run("atlas-opt", machine, "--convert-atlas-to-llvm-calls")
-        self.assertEqual(structured.returncode, 0, structured.stderr)
-        final = run("atlas-opt", structured.stdout, "--finalize-atlas-llvm-calls")
-        direct = run("atlas-opt", machine, "--convert-atlas-to-llvm")
-        self.assertEqual(final.returncode, 0, final.stderr)
-        self.assertEqual(final.stdout, direct.stdout)
-        lines = structured.stdout.splitlines()
-        index = next(i for i, line in enumerate(lines) if 'atlas.source_op = "atlas.vload"' in line)
-        word = int(re.search(r'atlas.word = (-?\d+) : i32', lines[index])[1])
-        lines[index] = lines[index].replace("dst = 40 : i32", "dst = 42 : i32")
-        changed_word = (word & 0xffffffff & ~(31 << 7)) | (10 << 7)
-        lines[index] = re.sub(r'atlas.word = -?\d+ : i32', f'atlas.word = {changed_word} : i32', lines[index])
-        changed = "\n".join(lines) + "\n"
+        structured = checked(self, artifact(facts, operations), "--convert-atlas-to-llvm-calls")
+        index = line_index(structured, 'atlas.source_op = "atlas.vload"')
+        changed = rewrite_line(structured, index, lambda line: structured_word(line, "dst = 40 : i32", "dst = 42 : i32", 7, 5, 10))
         self.assertEqual(records(changed), facts)
-        rejected = run("atlas-opt", changed, "--finalize-atlas-llvm-calls")
-        self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
-        self.assertEqual(rejected.stdout, "")
-        self.assertIn("tile contract", rejected.stderr.lower())
+        finalize_rejects(self, changed, "tile contract")
 
     def test_stream_rewrites_preserve_supported_contract_and_reject_padded_input(self) -> None:
         facts, operations = boundary_fixture()

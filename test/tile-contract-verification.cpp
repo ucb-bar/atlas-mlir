@@ -1,3 +1,4 @@
+#include "VerificationTestSupport.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
@@ -13,16 +14,9 @@
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0, failures = 0;
-void check(bool condition, StringRef label) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << label << '\n';
-  }
-}
 
 constexpr StringLiteral source = R"mlir(module {
   func.func @tiles(%control: i1, %count: i32) -> !atlas.virtual_state attributes {
@@ -55,19 +49,13 @@ struct Expected {
   SmallVector<int32_t> after;
 };
 
-void field(DictionaryAttr record, StringRef name, uint32_t expected) {
-  auto value = record.getAs<IntegerAttr>(name);
-  check(value && value.getType().isSignlessInteger(32) && value.getValue().getZExtValue() == expected, name);
-}
-
 void testSourceContract(MLIRContext &context, bool multipleBlocks) {
   std::string text = source.str();
   if (multipleBlocks) {
     text.insert(text.find("    %s7"), "    cf.br ^next(%s6 : !atlas.virtual_state)\n  ^next(%next_state: !atlas.virtual_state):\n");
     text.replace(text.find("(%s6, %seed)"), std::string("(%s6, %seed)").size(), "(%next_state, %seed)");
   }
-  auto module = parseSourceString<ModuleOp>(text, &context);
-  check(module && succeeded(verify(*module)), "typed tile source parses");
+  auto module = parse(context, text, "typed tile source parses");
   if (!module)
     return;
   auto function = *module->getOps<func::FuncOp>().begin();
@@ -151,7 +139,6 @@ void testSourceContract(MLIRContext &context, bool multipleBlocks) {
   std::reverse(transfers.begin(), transfers.end());
   auto reordered = buildAtlasTileContract(function, registers, transfers, fixed, scalarRegs);
   check(succeeded(reordered) && *reordered == *contract, "source order is independent of assignment vector order");
-  ScopedDiagnosticHandler diagnostics(&context, [](Diagnostic &) { return success(); });
   for (uint32_t words : {0u, 1024u}) {
     auto invalid = fixed;
     invalid.inputWindowWords = words;
@@ -184,12 +171,7 @@ void testSourceContract(MLIRContext &context, bool multipleBlocks) {
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  MLIRContext context(registry);
+void atlas_test::runTileContract(MLIRContext &context) {
   testSourceContract(context, false);
   testSourceContract(context, true);
-  llvm::outs() << checks << " checks, " << failures << " failures\n";
-  return failures != 0;
 }

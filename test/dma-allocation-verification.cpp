@@ -1,3 +1,4 @@
+#include "VerificationTestSupport.h"
 #include "Atlas/AtlasDMAAllocationVerification.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
@@ -15,19 +16,11 @@
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0;
-unsigned failures = 0;
 using Assignments = SmallVector<VirtualDMAAssignment>;
 
-void check(bool condition, StringRef name, StringRef detail = {}) {
-  ++checks;
-  if (condition)
-    return;
-  ++failures;
-  llvm::errs() << "FAIL: " << name << '\n' << detail << '\n';
-}
 
 // These typed SSA fixtures deliberately bypass the compiler's older single-
 // pending admission limit. This independent API checks source-handle ownership;
@@ -58,26 +51,7 @@ struct Fixture {
 
 void expect(Fixture &fixture, StringRef name, const Assignments &assignments,
             bool valid, ArrayRef<StringRef> fragments = {}) {
-  std::string diagnostics;
-  llvm::raw_string_ostream stream(diagnostics);
-  ScopedDiagnosticHandler handler(fixture.function.getContext(),
-                                 [&](Diagnostic &diagnostic) {
-    diagnostic.print(stream);
-    stream << '\n';
-    for (const Diagnostic &note : diagnostic.getNotes()) {
-      note.print(stream);
-      stream << '\n';
-    }
-    return success();
-  });
-  bool accepted = succeeded(verifyAtlasDMAAllocation(fixture.function, assignments));
-  stream.flush();
-  check(accepted == valid, name, diagnostics);
-  if (valid)
-    check(diagnostics.empty(), name, diagnostics);
-  for (StringRef fragment : fragments)
-    check(StringRef(diagnostics).contains(fragment), name,
-          "missing diagnostic fragment '" + fragment.str() + "':\n" + diagnostics);
+  expectVerified(name, valid, fragments, [&] { return verifyAtlasDMAAllocation(fixture.function, assignments); });
 }
 
 constexpr StringLiteral mixed = R"mlir(
@@ -255,19 +229,13 @@ void completionTests(MLIRContext &context) {
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  MLIRContext context(registry);
+void atlas_test::runDMAAllocation(MLIRContext &context) {
   Fixture fixture, foreign, released;
-  if (fixture.initialize(context, mixed, "mixed fixture") &&
-      foreign.initialize(context, mixed, "foreign fixture") &&
+  if (fixture.initialize(context, mixed, "mixed fixture") && foreign.initialize(context, mixed, "foreign fixture") &&
       released.initialize(context, partialRelease, "partial release fixture")) {
     completenessTests(fixture, foreign);
     geometryTests(fixture);
     ownershipTests(fixture, released);
     completionTests(context);
   }
-  llvm::outs() << checks << " DMA allocation checks, " << failures << " failures\n";
-  return failures ? 1 : 0;
 }

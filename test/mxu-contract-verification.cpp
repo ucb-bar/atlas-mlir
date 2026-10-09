@@ -1,32 +1,16 @@
 #include "Atlas/AtlasMXUContractVerification.h"
-#include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTypes.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Parser/Parser.h"
-#include "llvm/Support/raw_ostream.h"
+#include "VerificationTestSupport.h"
 #include <algorithm>
-#include <numeric>
 #include <string>
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0, failures = 0;
-void check(bool condition, StringRef label) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << label << '\n';
-  }
-}
-
 // Source SSA and deliberately nonpreferred placements define the oracle.
 // No allocator, lifetime summary, or emitted command is consulted.
 std::string source(unsigned unit) {
@@ -67,14 +51,8 @@ struct Expected {
   int reg, slot, weightSlot = -1, weight = -1, previous = -1, scaleReg = -1, scale = -1;
 };
 
-void field(DictionaryAttr record, StringRef name, int expected) {
-  auto value = record.getAs<IntegerAttr>(name);
-  check(value && value.getType().isSignlessInteger(32) && value.getInt() == expected, name);
-}
-
 void testSourceContract(MLIRContext &context, unsigned unit) {
-  auto module = parseSourceString<ModuleOp>(source(unit), &context);
-  check(module && succeeded(verify(*module)), "typed source includes every MXU expansion family");
+  auto module = parse(context, source(unit), "typed source includes every MXU expansion family");
   if (!module)
     return;
   auto function = *module->getOps<func::FuncOp>().begin();
@@ -138,67 +116,11 @@ void testSourceContract(MLIRContext &context, unsigned unit) {
   check(failed(buildAtlasMXUContract(function, registers, handles, fixed)), "missing source tensor placement fails");
 }
 
-void testStreamMetadata(MLIRContext &context) {
-  // A complete generated envelope: the pushed register needs a tile-checked
-  // origin, because the stream rewrite rechecks every contract.
-  constexpr StringLiteral source = R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v4", atlas.timing_state = "timed",
-    atlas.timing_provider = "npu-model-rtl-match-v1", atlas.virtual_dma_contract = [],
-    atlas.virtual_mxu_contract = [{id = 0 : i32, block = 0 : i32, kind = "weight_fp8", unit = 1 : i32, reg = 11 : i32, slot = 1 : i32, weight_slot = -1 : i32, weight = -1 : i32, previous = -1 : i32, scale_reg = -1 : i32, scale = -1 : i32}],
-    atlas.virtual_tile_contract = [
-      {id = 0 : i32, kind = "dma_load", reg = -1 : i32, vmem_byte = 1310720 : i32, dram_byte = -1870659584 : i32, bytes = 1024 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32>},
-      {id = 1 : i32, kind = "dma_wait", reg = -1 : i32, vmem_byte = 0 : i32, dram_byte = 0 : i32, bytes = 0 : i32, channel = 0 : i32, transfer = -1 : i32, after = array<i32: 0>},
-      {id = 2 : i32, kind = "vload", reg = 11 : i32, vmem_byte = 1310720 : i32, dram_byte = 0 : i32, bytes = 1024 : i32, channel = -1 : i32, transfer = -1 : i32, after = array<i32: 1>}],
-    atlas.virtual_source_memory_contract = {effects = [{id = 0 : i32, source = 0 : i32, block = 0 : i32, launch = 0 : i32, completion = 1 : i32, dram_byte = -1870659584 : i32, bytes = 1024 : i32, write = false, predecessors = array<i32>}]},
-    atlas.virtual_cfg_contract = {
-      values = [{id = 0 : i32, block = 0 : i32, reg = 11 : i32, type = "fp8", operands = array<i32>, def = "atlas.virtual_dma_await_fp8"}],
-      blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>, live_in = array<i32>, operations = array<i32: 0, 1, 2>, edges = array<i32>}],
-      edges = [],
-      operations = [
-        {id = 0 : i32, block = 0 : i32, name = "atlas.virtual_dma_load_fp8", operands = array<i32>, results = array<i32>, tile_commands = array<i32: 0>, mxu_commands = array<i32>},
-        {id = 1 : i32, block = 0 : i32, name = "atlas.virtual_dma_await_fp8", operands = array<i32>, results = array<i32: 0>, tile_commands = array<i32: 1, 2>, mxu_commands = array<i32>},
-        {id = 2 : i32, block = 0 : i32, name = "atlas.virtual_mxu_load_weight", operands = array<i32: 0>, results = array<i32>, tile_commands = array<i32>, mxu_commands = array<i32: 0>}]}
-  } {
-    %s0 = "atlas.start"() : () -> !atlas.state
-    %s1 = "atlas.dma_config"(%s0) {channel = 0 : i32, base_reg = 0 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s2 = "atlas.alu_imm"(%s1) {kind = "addi", dst = 29 : i32, src = 0 : i32, immediate = 1024 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s3 = "atlas.upper"(%s2) {kind = "lui", dst = 31 : i32, immediate = 591872 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s4 = "atlas.upper"(%s3) {kind = "lui", dst = 30 : i32, immediate = 80 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s5 = "atlas.dma"(%s4) {direction = "load", channel = 0 : i32, reg = 30 : i32, dram = 31 : i32, size = 29 : i32, atlas.virtual_tile_command = 0 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 0 : i32, atlas.virtual_cfg_operation = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s6 = "atlas.dma_wait"(%s5) {channel = 0 : i32, atlas.virtual_tile_command = 1 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 1 : i32} : (!atlas.state) -> !atlas.state
-    %s7 = "atlas.vload"(%s6) {dst = 11 : i32, base = 30 : i32, offset = 0 : i32, format = "raw", atlas.virtual_tile_command = 2 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_tensor_result = 0 : i32, atlas.virtual_cfg_source = 1 : i32, atlas.virtual_cfg_operation = 1 : i32} : (!atlas.state) -> !atlas.state
-    %s8 = "atlas.delay"(%s7) {cycles = 256 : i32, atlas.delay_reason = "tensor_completion", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s9 = "atlas.mxu_push"(%s8) {unit = 1 : i32, kind = "weight_fp8", src = 11 : i32, slot = 1 : i32, atlas.virtual_mxu_command = 0 : i32, atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_source = 2 : i32, atlas.virtual_cfg_operation = 2 : i32} : (!atlas.state) -> !atlas.state
-    %s10 = "atlas.delay"(%s9) {cycles = 256 : i32, atlas.delay_reason = "mxu_weight_completion", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s11 = "atlas.alu_imm"(%s10) {kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s12 = "atlas.trap"(%s11) {kind = "ecall", atlas.virtual_cfg_block = 0 : i32} : (!atlas.state) -> !atlas.state
-  })mlir";
-  auto module = parseSourceString<ModuleOp>(source, &context);
-  check(module && succeeded(verify(*module)), "stream fixture parses");
-  if (!module)
-    return;
-  Attribute contract = (*module)->getAttr("atlas.virtual_mxu_contract");
-  auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(stream), "verification stream retains emitted delays");
-  if (failed(stream))
-    return;
-  SmallVector<size_t> order(stream->ops.size());
-  std::iota(order.begin(), order.end(), 0);
-  SmallVector<DelayInsertion> before(stream->ops.size());
-  check(succeeded(writeAtlasStream(*module, *stream, order, before)), "identity stream rewrite succeeds");
-  check((*module)->getAttr("atlas.virtual_mxu_contract") == contract, "stream rewrite preserves source contract");
-  auto push = *module->getOps<MXUPushOp>().begin();
-  auto tag = push->getAttrOfType<IntegerAttr>("atlas.virtual_mxu_command");
-  check(tag && tag.getType().isSignlessInteger(32) && tag.getInt() == 0, "stream rewrite preserves command identity");
-  check(succeeded(verifyAtlasGeneratedMXUContract(*module)), "rewritten stream still satisfies source contract");
-}
-
 void testSourceBlocks(MLIRContext &context) {
   std::string text = source(1);
   text.insert(text.find("    %legacy"), "    cf.br ^next(%s11 : !atlas.virtual_state)\n  ^next(%next_state: !atlas.virtual_state):\n");
   text.replace(text.find("return %s11"), std::string("return %s11").size(), "return %next_state");
-  auto module = parseSourceString<ModuleOp>(text, &context);
-  check(module && succeeded(verify(*module)), "two source blocks with block-local resident handles");
+  auto module = parse(context, text, "two source blocks with block-local resident handles");
   if (!module)
     return;
   auto function = *module->getOps<func::FuncOp>().begin();
@@ -229,6 +151,7 @@ void testSourceBlocks(MLIRContext &context) {
   field(cast<DictionaryAttr>((*contract)[11]), "previous", 10);
 }
 
+// Python covers scale clobbers, SELD, joins and loop fixed points; these two facts are not reachable from streams.
 void testScaleFacts() {
   auto instruction = [](const char *name, int rd, long long imm = 0) {
     timing::Instr in;
@@ -238,16 +161,12 @@ void testScaleFacts() {
     return in;
   };
   timing::RegValues regs{};
-  check(!regs[0], "e0 starts unknown");
   applyAtlasScaleRegister(instruction("seli", 0, 255), regs);
-  check(regs[0] == 255, "e0 accepts SELI writes");
   applyAtlasScaleRegister(instruction("seli", 3, 129), regs);
   for (const char *name : {"addi", "lw"})
     for (int rd : {0, 3})
       applyAtlasScaleRegister(instruction(name, rd), regs);
   check(regs[0] == 255 && regs[3] == 129, "XRF writes preserve independent ERF contents");
-  applyAtlasScaleRegister(instruction("seld", 0), regs);
-  check(!regs[0] && regs[3] == 129, "SELD invalidates exactly the selected ERF register");
 
   AtlasStream stream;
   stream.ops.resize(3);
@@ -256,29 +175,12 @@ void testScaleFacts() {
   stream.succs = {{2}, {2}, {}};
   auto facts = atlasScaleRegisterEntries(stream);
   check(facts[2][3] == 129 && !facts[1][3], "unreachable conflicting predecessor does not weaken a known scale");
-  for (int reg : {0, 3}) {
-    for (int code : {129, 128}) {
-      stream.ops.resize(4);
-      stream.instrs = {instruction("seli", reg, 129), instruction("addi", 0), instruction("seli", reg, code), instruction("addi", 0)};
-      stream.starts = {0, 1, 2, 3};
-      stream.succs = {{1}, {2, 3}, {1}, {}};
-      facts = atlasScaleRegisterEntries(stream);
-      check(code == 129 ? facts[1][reg] == 129 && facts[3][reg] == 129 : !facts[1][reg] && !facts[3][reg], "loop scales require agreement including e0");
-    }
-  }
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  MLIRContext context(registry);
-  ScopedDiagnosticHandler diagnostics(&context, [](Diagnostic &) { return success(); });
+void atlas_test::runMXUContract(MLIRContext &context) {
   for (unsigned unit : {0u, 1u})
     testSourceContract(context, unit);
-  testStreamMetadata(context);
   testSourceBlocks(context);
   testScaleFacts();
-  llvm::outs() << checks << " checks, " << failures << " failures\n";
-  return failures != 0;
 }

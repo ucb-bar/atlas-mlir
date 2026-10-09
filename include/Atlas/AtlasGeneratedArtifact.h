@@ -8,8 +8,7 @@
 
 namespace mlir::atlas {
 
-// Module attributes stamped by virtual-to-machine lowering. The marker names
-// the only supported artifact version.
+// Module attributes stamped by virtual-to-machine lowering.
 constexpr llvm::StringLiteral kAtlasGeneratedMarker = "atlas.generated_from_virtual";
 constexpr llvm::StringLiteral kAtlasGeneratedVersion = "resource-contract-v4";
 constexpr llvm::StringLiteral kAtlasDMAContract = "atlas.virtual_dma_contract";
@@ -19,19 +18,28 @@ constexpr llvm::StringLiteral kAtlasCFGContract = "atlas.virtual_cfg_contract";
 constexpr llvm::StringLiteral kAtlasSourceMemoryContract = "atlas.virtual_source_memory_contract";
 constexpr llvm::StringLiteral kAtlasTimingState = "atlas.timing_state";
 constexpr llvm::StringLiteral kAtlasTimingProvider = "atlas.timing_provider";
+// Per-instruction correspondence tags that only generated artifacts carry.
+constexpr llvm::StringLiteral kAtlasTagDMATransfer = "atlas.virtual_dma_transfer";
+constexpr llvm::StringLiteral kAtlasTagMXUCommand = "atlas.virtual_mxu_command";
+constexpr llvm::StringLiteral kAtlasTagTileCommand = "atlas.virtual_tile_command";
+constexpr llvm::StringLiteral kAtlasTagCFGBlock = "atlas.virtual_cfg_block";
+constexpr llvm::StringLiteral kAtlasTagCFGEdge = "atlas.virtual_cfg_edge";
+constexpr llvm::StringLiteral kAtlasTagCFGBranch = "atlas.virtual_cfg_branch";
+constexpr llvm::StringLiteral kAtlasTagCFGSource = "atlas.virtual_cfg_source";
+constexpr llvm::StringLiteral kAtlasTagCFGOperation = "atlas.virtual_cfg_operation";
+constexpr llvm::StringLiteral kAtlasTagCFGHelper = "atlas.virtual_cfg_helper";
+constexpr llvm::StringLiteral kAtlasTagScalarResult = "atlas.virtual_scalar_result";
+constexpr llvm::StringLiteral kAtlasTagTensorResult = "atlas.virtual_tensor_result";
+constexpr llvm::StringLiteral kAtlasTagScalarArgument = "atlas.virtual_scalar_argument";
 
-// Module attributes that structured LLVM finalization carries into the stream
-// it reconstructs.
+// Module attributes that LLVM finalization carries into its rebuilt stream.
 llvm::ArrayRef<llvm::StringRef> atlasPreservedModuleAttrs();
 
 enum class AtlasArtifactKind { HandWritten, Generated };
 
-// HandWritten: no marker, contract attribute, or tag anywhere. Generated: the
-// supported marker with all five contract attributes and a timing state.
-// Any other combination fails with one diagnostic: legacy or unknown marker
-// versions (including the bare unit marker), metadata without the marker, or
-// the marker with a missing contract or timing state. Contract contents and
-// timing-state values are validated by their own checkers.
+// HandWritten: no marker, contract attribute or tag. Generated: the supported
+// marker, all five contracts and a timing state. Anything else fails with one
+// diagnostic; contract contents are left to their own checkers.
 FailureOr<AtlasArtifactKind> classifyAtlasGeneratedArtifact(ModuleOp module);
 // Fails unless the module classifies as a generated artifact.
 LogicalResult requireAtlasGeneratedArtifact(ModuleOp module);

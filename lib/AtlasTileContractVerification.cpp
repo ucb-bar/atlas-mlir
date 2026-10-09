@@ -1,4 +1,5 @@
 #include "Atlas/AtlasTileContractVerification.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
@@ -9,6 +10,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include <limits>
 #include <optional>
 #include <utility>
@@ -18,8 +20,6 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-constexpr llvm::StringLiteral kCommand = "atlas.virtual_tile_command";
-
 struct Record {
   int32_t id = -1;
   StringRef kind;
@@ -75,26 +75,11 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   }
   Record r;
-  for (auto [name, field] : {
-           std::pair<StringRef, int32_t *>("id", &r.id), {"reg", &r.reg},
-           {"channel", &r.channel}, {"transfer", &r.transfer}}) {
-    auto integer = dictionary.getAs<IntegerAttr>(name);
-    if (!integer || !integer.getType().isSignlessInteger(32)) {
-      module.emitOpError("tile contract field requires signless i32: ") << name;
-      return failure();
-    }
-    *field = int32_t(integer.getValue().getSExtValue());
-  }
-  for (auto [name, field] : {
-           std::pair<StringRef, uint32_t *>("vmem_byte", &r.vmemByte),
-           {"dram_byte", &r.dramByte}, {"bytes", &r.bytes}}) {
-    auto integer = dictionary.getAs<IntegerAttr>(name);
-    if (!integer || !integer.getType().isSignlessInteger(32)) {
-      module.emitOpError("tile contract field requires signless i32: ") << name;
-      return failure();
-    }
-    *field = uint32_t(integer.getValue().getZExtValue());
-  }
+  if (failed(readI32Fields<int32_t>(module, dictionary, "tile", {
+          {"id", &r.id}, {"reg", &r.reg}, {"channel", &r.channel}, {"transfer", &r.transfer}})) ||
+      failed(readI32Fields<uint32_t>(module, dictionary, "tile", {
+          {"vmem_byte", &r.vmemByte}, {"dram_byte", &r.dramByte}, {"bytes", &r.bytes}})))
+    return failure();
   auto kind = dictionary.getAs<StringAttr>("kind");
   auto after = dictionary.getAs<DenseI32ArrayAttr>("after");
   if (!kind || !after) {
@@ -108,16 +93,6 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   }
   return r;
-}
-
-LogicalResult checkValue(Operation *op, StringRef field,
-                         std::optional<uint64_t> actual, uint64_t expected) {
-  if (!actual)
-    return op->emitOpError("tile contract cannot prove captured ") << field;
-  if (*actual != expected)
-    return op->emitOpError("tile contract captured ") << field << " mismatch: expected "
-           << expected << ", got " << *actual;
-  return success();
 }
 
 LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
@@ -240,6 +215,22 @@ LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
 }
 } // namespace
 
+AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
+  return llvm::StringSwitch<AtlasTileExpansion>(sourceOp)
+      .Case(VirtualInputBF16Op::getOperationName(), {6, 2})
+      .Case(VirtualOutputBF16Op::getOperationName(), {6, 2})
+      .Case(VirtualInputFP8Op::getOperationName(), {3, 1})
+      .Case(VirtualDMALoadFP8Op::getOperationName(), {1, 1})
+      .Case(VirtualDMALoadBF16Op::getOperationName(), {1, 1})
+      .Case(VirtualDMAStoreFP8Op::getOperationName(), {2, 1})
+      .Case(VirtualDMAStoreBF16Op::getOperationName(), {3, 1})
+      .Case(VirtualDMAAwaitFP8Op::getOperationName(), {2, 0})
+      .Case(VirtualDMAAwaitBF16Op::getOperationName(), {3, 0})
+      .Case(VirtualDMAWaitOp::getOperationName(), {1, 0})
+      .Case(VirtualPackFP8Op::getOperationName(), {2, 0})
+      .Default({0, 0});
+}
+
 FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     func::FuncOp function, ArrayRef<VirtualRegisterAssignment> tensorRegisters,
     ArrayRef<VirtualDMAAssignment> dmaAssignments,
@@ -247,14 +238,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   auto sourceDMA = buildAtlasDMAContract(function, dmaAssignments);
   if (failed(sourceDMA))
     return failure();
-  llvm::DenseSet<Value> knownValues;
-  for (Block &block : function.getBody()) {
-    for (Value argument : block.getArguments())
-      knownValues.insert(argument);
-    for (Operation &op : block)
-      for (Value result : op.getResults())
-        knownValues.insert(result);
-  }
+  llvm::DenseSet<Value> knownValues = sourceValues(function);
   llvm::DenseMap<Value, unsigned> registers;
   for (const VirtualRegisterAssignment &assignment : tensorRegisters) {
     if (!assignment.value || !knownValues.contains(assignment.value) ||
@@ -487,7 +471,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
   llvm::DenseMap<Operation *, int32_t> tags;
   llvm::BitVector seen(records.size());
   for (Operation &op : module.getBody()->getOperations()) {
-    Attribute attr = op.getAttr(kCommand);
+    Attribute attr = op.getAttr(kAtlasTagTileCommand);
     bool required = isa<VLoadOp, VStoreOp, DMAOp, DMAWaitOp>(op);
     if (!attr) {
       if (required)
@@ -518,7 +502,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     if (!matches)
       return op.emitOpError("tile contract command kind, format, register, or channel mismatch");
     if (isa<DMAOp, DMAWaitOp>(op)) {
-      auto transfer = op.getAttrOfType<IntegerAttr>("atlas.virtual_dma_transfer");
+      auto transfer = op.getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
       if ((r.transfer == -1 && transfer) ||
           (r.transfer >= 0 && (!transfer || !transfer.getType().isSignlessInteger(32) ||
                               transfer.getInt() != r.transfer)))
@@ -562,17 +546,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
             uint32_t word = uint32_t(int64_t(*regs[base]) + offset * 32);
             address = uint64_t(word) * 4;
           }
-          if (failed(checkValue(op, "vector VMEM byte address", address, r.vmemByte)))
+          if (failed(checkCaptured(op, "tile", "vector VMEM byte address", address, r.vmemByte)))
             return failure();
         } else if (isDMA(r)) {
           auto dma = cast<DMAOp>(op);
           std::optional<uint64_t> address;
           if (regs[dma.getReg()])
             address = uint64_t(*regs[dma.getReg()]) * 4;
-          if (failed(checkValue(op, "DRAM upper word", upper, 0)) ||
-              failed(checkValue(op, "DMA VMEM byte address", address, r.vmemByte)) ||
-              failed(checkValue(op, "DRAM byte address", regs[dma.getDram()], r.dramByte)) ||
-              failed(checkValue(op, "byte length", regs[dma.getSize()], r.bytes)))
+          if (failed(checkCaptured(op, "tile", "DRAM upper word", upper, 0)) ||
+              failed(checkCaptured(op, "tile", "DMA VMEM byte address", address, r.vmemByte)) ||
+              failed(checkCaptured(op, "tile", "DRAM byte address", regs[dma.getDram()], r.dramByte)) ||
+              failed(checkCaptured(op, "tile", "byte length", regs[dma.getSize()], r.bytes)))
             return failure();
         } else if (r.kind == "mailbox_load") {
           auto load = cast<ScalarLoadOp>(op);
@@ -580,7 +564,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
           if (regs[load.getBase()])
             address = uint32_t(int64_t(*regs[load.getBase()]) +
                                load.getOffsetAttr().getValue().getSExtValue());
-          if (failed(checkValue(op, "mailbox VMEM byte address", address, r.vmemByte)))
+          if (failed(checkCaptured(op, "tile", "mailbox VMEM byte address", address, r.vmemByte)))
             return failure();
         }
       }
@@ -588,9 +572,4 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     }
   }
   return success();
-}
-
-LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
-  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
-  return failed(ctx) ? failure() : verifyAtlasGeneratedTileContract(*ctx);
 }

@@ -36,7 +36,7 @@ std::string mlir::atlas::timing::validateTimingProvider(
 
 TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
   TimingProvider p;
-  p.id = "npu-model-rtl-match-v1";
+  p.id = kNpuModelTimingProviderId.str();
   p.validateScope = [](const mlir::atlas::AtlasStream &) { return std::string{}; };
   p.footprint = footprintOf;
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b,
@@ -61,7 +61,7 @@ TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
 
 TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
     const std::string &id) {
-  if (id == "npu-model-rtl-match-v1")
+  if (id == kNpuModelTimingProviderId)
     return {npuModelTimingProvider(), {}};
   if (id == "atlas.vls.conservative.v1")
     return {{}, "selected CIRCT VLS evidence lacks a complete timing policy; footprint-only coverage cannot borrow model rules"};

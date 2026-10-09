@@ -1,54 +1,30 @@
-"""Fixtures for generated (resource-contract-v4) artifacts.
+"""Hand-built generated (resource-contract-v4) artifacts for streams no lowering produces.
 
-Lowering is the only producer of generated artifacts, and every consumer requires the
-whole envelope: the marker, a timing state, the DMA/MXU/tile contracts, a CFG contract
-that owns each instruction and a source memory contract. Prefer mutating lowered output (`insert_after`, `remove_line`).
-Where one checker needs a hand-built stream, `artifact` wraps it in a timed envelope and
-derives the rest so that only the checker under test can reject the fixture:
-
-- DMA contract records come from tile records that carry an explicit transfer id.
-- Tile records are derived from the stream when the fixture authors none; addresses are
-  read from LUI/ADDI constants and unknown operands become zero placeholders.
-- A prologue loads every tensor register read before it is written, stages a PACK-style
-  VSTORE endpoint for VLOADs outside a completed DMA load, and writes the VMEM halves a
-  DMA store reads that no earlier stream VSTORE wrote.
-- CFG scaffolding: one source block per fixture block (see `structured` for labels), one
-  synthetic source operation per issued command, one single-register tensor value per
-  VLOAD/POP destination, and an `arith.constant` condition for conditional terminators.
-  DMA launches are owned by source operations named after a one-launch virtual DMA.
-- Source memory effects mirror the checker's derivation from the tile and CFG records.
-
-The scaffolding is not an oracle for CFG correspondence (test_cfg_contract_verification.py
-covers that on lowered artifacts). Checks run in the order schedule, DMA memory, DMA, MXU,
-tile, CFG, source memory, timing, so a negative fixture may leave the scaffolding inconsistent as long as
-its test asserts the intended diagnostic. Registers written by VPU/XLU/VLI/PACK are only
-killed, never redefined; a fixture that reads such a result needs real CFG records.
+Prefer mutating lowered output (verification_support.insert_after, remove_line). `artifact` wraps a stream in a
+timed envelope and derives the rest so that only the checker under test can reject it:
+- tile records are derived from the stream unless authored (LUI/ADDI constants; unknown operands become zero);
+  DMA contract records come from tile records that carry a transfer id;
+- a prologue loads every tensor register read before it is written, stages a PACK-style VSTORE endpoint for
+  VLOADs outside a completed DMA load, and writes the VMEM halves a DMA store reads that no stream VSTORE wrote;
+- CFG scaffolding has one source block per fixture block, one synthetic source operation per issued command,
+  one tensor value per VLOAD/POP destination and an `arith.constant` condition per conditional terminator;
+- source memory effects mirror the checker's derivation from the tile and CFG records.
+The scaffolding is not a CFG oracle. Checks run in the order schedule, DMA memory, DMA, MXU, tile, CFG, source
+memory, timing, so a negative fixture may leave later scaffolding inconsistent. VPU/XLU/VLI/PACK results are only
+killed, never redefined; reading one needs real CFG records.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 
+from verification_support import DELAY, MARKER, MASK, NOP, STATE, TIMED, PROVIDER, TRANSFER as TRANSFER_TAG, TRAP, fields
 
-STATE = "!atlas.state"
-MARKER = 'atlas.generated_from_virtual = "resource-contract-v4"'
-# Classification diagnostics (lib/AtlasGeneratedArtifact.cpp).
-UNSUPPORTED = "unsupported Atlas virtual-to-machine artifact marker"
-UNMARKED = "generated resource metadata requires an Atlas virtual-to-machine artifact marked"
-INCOMPLETE = "resource-contract-v4 artifact requires"
-CLASSIFICATION = (UNSUPPORTED, UNMARKED, INCOMPLETE)
-TIMED = 'atlas.timing_state = "timed", atlas.timing_provider = "npu-model-rtl-match-v1"'
-NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
-DELAY = ("delay", 'cycles = 256 : i32, atlas.delay_reason = "tensor_completion"')
-TRAP = ("trap", 'kind = "ecall"')
 TILE_TAG = "atlas.virtual_tile_command"
 MXU_TAG = "atlas.virtual_mxu_command"
-TRANSFER_TAG = "atlas.virtual_dma_transfer"
 # The source memory contract counts each source operation's DMA launches by its name.
 DMA_SOURCE = {"load": "atlas.virtual_dma_load_fp8", "store": "atlas.virtual_dma_store_fp8"}
 LABEL, BRANCH, JUMP = "@label", "@branch", "@jump"
-FIELD_RE = re.compile(r'([\w.]+) = (?:(-?\d+) : i32|"([^"]*)"|(true|false))')
 
 # Scratch resources reserved for the prologue; fixture bodies must not rely on them.
 SIZE_REG, BASE_REG, DRAM_REG = 29, 30, 31
@@ -56,7 +32,6 @@ STAGE_REG = 62  # the tensor register staged VSTOREs write from
 PROLOGUE_LUI = 80  # VMEM word 0x50000 (byte 0x140000, bank 5); one 16 KiB slot per register
 PROLOGUE_DRAM_LUI = 0x90800
 CONDITION_REG = 1
-MASK = 0xffffffff
 
 Op = tuple[str, str]
 
@@ -73,11 +48,6 @@ class Block:
     ops: list = field(default_factory=list)
     branch: tuple[int, int] | None = None
     goto: int | None = None
-
-
-def fields(text: str) -> dict:
-    return {name: int(integer) if integer else string if string is not None else boolean == "true"
-            for name, integer, string, boolean in FIELD_RE.findall(text)}
 
 
 def integer_tag(f: dict, name: str) -> int | None:
@@ -520,45 +490,11 @@ class _Builder:
                        operations=b["operations"], edges=b["edges"]) for b in self.block_records]
         cfg = (f"{{values = {record_text(values)}, blocks = {record_text(blocks)}, "
                f"edges = {record_text(self.edges)}, operations = {record_text(self.sources)}}}")
-        attributes = (f"{MARKER}, {TIMED}, atlas.virtual_dma_contract = {record_text(self.dma_records())}, "
+        attributes = (f"{MARKER}, {TIMED}, {PROVIDER}, atlas.virtual_dma_contract = {record_text(self.dma_records())}, "
                       f"atlas.virtual_mxu_contract = {record_text(self.mxu)}, atlas.virtual_tile_contract = {record_text(self.records)}, "
                       f"atlas.virtual_cfg_contract = {cfg}, "
                       f"atlas.virtual_source_memory_contract = {{effects = {record_text(self.source_memory_records())}}}")
         return f"module attributes {{{attributes}}} {{\n" + "\n".join(lines) + "\n}\n"
-
-
-def _result(line: str) -> str:
-    return re.match(r'\s*(%[\w.]+) = ', line)[1]
-
-
-def _rethread(lines: list[str], index: int, old: str, new: str) -> None:
-    if index < len(lines) and f"({old})" in lines[index]:
-        lines[index] = lines[index].replace(f"({old})", f"({new})", 1)
-
-
-def insert_after(machine: str, index: int, operations) -> str:
-    """Insert (name, fields) operations after line `index` of a printed artifact, owned by
-    that line's source block."""
-    lines = machine.splitlines()
-    previous = _result(lines[index])
-    block = re.search(r'atlas\.virtual_cfg_block = (\d+) : i32', lines[index])[1]
-    inserted = []
-    for offset, (name, text) in enumerate(operations):
-        result = f"%inserted{index}_{offset}"
-        inserted.append(f'  {result} = "atlas.{name}"({previous}) {{{text}, atlas.virtual_cfg_block = {block} : i32}} : ({STATE}) -> {STATE}')
-        previous = result
-    _rethread(lines, index + 1, _result(lines[index]), previous)
-    lines[index + 1:index + 1] = inserted
-    return "\n".join(lines) + "\n"
-
-
-def remove_line(machine: str, index: int) -> str:
-    """Remove the operation on line `index` of a printed artifact, rethreading its state."""
-    lines = machine.splitlines()
-    operand = re.search(r'"atlas\.\w+"\((%[\w.]+)\)', lines[index])[1]
-    _rethread(lines, index + 1, _result(lines[index]), operand)
-    del lines[index]
-    return "\n".join(lines) + "\n"
 
 
 def label(name: str) -> Op:

@@ -5,14 +5,11 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// Per-instruction correspondence tags that only generated artifacts carry.
 constexpr llvm::StringRef kTags[] = {
-    "atlas.virtual_dma_transfer", "atlas.virtual_mxu_command",
-    "atlas.virtual_tile_command", "atlas.virtual_cfg_block",
-    "atlas.virtual_cfg_edge", "atlas.virtual_cfg_branch",
-    "atlas.virtual_cfg_source", "atlas.virtual_cfg_operation",
-    "atlas.virtual_cfg_helper", "atlas.virtual_scalar_result",
-    "atlas.virtual_tensor_result", "atlas.virtual_scalar_argument"};
+    kAtlasTagDMATransfer, kAtlasTagMXUCommand, kAtlasTagTileCommand,
+    kAtlasTagCFGBlock, kAtlasTagCFGEdge, kAtlasTagCFGBranch,
+    kAtlasTagCFGSource, kAtlasTagCFGOperation, kAtlasTagCFGHelper,
+    kAtlasTagScalarResult, kAtlasTagTensorResult, kAtlasTagScalarArgument};
 constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
                                           kAtlasTileContract, kAtlasCFGContract,
                                           kAtlasSourceMemoryContract};

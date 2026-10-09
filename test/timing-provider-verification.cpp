@@ -1,3 +1,4 @@
+#include "VerificationTestSupport.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Diagnostics.h"
@@ -8,17 +9,10 @@
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 using namespace mlir::atlas::timing;
 
 namespace {
-unsigned checks = 0, failures = 0;
-void check(bool condition, StringRef label) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << label << '\n';
-  }
-}
 
 struct OperationSpec { StringRef name, fields; };
 const OperationSpec a = {"alu_imm", "kind = \"addi\", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32"};
@@ -296,15 +290,9 @@ void testRetainedProvider(MLIRContext &context) {
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect>();
-  MLIRContext context(registry);
-  ScopedDiagnosticHandler diagnostics(&context, [](Diagnostic &) { return success(); });
+void atlas_test::runTimingProvider(MLIRContext &context) {
   testPolicies(context);
   testMissingCoverage(context);
   testBoundedScope(context);
   testRetainedProvider(context);
-  llvm::outs() << checks << " checks, " << failures << " failures\n";
-  return failures != 0;
 }

@@ -44,7 +44,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     return failure();
   if (failed(verifyAtlasGeneratedSourceMemoryEffectContract(ctx)))
     return failure();
-  auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
+  auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
   if (state && state.getValue() == "timed")
     return verifyAtlasTiming(ctx);
   return success();

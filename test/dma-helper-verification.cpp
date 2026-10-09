@@ -1,3 +1,4 @@
+#include "VerificationTestSupport.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
@@ -15,21 +16,14 @@
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0, failures = 0;
 constexpr StringLiteral state = "!atlas.virtual_state";
 constexpr StringLiteral clobber = "DMA helper write clobbers live scalar value";
 constexpr StringLiteral pendingBase = "pending DMA staging base is not preserved";
 constexpr StringLiteral halfSize = "persistent DMA half-size helper is not preserved";
 
-void check(bool condition, StringRef name, StringRef detail = {}) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << name << '\n' << detail << '\n';
-  }
-}
 
 std::string source(bool bf16, bool store, bool keepAfterLaunch = false,
                    bool keepLive = true, StringRef cfg = "", bool useOperands = false) {
@@ -149,25 +143,8 @@ void expectAssignments(Fixture &fixture, StringRef name,
                        ArrayRef<StringRef> fragments = {},
                        DMAAwaitBasePolicy policy = DMAAwaitBasePolicy::Preserved,
                        const FixedResourcePlacement *suppliedFixed = nullptr) {
-  std::string diagnostics;
-  llvm::raw_string_ostream stream(diagnostics);
-  ScopedDiagnosticHandler handler(fixture.function.getContext(), [&](Diagnostic &diagnostic) {
-    diagnostic.print(stream);
-    stream << '\n';
-    for (const Diagnostic &note : diagnostic.getNotes()) {
-      note.print(stream);
-      stream << '\n';
-    }
-    return success();
-  });
-  bool accepted = succeeded(verifyAtlasRegisterAllocation(fixture.function, fixture.registers,
-      suppliedFixed ? *suppliedFixed : fixedPlacement(), {}, assignments, policy));
-  stream.flush();
-  check(accepted == valid, name, diagnostics);
-  if (valid)
-    check(diagnostics.empty(), name, diagnostics);
-  for (StringRef fragment : fragments)
-    check(StringRef(diagnostics).contains(fragment), name, diagnostics);
+  expectVerified(name, valid, fragments, [&] { return verifyAtlasRegisterAllocation(fixture.function, fixture.registers,
+      suppliedFixed ? *suppliedFixed : fixedPlacement(), {}, assignments, policy); });
 }
 
 void expect(Fixture &fixture, StringRef name, DMATransferPlacement placement,
@@ -460,10 +437,7 @@ void cfgTests(MLIRContext &context) {
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  MLIRContext context(registry);
+void atlas_test::runDMAHelper(MLIRContext &context) {
   for (bool bf16 : {false, true})
     for (bool store : {false, true}) {
       launchTests(context, bf16, store);
@@ -475,6 +449,4 @@ int main() {
   halfSizeCFGTests(context);
   packHelperTests(context);
   scalarCopyHelperTests(context);
-  llvm::outs() << checks << " DMA helper checks, " << failures << " failures\n";
-  return failures ? 1 : 0;
 }

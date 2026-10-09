@@ -19,8 +19,6 @@ except ModuleNotFoundError as error:
     raise ImportError("Atlas virtual parsing requires tools/requirements-virtual-evaluator.txt") from error
 
 
-CONTRACT_VERSION = "atlas.virtual-evaluator.v1"
-COMPATIBILITY_REVISION = "23fdbf51f89a829bfcd24bbd32fa179616e26d9f"
 TileFormat = Literal["bf16", "fp8"]
 
 
@@ -357,6 +355,15 @@ def parse_program(source: str, *, function: str | None = None) -> ParsedProgram:
     return ParsedProgram(module, selected, blocks, MappingProxyType(inputs), tuple(outputs), controls)
 
 
+def _numerics(unit: str):
+    try:
+        import torch
+        from npu_model.configs.numerics import RtlNumerics
+    except ModuleNotFoundError as error:
+        raise ImportError(f"{unit} execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+    return torch, RtlNumerics
+
+
 def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     """Evaluate a pure VPU/pack operation, including FP8 results without boundary I/O."""
     _require(isinstance(op, Operation), "expected a parsed virtual operation")
@@ -370,11 +377,7 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     kind = _atlas_fields(op)["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
     if kind == "mov":
         return operands[0]
-    try:
-        import torch
-        from npu_model.configs.numerics import RtlNumerics
-    except ModuleNotFoundError as error:
-        raise ImportError("VPU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+    torch, RtlNumerics = _numerics("VPU")
     # Reinterpret owned raw bits: floating-point conversion would lose encodings.
     owned = tuple(torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16).reshape(32, 32) for tile in operands)
     if kind == "add":
@@ -400,11 +403,7 @@ def _mxu_unit(op: Operation) -> int:
 
 
 def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127, *, unit: int = 0) -> Tile:
-    try:
-        import torch
-        from npu_model.configs.numerics import RtlNumerics
-    except ModuleNotFoundError as error:
-        raise ImportError("MXU execution requires the npu-model Python environment and its source root on PYTHONPATH") from error
+    torch, RtlNumerics = _numerics("MXU")
     tensors = tuple(torch.tensor(tile.bits, dtype=torch.uint8 if tile.format == "fp8" else torch.uint16)
                     .view(torch.float8_e4m3fn if tile.format == "fp8" else torch.bfloat16).reshape(32, 32) for tile in operands)
     if kind == "matmul":
@@ -524,10 +523,7 @@ def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tupl
         if name.startswith(("dma_load_", "dma_store_")):
             address, length, format, store = span = _dma_span(op, constants)
             _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
-            for other, size, kind in boundaries:
-                if not _overlaps(address, length, other, size):
-                    continue
-                _require(kind != "control", "DMA must not overlap the control mailbox")
+            _require(not any(kind == "control" and _overlaps(address, length, other, size) for other, size, kind in boundaries), "DMA must not overlap the control mailbox")
             pending[op.results[1]] = span
         elif name.startswith("dma_await_") or name == "dma_wait":
             _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
@@ -603,16 +599,6 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
     entry = program.blocks[0]
     starts = [op for op in program.operations if operation_name(op) == "atlas.virtual_start"]
     _require(len(starts) == 1 and bool(blocks[entry]) and blocks[entry][0] is starts[0], "virtual_start must be the unique first entry operation")
-    supported = {
-        "atlas.virtual_start", "atlas.virtual_input_bf16", "atlas.virtual_input_fp8", "atlas.virtual_output_bf16",
-        "atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8",
-        "atlas.virtual_scale_constant", "atlas.virtual_mxu_matmul", "atlas.virtual_mxu_load_weight",
-        "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_load_acc_fp8", "atlas.virtual_mxu_reset",
-        "atlas.virtual_mxu_accumulate", "atlas.virtual_mxu_readout_bf16", "atlas.virtual_mxu_readout_fp8",
-        "atlas.virtual_dma_load_fp8", "atlas.virtual_dma_load_bf16", "atlas.virtual_dma_await_fp8",
-        "atlas.virtual_dma_await_bf16", "atlas.virtual_dma_store_fp8", "atlas.virtual_dma_store_bf16", "atlas.virtual_dma_wait",
-        "arith.constant", "arith.addi", "arith.cmpi", "cf.br", "cf.cond_br", "func.return",
-    }
     definitions = {}
     for block, operations in blocks.items():
         definitions.update((arg, (block, -1)) for arg in block.args)
@@ -621,8 +607,6 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
             _require(bool(operations) and isinstance(operations[-1], (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)), "function block requires a branch or return terminator")
         for position, op in enumerate(operations):
             name = operation_name(op)
-            if name not in supported:
-                raise UnsupportedVirtualMode(f"execution is not implemented for {name}")
             if isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp, func.ReturnOp)):
                 _require(position == len(operations) - 1, f"{name}: terminator must be last in its block")
             for target, arguments in _edges(op):

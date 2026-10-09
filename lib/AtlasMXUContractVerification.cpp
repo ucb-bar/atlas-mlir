@@ -1,4 +1,5 @@
 #include "Atlas/AtlasMXUContractVerification.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
@@ -7,7 +8,6 @@
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include <deque>
 #include <optional>
 #include <utility>
 
@@ -15,8 +15,6 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-constexpr llvm::StringLiteral kCommand = "atlas.virtual_mxu_command";
-
 struct Record {
   int32_t id = -1, block = -1;
   StringRef kind;
@@ -70,19 +68,12 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   }
   Record r;
-  for (auto [name, field] : {
-           std::pair<StringRef, int32_t *>("id", &r.id),
-           {"block", &r.block}, {"unit", &r.unit}, {"reg", &r.reg},
-           {"slot", &r.slot}, {"weight_slot", &r.weightSlot},
-           {"weight", &r.weight}, {"previous", &r.previous},
-           {"scale_reg", &r.scaleReg}, {"scale", &r.scale}}) {
-    auto integer = dyn_cast_or_null<IntegerAttr>(dictionary.get(name));
-    if (!integer || !integer.getType().isSignlessInteger(32)) {
-      module.emitOpError("MXU contract field requires signless i32: ") << name;
-      return failure();
-    }
-    *field = int32_t(integer.getValue().getSExtValue());
-  }
+  if (failed(readI32Fields<int32_t>(module, dictionary, "MXU", {
+          {"id", &r.id}, {"block", &r.block}, {"unit", &r.unit}, {"reg", &r.reg},
+          {"slot", &r.slot}, {"weight_slot", &r.weightSlot},
+          {"weight", &r.weight}, {"previous", &r.previous},
+          {"scale_reg", &r.scaleReg}, {"scale", &r.scale}})))
+    return failure();
   auto kind = dictionary.getAs<StringAttr>("kind");
   if (!kind) {
     module.emitOpError("MXU contract kind requires a string");
@@ -249,40 +240,19 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
     }
     return success();
   };
-  std::vector<PathOwnership> entries(stream.starts.size(), PathOwnership(records.size()));
-  std::vector<bool> reached(stream.starts.size(), false);
-  std::deque<size_t> work = {0};
-  reached[0] = true;
   // Entry owners only become unknown; must-fresh bits only become false and
   // may-pending bits only become true. Producer writes make loop transfer finite.
-  while (!work.empty()) {
-    size_t block = work.front();
-    work.pop_front();
-    PathOwnership state = entries[block];
+  auto paths = atlasForwardEntries(stream, PathOwnership(records.size()), [&](size_t block, PathOwnership &state) {
     (void)transfer(block, state, false);
-    for (size_t next : stream.succs[block]) {
-      if (!reached[next]) {
-        entries[next] = state;
-        reached[next] = true;
-        work.push_back(next);
-      } else if (mergeOwnership(entries[next], state)) {
-        work.push_back(next);
-      }
-    }
-  }
+    return success();
+  }, mergeOwnership);
   for (size_t block = 0; block < stream.starts.size(); ++block) {
-    if (!reached[block])
+    if (!paths->reached[block])
       continue;
-    PathOwnership state = entries[block];
+    PathOwnership state = paths->entries[block];
     if (failed(transfer(block, state, true)))
       return failure();
-    bool exits = stream.succs[block].empty();
-    if (stream.endsInBranch(block)) {
-      Operation *redirect = stream.ops[stream.blockEnd(block) - 2];
-      exits |= !stream.targetOf.lookup(redirect);
-      exits |= isa<BranchOp>(redirect) && stream.blockEnd(block) == stream.ops.size();
-    }
-    if (exits && state.owners.blockExit())
+    if (atlasBlockExits(stream, block) && state.owners.blockExit())
       return module.emitOpError("MXU contract accumulator remains live at emitted path exit");
   }
   return success();
@@ -313,14 +283,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
     const FixedResourcePlacement &fixed) {
   if (failed(verifyAtlasMXUAllocation(function, mxuAssignments, fixed)))
     return failure();
-  llvm::DenseSet<Value> known;
-  for (Block &block : function.getBody()) {
-    for (Value argument : block.getArguments())
-      known.insert(argument);
-    for (Operation &op : block)
-      for (Value result : op.getResults())
-        known.insert(result);
-  }
+  llvm::DenseSet<Value> known = sourceValues(function);
   llvm::DenseMap<Value, unsigned> mapped;
   for (const VirtualRegisterAssignment &assignment : registers) {
     Value value = assignment.value;
@@ -460,7 +423,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
   llvm::DenseMap<Operation *, int32_t> tagged;
   llvm::DenseSet<int32_t> seen;
   for (Operation &op : module.getBody()->getOperations()) {
-    Attribute attr = op.getAttr(kCommand);
+    Attribute attr = op.getAttr(kAtlasTagMXUCommand);
     bool command = isa<MXUPushOp, MXUMatmulOp, MXUPopOp>(op);
     if (!attr && !command)
       continue;

@@ -10,14 +10,9 @@ struct VirtualMXUAssignment {
   MXUPlacement placement;
 };
 
-// Requires live source IR with verified SSA and typed virtual MXU operations.
-// Admission and state-flow verification remain separate. Independently
-// checks complete placements, unit/slot geometry, block-local logical ownership,
-// and in-place accumulator versions. The shared MXUOwnership transitions are
-// applied to weight use counts derived here from source operands, never from
-// allocator summaries. Last virtual weight use and accumulator readout release
-// logical ownership only: this does not prove physical engine read/write
-// completion or correspondence with emitted commands.
+// Checks MXU placements against live, SSA-verified source: completeness,
+// geometry and logical ownership from source-derived use counts.
+// See docs/dialect-reference.md.
 LogicalResult verifyAtlasMXUAllocation(
     func::FuncOp function, llvm::ArrayRef<VirtualMXUAssignment> assignments,
     const FixedResourcePlacement &fixed);

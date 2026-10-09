@@ -7,20 +7,14 @@
 namespace mlir::atlas {
 struct AtlasVerificationContext;
 
-// Derives expectations from live virtual source and independently validated
-// placements. Numeric fields are signless i32 bit patterns; direction is a
-// load/store string. Records are sorted by nonnegative transfer id.
+// Builds explicit-transfer records, sorted by transfer id, from live source and
+// independently validated placements.
 FailureOr<ArrayAttr> buildAtlasDMAContract(
     func::FuncOp function, llvm::ArrayRef<VirtualDMAAssignment> assignments);
 
-// Checks retained source expectations against captured tagged machine DMA operands.
-// Requires separate structural and DMA lifecycle checks (the generated-schedule
-// entry point runs those first); correspondence alone does not prove ordering.
-// Requires a generated artifact (AtlasGeneratedArtifact.h). This does not prove
-// tensor contents, untagged DMA correspondence, or source-to-emitted CFG
-// correspondence.
+// Checks a generated artifact's captured tagged DMA operands against its
+// contract, after the structural stage. See docs/dialect-reference.md.
 LogicalResult verifyAtlasGeneratedDMAContract(const AtlasVerificationContext &ctx);
-LogicalResult verifyAtlasGeneratedDMAContract(ModuleOp module);
 
 } // namespace mlir::atlas
 

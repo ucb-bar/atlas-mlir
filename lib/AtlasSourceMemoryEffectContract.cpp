@@ -1,12 +1,13 @@
 #include "Atlas/AtlasSourceMemoryEffectContract.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/BitVector.h"
 #include <array>
-#include <deque>
 #include <map>
 #include <optional>
 #include <vector>
@@ -16,24 +17,6 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-constexpr StringLiteral commandTag = "atlas.virtual_tile_command";
-constexpr StringLiteral edgeTag = "atlas.virtual_cfg_edge";
-constexpr StringLiteral blockTag = "atlas.virtual_cfg_block";
-
-std::optional<int32_t> integer(DictionaryAttr d, StringRef key) {
-  auto a = d.getAs<IntegerAttr>(key);
-  if (!a || !a.getType().isSignlessInteger(32)) return {};
-  return int32_t(a.getInt());
-}
-std::optional<int32_t> tag(Operation *op, StringRef key) {
-  auto a = op->getAttrOfType<IntegerAttr>(key);
-  if (!a || !a.getType().isSignlessInteger(32) || a.getInt() < 0) return {};
-  return int32_t(a.getInt());
-}
-StringRef string(DictionaryAttr d, StringRef key) {
-  auto a = d.getAs<StringAttr>(key);
-  return a ? a.getValue() : StringRef{};
-}
 struct Tile { StringRef kind; uint32_t dram, bytes; int32_t channel; std::vector<int32_t> after; };
 struct Owner { int32_t source, block; };
 struct Effect {
@@ -44,20 +27,13 @@ struct Effect {
 };
 struct SourceEdge { int32_t from, to; };
 
-unsigned launchCount(StringRef name) {
-  if (name == "atlas.virtual_input_bf16" || name == "atlas.virtual_output_bf16") return 2;
-  if (name == "atlas.virtual_input_fp8" || name == "atlas.virtual_dma_load_fp8" || name == "atlas.virtual_dma_load_bf16" ||
-      name == "atlas.virtual_dma_store_fp8" || name == "atlas.virtual_dma_store_bf16") return 1;
-  return 0;
-}
 bool overlap(const Effect &a, const Effect &b) {
   return uint64_t(a.dram) < uint64_t(b.dram) + b.bytes && uint64_t(b.dram) < uint64_t(a.dram) + a.bytes;
 }
 
-// The CFG and tile contracts are themselves source-derived; join them by
-// stable source identities. Effects are ordered by tile id, so tile ids must
-// follow source order: the unowned mailbox prelude first, then each operation's
-// commands strictly after the previous operation's.
+// Joins the source-derived CFG and tile contracts by stable source identities.
+// Effects are ordered by tile id, so tile ids must follow source order: the
+// unowned mailbox prelude, then each operation strictly after the previous one.
 FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr records) {
   auto blocks = cfg.getAs<ArrayAttr>("blocks");
   auto operations = cfg.getAs<ArrayAttr>("operations");
@@ -66,10 +42,10 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
   for (Attribute a : records) {
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return failure();
-    auto id = integer(d, "id"), dram = integer(d, "dram_byte"), bytes = integer(d, "bytes"), channel = integer(d, "channel");
+    auto id = contractI32(d, "id"), dram = contractI32(d, "dram_byte"), bytes = contractI32(d, "bytes"), channel = contractI32(d, "channel");
     auto after = d.getAs<DenseI32ArrayAttr>("after");
     if (!id || *id != int32_t(tiles.size()) || !dram || !bytes || !channel || !after) return failure();
-    Tile t{string(d, "kind"), uint32_t(*dram), uint32_t(*bytes), *channel, {after.asArrayRef().begin(), after.asArrayRef().end()}};
+    Tile t{contractString(d, "kind"), uint32_t(*dram), uint32_t(*bytes), *channel, {after.asArrayRef().begin(), after.asArrayRef().end()}};
     if ((t.kind == "dma_load" || t.kind == "dma_store" || t.kind == "dma_wait") && (t.channel < 0 || t.channel >= 8)) return failure();
     tiles.push_back(t);
   }
@@ -80,7 +56,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
   for (Attribute a : operations) {
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return failure();
-    auto source = integer(d, "id"), block = integer(d, "block");
+    auto source = contractI32(d, "id"), block = contractI32(d, "block");
     auto commands = d.getAs<DenseI32ArrayAttr>("tile_commands");
     if (!source || *source <= previousSource || !block || *block < previousBlock || *block < 0 || *block >= int32_t(blocks.size()) || !commands) return failure();
     previousSource = *source;
@@ -91,7 +67,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
       previousCommand = id;
       launches += tiles[id].kind == "dma_load" || tiles[id].kind == "dma_store";
     }
-    if (launches != launchCount(string(d, "name"))) return failure();
+    if (launches != atlasTileExpansion(contractString(d, "name")).launches) return failure();
   }
   for (int32_t id = 0; id < int32_t(tiles.size()); ++id)
     if (!owners.count(id) && !owners.empty() && id > owners.begin()->first) return failure();
@@ -168,7 +144,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
   std::map<int32_t, DictionaryAttr> records;
   for (Attribute a : operations) {
     auto d = dyn_cast<DictionaryAttr>(a);
-    auto id = d ? integer(d, "id") : std::nullopt;
+    auto id = d ? contractI32(d, "id") : std::nullopt;
     if (!id || !records.emplace(*id, d).second) {
       function.emitOpError("source memory contract requires unique source operation records");
       return failure();
@@ -178,9 +154,9 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
   for (Block &block : function.getBody()) {
     for (Operation &op : block) {
       int32_t id = source++;
-      if (!launchCount(op.getName().getStringRef())) continue;
+      if (!atlasTileExpansion(op.getName().getStringRef()).launches) continue;
       auto found = records.find(id);
-      if (found == records.end() || string(found->second, "name") != op.getName().getStringRef() || integer(found->second, "block") != blockID) {
+      if (found == records.end() || contractString(found->second, "name") != op.getName().getStringRef() || contractI32(found->second, "block") != blockID) {
         op.emitOpError("source memory contract requires its live source identity in the CFG contract");
         return failure();
       }
@@ -215,7 +191,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
   for (Attribute a : cfgEdges) {
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return bad();
-    auto id = integer(d, "id"), from = integer(d, "from"), to = integer(d, "to");
+    auto id = contractI32(d, "id"), from = contractI32(d, "from"), to = contractI32(d, "to");
     if (!id || *id != int32_t(edges.size()) || !from || *from < 0 || *from >= int32_t(cfgBlocks.size()) || !to || *to < 0 || *to >= int32_t(cfgBlocks.size())) return bad();
     edges.push_back({*from, *to});
   }
@@ -226,7 +202,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
   for (const Effect &e : *effects) { launchEffect[e.launch] = e.id; waitEffect[e.completion] = e.id; }
   std::vector<unsigned> launches(effects->size()), waits(effects->size());
   for (Operation *op : s.ops) {
-    auto command = tag(op, commandTag);
+    auto command = contractTag(op, kAtlasTagTileCommand);
     if (!command) continue;
     if (auto found = launchEffect.find(*command); found != launchEffect.end()) ++launches[found->second];
     if (auto found = waitEffect.find(*command); found != waitEffect.end()) ++waits[found->second];
@@ -246,7 +222,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc) {
       Operation *op = s.ops[pc];
-      auto command = tag(op, commandTag);
+      auto command = contractTag(op, kAtlasTagTileCommand);
       auto launch = command ? launchEffect.find(*command) : launchEffect.end();
       auto wait = command ? waitEffect.find(*command) : waitEffect.end();
       if (launch != launchEffect.end()) {
@@ -270,11 +246,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
         state.completed[e.id] = current;
         state.pending[e.channel] = -1;
       }
-      if (auto edge = tag(op, edgeTag); edge && s.instrs[pc].op->opClass == OpClass::Jump) {
+      if (auto edge = contractTag(op, kAtlasTagCFGEdge); edge && s.instrs[pc].op->opClass == OpClass::Jump) {
         if (*edge >= int32_t(edges.size())) return bad();
         const SourceEdge &e = edges[*edge];
         Operation *target = s.targetOf.lookup(op);
-        if (!target || tag(target, blockTag) != e.to) return fail(pc, "edge target is not its checked source destination");
+        if (!target || contractTag(target, kAtlasTagCFGBlock) != e.to) return fail(pc, "edge target is not its checked source destination");
         if (diagnose && state.sourceBlock != e.from) return fail(pc, "edge does not leave the current source visit");
         if (failed(drained(state, diagnose, pc))) return failure();
         for (const Effect &effect : *effects)
@@ -285,28 +261,13 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
     }
     return success();
   };
-  std::vector<State> entries(s.starts.size(), State(effects->size()));
-  std::vector<bool> reached(s.starts.size(), false);
-  std::deque<size_t> work{0};
-  reached[0] = true;
-  while (!work.empty()) {
-    size_t block = work.front();
-    work.pop_front();
-    State output = entries[block];
-    if (failed(run(block, output, false))) return failure();
-    for (size_t next : s.succs[block]) {
-      if (!reached[next]) { entries[next] = output; reached[next] = true; work.push_back(next); }
-      else if (merge(entries[next], output)) work.push_back(next);
-    }
-  }
+  auto paths = atlasForwardEntries(s, State(effects->size()), [&](size_t block, State &state) { return run(block, state, false); }, merge);
+  if (failed(paths)) return failure();
   for (size_t block = 0; block < s.starts.size(); ++block) {
-    if (!reached[block]) continue;
-    State output = entries[block];
+    if (!paths->reached[block]) continue;
+    State output = paths->entries[block];
     if (failed(run(block, output, true))) return failure();
-    size_t end = s.blockEnd(block);
-    bool exits = s.succs[block].empty();
-    if (s.endsInBranch(block)) exits |= !s.targetOf.lookup(s.ops[end - 2]) || (s.instrs[end - 2].op->opClass == OpClass::Branch && end == s.ops.size());
-    if (exits && failed(drained(output, true, end - 1))) return failure();
+    if (atlasBlockExits(s, block) && failed(drained(output, true, s.blockEnd(block) - 1))) return failure();
   }
   return success();
 }

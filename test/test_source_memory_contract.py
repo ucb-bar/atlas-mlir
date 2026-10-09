@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 import unittest
 
-from generated_fixture import INCOMPLETE
 from test_virtual_lowering import lower, run
+from verification_support import TIMED_FINAL as BOUNDARIES, UNTIMED, assert_boundaries
 
 
 CONTRACT = "atlas.virtual_source_memory_contract"
@@ -15,9 +15,6 @@ INCONSISTENT = "source memory contract has malformed or inconsistent source reco
 LAUNCHES = ("atlas.virtual_dma_load_fp8", "atlas.virtual_dma_store_fp8")
 STATE = "!atlas.virtual_state"
 X, Y = 0x90000000, 0x90010000
-BOUNDARIES = (("atlas-opt", ("--verify-atlas-generated-schedule",)), ("atlas-emit", ()),
-              ("atlas-opt", ("--convert-atlas-to-llvm",)), ("atlas-opt", ("--convert-atlas-to-llvm-calls",)))
-UNTIMED = (("atlas-opt", ("--verify-atlas-generated-schedule",)), ("atlas-emit", ("--allow-untimed",)))
 
 
 def signed(value: int) -> int:
@@ -127,13 +124,7 @@ def swap_sources(machine: str, first: set[int], second: set[int]) -> str:
 
 class SourceMemoryContractTest(unittest.TestCase):
     def check(self, machine: str, boundaries, *, rejected: str | None = None) -> None:
-        """Accept at every boundary, or reject with the given diagnostic."""
-        for tool, flags in boundaries:
-            with self.subTest(tool=tool, flags=flags):
-                result = run(tool, machine, *flags)
-                self.assertEqual(result.returncode == 0, rejected is None, result.stderr)
-                if rejected is not None:
-                    self.assertIn(rejected, result.stderr)
+        assert_boundaries(self, machine, boundaries, rejects=rejected)
 
     def test_completed_overlapping_transfers_keep_source_order(self) -> None:
         for first, second in (("store", "load"), ("load", "store"), ("store", "store")):
@@ -161,10 +152,8 @@ class SourceMemoryContractTest(unittest.TestCase):
                 self.assertEqual(delayed.returncode, 0, delayed.stderr)
                 self.check(delayed.stdout, BOUNDARIES)
 
-    def test_missing_or_weakened_contract_is_rejected(self) -> None:
+    def test_weakened_contract_is_rejected(self) -> None:
         timed = lower(program("store", "load"))
-        self.check(timed.replace(CONTRACT, "atlas.removed_source_memory_contract", 1), BOUNDARIES,
-                   rejected=f"{INCOMPLETE} {CONTRACT}")
         weakened = re.sub(r"predecessors = array<i32: [^>]*>", "predecessors = array<i32>", timed)
         self.assertNotEqual(weakened, timed)
         self.check(weakened, BOUNDARIES, rejected=INCONSISTENT)

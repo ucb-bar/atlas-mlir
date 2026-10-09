@@ -137,8 +137,3 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
   }
   return success();
 }
-
-LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
-  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
-  return failed(ctx) ? failure() : verifyAtlasGeneratedDMAMemory(*ctx);
-}

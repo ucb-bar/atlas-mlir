@@ -6,6 +6,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include <deque>
 
 namespace mlir::atlas {
 struct AtlasVerificationContext;
@@ -71,6 +72,43 @@ atlasDMAUpperWordEntries(const AtlasStream &stream);
 std::vector<timing::RegValues>
 atlasScaleRegisterEntries(const AtlasStream &stream);
 void applyAtlasScaleRegister(const timing::Instr &in, timing::RegValues &regs);
+// Whether a block leaves the stream: no successor, a redirect to the stream
+// end, or a branch whose fall-through is the stream end.
+bool atlasBlockExits(const AtlasStream &stream, size_t block);
+
+template <typename S> struct AtlasForwardEntries {
+  std::vector<S> entries;
+  std::vector<bool> reached;
+};
+// Forward worklist from block 0: `transfer(block, state)` turns a copy of the
+// entry state into the exit state, and `join(into, incoming)` returns whether
+// a reached entry changed. A failed transfer aborts the walk.
+template <typename S, typename Transfer, typename Join>
+FailureOr<AtlasForwardEntries<S>>
+atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join) {
+  AtlasForwardEntries<S> result{std::vector<S>(stream.starts.size(), init), std::vector<bool>(stream.starts.size(), false)};
+  if (stream.starts.empty())
+    return result;
+  result.reached[0] = true;
+  std::deque<size_t> work = {0};
+  while (!work.empty()) {
+    size_t block = work.front();
+    work.pop_front();
+    S state = result.entries[block];
+    if (failed(transfer(block, state)))
+      return failure();
+    for (size_t next : stream.succs[block]) {
+      if (!result.reached[next]) {
+        result.reached[next] = true;
+        result.entries[next] = state;
+        work.push_back(next);
+      } else if (join(result.entries[next], state)) {
+        work.push_back(next);
+      }
+    }
+  }
+  return result;
+}
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions. Rewriting alone leaves the

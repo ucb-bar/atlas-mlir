@@ -1,5 +1,6 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
@@ -356,34 +357,23 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
 // Its value, like the scalar operands, must agree on every incoming CFG edge.
 std::vector<std::optional<uint32_t>>
 mlir::atlas::atlasDMAUpperWordEntries(const AtlasStream &s) {
-  std::vector<std::optional<uint32_t>> entry(s.starts.size());
-  std::vector<bool> reached(s.starts.size(), false);
-  if (s.starts.empty())
-    return entry;
-  reached[0] = true;
-  std::deque<size_t> work = {0};
-  while (!work.empty()) {
-    size_t block = work.front();
-    work.pop_front();
+  auto transfer = [&](size_t block, std::optional<uint32_t> &base) {
     RegValues regs = s.entry[block];
-    auto base = entry[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
       if (auto config = dyn_cast<DMAConfigOp>(s.ops[i]))
         base = regs[config.getBaseReg()];
       applyScalar(s.instrs[i], regs);
     }
-    for (size_t next : s.succs[block]) {
-      if (!reached[next]) {
-        reached[next] = true;
-        entry[next] = base;
-        work.push_back(next);
-      } else if (entry[next] && entry[next] != base) {
-        entry[next].reset();
-        work.push_back(next);
-      }
-    }
-  }
-  return entry;
+    return success();
+  };
+  // Unknown sticks: a disagreeing edge resets the entry for good.
+  auto join = [](std::optional<uint32_t> &into, const std::optional<uint32_t> &incoming) {
+    if (!into || into == incoming)
+      return false;
+    into.reset();
+    return true;
+  };
+  return std::move(atlasForwardEntries<std::optional<uint32_t>>(s, std::nullopt, transfer, join)->entries);
 }
 
 void mlir::atlas::applyAtlasScaleRegister(const Instr &in, RegValues &regs) {
@@ -395,29 +385,20 @@ void mlir::atlas::applyAtlasScaleRegister(const Instr &in, RegValues &regs) {
 
 std::vector<RegValues>
 mlir::atlas::atlasScaleRegisterEntries(const AtlasStream &s) {
-  std::vector<RegValues> entry(s.starts.size());
-  std::vector<bool> reached(s.starts.size(), false);
-  if (s.starts.empty())
-    return entry;
-  reached[0] = true;
-  std::deque<size_t> work = {0};
-  while (!work.empty()) {
-    size_t block = work.front();
-    work.pop_front();
-    RegValues regs = entry[block];
+  auto transfer = [&](size_t block, RegValues &regs) {
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i)
       applyAtlasScaleRegister(s.instrs[i], regs);
-    for (size_t next : s.succs[block]) {
-      if (!reached[next]) {
-        reached[next] = true;
-        entry[next] = regs;
-        work.push_back(next);
-      } else if (mergeInto(entry[next], regs, /*first=*/0)) {
-        work.push_back(next);
-      }
-    }
-  }
-  return entry;
+    return success();
+  };
+  auto join = [](RegValues &into, const RegValues &incoming) { return mergeInto(into, incoming, /*first=*/0); };
+  return std::move(atlasForwardEntries(s, RegValues{}, transfer, join)->entries);
+}
+
+bool mlir::atlas::atlasBlockExits(const AtlasStream &s, size_t block) {
+  size_t end = s.blockEnd(block);
+  if (s.succs[block].empty())
+    return true;
+  return s.endsInBranch(block) && (!s.targetOf.lookup(s.ops[end - 2]) || (s.instrs[end - 2].op->opClass == OpClass::Branch && end == s.ops.size()));
 }
 
 LogicalResult mlir::atlas::checkAtlasStream(
@@ -515,8 +496,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
     current = i;
     Operation *op = s.ops[i];
     auto carryCFGOwner = [&](Operation *padding) {
-      for (StringRef name : {"atlas.virtual_cfg_block", "atlas.virtual_cfg_edge",
-                             "atlas.virtual_cfg_helper"})
+      for (StringRef name : {kAtlasTagCFGBlock, kAtlasTagCFGEdge, kAtlasTagCFGHelper})
         if (Attribute value = op->getAttr(name))
           padding->setAttr(name, value);
     };
@@ -559,18 +539,18 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       cast<JumpOp>(op).setOffsetAttr(builder.getI32IntegerAttr(offset));
   }
 
-  module->setAttr("atlas.timing_state", builder.getStringAttr(timed ? "timed" : "untimed"));
+  module->setAttr(kAtlasTimingState, builder.getStringAttr(timed ? "timed" : "untimed"));
   if (timed)
-    module->setAttr("atlas.timing_provider", builder.getStringAttr("npu-model-rtl-match-v1"));
+    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(kNpuModelTimingProviderId));
   else
-    module->removeAttr("atlas.timing_provider");
+    module->removeAttr(kAtlasTimingProvider);
   SmallVector<uint32_t> words;
   return verifyAtlasArtifact(module, /*llvmBlock=*/false, words);
 }
 
 LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireTimed) {
-  Attribute rawState = module->getAttr("atlas.timing_state");
-  Attribute rawProvider = module->getAttr("atlas.timing_provider");
+  Attribute rawState = module->getAttr(kAtlasTimingState);
+  Attribute rawProvider = module->getAttr(kAtlasTimingProvider);
   if (!rawState) {
     if (rawProvider)
       return module.emitOpError("timing provider requires an explicit timing state");
@@ -691,7 +671,7 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
   ModuleOp module = ctx.module;
   if (failed(verifyAtlasTimingState(module)))
     return failure();
-  if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider");
+  if (auto selected = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
       selected && selected.getValue() != provider.id)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   assert(ctx.stream && "a timed stream is decoded");
@@ -706,8 +686,8 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
 
 LogicalResult mlir::atlas::verifyAtlasTiming(const AtlasVerificationContext &ctx) {
   ModuleOp module = ctx.module;
-  std::string id = "npu-model-rtl-match-v1";
-  if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider"))
+  std::string id = kNpuModelTimingProviderId.str();
+  if (auto selected = module->getAttrOfType<StringAttr>(kAtlasTimingProvider))
     id = selected.getValue().str();
   auto provider = lookupTimingProvider(id);
   if (!provider.error.empty())
@@ -737,8 +717,8 @@ struct VerifyAtlasTimingPass
       return;
     }
     Builder builder(module.getContext());
-    module->setAttr("atlas.timing_state", builder.getStringAttr("timed"));
-    module->setAttr("atlas.timing_provider", builder.getStringAttr("npu-model-rtl-match-v1"));
+    module->setAttr(kAtlasTimingState, builder.getStringAttr("timed"));
+    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(kNpuModelTimingProviderId));
   }
 };
 }

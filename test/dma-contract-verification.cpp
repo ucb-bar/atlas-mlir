@@ -1,27 +1,13 @@
 #include "Atlas/AtlasDMAContractVerification.h"
-#include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Parser/Parser.h"
-#include "llvm/Support/raw_ostream.h"
+#include "VerificationTestSupport.h"
 #include <algorithm>
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0, failures = 0;
-void check(bool condition, StringRef label) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << label << '\n';
-  }
-}
-
 constexpr StringLiteral source = R"mlir(
 module {
   func.func @transfers() -> !atlas.virtual_state {
@@ -38,15 +24,11 @@ module {
     return %s4 : !atlas.virtual_state
   }
 })mlir";
+} // namespace
 
-void field(DictionaryAttr record, StringRef name, uint32_t expected) {
-  auto value = record.getAs<IntegerAttr>(name);
-  check(value && value.getType().isSignlessInteger(32) && value.getValue().getZExtValue() == expected, name);
-}
-
-void testSourceContract(MLIRContext &context) {
-  auto module = parseSourceString<ModuleOp>(source, &context);
-  check(module && succeeded(verify(*module)), "valid typed source");
+// Source records are ordered by transfer id, not by assignment order; Python checks lowered field values.
+void atlas_test::runDMAContract(MLIRContext &context) {
+  auto module = parse(context, source, "valid typed source");
   if (!module)
     return;
   auto function = *module->getOps<func::FuncOp>().begin();
@@ -61,45 +43,21 @@ void testSourceContract(MLIRContext &context) {
   check(succeeded(contract) && contract->size() == 2, "two source records");
   if (failed(contract) || contract->size() != 2)
     return;
-  for (unsigned index = 0; index < 2; ++index) {
-    auto record = cast<DictionaryAttr>((*contract)[index]);
-    field(record, "id", index == 0 ? 7 : 41);
-    field(record, "dram_byte", index == 0 ? 0x80002000 : 0x80000400);
-    field(record, "size_bytes", 2048);
-    field(record, "channel", 3);
-    field(record, "staging_word", 0x2000);
-    field(record, "staging_reg", 9);
-    field(record, "dram_reg", 7);
-    field(record, "size_reg", 4);
-    auto direction = record.getAs<StringAttr>("direction");
-    check(direction && direction.getValue() == (index == 0 ? "store" : "load"), "source direction");
-  }
+  for (unsigned index = 0; index < 2; ++index)
+    field(cast<DictionaryAttr>((*contract)[index]), "id", index == 0 ? 7 : 41);
   std::reverse(assignments.begin(), assignments.end());
   auto reordered = buildAtlasDMAContract(function, assignments);
   check(succeeded(reordered) && *reordered == *contract, "assignment order does not change source contract");
 
   auto base = cast<arith::ConstantOp>(function.getBody().front().front());
   base.setValueAttr(IntegerAttr::get(IntegerType::get(&context, 32), 0xfffffc00));
-  auto wrapped = buildAtlasDMAContract(function, assignments);
   // 0xfffffc00 + 1024 wraps to zero, outside the selected DRAM address domain.
-  check(failed(wrapped), "wrapping source address cannot masquerade as selected DRAM");
+  check(failed(buildAtlasDMAContract(function, assignments)), "wrapping source address cannot masquerade as selected DRAM");
   base.setValueAttr(IntegerAttr::get(IntegerType::get(&context, 32), 0xfffffc00u - 0x80000000u));
   auto changed = buildAtlasDMAContract(function, assignments);
   check(succeeded(changed), "wrapping i32 addition reaches selected DRAM");
   if (succeeded(changed))
     field(cast<DictionaryAttr>((*changed)[1]), "dram_byte", 0x80000000);
-
   assignments.pop_back();
   check(failed(buildAtlasDMAContract(function, assignments)), "missing source assignment fails");
-}
-} // namespace
-
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, func::FuncDialect>();
-  MLIRContext context(registry);
-  ScopedDiagnosticHandler diagnostics(&context, [](Diagnostic &) { return success(); });
-  testSourceContract(context);
-  llvm::outs() << checks << " checks, " << failures << " failures\n";
-  return failures != 0;
 }

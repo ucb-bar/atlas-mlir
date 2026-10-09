@@ -1,4 +1,5 @@
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
@@ -15,8 +16,6 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-constexpr llvm::StringLiteral kTransfer = "atlas.virtual_dma_transfer";
-
 struct Record {
   uint32_t id, channel, stagingWord, dramByte, sizeBytes;
   uint32_t stagingReg, dramReg, sizeReg;
@@ -90,19 +89,12 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   }
   Record r{};
-  for (auto [name, field] : {
-           std::pair<StringRef, uint32_t *>("id", &r.id),
-           {"channel", &r.channel}, {"staging_word", &r.stagingWord},
-           {"dram_byte", &r.dramByte}, {"size_bytes", &r.sizeBytes},
-           {"staging_reg", &r.stagingReg}, {"dram_reg", &r.dramReg},
-           {"size_reg", &r.sizeReg}}) {
-    auto integer = dyn_cast_or_null<IntegerAttr>(dictionary.get(name));
-    if (!integer || !integer.getType().isSignlessInteger(32)) {
-      module.emitOpError("DMA contract field requires signless i32: ") << name;
-      return failure();
-    }
-    *field = uint32_t(integer.getValue().getZExtValue());
-  }
+  if (failed(readI32Fields<uint32_t>(module, dictionary, "DMA", {
+          {"id", &r.id}, {"channel", &r.channel}, {"staging_word", &r.stagingWord},
+          {"dram_byte", &r.dramByte}, {"size_bytes", &r.sizeBytes},
+          {"staging_reg", &r.stagingReg}, {"dram_reg", &r.dramReg},
+          {"size_reg", &r.sizeReg}})))
+    return failure();
   auto direction = dyn_cast_or_null<StringAttr>(dictionary.get("direction"));
   if (!direction) {
     module.emitOpError("DMA contract direction requires a string");
@@ -114,16 +106,6 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   }
   return r;
-}
-
-LogicalResult capturedValue(Operation *op, StringRef field,
-                            std::optional<uint32_t> actual, uint32_t expected) {
-  if (!actual)
-    return op->emitOpError("DMA contract cannot prove captured ") << field;
-  if (*actual != expected)
-    return op->emitOpError("DMA contract captured ")
-           << field << " mismatch: expected " << expected << ", got " << *actual;
-  return success();
 }
 } // namespace
 
@@ -162,6 +144,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
     const AtlasVerificationContext &ctx) {
+  assert(ctx.generated && "the structural stage checks transfer tags and launch/wait pairing");
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module)))
     return failure();
@@ -182,31 +165,24 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
 
   llvm::DenseMap<Operation *, uint32_t> tagged;
   for (Operation &op : module.getBody()->getOperations()) {
-    Attribute attr = op.getAttr(kTransfer);
-    if (!attr)
+    auto id = op.getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
+    if (!id)
       continue;
-    auto id = dyn_cast<IntegerAttr>(attr);
-    if (!isa<DMAOp, DMAWaitOp>(op) || !id ||
-        !id.getType().isSignlessInteger(32) || id.getValue().isNegative())
-      return op.emitOpError("DMA contract transfer tag requires nonnegative i32 on DMA or DMA.WAIT");
     uint32_t value = uint32_t(id.getValue().getZExtValue());
     auto found = records.find(value);
     if (found == records.end())
       return op.emitOpError("DMA contract has no source record for transfer id ") << value;
     Record &r = found->second;
     if (auto dma = dyn_cast<DMAOp>(op)) {
-      if (++r.launches != 1)
-        return op.emitOpError("DMA contract has duplicate tagged launch");
+      ++r.launches;
       if (dma.getChannel() != r.channel || dma.getDirection() != r.direction ||
           dma.getReg() != r.stagingReg || dma.getDram() != r.dramReg ||
           dma.getSize() != r.sizeReg)
         return op.emitOpError("DMA contract launch direction, channel, or helper register mismatch");
       tagged[&op] = value;
     } else {
-      auto wait = cast<DMAWaitOp>(op);
-      if (++r.waits != 1)
-        return op.emitOpError("DMA contract has duplicate tagged wait");
-      if (wait.getChannel() != r.channel)
+      ++r.waits;
+      if (cast<DMAWaitOp>(op).getChannel() != r.channel)
         return op.emitOpError("DMA contract wait channel mismatch");
     }
   }
@@ -231,19 +207,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
         const Record &r = records.find(found->second)->second;
         // Exact captured values also ensure RTL masking/alignment cannot turn
         // a different command into a silently shortened or shifted transfer.
-        if (failed(capturedValue(op, "DRAM upper word", base, 0)) ||
-            failed(capturedValue(op, "staging word", regs[r.stagingReg], r.stagingWord)) ||
-            failed(capturedValue(op, "DRAM byte address", regs[r.dramReg], r.dramByte)) ||
-            failed(capturedValue(op, "byte length", regs[r.sizeReg], r.sizeBytes)))
+        if (failed(checkCaptured(op, "DMA", "DRAM upper word", base, 0)) ||
+            failed(checkCaptured(op, "DMA", "staging word", regs[r.stagingReg], r.stagingWord)) ||
+            failed(checkCaptured(op, "DMA", "DRAM byte address", regs[r.dramReg], r.dramByte)) ||
+            failed(checkCaptured(op, "DMA", "byte length", regs[r.sizeReg], r.sizeBytes)))
           return failure();
       }
       applyScalar(s.instrs[i], regs);
     }
   }
   return success();
-}
-
-LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
-  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
-  return failed(ctx) ? failure() : verifyAtlasGeneratedDMAContract(*ctx);
 }

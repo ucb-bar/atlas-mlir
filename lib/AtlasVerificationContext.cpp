@@ -19,7 +19,7 @@ verifyGeneratedStructure(ModuleOp module,
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;
-    if (Attribute marker = op.getAttr("atlas.virtual_dma_transfer")) {
+    if (Attribute marker = op.getAttr(kAtlasTagDMATransfer)) {
       auto integer = dyn_cast<IntegerAttr>(marker);
       if (!isa<DMAOp, DMAWaitOp>(op) || !integer ||
           !integer.getType().isSignlessInteger(32) ||
@@ -103,10 +103,10 @@ mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
     ctx.pcOf[&op] = ctx.ops.size();
     ctx.ops.push_back(&op);
     ctx.hasDMA |= isa<DMAOp>(op);
-    ctx.hasResourceTags |= op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_tile_command");
+    ctx.hasResourceTags |= op.hasAttr(kAtlasTagDMATransfer) || op.hasAttr(kAtlasTagMXUCommand) || op.hasAttr(kAtlasTagTileCommand);
   }
   ctx.hasCFGContract = module->hasAttr(kAtlasCFGContract);
-  auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
+  auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
   ctx.timed = state && state.getValue() == "timed";
   // The structural stage precedes decoding, which rejects every JALR.
   if (generated && failed(verifyGeneratedStructure(module, ctx.dmaIntervals)))

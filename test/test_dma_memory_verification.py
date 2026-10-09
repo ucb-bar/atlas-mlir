@@ -7,14 +7,12 @@ compiler verifier, emitter, and LLVM handoff, without a runtime model bundle.
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 import unittest
 
 import generated_fixture
-from test_dma_capture_verification import DELAY, MARKER, NOP, STATE, wait
-from test_virtual_ssa import BIN, run
+from test_virtual_lowering import run
+from verification_support import DELAY, NOP, STATE, TRANSFER, assert_boundaries, dma_wait as wait
 
 
 CONFLICT = "DMA memory conflict"
@@ -32,7 +30,7 @@ def constant(reg: int, value: int) -> list[tuple[str, str]]:
 
 
 def launch(direction: str = "load", *, channel: int = 0, identity: int = 0, base: int = 4, dram: int = 7) -> tuple[str, str]:
-    return "dma", f'direction = "{direction}", channel = {channel} : i32, reg = {base} : i32, dram = {dram} : i32, size = 9 : i32, {MARKER} = {identity} : i32'
+    return "dma", f'direction = "{direction}", channel = {channel} : i32, reg = {base} : i32, dram = {dram} : i32, size = 9 : i32, {TRANSFER} = {identity} : i32'
 
 
 def vector(kind: str = "vload", *, base: int = 5, offset: int = 0) -> list[tuple[str, str]]:
@@ -76,34 +74,8 @@ def artifact(work=(), *, direction="load", base=0x2000, size=1024) -> str:
 
 
 class DMAMemoryVerificationTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        try:
-            help_result = subprocess.run([str(BIN / "atlas-opt"), "--help"], capture_output=True, text=True, timeout=30)
-            cls.two_pending = help_result.returncode == 0 and "--schedule-atlas-virtual" in help_result.stdout
-        except (OSError, subprocess.TimeoutExpired):
-            cls.two_pending = False
-        if os.environ.get("ATLAS_REQUIRE_VIRTUAL_SCHEDULER") == "1" and not cls.two_pending:
-            raise AssertionError("ATLAS_OOT_BIN_DIR must select the two-pending scheduler compiler")
-
-    def setUp(self) -> None:
-        for tool in ("atlas-opt", "atlas-emit"):
-            self.assertTrue((BIN / tool).is_file(), f"build {tool} first")
-
     def checked(self, source: str, diagnostic: str | None = None) -> None:
-        for tool, options in (("atlas-opt", ("--verify-atlas-generated-schedule",)), ("atlas-emit", ()), ("atlas-opt", ("--convert-atlas-to-llvm",))):
-            result = run(tool, source, *options)
-            if diagnostic is None:
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout)
-            else:
-                self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertEqual(result.stdout, "")
-                self.assertIn(diagnostic, result.stderr)
-
-    def require_two_pending(self) -> None:
-        if not self.two_pending:
-            self.skipTest("baseline compiler admits one pending DMA; use the scheduler compiler for pair cases")
+        assert_boundaries(self, source, rejects=diagnostic)
 
     def test_empty_generated_artifact_has_no_dma_memory_obligations(self) -> None:
         self.checked(program([]))
@@ -179,7 +151,6 @@ class DMAMemoryVerificationTest(unittest.TestCase):
                 self.checked(program(ops), diagnostic)
 
     def test_two_pending_captured_windows_and_only_matching_wait_release(self) -> None:
-        self.require_two_pending()
         ops = [*prefix(), launch(), *constant(4, 0x2100), launch(channel=1, identity=1),
                wait(), *constant(5, 0x2000), *vector(), wait(channel=1, identity=1)]
         self.checked(program(ops))
@@ -192,7 +163,6 @@ class DMAMemoryVerificationTest(unittest.TestCase):
                                       wait(channel=1, identity=1), wait()]), CONFLICT)
 
     def test_concurrent_dram_ranges_and_read_only_vmem_aliases(self) -> None:
-        self.require_two_pending()
         # The memory check admits concurrent reads of one VMEM range; the timing provider,
         # which runs last, still serializes them.
         for direction, address, base, diagnostic in (("store", 0x90001000, 0x2000, "may still be in flight"), ("store", 0x9000001F, 0x2000, CONFLICT + " in DRAM"), ("load", 0x90000000, 0x2100, CONFLICT + " in DRAM")):

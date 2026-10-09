@@ -5,22 +5,27 @@ from __future__ import annotations
 import re
 import unittest
 
-from test_virtual_lowering import ROOT, lower, run, virtual_chain
-from test_virtual_dma import copy
-from test_tile_contract_verification import records as tile_records
-from test_mxu_contract_verification import records as mxu_records
-from test_dma_contract_verification import records as dma_records
 from test_delay_insertion import addi, nop, program
+from test_virtual_dma import copy
+from test_virtual_evaluator_core import ROWS, schedules
+from test_virtual_lowering import ROOT, lower, run, virtual_chain
 from test_virtual_mxu_lowering import instructions
+from verification_support import (
+    PROVIDER, TIMED, UNTIMED as UNTIMED_BOUNDARIES, UNTIMED_STATE as UNTIMED, assert_boundaries, contract_text, handoff_chain, lines_of,
+    records, rewrite_line, shorten_all_delays,
+)
 
-
-UNTIMED = 'atlas.timing_state = "untimed"'
-TIMED = 'atlas.timing_state = "timed"'
-PROVIDER = 'atlas.timing_provider = "npu-model-rtl-match-v1"'
+TAGS = ("atlas.virtual_dma_transfer", "atlas.virtual_mxu_command", "atlas.virtual_tile_command")
+CONTRACTS = ("dma", "mxu", "tile", "cfg", "source_memory")
+TWO_RESOURCE = {row.name: row.source for row in ROWS if row.name in ("two_dma_reverse_await", "two_chains_same_unit")}
 
 
 def source_contracts(text: str) -> tuple:
-    return dma_records(text), mxu_records(text), tile_records(text)
+    return tuple(records(text, name) for name in ("dma", "mxu", "tile"))
+
+
+def contract_facts(text: str) -> tuple:
+    return tuple(contract_text(text, name) for name in CONTRACTS)
 
 
 class UntimedPipelineTest(unittest.TestCase):
@@ -60,29 +65,14 @@ class UntimedPipelineTest(unittest.TestCase):
 
     def test_ordering_then_delay_insertion_preserves_contracts_and_llvm(self) -> None:
         for name, source in self.sources().items():
+            untimed = lower(source, timed=False)
+            expected, tags = source_contracts(untimed), [untimed.count(tag + " =") for tag in TAGS]
             for reorder in (False, True):
                 with self.subTest(program=name, reorder=reorder):
-                    untimed = lower(source, timed=False)
-                    expected = source_contracts(untimed)
-                    if reorder:
-                        untimed = self.checked(untimed, "--schedule-atlas-stream=insert-delays=false")
-                        self.assertIn(UNTIMED, untimed)
-                        self.assertNotIn('"atlas.delay"', untimed)
-                        self.assertEqual(source_contracts(untimed), expected)
-                    timed = self.checked(untimed, "--insert-atlas-delays", "--verify-atlas-timing")
-                    self.assertIn(TIMED, timed)
-                    self.assertIn(PROVIDER, timed)
-                    self.assertNotIn("atlas.delay_reason", timed)
-                    self.assertEqual(source_contracts(timed), expected)
-                    emitted = run("atlas-emit", timed)
-                    self.assertEqual(emitted.returncode, 0, emitted.stderr)
-                    structured = self.checked(timed, "--convert-atlas-to-llvm-calls")
-                    self.assertIn(TIMED, structured)
-                    self.assertIn(PROVIDER, structured)
-                    self.assertEqual(source_contracts(structured), expected)
-                    direct = self.checked(timed, "--convert-atlas-to-llvm")
-                    final = self.checked(structured, "--finalize-atlas-llvm-calls")
-                    self.assertEqual(final, direct)
+                    for stage, text in handoff_chain(self, untimed, reorder=reorder).items():
+                        self.assertEqual(source_contracts(text), expected, stage)
+                        if stage != "direct":
+                            self.assertEqual([text.count(tag + " =") for tag in TAGS], tags, stage)
 
     def test_correspondence_remains_required_before_and_after_timing(self) -> None:
         for timed in (False, True):
@@ -106,8 +96,7 @@ class UntimedPipelineTest(unittest.TestCase):
     def test_shortened_timing_is_rejected_at_final_boundaries(self) -> None:
         machine = lower(virtual_chain(1))
         self.assertIn(TIMED, machine)
-        changed = re.sub(r'cycles = \d+ : i32', 'cycles = 1 : i32', machine)
-        self.assertNotEqual(changed, machine)
+        changed = shorten_all_delays(machine)
         self.assertEqual(source_contracts(changed), source_contracts(machine))
         for tool, options in (("atlas-opt", ("--verify-atlas-timing",)),
                               ("atlas-opt", ("--verify-atlas-generated-schedule",)),
@@ -138,8 +127,7 @@ class UntimedPipelineTest(unittest.TestCase):
         self.assertNotIn("atlas.generated_from_virtual", timed)
         structured = self.checked(timed, "--convert-atlas-to-llvm-calls")
         self.checked(structured, "--finalize-atlas-llvm-calls")
-        corrupted = re.sub(r'cycles = \d+ : i32', 'cycles = 1 : i32', timed)
-        self.assertNotEqual(corrupted, timed)
+        corrupted = shorten_all_delays(timed)
         for tool, options in (("atlas-emit", ()), ("atlas-opt", ("--verify-atlas-machine-stream",)),
                               ("atlas-opt", ("--convert-atlas-to-llvm",)), ("atlas-opt", ("--convert-atlas-to-llvm-calls",))):
             with self.subTest(tool=tool, options=options):
@@ -159,7 +147,7 @@ class UntimedPipelineTest(unittest.TestCase):
                 self.assertTrue(entries[publication]["fields"]["atlas.complete"])
                 self.assertEqual(entries[publication - 1]["operation"], "atlas.delay")
                 self.checked(timed, "--convert-atlas-to-llvm-calls", "--finalize-atlas-llvm-calls")
-                corrupted = re.sub(r'cycles = \d+ : i32', 'cycles = 1 : i32', timed)
+                corrupted = shorten_all_delays(timed)
                 result = run("atlas-opt", corrupted, "--verify-atlas-timing")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("atlas.complete", result.stderr)
@@ -173,7 +161,7 @@ class UntimedPipelineTest(unittest.TestCase):
         branch = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.branch")
         target = branch + entries[branch]["fields"]["offset_bytes"] // 2
         self.assertEqual(entries[target]["operation"], "atlas.delay")
-        corrupted = re.sub(r'cycles = \d+ : i32', 'cycles = 1 : i32', timed)
+        corrupted = shorten_all_delays(timed)
         result = run("atlas-opt", corrupted, "--verify-atlas-timing")
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("block boundary", result.stderr)
@@ -226,6 +214,45 @@ class UntimedPipelineTest(unittest.TestCase):
         dma_events = [entry["operation"] for entry in entries if entry["operation"] in ("atlas.dma", "atlas.dma_wait")]
         self.assertEqual(dma_events[:2], ["atlas.dma", "atlas.dma"])
         self.checked(ordered, "--insert-atlas-delays", "--verify-atlas-timing")
+
+    def test_two_resource_schedules_use_both_slots_and_complete_checked_handoffs(self) -> None:
+        channels, windows, weights, accumulators = set(), set(), set(), set()
+        for name, source in TWO_RESOURCE.items():
+            for variant, scheduled in (("original", source), *schedules(source)):
+                with self.subTest(case=name, schedule=variant):
+                    untimed = lower(scheduled, timed=False)
+                    self.assertNotIn('"atlas.delay"', untimed)
+                    self.assertNotIn("atlas.delay_reason", untimed)
+                    if name == "two_dma_reverse_await":
+                        loads = [record for record in records(untimed, "dma") if record["direction"] == "load"]
+                        channels.update(record["channel"] for record in loads)
+                        windows.update(record["staging_word"] for record in loads)
+                    else:
+                        mxu = records(untimed, "mxu")
+                        self.assertEqual({record["unit"] for record in mxu}, {0})
+                        weights.update(record["slot"] for record in mxu if record["kind"] == "weight_fp8")
+                        accumulators.update(record["slot"] for record in mxu if record["kind"] == "reset")
+                    stages = handoff_chain(self, untimed)
+                    for stage in ("ordered", "timed", "structured"):
+                        self.assertEqual(contract_facts(stages[stage]), contract_facts(untimed), stage)
+        self.assertEqual((channels, windows, weights, accumulators), ({0, 1}, {131072, 131584}, {0, 1}, {0, 1}))
+
+    def test_concurrent_dma_rejects_channel_reuse_wrong_wait_and_unsafe_second_window(self) -> None:
+        machine = lower(TWO_RESOURCE["two_dma_reverse_await"], timed=False)
+        lines = machine.splitlines()
+        first, second = lines_of(machine, "dma", "atlas.virtual_dma_transfer")[:2]
+        first_channel, second_channel = (int(re.search(r"channel = (\d+) : i32", lines[i])[1]) for i in (first, second))
+        self.assertNotEqual(first_channel, second_channel)
+        wait = lines_of(machine, "dma_wait", "atlas.virtual_dma_transfer")[0]
+        self.assertIn(f"channel = {second_channel} : i32", lines[wait])
+        base = max(i for i in range(second) if '"atlas.alu_imm"' in lines[i] and "dst = 4 : i32" in lines[i])
+        retarget = lambda line: re.sub(r"channel = \d+ : i32", f"channel = {first_channel} : i32", line)
+        for index, change, diagnostic in ((second, retarget, "channel is pending"), (wait, retarget, "channel and transfer ID"),
+                                          (base, lambda line: line.replace("immediate = 512 : i32", "immediate = 0 : i32"), "DMA memory conflict")):
+            with self.subTest(diagnostic=diagnostic):
+                corrupted = rewrite_line(machine, index, change)
+                self.assertEqual(contract_facts(corrupted), contract_facts(machine))
+                assert_boundaries(self, corrupted, UNTIMED_BOUNDARIES, rejects=diagnostic)
 
 
 if __name__ == "__main__":

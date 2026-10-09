@@ -1,3 +1,4 @@
+#include "VerificationTestSupport.h"
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasTypes.h"
@@ -13,21 +14,14 @@
 
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 
 namespace {
-unsigned checks = 0, failures = 0;
 using Assignments = SmallVector<VirtualMXUAssignment>;
 constexpr StringLiteral state = "!atlas.virtual_state";
 constexpr StringLiteral fp8 = "!atlas.virtual_fp8";
 constexpr StringLiteral bf16 = "!atlas.virtual_bf16";
 
-void check(bool condition, StringRef name, StringRef detail = {}) {
-  ++checks;
-  if (!condition) {
-    ++failures;
-    llvm::errs() << "FAIL: " << name << '\n' << detail << '\n';
-  }
-}
 
 std::string type(StringRef bank, unsigned unit) {
   return "!atlas.virtual_mxu_" + bank.str() + "<" + std::to_string(unit) + ">";
@@ -107,24 +101,7 @@ void expect(Fixture &fixture, StringRef name, const Assignments &assignments,
   FixedResourcePlacement fixed{};
   fixed.mxuWeightSlot = legacyWeight;
   fixed.mxuAccSlot = legacyAcc;
-  std::string diagnostics;
-  llvm::raw_string_ostream stream(diagnostics);
-  ScopedDiagnosticHandler handler(fixture.function.getContext(), [&](Diagnostic &diagnostic) {
-    diagnostic.print(stream);
-    stream << '\n';
-    for (const Diagnostic &note : diagnostic.getNotes()) {
-      note.print(stream);
-      stream << '\n';
-    }
-    return success();
-  });
-  bool accepted = succeeded(verifyAtlasMXUAllocation(fixture.function, assignments, fixed));
-  stream.flush();
-  check(accepted == valid, name, diagnostics);
-  if (valid)
-    check(diagnostics.empty(), name, diagnostics);
-  for (StringRef fragment : fragments)
-    check(StringRef(diagnostics).contains(fragment), name, diagnostics);
+  expectVerified(name, valid, fragments, [&] { return verifyAtlasMXUAllocation(fixture.function, assignments, fixed); });
 }
 
 void assignmentAndChainTests(MLIRContext &context, unsigned unit) {
@@ -296,15 +273,10 @@ void lifetimeAndCFGTests(MLIRContext &context) {
 }
 } // namespace
 
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  MLIRContext context(registry);
+void atlas_test::runMXUAllocation(MLIRContext &context) {
   assignmentAndChainTests(context, 0);
   assignmentAndChainTests(context, 1);
   reuseAndDeadTests(context);
   legacyTests(context);
   lifetimeAndCFGTests(context);
-  llvm::outs() << checks << " MXU allocation checks, " << failures << " failures\n";
-  return failures ? 1 : 0;
 }

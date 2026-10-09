@@ -8,94 +8,29 @@ mlir_check_all_link_libraries(atlas-register-allocation-test)
 add_test(NAME atlas-register-allocation
   COMMAND atlas-register-allocation-test)
 
-add_llvm_executable(atlas-dma-allocation-test
-  dma-allocation-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-dma-allocation-test)
-target_link_libraries(atlas-dma-allocation-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
-  MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-dma-allocation-test)
-add_test(NAME atlas-dma-allocation
-  COMMAND atlas-dma-allocation-test)
-
-add_llvm_executable(atlas-mxu-allocation-test
-  mxu-allocation-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-mxu-allocation-test)
-target_link_libraries(atlas-mxu-allocation-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
-  MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-mxu-allocation-test)
-add_test(NAME atlas-mxu-allocation
-  COMMAND atlas-mxu-allocation-test)
-
-add_llvm_executable(atlas-dma-helper-test
-  dma-helper-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-dma-helper-test)
-target_link_libraries(atlas-dma-helper-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
-  MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-dma-helper-test)
-add_test(NAME atlas-dma-helper
-  COMMAND atlas-dma-helper-test)
-
-add_llvm_executable(atlas-dma-contract-test
-  dma-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-dma-contract-test)
-target_link_libraries(atlas-dma-contract-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-dma-contract-test)
-add_test(NAME atlas-dma-contract
-  COMMAND atlas-dma-contract-test)
-
-add_llvm_executable(atlas-mxu-contract-test
-  mxu-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-mxu-contract-test)
-target_link_libraries(atlas-mxu-contract-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-mxu-contract-test)
-add_test(NAME atlas-mxu-contract COMMAND atlas-mxu-contract-test)
-
-add_llvm_executable(atlas-tile-contract-test
-  tile-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-tile-contract-test)
-target_link_libraries(atlas-tile-contract-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-tile-contract-test)
-add_test(NAME atlas-tile-contract COMMAND atlas-tile-contract-test)
-
-add_llvm_executable(atlas-timing-provider-test
-  timing-provider-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-timing-provider-test)
-target_link_libraries(atlas-timing-provider-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR)
-mlir_check_all_link_libraries(atlas-timing-provider-test)
-add_test(NAME atlas-timing-provider COMMAND atlas-timing-provider-test)
-
-add_llvm_executable(atlas-cfg-contract-verification
-  cfg-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-cfg-contract-verification)
-target_link_libraries(atlas-cfg-contract-verification PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
-  MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-cfg-contract-verification)
-add_test(NAME atlas-cfg-contract COMMAND atlas-cfg-contract-verification)
-
-add_llvm_executable(atlas-verification-context-test
-  verification-context.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-verification-context-test)
-target_compile_definitions(atlas-verification-context-test PRIVATE
+# One executable runs each verification suite named by its argument (see VerificationTestSupport.h).
+add_llvm_executable(atlas-verification-test
+  verification-tests.cpp
+  cfg-contract-verification.cpp
+  dma-allocation-verification.cpp
+  dma-contract-verification.cpp
+  dma-helper-verification.cpp
+  mxu-allocation-verification.cpp
+  mxu-contract-verification.cpp
+  source-memory-effect-contract.cpp
+  tile-contract-verification.cpp
+  timing-provider-verification.cpp
+  verification-context.cpp
+  PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-verification-test)
+target_compile_definitions(atlas-verification-test PRIVATE
   ATLAS_GENERATED_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/examples/virtual_bf16_shared_relu.mlir")
-target_link_libraries(atlas-verification-context-test PRIVATE
+target_link_libraries(atlas-verification-test PRIVATE
   MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
   MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-verification-context-test)
-add_test(NAME atlas-verification-context COMMAND atlas-verification-context-test)
-
-add_llvm_executable(atlas-source-memory-contract-verification
-  source-memory-effect-contract.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-source-memory-contract-verification)
-target_link_libraries(atlas-source-memory-contract-verification PRIVATE
-  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
-  MLIRFuncDialect)
-mlir_check_all_link_libraries(atlas-source-memory-contract-verification)
-add_test(NAME atlas-source-memory-contract COMMAND atlas-source-memory-contract-verification)
+mlir_check_all_link_libraries(atlas-verification-test)
+foreach(suite cfg-contract dma-allocation dma-contract dma-helper mxu-allocation
+    mxu-contract source-memory-contract tile-contract timing-provider
+    verification-context)
+  add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
+endforeach()

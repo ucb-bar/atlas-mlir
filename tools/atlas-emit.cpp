@@ -1,5 +1,6 @@
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "Atlas/AtlasStream.h"
@@ -114,9 +115,9 @@ int main(int argc, char **argv) {
         {"timing_scope", "explicit_delay_only; other availability unqualified"},
         {"instructions", std::move(instructions)},
     };
-    if (auto state = (*module)->getAttrOfType<StringAttr>("atlas.timing_state"))
+    if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
-    if (auto provider = (*module)->getAttrOfType<StringAttr>("atlas.timing_provider"))
+    if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
       root["timing_provider"] = provider.getValue().str();
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;

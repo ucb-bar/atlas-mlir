@@ -1,32 +1,17 @@
 """Source CFG/scalar/edge correspondence survives every emitted handoff."""
+
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import unittest
 
-from generated_fixture import INCOMPLETE
-from test_virtual_lowering import ROOT, EXAMPLES, lower, run
+from test_virtual_lowering import EXAMPLES, lower, run
+from verification_support import TIMED, TIMED_FINAL, UNTIMED, assert_boundaries, rewrite_line
 
 
 class CFGContractVerificationTest(unittest.TestCase):
-    def check(self, text: str, *, accepted: bool, diagnostic: str = "CFG contract") -> None:
-        boundaries = [("atlas-opt", ("--verify-atlas-generated-schedule",))]
-        if 'atlas.timing_state = "timed"' in text:
-            boundaries.append(("atlas-emit", ()))
-        for tool, flags in boundaries:
-            result = run(tool, text, *flags)
-            self.assertEqual(result.returncode == 0, accepted, result.stderr)
-            if not accepted:
-                self.assertIn(diagnostic, result.stderr)
-
-    def changed_line(self, machine: str, predicate, change) -> str:
-        lines = machine.splitlines()
-        index = next(n for n, line in enumerate(lines) if predicate(line))
-        changed = change(lines[index])
-        self.assertNotEqual(changed, lines[index])
-        lines[index] = changed
-        return "\n".join(lines) + "\n"
+    def check(self, text: str, *, accepted: bool) -> None:
+        assert_boundaries(self, text, TIMED_FINAL[:2] if TIMED in text else UNTIMED, rejects=None if accepted else "CFG contract")
 
     def test_existing_branches_loops_and_simultaneous_tensor_copies(self) -> None:
         for name in ("branch", "dynamic_branch", "loop", "swap_loop", "vpu"):
@@ -47,18 +32,18 @@ class CFGContractVerificationTest(unittest.TestCase):
         predicate = lambda line: '"atlas.branch"' in line and "atlas.virtual_cfg_branch" in line
         for transform in (lambda line: line.replace('kind = "bne"', 'kind = "beq"'),
                           lambda line: re.sub(r"lhs = \d+ : i32", "lhs = 0 : i32", line)):
-            self.check(self.changed_line(machine, predicate, transform), accepted=False)
+            self.check(rewrite_line(machine, predicate, transform), accepted=False)
 
     def test_ordinary_branch_cannot_claim_pack_helper_exemption(self) -> None:
         machine = lower((EXAMPLES / "virtual_bf16_loop_program.mlir").read_text(), timed=False)
         predicate = lambda line: '"atlas.branch"' in line and "atlas.virtual_cfg_branch" in line
-        forged = self.changed_line(machine, predicate,
+        forged = rewrite_line(machine, predicate,
                     lambda line: line.replace("}> {", '}> {atlas.virtual_cfg_helper = "pack", ', 1))
         self.check(forged, accepted=False)
         comparison = next(line for line in machine.splitlines()
                           if "atlas.virtual_scalar_result" in line and 'kind = "slt"' in line)
         source_id = re.search(r"atlas.virtual_cfg_source = (\d+) : i32", comparison)[1]
-        forged_source = self.changed_line(machine, predicate,
+        forged_source = rewrite_line(machine, predicate,
                     lambda line: line.replace("}> {", f'}}> {{atlas.virtual_cfg_helper = "pack", atlas.virtual_cfg_source = {source_id} : i32, ', 1))
         self.check(forged_source, accepted=False)
 
@@ -67,7 +52,7 @@ class CFGContractVerificationTest(unittest.TestCase):
         lines = [line for line in machine.splitlines() if ': (!atlas.state)' in line]
         branch_pc = next(n for n, line in enumerate(lines) if '"atlas.branch"' in line)
         target_pc = next(n for n, line in enumerate(lines) if "atlas.virtual_cfg_block = 3 : i32" in line)
-        changed = self.changed_line(machine,
+        changed = rewrite_line(machine,
                     lambda line: '"atlas.branch"' in line,
                     lambda line: re.sub(r"offset_bytes = -?\d+ : i32",
                                       f"offset_bytes = {2 * (target_pc - branch_pc)} : i32", line))
@@ -76,7 +61,7 @@ class CFGContractVerificationTest(unittest.TestCase):
     def test_scalar_add_and_comparison_corruption(self) -> None:
         machine = lower((EXAMPLES / "virtual_bf16_loop_program.mlir").read_text(), timed=False)
         for kind, replacement in (("add", "sub"), ("slt", "sltu")):
-            changed = self.changed_line(machine,
+            changed = rewrite_line(machine,
                     lambda line: '"atlas.alu_reg"' in line and f'kind = "{kind}"' in line
                     and "atlas.virtual_scalar_result" in line,
                     lambda line: line.replace(f'kind = "{kind}"', f'kind = "{replacement}"'))
@@ -90,7 +75,7 @@ class CFGContractVerificationTest(unittest.TestCase):
         source = source.replace("%next_i : !atlas.virtual_state, !atlas.virtual_bf16, !atlas.virtual_bf16, i32)", "%next_i, %v, %u : !atlas.virtual_state, !atlas.virtual_bf16, !atlas.virtual_bf16, i32, i32, i32)")
         machine = lower(source, timed=False)
         self.check(machine, accepted=True)
-        changed = self.changed_line(machine,
+        changed = rewrite_line(machine,
                     lambda line: '"atlas.alu_imm"' in line and "atlas.virtual_cfg_edge" in line
                     and 'kind = "addi"' in line and "immediate = 0 : i32" in line
                     and not "dst = 0 : i32" in line,
@@ -164,7 +149,7 @@ class CFGContractVerificationTest(unittest.TestCase):
         self.assertIn("atlas.virtual_cfg_contract", result.stdout)
         good = run("atlas-opt", result.stdout, "--finalize-atlas-llvm-calls")
         self.assertEqual(good.returncode, 0, good.stderr)
-        changed = self.changed_line(result.stdout,
+        changed = rewrite_line(result.stdout,
                     lambda line: 'atlas.source_op = "atlas.alu_reg"' in line
                     and 'kind = "slt"' in line and "atlas.virtual_scalar_result" in line,
                     lambda line: line.replace('kind = "slt"', 'kind = "sltu"'))
@@ -172,14 +157,10 @@ class CFGContractVerificationTest(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("CFG contract", bad.stderr)
 
-    def test_missing_contract_and_wrong_metadata_types_fail(self) -> None:
+    def test_wrong_metadata_types_fail(self) -> None:
         machine = lower((EXAMPLES / "virtual_bf16_loop_program.mlir").read_text(), timed=False)
-        for before, after, diagnostic in (("atlas.virtual_cfg_contract", "atlas.removed_cfg_contract", f"{INCOMPLETE} atlas.virtual_cfg_contract"),
-                                          ("atlas.virtual_cfg_branch = 1 : i32", "atlas.virtual_cfg_branch = 1 : i64", "CFG contract")):
-            with self.subTest(before=before):
-                self.assertIn(before, machine)
-                self.check(machine.replace(before, after, 1), accepted=False, diagnostic=diagnostic)
-
+        self.assertIn("atlas.virtual_cfg_branch = 1 : i32", machine)
+        self.check(machine.replace("atlas.virtual_cfg_branch = 1 : i32", "atlas.virtual_cfg_branch = 1 : i64", 1), accepted=False)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,24 +1,13 @@
 #include "Atlas/AtlasCFGContractVerification.h"
-#include "Atlas/AtlasDialect.h"
-#include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Verifier.h"
-#include "mlir/Parser/Parser.h"
+#include "VerificationTestSupport.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
-#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 using namespace mlir;
 using namespace mlir::atlas;
+using namespace atlas_test;
 namespace {
-unsigned checks = 0, failures = 0;
-void check(bool condition, StringRef name) {
-  ++checks; if (!condition) { ++failures; llvm::errs() << "FAIL: " << name << '\n'; }
-}
 constexpr StringLiteral source = R"mlir(module {
   func.func @cfg(%choose: i1) -> !atlas.virtual_state {
     %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
@@ -37,10 +26,8 @@ constexpr StringLiteral source = R"mlir(module {
     return %s2 : !atlas.virtual_state
   }
 })mlir";
-int32_t field(DictionaryAttr d, StringRef name) { return int32_t(d.getAs<IntegerAttr>(name).getInt()); }
 void run(MLIRContext &context) {
-  auto module = parseSourceString<ModuleOp>(source,&context);
-  check(module && succeeded(verify(*module)),"typed source parses independently");
+  auto module = parse(context,source,"typed source parses independently");
   if (!module) return;
   auto function = *module->getOps<func::FuncOp>().begin();
   // Literal source identities and intentionally nonpreferred registers form
@@ -65,17 +52,17 @@ void run(MLIRContext &context) {
   check(values.size() == 10 && blocks.size() == 4 && edges.size() == 4,"literal source cardinalities");
   for (unsigned n = 0; n < values.size(); ++n) {
     auto r = cast<DictionaryAttr>(values[n]);
-    check(field(r,"id") == int32_t(n) && field(r,"reg") == int32_t(selected[n]),"stable value identity and supplied placement");
+    check(integer(r,"id") == int32_t(n) && integer(r,"reg") == int32_t(selected[n]),"stable value identity and supplied placement");
   }
   auto sum = cast<DictionaryAttr>(values[4]);
   auto cmp = cast<DictionaryAttr>(values[5]);
   check(sum.getAs<StringAttr>("def").getValue() == "arith.addi" && sum.getAs<DenseI32ArrayAttr>("operands").asArrayRef() == ArrayRef<int32_t>({2,3}),"source add operands");
-  check(field(cmp,"predicate") == int32_t(arith::CmpIPredicate::slt) && cmp.getAs<DenseI32ArrayAttr>("operands").asArrayRef() == ArrayRef<int32_t>({2,4}),"source compare predicate and operands");
+  check(integer(cmp,"predicate") == int32_t(arith::CmpIPredicate::slt) && cmp.getAs<DenseI32ArrayAttr>("operands").asArrayRef() == ArrayRef<int32_t>({2,4}),"source compare predicate and operands");
   auto entry = cast<DictionaryAttr>(blocks[0]);
-  check(field(entry,"condition") == 0 && entry.getAs<DenseI32ArrayAttr>("edges").asArrayRef() == ArrayRef<int32_t>({0,1}),"true and false source edges retain order");
+  check(integer(entry,"condition") == 0 && entry.getAs<DenseI32ArrayAttr>("edges").asArrayRef() == ArrayRef<int32_t>({0,1}),"true and false source edges retain order");
   auto left = cast<DictionaryAttr>(edges[2]), right = cast<DictionaryAttr>(edges[3]);
-  check(field(left,"from") == 1 && field(left,"to") == 3 && left.getAs<DenseI32ArrayAttr>("incoming").asArrayRef() == ArrayRef<int32_t>({6,4}),"left simultaneous incoming values");
-  check(field(right,"from") == 2 && field(right,"to") == 3 && right.getAs<DenseI32ArrayAttr>("incoming").asArrayRef() == ArrayRef<int32_t>({7,3}),"right simultaneous incoming values");
+  check(integer(left,"from") == 1 && integer(left,"to") == 3 && left.getAs<DenseI32ArrayAttr>("incoming").asArrayRef() == ArrayRef<int32_t>({6,4}),"left simultaneous incoming values");
+  check(integer(right,"from") == 2 && integer(right,"to") == 3 && right.getAs<DenseI32ArrayAttr>("incoming").asArrayRef() == ArrayRef<int32_t>({7,3}),"right simultaneous incoming values");
   std::reverse(assignments.begin(),assignments.end());
   auto reordered = buildAtlasCFGContract(function,assignments);
   check(succeeded(reordered) && *reordered == *contract,"placement vector order is not the oracle");
@@ -213,8 +200,7 @@ void bindings(MLIRContext &context) {
       return %s9 : !atlas.virtual_state
     }
   })mlir";
-  auto module = parseSourceString<ModuleOp>(text,&context);
-  check(module && succeeded(verify(*module)),"binding fixture typed source");
+  auto module = parse(context,text,"binding fixture typed source");
   if (!module) return;
   auto function = *module->getOps<func::FuncOp>().begin();
   SmallVector<VirtualRegisterAssignment> claims;
@@ -256,17 +242,10 @@ void bindings(MLIRContext &context) {
   association("atlas.virtual_mxu_readout_bf16","mxu_commands",{5});
 }
 }
-int main() {
-  DialectRegistry registry;
-  registry.insert<AtlasDialect,arith::ArithDialect,cf::ControlFlowDialect,func::FuncDialect>();
-  MLIRContext context(registry);
-  ScopedDiagnosticHandler diagnostics(&context,[](Diagnostic &) { return success(); });
-  registerLowerAtlasVirtualToMachinePass();
+void atlas_test::runCFGContract(MLIRContext &context) {
   run(context);
   bindings(context);
   delaySlot(context);
   rawTensorWrites(context);
   emptyIssuedStream(context);
-  llvm::outs() << checks << " checks, " << failures << " failures\n";
-  return failures != 0;
 }
