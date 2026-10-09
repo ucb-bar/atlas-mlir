@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualToMachine.h"
+#include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
@@ -44,6 +45,22 @@ public:
   LogicalResult plan() {
     if (failed(readABI()) || failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
+    int32_t nextValue = 0, nextBlock = 0, nextOperation = 0;
+    for (Block &block : function.getBody()) {
+      cfgBlocks[&block] = nextBlock++;
+      for (Value v : block.getArguments())
+        if (cfgTracked(v)) cfgValues[v] = nextValue++;
+      for (Operation &op : block) {
+        cfgOperations[&op] = nextOperation++;
+        for (Value v : op.getResults())
+          if (cfgTracked(v)) cfgValues[v] = nextValue++;
+      }
+      if (auto branch = dyn_cast<cf::BranchOp>(block.getTerminator())) {
+        cfgEdges[&block] = {nextCFGEdge++};
+      } else if (isa<cf::CondBranchOp>(block.getTerminator())) {
+        cfgEdges[&block] = {nextCFGEdge++, nextCFGEdge++};
+      }
+    }
     Location loc = function.getLoc();
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(fixed().oneReg)}, {"src", i32(0)},
@@ -59,10 +76,26 @@ public:
       stageScalarArguments(loc);
 
     for (Block &block : function.getBody()) {
+      currentCFGBlock = cfgBlocks.lookup(&block);
       mark(labelFor(&block));
       for (Operation &op : block) {
+        size_t first = planned.size();
         if (failed(lowerOperation(op)))
           return failure();
+        if (planned.size() != first && !op.hasTrait<OpTrait::IsTerminator>()) {
+          for (size_t n = first; n < planned.size(); ++n)
+            planned[n].attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_source"), i32(cfgOperations.lookup(&op)));
+          planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_operation"), i32(cfgOperations.lookup(&op)));
+          for (Value result : op.getResults()) {
+            if (!cfgTracked(result)) continue;
+            StringRef name = result.getType().isInteger(1) || result.getType().isInteger(32)
+                ? "atlas.virtual_scalar_result" : "atlas.virtual_tensor_result";
+            planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
+          }
+          if (isa<VirtualPackFP8Op>(op))
+            for (size_t n = first; n < planned.size(); ++n)
+              planned[n].attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_helper"), str("pack"));
+        }
       }
     }
     if (planned.size() > 2048)
@@ -73,8 +106,14 @@ public:
   LogicalResult materialize() {
     SmallVector<VirtualDMAAssignment> dmaAssignments;
     SmallVector<VirtualMXUAssignment> mxuAssignments;
-    SmallVector<VirtualRegisterAssignment> registers;
+    SmallVector<VirtualRegisterAssignment> registers, cfgRegisters;
     auto recordPlacement = [&](Value value) {
+      if (cfgTracked(value)) {
+        unsigned reg = value.getType().isInteger(1) || value.getType().isInteger(32)
+            ? allocation.scalar(value) : isa<VirtualBF16Type>(value.getType())
+            ? allocation.tile(value) : allocation.fp8(value);
+        cfgRegisters.push_back({value, reg});
+      }
       if (isa<VirtualBF16Type>(value.getType()))
         registers.push_back({value, allocation.tile(value)});
       else if (isa<VirtualFP8Type>(value.getType()))
@@ -94,10 +133,11 @@ public:
         }
       }
     }
+    auto cfgContract = buildAtlasCFGContract(function, cfgRegisters);
     auto dmaContract = buildAtlasDMAContract(function, dmaAssignments);
     auto mxuContract = buildAtlasMXUContract(function, registers, mxuAssignments, fixed());
     auto tileContract = buildAtlasTileContract(function, registers, dmaAssignments, fixed(), allocation.scalarArguments());
-    if (failed(dmaContract) || failed(mxuContract) || failed(tileContract))
+    if (failed(cfgContract) || failed(dmaContract) || failed(mxuContract) || failed(tileContract))
       return failure();
     OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
     (*emitted)->setAttrs(module->getAttrs());
@@ -113,9 +153,10 @@ public:
       machineState.addAttributes(step.attrs);
       state = builder.create(machineState)->getResult(0);
     }
-    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v2"));
+    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v3"));
     (*emitted)->setAttr("atlas.timing_state", builder.getStringAttr("untimed"));
     (*emitted)->removeAttr("atlas.timing_provider");
+    (*emitted)->setAttr("atlas.virtual_cfg_contract", *cfgContract);
     (*emitted)->setAttr("atlas.virtual_dma_contract", *dmaContract);
     (*emitted)->setAttr("atlas.virtual_mxu_contract", *mxuContract);
     (*emitted)->setAttr("atlas.virtual_tile_contract", *tileContract);
@@ -134,6 +175,10 @@ public:
 
 private:
   using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
+  bool cfgTracked(Value v) const {
+    Type t = v.getType();
+    return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t);
+  }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
   StringAttr str(StringRef value) { return attrs.getStringAttr(value); }
@@ -142,6 +187,9 @@ private:
   void add(StringRef name, Location loc, Fields fields = {},
            std::optional<unsigned> target = std::nullopt) {
     PlannedOp step{name.str(), {}, loc, target};
+    step.attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_block"), i32(currentCFGBlock));
+    if (currentCFGEdge)
+      step.attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_edge"), i32(*currentCFGEdge));
     for (const auto &[key, value] : fields)
       step.attrs.emplace_back(StringAttr::get(module.getContext(), key), value);
     if (name == "atlas.mxu_push" || name == "atlas.mxu_matmul" || name == "atlas.mxu_pop")
@@ -305,10 +353,12 @@ private:
           {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
            {"offset", i32(4 * (fixed().mailboxWord + index))}});
       tagTileCommand();
+      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_scalar_argument"), i32(cfgValues.lookup(arg)));
       if (arg.getType().isInteger(1))
         add("atlas.alu_imm", loc,
             {{"kind", str("andi")}, {"dst", i32(reg)},
              {"src", i32(reg)}, {"immediate", i32(1)}});
+      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_scalar_result"), i32(cfgValues.lookup(arg)));
     }
   }
 
@@ -712,8 +762,10 @@ private:
     if (auto cmp = dyn_cast<arith::CmpIOp>(op))
       return lowerCompare(cmp);
     if (auto branch = dyn_cast<cf::BranchOp>(op)) {
+      currentCFGEdge = cfgEdges.lookup(op.getBlock())[0];
       edgeCopies(branch.getDest(), branch.getDestOperands(), loc);
       jump(labelFor(branch.getDest()), loc);
+      currentCFGEdge.reset();
       return success();
     }
     if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
@@ -721,14 +773,18 @@ private:
       add("atlas.branch", loc,
           {{"kind", str("bne")}, {"lhs", i32(scalar(branch.getCondition()))},
            {"rhs", i32(0)}}, trueEdge);
+      planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_cfg_branch"), i32(currentCFGBlock));
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
            {"immediate", i32(0)}});
+      currentCFGEdge = cfgEdges.lookup(op.getBlock())[1];
       edgeCopies(branch.getFalseDest(), branch.getFalseDestOperands(), loc);
       jump(labelFor(branch.getFalseDest()), loc);
       mark(trueEdge);
+      currentCFGEdge = cfgEdges.lookup(op.getBlock())[0];
       edgeCopies(branch.getTrueDest(), branch.getTrueDestOperands(), loc);
       jump(labelFor(branch.getTrueDest()), loc);
+      currentCFGEdge.reset();
       return success();
     }
     if (isa<func::ReturnOp>(op)) {
@@ -809,6 +865,12 @@ private:
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
   std::vector<PlannedOp> planned;
+  llvm::DenseMap<Value, int32_t> cfgValues;
+  llvm::DenseMap<Block *, int32_t> cfgBlocks;
+  llvm::DenseMap<Operation *, int32_t> cfgOperations;
+  llvm::DenseMap<Block *, SmallVector<int32_t, 2>> cfgEdges;
+  int32_t currentCFGBlock = 0, nextCFGEdge = 0;
+  std::optional<int32_t> currentCFGEdge;
   unsigned nextLabel = 0;
   unsigned nextMXUCommand = 0;
   unsigned nextTileCommand = 0;

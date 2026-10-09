@@ -78,7 +78,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
         self.assertNotIn('"atlas.delay"', untimed)
         machine = lower(source)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn('"atlas.virtual_', machine)
+        self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
         for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -322,8 +322,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                  re.sub(rf"{MARKER} = \d+ : i32", f"{MARKER} = {marker}", lines[launch])))
         orphan = next(i for i in range(launch) if '"atlas.dma_wait"' in lines[i])
         replacements.append(("orphan marker", orphan,
-                             lines[orphan].replace("{atlas.virtual_tile_command",
-                                                   f"{{{MARKER} = 999 : i32, atlas.virtual_tile_command", 1)))
+                             lines[orphan].replace("atlas.virtual_tile_command =",
+                                                   f"{MARKER} = 999 : i32, atlas.virtual_tile_command =", 1)))
         changes = []
         for name, index, replacement in replacements:
             changed = lines.copy()
@@ -361,9 +361,10 @@ class VirtualDMALoweringTest(unittest.TestCase):
             changed = lines.copy()
             state = re.search(r'"atlas.alu_imm"\((%\w+)\)', lines[scalar])[1]
             changed[scalar] = lines[scalar].replace(f"({state})", "(%seli_probe)", 1)
+            owner = re.search(r"atlas.virtual_cfg_block = \d+ : i32", lines[scalar])[0]
             changed.insert(scalar,
                 f'  %seli_probe = "atlas.scalar_load"({state}) '
-                f'{{kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32}} '
+                f'{{kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32, {owner}}} '
                 ': (!atlas.state) -> !atlas.state')
             self.assertNotEqual(changed[scalar], lines[scalar])
             for tool, options in (("atlas-emit", ()),

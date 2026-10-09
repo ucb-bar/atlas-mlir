@@ -14,7 +14,7 @@ from test_virtual_mxu_lowering import source
 CONTRACT = "atlas.virtual_mxu_contract"
 TAG = "atlas.virtual_mxu_command"
 VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
-LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
+LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_mxu_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')

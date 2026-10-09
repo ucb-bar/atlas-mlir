@@ -467,14 +467,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
   for (Operation &op : module.getBody()->getOperations())
     tagged |= bool(op.getAttr(kCommand));
   auto version = dyn_cast_or_null<StringAttr>(marker);
-  if (!version || version.getValue() != kVersion) {
+  if (!version || (version.getValue() != kVersion && version.getValue() != "resource-contract-v3")) {
     if (contract || tagged)
-      return module.emitOpError("tile metadata requires generated marker resource-contract-v2");
+      return module.emitOpError("tile metadata requires generated marker resource-contract-v2/v3");
     if (isa_and_nonnull<UnitAttr>(marker) ||
         (version && (version.getValue() == "dma-contract-v1" ||
                      version.getValue() == "resource-contract-v1")))
       return success();
-    return module.emitOpError("expected generated marker resource-contract-v2 or supported legacy marker");
+    return module.emitOpError("expected generated marker resource-contract-v2/v3 or supported legacy marker");
   }
   auto array = dyn_cast_or_null<ArrayAttr>(contract);
   if (!array)

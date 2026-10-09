@@ -365,7 +365,7 @@ class VirtualDMATest(unittest.TestCase):
             lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
             if "func.func" in source:
                 self.assertEqual(lowered.returncode, 0, lowered.stderr)
-                self.assertNotIn('"atlas.virtual_', lowered.stdout)
+                self.assertNotRegex(lowered.stdout, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
             else:
                 self.assertNotEqual(lowered.returncode, 0, lowered.stdout)
                 self.assertTrue(lowered.stderr)

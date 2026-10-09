@@ -70,3 +70,12 @@ target_link_libraries(atlas-timing-provider-test PRIVATE
   MLIRAtlas MLIRParser MLIRIR)
 mlir_check_all_link_libraries(atlas-timing-provider-test)
 add_test(NAME atlas-timing-provider COMMAND atlas-timing-provider-test)
+
+add_llvm_executable(atlas-cfg-contract-verification
+  cfg-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-cfg-contract-verification)
+target_link_libraries(atlas-cfg-contract-verification PRIVATE
+  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-cfg-contract-verification)
+add_test(NAME atlas-cfg-contract COMMAND atlas-cfg-contract-verification)

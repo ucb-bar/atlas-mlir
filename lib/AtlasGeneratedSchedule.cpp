@@ -3,6 +3,7 @@
 #include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
+#include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
@@ -126,6 +127,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
   if (failed(verifyAtlasGeneratedMXUContract(module)))
     return failure();
   if (failed(verifyAtlasGeneratedTileContract(module)))
+    return failure();
+  if (failed(verifyAtlasGeneratedCFGContract(module)))
     return failure();
   auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
   if (state && state.getValue() == "timed")

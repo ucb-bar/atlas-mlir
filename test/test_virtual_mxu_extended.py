@@ -85,7 +85,7 @@ class VirtualMXUExtendedTest(unittest.TestCase):
         self.assertNotIn('"atlas.delay"', untimed)
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn('"atlas.virtual_', machine)
+        self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
         for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)

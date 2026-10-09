@@ -176,7 +176,7 @@ class VirtualLoweringTest(unittest.TestCase):
                     checked = run("atlas-opt", machine, option)
                     self.assertEqual(checked.returncode, 0, checked.stderr)
                 self.assertIn("atlas.generated_from_virtual", machine)
-                self.assertNotIn('"atlas.virtual_', machine)
+                self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
                 self.assertIn('"atlas.dma_wait"', machine)
                 self.assertIn('"atlas.branch"', machine)
                 self.assertIn('"atlas.jump"', machine)

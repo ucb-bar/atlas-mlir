@@ -96,7 +96,7 @@ def selected_core(*, max_cycles: int = 20000):
 class VirtualEvaluatorCoreTest(unittest.TestCase):
     def test_lowering_and_llvm_preserve_emitted_words_for_both_modes(self) -> None:
         machine = lower(SOURCE.read_text())
-        self.assertEqual(machine.count('kind = "relu"'), 1)
+        self.assertEqual(sum('kind = "relu"' in line and '"atlas.vpu_unary"' in line for line in machine.splitlines()), 1)
         changed = machine.replace('kind = "relu"', 'kind = "mov"')
         words, changed_words = emitted(machine), emitted(changed)
         self.assertEqual(object_words(machine), words)
@@ -130,7 +130,7 @@ class VirtualEvaluatorCoreTest(unittest.TestCase):
         with selected_core() as run:
             program = parse_program(SOURCE.read_text())
             machine = lower(SOURCE.read_text())
-            self.assertEqual(machine.count('kind = "relu"'), 1)
+            self.assertEqual(sum('kind = "relu"' in line and '"atlas.vpu_unary"' in line for line in machine.splitlines()), 1)
             words = object_words(machine)
             changed_words = object_words(machine.replace('kind = "relu"', 'kind = "mov"'))
             for phase in (0, 257):

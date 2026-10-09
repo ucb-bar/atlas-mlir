@@ -505,6 +505,12 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   for (size_t i : order) {
     current = i;
     Operation *op = s.ops[i];
+    auto carryCFGOwner = [&](Operation *padding) {
+      for (StringRef name : {"atlas.virtual_cfg_block", "atlas.virtual_cfg_edge",
+                             "atlas.virtual_cfg_helper"})
+        if (Attribute value = op->getAttr(name))
+          padding->setAttr(name, value);
+    };
     const DelayInsertion &insertion = before[i];
     StringAttr reason = builder.getStringAttr(insertion.reason);
     for (uint32_t cycles : insertion.delays) {
@@ -512,6 +518,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       auto delay =
           DelayOp::create(builder, op->getLoc(), stateType, state, cycles);
       delay->setAttr("atlas.reason", reason);
+      carryCFGOwner(delay);
       append(delay);
     }
     if (insertion.guard) {
@@ -519,6 +526,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       Operation *nop = createNop(builder, op->getLoc(), state);
       nop->setAttr("atlas.reason", builder.getStringAttr(
                                        "a halt does not wait for a delay"));
+      carryCFGOwner(nop);
       append(nop);
     }
     append(op);
@@ -556,8 +564,9 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
   Attribute rawProvider = module->getAttr("atlas.timing_provider");
   if (!rawState) {
     auto generated = module->getAttrOfType<StringAttr>("atlas.generated_from_virtual");
-    if (generated && generated.getValue() == "resource-contract-v2")
-      return module.emitOpError("resource-contract-v2 requires an explicit timing state");
+    if (generated && (generated.getValue() == "resource-contract-v2" ||
+                      generated.getValue() == "resource-contract-v3"))
+      return module.emitOpError("resource-contract-v2/v3 requires an explicit timing state");
     if (rawProvider)
       return module.emitOpError("timing provider requires an explicit timing state");
     return success();

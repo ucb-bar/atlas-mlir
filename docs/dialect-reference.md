@@ -173,7 +173,7 @@ The independent [DMA memory check](../include/Atlas/AtlasDMAMemoryVerification.h
 The [DMA correspondence checker](../include/Atlas/AtlasDMAContractVerification.h)
 derives explicit-transfer expectations from source SSA and checked placements
 before lowering replaces the source. Generated artifacts retain these records
-in `atlas.virtual_dma_contract` under marker `"resource-contract-v2"`. Emission and
+in `atlas.virtual_dma_contract` under marker `"resource-contract-v3"`. Emission and
 both LLVM paths compare actual launch-time operands and completion identities
 against them, rejecting missing or malformed contracts. Legacy unit markers
 retain their earlier checks, and `"dma-contract-v1"` retains DMA-only correspondence.
@@ -237,7 +237,18 @@ PACK's scalar permutation, general buffer contents and physical completion
 remain separate. Older `"resource-contract-v1"` artifacts retain DMA/MXU checks
 and cannot carry tile contracts or tags.
 
-Generated `"resource-contract-v2"` artifacts require `atlas.timing_state`.
+The [CFG correspondence checker](../include/Atlas/AtlasCFGContractVerification.h)
+retains source blocks, scalar definitions, tensor origins and simultaneous edge
+copies independently of the emission plan. It checks actual branch conditions,
+targets, operation visits and register contents across branches and loops.
+Every physical tensor write invalidates its previous origin, including writes
+without a source tag. Generated `"resource-contract-v3"` artifacts require this
+contract through scheduling, encoding and LLVM handoff. This proves source
+control/data correspondence; PACK memory layout and buffer preservation remain
+separate obligations.
+
+Generated `"resource-contract-v2"` and `"resource-contract-v3"` artifacts require
+`atlas.timing_state`.
 Lowering produces `"untimed"` output without fixed padding, including mailbox
 reads, PACK helpers and CFG tensor copies. Use
 `--lower-atlas-virtual-to-machine --insert-atlas-delays`, optionally inserting

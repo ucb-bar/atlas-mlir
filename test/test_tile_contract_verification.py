@@ -14,6 +14,7 @@ from test_virtual_mxu_handles import program
 CONTRACT = "atlas.virtual_tile_contract"
 TAG = "atlas.virtual_tile_command"
 VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
+LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_tile_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -180,7 +181,7 @@ class TileContractVerificationTest(unittest.TestCase):
         for fmt, halves, size in (("fp8", 1, 1024), ("bf16", 2, 2048)):
             machine = lower(copy(fmt))
             facts = records(machine)
-            self.assertIn(VERSION, machine)
+            self.assertIn(LOWERED_VERSION, machine)
             self.assertEqual([r["kind"] for r in facts],
                              ["dma_load", "dma_wait"] + ["vload"] * halves + ["vstore"] * halves + ["dma_store", "dma_wait"])
             self.assertEqual([r["id"] for r in facts], list(range(4 + 2 * halves)))

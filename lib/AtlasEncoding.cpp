@@ -250,8 +250,14 @@ LogicalResult mlir::atlas::collectAtlasWords(
   bool generated =
       module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
        module->hasAttr("atlas.virtual_mxu_contract") || module->hasAttr("atlas.virtual_tile_contract") ||
+       module->hasAttr("atlas.virtual_cfg_contract") ||
        llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
-         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_tile_command");
+         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_tile_command") ||
+                op.hasAttr("atlas.virtual_cfg_block") || op.hasAttr("atlas.virtual_cfg_edge") ||
+                op.hasAttr("atlas.virtual_cfg_branch") || op.hasAttr("atlas.virtual_cfg_operation") ||
+                op.hasAttr("atlas.virtual_cfg_source") ||
+                op.hasAttr("atlas.virtual_scalar_result") || op.hasAttr("atlas.virtual_tensor_result") ||
+                op.hasAttr("atlas.virtual_scalar_argument") || op.hasAttr("atlas.virtual_cfg_helper");
        });
   if (!skipGeneratedCheck && generated &&
       failed(verifyAtlasGeneratedSchedule(module)))

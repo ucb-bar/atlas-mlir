@@ -14,7 +14,7 @@ from test_virtual_lowering import BIN, lower, run, virtual_chain
 
 CONTRACT = "atlas.virtual_dma_contract"
 VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
-LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
+LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v3"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_dma_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
