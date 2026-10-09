@@ -80,8 +80,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       // A halt neither drains in-flight work nor waits for a delay, so its
       // stall ends on a NOP, reusing one that is already there.
       for (const Issued &x : issued)
-        if (x.cycle + x.f.doneAge > cycle) {
-          cycle = x.cycle + x.f.doneAge;
+        if (x.cycle + x.f.doneAge + 1 > cycle) {
+          cycle = x.cycle + x.f.doneAge + 1;
           reason = "halt waits for " + name(x.index) + " to finish";
         }
       int idle = cycle - nextFree;
@@ -158,7 +158,7 @@ LogicalResult insertDelays(ModuleOp module) {
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);
-  return writeAtlasStream(module, *stream, order, before);
+  return writeAtlasStream(module, *stream, order, before, /*timed=*/true);
 }
 
 struct InsertAtlasDelaysPass

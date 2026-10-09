@@ -4,6 +4,7 @@
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -14,7 +15,21 @@
 using namespace mlir;
 using namespace mlir::atlas;
 
+bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
+  if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp,
+          VPUBinaryOp, VLoadOp, VStoreOp>(op))
+    return true;
+  // ScalarCore captures DMA operands at launch; later scalar writes are safe.
+  if (isa<ALURegOp, ALUImmOp, UpperOp>(op))
+    return true;
+  if (auto load = dyn_cast<ScalarLoadOp>(op))
+    return load.getKind() == "seli";
+  return false;
+}
+
 LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
+  if (failed(verifyAtlasTimingState(module)))
+    return failure();
   if (!module->hasAttr("atlas.generated_from_virtual"))
     return module.emitOpError("expected an Atlas virtual-to-machine artifact");
   struct PendingDMA {
@@ -50,7 +65,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
       if (id) {
         if (!launchIDs.insert(*id).second)
           return op.emitOpError("duplicate virtual DMA transfer launch ID");
-      } else {
+      } else if (!module->hasAttr("atlas.timing_state")) {
         auto wait = next ? dyn_cast<DMAWaitOp>(next) : DMAWaitOp{};
         if (!wait || wait.getChannel() != dma.getChannel())
           return op.emitOpError(
@@ -64,44 +79,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
           id != pending->id)
         return op.emitOpError(
             "DMA.WAIT must match the pending DMA channel and transfer ID");
-      if (pending->id)
-        intervals.emplace_back(pending->pc, currentPC);
+      intervals.emplace_back(pending->pc, currentPC);
       pending.reset();
     } else if (pending) {
-      std::optional<unsigned> scalarDst;
-      bool allowed = isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp, VLoadOp, VStoreOp>(op);
-      if (auto alu = dyn_cast<ALURegOp>(op))
-        scalarDst = alu.getDst();
-      else if (auto alu = dyn_cast<ALUImmOp>(op))
-        scalarDst = alu.getDst();
-      else if (auto upper = dyn_cast<UpperOp>(op))
-        scalarDst = upper.getDst();
-      else if (auto load = dyn_cast<ScalarLoadOp>(op))
-        allowed = load.getKind() == "seli";
-      if (scalarDst) {
-        // ScalarCore forms every DMA operand at launch; DMA queues the command.
-        // Reusing those scalar registers does not change the captured transfer.
-        allowed = true;
-      }
-      if (!allowed)
+      if (!canOverlapAtlasGeneratedDMA(&op))
         return op.emitOpError("unexpected instruction while DMA is pending");
-    }
-    if (isa<VLoadOp, VStoreOp, VPUUnaryOp, VPUBinaryOp, VPUPackOp,
-            MXUPushOp, MXUMatmulOp, MXUPopOp>(op)) {
-      auto wait = next ? dyn_cast<DelayOp>(next) : DelayOp{};
-      if (!wait || wait.getCycles() < 256 ||
-          !wait->getAttrOfType<StringAttr>("atlas.delay_reason"))
-        return op.emitOpError(
-            "generated async instruction requires an annotated DELAY >= 256");
-    }
-    if (auto load = dyn_cast<ScalarLoadOp>(op)) {
-      auto wait = next ? dyn_cast<DelayOp>(next) : DelayOp{};
-      if (load.getKind() == "lw" &&
-          (!wait || wait.getCycles() < 8 ||
-           wait->getAttrOfType<StringAttr>("atlas.delay_reason") !=
-               StringAttr::get(module.getContext(), "scalar_load_completion")))
-        return op.emitOpError(
-            "generated scalar LW requires an annotated DELAY >= 8");
     }
     if (isa<BranchOp, JumpOp>(op)) {
       auto slot = next ? dyn_cast<ALUImmOp>(next) : ALUImmOp{};
@@ -143,7 +125,12 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
     return failure();
   if (failed(verifyAtlasGeneratedMXUContract(module)))
     return failure();
-  return verifyAtlasGeneratedTileContract(module);
+  if (failed(verifyAtlasGeneratedTileContract(module)))
+    return failure();
+  auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
+  if (state && state.getValue() == "timed")
+    return verifyAtlasTiming(module, timing::footprintOf);
+  return success();
 }
 
 namespace {
@@ -154,7 +141,7 @@ struct VerifyAtlasGeneratedSchedulePass
     return "verify-atlas-generated-schedule";
   }
   StringRef getDescription() const final {
-    return "Check generated DMA lifetimes, async waits, and selected-core branch slots";
+    return "Check generated resources, correspondence, branch slots and retained timing proofs";
   }
   void runOnOperation() override {
     if (failed(verifyAtlasGeneratedSchedule(getOperation())))

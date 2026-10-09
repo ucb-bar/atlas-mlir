@@ -87,8 +87,7 @@ class DelayInsertionTest(unittest.TestCase):
 
                 result = run(OPT, without_delays(authored), "--insert-atlas-delays")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stderr.count("warning:"), 1, result.stderr)
-                self.assertIn("reuses DMA channel 0", result.stderr)
+                self.assertEqual(result.stderr.count("warning:"), 0, result.stderr)
 
                 ops = stream(result.stdout)
                 delays = [(cycles(f), reason) for op, f, reason in ops if op == "delay"]
@@ -135,8 +134,10 @@ class DelayInsertionTest(unittest.TestCase):
                 printed = stream(result.stdout)
                 self.assertEqual([op for op, _, _ in printed],
                                  ["alu_imm", "vload", "delay", "alu_imm", "trap"])
-                self.assertEqual(cycles(printed[2][1]), 31)
+                self.assertEqual(cycles(printed[2][1]), 32)
                 self.assertEqual(printed[3][2], guard)
+                checked = run(OPT, result.stdout, "--verify-atlas-timing")
+                self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_rejects_what_a_delay_cannot_fix(self) -> None:
         dma_then_vload = [

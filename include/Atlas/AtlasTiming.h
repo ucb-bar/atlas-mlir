@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -112,6 +113,9 @@ struct Footprint {
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
+// Supplied timing rules; the built-in footprintOf provider is the unqualified
+// npu-model rtl-match model, not an independently qualified RTL contract.
+using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
 const char *edgeKindName(EdgeKind k);

@@ -6,6 +6,7 @@
 #include "Atlas/AtlasVirtualVerification.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -26,6 +27,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerVerifyAtlasVirtualStreamPass();
   mlir::atlas::registerLowerAtlasVirtualToMachinePass();
   mlir::atlas::registerVerifyAtlasGeneratedSchedulePass();
+  mlir::atlas::registerVerifyAtlasTimingPass();
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Atlas dialect verifier\n", registry));
 }

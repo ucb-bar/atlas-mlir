@@ -2,6 +2,7 @@
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <deque>
 #include <set>
@@ -16,6 +17,12 @@ int64_t signedValue(IntegerAttr attr) { return attr.getValue().getSExtValue(); }
 
 FailureOr<Instr> toInstr(Operation *op) {
   Instr in;
+  if (Attribute raw = op->getAttr("atlas.complete")) {
+    auto complete = dyn_cast<BoolAttr>(raw);
+    if (!complete)
+      return op->emitOpError("atlas.complete requires a boolean completion annotation");
+    in.release = complete.getValue();
+  }
   std::string name;
   auto mxu = [](uint32_t unit) { return ".mxu" + std::to_string(unit); };
   auto ch = [](uint32_t channel) { return ".ch" + std::to_string(channel); };
@@ -120,6 +127,11 @@ FailureOr<Instr> toInstr(Operation *op) {
     in.rd = x.getDst();
     in.rs1 = x.getSource();
     in.imm = x.getAddress();
+    // The selected ABI publishes completion through this CSR. Dropping an
+    // optional annotation cannot turn an actual publication into an ordinary op.
+    if (x.getAddress() == 0xc10 &&
+        (x.getKind() == "rrw" || x.getKind() == "rrwi" || x.getSource() != 0))
+      in.release = true;
   } else if (auto x = dyn_cast<TrapOp>(op)) {
     name = x.getKind().str();
   } else if (auto x = dyn_cast<DelayOp>(op)) {
@@ -398,7 +410,8 @@ mlir::atlas::atlasScaleRegisterEntries(const AtlasStream &s) {
   return entry;
 }
 
-LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
+LogicalResult mlir::atlas::checkAtlasStream(
+    const AtlasStream &s, const FootprintResolver &resolver) {
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
@@ -408,13 +421,17 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
-      Footprint f = footprintOf(in, regs);
+      Footprint f = resolver ? resolver(in, regs) : footprintOf(in, regs);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
       if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
           (f.doneAge > 0 || op.opClass == OpClass::Halt))
         return s.ops[i]->emitOpError(
             "delay-slot instruction must be single-cycle scalar work");
+      if (in.release)
+        for (int ch = 0; ch < 8; ++ch)
+          if (!pending[ch].empty())
+            return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
       for (int ch = 0; ch < 8; ++ch)
         for (const auto &[k, dma] : pending[ch]) {
           EdgeKind kind;
@@ -425,7 +442,7 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
                    << ", which may still be in flight; a delay cannot cover "
                       "a DMA transfer, so add atlas.dma_wait first";
         }
-      bool command = op.engine == Engine::Dma && op.opClass != OpClass::DmaWait;
+      bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
       if (command && !pending[op.channel].empty())
         s.ops[i]->emitWarning()
             << "reuses DMA channel " << op.channel << " while "
@@ -456,18 +473,24 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s) {
 LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
                                             const AtlasStream &s,
                                             ArrayRef<size_t> order,
-                                            ArrayRef<DelayInsertion> before) {
+                                            ArrayRef<DelayInsertion> before,
+                                            bool timed) {
   OpBuilder builder(module.getContext());
   Type stateType = StateType::get(module.getContext());
   Operation *prev = &module.getBody()->front();
   Value state = prev->getResult(0);
+  std::vector<Operation *> emittedFirst(s.ops.size(), nullptr);
+  size_t current = 0;
   auto append = [&](Operation *op) {
+    if (!emittedFirst[current])
+      emittedFirst[current] = op;
     op->moveAfter(prev);
     op->setOperand(0, state);
     prev = op;
     state = op->getResult(0);
   };
   for (size_t i : order) {
+    current = i;
     Operation *op = s.ops[i];
     const DelayInsertion &insertion = before[i];
     StringAttr reason = builder.getStringAttr(insertion.reason);
@@ -496,7 +519,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   // A target starts a block, and reordering may put another op first.
   llvm::DenseMap<Operation *, Operation *> first;
   for (size_t start : s.starts)
-    first[s.ops[start]] = s.ops[order[start]];
+    first[s.ops[start]] = emittedFirst[order[start]];
   for (auto [op, target] : s.targetOf) {
     int64_t aim = target ? word[first.lookup(target)] : count;
     int64_t offset = 2 * (aim - word[op]);
@@ -506,6 +529,139 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       cast<JumpOp>(op).setOffsetAttr(builder.getI32IntegerAttr(offset));
   }
 
+  module->setAttr("atlas.timing_state", builder.getStringAttr(timed ? "timed" : "untimed"));
+  if (timed)
+    module->setAttr("atlas.timing_provider", builder.getStringAttr("npu-model-rtl-match-v1"));
+  else
+    module->removeAttr("atlas.timing_provider");
   SmallVector<uint32_t> words;
   return collectAtlasWords(module, words, /*llvmBlock=*/false);
+}
+
+LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireTimed) {
+  Attribute rawState = module->getAttr("atlas.timing_state");
+  Attribute rawProvider = module->getAttr("atlas.timing_provider");
+  if (!rawState) {
+    auto generated = module->getAttrOfType<StringAttr>("atlas.generated_from_virtual");
+    if (generated && generated.getValue() == "resource-contract-v2")
+      return module.emitOpError("resource-contract-v2 requires an explicit timing state");
+    if (rawProvider)
+      return module.emitOpError("timing provider requires an explicit timing state");
+    return success();
+  }
+  auto state = dyn_cast<StringAttr>(rawState);
+  if (!state || (state.getValue() != "untimed" && state.getValue() != "timed"))
+    return module.emitOpError("unknown Atlas timing state");
+  if (rawProvider) {
+    auto provider = dyn_cast<StringAttr>(rawProvider);
+    if (!provider || provider.getValue() != "npu-model-rtl-match-v1")
+      return module.emitOpError("unknown Atlas timing provider");
+  }
+  if (state.getValue() == "timed" && !rawProvider)
+    return module.emitOpError("timed Atlas stream requires its timing provider");
+  if (requireTimed && state.getValue() != "timed")
+    return module.emitOpError("untimed Atlas stream requires scheduling or delay insertion before executable emission");
+  return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasTimedStream(
+    const AtlasStream &s, const FootprintResolver &resolver) {
+  if (s.ops.empty())
+    return failure();
+  if (!resolver)
+    return s.ops.front()->emitOpError("timing verification requires supplied footprint rules");
+  if (failed(checkAtlasStream(s, resolver)))
+    return failure();
+  struct Issued { size_t index; Footprint footprint; int cycle; };
+  for (size_t block = 0; block < s.starts.size(); ++block) {
+    RegValues regs = s.entry[block];
+    ReservationTable table;
+    std::vector<Issued> issued;
+    std::array<Operation *, 8> pendingDMA{};
+    int cycle = 0;
+    int drained = 0;
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      const Instr &in = s.instrs[i];
+      Footprint f = resolver(in, regs);
+      if (!f.error.empty())
+        return s.ops[i]->emitOpError(f.error);
+      for (const Issued &prior : issued) {
+        Dependence d = dependence(s.instrs[prior.index], prior.footprint, in, f);
+        if (cycle - prior.cycle < d.distance)
+          return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
+                 << "; requires " << d.distance << ", got " << cycle - prior.cycle;
+      }
+      std::string conflict = table.conflict(in, f, cycle);
+      if (!conflict.empty())
+        return s.ops[i]->emitOpError("timing resource conflict: ") << conflict;
+      if (in.op->opClass == OpClass::Halt) {
+        if (i > 0 && isa<DelayOp>(s.ops[i - 1]))
+          return s.ops[i]->emitOpError("halt does not wait for a preceding DELAY; require a scalar guard instruction");
+        if (cycle < drained)
+          return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
+      }
+      if (isControlFlow(*in.op) && cycle + 2 < drained)
+        return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
+      table.reserve(in, f, cycle);
+      if (in.op->opClass == OpClass::DmaWait)
+        table.extendForWait(cycle);
+      if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
+        pendingDMA[in.op->channel] = s.ops[i];
+      else if (in.op->opClass == OpClass::DmaWait)
+        pendingDMA[in.op->channel] = nullptr;
+      issued.push_back({i, f, cycle});
+      drained = std::max(drained, cycle + f.doneAge + 1);
+      applyScalar(in, regs);
+      cycle += naturalGap(in);
+    }
+    for (Operation *launch : pendingDMA)
+      if (launch)
+        return launch->emitOpError("timing verification requires DMA completion before a block boundary");
+    if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
+      int idle = 0;
+      if (s.fallsThrough(block))
+        for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i)
+          idle += naturalGap(s.instrs[i]);
+      if (drained > cycle + idle)
+        return s.ops[s.blockEnd(block) - 1]->emitOpError("fixed-latency work remains live across a block boundary or stream end");
+    }
+  }
+  return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasTiming(
+    ModuleOp module, const FootprintResolver &resolver) {
+  if (failed(verifyAtlasTimingState(module)))
+    return failure();
+  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  if (failed(stream))
+    return failure();
+  return verifyAtlasTimedStream(*stream, resolver);
+}
+
+namespace {
+struct VerifyAtlasTimingPass
+    : PassWrapper<VerifyAtlasTimingPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VerifyAtlasTimingPass)
+  StringRef getArgument() const final { return "verify-atlas-timing"; }
+  StringRef getDescription() const final {
+    return "Check actual issue spacing using the unqualified npu-model rtl-match timing provider";
+  }
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    SmallVector<uint32_t> words;
+    if (failed(collectAtlasWords(module, words, false)) ||
+        failed(verifyAtlasTiming(module, footprintOf))) {
+      signalPassFailure();
+      return;
+    }
+    Builder builder(module.getContext());
+    module->setAttr("atlas.timing_state", builder.getStringAttr("timed"));
+    module->setAttr("atlas.timing_provider", builder.getStringAttr("npu-model-rtl-match-v1"));
+  }
+};
+}
+
+void mlir::atlas::registerVerifyAtlasTimingPass() {
+  PassRegistration<VerifyAtlasTimingPass>();
 }

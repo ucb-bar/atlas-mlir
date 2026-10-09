@@ -90,11 +90,11 @@ and x27 are reserved for parallel-copy cycles. It reuses a location when the
 source SSA value is dead, checks coloring against its interference graph, and
 rejects excess pressure. Block arguments become edge copies; a cycle is
 broken through the reserved temporary. VMEM bank 0 stages input tiles and
-bank 1 stages outputs, with DMA completion before reads and stores. Fixed
-serialization adds diagnostic delays after VPU and VMEM operations. The
-generated-stream checker enforces those waits and the selected one-slot
-branch convention before word emission or LLVM lowering. The stage does not
-solve alternate scheduling, layer tiling, or a qualified latency model.
+bank 1 stages outputs, with DMA completion before reads and stores. Lowering emits an untimed stream with DMA waits and architectural branch
+slots, retaining all source resource contracts. Scheduling or in-order delay
+insertion supplies timing separately; the generated checker keeps structural,
+memory and correspondence checks active at both stages. A qualified RTL timing
+model and general layer tiling remain separate obligations.
 Generated VPU execution currently admits unary `mov`/`relu` and binary `add`;
 other virtual modes receive an explicit
 qualification error. `add` uses the selected VPU's FP32 sum followed by a
@@ -162,7 +162,7 @@ Only one transfer may be outstanding. Await/wait must consume its exact handle o
 
 The invocation must keep load-source memory stable and exclude conflicting external accesses to transfer ranges until completion. The stream verifier checks operations in this IR; it cannot enforce concurrent host behavior.
 
-[`virtual_dma_tiles.mlir`](../test/examples/virtual_dma_tiles.mlir) demonstrates SSA address arithmetic and explicit load/store completion. Within the existing single-function ABI, physical lowering reserves a private 2-KiB staging window at VMEM bank 2, word address 131072 (byte address 524288). Loads launch one full-tile DMA on channel 0 at issue; await emits the matching wait before loading the ready tensor. Stores snapshot the tensor into staging before launching one full-tile DMA on channel 1; `virtual_dma_wait` emits its completion wait. BF16 halves occupy consecutive 1-KiB regions. Every tensor load/store retains its annotated 256-cycle diagnostic delay.
+[`virtual_dma_tiles.mlir`](../test/examples/virtual_dma_tiles.mlir) demonstrates SSA address arithmetic and explicit load/store completion. Within the existing single-function ABI, physical lowering reserves a private 2-KiB staging window at VMEM bank 2, word address 131072 (byte address 524288). Loads launch one full-tile DMA on channel 0 at issue; await emits the matching wait before loading the ready tensor. Stores snapshot the tensor into staging before launching one full-tile DMA on channel 1; `virtual_dma_wait` emits its completion wait. BF16 halves occupy consecutive 1-KiB regions. Tensor transfers carry no fixed diagnostic padding; physical timing passes insert the spacing required by their selected model.
 
 SSA addresses and lengths use the existing bounded scalar coloring. At issue, lowering copies their values into reserved x7/x9 and materializes the staging base in x4, keeping these registers stable until completion even if the original SSA registers are reused. Legacy boundary I/O and its x2 half-tile length remain unchanged. Explicit DMA functions still require the existing input/output base attributes; transfers may not overlap the control mailbox used for function arguments. Runtime addresses, general channel/window allocation, and an overlap scheduler remain future work.
 
@@ -203,11 +203,11 @@ Both readout forms intentionally use generated operand/result checks instead of 
 
 The existing reset-only `virtual_mxu_matmul` remains supported. Within a mixed stream it invalidates the current weight handle on its selected unit and cannot overwrite a live explicit accumulator on that unit. Transformations of mixed streams must recheck this ordering contract; the existing convenience operation retains its original pure trait.
 
-[`virtual_mxu_accumulation.mlir`](../test/examples/virtual_mxu_accumulation.mlir) demonstrates independent chains on both units. In the existing single-function ABI, physical lowering maps weight handles to weight slot 0 and accumulator versions to accumulator slot 0 on their selected unit. A separate handle placement map keeps these resources out of tensor-register coloring. Loading emits `atlas.mxu_push`, reset/continuation emit `atlas.mxu_matmul` with `accumulate=false/true`, and readout emits a BF16 `atlas.mxu_pop` into an allocated tensor pair. Each instruction retains the existing annotated 256-cycle diagnostic delay. Weight reuse emits no extra push; explicit replacement emits a new push without resetting the accumulator.
+[`virtual_mxu_accumulation.mlir`](../test/examples/virtual_mxu_accumulation.mlir) demonstrates independent chains on both units. In the existing single-function ABI, physical lowering maps weight handles to weight slot 0 and accumulator versions to accumulator slot 0 on their selected unit. A separate handle placement map keeps these resources out of tensor-register coloring. Loading emits `atlas.mxu_push`, reset/continuation emit `atlas.mxu_matmul` with `accumulate=false/true`, and readout emits a BF16 `atlas.mxu_pop` into an allocated tensor pair. Lowering emits these instructions without fixed padding. Weight reuse emits no extra push; explicit replacement emits a new push without resetting the accumulator.
 
-Accumulator initialization emits `atlas.mxu_push` with `kind=acc_fp8` or `acc_bf16`, followed by the same diagnostic delay. FP8 readout emits `SELI` to scratch scale register e3 immediately before `atlas.mxu_pop format=fp8`, followed by the readout delay. The scale code is rematerialized at every use, allowing different readouts and existing VPU pack lowering to share e3 without stale scale contents. Scale constants do not consume scalar or tensor registers. This is a bounded rematerialization policy, not general scale-register allocation. The selected MXU readout produces a logical row-major FP8 tile directly; the VPU pack relayout sequence is not needed. [`virtual_mxu_seeded_fp8.mlir`](../test/examples/virtual_mxu_seeded_fp8.mlir) demonstrates accumulator initialization and FP8 readout.
+Accumulator initialization emits `atlas.mxu_push` with `kind=acc_fp8` or `acc_bf16`. FP8 readout emits `SELI` to scratch scale register e3 immediately before `atlas.mxu_pop format=fp8`. Timing is supplied by a later physical pass. The scale code is rematerialized at every use, allowing different readouts and existing VPU pack lowering to share e3 without stale scale contents. Scale constants do not consume scalar or tensor registers. This is a bounded rematerialization policy, not general scale-register allocation. The selected MXU readout produces a logical row-major FP8 tile directly; the VPU pack relayout sequence is not needed. [`virtual_mxu_seeded_fp8.mlir`](../test/examples/virtual_mxu_seeded_fp8.mlir) demonstrates accumulator initialization and FP8 readout.
 
-The original reset-only lowering remains unchanged. General slot allocation, handles across blocks, numerical execution qualification of these new virtual chains, and asynchronous lifetime qualification remain future work. The generated-schedule check enforces the conservative serial-delay convention; it does not establish a minimal or fully qualified hardware schedule.
+The original reset-only lowering remains unchanged. General slot allocation, handles across blocks, numerical execution qualification of these new virtual chains, and asynchronous lifetime qualification remain future work. The generated checker enforces resource correspondence and logical completion; timed artifacts additionally undergo an actual issue-spacing check against their named model. This does not qualify that model against hardware.
 
 The [MXU correspondence checker](../include/Atlas/AtlasMXUContractVerification.h)
 derives command expectations from live source and checked placements. New
@@ -233,6 +233,26 @@ Required predecessors must execute on every emitted path reaching a command.
 PACK's scalar permutation, general buffer contents and physical completion
 remain separate. Older `"resource-contract-v1"` artifacts retain DMA/MXU checks
 and cannot carry tile contracts or tags.
+
+Generated `"resource-contract-v2"` artifacts require `atlas.timing_state`.
+Lowering produces `"untimed"` output without fixed padding, including mailbox
+reads, PACK helpers and CFG tensor copies. Use
+`--lower-atlas-virtual-to-machine --insert-atlas-delays`, optionally inserting
+`--schedule-atlas-stream=insert-delays=false` between them. Generated scheduling
+preserves the current single-pending-DMA policy and its permitted overlap.
+
+Executable emission and LLVM handoff require `"timed"` state and the named
+`atlas.timing_provider`; `atlas-emit --allow-untimed` permits inspection with
+resource/correspondence checks. Structured LLVM finalization reconstructs and
+rechecks the stream. Legacy artifacts without timing metadata retain their
+unqualified scope.
+
+Final timing verification reconstructs issue cycles, dependencies and reservations.
+The current provider, `"npu-model-rtl-match-v1"`, includes built-in dependence,
+capacity and overlap policies; its footprint callback alone is not a complete
+provider-independent interface. DMA waits establish completion regardless of
+estimated duration. This checks the selected model, not its RTL qualification;
+full provider integration remains separate work.
 
 ## Machine operations
 
@@ -280,24 +300,25 @@ between selected RTL, architecture text, and the inspected model.
 | Name | Kind | Implemented behavior |
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
-| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches, DMA waits, and serial diagnostic delays; emit typed machine operations with a generated-stage marker. |
-| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Require the generated marker, matching DMA waits and protected explicit-transfer intervals, annotated diagnostic delays, scalar-LW waits, and a NOP selected delay slot. `atlas-emit` and LLVM conversion invoke this check for marked artifacts. It checks a chosen policy, not a proven mode-wide availability bound. |
+| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies, branches and DMA waits; emit typed machine operations with resource contracts and `atlas.timing_state = "untimed"`, without fixed async, scalar-load or helper padding. |
+| `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Check generated resource contracts, matching DMA waits, protected transfer intervals, memory conflicts and architectural NOP branch slots. Untimed streams receive no cycle proof; timed streams also recheck actual issue spacing. Emission and LLVM conversion invoke the checks for retained contracts or tags. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |
 | `--insert-atlas-delays` | `atlas-opt` module pass | Reject input that contains `atlas.delay`, then time each basic block in program order and insert the minimum delays the timing model requires, each with an `atlas.reason`. Branch and jump offsets are recomputed. The model is npu_model's `rtl-match` rules ported from atlas-compiler-experiments `3ae2b5d` (`AtlasTiming.cpp`), with DMA VMEM addresses counted in words as in Atlas RTL; it is not selected-RTL timing evidence. Fixed-latency work drains at block boundaries, a DMA wait may release at any time, and a hazard only a DMA wait can fix is an error (channel reuse is a warning). AUIPC, JALR, and linking JAL are rejected. |
-| `--schedule-atlas-stream` | `atlas-opt` module pass | Same input, model, and checks as `--insert-atlas-delays`, but reorder each basic block with the greedy list scheduler ported from atlas-compiler-experiments `3ae2b5d` (`buildGraph`, `criticalHeights`, `scheduleBlock`), then insert the delays its issue cycles need. Work moves only within a block and after everything it depends on; branches are re-aimed at the new first instruction of their target block. Delay slots are not filled. |
+| `--schedule-atlas-stream` | `atlas-opt` module pass | Same input, model, and checks as `--insert-atlas-delays`, but reorder each basic block with the greedy list scheduler ported from atlas-compiler-experiments `3ae2b5d` (`buildGraph`, `criticalHeights`, `scheduleBlock`), then insert the delays its issue cycles need. `insert-delays=false` reorders without padding and keeps the output untimed for a later `--insert-atlas-delays`. Work moves only within a block and after everything it depends on; branches are re-aimed at the new first instruction of their target block. Delay slots are not filled. |
+| `--verify-atlas-timing` | `atlas-opt` module pass | Check actual instruction issue cycles, dependency distances, reservations, DMA wait handling, guarded halt and drained CFG boundaries, then retain timed state and `npu-model-rtl-match-v1` provenance. Unknown states/providers fail. This named model is unqualified against the selected RTL. |
 | `--convert-atlas-to-llvm-calls` | `atlas-opt` module pass | Preserve each checked machine instruction as a separate `llvm.call @atlas_emit_*` with physical fields, encoded word, word index, conservative effects, and unknown availability. This intermediate requires finalization before LLVM IR translation; its calls are markers, not runtime functions. |
 | `--finalize-atlas-llvm-calls` | `atlas-opt` module pass | Reconstruct and verify the typed Atlas stream from the LLVM calls, check every encoded word and control target, then emit one ordered LLVM inline-assembly block. Reject inconsistent fields, words, indexes, and malformed streams. |
 | `--convert-atlas-to-llvm` | `atlas-opt` module pass | Replace checked stream with `llvm.func @atlas_program()` containing one side-effecting, ordered `llvm.inline_asm` word block and `llvm.return`. This is a reset-entry body, not a C-callable ABI. |
-| `atlas-emit` | tool, not pass | Emit words or `--map-json` sidecar with source operation, attributes, word index, branch/delay-slot mapping, conservative effects, and `availability: unknown`. |
+| `atlas-emit` | tool, not pass | Require timed state for new generated artifacts; `--allow-untimed` explicitly permits inspection without an execution timing claim. Emit words or `--map-json` sidecar with source operation, attributes, word index, branch/delay-slot mapping, conservative effects, and `availability: unknown`. |
 | `atlas-emit --program-json` | tool mode, not pass | Emit the checked physical words with typed fields and selected-PC control metadata for a separate functional model. It does not define numerical or timing semantics. |
 | `atlas-boot-pack` | tool, not pass | Package one checked reset-entry ELF `.text` section with a narrow authored memory layout and manifest. |
 | `export_llvm_handoff.py` | exporter, not pass | Produce numbered Atlas/LLVM MLIR, LLVM IR, RV32 assembly, relocatable object, linked ELF, disassembly, word map, and hashes for the bounded MLP/attention fixtures. |
 
 No instruction selector, whole-target allocator, general Linalg-to-Atlas pass,
-qualified timing model, or callable ABI is implemented here. The generated
-virtual path uses conservative serial diagnostic spacing; the physical timing
-passes accept a stream without delays and have not been integrated into that
-virtual lowering. Other physical examples retain authored delays. Focused selected-core
+qualified timing model, or callable ABI is implemented here. The generated virtual path emits an untimed stream accepted by the physical
+scheduler and in-order delay inserter. Both preserve resource contracts and
+command tags, re-aim branches at inserted preludes, and produce timed state
+with the named model provider. Other physical examples retain authored delays. Focused selected-core
 tests cover a long SSA chain with physical pair reuse, a swap backedge,
 branch merges, runtime mailbox control, two ordered outputs, actual
 LLVM-produced object words, and memory guards. A 32-tile simultaneously live

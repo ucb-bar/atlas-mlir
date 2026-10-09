@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import itertools
 import re
 import unittest
 
@@ -36,7 +37,8 @@ def branch_target(ops: list[tuple[str, str, str]]) -> int:
 
 def loop_body(ops: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
     branch = next(i for i, (op, _, _) in enumerate(ops) if op == "branch")
-    return ops[branch_target(ops):branch + 1]
+    # Entry drain depends on predecessor scheduling; compare body stalls only.
+    return list(itertools.dropwhile(lambda entry: entry[0] == "delay", ops[branch_target(ops):branch + 1]))
 
 
 def work_overlapping_first_dma(ops: list[tuple[str, str, str]]) -> int:
@@ -53,7 +55,7 @@ class StreamSchedulingTest(unittest.TestCase):
                     (ROOT / f"test/examples/handoff_{name}_tile.mlir").read_text())
                 result = run(OPT, source, "--schedule-atlas-stream")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stderr.count("warning:"), 1, result.stderr)
+                self.assertEqual(result.stderr.count("warning:"), 0, result.stderr)
                 in_order = stream(run(OPT, source, "--insert-atlas-delays").stdout)
                 scheduled = stream(result.stdout)
 
@@ -73,7 +75,9 @@ class StreamSchedulingTest(unittest.TestCase):
                 pop = next(i for i, (op, f, _) in enumerate(scheduled)
                            if op == "mxu_pop" and "unit = 0" in f)
                 self.assertGreaterEqual(issue[pop] - issue[matmul], 64)
-                self.assertEqual(scheduled[branch_target(scheduled)][0], "scalar_load")
+                self.assertEqual(loop_body(scheduled)[0][0], "scalar_load")
+                verified = run(OPT, result.stdout, "--verify-atlas-timing")
+                self.assertEqual(verified.returncode, 0, verified.stderr)
 
                 checked = run(OPT, result.stdout, "--verify-atlas-machine-stream")
                 self.assertEqual(checked.returncode, 0, checked.stderr)

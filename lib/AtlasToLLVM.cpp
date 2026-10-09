@@ -1,6 +1,7 @@
 #include "Atlas/AtlasToLLVM.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -61,7 +62,8 @@ struct ConvertAtlasToLLVMPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
+        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
       signalPassFailure();
       return;
     }
@@ -87,7 +89,8 @@ struct ConvertAtlasToLLVMCallsPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
+        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
       signalPassFailure();
       return;
     }
@@ -178,7 +181,7 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
-    for (StringRef name : {"atlas.generated_from_virtual", "atlas.virtual_dma_contract", "atlas.virtual_mxu_contract", "atlas.virtual_tile_contract"})
+    for (StringRef name : {"atlas.generated_from_virtual", "atlas.virtual_dma_contract", "atlas.virtual_mxu_contract", "atlas.virtual_tile_contract", "atlas.timing_state", "atlas.timing_provider"})
       if (Attribute value = module->getAttr(name))
         reconstructed->setAttr(name, value);
     builder.setInsertionPointToStart(reconstructed.getBody());
@@ -227,6 +230,7 @@ struct FinalizeAtlasLLVMCallsPass
     }
     llvm::SmallVector<uint32_t> checked;
     if (stagedWords.empty() ||
+        failed(mlir::atlas::verifyAtlasTimingState(reconstructed, true)) ||
         failed(mlir::atlas::collectAtlasWords(reconstructed, checked, true)) ||
         !llvm::equal(stagedWords, checked)) {
       module.emitError("structured Atlas LLVM calls disagree with checked encodings");

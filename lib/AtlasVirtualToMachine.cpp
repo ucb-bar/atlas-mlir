@@ -28,7 +28,6 @@ using namespace mlir::atlas;
 namespace {
 constexpr uint64_t kTileBytes = 2048;
 constexpr uint64_t kHalfBytes = 1024;
-constexpr unsigned kDiagnosticDelay = 256;
 
 struct PlannedOp {
   std::string name;
@@ -115,6 +114,8 @@ public:
       state = builder.create(machineState)->getResult(0);
     }
     (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v2"));
+    (*emitted)->setAttr("atlas.timing_state", builder.getStringAttr("untimed"));
+    (*emitted)->removeAttr("atlas.timing_provider");
     (*emitted)->setAttr("atlas.virtual_dma_contract", *dmaContract);
     (*emitted)->setAttr("atlas.virtual_mxu_contract", *mxuContract);
     (*emitted)->setAttr("atlas.virtual_tile_contract", *tileContract);
@@ -287,12 +288,6 @@ private:
          {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
   }
 
-  void delay(Location loc, StringRef reason) {
-    add("atlas.delay", loc,
-        {{"cycles", i32(kDiagnosticDelay)},
-         {"atlas.delay_reason", str(reason)}});
-  }
-
   void stageScalarArguments(Location loc) {
     // The first 1-KiB VMEM window is a temporary mailbox. Tensor input DMA
     // may reuse it only after every asynchronous scalar LW has completed.
@@ -310,9 +305,6 @@ private:
           {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
            {"offset", i32(4 * (fixed().mailboxWord + index))}});
       tagTileCommand();
-      add("atlas.delay", loc,
-          {{"cycles", i32(8)},
-           {"atlas.delay_reason", str("scalar_load_completion")}});
       if (arg.getType().isInteger(1))
         add("atlas.alu_imm", loc,
             {{"kind", str("andi")}, {"dst", i32(reg)},
@@ -326,7 +318,6 @@ private:
     if (tensor) {
       add("atlas.vpu_unary", loc,
           {{"kind", str("mov")}, {"dst", i32(dst)}, {"src", i32(src)}});
-      delay(loc, "cfg_tensor_copy");
     } else {
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(dst)},
@@ -403,7 +394,7 @@ private:
     add("atlas.vload", loc,
         {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
-    delay(loc, "vload_completion");
+
   }
 
   void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
@@ -415,7 +406,7 @@ private:
     add("atlas.vstore", loc,
         {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
-    delay(loc, "vstore_completion");
+
     materializeScalar(fixed().outputDramReg, dramByte, loc);
     add("atlas.dma", loc,
         {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
@@ -439,7 +430,7 @@ private:
         add("atlas.vstore", loc,
             {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
-        delay(loc, "vstore_completion");
+
       }
       if (placement.halves > 1)
         materializeScalar(placement.stagingReg, placement.stagingWord, loc);
@@ -466,7 +457,7 @@ private:
         add("atlas.vload", loc,
             {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
-        delay(loc, "vload_completion");
+
       }
     }
     return success();
@@ -484,7 +475,6 @@ private:
         {{"direction", str("bf16_to_fp8")},
          {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
          {"scale_reg", i32(fixed().scaleReg)}});
-    delay(loc, "vpu_pack_completion");
 
     // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
     // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
@@ -494,7 +484,7 @@ private:
     add("atlas.vstore", loc,
         {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
-    delay(loc, "pack_vstore_completion");
+
     materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
     materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
     materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
@@ -509,9 +499,6 @@ private:
         add("atlas.scalar_load", loc,
             {{"kind", str("lw")}, {"dst", i32(temp)},
              {"base", i32(source)}, {"offset", i32(4 * word)}});
-        add("atlas.delay", loc,
-            {{"cycles", i32(8)},
-             {"atlas.delay_reason", str("scalar_load_completion")}});
         add("atlas.scalar_store", loc,
             {{"kind", str("sw")}, {"src", i32(temp)},
              {"base", i32(fixed().packDestinationReg)},
@@ -534,12 +521,12 @@ private:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-    delay(loc, "scalar_relayout_completion");
+
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
     add("atlas.vload", loc,
         {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
-    delay(loc, "pack_relayout_vload_completion");
+
     return success();
   }
 
@@ -591,7 +578,7 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
            {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
-      delay(loc, "mxu_weight_completion");
+
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
@@ -599,7 +586,7 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("acc_fp8")}, {"unit", i32(acc.unit)},
            {"src", i32(fp8(load.getSrc()))}, {"slot", i32(acc.slot)}});
-      delay(loc, "mxu_accumulator_completion");
+
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
@@ -607,7 +594,7 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("acc_bf16")}, {"unit", i32(acc.unit)},
            {"src", i32(tile(load.getSrc()))}, {"slot", i32(acc.slot)}});
-      delay(loc, "mxu_accumulator_completion");
+
       return success();
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
@@ -617,7 +604,7 @@ private:
           {{"unit", i32(acc.unit)}, {"src", i32(fp8(reset.getActivation()))},
            {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
            {"accumulate", boolean(false)}});
-      delay(loc, "mxu_matmul_completion");
+
       return success();
     }
     if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
@@ -628,7 +615,7 @@ private:
            {"src", i32(fp8(accumulate.getActivation()))},
            {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
            {"accumulate", boolean(true)}});
-      delay(loc, "mxu_matmul_completion");
+
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
@@ -637,7 +624,7 @@ private:
           {{"format", str("bf16")}, {"unit", i32(acc.unit)},
            {"dst", i32(tile(readout.getValue()))},
            {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
-      delay(loc, "mxu_readout_completion");
+
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
@@ -654,7 +641,7 @@ private:
           {{"format", str("fp8")}, {"unit", i32(acc.unit)},
            {"dst", i32(fp8(readout.getValue()))},
            {"slot", i32(acc.slot)}, {"scale_reg", i32(fixed().scaleReg)}});
-      delay(loc, "mxu_readout_completion");
+
       return success();
     }
     if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
@@ -663,18 +650,18 @@ private:
           {{"kind", str("weight_fp8")}, {"unit", i32(unit)},
            {"src", i32(fp8(matmul.getWeight()))},
            {"slot", i32(fixed().mxuWeightSlot)}});
-      delay(loc, "mxu_weight_completion");
+
       add("atlas.mxu_matmul", loc,
           {{"unit", i32(unit)}, {"src", i32(fp8(matmul.getActivation()))},
            {"weight_slot", i32(fixed().mxuWeightSlot)},
            {"acc_slot", i32(fixed().mxuAccSlot)},
            {"accumulate", boolean(false)}});
-      delay(loc, "mxu_matmul_completion");
+
       add("atlas.mxu_pop", loc,
           {{"format", str("bf16")}, {"unit", i32(unit)},
            {"dst", i32(tile(matmul.getResult()))},
            {"slot", i32(fixed().mxuAccSlot)}, {"scale_reg", i32(0)}});
-      delay(loc, "mxu_readout_completion");
+
       return success();
     }
     if (auto pack = dyn_cast<VirtualPackFP8Op>(op))
@@ -692,7 +679,7 @@ private:
       add("atlas.vpu_unary", loc,
           {{"kind", unary.getKindAttr()}, {"dst", i32(tile(unary.getDst()))},
            {"src", i32(tile(unary.getSrc()))}});
-      delay(loc, "vpu_completion");
+
       return success();
     }
     if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
@@ -704,7 +691,7 @@ private:
            {"dst", i32(tile(binary.getDst()))},
            {"lhs", i32(tile(binary.getLhs()))},
            {"rhs", i32(tile(binary.getRhs()))}});
-      delay(loc, "vpu_completion");
+
       return success();
     }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
@@ -748,7 +735,7 @@ private:
       materializeScalar(fixed().haltReg, 1, loc);
       add("atlas.csr", loc,
           {{"kind", str("rrw")}, {"dst", i32(0)}, {"source", i32(fixed().haltReg)},
-           {"address", i32(0xc10)}});
+           {"address", i32(0xc10)}, {"atlas.complete", boolean(true)}});
       add("atlas.trap", loc, {{"kind", str("ecall")}});
       return success();
     }

@@ -95,7 +95,8 @@ class FunctionalStreamContractTest(unittest.TestCase):
                                  text=True, capture_output=True)
         self.assertEqual(emitted.returncode, 0, emitted.stderr)
         words = [int(line, 16) for line in emitted.stdout.splitlines()]
-        self.assertEqual(program["word_count"], 143)
+        self.assertEqual(program["word_count"], len(words))
+        self.assertIn('atlas.timing_state = "timed"', machine)
         self.assertEqual([row["word_u32"] for row in program["instructions"]], words)
         self.assertTrue(any(row["operation"] == "atlas.mxu_matmul"
                             for row in program["instructions"]))

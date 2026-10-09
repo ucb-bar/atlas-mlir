@@ -5,6 +5,8 @@
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::atlas {
+// Instruction classes permitted between a generated DMA launch and its wait.
+bool canOverlapAtlasGeneratedDMA(Operation *op);
 LogicalResult verifyAtlasGeneratedSchedule(ModuleOp module);
 void registerVerifyAtlasGeneratedSchedulePass();
 }

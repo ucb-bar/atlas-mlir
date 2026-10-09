@@ -37,7 +37,20 @@ enum class AtlasStreamReadMode { Scheduling, Verification };
 FailureOr<AtlasStream> readAtlasStream(
     ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
-LogicalResult checkAtlasStream(const AtlasStream &stream);
+LogicalResult checkAtlasStream(
+    const AtlasStream &stream, const timing::FootprintResolver &resolver = {});
+// Checks actual issue spacing, reservations and drained CFG boundaries without
+// using a scheduler dependency graph. Footprints are supplied; dependence,
+// capacities, VPU overlap and reservation policy remain the named npu-model
+// rtl-match model. This is not a complete provider-independent RTL verifier.
+LogicalResult verifyAtlasTimedStream(
+    const AtlasStream &stream, const timing::FootprintResolver &resolver);
+LogicalResult verifyAtlasTiming(
+    ModuleOp module, const timing::FootprintResolver &resolver);
+// Validates explicit timing metadata. Legacy streams without a timing state
+// keep their existing scope; requireTimed rejects explicitly untimed streams.
+LogicalResult verifyAtlasTimingState(ModuleOp module, bool requireTimed = false);
+void registerVerifyAtlasTimingPass();
 // DMA_CONFIG updates one shared upper address word, irrespective of channel.
 // Entry values are known only when all reachable incoming CFG edges agree.
 std::vector<std::optional<uint32_t>>
@@ -50,10 +63,12 @@ atlasScaleRegisterEntries(const AtlasStream &stream);
 void applyAtlasScaleRegister(const timing::Instr &in, timing::RegValues &regs);
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
-// every block's ops at that block's positions.
+// every block's ops at that block's positions. Rewriting alone leaves the
+// stream untimed; timing passes explicitly request a checked timed artifact.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
-                               llvm::ArrayRef<DelayInsertion> before);
+                               llvm::ArrayRef<DelayInsertion> before,
+                               bool timed = false);
 std::vector<uint32_t> idleDelays(int idle);
 bool isNop(Operation *op);
 

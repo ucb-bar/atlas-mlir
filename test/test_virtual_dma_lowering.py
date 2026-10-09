@@ -73,10 +73,13 @@ class VirtualDMALoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
     def checked(self, source: str) -> tuple[str, list[dict]]:
+        untimed = lower(source, timed=False)
+        self.assertIn('atlas.timing_state = "untimed"', untimed)
+        self.assertNotIn('"atlas.delay"', untimed)
         machine = lower(source)
         self.assertIn("atlas.generated_from_virtual", machine)
         self.assertNotIn('"atlas.virtual_', machine)
-        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule"):
+        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
         entries = instructions(machine)
@@ -99,9 +102,6 @@ class VirtualDMALoweringTest(unittest.TestCase):
                         self.assertEqual((fields["reg"], fields["dram"], fields["size"]), (4, 7, 9))
                     elif operation in vector_addresses:
                         vector_addresses[operation].append(registers[fields["base"]] + fields["offset"] * 32)
-                        wait = entries[index + 1]
-                        self.assertEqual(wait["operation"], "atlas.delay")
-                        self.assertEqual(wait["fields"]["cycles"], 256)
                 self.assertEqual([launch[:5] for launch in launches],
                                  [("load", 0, STAGING_WORD, 0x80000000, size),
                                   ("store", 1, STAGING_WORD, 0x80000000, size)])

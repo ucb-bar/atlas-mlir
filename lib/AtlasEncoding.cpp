@@ -1,5 +1,6 @@
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/STLExtras.h"
@@ -245,14 +246,20 @@ static FailureOr<uint32_t> proveJalrTarget(
 LogicalResult mlir::atlas::collectAtlasWords(
     ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock,
     bool skipGeneratedCheck) {
-  if (failed(verify(module))) return failure();
-  if (!skipGeneratedCheck &&
-      (module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
+  if (failed(verify(module)) || failed(verifyAtlasTimingState(module))) return failure();
+  bool generated =
+      module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
        module->hasAttr("atlas.virtual_mxu_contract") || module->hasAttr("atlas.virtual_tile_contract") ||
        llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
          return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_tile_command");
-       })) &&
+       });
+  if (!skipGeneratedCheck && generated &&
       failed(verifyAtlasGeneratedSchedule(module)))
+    return failure();
+  auto timingState = module->getAttrOfType<StringAttr>("atlas.timing_state");
+  if (!skipGeneratedCheck && !generated && timingState &&
+      timingState.getValue() == "timed" &&
+      failed(verifyAtlasTiming(module, timing::footprintOf)))
     return failure();
   llvm::SmallVector<uint32_t> collected;
   llvm::SmallVector<Operation *> encodedOps;

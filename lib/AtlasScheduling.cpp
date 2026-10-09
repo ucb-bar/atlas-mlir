@@ -1,4 +1,5 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
@@ -16,7 +17,8 @@ constexpr int kMaxIdle = 100000;
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
-                            uint32_t dmaRegs, std::vector<size_t> &order,
+                            uint32_t dmaRegs, bool generated,
+                            std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
   size_t begin = s.starts[block];
@@ -32,6 +34,35 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
   DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs);
+  if (generated) {
+    // Preserve the generated DMA interval policy while allowing its permitted
+    // compute to overlap. Commands outside an interval cannot move into it.
+    int wait = -1;
+    std::vector<int> outside;
+    auto edge = [&](int from, int to) {
+      int index = static_cast<int>(g.edges.size());
+      g.edges.push_back({from, to, 1, EdgeKind::Order,
+                         "generated DMA lifecycle"});
+      g.out[from].push_back(index);
+      g.in[to].push_back(index);
+    };
+    for (int i = 0; i < n; ++i) {
+      if (nodes[i].op->opClass == OpClass::DmaWait) {
+        wait = i;
+      } else if (nodes[i].op->opClass == OpClass::DmaLoad ||
+                 nodes[i].op->opClass == OpClass::DmaStore) {
+        if (wait >= 0)
+          edge(wait, i);
+        for (int previous : outside)
+          edge(previous, i);
+        outside.clear();
+      } else if (!canOverlapAtlasGeneratedDMA(op(i))) {
+        if (wait >= 0)
+          edge(wait, i);
+        outside.push_back(i);
+      }
+    }
+  }
   for (int i = 0; i < n; i++) {
     std::string alone =
         ReservationTable().conflict(nodes[i], g.footprints[i], 0);
@@ -220,7 +251,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   return success();
 }
 
-LogicalResult scheduleStream(ModuleOp module) {
+LogicalResult scheduleStream(ModuleOp module, bool insertDelays) {
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream)))
     return failure();
@@ -229,7 +260,9 @@ LogicalResult scheduleStream(ModuleOp module) {
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, dmaRegs, order, before, tailIdle[b])))
+    if (failed(scheduleBlock(*stream, b, dmaRegs,
+                             module->hasAttr("atlas.generated_from_virtual"),
+                             order, before, tailIdle[b])))
       return failure();
   // A block that falls through finishes before the next block's first op.
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {
@@ -242,12 +275,19 @@ LogicalResult scheduleStream(ModuleOp module) {
     std::string reason = "this block finishes before the next one starts";
     next.reason = next.reason.empty() ? reason : reason + "; " + next.reason;
   }
-  return writeAtlasStream(module, *stream, order, before);
+  if (!insertDelays)
+    before.assign(stream->ops.size(), DelayInsertion{});
+  return writeAtlasStream(module, *stream, order, before, insertDelays);
 }
 
 struct ScheduleAtlasStreamPass
     : PassWrapper<ScheduleAtlasStreamPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ScheduleAtlasStreamPass)
+  ScheduleAtlasStreamPass() = default;
+  ScheduleAtlasStreamPass(const ScheduleAtlasStreamPass &other) : PassWrapper(other) {}
+  Option<bool> insertDelays{*this, "insert-delays",
+                           llvm::cl::desc("Insert timing delays after reordering"),
+                           llvm::cl::init(true)};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
@@ -256,7 +296,7 @@ struct ScheduleAtlasStreamPass
   }
 
   void runOnOperation() override {
-    if (failed(scheduleStream(getOperation())))
+    if (failed(scheduleStream(getOperation(), insertDelays)))
       signalPassFailure();
   }
 };

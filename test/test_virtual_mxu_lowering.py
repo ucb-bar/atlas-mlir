@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import unittest
 
-from test_virtual_lowering import BIN, emitted, lower, object_words, run
+from test_virtual_lowering import BIN, emitted, lower, object_words, run, shorten_delay
 from test_virtual_mxu_handles import (
     EXAMPLE, STATE, FP8, BF16, acc, load, reset, accumulate, readout,
 )
@@ -45,8 +45,8 @@ def continuation(unit: int, *, reload_weight: bool = False) -> str:
     return source(*body)
 
 
-def instructions(machine: str) -> list[dict]:
-    exported = run("atlas-emit", machine, "--program-json")
+def instructions(machine: str, *, allow_untimed: bool = False) -> list[dict]:
+    exported = run("atlas-emit", machine, "--program-json", *(("--allow-untimed",) if allow_untimed else ()))
     if exported.returncode:
         raise AssertionError(exported.stderr)
     return json.loads(exported.stdout)["instructions"]
@@ -58,11 +58,14 @@ class VirtualMXULoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
     def checked(self, virtual: str) -> tuple[str, list[dict]]:
+        untimed = lower(virtual, timed=False)
+        self.assertIn('atlas.timing_state = "untimed"', untimed)
+        self.assertNotIn('"atlas.delay"', untimed)
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
         self.assertNotIn('"atlas.virtual_', machine)
         for option in ("--verify-atlas-machine-stream",
-                       "--verify-atlas-generated-schedule"):
+                       "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
         entries = instructions(machine)
@@ -77,24 +80,17 @@ class VirtualMXULoweringTest(unittest.TestCase):
             if operation == "atlas.mxu_matmul":
                 self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
                 self.assertLess(fields["src"], 32)
-                reason = "mxu_matmul_completion"
             else:
                 self.assertEqual(fields["slot"], 0)
                 if operation == "atlas.mxu_push":
                     self.assertEqual(fields["kind"], "weight_fp8")
                     self.assertLess(fields["src"], 32)
-                    reason = "mxu_weight_completion"
                 else:
                     self.assertEqual(operation, "atlas.mxu_pop")
                     self.assertEqual(fields["format"], "bf16")
                     self.assertGreaterEqual(fields["dst"], 32)
                     self.assertEqual(fields["dst"] % 2, 0)
                     self.assertEqual(fields["scale_reg"], 0)
-                    reason = "mxu_readout_completion"
-            following = entries[index + 1]
-            self.assertEqual(following["operation"], "atlas.delay")
-            self.assertEqual(following["fields"]["cycles"], 256)
-            self.assertEqual(following["fields"]["atlas.delay_reason"], reason)
         return machine, entries
 
     def test_reset_only_matches_legacy_matmul_words_on_both_units(self) -> None:
@@ -257,20 +253,15 @@ class VirtualMXULoweringTest(unittest.TestCase):
 
     def test_generated_mxu_waits_are_enforced(self) -> None:
         machine, _ = self.checked(continuation(0, reload_weight=True))
-        for reason in ("mxu_weight_completion", "mxu_matmul_completion",
-                       "mxu_readout_completion"):
-            lines = machine.splitlines()
-            index = next(i for i, line in enumerate(lines)
-                         if f'atlas.delay_reason = "{reason}"' in line)
-            self.assertIn("cycles = 256 : i32", lines[index])
-            lines[index] = lines[index].replace("cycles = 256 : i32", "cycles = 1 : i32")
-            changed = "\n".join(lines)
+        for producer in ("atlas.mxu_matmul", "atlas.mxu_pop"):
+            changed = shorten_delay(machine, after=producer)
+            self.assertNotEqual(changed, machine)
             for tool, options in (("atlas-emit", ()),
-                                  ("atlas-opt", ("--verify-atlas-generated-schedule",))):
-                with self.subTest(reason=reason, tool=tool):
+                                  ("atlas-opt", ("--verify-atlas-timing",))):
+                with self.subTest(producer=producer, tool=tool):
                     result = run(tool, changed, *options)
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("DELAY >= 256", result.stderr)
+                    self.assertIn("insufficient issue spacing", result.stderr)
 
     def test_structured_llvm_handoff_preserves_continuation_flags_and_words(self) -> None:
         for unit in (0, 1):

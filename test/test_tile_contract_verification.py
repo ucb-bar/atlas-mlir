@@ -83,7 +83,7 @@ def materialize(reg: int, value: int) -> list[tuple[str, str]]:
 def artifact(facts: list[dict], operations: list[tuple[str, str]]) -> str:
     lines = [f'%s0 = "atlas.start"() : () -> {STATE}']
     lines += [f'%s{i + 1} = "atlas.{name}"(%s{i}) {{{fields}}} : ({STATE}) -> {STATE}'
-              for i, (name, fields) in enumerate([*operations, ("trap", 'kind = "ecall"')])]
+              for i, (name, fields) in enumerate([*operations, NOP, ("trap", 'kind = "ecall"')])]
     dma = []
     for fact in facts:
         if fact["kind"] not in ("dma_load", "dma_store") or fact["transfer"] < 0:
@@ -91,7 +91,7 @@ def artifact(facts: list[dict], operations: list[tuple[str, str]]) -> str:
         dma.append("{" + f'id = {fact["transfer"]} : i32, direction = "{fact["kind"][4:]}", channel = {fact["channel"]} : i32, '
                    f'staging_word = {fact["vmem_byte"] // 4} : i32, dram_byte = {fact["dram_byte"]} : i32, '
                    f'size_bytes = {fact["bytes"]} : i32, staging_reg = 4 : i32, dram_reg = 7 : i32, size_reg = 2 : i32' + "}")
-    return (f"module attributes {{{VERSION}, atlas.virtual_dma_contract = [{', '.join(dma)}], atlas.virtual_mxu_contract = [], "
+    return (f'module attributes {{{VERSION}, atlas.timing_state = "timed", atlas.timing_provider = "npu-model-rtl-match-v1", atlas.virtual_dma_contract = [{", ".join(dma)}], atlas.virtual_mxu_contract = [], '
             f"{CONTRACT} = {record_text(facts)}}} {{\n" + "\n".join(lines) + "\n}")
 
 
@@ -274,7 +274,7 @@ class TileContractVerificationTest(unittest.TestCase):
         self.rejected(artifact(facts, changed))
         reused = [*operations[:8], ("alu_imm", 'kind = "addi", dst = 7 : i32, src = 0 : i32, immediate = 1 : i32'),
                   ("alu_imm", 'kind = "addi", dst = 2 : i32, src = 0 : i32, immediate = 1 : i32'), *operations[8:]]
-        self.rejected(artifact(facts, reused), "generated DMA requires immediate same-channel DMA.WAIT")
+        self.accepted(artifact(facts, reused))
         reused_after_wait = [*operations[:9], *reused[8:10], *operations[9:]]
         self.accepted(artifact(facts, reused_after_wait))
 
