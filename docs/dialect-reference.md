@@ -216,8 +216,11 @@ artifacts require DMA, MXU and tile contract arrays, including empty arrays.
 `atlas.virtual_mxu_command` identities retain expected operands, formats, slots
 and logical weight/accumulator versions, including legacy matmul expansion.
 Emission and both LLVM paths check every MXU command against these expectations
-and recompute scale-register contents at FP8 readout. Independent chains may
-reorder; conflicting ownership or stale versions fail. SELD writes to registers
+and recompute scale-register contents at FP8 readout. Physical owners follow
+reachable emitted CFG paths across source blocks. Joins retain possible live
+versions, repeated consumers require fresh producers, and every exit must
+release live accumulators. Independent chains may reorder; skipped producers,
+conflicting ownership and stale versions fail. SELD writes to registers
 used by FP8 readouts remain unsupported without a completion proof; current
 lowering uses SELI. These checks do not prove tensor contents, source-to-machine
 CFG paths, or physical completion.

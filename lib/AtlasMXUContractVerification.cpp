@@ -3,7 +3,9 @@
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include <array>
+#include <deque>
 #include <optional>
 #include <utility>
 
@@ -166,6 +168,134 @@ LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records,
       for (int32_t owner : unit)
         if (owner != -1)
           return module.emitOpError("MXU contract accumulator remains live at source-block exit");
+  return success();
+}
+
+// The emitted stream has one physical state, irrespective of source-block ids.
+// Unknown owners retain possible liveness. Freshness intersects incoming paths,
+// while pending consumers unite them so skipped uses cannot hide live weights.
+struct PathOwnership {
+  Owners weights = emptyOwners(), accumulators = emptyOwners();
+  SmallVector<bool> fresh, pending;
+
+  explicit PathOwnership(size_t records) : fresh(records, false), pending(records, false) {}
+};
+
+bool mergeOwnership(PathOwnership &into, const PathOwnership &from) {
+  bool changed = false;
+  auto mergeOwners = [&](Owners &owners, const Owners &incoming) {
+    for (unsigned unit = 0; unit < 2; ++unit)
+      for (unsigned slot = 0; slot < 2; ++slot)
+        if (owners[unit][slot] != -2 && owners[unit][slot] != incoming[unit][slot]) {
+          owners[unit][slot] = -2;
+          changed = true;
+        }
+  };
+  mergeOwners(into.weights, from.weights);
+  mergeOwners(into.accumulators, from.accumulators);
+  for (size_t i = 0; i < into.fresh.size(); ++i) {
+    if (into.fresh[i] && !from.fresh[i]) {
+      into.fresh[i] = false;
+      changed = true;
+    }
+    if (!into.pending[i] && from.pending[i]) {
+      into.pending[i] = true;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
+                                 const AtlasStream &stream,
+                                 const llvm::DenseMap<Operation *, int32_t> &tagged) {
+  if (stream.starts.empty())
+    return success();
+  SmallVector<SmallVector<int32_t>> consumers(records.size());
+  for (const Record &r : records)
+    if (isMatmul(r))
+      consumers[r.weight].push_back(r.id);
+  auto transfer = [&](size_t block, PathOwnership &state, bool diagnose) -> LogicalResult {
+    for (size_t i = stream.starts[block]; i < stream.blockEnd(block); ++i) {
+      auto found = tagged.find(stream.ops[i]);
+      if (found == tagged.end())
+        continue;
+      const Record &r = records[found->second];
+      int32_t &weight = state.weights[r.unit][isMatmul(r) ? r.weightSlot : r.slot];
+      int32_t &acc = state.accumulators[r.unit][r.slot];
+      auto error = [&](StringRef message) -> LogicalResult {
+        return stream.ops[i]->emitOpError("MXU contract emitted path ") << message << " at command " << r.id;
+      };
+      if (isWeight(r)) {
+        if (diagnose && weight != -1)
+          return error("overwrites a logically live weight slot");
+        weight = consumers[r.id].empty() ? -1 : r.id;
+        // A repeated consumer needs a producer execution since its prior use;
+        // distinct consumers may share one producer within the same iteration.
+        for (int32_t consumer : consumers[r.id]) {
+          state.fresh[consumer] = true;
+          state.pending[consumer] = true;
+        }
+      } else if (isSeed(r)) {
+        if (diagnose && acc != -1)
+          return error("overwrites a logically live accumulator slot");
+        acc = r.id;
+      } else if (isMatmul(r)) {
+        if (diagnose && (weight != r.weight || !state.fresh[r.id]))
+          return error("requires a fresh current weight owner on every incoming path");
+        if (diagnose && (r.kind == "reset" ? acc != -1 : acc != r.previous))
+          return error("requires the current accumulator version or a free reset slot on every incoming path");
+        state.fresh[r.id] = state.pending[r.id] = false;
+        if (llvm::none_of(consumers[r.weight], [&](int32_t id) { return state.pending[id]; }))
+          weight = -1;
+        acc = r.id;
+      } else {
+        if (diagnose && acc != r.previous)
+          return error("readout requires the current accumulator version on every incoming path");
+        acc = -1;
+      }
+    }
+    return success();
+  };
+  std::vector<PathOwnership> entries(stream.starts.size(), PathOwnership(records.size()));
+  std::vector<bool> reached(stream.starts.size(), false);
+  std::deque<size_t> work = {0};
+  reached[0] = true;
+  // Entry owners only become unknown; must-fresh bits only become false and
+  // may-pending bits only become true. Producer writes make loop transfer finite.
+  while (!work.empty()) {
+    size_t block = work.front();
+    work.pop_front();
+    PathOwnership state = entries[block];
+    (void)transfer(block, state, false);
+    for (size_t next : stream.succs[block]) {
+      if (!reached[next]) {
+        entries[next] = state;
+        reached[next] = true;
+        work.push_back(next);
+      } else if (mergeOwnership(entries[next], state)) {
+        work.push_back(next);
+      }
+    }
+  }
+  for (size_t block = 0; block < stream.starts.size(); ++block) {
+    if (!reached[block])
+      continue;
+    PathOwnership state = entries[block];
+    if (failed(transfer(block, state, true)))
+      return failure();
+    bool exits = stream.succs[block].empty();
+    if (stream.endsInBranch(block)) {
+      Operation *redirect = stream.ops[stream.blockEnd(block) - 2];
+      exits |= !stream.targetOf.lookup(redirect);
+      exits |= isa<BranchOp>(redirect) && stream.blockEnd(block) == stream.ops.size();
+    }
+    if (exits)
+      for (const auto &unit : state.accumulators)
+        for (int32_t owner : unit)
+          if (owner != -1)
+            return module.emitOpError("MXU contract accumulator remains live at emitted path exit");
+  }
   return success();
 }
 
@@ -343,7 +473,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
   }
   if (failed(checkReferences(module, records)))
     return failure();
-  SmallVector<int32_t> sourceOrder, issuedOrder;
+  SmallVector<int32_t> sourceOrder;
   for (const Record &r : records)
     sourceOrder.push_back(r.id);
   if (failed(checkOwnership(module, records, sourceOrder)))
@@ -366,16 +496,15 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
     if (failed(matchCommand(op, records[value])))
       return failure();
     tagged[&op] = value;
-    issuedOrder.push_back(value);
   }
   if (seen.size() != records.size())
     return module.emitOpError("MXU contract requires exactly one issued command for every source record");
-  if (failed(checkOwnership(module, records, issuedOrder)))
-    return failure();
   if (tagged.empty())
     return success();
   auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
   if (failed(stream))
+    return failure();
+  if (failed(checkPathOwnership(module, records, *stream, tagged)))
     return failure();
   llvm::DenseSet<int32_t> readoutScaleRegs;
   for (const Record &r : records)
