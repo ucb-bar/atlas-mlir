@@ -1,21 +1,18 @@
 #include "Atlas/AtlasMXUAllocationVerification.h"
+#include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/raw_ostream.h"
-#include <array>
 #include <string>
 
 using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// WeightBuffers.scala and AccumulationBuffers.scala define two separate slots
-// in each bank of each MXU. This is geometry, not a physical release rule.
-constexpr unsigned kUnits = 2;
-constexpr unsigned kSlots = 2;
-using Owners = std::array<std::array<Value, kSlots>, kUnits>;
+constexpr unsigned kUnits = MXUOwnership::kUnits, kSlots = MXUOwnership::kSlots;
+constexpr int32_t kFree = MXUOwnership::kFree;
 
 bool isWeight(Value value) {
   return isa<VirtualMXUWeightType>(value.getType());
@@ -99,98 +96,88 @@ private:
     return failure();
   }
 
-  LogicalResult ownershipError(Operation &op, Value handle, Value owner,
+  LogicalResult ownershipError(Operation &op, Value handle, int32_t owner,
                                StringRef message) {
     auto diagnostic = op.emitOpError(message);
     noteHandle(diagnostic, handle, "used or produced handle");
-    if (owner)
-      noteHandle(diagnostic, owner, "current owner");
+    if (owner != kFree)
+      noteHandle(diagnostic, values[owner], "current owner");
     return failure();
   }
 
-  LogicalResult claim(Operation &op, Value handle, Owners &owners) {
-    MXUPlacement placement = placements.lookup(handle);
-    Value &owner = owners[placement.unit][placement.slot];
-    if (owner)
-      return ownershipError(op, handle, owner, "MXU placement overwrites a logically live slot");
-    owner = handle;
+  LogicalResult ownerError(Operation &op, int32_t owner, StringRef message) {
+    auto diagnostic = op.emitOpError(message);
+    noteHandle(diagnostic, values[owner], "current owner");
+    return failure();
+  }
+
+  // Owner ids are assigned on first use so no two values ever share one.
+  int32_t id(Value value) {
+    auto [found, inserted] = ids.try_emplace(value, values.size());
+    if (inserted)
+      values.push_back(value);
+    return found->second;
+  }
+
+  LogicalResult useWeight(Operation &op, Value weight) {
+    MXUPlacement at = placements.lookup(weight);
+    unsigned &remaining = remainingUses[weight];
+    if (auto violation = owners.useWeight(at.unit, at.slot, id(weight), remaining == 1))
+      return ownershipError(op, weight, *violation, "MXU weight use requires its current block-local slot owner");
+    --remaining;
     return success();
   }
 
-  LogicalResult useWeight(Operation &op, Value handle, Owners &weights) {
-    MXUPlacement placement = placements.lookup(handle);
-    Value &owner = weights[placement.unit][placement.slot];
-    if (owner != handle || remainingUses.lookup(handle) == 0)
-      return ownershipError(op, handle, owner, "MXU weight use requires its current block-local slot owner");
-    if (--remainingUses[handle] == 0)
-      owner = Value{};
+  LogicalResult startAccumulator(Operation &op, Value acc) {
+    MXUPlacement at = placements.lookup(acc);
+    if (auto violation = owners.startAccumulator(at.unit, at.slot, id(acc)))
+      return ownershipError(op, acc, *violation, "MXU placement overwrites a logically live slot");
     return success();
   }
 
   LogicalResult verifyBlock(Block &block) {
-    Owners weights{}, accumulators{};
+    owners = MXUOwnership{};
     for (Operation &op : block) {
       for (Value operand : op.getOperands())
         if ((isWeight(operand) || isAccumulator(operand)) && operand.getParentBlock() != &block)
           return op.emitOpError("MXU handles cannot cross CFG blocks");
       if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
         Value weight = load.getWeight();
-        if (failed(claim(op, weight, weights)))
-          return failure();
-        // A dead load still writes its claimed slot before becoming dead.
-        if (remainingUses.lookup(weight) == 0) {
-          MXUPlacement placement = placements.lookup(weight);
-          weights[placement.unit][placement.slot] = Value{};
-        }
+        MXUPlacement at = placements.lookup(weight);
+        if (auto violation = owners.pushWeight(at.unit, at.slot, id(weight), remainingUses.lookup(weight) != 0))
+          return ownershipError(op, weight, *violation, "MXU placement overwrites a logically live slot");
       } else if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
-        if (failed(claim(op, op.getResult(1), accumulators)))
+        if (failed(startAccumulator(op, op.getResult(1))))
           return failure();
       } else if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
-        if (failed(useWeight(op, reset.getWeight(), weights)) ||
-            failed(claim(op, reset.getAcc(), accumulators)))
+        if (failed(useWeight(op, reset.getWeight())) || failed(startAccumulator(op, reset.getAcc())))
           return failure();
       } else if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
         Value previous = accumulate.getAcc(), next = accumulate.getNextAcc();
-        MXUPlacement oldPlacement = placements.lookup(previous);
-        MXUPlacement newPlacement = placements.lookup(next);
-        Value &owner = accumulators[oldPlacement.unit][oldPlacement.slot];
-        if (owner != previous)
-          return ownershipError(op, previous, owner, "MXU accumulation requires the current accumulator version");
-        if (oldPlacement.unit != newPlacement.unit || oldPlacement.slot != newPlacement.slot)
-          return ownershipError(op, next, previous, "MXU accumulator continuation must retain its unit and slot");
-        if (failed(useWeight(op, accumulate.getWeight(), weights)))
+        MXUPlacement at = placements.lookup(previous), to = placements.lookup(next);
+        if (auto violation = owners.continueAccumulator(at.unit, at.slot, id(previous), id(next)))
+          return ownershipError(op, previous, *violation, "MXU accumulation requires the current accumulator version");
+        if (at.unit != to.unit || at.slot != to.slot)
+          return ownershipError(op, next, id(previous), "MXU accumulator continuation must retain its unit and slot");
+        if (failed(useWeight(op, accumulate.getWeight())))
           return failure();
-        owner = next;
       } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
         Value acc = op.getOperand(1);
-        MXUPlacement placement = placements.lookup(acc);
-        Value &owner = accumulators[placement.unit][placement.slot];
-        if (owner != acc)
-          return ownershipError(op, acc, owner, "MXU readout requires the current accumulator version");
-        owner = Value{};
+        MXUPlacement at = placements.lookup(acc);
+        if (auto violation = owners.readoutAccumulator(at.unit, at.slot, id(acc)))
+          return ownershipError(op, acc, *violation, "MXU readout requires the current accumulator version");
       } else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
         unsigned unit = matmul.getUnit();
         if (unit >= kUnits || fixed.mxuWeightSlot >= kSlots || fixed.mxuAccSlot >= kSlots)
           return op.emitOpError("legacy MXU fixed unit/slots are outside [0, 1]");
-        if (Value owner = weights[unit][fixed.mxuWeightSlot]) {
-          auto diagnostic = op.emitOpError("legacy MXU matmul overwrites a logically live weight slot");
-          noteHandle(diagnostic, owner, "current owner");
-          return failure();
-        }
-        if (Value owner = accumulators[unit][fixed.mxuAccSlot]) {
-          auto diagnostic = op.emitOpError("legacy MXU matmul overwrites a logically live accumulator slot");
-          noteHandle(diagnostic, owner, "current owner");
-          return failure();
-        }
+        if (auto violation = owners.legacyMatmul(unit, fixed.mxuWeightSlot, fixed.mxuAccSlot))
+          return ownerError(op, *violation, isWeight(values[*violation])
+                                                ? "legacy MXU matmul overwrites a logically live weight slot"
+                                                : "legacy MXU matmul overwrites a logically live accumulator slot");
       }
     }
-    for (const auto &unit : accumulators)
-      for (Value owner : unit)
-        if (owner) {
-          auto diagnostic = block.getTerminator()->emitOpError("MXU accumulator ownership remains live at block exit");
-          noteHandle(diagnostic, owner, "current owner");
-          return failure();
-        }
+    if (auto violation = owners.blockExit())
+      return ownerError(*block.getTerminator(), *violation, "MXU accumulator ownership remains live at block exit");
     return success();
   }
 
@@ -201,6 +188,9 @@ private:
   SmallVector<Value> handles;
   llvm::DenseMap<Value, MXUPlacement> placements;
   llvm::DenseMap<Value, unsigned> remainingUses;
+  llvm::DenseMap<Value, int32_t> ids;
+  SmallVector<Value> values;
+  MXUOwnership owners;
   AsmState assemblyState;
 };
 } // namespace

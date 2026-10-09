@@ -18,10 +18,11 @@ FailureOr<ArrayAttr> buildAtlasMXUContract(
 // Checks exact command fields, logical versions and SELI-defined FP8 scales.
 // SELD writes to an FP8 readout's scale register require separate completion
 // evidence and are unsupported, even when later SELI instructions restore it.
-// Source ownership is checked independently. Emitted physical versions and
-// fresh producers are required on every reachable CFG path, including loops.
-// Source/emitted CFG correspondence, tensor contents and physical engine
-// completion remain separate obligations.
+// Source-order record ownership and emitted physical versions apply the shared
+// MXUOwnership transitions to use counts and issued commands derived here,
+// never to allocator decisions. Fresh producers are required on every
+// reachable CFG path, including loops. Source/emitted CFG correspondence,
+// tensor contents and physical engine completion remain separate obligations.
 // Legacy unit/dma-contract-v1 artifacts must carry no MXU contract or tags.
 LogicalResult verifyAtlasGeneratedMXUContract(ModuleOp module);
 

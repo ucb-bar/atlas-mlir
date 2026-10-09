@@ -139,7 +139,7 @@ and reuse after the last read. PACK's uncertain helper effects lose constant
 proofs. Other fixed helpers, general buffer preservation, emitted helper effects,
 and post-await VLOAD completion remain separate obligations.
 
-The independent [MXU placement checker](../include/Atlas/AtlasMXUAllocationVerification.h) checks complete assignments, both units' separate weight/accumulator banks, source-derived weight uses, live-slot overwrite, and in-place accumulator continuation. Readout consumes its version; legacy matmul checks its actual fixed slots. [Direct tests](../test/mxu-allocation-verification.cpp) inject wrong placements and allow alternative legal ones. These placement APIs are independent of admission capacity policy; the lowering pipeline still runs admission/state-flow checks first. Last source use or readout releases logical ownership, without proving hardware completion.
+The independent [MXU placement checker](../include/Atlas/AtlasMXUAllocationVerification.h) checks complete assignments, both units' separate weight/accumulator banks, source-derived weight uses, live-slot overwrite, and in-place accumulator continuation. Readout consumes its version; legacy matmul checks its actual fixed slots. The slot invariants and transitions are the shared [`MXUOwnership`](../include/Atlas/AtlasMXUOwnership.h) model, which the generated MXU checker also applies to its own record and emitted-path facts. [Direct tests](../test/mxu-allocation-verification.cpp) inject wrong placements and allow alternative legal ones. These placement APIs are independent of admission capacity policy; the lowering pipeline still runs admission/state-flow checks first. Last source use or readout releases logical ownership, without proving hardware completion.
 
 ### Channel-free virtual DMA and scalar SSA
 
@@ -217,9 +217,10 @@ artifacts require DMA, MXU and tile contract arrays, including empty arrays.
 and logical weight/accumulator versions, including legacy matmul expansion.
 Emission and both LLVM paths check every MXU command against these expectations
 and recompute scale-register contents at FP8 readout. Physical owners follow
-reachable emitted CFG paths across source blocks. Joins retain possible live
-versions, repeated consumers require fresh producers, and every exit must
-release live accumulators. Independent chains may reorder; skipped producers,
+reachable emitted CFG paths across source blocks through the shared
+`MXUOwnership` transitions, applied to issued commands rather than allocator
+decisions. Joins retain possible live versions, repeated consumers require
+fresh producers, and every exit must release live accumulators. Independent chains may reorder; skipped producers,
 conflicting ownership and stale versions fail. SELD writes to registers
 used by FP8 readouts remain unsupported without a completion proof; current
 lowering uses SELI. These checks do not prove tensor contents, source-to-machine

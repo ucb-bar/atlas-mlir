@@ -1,10 +1,10 @@
 #include "Atlas/AtlasMXUContractVerification.h"
+#include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include <array>
 #include <deque>
 #include <optional>
 #include <utility>
@@ -119,11 +119,15 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
   return success();
 }
 
-using Owners = std::array<std::array<int32_t, 2>, 2>;
-Owners emptyOwners() { return {{{-1, -1}, {-1, -1}}}; }
+// Seeds and resets start a version chain; an accumulate continues its previous.
+MXUOwnershipViolation writeAccumulator(MXUOwnership &owners, const Record &r) {
+  if (r.kind == "accumulate")
+    return owners.continueAccumulator(r.unit, r.slot, r.previous, r.id);
+  return owners.startAccumulator(r.unit, r.slot, r.id);
+}
 
 struct BlockOwnership {
-  Owners weights = emptyOwners(), accumulators = emptyOwners();
+  MXUOwnership owners;
   llvm::DenseMap<int32_t, unsigned> remaining;
 };
 
@@ -136,38 +140,31 @@ LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records,
   for (int32_t id : order) {
     const Record &r = records[id];
     BlockOwnership &block = blocks[r.block];
-    int32_t &weightOwner = block.weights[r.unit][isMatmul(r) ? r.weightSlot : r.slot];
-    int32_t &accOwner = block.accumulators[r.unit][r.slot];
+    MXUOwnership &owners = block.owners;
     auto error = [&](StringRef message) -> LogicalResult {
       return module.emitOpError("MXU contract ") << message << " at command " << r.id;
     };
     if (isWeight(r)) {
-      if (weightOwner != -1)
+      if (owners.pushWeight(r.unit, r.slot, r.id, block.remaining.lookup(r.id) != 0))
         return error("overwrites a logically live weight slot");
-      weightOwner = block.remaining.lookup(r.id) ? r.id : -1;
     } else if (isSeed(r)) {
-      if (accOwner != -1)
+      if (writeAccumulator(owners, r))
         return error("overwrites a logically live accumulator slot");
-      accOwner = r.id;
     } else if (isMatmul(r)) {
-      if (weightOwner != r.weight || !block.remaining.lookup(r.weight))
+      unsigned &remaining = block.remaining[r.weight];
+      if (owners.useWeight(r.unit, r.weightSlot, r.weight, remaining == 1))
         return error("requires the current weight owner");
-      if (r.kind == "reset" ? accOwner != -1 : accOwner != r.previous)
+      --remaining;
+      if (writeAccumulator(owners, r))
         return error("requires the current accumulator version or a free reset slot");
-      if (--block.remaining[r.weight] == 0)
-        weightOwner = -1;
-      accOwner = r.id;
     } else {
-      if (accOwner != r.previous)
+      if (owners.readoutAccumulator(r.unit, r.slot, r.previous))
         return error("readout requires the current accumulator version");
-      accOwner = -1;
     }
   }
   for (const auto &entry : blocks)
-    for (const auto &unit : entry.second.accumulators)
-      for (int32_t owner : unit)
-        if (owner != -1)
-          return module.emitOpError("MXU contract accumulator remains live at source-block exit");
+    if (entry.second.owners.blockExit())
+      return module.emitOpError("MXU contract accumulator remains live at source-block exit");
   return success();
 }
 
@@ -175,7 +172,7 @@ LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records,
 // Unknown owners retain possible liveness. Freshness intersects incoming paths,
 // while pending consumers unite them so skipped uses cannot hide live weights.
 struct PathOwnership {
-  Owners weights = emptyOwners(), accumulators = emptyOwners();
+  MXUOwnership owners;
   SmallVector<bool> fresh, pending;
 
   explicit PathOwnership(size_t records) : fresh(records, false), pending(records, false) {}
@@ -183,16 +180,16 @@ struct PathOwnership {
 
 bool mergeOwnership(PathOwnership &into, const PathOwnership &from) {
   bool changed = false;
-  auto mergeOwners = [&](Owners &owners, const Owners &incoming) {
-    for (unsigned unit = 0; unit < 2; ++unit)
-      for (unsigned slot = 0; slot < 2; ++slot)
-        if (owners[unit][slot] != -2 && owners[unit][slot] != incoming[unit][slot]) {
-          owners[unit][slot] = -2;
+  auto mergeOwners = [&](MXUOwnership::Owners &owners, const MXUOwnership::Owners &incoming) {
+    for (unsigned unit = 0; unit < MXUOwnership::kUnits; ++unit)
+      for (unsigned slot = 0; slot < MXUOwnership::kSlots; ++slot)
+        if (owners[unit][slot] != MXUOwnership::kUnknown && owners[unit][slot] != incoming[unit][slot]) {
+          owners[unit][slot] = MXUOwnership::kUnknown;
           changed = true;
         }
   };
-  mergeOwners(into.weights, from.weights);
-  mergeOwners(into.accumulators, from.accumulators);
+  mergeOwners(into.owners.weights, from.owners.weights);
+  mergeOwners(into.owners.accumulators, from.owners.accumulators);
   for (size_t i = 0; i < into.fresh.size(); ++i) {
     if (into.fresh[i] && !from.fresh[i]) {
       into.fresh[i] = false;
@@ -221,15 +218,13 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
       if (found == tagged.end())
         continue;
       const Record &r = records[found->second];
-      int32_t &weight = state.weights[r.unit][isMatmul(r) ? r.weightSlot : r.slot];
-      int32_t &acc = state.accumulators[r.unit][r.slot];
+      MXUOwnership &owners = state.owners;
       auto error = [&](StringRef message) -> LogicalResult {
         return stream.ops[i]->emitOpError("MXU contract emitted path ") << message << " at command " << r.id;
       };
       if (isWeight(r)) {
-        if (diagnose && weight != -1)
+        if (owners.pushWeight(r.unit, r.slot, r.id, !consumers[r.id].empty()) && diagnose)
           return error("overwrites a logically live weight slot");
-        weight = consumers[r.id].empty() ? -1 : r.id;
         // A repeated consumer needs a producer execution since its prior use;
         // distinct consumers may share one producer within the same iteration.
         for (int32_t consumer : consumers[r.id]) {
@@ -237,22 +232,19 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
           state.pending[consumer] = true;
         }
       } else if (isSeed(r)) {
-        if (diagnose && acc != -1)
+        if (writeAccumulator(owners, r) && diagnose)
           return error("overwrites a logically live accumulator slot");
-        acc = r.id;
       } else if (isMatmul(r)) {
-        if (diagnose && (weight != r.weight || !state.fresh[r.id]))
-          return error("requires a fresh current weight owner on every incoming path");
-        if (diagnose && (r.kind == "reset" ? acc != -1 : acc != r.previous))
-          return error("requires the current accumulator version or a free reset slot on every incoming path");
+        bool fresh = state.fresh[r.id];
         state.fresh[r.id] = state.pending[r.id] = false;
-        if (llvm::none_of(consumers[r.weight], [&](int32_t id) { return state.pending[id]; }))
-          weight = -1;
-        acc = r.id;
+        bool lastUse = llvm::none_of(consumers[r.weight], [&](int32_t id) { return state.pending[id]; });
+        if ((owners.useWeight(r.unit, r.weightSlot, r.weight, lastUse) || !fresh) && diagnose)
+          return error("requires a fresh current weight owner on every incoming path");
+        if (writeAccumulator(owners, r) && diagnose)
+          return error("requires the current accumulator version or a free reset slot on every incoming path");
       } else {
-        if (diagnose && acc != r.previous)
+        if (owners.readoutAccumulator(r.unit, r.slot, r.previous) && diagnose)
           return error("readout requires the current accumulator version on every incoming path");
-        acc = -1;
       }
     }
     return success();
@@ -290,11 +282,8 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
       exits |= !stream.targetOf.lookup(redirect);
       exits |= isa<BranchOp>(redirect) && stream.blockEnd(block) == stream.ops.size();
     }
-    if (exits)
-      for (const auto &unit : state.accumulators)
-        for (int32_t owner : unit)
-          if (owner != -1)
-            return module.emitOpError("MXU contract accumulator remains live at emitted path exit");
+    if (exits && state.owners.blockExit())
+      return module.emitOpError("MXU contract accumulator remains live at emitted path exit");
   }
   return success();
 }
