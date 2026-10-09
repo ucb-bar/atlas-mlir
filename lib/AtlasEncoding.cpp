@@ -248,8 +248,9 @@ LogicalResult mlir::atlas::collectAtlasWords(
   if (failed(verify(module))) return failure();
   if (!skipGeneratedCheck &&
       (module->hasAttr("atlas.generated_from_virtual") || module->hasAttr("atlas.virtual_dma_contract") ||
-       module->hasAttr("atlas.virtual_mxu_contract") || llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
-         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer");
+       module->hasAttr("atlas.virtual_mxu_contract") || module->hasAttr("atlas.virtual_tile_contract") ||
+       llvm::any_of(module.getBody()->getOperations(), [](Operation &op) {
+         return op.hasAttr("atlas.virtual_mxu_command") || op.hasAttr("atlas.virtual_dma_transfer") || op.hasAttr("atlas.virtual_tile_command");
        })) &&
       failed(verifyAtlasGeneratedSchedule(module)))
     return failure();

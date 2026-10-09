@@ -326,11 +326,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
         return op.emitOpError("legacy generated marker cannot carry MXU command tags");
     return success();
   }
-  if (!version || version.getValue() != "resource-contract-v1")
-    return module.emitOpError("expected resource-contract-v1 or a legacy generated marker");
+  if (!version || (version.getValue() != "resource-contract-v1" && version.getValue() != "resource-contract-v2"))
+    return module.emitOpError("expected resource-contract-v1/v2 or a legacy generated marker");
   auto array = dyn_cast_or_null<ArrayAttr>(contract);
   if (!array || !isa_and_nonnull<ArrayAttr>(module->getAttr("atlas.virtual_dma_contract")))
-    return module.emitOpError("resource-contract-v1 requires DMA and MXU contract arrays");
+    return module.emitOpError("generated resource contract requires DMA and MXU contract arrays");
   SmallVector<Record> records;
   for (Attribute attr : array) {
     auto record = parseRecord(module, attr);

@@ -1,6 +1,7 @@
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
+#include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
@@ -96,7 +97,8 @@ public:
     }
     auto dmaContract = buildAtlasDMAContract(function, dmaAssignments);
     auto mxuContract = buildAtlasMXUContract(function, registers, mxuAssignments, fixed());
-    if (failed(dmaContract) || failed(mxuContract))
+    auto tileContract = buildAtlasTileContract(function, registers, dmaAssignments, fixed(), allocation.scalarArguments());
+    if (failed(dmaContract) || failed(mxuContract) || failed(tileContract))
       return failure();
     OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
     (*emitted)->setAttrs(module->getAttrs());
@@ -112,9 +114,10 @@ public:
       machineState.addAttributes(step.attrs);
       state = builder.create(machineState)->getResult(0);
     }
-    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v1"));
+    (*emitted)->setAttr("atlas.generated_from_virtual", builder.getStringAttr("resource-contract-v2"));
     (*emitted)->setAttr("atlas.virtual_dma_contract", *dmaContract);
     (*emitted)->setAttr("atlas.virtual_mxu_contract", *mxuContract);
+    (*emitted)->setAttr("atlas.virtual_tile_contract", *tileContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
@@ -143,6 +146,12 @@ private:
     if (name == "atlas.mxu_push" || name == "atlas.mxu_matmul" || name == "atlas.mxu_pop")
       step.attrs.emplace_back(StringAttr::get(module.getContext(), "atlas.virtual_mxu_command"), i32(nextMXUCommand++));
     planned.push_back(std::move(step));
+    if (name == "atlas.vload" || name == "atlas.vstore" || name == "atlas.dma" || name == "atlas.dma_wait")
+      tagTileCommand();
+  }
+
+  void tagTileCommand() {
+    planned.back().attrs.emplace_back(attrs.getStringAttr("atlas.virtual_tile_command"), i32(nextTileCommand++));
   }
 
   unsigned newLabel() { return nextLabel++; }
@@ -300,6 +309,7 @@ private:
       add("atlas.scalar_load", loc,
           {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
            {"offset", i32(4 * (fixed().mailboxWord + index))}});
+      tagTileCommand();
       add("atlas.delay", loc,
           {{"cycles", i32(8)},
            {"atlas.delay_reason", str("scalar_load_completion")}});
@@ -814,6 +824,7 @@ private:
   std::vector<PlannedOp> planned;
   unsigned nextLabel = 0;
   unsigned nextMXUCommand = 0;
+  unsigned nextTileCommand = 0;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
 };

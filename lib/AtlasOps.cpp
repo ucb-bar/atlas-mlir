@@ -282,7 +282,7 @@ LogicalResult VLoadOp::verify() {
   if (failed(matrixReg(*this, "dst", getDst())) ||
       failed(scalarReg(*this, "base", getBase())))
     return failure();
-  return inRange(*this, "offset (32-byte units)",
+  return inRange(*this, "offset (32-word units)",
                  getOffsetAttr().getValue().getSExtValue(), -2048, 2047);
 }
 
@@ -292,7 +292,7 @@ LogicalResult VStoreOp::verify() {
   if (failed(matrixReg(*this, "src", getSrc())) ||
       failed(scalarReg(*this, "base", getBase())))
     return failure();
-  return inRange(*this, "offset (32-byte units)",
+  return inRange(*this, "offset (32-word units)",
                  getOffsetAttr().getValue().getSExtValue(), -2048, 2047);
 }
 

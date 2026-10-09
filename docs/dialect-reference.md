@@ -173,7 +173,7 @@ The independent [DMA memory check](../include/Atlas/AtlasDMAMemoryVerification.h
 The [DMA correspondence checker](../include/Atlas/AtlasDMAContractVerification.h)
 derives explicit-transfer expectations from source SSA and checked placements
 before lowering replaces the source. Generated artifacts retain these records
-in `atlas.virtual_dma_contract` under marker `"resource-contract-v1"`. Emission and
+in `atlas.virtual_dma_contract` under marker `"resource-contract-v2"`. Emission and
 both LLVM paths compare actual launch-time operands and completion identities
 against them, rejecting missing or malformed contracts. Legacy unit markers
 retain their earlier checks, and `"dma-contract-v1"` retains DMA-only correspondence.
@@ -211,8 +211,8 @@ The original reset-only lowering remains unchanged. General slot allocation, han
 
 The [MXU correspondence checker](../include/Atlas/AtlasMXUContractVerification.h)
 derives command expectations from live source and checked placements. New
-`"resource-contract-v1"` artifacts require both DMA and MXU contract arrays,
-including empty arrays. `atlas.virtual_mxu_contract` and per-command
+artifacts require DMA, MXU and tile contract arrays, including empty arrays.
+`atlas.virtual_mxu_contract` and per-command
 `atlas.virtual_mxu_command` identities retain expected operands, formats, slots
 and logical weight/accumulator versions, including legacy matmul expansion.
 Emission and both LLVM paths check every MXU command against these expectations
@@ -221,6 +221,18 @@ reorder; conflicting ownership or stale versions fail. SELD writes to registers
 used by FP8 readouts remain unsupported without a completion proof; current
 lowering uses SELI. These checks do not prove tensor contents, source-to-machine
 CFG paths, or physical completion.
+
+The [tile-transfer checker](../include/Atlas/AtlasTileContractVerification.h)
+retains source-derived registers, VMEM/DRAM addresses and required predecessor
+commands in `atlas.virtual_tile_contract`. Every generated VLOAD/VSTORE and
+DMA launch/wait, plus mailbox LW, carries `atlas.virtual_tile_command` and is
+checked through emission and LLVM handoff. It covers BF16 halves, FP8 boundary
+slots, explicit staging and PACK's vector endpoints. VLS addresses use signed
+offsets scaled by 32 words; exact addresses must match before hardware masking.
+Required predecessors must execute on every emitted path reaching a command.
+PACK's scalar permutation, general buffer contents and physical completion
+remain separate. Older `"resource-contract-v1"` artifacts retain DMA/MXU checks
+and cannot carry tile contracts or tags.
 
 ## Machine operations
 
@@ -231,7 +243,7 @@ bounded execution evidence in the census and source-discrepancy notes.
 | Operation | Attributes and verified forms | Physical meaning and limit |
 | --- | --- | --- |
 | `atlas.start` | none | Begin stream; no encoded word. |
-| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, scalar base, signed 12-bit offset in 32-byte units | Load one 1,024-byte VMEM tile into a tensor register. |
+| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, scalar base, signed 12-bit offset in 32-word units | Load one 1,024-byte VMEM tile into a tensor register. |
 | `atlas.vstore` | `src, base, offset, format="raw"`; same register and offset bounds | Store one 1,024-byte tensor register to VMEM. |
 | `atlas.dma` | `direction=load/store, channel=0..7, reg, dram, size`; latter three are scalar register numbers | Launch asynchronous VMEM/DRAM transfer; completion is separate. |
 | `atlas.dma_wait` | `channel=0..7` | Wait for that DMA channel. |

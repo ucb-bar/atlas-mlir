@@ -54,3 +54,11 @@ target_link_libraries(atlas-mxu-contract-test PRIVATE
   MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-mxu-contract-test)
 add_test(NAME atlas-mxu-contract COMMAND atlas-mxu-contract-test)
+
+add_llvm_executable(atlas-tile-contract-test
+  tile-contract-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-tile-contract-test)
+target_link_libraries(atlas-tile-contract-test PRIVATE
+  MLIRAtlas MLIRParser MLIRIR MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-tile-contract-test)
+add_test(NAME atlas-tile-contract COMMAND atlas-tile-contract-test)

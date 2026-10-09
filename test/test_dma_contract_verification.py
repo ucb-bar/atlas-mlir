@@ -14,6 +14,7 @@ from test_virtual_lowering import BIN, lower, run, virtual_chain
 
 CONTRACT = "atlas.virtual_dma_contract"
 VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
+LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_dma_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -94,7 +95,7 @@ class DMAContractVerificationTest(unittest.TestCase):
             for address in (-2147483648, 0xfffff800):
                 with self.subTest(fmt=fmt, address=address):
                     machine = lower(copy(fmt, address=address))
-                    self.assertIn(VERSION, machine)
+                    self.assertIn(LOWERED_VERSION, machine)
                     expected = [expected_record(0, "load", size, address & 0xffffffff),
                                 expected_record(1, "store", size, address & 0xffffffff)]
                     self.assertEqual(records(machine), expected)
@@ -152,8 +153,12 @@ class DMAContractVerificationTest(unittest.TestCase):
         tagged = [i for i, line in enumerate(lines) if MARKER in line]
         for index in tagged:
             with self.subTest(missing=index):
-                changed = replace_line(machine, index, re.sub(
-                    rf' \{{{re.escape(MARKER)} = \d+ : i32\}}', "", lines[index]))
+                replacement, removed = re.subn(
+                    rf'{re.escape(MARKER)} = \d+ : i32, ', "", lines[index], count=1)
+                self.assertEqual(removed, 1)
+                self.assertNotIn(MARKER, replacement)
+                self.assertIn("atlas.virtual_tile_command =", replacement)
+                changed = replace_line(machine, index, replacement)
                 self.assertNotEqual(changed, machine)
                 self.rejected(changed)
         for identity in (0, 999):
@@ -172,10 +177,10 @@ class DMAContractVerificationTest(unittest.TestCase):
         contract = contract_text(machine)
         mutations = [
             ("missing contract", CONTRACT_RE.sub("", machine).replace(", ,", ",").replace(", }", "}")),
-            ("missing version", machine.replace(VERSION + ", ", "")),
-            ("unknown version", machine.replace('"resource-contract-v1"', '"resource-contract-v2"', 1)),
-            ("malformed version", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32")),
-            ("legacy with contract", machine.replace(VERSION, "atlas.generated_from_virtual")),
+            ("missing version", machine.replace(LOWERED_VERSION + ", ", "")),
+            ("unknown version", machine.replace(LOWERED_VERSION, 'atlas.generated_from_virtual = "resource-contract-v999"')),
+            ("malformed version", machine.replace(LOWERED_VERSION, "atlas.generated_from_virtual = 1 : i32")),
+            ("legacy with contract", machine.replace(LOWERED_VERSION, "atlas.generated_from_virtual")),
             ("nonarray", replace_contract(machine, '"bad"')),
             ("nondictionary", replace_contract(machine, "[0 : i32]")),
             ("empty explicit contract", replace_contract(machine, "[]")),
@@ -193,7 +198,7 @@ class DMAContractVerificationTest(unittest.TestCase):
 
     def test_empty_contract_and_legacy_marker_remain_valid(self) -> None:
         machine = lower(virtual_chain(1))
-        self.assertIn(VERSION, machine)
+        self.assertIn(LOWERED_VERSION, machine)
         self.assertEqual(contract_text(machine), "[]")
         self.accepted(machine)
         legacy = artifact()

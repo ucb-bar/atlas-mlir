@@ -2,6 +2,7 @@
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
+#include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
@@ -140,7 +141,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
     return failure();
   if (failed(verifyAtlasGeneratedDMAContract(module)))
     return failure();
-  return verifyAtlasGeneratedMXUContract(module);
+  if (failed(verifyAtlasGeneratedMXUContract(module)))
+    return failure();
+  return verifyAtlasGeneratedTileContract(module);
 }
 
 namespace {

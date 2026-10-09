@@ -14,6 +14,7 @@ from test_virtual_mxu_lowering import source
 CONTRACT = "atlas.virtual_mxu_contract"
 TAG = "atlas.virtual_mxu_command"
 VERSION = 'atlas.generated_from_virtual = "resource-contract-v1"'
+LOWERED_VERSION = 'atlas.generated_from_virtual = "resource-contract-v2"'
 CONTRACT_RE = re.compile(r'atlas\.virtual_mxu_contract = (\[[^\]]*\])')
 RECORD_RE = re.compile(r'\{([^{}]*)\}')
 FIELD_RE = re.compile(r'(\w+) = (?:(-?\d+) : i32|"([^"]*)")')
@@ -123,7 +124,7 @@ class MXUContractVerificationTest(unittest.TestCase):
             for fmt in ("bf16", "fp8"):
                 with self.subTest(unit=unit, fmt=fmt):
                     machine = lower(seeded_chain(unit, fmt, code=173))
-                    self.assertIn(VERSION, machine)
+                    self.assertIn(LOWERED_VERSION, machine)
                     facts = records(machine)
                     self.assertEqual([r["kind"] for r in facts], ["weight_fp8", "acc_" + fmt, "accumulate", "pop_fp8", "acc_fp8", "accumulate", "pop_bf16"])
                     self.assertEqual([r["id"] for r in facts], list(range(7)))
@@ -289,7 +290,7 @@ class MXUContractVerificationTest(unittest.TestCase):
                      ("missing version", machine.replace(VERSION + ", ", "")),
                      ("unit legacy with MXU", machine.replace(VERSION, "atlas.generated_from_virtual")),
                      ("DMA legacy with MXU", machine.replace("resource-contract-v1", "dma-contract-v1")),
-                     ("future version", machine.replace("resource-contract-v1", "resource-contract-v2")),
+                     ("future version", machine.replace("resource-contract-v1", "resource-contract-v999")),
                      ("bad marker type", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32")),
                      ("nonarray", replace_contract(machine, '"bad"')),
                      ("nondictionary", replace_contract(machine, "[0 : i32]")),
@@ -312,7 +313,7 @@ class MXUContractVerificationTest(unittest.TestCase):
 
     def test_empty_new_contract_and_legacy_without_mxu_metadata(self) -> None:
         machine = lower(virtual_chain(1))
-        self.assertIn(VERSION, machine)
+        self.assertIn(LOWERED_VERSION, machine)
         self.assertEqual(contract_text(machine), "[]")
         self.accepted(machine)
         facts, operations = chain_fixture()
@@ -376,7 +377,7 @@ class MXUContractVerificationTest(unittest.TestCase):
                      ("bad MXU array", replace_contract(text, '"bad"')),
                      ("missing DMA array", text.replace("atlas.virtual_dma_contract = [], ", "")),
                      ("missing version", text.replace(VERSION + ", ", "")),
-                     ("unknown version", text.replace("resource-contract-v1", "resource-contract-v2")),
+                     ("unknown version", text.replace("resource-contract-v1", "resource-contract-v999")),
                      ("legacy with MXU metadata", text.replace("resource-contract-v1", "dma-contract-v1")),
                      ("foreign tag", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 999 : i32")),
                      ("duplicate tag", text.replace(f"{TAG} = 3 : i32", f"{TAG} = 2 : i32")),

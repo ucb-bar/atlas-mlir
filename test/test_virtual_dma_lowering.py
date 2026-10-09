@@ -311,14 +311,19 @@ class VirtualDMALoweringTest(unittest.TestCase):
             ("DMA configuration", scalar, replace_operation(lines[scalar], "dma_config", 'channel = 0 : i32, base_reg = 5 : i32')),
         ]
         for index in (launch, wait):
-            replacements.append((f"missing marker at {index}", index,
-                                 re.sub(rf" \{{{re.escape(MARKER)} = \d+ : i32\}}", "", lines[index])))
+            replacement, removed = re.subn(
+                rf"{re.escape(MARKER)} = \d+ : i32, ", "", lines[index], count=1)
+            self.assertEqual(removed, 1)
+            self.assertNotIn(MARKER, replacement)
+            self.assertIn("atlas.virtual_tile_command =", replacement)
+            replacements.append((f"missing marker at {index}", index, replacement))
         for marker in ('-1 : i32', '0 : i64', '"bad"'):
             replacements.append((f"malformed marker {marker}", launch,
                                  re.sub(rf"{MARKER} = \d+ : i32", f"{MARKER} = {marker}", lines[launch])))
         orphan = next(i for i in range(launch) if '"atlas.dma_wait"' in lines[i])
         replacements.append(("orphan marker", orphan,
-                             lines[orphan].replace("}>", f"}}> {{{MARKER} = 999 : i32}}")))
+                             lines[orphan].replace("{atlas.virtual_tile_command",
+                                                   f"{{{MARKER} = 999 : i32, atlas.virtual_tile_command", 1)))
         changes = []
         for name, index, replacement in replacements:
             changed = lines.copy()
@@ -344,6 +349,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertTrue(result.stderr)
                     self.assertEqual(result.stdout, "")
+                    if name == "orphan marker":
+                        self.assertIn("DMA.WAIT must match the pending DMA channel and transfer ID", result.stderr)
 
     def test_pending_seli_writes_use_the_separate_extended_register_file(self) -> None:
         machine, _ = self.checked(independent_work())
