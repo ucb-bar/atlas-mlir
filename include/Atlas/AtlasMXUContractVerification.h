@@ -6,6 +6,7 @@
 #include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::atlas {
+struct AtlasVerificationContext;
 
 // Requires live verified source and independently checked register allocation.
 // Tensor assignments are validated locally; MXU placement is checked again.
@@ -24,6 +25,7 @@ FailureOr<ArrayAttr> buildAtlasMXUContract(
 // reachable CFG path, including loops. Source/emitted CFG correspondence,
 // tensor contents and physical engine completion remain separate obligations.
 // Legacy unit/dma-contract-v1 artifacts must carry no MXU contract or tags.
+LogicalResult verifyAtlasGeneratedMXUContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedMXUContract(ModuleOp module);
 
 } // namespace mlir::atlas

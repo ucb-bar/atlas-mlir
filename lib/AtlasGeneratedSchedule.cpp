@@ -6,13 +6,8 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallVector.h"
-#include <cstdint>
-#include <optional>
-#include <utility>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -29,112 +24,33 @@ bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
   return false;
 }
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
+    const AtlasVerificationContext &ctx) {
+  assert(ctx.generated && "generated checks require the structural stage");
+  ModuleOp module = ctx.module;
   if (failed(verifyAtlasTimingState(module)))
     return failure();
   if (!module->hasAttr("atlas.generated_from_virtual"))
     return module.emitOpError("expected an Atlas virtual-to-machine artifact");
-  struct PendingDMA {
-    DMAOp launch;
-    std::optional<int32_t> id;
-    int64_t pc;
-  };
-  llvm::DenseMap<unsigned, PendingDMA> pending;
-  llvm::DenseSet<int32_t> launchIDs;
-  llvm::SmallVector<std::pair<int64_t, int64_t>> intervals;
-  int64_t pc = 0;
-  for (Operation &op : module.getBody()->getOperations()) {
-    std::optional<int32_t> id;
-    if (Attribute marker = op.getAttr("atlas.virtual_dma_transfer")) {
-      auto integer = dyn_cast<IntegerAttr>(marker);
-      if (!isa<DMAOp, DMAWaitOp>(op) || !integer ||
-          !integer.getType().isSignlessInteger(32) ||
-          integer.getValue().isNegative())
-        return op.emitOpError(
-            "atlas.virtual_dma_transfer requires a nonnegative i32 on DMA or DMA.WAIT");
-      id = static_cast<int32_t>(integer.getValue().getSExtValue());
-    }
-    if (isa<StartOp>(op)) {
-      if (!pending.empty())
-        return op.emitOpError("unexpected instruction while DMA is pending");
-      continue;
-    }
-    int64_t currentPC = pc++;
-    Operation *next = op.getNextNode();
-    if (auto dma = dyn_cast<DMAOp>(op)) {
-      if (pending.count(dma.getChannel()))
-        return op.emitOpError("another DMA launch while its channel is pending");
-      if (id) {
-        if (!launchIDs.insert(*id).second)
-          return op.emitOpError("duplicate virtual DMA transfer launch ID");
-      } else if (!module->hasAttr("atlas.timing_state")) {
-        auto wait = next ? dyn_cast<DMAWaitOp>(next) : DMAWaitOp{};
-        if (!wait || wait.getChannel() != dma.getChannel())
-          return op.emitOpError(
-              "generated DMA requires immediate same-channel DMA.WAIT");
-      }
-      pending.try_emplace(dma.getChannel(), PendingDMA{dma, id, currentPC});
-    } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
-      auto transfer = pending.find(wait.getChannel());
-      if (transfer == pending.end())
-        return op.emitOpError("DMA.WAIT has no pending DMA transfer");
-      if (id != transfer->second.id)
-        return op.emitOpError(
-            "DMA.WAIT must match the pending DMA channel and transfer ID");
-      intervals.emplace_back(transfer->second.pc, currentPC);
-      pending.erase(transfer);
-    } else if (!pending.empty()) {
-      if (!canOverlapAtlasGeneratedDMA(&op))
-        return op.emitOpError("unexpected instruction while DMA is pending");
-    }
-    if (isa<BranchOp, JumpOp>(op)) {
-      auto slot = next ? dyn_cast<ALUImmOp>(next) : ALUImmOp{};
-      if (!slot || slot.getKind() != "addi" || slot.getDst() != 0 ||
-          slot.getSrc() != 0 || slot.getImmediate() != 0)
-        return op.emitOpError(
-            "generated redirect requires a nonredirecting x0 NOP delay slot");
-    }
-  }
-  if (!pending.empty())
-    return pending.begin()->second.launch.emitOpError("generated DMA has no matching DMA.WAIT");
-  if (!intervals.empty()) {
-    pc = 0;
-    for (Operation &op : module.getBody()->getOperations()) {
-      if (isa<StartOp>(op))
-        continue;
-      int64_t currentPC = pc++;
-      std::optional<int64_t> target;
-      // Selected Atlas redirects encode twice the instruction-word distance.
-      if (auto branch = dyn_cast<BranchOp>(op))
-        target = currentPC +
-                 branch.getOffsetBytesAttr().getValue().getSExtValue() / 2;
-      else if (auto jump = dyn_cast<JumpOp>(op)) {
-        if (jump.getKind() == "jalr")
-          return op.emitOpError(
-              "generated explicit DMA intervals forbid unproven JALR targets");
-        target = currentPC + jump.getOffsetAttr().getValue().getSExtValue() / 2;
-      }
-      if (target)
-        for (auto [launchPC, waitPC] : intervals)
-          if (*target > launchPC && *target <= waitPC)
-            return op.emitOpError(
-                "generated redirect target enters a pending DMA interval");
-    }
-  }
-  if (failed(verifyAtlasGeneratedDMAMemory(module)))
+  if (failed(verifyAtlasGeneratedDMAMemory(ctx)))
     return failure();
-  if (failed(verifyAtlasGeneratedDMAContract(module)))
+  if (failed(verifyAtlasGeneratedDMAContract(ctx)))
     return failure();
-  if (failed(verifyAtlasGeneratedMXUContract(module)))
+  if (failed(verifyAtlasGeneratedMXUContract(ctx)))
     return failure();
-  if (failed(verifyAtlasGeneratedTileContract(module)))
+  if (failed(verifyAtlasGeneratedTileContract(ctx)))
     return failure();
-  if (failed(verifyAtlasGeneratedCFGContract(module)))
+  if (failed(verifyAtlasGeneratedCFGContract(ctx)))
     return failure();
   auto state = module->getAttrOfType<StringAttr>("atlas.timing_state");
   if (state && state.getValue() == "timed")
-    return verifyAtlasTiming(module);
+    return verifyAtlasTiming(ctx);
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedSchedule(*ctx);
 }
 
 namespace {

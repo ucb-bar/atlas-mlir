@@ -1,9 +1,11 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
+#include <atomic>
 #include <deque>
 #include <limits>
 #include <set>
@@ -215,12 +217,19 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
-FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module,
-                                                 AtlasStreamReadMode mode) {
+static std::atomic<unsigned> decodeCount{0};
+
+unsigned mlir::atlas::atlasStreamDecodeCount() { return decodeCount; }
+
+FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
+    ModuleOp module, AtlasStreamReadMode mode,
+    llvm::SmallVectorImpl<uint32_t> *words) {
   bool verification = mode == AtlasStreamReadMode::Verification;
-  SmallVector<uint32_t> words;
-  if (failed(collectAtlasWords(module, words, /*llvmBlock=*/false,
-                               /*skipGeneratedCheck=*/verification)))
+  ++decodeCount;
+  SmallVector<uint32_t> local;
+  SmallVectorImpl<uint32_t> &encoded = words ? *words : local;
+  if (failed(verification ? encodeAtlasWords(module, encoded)
+                          : verifyAtlasArtifact(module, /*llvmBlock=*/false, encoded)))
     return failure();
   AtlasStream s;
   SmallVector<Operation *> &ops = s.ops;
@@ -556,7 +565,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   else
     module->removeAttr("atlas.timing_provider");
   SmallVector<uint32_t> words;
-  return collectAtlasWords(module, words, /*llvmBlock=*/false);
+  return verifyAtlasArtifact(module, /*llvmBlock=*/false, words);
 }
 
 LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireTimed) {
@@ -682,26 +691,37 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
 }
 
 LogicalResult mlir::atlas::verifyAtlasTiming(
-    ModuleOp module, const TimingProvider &provider) {
+    const AtlasVerificationContext &ctx, const TimingProvider &provider) {
+  ModuleOp module = ctx.module;
   if (failed(verifyAtlasTimingState(module)))
     return failure();
   if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider");
       selected && selected.getValue() != provider.id)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
-  if (failed(stream))
-    return failure();
-  return verifyAtlasTimedStream(*stream, provider);
+  assert(ctx.stream && "a timed stream is decoded");
+  return verifyAtlasTimedStream(*ctx.stream, provider);
 }
 
-LogicalResult mlir::atlas::verifyAtlasTiming(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasTiming(
+    ModuleOp module, const TimingProvider &provider) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasTiming(*ctx, provider);
+}
+
+LogicalResult mlir::atlas::verifyAtlasTiming(const AtlasVerificationContext &ctx) {
+  ModuleOp module = ctx.module;
   std::string id = "npu-model-rtl-match-v1";
   if (auto selected = module->getAttrOfType<StringAttr>("atlas.timing_provider"))
     id = selected.getValue().str();
   auto provider = lookupTimingProvider(id);
   if (!provider.error.empty())
     return module.emitOpError(provider.error);
-  return verifyAtlasTiming(module, provider.value);
+  return verifyAtlasTiming(ctx, provider.value);
+}
+
+LogicalResult mlir::atlas::verifyAtlasTiming(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasTiming(*ctx);
 }
 
 namespace {
@@ -715,7 +735,7 @@ struct VerifyAtlasTimingPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SmallVector<uint32_t> words;
-    if (failed(collectAtlasWords(module, words, false)) ||
+    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/false, words)) ||
         failed(verifyAtlasTiming(module, npuModelTimingProvider()))) {
       signalPassFailure();
       return;

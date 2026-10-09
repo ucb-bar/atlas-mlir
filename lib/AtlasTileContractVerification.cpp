@@ -2,6 +2,7 @@
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -460,7 +461,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   return builder.getArrayAttr(encoded);
 }
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
+    const AtlasVerificationContext &ctx) {
+  ModuleOp module = ctx.module;
   Attribute marker = module->getAttr(kMarker);
   Attribute contract = module->getAttr(kContract);
   bool tagged = false;
@@ -542,11 +545,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
     return module.emitOpError("tile contract requires exactly one command for every source record");
   if (tags.empty())
     return success();
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
-  if (failed(stream) || failed(checkDependencies(*stream, records, tags)))
+  assert(ctx.stream && "a tagged tile stream is decoded");
+  const AtlasStream &s = *ctx.stream;
+  if (failed(checkDependencies(s, records, tags)))
     return failure();
-  const AtlasStream &s = *stream;
-  auto bases = atlasDMAUpperWordEntries(s);
+  const auto &bases = ctx.dmaUpperEntry;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto upper = bases[block];
@@ -600,4 +603,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
     }
   }
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedTileContract(*ctx);
 }

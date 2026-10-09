@@ -63,7 +63,7 @@ struct ConvertAtlasToLLVMPass
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
     if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
-        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+        failed(mlir::atlas::verifyAtlasArtifact(module, true, words))) {
       signalPassFailure();
       return;
     }
@@ -90,7 +90,7 @@ struct ConvertAtlasToLLVMCallsPass
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
     if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
-        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+        failed(mlir::atlas::verifyAtlasArtifact(module, true, words))) {
       signalPassFailure();
       return;
     }
@@ -231,7 +231,7 @@ struct FinalizeAtlasLLVMCallsPass
     llvm::SmallVector<uint32_t> checked;
     if (stagedWords.empty() ||
         failed(mlir::atlas::verifyAtlasTimingState(reconstructed, true)) ||
-        failed(mlir::atlas::collectAtlasWords(reconstructed, checked, true)) ||
+        failed(mlir::atlas::verifyAtlasArtifact(reconstructed, true, checked)) ||
         !llvm::equal(stagedWords, checked)) {
       module.emitError("structured Atlas LLVM calls disagree with checked encodings");
       signalPassFailure();

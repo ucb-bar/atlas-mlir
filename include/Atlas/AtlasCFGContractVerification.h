@@ -5,6 +5,7 @@
 #include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::atlas {
+struct AtlasVerificationContext;
 // Stable identities follow source block, argument and operation order. The
 // builder reads live admitted SSA and placement claims, never planned words.
 // Registers include scalar and tensor values; other resource handles are omitted.
@@ -20,6 +21,7 @@ FailureOr<DictionaryAttr> buildAtlasCFGContract(
 // Numerical tensor semantics and physical completion remain separate checks.
 // Resource-contract-v3 requires CFG metadata; older artifacts without it retain
 // their existing verification scope.
+LogicalResult verifyAtlasGeneratedCFGContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedCFGContract(ModuleOp module);
 } // namespace mlir::atlas
 #endif

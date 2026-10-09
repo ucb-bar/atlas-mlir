@@ -79,3 +79,11 @@ target_link_libraries(atlas-cfg-contract-verification PRIVATE
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-cfg-contract-verification)
 add_test(NAME atlas-cfg-contract COMMAND atlas-cfg-contract-verification)
+
+add_llvm_executable(atlas-verification-context-test
+  verification-context.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-verification-context-test)
+target_link_libraries(atlas-verification-context-test PRIVATE
+  MLIRAtlas MLIRParser MLIRIR)
+mlir_check_all_link_libraries(atlas-verification-context-test)
+add_test(NAME atlas-verification-context COMMAND atlas-verification-context-test)

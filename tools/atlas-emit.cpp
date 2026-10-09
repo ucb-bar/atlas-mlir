@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
 
   llvm::SmallVector<uint32_t> words;
   if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
-  if (failed(collectAtlasWords(*module, words, mapJson || programJson))) return 1;
+  if (failed(verifyAtlasArtifact(*module, mapJson || programJson, words))) return 1;
   if (programJson) {
     // This is the physical-stream input boundary for an external functional
     // model. The encoded words remain authoritative; these typed fields and

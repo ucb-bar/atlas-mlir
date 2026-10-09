@@ -1,6 +1,7 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -239,7 +240,9 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   return dictionary({field("values",b.getArrayAttr(values)),field("blocks",b.getArrayAttr(blockRecords)),field("edges",b.getArrayAttr(edgeRecords)),field("operations",b.getArrayAttr(operationRecords))});
 }
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
+    const AtlasVerificationContext &ctx) {
+  ModuleOp module = ctx.module;
   auto raw = module->getAttr(contractName);
   bool hasTags = false;
   for (Operation &op : module.getBody()->getOperations()) for (StringRef name : {blockTag,edgeTag,branchTag,sourceTag,operationTag,scalarTag,tensorTag,argumentTag,helperTag}) hasTags |= op.hasAttr(name);
@@ -307,15 +310,15 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(ModuleOp module) {
       for (int32_t v : array(d,key)) if (v < 0 || v >= int32_t(values.size())) return bad();
   }
   if (sourceOperations.size() != expectedOperations.size()) return bad();
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification); if (failed(stream)) return failure();
+  assert(ctx.stream && "a CFG-contract stream is decoded");
+  const std::optional<AtlasStream> &stream = ctx.stream;
   auto &ops = stream->ops;
   if (ops.empty())
     return module.emitOpError("CFG contract requires a nonempty issued instruction stream");
   std::vector<size_t> starts(blocks.size(), ops.size()), edgeStarts(edges.size(), ops.size());
-  std::map<Operation *,size_t> pcs;
   std::set<int32_t> seenOperations, seenResults, seenBranches, seenEdges;
   for (size_t pc = 0; pc < ops.size(); ++pc) {
-    Operation *op = ops[pc]; pcs[op] = pc;
+    Operation *op = ops[pc];
     for (StringRef name : {blockTag,edgeTag,branchTag,sourceTag,operationTag,scalarTag,tensorTag,argumentTag}) if (op->hasAttr(name) && !tag(op,name)) return op->emitOpError("CFG contract tags require nonnegative i32 identities");
     auto owner = tag(op,blockTag);
     if (!owner) { if (!isa<DelayOp>(op) && !isNop(op)) return op->emitOpError("CFG contract instruction lacks source block ownership"); continue; }
@@ -396,7 +399,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(ModuleOp module) {
   if (seenOperations != expectedOperations || seenEdges.size() != edges.size()) return module.emitOpError("CFG contract requires exactly one issued operation and edge site for every source record");
   for (auto &b : blocks) if (starts[b.id] == ops.size() || (b.condition >= 0 && !seenBranches.count(b.id))) return module.emitOpError("CFG contract missing source block or branch site");
   for (auto &v : values) if ((v.def != "argument" || v.block == 0) && !seenResults.count(v.id)) return module.emitOpError("CFG contract missing source result site");
-  auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? pcs[t] : ops.size(); };
+  auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? ctx.pcOf.lookup(t) : ops.size(); };
   auto matches = [&](State &s, const ValueRecord &v, int32_t expected) { return v.type == "i1" || v.type == "i32" ? same(s.x[v.reg],origin(expected)) : s.tensor[v.reg] == expected && (v.type != "bf16" || s.tensor[v.reg+1] == expected); };
   auto install = [&](State &s, const ValueRecord &v) { if (v.type == "i1" || v.type == "i32") s.x[v.reg] = origin(v.id); else { s.tensor[v.reg] = v.id; if (v.type == "bf16") s.tensor[v.reg+1] = v.id; } };
   for (auto &block : blocks) {
@@ -559,4 +562,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(ModuleOp module) {
     }
   }
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedCFGContract(*ctx);
 }

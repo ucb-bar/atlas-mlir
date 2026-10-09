@@ -16,8 +16,8 @@ struct VerifyAtlasMachineStreamPass
 
   void runOnOperation() override {
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::collectAtlasWords(getOperation(), words,
-                                               /*llvmBlock=*/true)))
+    if (failed(mlir::atlas::verifyAtlasArtifact(getOperation(),
+                                                 /*llvmBlock=*/true, words)))
       signalPassFailure();
   }
 };

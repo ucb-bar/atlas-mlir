@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include <algorithm>
 #include <optional>
 #include <string>
@@ -56,17 +57,13 @@ LogicalResult compare(Operation *op, const Span &a, const Span &b,
 
 } // namespace
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
-  bool hasDMA = false;
-  for (Operation &op : module.getBody()->getOperations())
-    hasDMA |= isa<DMAOp>(op);
-  if (!hasDMA)
+LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
+    const AtlasVerificationContext &ctx) {
+  if (!ctx.hasDMA)
     return success();
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
-  if (failed(stream))
-    return failure();
-  const AtlasStream &s = *stream;
-  auto bases = atlasDMAUpperWordEntries(s);
+  assert(ctx.stream && "a DMA stream is decoded");
+  const AtlasStream &s = *ctx.stream;
+  const auto &bases = ctx.dmaUpperEntry;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];
@@ -139,4 +136,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
           "DMA memory transfer crosses a basic-block boundary");
   }
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedDMAMemory(*ctx);
 }

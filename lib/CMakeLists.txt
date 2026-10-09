@@ -24,6 +24,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasTileContractVerification.cpp
   AtlasCFGContractVerification.cpp
   AtlasGeneratedSchedule.cpp
+  AtlasVerificationContext.cpp
   DEPENDS MLIRAtlasOpsIncGen
   LINK_LIBS PUBLIC MLIRIR MLIRSideEffectInterfaces MLIRArithDialect
                    MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect

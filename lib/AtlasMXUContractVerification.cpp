@@ -2,6 +2,7 @@
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -432,7 +433,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
   return builder.getArrayAttr(encoded);
 }
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
+    const AtlasVerificationContext &ctx) {
+  ModuleOp module = ctx.module;
   Attribute marker = module->getAttr(kMarker), contract = module->getAttr(kContract);
   auto version = dyn_cast_or_null<StringAttr>(marker);
   bool legacy = isa_and_nonnull<UnitAttr>(marker) ||
@@ -490,9 +493,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
     return module.emitOpError("MXU contract requires exactly one issued command for every source record");
   if (tagged.empty())
     return success();
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
-  if (failed(stream))
-    return failure();
+  assert(ctx.stream && "a tagged MXU stream is decoded");
+  const std::optional<AtlasStream> &stream = ctx.stream;
   if (failed(checkPathOwnership(module, records, *stream, tagged)))
     return failure();
   llvm::DenseSet<int32_t> readoutScaleRegs;
@@ -506,7 +508,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
     if (stream->instrs[i].op->opClass == timing::OpClass::ScaleLoad &&
         readoutScaleRegs.contains(stream->instrs[i].rd))
       return stream->ops[i]->emitOpError("MXU contract cannot prove FP8 scale contents with SELD writes to its scale register");
-  auto scales = atlasScaleRegisterEntries(*stream);
+  const auto &scales = ctx.scaleEntry;
   for (size_t block = 0; block < stream->starts.size(); ++block) {
     timing::RegValues regs = scales[block];
     for (size_t i = stream->starts[block]; i < stream->blockEnd(block); ++i) {
@@ -520,4 +522,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
     }
   }
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedMXUContract(*ctx);
 }

@@ -8,6 +8,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir::atlas {
+struct AtlasVerificationContext;
 
 // A flat Atlas stream in basic blocks. A block ending in a
 // branch or jump ends with its delay slot.
@@ -33,9 +34,14 @@ struct DelayInsertion {
 
 enum class AtlasStreamReadMode { Scheduling, Verification };
 // Verification reads emitted delays and treats PC-dependent scalar values as
-// unknown. It skips only the generated verifier hook to avoid recursive checks.
+// unknown; it only encodes, so its caller has already checked the artifact.
+// Scheduling first verifies the artifact at its boundary. `words`, when given,
+// receives the encoded stream.
 FailureOr<AtlasStream> readAtlasStream(
-    ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling);
+    ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling,
+    llvm::SmallVectorImpl<uint32_t> *words = nullptr);
+// Number of readAtlasStream calls in this process, for decode-once tests.
+unsigned atlasStreamDecodeCount();
 // Rejects illegal delay slots and DMA hazards using complete supplied rules.
 LogicalResult checkAtlasStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
@@ -43,10 +49,13 @@ LogicalResult checkAtlasStream(
 // consulting a scheduler graph or implicitly using any model timing policy.
 LogicalResult verifyAtlasTimedStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
+LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
+                                const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
 // Dispatches the explicitly retained complete provider. Legacy streams without
 // timing metadata select the named model for compatibility.
+LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasTiming(ModuleOp module);
 // Validates explicit timing metadata. Legacy streams without a timing state
 // keep their existing scope; requireTimed rejects explicitly untimed streams.
@@ -66,6 +75,7 @@ void applyAtlasScaleRegister(const timing::Instr &in, timing::RegValues &regs);
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions. Rewriting alone leaves the
 // stream untimed; timing passes explicitly request a checked timed artifact.
+// The module is then re-verified, and `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
                                llvm::ArrayRef<DelayInsertion> before,

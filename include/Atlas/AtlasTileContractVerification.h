@@ -5,6 +5,7 @@
 #include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::atlas {
+struct AtlasVerificationContext;
 
 // Requires admitted, verified live virtual SSA, independently checked register
 // placement claims and valid boundary ABI bindings. Derives static transfer
@@ -21,6 +22,7 @@ FailureOr<ArrayAttr> buildAtlasTileContract(
 // paths. Requires separate structural/lifecycle and DMA/MXU contract checks.
 // Excludes tensor contents, PACK's scalar relayout, source/emitted CFG
 // correspondence, dynamic execution counts, and physical completion/release.
+LogicalResult verifyAtlasGeneratedTileContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedTileContract(ModuleOp module);
 
 } // namespace mlir::atlas

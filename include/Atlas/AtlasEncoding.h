@@ -11,16 +11,21 @@ namespace mlir::atlas {
 // One selected-RTL 32-bit word for a verified machine operation.
 FailureOr<uint32_t> encodeMachineWord(Operation *op);
 
-// Validates a flat ordered Atlas stream and collects all words atomically.
+// Validates the flat state chain and delay-slot adjacency, then appends every
+// word atomically. It performs no artifact checks.
+LogicalResult encodeAtlasWords(ModuleOp module,
+                               llvm::SmallVectorImpl<uint32_t> &words);
+// Number of encodeAtlasWords calls in this process, for decode-once tests.
+unsigned atlasWordEncodeCount();
+
+// Verification boundary: runs the MLIR verifier, the timing-state check and,
+// on one AtlasVerificationContext, the generated or timed checks, then appends
+// the words atomically.
 // llvmBlock additionally requires statically in-block direct branch targets and
 // rejects unresolved JALR, since one inline assembly block has no external Atlas
 // program/ABI to resolve such jumps.
-// skipGeneratedCheck is for a generated verifier reading the already emitted
-// stream; encoding and linear-state validation still run.
-LogicalResult collectAtlasWords(ModuleOp module,
-                                llvm::SmallVectorImpl<uint32_t> &words,
-                                bool llvmBlock,
-                                bool skipGeneratedCheck = false);
+LogicalResult verifyAtlasArtifact(ModuleOp module, bool llvmBlock,
+                                  llvm::SmallVectorImpl<uint32_t> &words);
 
 } // namespace mlir::atlas
 

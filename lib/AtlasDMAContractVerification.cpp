@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
@@ -161,7 +162,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
   return builder.getArrayAttr(encoded);
 }
 
-LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
+    const AtlasVerificationContext &ctx) {
+  ModuleOp module = ctx.module;
   Attribute marker = module->getAttr(kMarker);
   Attribute contract = module->getAttr(kContract);
   if (isa_and_nonnull<UnitAttr>(marker)) {
@@ -224,11 +227,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
   if (tagged.empty())
     return success();
 
-  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
-  if (failed(stream))
-    return failure();
-  const AtlasStream &s = *stream;
-  auto bases = atlasDMAUpperWordEntries(s);
+  assert(ctx.stream && "a tagged DMA stream is decoded");
+  const AtlasStream &s = *ctx.stream;
+  const auto &bases = ctx.dmaUpperEntry;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];
@@ -250,4 +251,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
     }
   }
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(ModuleOp module) {
+  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
+  return failed(ctx) ? failure() : verifyAtlasGeneratedDMAContract(*ctx);
 }

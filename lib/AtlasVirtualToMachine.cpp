@@ -170,7 +170,7 @@ public:
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
     llvm::SmallVector<uint32_t> words;
-    if (failed(collectAtlasWords(*emitted, words, /*llvmBlock=*/true)))
+    if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words)))
       return failure();
     module->setAttrs((*emitted)->getAttrs());
     module.getBodyRegion().takeBody(emitted->getBodyRegion());
