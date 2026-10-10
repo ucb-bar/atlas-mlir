@@ -501,7 +501,7 @@ def two_chains_case(phase: int):
     inputs = guarded({0: x, 1: identity_weight(), 2: identity_weight(3)}, 2)
     first = Tile("bf16", tuple(TWICE_BF16[code] for code in x.bits))
     second = Tile("bf16", tuple(TWICE_BF16[x.bits[row * 32 + (col + 3) % 32]] for row in range(32) for col in range(32)))
-    return inputs, EvaluationResult({0: first, 1: second}, inputs.memory), None
+    return inputs, EvaluationResult({0: first, 1: second}, inputs.memory), (96, 128)
 
 
 def two_dma_case(phase: int):
@@ -509,7 +509,7 @@ def two_dma_case(phase: int):
     payload = tile_bytes(Tile("bf16", tuple(READY_SUM[bits] for bits in ready.bits)))
     inputs, memory = mapped({0x80000000: tile_bytes(ready), 0x80000800: tile_bytes(Tile("bf16", (0x3F00,) * 1024)), 0x80002000: b"\xA5" * 2048},
                             {0x80002000: payload})
-    return inputs, EvaluationResult({}, memory), None
+    return inputs, EvaluationResult({}, memory), (128, 64)
 
 
 # -- the table ---------------------------------------------------------------------------------------------------
@@ -556,8 +556,9 @@ def rows() -> tuple[Row, ...]:
         source = DUAL
         if same_unit:
             source = source.replace("unit = 1 : i32", "unit = 0 : i32").replace("virtual_mxu_weight<1>", "virtual_mxu_weight<0>").replace("virtual_mxu_acc<1>", "virtual_mxu_acc<0>")
-        table.append(Row(f"two_chains_{'same_unit' if same_unit else 'both_units'}", source, two_chains_case, scheduled=True))
-    table.append(Row("two_dma_reverse_await", TWO_DMA, two_dma_case, scheduled=True))
+        table.append(Row(f"two_chains_{'same_unit' if same_unit else 'both_units'}", source, two_chains_case, (0, 3), output_bytes=4096, max_cycles=100000,
+                         scheduled=True, core_scheduled=True))
+    table.append(Row("two_dma_reverse_await", TWO_DMA, two_dma_case, (0, 3), max_cycles=100000, scheduled=True, core_scheduled=True))
     return tuple(table)
 
 
