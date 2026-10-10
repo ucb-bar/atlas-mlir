@@ -165,6 +165,13 @@ class DMAContractVerificationTest(unittest.TestCase):
             with self.subTest(direction=direction, register=register, kind=kind):
                 self.accepted(insert_after(machine, launch(machine, direction), [(kind, fields)]))
 
+    def test_helper_writes_before_launch_change_the_captured_command(self) -> None:
+        machine = lower(copy())
+        for register, field, value in ((4, "staging word", 1), (7, "DRAM byte address", 1), (9, "byte length", 32)):
+            with self.subTest(register=register):
+                clobber = ("alu_imm", f'kind = "addi", dst = {register} : i32, src = 0 : i32, immediate = {value} : i32')
+                self.rejected(insert_after(machine, launch(machine) - 1, [clobber]), f"DMA contract captured {field} mismatch")
+
     def test_pending_configuration_memory_and_control_restrictions_remain(self) -> None:
         machine = lower(copy())
         forbidden = (("configuration", (("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),)),

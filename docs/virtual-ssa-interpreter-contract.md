@@ -86,8 +86,8 @@ is `A[M,K] @ W[N,K].T`; do not derive expected values from compiler relayout.
 Install `tools/requirements-virtual-evaluator.txt` (xDSL 0.65.0) in an
 environment compatible with the pinned model (Python 3.14, Torch 2.11.0, NumPy
 2.4.4 in this session) with the model source root on `PYTHONPATH`. Compiler-backed
-checks also need `ATLAS_OOT_BIN_DIR` and `ATLAS_LLVM_BIN`;
-`ATLAS_REQUIRE_VIRTUAL_SCHEDULER=1` makes scheduled comparisons mandatory.
+checks also need `ATLAS_OOT_BIN_DIR` and `ATLAS_LLVM_BIN`; scheduled comparisons
+run unconditionally because the virtual scheduler is part of this compiler.
 
 ## Recommended interpreter state
 
