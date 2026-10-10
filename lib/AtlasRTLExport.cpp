@@ -86,7 +86,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   }
   auto hash = llvm::SHA256::hash(encoded);
   const auto &evidence = *program.evidence;
-  const bool dynamic = evidence.hasDMAEvidence();
+  const bool dynamic = evidence.dmaWait();
   for (size_t i = 0; i < program.instructions.size(); ++i) {
     const auto &entry = program.instructions[i];
     const Instr &in = entry.instruction;
@@ -118,10 +118,11 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       {"target_config", "EE290SimConfig"},
       {"qualification", evidence.qualificationStatus()},
       {"scheduling_qualified", false},
-      {"resolver", Object{{"id", evidence.selectedResolverID()},
-                          {"version", RTLEvidence::resolverVersion()}}},
-      {"evidence", Object{{"evidence_sha256", evidence.evidenceSha256()},
-          {"manifest_sha256", evidence.manifestSha256()},
+      {"resolver", Object{{"id", RTLEvidence::resolverID()},
+                          {"version", RTLEvidence::resolverVersion()},
+                          {"dma_policy", dynamic ? "wait" : "none"}}},
+      {"evidence", Object{{"op_timing_schema", "merlin.op_timing.v1"},
+          {"op_timing_sha256", evidence.factsSha256()},
           {"hardware_ir_sha256", evidence.hardwareIRSha256()}}},
       {"program", Object{{"word_count", static_cast<int64_t>(program.words.size())},
           {"words", std::move(words)},
@@ -136,16 +137,11 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       {"applicability", evidence.applicability()},
       {"instructions", std::move(instructions)}};
   if (dynamic) {
-    (*result.getObject("evidence"))["dma_evidence_sha256"] = evidence.dmaEvidenceSha256();
     auto *conventions = result.getObject("conventions");
     (*conventions)["cycle_origin"] = "epoch0:first_instruction; later_epochs:matching_wait_acceptance";
     (*conventions)["timeline"] = "minimum_issue_cycle_is_lower_bound; compare_offsets_only_within_epoch";
     (*conventions)["dynamic_completion"] = "memory_lifetime_ends_at_matching_wait; null_age_is_unknown_not_zero";
     (*conventions)["access_elements"] = "xreg/ereg:register; mreg:register*32+row; vmem:32_byte_line; dram:conservative_anywhere";
   }
-  if (evidence.hasXLUEvidence())
-    (*result.getObject("evidence"))["xlu_evidence_sha256"] = evidence.xluEvidenceSha256();
-  if (evidence.hasVmulEvidence())
-    (*result.getObject("evidence"))["vmul_evidence_sha256"] = evidence.vmulEvidenceSha256();
   return result;
 }

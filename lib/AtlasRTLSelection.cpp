@@ -31,55 +31,27 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   auto attr = dyn_cast<DictionaryAttr>(raw);
   if (!attr)
     return module.emitError("atlas.rtl_evidence must be a selection dictionary");
-  auto path = attr.getAs<StringAttr>("path");
-  auto report = attr.getAs<StringAttr>("evidence_sha256");
-  auto manifest = attr.getAs<StringAttr>("manifest_sha256");
+  auto path = attr.getAs<StringAttr>("op_timing");
+  auto hash = attr.getAs<StringAttr>("op_timing_sha256");
   auto hardware = attr.getAs<StringAttr>("hardware_ir_sha256");
-  auto conditional = attr.getAs<BoolAttr>("allow_conditional");
   auto resolver = attr.getAs<StringAttr>("resolver");
-  if (!path || !report || !manifest || !hardware || !conditional || !resolver)
+  if (!path || !hash || !hardware || !resolver)
     return module.emitError("incomplete RTL evidence selection");
-  auto dmaPath = attr.getAs<StringAttr>("dma_path");
-  auto dmaHash = attr.getAs<StringAttr>("dma_evidence_sha256");
-  auto xluPath = attr.getAs<StringAttr>("xlu_path");
-  auto xluHash = attr.getAs<StringAttr>("xlu_evidence_sha256");
-  auto vmulPath = attr.getAs<StringAttr>("vmul_path");
-  auto vmulHash = attr.getAs<StringAttr>("vmul_evidence_sha256");
-  if (bool(dmaPath) != bool(dmaHash) ||
-      (attr.get("dma_path") && !dmaPath) ||
-      (attr.get("dma_evidence_sha256") && !dmaHash))
-    return module.emitError("incomplete DMA evidence selection");
-  if (bool(xluPath) != bool(xluHash) ||
-      (attr.get("xlu_path") && !xluPath) ||
-      (attr.get("xlu_evidence_sha256") && !xluHash))
-    return module.emitError("incomplete XLU evidence selection");
-  if (bool(vmulPath) != bool(vmulHash) ||
-      (attr.get("vmul_path") && !vmulPath) ||
-      (attr.get("vmul_evidence_sha256") && !vmulHash))
-    return module.emitError("incomplete VMUL evidence selection");
-  const char *expectedResolver = RTLEvidence::resolverIDFor(
-      bool(dmaPath), bool(xluPath), bool(vmulPath));
-  if (resolver.getValue() != expectedResolver)
+  bool dma = false;
+  if (Attribute policy = attr.get("dma")) {
+    auto text = dyn_cast<StringAttr>(policy);
+    if (!text || text.getValue() != "wait")
+      return module.emitError("unsupported DMA policy selection; only dma = \"wait\" is defined");
+    dma = true;
+  }
+  if (resolver.getValue() != RTLEvidence::resolverID())
     return module.emitError("unsupported RTL evidence resolver or capability selection");
-  ExpectedEvidenceIdentity identity{report.getValue().str(),
-                                    manifest.getValue().str(),
-                                    hardware.getValue().str()};
-  auto loaded = loadRTLEvidence(path.getValue(), identity, conditional.getValue());
+  auto loaded = loadRTLTimingFacts(path.getValue(), hash.getValue(), dma);
   if (!loaded)
     return module.emitError("RTL evidence selection failed: ")
            << llvm::toString(loaded.takeError());
-  if (dmaPath)
-    if (auto error = loadDMAEvidence(*loaded, dmaPath.getValue(), dmaHash.getValue()))
-      return module.emitError("DMA evidence selection failed: ")
-             << llvm::toString(std::move(error));
-  if (xluPath)
-    if (auto error = loadXLUEvidence(*loaded, xluPath.getValue(), xluHash.getValue()))
-      return module.emitError("XLU evidence selection failed: ")
-             << llvm::toString(std::move(error));
-  if (vmulPath)
-    if (auto error = loadVmulEvidence(*loaded, vmulPath.getValue(), vmulHash.getValue()))
-      return module.emitError("VMUL evidence selection failed: ")
-             << llvm::toString(std::move(error));
+  if (loaded->hardwareIRSha256() != hardware.getValue())
+    return module.emitError("selected facts describe a different hardware IR than recorded");
   return std::make_shared<RTLEvidence>(std::move(*loaded));
 }
 
@@ -90,65 +62,38 @@ struct SelectAtlasRTLEvidencePass
   SelectAtlasRTLEvidencePass() = default;
   SelectAtlasRTLEvidencePass(const SelectAtlasRTLEvidencePass &other)
       : PassWrapper(other) {}
-  Option<std::string> evidence{*this, "evidence", llvm::cl::desc("Selected replay report")};
-  Option<std::string> evidenceHash{*this, "evidence-sha256", llvm::cl::desc("Expected replay report SHA-256")};
-  Option<std::string> manifestHash{*this, "manifest-sha256", llvm::cl::desc("Expected retention manifest SHA-256")};
-  Option<std::string> hardwareHash{*this, "hardware-ir-sha256", llvm::cl::desc("Expected HW/Comb/Seq SHA-256")};
-  Option<std::string> dmaEvidence{*this, "dma-evidence", llvm::cl::desc("Optional selected DMA replay report")};
-  Option<std::string> dmaEvidenceHash{*this, "dma-evidence-sha256", llvm::cl::desc("Expected DMA replay SHA-256")};
-  Option<std::string> xluEvidence{*this, "xlu-evidence", llvm::cl::desc("Optional selected XLU replay report")};
-  Option<std::string> xluEvidenceHash{*this, "xlu-evidence-sha256", llvm::cl::desc("Expected XLU replay SHA-256")};
-  Option<std::string> vmulEvidence{*this, "vmul-evidence", llvm::cl::desc("Optional selected BF16 multiply replay report")};
-  Option<std::string> vmulEvidenceHash{*this, "vmul-evidence-sha256", llvm::cl::desc("Expected BF16 multiply replay SHA-256")};
-  Option<bool> allowConditional{*this, "allow-conditional", llvm::cl::init(false),
-      llvm::cl::desc("Explicitly accept a conditional experimental scope")};
+  Option<std::string> opTiming{*this, "op-timing",
+      llvm::cl::desc("RTL-computed operation timing facts (merlin.op_timing.v1)")};
+  Option<std::string> opTimingHash{*this, "op-timing-sha256",
+      llvm::cl::desc("Expected SHA-256 of the facts file")};
+  Option<std::string> dmaPolicy{*this, "dma",
+      llvm::cl::desc("Optional DMA policy: wait (one pending transfer, VMEM exclusive until its matching wait)")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
   StringRef getDescription() const final {
-    return "Select identity-checked conditional RTL evidence for bounded timing consumers";
+    return "Select SHA-256-identified RTL-computed timing facts for bounded timing consumers";
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (!dmaPolicy.empty() && dmaPolicy != "wait") {
+      module.emitError("unsupported DMA policy; only dma=wait is defined");
+      signalPassFailure();
+      return;
+    }
+    auto loaded = loadRTLTimingFacts(opTiming, opTimingHash, dmaPolicy == "wait");
+    if (!loaded) {
+      module.emitError("RTL evidence selection failed: ") << llvm::toString(loaded.takeError());
+      signalPassFailure();
+      return;
+    }
     Builder builder(module.getContext());
     NamedAttrList fields;
-    fields.set("path", builder.getStringAttr(evidence));
-    fields.set("evidence_sha256", builder.getStringAttr(evidenceHash));
-    fields.set("manifest_sha256", builder.getStringAttr(manifestHash));
-    fields.set("hardware_ir_sha256", builder.getStringAttr(hardwareHash));
-    fields.set("allow_conditional", builder.getBoolAttr(allowConditional));
-    if (dmaEvidence.empty() != dmaEvidenceHash.empty()) {
-      module.emitError("DMA evidence path and SHA-256 must be selected together");
-      signalPassFailure();
-      return;
-    }
-    if (!dmaEvidence.empty()) {
-      fields.set("dma_path", builder.getStringAttr(dmaEvidence));
-      fields.set("dma_evidence_sha256", builder.getStringAttr(dmaEvidenceHash));
-    }
-    if (xluEvidence.empty() != xluEvidenceHash.empty()) {
-      module.emitError("XLU evidence path and SHA-256 must be selected together");
-      signalPassFailure();
-      return;
-    }
-    if (!xluEvidence.empty()) {
-      fields.set("xlu_path", builder.getStringAttr(xluEvidence));
-      fields.set("xlu_evidence_sha256", builder.getStringAttr(xluEvidenceHash));
-    }
-    if (vmulEvidence.empty() != vmulEvidenceHash.empty()) {
-      module.emitError("VMUL evidence path and SHA-256 must be selected together");
-      signalPassFailure();
-      return;
-    }
-    if (!vmulEvidence.empty()) {
-      fields.set("vmul_path", builder.getStringAttr(vmulEvidence));
-      fields.set("vmul_evidence_sha256", builder.getStringAttr(vmulEvidenceHash));
-    }
-    fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverIDFor(
-        !dmaEvidence.empty(), !xluEvidence.empty(), !vmulEvidence.empty())));
+    fields.set("op_timing", builder.getStringAttr(opTiming));
+    fields.set("op_timing_sha256", builder.getStringAttr(opTimingHash));
+    fields.set("hardware_ir_sha256", builder.getStringAttr(loaded->hardwareIRSha256()));
+    if (loaded->dmaWait())
+      fields.set("dma", builder.getStringAttr("wait"));
+    fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverID()));
     module->setAttr("atlas.rtl_evidence", fields.getDictionary(module.getContext()));
-    if (failed(getSelectedRTLEvidence(module))) {
-      signalPassFailure();
-      return;
-    }
     module->setAttr("atlas.rtl_qualification", builder.getStringAttr("conditional"));
   }
 };

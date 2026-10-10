@@ -1,25 +1,14 @@
-"""Finite selected BF16 multiply timing, consumers, and evidence mutations.
+"""Selected VPU timing (BF16 multiply first) from RTL-computed facts.
 
-Select ATLAS_OOT_BIN_DIR, ATLAS_RTL_EVIDENCE_REPORT, and
-ATLAS_RTL_VMUL_EVIDENCE_REPORT explicitly. Optional XLU/DMA composition uses
-ATLAS_RTL_XLU_EVIDENCE_REPORT and ATLAS_RTL_DMA_EVIDENCE_REPORT.
+Select ATLAS_OOT_BIN_DIR and ATLAS_OP_TIMING explicitly.
 """
-import copy
-import hashlib
 import json
-import os
-from pathlib import Path
 import tempfile
 import unittest
 
 from test_delay_insertion import OPT, EMIT, addi, nop, program, run, without_delays
-from test_rtl_timing import HALT, MARKER, delay, vls
-
-REPORT = os.environ.get("ATLAS_RTL_EVIDENCE_REPORT")
-VMUL_REPORT = os.environ.get("ATLAS_RTL_VMUL_EVIDENCE_REPORT")
-XLU_REPORT = os.environ.get("ATLAS_RTL_XLU_EVIDENCE_REPORT")
-DMA_REPORT = os.environ.get("ATLAS_RTL_DMA_EVIDENCE_REPORT")
-CONSUMERS = ("--insert-atlas-delays", "--schedule-atlas-stream")
+from test_rtl_timing import (CONSUMERS, FACTS, HALT, MARKER, RESOLVER, block, delay, export, facts,
+                             facts_variant, selected, vls)
 
 
 def vmul(lhs=0, rhs=2, dst=4, kind="mul"):
@@ -27,73 +16,152 @@ def vmul(lhs=0, rhs=2, dst=4, kind="mul"):
                           f'lhs = {lhs} : i32, rhs = {rhs} : i32')
 
 
-def identity(path):
-    path = Path(path)
-    data = path.read_bytes()
-    return dict(path=str(path), sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
+def unary(kind, src=0, dst=4):
+    return ("vpu_unary", f'kind = "{kind}", dst = {dst} : i32, src = {src} : i32')
 
 
-@unittest.skipUnless(REPORT and VMUL_REPORT and OPT.is_file() and EMIT.is_file(),
-                     "requires explicitly selected VLS/VMUL receipts and built tools")
+def reduce(kind, src=0, dst=4):
+    return ("vpu_reduce", f'kind = "{kind}", dst = {dst} : i32, src = {src} : i32')
+
+
+def pack(direction, src=0, dst=4, scale=3):
+    return ("vpu_pack", f'direction = "{direction}", dst = {dst} : i32, src = {src} : i32, scale_reg = {scale} : i32')
+
+
+def vli(mode, dst=4, immediate=16256):
+    return ("vli", f'mode = "{mode}", dst = {dst} : i32, immediate = {immediate} : i32')
+
+
+# Every VPU operation the facts cover, with its facts block.
+VPU_OPERATIONS = {
+    **{f"v{kind}.bf16": (vmul(kind=kind), f"vpu.{kind}") for kind in ("add", "sub", "mul")},
+    "vmaximum.bf16": (vmul(kind="max"), "vpu.pairmax"), "vminimum.bf16": (vmul(kind="min"), "vpu.pairmin"),
+    "vmov": (unary("mov"), "vpu.mov"), "vrecip.bf16": (unary("recip"), "vpu.rcp"),
+    **{f"v{kind}.bf16": (unary(kind), f"vpu.{kind}")
+       for kind in ("exp", "exp2", "relu", "sin", "cos", "tanh", "sqrt", "square", "cube")},
+    "vlog2.bf16": (unary("log2"), "vpu.log"),
+    "vredsum.row.bf16": (reduce("row_sum"), "vpu.rsum"), "vredmax.row.bf16": (reduce("row_max"), "vpu.rmax"),
+    "vredmin.row.bf16": (reduce("row_min"), "vpu.rmin"), "vredsum.bf16": (reduce("col_sum"), "vpu.csum"),
+    "vredmax.bf16": (reduce("col_max"), "vpu.cmax"), "vredmin.bf16": (reduce("col_min"), "vpu.cmin"),
+    "vpack.bf16.fp8": (pack("bf16_to_fp8"), "vpu.fp8pack"),
+    "vunpack.fp8.bf16": (pack("fp8_to_bf16"), "vpu.fp8unpack"),
+    "vli.all": (vli("all"), "vpu.vliAll"), "vli.row": (vli("row"), "vpu.vliRow"),
+    "vli.col": (vli("col"), "vpu.vliCol"), "vli.one": (vli("one"), "vpu.vliOne"),
+}
+
+
+def expected_mreg_accesses(record):
+    """(age, count, step) of the compiler MReg accesses a facts block implies; a column
+    reduction reads its 64 source rows twice, which the compiler keeps as two passes."""
+    expected = []
+    for name, group in record["events"].items():
+        if not group["count"]:
+            continue
+        if group["count"] == 128:
+            expected += [(group["first_age"], 64, group["step"]), (group["first_age"] + 64, 64, group["step"])]
+        else:
+            expected.append((group["first_age"], group["count"], group["step"]))
+    return sorted(expected)
+
+
+@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
+                     "requires explicit RTL timing facts and built tools")
 class SelectedVmulTimingTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        report, vmul_report = Path(REPORT).resolve(), Path(VMUL_REPORT).resolve()
-        value = json.loads(report.read_text())
-        cls.options = {"evidence": str(report), "evidence-sha256": identity(report)["sha256"],
-                       "manifest-sha256": value["inputs"]["manifest"]["sha256"],
-                       "hardware-ir-sha256": value["inputs"]["hardware_ir"]["sha256"],
-                       "allow-conditional": "true", "vmul-evidence": str(vmul_report),
-                       "vmul-evidence-sha256": identity(vmul_report)["sha256"]}
-        cls.receipt = json.loads(vmul_report.read_text())
-
-    def selected(self, ops, *passes, **overrides):
-        options = {k: v for k, v in {**self.options, **overrides}.items() if v is not None}
-        selection = "--select-atlas-rtl-evidence=" + " ".join(f"{k}={v}" for k, v in options.items())
-        return run(OPT, ops if isinstance(ops, str) else program(ops), selection, *passes)
+    def selected(self, ops, *passes, **options):
+        return selected(ops, *passes, **options)
 
     def test_both_consumers_and_observed_stream_export(self):
+        record = block(facts(), "vpu.mul")
         for lhs, rhs, dst in ((0, 2, 4), (62, 2, 4), (0, 60, 62)):
             for consumer in CONSUMERS:
                 with self.subTest(lhs=lhs, rhs=rhs, dst=dst, consumer=consumer):
                     result = self.selected([vmul(lhs, rhs, dst), HALT], consumer, "--verify-atlas-rtl-timing")
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("atlas.vls_vmul.serialized.v1", result.stdout)
-                    exported = run(EMIT, result.stdout, "--rtl-timing-json")
-                    self.assertEqual(exported.returncode, 0, exported.stderr)
-                    value = json.loads(exported.stdout)
+                    self.assertIn(RESOLVER, result.stdout)
+                    value = export(result.stdout)
                     self.assertFalse(value["scheduling_qualified"])
                     self.assertEqual(value["qualification"], "conditional")
                     instruction = next(i for i in value["instructions"] if i["mnemonic"] == "vmul.bf16")
                     footprint = instruction["footprint"]
                     accesses = footprint["accesses"]
                     self.assertEqual(len(accesses), 3)
-                    self.assertEqual(sorted(a["age"] for a in accesses), [0, 0, 2])
+                    self.assertEqual(sorted(a["age"] for a in accesses),
+                                     sorted(record["events"][g]["first_age"] for g in ("read0", "read1", "write0")))
                     self.assertTrue(all(a["count"] == 64 and a["step"] == 1 for a in accesses))
-                    self.assertEqual(footprint["done_age"], 65)
+                    self.assertEqual(footprint["done_age"], record["first_free_age"] - 1)
+                    self.assertEqual(footprint["write_release"], record["next_issue_age"])
+                    self.assertEqual(footprint["read_release"], record["events"]["read0"]["last_age"] +
+                                     record["assumptions"]["scratchpad_read_latency"])
+                    self.assertEqual(sorted(h["unit"] for h in footprint["holds"]),
+                                     ["VLOAD path", "VPU", "VSTORE path"])
+                    self.assertTrue(all((h["from"], h["to"]) == (0, record["first_free_age"] - 1)
+                                        for h in footprint["holds"]))
                     self.assertNotEqual(run(EMIT, without_delays(result.stdout)).returncode, 0)
 
-    def test_pair_domain_and_unreviewed_compute_rejected(self):
+    def test_pair_domain_is_rejected_in_both_consumers(self):
         pairs = ((1, 2, 4), (0, 3, 4), (0, 2, 5), (0, 2, 64),
                  (-2, 2, 4), (0, 0, 4), (0, 32, 4), (0, 2, 0), (0, 2, 34))
         for pair in pairs:
             for consumer in CONSUMERS:
                 with self.subTest(pair=pair, consumer=consumer):
-                    self.assertNotEqual(self.selected([vmul(*pair), HALT], consumer).returncode, 0)
-        for kind in ("add", "sub", "max", "min"):
-            self.assertNotEqual(self.selected([vmul(kind=kind), HALT], CONSUMERS[0]).returncode, 0)
-        for overrides in ({"vmul-evidence": None, "vmul-evidence-sha256": None},
-                          {"vmul-evidence-sha256": "0" * 64},
-                          {"vmul-evidence": None}, {"vmul-evidence-sha256": None}):
-            self.assertNotEqual(self.selected([vmul(), HALT], CONSUMERS[0], **overrides).returncode, 0)
+                    result = self.selected([vmul(*pair), HALT], consumer)
+                    self.assertNotEqual(result.returncode, 0)
+        # Physical bank aliases (register mod 32) pass the dialect verifier and fail in the resolver.
+        for ops in ([unary("mov", 0, 32), HALT], [reduce("row_sum", 32, 0), HALT], [reduce("col_sum", 0, 0), HALT],
+                    [pack("bf16_to_fp8", 0, 1), HALT], [pack("fp8_to_bf16", 4, 4), HALT], [unary("square", 2, 34), HALT]):
+            with self.subTest(ops=ops):
+                result = self.selected(ops, CONSUMERS[0])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(RESOLVER, result.stderr)
+
+    def test_every_vpu_operation_takes_its_numbers_from_the_facts(self):
+        document = facts()
+        for mnemonic, (operation, name) in VPU_OPERATIONS.items():
+            record = block(document, name)
+            for consumer in CONSUMERS:
+                with self.subTest(mnemonic=mnemonic, consumer=consumer):
+                    result = self.selected([operation, HALT], consumer, "--verify-atlas-rtl-timing")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(run(EMIT, result.stdout).returncode, 0)
+                    self.assertNotEqual(run(OPT, without_delays(result.stdout), "--verify-atlas-rtl-timing").returncode, 0)
+                    instruction = next(i for i in export(result.stdout)["instructions"] if i["mnemonic"] == mnemonic)
+                    footprint = instruction["footprint"]
+                    mreg = sorted((a["age"], a["count"], a["step"]) for a in footprint["accesses"]
+                                  if a["resource"] == "mreg")
+                    self.assertEqual(mreg, expected_mreg_accesses(record))
+                    self.assertEqual(footprint["done_age"], record["first_free_age"] - 1)
+                    self.assertEqual(footprint["write_release"], record["next_issue_age"])
+                    self.assertEqual({h["unit"]: h["to"] for h in footprint["holds"]},
+                                     {u: record["first_free_age"] - 1 for u in ("VPU", "VLOAD path", "VSTORE path")})
 
     def test_serialized_reuse_and_store_boundary(self):
-        for gap in (65, 66, 67):
+        boundary = block(facts(), "vpu.mul")["first_free_age"]
+        for gap in (boundary - 1, boundary, boundary + 1):
             for next_op in (vmul(6, 8, 10), vls("vstore", 4)):
                 with self.subTest(gap=gap, next_op=next_op):
                     result = self.selected([addi(6, 0, 0), vmul(), delay(gap - 2),
                                             next_op, delay(64), nop(), HALT], "--verify-atlas-rtl-timing")
-                    self.assertEqual(result.returncode == 0, gap >= 66, result.stderr)
+                    self.assertEqual(result.returncode == 0, gap >= boundary, result.stderr)
+
+    def test_facts_numbers_drive_the_boundary_and_unresolved_blocks_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="atlas-vpu-facts-") as directory:
+            slower = facts_variant(directory, lambda d: block(d, "vpu.mul").update(first_free_age=70, next_issue_age=69))
+            for gap, accepted in ((66, False), (69, False), (70, True)):
+                with self.subTest(gap=gap):
+                    result = self.selected([addi(6, 0, 0), vmul(), delay(gap - 2), vmul(6, 8, 10), delay(68), nop(), HALT],
+                                           "--verify-atlas-rtl-timing", path=slower)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+            unresolved = facts_variant(directory, lambda d: block(d, "vpu.mul").update(events=None), "unresolved.json")
+            rejected = self.selected([vmul(), HALT], CONSUMERS[0], path=unresolved)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("vpu.mul: facts block is unresolved", rejected.stderr)
+            accepted = self.selected([vmul(kind="add"), HALT], CONSUMERS[0], "--verify-atlas-rtl-timing", path=unresolved)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            # Structure is the compiler's: a facts write group with the wrong sweep is refused.
+            narrow = facts_variant(directory, lambda d: block(d, "vpu.mul")["events"]["write0"].update(count=32), "narrow.json")
+            rejected = self.selected([vmul(), HALT], CONSUMERS[0], path=narrow)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("does not sweep 1x64", rejected.stderr)
 
     def test_producer_consumer_and_completion_are_rechecked(self):
         ops = [addi(6, 0, 0), addi(8, 0, 1024), vls("vload", 0),
@@ -118,92 +186,21 @@ class SelectedVmulTimingTest(unittest.TestCase):
             self.assertNotEqual(run(OPT, unsafe, entrypoint).returncode, 0)
         staged = run(OPT, result.stdout, "--convert-atlas-to-llvm-calls")
         self.assertEqual(staged.returncode, 0, staged.stderr)
-        self.assertIn("vmul_evidence_sha256", staged.stdout)
+        self.assertIn("op_timing_sha256", staged.stdout)
         finalized = run(OPT, staged.stdout, "--finalize-atlas-llvm-calls")
         self.assertEqual(finalized.returncode, 0, finalized.stderr)
-        self.assertIn("vmul_evidence_sha256", finalized.stdout)
+        self.assertIn("op_timing_sha256", finalized.stdout)
 
-    def reject_receipt(self, changed, directory):
-        receipt = Path(directory) / "receipt.json"
-        receipt.write_text(json.dumps(changed))
-        result = self.selected([HALT], "--verify-atlas-rtl-timing", **{
-            "vmul-evidence": str(receipt), "vmul-evidence-sha256": identity(receipt)["sha256"]})
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn("RTL evidence", result.stderr)
-
-    def test_rehashed_provenance_claims_are_rejected(self):
-        mutations = (lambda r: r.update(state="prepared"),
-                     lambda r: r.update(scheduling_qualified=True),
-                     lambda r: r["hardware_ir"].update(sha256="0" * 64),
-                     lambda r: r["rtl_snapshots"].pop(),
-                     lambda r: r["producer_snapshots"].pop(),
-                     lambda r: r["cases"].pop())
-        with tempfile.TemporaryDirectory(prefix="atlas-vmul-claims-") as directory:
-            for index, mutate in enumerate(mutations):
-                with self.subTest(index=index):
-                    changed = copy.deepcopy(self.receipt)
-                    mutate(changed)
-                    self.reject_receipt(changed, directory)
-
-    def test_rehashed_event_changes_reject_copied_success_flags(self):
-        case = next(c for c in self.receipt["cases"] if c["name"] == "vmul")
-        original = json.loads(Path(case["events"]["path"]).read_text())
-        mutations = (lambda e: e["commands"][4]["reads"][0].update(age=1),
-                     lambda e: e["commands"][4]["responses"][0].update(port=1),
-                     lambda e: e["commands"][4]["writes"][63].update(row=30),
-                     lambda e: e["commands"][4]["writes"][0].update(data_hex="00" * 32),
-                     lambda e: e["commands"][4].update(lhs=2),
-                     lambda e: e["commands"][4].update(release_age=65),
-                     lambda e: e["instructions"][12].update(word_u32=0),
-                     lambda e: e["endpoints"][0]["engine_state"].update(vpu_write_mask=1),
-                     lambda e: e.update(full_memory_checked_bytes=2048),
-                     lambda e: e.update(terminal_drain_edges=1))
-        with tempfile.TemporaryDirectory(prefix="atlas-vmul-events-") as directory:
-            events = Path(directory) / "events.json"
-            for index, mutate in enumerate(mutations):
-                with self.subTest(index=index):
-                    changed = copy.deepcopy(original)
-                    mutate(changed)
-                    events.write_text(json.dumps(changed))
-                    report = copy.deepcopy(self.receipt)
-                    next(c for c in report["cases"] if c["name"] == "vmul")["events"] = identity(events)
-                    self.reject_receipt(report, directory)
-
-    def test_rehashed_build_recipe_does_not_accept_copied_flags(self):
-        original = json.loads(Path(self.receipt["compile_phase"]["path"]).read_text())
-        with tempfile.TemporaryDirectory(prefix="atlas-vmul-build-") as directory:
-            phase = Path(directory) / "phase.json"
-            for mutation in ("--assert", "--top-module", "--no-assert", "-CFLAGS"):
-                with self.subTest(mutation=mutation):
-                    changed = copy.deepcopy(original)
-                    argv = changed["command"]["argv"]
-                    if mutation == "--no-assert":
-                        argv.append("--no-assert")
-                    elif mutation == "-CFLAGS":
-                        argv[argv.index("-CFLAGS") + 1] = "-std=c++17 -DNDEBUG"
-                    else:
-                        argv.remove(mutation)
-                    phase.write_text(json.dumps(changed))
-                    report = copy.deepcopy(self.receipt)
-                    report["compile_phase"] = identity(phase)
-                    self.reject_receipt(report, directory)
-
-    @unittest.skipUnless(DMA_REPORT and XLU_REPORT, "requires explicit DMA/XLU composition receipts")
     def test_dma_wait_and_xlu_share_serialized_compute_policy(self):
         from test_rtl_dma_timing import setup, transfer, wait
         from test_rtl_xlu_timing import transpose
-        options = {}
-        for engine, receipt in (("dma", DMA_REPORT), ("xlu", XLU_REPORT)):
-            path = Path(receipt).resolve()
-            options.update({engine + "-evidence": str(path),
-                            engine + "-evidence-sha256": identity(path)["sha256"]})
         unsafe = [*setup(), transfer(), vmul(), wait(), HALT]
-        self.assertNotEqual(self.selected(unsafe, CONSUMERS[0], **options).returncode, 0)
+        self.assertNotEqual(self.selected(unsafe, CONSUMERS[0], dma="wait").returncode, 0)
         for consumer in CONSUMERS:
             result = self.selected([*setup(), transfer(), wait(), transpose(0, 2),
-                                    vmul(2, 4, 6), HALT], consumer, "--verify-atlas-rtl-timing", **options)
+                                    vmul(2, 4, 6), HALT], consumer, "--verify-atlas-rtl-timing", dma="wait")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("atlas.vls_dma_xlu_vmul.serialized.v1", result.stdout)
+            self.assertIn('dma = "wait"', result.stdout)
             self.assertEqual(run(EMIT, result.stdout).returncode, 0)
 
 

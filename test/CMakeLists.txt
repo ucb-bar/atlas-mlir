@@ -24,10 +24,3 @@ target_link_libraries(atlas-dma-stream-policy-test PRIVATE
 mlir_check_all_link_libraries(atlas-dma-stream-policy-test)
 add_test(NAME atlas-dma-stream-policy
   COMMAND atlas-dma-stream-policy-test)
-
-add_llvm_executable(atlas-rtl-evidence-test rtl-evidence.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-rtl-evidence-test)
-target_link_libraries(atlas-rtl-evidence-test PRIVATE MLIRAtlas)
-mlir_check_all_link_libraries(atlas-rtl-evidence-test)
-# This executable takes explicitly selected local evidence; no private artifact
-# path or unqualified report is silently installed as a default CTest input.

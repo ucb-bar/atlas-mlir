@@ -129,10 +129,11 @@ using FootprintResolver = std::function<Footprint(const Instr &, const RegValues
 
 // Selected footprints must not silently inherit model-specific engine policy.
 // ConservativeRTL admits scalar, LSU, DMA and XLU by default. Additional
-// compute operations require an explicit separately reviewed policy.
+// compute operations require an explicit policy: VmulBf16 admits only
+// vmul.bf16, Vpu every VPU operation the resolver supports.
 struct TargetTiming {
   enum class Policy { LegacyModel, ConservativeRTL };
-  enum class ComputePolicy { VmulBf16 };
+  enum class ComputePolicy { VmulBf16, Vpu };
   FootprintResolver resolver;
   Policy policy = Policy::LegacyModel;
   std::set<ComputePolicy> computePolicies;

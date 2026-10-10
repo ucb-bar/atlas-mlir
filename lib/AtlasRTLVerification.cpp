@@ -123,10 +123,10 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
       pendingDMA = footprint;
       pendingChannel = instruction.op->channel;
     }
-    if (fixedEngine) {
+    if (footprint.doneAge > 0)
       asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
+    if (fixedEngine)
       fixedEngineAvailable = cycle + footprint.doneAge + 1;
-    }
     applyScalar(instruction, registers);
     previousWasDelay = opClass == OpClass::Delay;
     halted = terminal;

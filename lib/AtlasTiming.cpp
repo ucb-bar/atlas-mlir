@@ -219,7 +219,8 @@ bool TargetTiming::allowsEngine(Engine engine) const {
   case Engine::Xlu:
     return true;
   case Engine::Vpu:
-    return computePolicies.count(ComputePolicy::VmulBf16) != 0;
+    return computePolicies.count(ComputePolicy::Vpu) != 0 ||
+           computePolicies.count(ComputePolicy::VmulBf16) != 0;
   default:
     return false;
   }
@@ -229,8 +230,9 @@ bool TargetTiming::allowsOperation(const OpInfo &op) const {
   if (usesLegacyModelPolicies())
     return true;
   if (op.engine == Engine::Vpu)
-    return op.name == "vmul.bf16" &&
-           computePolicies.count(ComputePolicy::VmulBf16) != 0;
+    return computePolicies.count(ComputePolicy::Vpu) != 0 ||
+           (op.name == "vmul.bf16" &&
+            computePolicies.count(ComputePolicy::VmulBf16) != 0);
   return allowsEngine(op.engine);
 }
 

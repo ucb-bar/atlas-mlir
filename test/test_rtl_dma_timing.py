@@ -1,22 +1,14 @@
-"""Explicit selected conditional DMA timing policy; no private evidence defaults.
+"""Explicit selected conditional DMA policy (dma=wait) beside RTL-computed facts.
 
-Run with ATLAS_OOT_BIN_DIR, ATLAS_RTL_EVIDENCE_REPORT and
-ATLAS_RTL_DMA_EVIDENCE_REPORT pointing to the selected compiler/evidence.
+Run with ATLAS_OOT_BIN_DIR and ATLAS_OP_TIMING pointing to the compiler and facts.
 """
-import copy
-import hashlib
 import json
-import os
-from pathlib import Path
-import tempfile
+import re
 import unittest
 
 from test_delay_insertion import OPT, EMIT, addi, program, run
-from test_rtl_timing import HALT, MARKER, VLOAD, word_base
+from test_rtl_timing import CONSUMERS, FACTS, HALT, MARKER, RESOLVER, VLOAD, selected, word_base
 
-REPORT=os.environ.get('ATLAS_RTL_EVIDENCE_REPORT')
-DMA_REPORT=os.environ.get('ATLAS_RTL_DMA_EVIDENCE_REPORT')
-CONSUMERS=('--insert-atlas-delays','--schedule-atlas-stream')
 
 def config(reg=5,channel=0):
     return ('dma_config',f'channel = {channel} : i32, base_reg = {reg} : i32')
@@ -26,25 +18,11 @@ def wait(channel=0): return ('dma_wait',f'channel = {channel} : i32')
 def setup(vmem=0,offset=0x90000000,size=128,base=0):
     return [*word_base(5,base),config(),*word_base(6,vmem),*word_base(1,offset),*word_base(2,size)]
 
-@unittest.skipUnless(REPORT and DMA_REPORT and OPT.is_file() and EMIT.is_file(),
-                     'requires explicitly selected VLS/DMA receipts and built tools')
+@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
+                     'requires explicit RTL timing facts and built tools')
 class SelectedDMATimingTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        path=Path(REPORT).resolve();value=json.loads(path.read_text())
-        dma=Path(DMA_REPORT).resolve()
-        cls.options={'evidence':str(path),'evidence-sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
-                     'manifest-sha256':value['inputs']['manifest']['sha256'],
-                     'hardware-ir-sha256':value['inputs']['hardware_ir']['sha256'],
-                     'allow-conditional':'true','dma-evidence':str(dma),
-                     'dma-evidence-sha256':hashlib.sha256(dma.read_bytes()).hexdigest()}
-        cls.receipt=json.loads(dma.read_text())
-    def selected(self,ops,*passes,**overrides):
-        options={**self.options,**overrides}
-        for key in [key for key,value in options.items() if value is None]: del options[key]
-        text=ops if isinstance(ops,str) else program(ops)
-        selection='--select-atlas-rtl-evidence='+' '.join(f'{k}={v}' for k,v in options.items())
-        return run(OPT,text,selection,*passes)
+    def selected(self,ops,*passes,dma='wait',**options):
+        return selected(ops,*passes,dma=dma,**options)
     def check_consumers(self,ops,accepted):
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
@@ -58,14 +36,17 @@ class SelectedDMATimingTest(unittest.TestCase):
         for consumer in CONSUMERS:
             checked=self.selected(ops,consumer,'--verify-atlas-rtl-timing')
             self.assertEqual(checked.returncode,0,checked.stderr)
-            self.assertIn('atlas.vls_dma.serialized.v1',checked.stdout)
+            self.assertIn('dma = "wait"',checked.stdout)
             export=run(EMIT,checked.stdout,'--rtl-timing-json')
             self.assertEqual(export.returncode,0,export.stderr)
             data=json.loads(export.stdout)
             self.assertEqual(data['schema'],'atlas.resolved_rtl_timing.v1')
             self.assertFalse(data['scheduling_qualified'])
             self.assertEqual(data['qualification'],'conditional')
-            self.assertEqual(data['resolver']['id'],'atlas.vls_dma.serialized.v1')
+            self.assertEqual(data['resolver']['id'],RESOLVER)
+            self.assertEqual(data['resolver']['dma_policy'],'wait')
+            self.assertIn('dma.load.ch0..7',data['applicability']['supported_operations'])
+            self.assertIsNone(data['applicability']['dma_domain']['completion_latency'])
             dma=[i for i in data['instructions'] if i['mnemonic'].startswith('dma.')]
             launch=next(i for i in dma if i['mnemonic']=='dma.load.ch0')
             retired=next(i for i in dma if i['mnemonic']=='dma.wait.ch0')
@@ -115,7 +96,6 @@ class SelectedDMATimingTest(unittest.TestCase):
         self.assertEqual(selected.returncode,0,selected.stderr)
         source=selected.stdout
         lines=source.splitlines();alias={};kept=[]
-        import re
         for line in lines:
             matched=re.search(r'(%\w+) = "atlas.dma_wait"\((%\w+)\)',line)
             if matched: alias[matched[1]]=matched[2];continue
@@ -125,7 +105,6 @@ class SelectedDMATimingTest(unittest.TestCase):
         self.assertNotEqual(run(OPT,unsafe,'--verify-atlas-rtl-timing').returncode,0)
         self.assertNotEqual(run(EMIT,unsafe).returncode,0)
     def test_llvm_entrypoints_and_structured_finalization_recheck_completion(self):
-        import re
         selected=self.selected([*setup(),transfer(),wait(),HALT],'--verify-atlas-rtl-timing')
         self.assertEqual(selected.returncode,0,selected.stderr)
         # Remove the terminal wait while reconnecting the physical state chain.
@@ -156,44 +135,19 @@ class SelectedDMATimingTest(unittest.TestCase):
         self.assertNotEqual(finalized.returncode,0)
         self.assertIn('DMA',finalized.stderr)
 
-    def test_vls_only_never_silently_enables_dma(self):
-        selected=self.selected([*setup(),transfer(),wait(),HALT],'--insert-atlas-delays',
-                               **{'dma-evidence':None,'dma-evidence-sha256':None})
-        self.assertNotEqual(selected.returncode,0)
-    def test_hash_and_copied_success_flags_rejected(self):
-        source=[*setup(),transfer(),wait(),HALT]
-        self.assertNotEqual(self.selected(source,'--verify-atlas-rtl-timing',
-                            **{'dma-evidence-sha256':'0'*64}).returncode,0)
-        with tempfile.TemporaryDirectory(prefix='atlas-dma-test-') as directory:
-            receipt=Path(directory)/'receipt.json'
-            for field,value in [('state','prepared'),('scheduling_qualified',True),
-                                ('qualification','qualified')]:
-                changed=copy.deepcopy(self.receipt);changed[field]=value
-                receipt.write_text(json.dumps(changed))
-                selected=self.selected(source,'--verify-atlas-rtl-timing',**{
-                    'dma-evidence':str(receipt),'dma-evidence-sha256':hashlib.sha256(receipt.read_bytes()).hexdigest()})
-                self.assertNotEqual(selected.returncode,0,field)
-    def test_rehashed_event_mutations_rejected(self):
-        with tempfile.TemporaryDirectory(prefix='atlas-dma-event-test-') as directory:
-            directory=Path(directory);receipt=directory/'receipt.json';events=directory/'events.json'
-            case=next(c for c in self.receipt['cases'] if c['name']=='capture_after_launch')
-            original=json.loads(Path(case['events']['path']).read_text())
-            for kind,field,value in [('a','address',0),('d','source',63),('wait','channel',7),
-                                     ('launch','size',32),('launch','dram_address',0x90001000),
-                                     ('launch','vmem_word',8),('config','base',1),('a','source',63),
-                                     ('d','edge',1)]:
-                changed=copy.deepcopy(original)
-                target=next(e for e in changed['events'] if e['kind']==kind)
-                if kind=='a' and field=='source':
-                    requests=[e for e in changed['events'] if e['kind']=='a']
-                    target=requests[1];value=requests[0]['source']
-                target[field]=value
-                events.write_text(json.dumps(changed));report=copy.deepcopy(self.receipt)
-                selected_case=next(c for c in report['cases'] if c['name']==case['name'])
-                selected_case['events']={'path':str(events),'sha256':hashlib.sha256(events.read_bytes()).hexdigest(),'bytes':events.stat().st_size}
-                receipt.write_text(json.dumps(report))
-                result=self.selected([HALT],'--verify-atlas-rtl-timing',**{'dma-evidence':str(receipt),
-                    'dma-evidence-sha256':hashlib.sha256(receipt.read_bytes()).hexdigest()})
-                self.assertNotEqual(result.returncode,0,(kind,field))
+    def test_dma_policy_must_be_explicit_and_known(self):
+        ops=[*setup(),transfer(),wait(),HALT]
+        unselected=self.selected(ops,'--insert-atlas-delays',dma=None)
+        self.assertNotEqual(unselected.returncode,0)
+        self.assertIn('dma=wait',unselected.stderr)
+        for policy in ('latency','none','true'):
+            with self.subTest(policy=policy):
+                result=self.selected(ops,'--verify-atlas-rtl-timing',dma=policy)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('unsupported DMA policy',result.stderr)
+        plain=self.selected([HALT],'--verify-atlas-rtl-timing',dma=None)
+        self.assertEqual(plain.returncode,0,plain.stderr)
+        self.assertNotIn('dma =',plain.stdout)
+        self.assertEqual(json.loads(run(EMIT,plain.stdout,'--rtl-timing-json').stdout)['resolver']['dma_policy'],'none')
 
 if __name__=='__main__': unittest.main()

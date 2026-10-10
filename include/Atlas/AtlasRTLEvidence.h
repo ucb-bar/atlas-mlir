@@ -5,101 +5,59 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
+#include <map>
+#include <optional>
+#include <string>
 
 namespace mlir::atlas::timing {
 
-// Caller-selected byte identities. No field claims full Chisel-source equality.
-struct ExpectedEvidenceIdentity {
-  std::string evidenceSha256;
-  std::string manifestSha256;
-  std::string hardwareIRSha256;
+// One event group of a merlin.op_timing.v1 block; ages count cycles after issue.
+struct OpTimingGroup {
+  int firstAge = 0, lastAge = 0, count = 0;
+  std::optional<int> step;
 };
 
+struct OpTimingBlock {
+  bool resolved = false; // events were computed (not null)
+  std::map<std::string, OpTimingGroup> events;
+  std::optional<int> firstFreeAge, nextIssueAge, readLatency;
+};
+
+// Operation timing computed from the RTL (tools/rtl_extract, schema
+// merlin.op_timing.v1), selected by the SHA-256 of the facts file. Footprint
+// structure (resources, registers, pairs) comes from the compiler; ages,
+// counts, steps, holds and releases come from the mapped facts block. Any
+// mnemonic without a resolved, structurally agreeing block is rejected.
 class RTLEvidence {
 public:
-  static constexpr const char *resolverID() {
-    return "atlas.vls.conservative.v1";
-  }
+  static constexpr const char *resolverID() { return "atlas.op_timing.serialized.v1"; }
   static constexpr int resolverVersion() { return 1; }
-  static constexpr const char *dmaResolverID() {
-    return "atlas.vls_dma.serialized.v1";
-  }
-  static constexpr const char *resolverIDFor(bool dma, bool xlu, bool vmul = false) {
-    if (vmul)
-      return xlu ? (dma ? "atlas.vls_dma_xlu_vmul.serialized.v1" :
-                         "atlas.vls_xlu_vmul.serialized.v1") :
-                   (dma ? "atlas.vls_dma_vmul.serialized.v1" :
-                          "atlas.vls_vmul.serialized.v1");
-    return xlu ? (dma ? "atlas.vls_dma_xlu.serialized.v1" :
-                       "atlas.vls_xlu.serialized.v1") :
-                 (dma ? dmaResolverID() : resolverID());
-  }
-  const char *selectedResolverID() const {
-    return resolverIDFor(hasDMAEvidence(), hasXLUEvidence(), hasVmulEvidence());
-  }
-  bool hasDMAEvidence() const { return !dmaIdentity.empty(); }
-  const std::string &dmaEvidenceSha256() const { return dmaIdentity; }
-  bool hasXLUEvidence() const { return !xluIdentity.empty(); }
-  const std::string &xluEvidenceSha256() const { return xluIdentity; }
-  bool hasVmulEvidence() const { return !vmulIdentity.empty(); }
-  const std::string &vmulEvidenceSha256() const { return vmulIdentity; }
   // Reviewed ScalarCore fetch uses a 15-bit word index into InstrMem.
   static constexpr unsigned maximumProgramWords() { return 32768; }
-  const std::string &evidenceSha256() const { return identity.evidenceSha256; }
-  const std::string &manifestSha256() const { return identity.manifestSha256; }
-  const std::string &hardwareIRSha256() const { return identity.hardwareIRSha256; }
   const char *qualificationStatus() const { return "conditional"; }
+  const std::string &factsSha256() const { return sha256; }
+  const std::string &hardwareIRSha256() const { return hardwareIR; }
+  // dma=wait: launch-time operand capture, synchronous config, one pending
+  // transfer, VMEM exclusive until the matching wait, no completion latency.
+  bool dmaWait() const { return dma; }
 
-  // Resolves the explicit bounded subset. Unsupported instances carry error.
-  // Every VLS reserves BOTH paths, deliberately serializing all vector memory.
+  // Every selected engine operation reserves BOTH VLS paths, deliberately
+  // serializing vector memory, XLU and VPU work.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
-  // All consumers use the same evidence-gated operation admission policy.
   TargetTiming targetTiming() const;
-  // Describes resolver policy and assumptions, not newly qualified domains.
   llvm::json::Object applicability() const;
-  Footprint footprintOf(const Instr &in, const RegValues &regs) const {
-    return resolve(in, regs);
-  }
 
 private:
-  struct Stream {
-    int sourceAge = 0, destinationAge = 0, step = 0, rows = 0;
-    int busyLast = 0, sourceLast = 0, destinationLast = 0;
-  };
-  Stream load, store, transpose, multiply;
-  ExpectedEvidenceIdentity identity;
-  std::string dmaIdentity;
-  std::string xluIdentity;
-  std::string vmulIdentity;
-  friend llvm::Expected<RTLEvidence>
-  loadRTLEvidence(llvm::StringRef, const ExpectedEvidenceIdentity &, bool);
-  friend llvm::Error loadDMAEvidence(RTLEvidence &, llvm::StringRef,
-                                     llvm::StringRef);
-  friend llvm::Error loadXLUEvidence(RTLEvidence &, llvm::StringRef,
-                                     llvm::StringRef);
-  friend llvm::Error loadVmulEvidence(RTLEvidence &, llvm::StringRef,
-                                    llvm::StringRef);
+  std::map<std::string, OpTimingBlock> blocks;
+  std::string sha256, hardwareIR;
+  bool dma = false;
+  friend llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef,
+                                                        llvm::StringRef, bool);
 };
 
-// Draft full-ISA contracts are intentionally not accepted by this loader.
-// The report remains conditional; opting in does not qualify the target.
-llvm::Expected<RTLEvidence>
-loadRTLEvidence(llvm::StringRef path, const ExpectedEvidenceIdentity &expected,
-                bool conditionalOptIn);
-
-// Extend an already selected VLS provider only after checking a separate
-// selected-core DMA receipt against the same retained hardware identity.
-llvm::Error loadDMAEvidence(RTLEvidence &evidence, llvm::StringRef path,
-                            llvm::StringRef expectedSha256);
-llvm::Error loadXLUEvidence(RTLEvidence &evidence, llvm::StringRef path,
-                            llvm::StringRef expectedSha256);
-llvm::Error loadVmulEvidence(RTLEvidence &evidence, llvm::StringRef path,
-                            llvm::StringRef expectedSha256);
-
-// Exact reviewed semantic module closure for resolver v1. Location aliases
-// are ignored; changed frontend, geometry or wiring requires renewed review.
-// This checks text already in memory and does not inspect artifact paths.
-llvm::Error checkRTLSemanticCompatibility(llvm::StringRef hardwareIR);
+llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef path,
+                                               llvm::StringRef expectedSha256,
+                                               bool dmaWait);
 
 } // namespace mlir::atlas::timing
 #endif
