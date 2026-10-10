@@ -65,19 +65,12 @@ public:
       }
     }
     Location loc = function.getLoc();
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(fixed().oneReg)}, {"src", i32(0)},
-         {"immediate", i32(1)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(fixed().zeroReg)}, {"src", i32(0)},
-         {"immediate", i32(0)}});
-    SmallVector<unsigned> dmaChannels{fixed().loadChannel, fixed().storeChannel};
-    for (unsigned channel : allocation.dmaChannels())
-      if (!llvm::is_contained(dmaChannels, channel))
-        dmaChannels.push_back(channel);
-    for (unsigned channel : dmaChannels)
-      add("atlas.dma_config", loc,
-          {{"channel", i32(channel)}, {"base_reg", i32(fixed().zeroReg)}});
+    // A DMA addresses DRAM as Cat(dmaBaseReg, low word), and DMA_CONFIG sets
+    // that one upper word whatever its channel field (ScalarCore.scala). The
+    // ABI keeps DRAM below 4 GiB, so one configuration from x0 states the
+    // zero upper word every transfer relies on.
+    add("atlas.dma_config", loc,
+        {{"channel", i32(fixed().loadChannel)}, {"base_reg", i32(0)}});
     materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
     if (controlBase)
       stageScalarArguments(loc);
@@ -335,6 +328,9 @@ private:
   unsigned scalar(Value value) const { return allocation.scalar(value); }
   MXUPlacement mxu(Value value) const { return allocation.mxu(value); }
 
+  // Loads `value` with the fewest instructions, as RISC-V `li` expands: LUI
+  // sets the upper 20 bits, rounded because ADDI's 12-bit immediate is signed,
+  // and each is left out when its part is zero.
   void materializeScalar(unsigned dst, uint32_t value, Location loc) {
     uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
     int32_t lower = static_cast<int32_t>(value & 0xfff);
@@ -344,9 +340,10 @@ private:
       add("atlas.upper", loc,
           {{"kind", str("lui")}, {"dst", i32(dst)},
            {"immediate", i32(upper)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(dst)},
-         {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
+    if (lower || !upper)
+      add("atlas.alu_imm", loc,
+          {{"kind", str("addi")}, {"dst", i32(dst)},
+           {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
   }
 
   void stageScalarArguments(Location loc) {
@@ -896,7 +893,9 @@ struct LowerAtlasVirtualToMachinePass
 
   StringRef getArgument() const final { return "lower-atlas-virtual-to-machine"; }
   StringRef getDescription() const final {
-    return "Allocate a bounded Atlas virtual BF16 CFG and emit a delayed physical word stream";
+    return "Allocate a bounded Atlas virtual CFG and emit an untimed physical "
+           "instruction stream with its resource contracts; insert-atlas-delays "
+           "or schedule-atlas-stream then times it";
   }
 
   void runOnOperation() override {

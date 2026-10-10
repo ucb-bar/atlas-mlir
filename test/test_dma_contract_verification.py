@@ -16,8 +16,8 @@ from test_virtual_dma_lowering import STAGING_WORD
 from test_virtual_lowering import lower, virtual_chain
 from verification_support import (
     DELAY, INCOMPLETE, MARKER as VERSION, NOP, STREAM_REWRITES, TRANSFER, UNMARKED, UNSUPPORTED, assert_boundaries,
-    checked, contract_text, dma_wait, drop_attribute, finalize_rejects, insert_after, line_index, lines_of, records,
-    remove_line, replace_contract, replace_line, rewrite_line, structured_word,
+    checked, contract_text, dma_wait, drop_attribute, finalize_rejects, insert_after, last_constant_write, line_index,
+    lines_of, records, remove_line, replace_contract, replace_line, rewrite_line, shift_constant, structured_word,
 )
 
 CONTRACT = "atlas.virtual_dma_contract"
@@ -65,12 +65,16 @@ class DMAContractVerificationTest(unittest.TestCase):
         load = launch(machine)
         address = next(i for i in range(load) if "dst = 7 : i32" in lines[i])
         size = next(i for i in range(load) if "dst = 9 : i32" in lines[i])
-        staging = max(i for i in range(load) if '"atlas.alu_imm"' in lines[i] and "dst = 4 : i32" in lines[i])
-        upper = next(i for i in range(load) if "dst = 5 : i32" in lines[i])
+        staging = last_constant_write(machine, load, 4)
         mutations = [("DRAM address", address, "immediate = 0", "immediate = 32"), ("byte length", size, "immediate = 0", "immediate = -32"),
-                     ("staging word", staging, "immediate = 0", "immediate = 256"), ("DRAM upper word", upper, "immediate = 0", "immediate = 1"),
+                     ("staging word", staging, lines[staging], shift_constant(lines[staging], 256)),
                      ("direction", load, 'direction = "load"', 'direction = "store"')]
         changes = [(name, replace_line(machine, index, old, new)) for name, index, old, new in mutations]
+        # A second configuration sets a nonzero DRAM upper word before the launch.
+        config = line_index(machine, '"atlas.dma_config"')
+        changes.append(("DRAM upper word", insert_after(machine, config, [
+            ("alu_imm", 'kind = "addi", dst = 15 : i32, src = 0 : i32, immediate = 1 : i32'),
+            ("dma_config", "channel = 0 : i32, base_reg = 15 : i32")])))
         for role, field, value in (("staging", "reg", 5), ("DRAM", "dram", 6), ("size", "size", 8)):
             changes.append((role + " register", rewrite_line(machine, load, lambda line: re.sub(rf"\b{field} = \d+ : i32", f"{field} = {value} : i32", line))))
         changes.append(("channel", replace_line(replace_line(machine, load, "channel = 0", "channel = 1"), load + 1, "channel = 0", "channel = 1")))
@@ -129,7 +133,7 @@ class DMAContractVerificationTest(unittest.TestCase):
 
     def test_unknown_captured_addresses_are_rejected(self) -> None:
         machine = lower(copy())
-        for name, changed in (("DRAM upper word", machine.replace("base_reg = 5 : i32", "base_reg = 15 : i32")),
+        for name, changed in (("DRAM upper word", machine.replace("base_reg = 0 : i32", "base_reg = 15 : i32")),
                               ("DRAM byte address", machine.replace('dst = 10 : i32, immediate = 524288 : i32, kind = "lui"',
                                                                     'dst = 10 : i32, immediate = 524288 : i32, kind = "auipc"'))):
             with self.subTest(capture=name):

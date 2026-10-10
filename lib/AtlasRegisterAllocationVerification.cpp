@@ -104,10 +104,10 @@ private:
 
   bool reservedScalar(unsigned reg) const {
     for (unsigned reserved :
-         {fixed.scalarTemporary, fixed.oneReg, fixed.zeroReg, fixed.halfSizeReg,
-          fixed.haltReg, fixed.inputBaseReg, fixed.inputDramReg,
-          fixed.outputBaseReg, fixed.outputDramReg, fixed.dmaBaseReg,
-          fixed.dmaDramReg, fixed.dmaSizeReg})
+         {fixed.scalarTemporary, fixed.halfSizeReg, fixed.haltReg,
+          fixed.inputBaseReg, fixed.inputDramReg, fixed.outputBaseReg,
+          fixed.outputDramReg, fixed.dmaBaseReg, fixed.dmaDramReg,
+          fixed.dmaSizeReg})
       if (reg == reserved)
         return true;
     if (!hasPack)
@@ -527,10 +527,6 @@ private:
       return success();
     HelperRegisters initial{};
     initial[0] = 0;
-    if (fixed.oneReg > 0 && fixed.oneReg < 32)
-      initial[fixed.oneReg] = 1;
-    if (fixed.zeroReg > 0 && fixed.zeroReg < 32)
-      initial[fixed.zeroReg] = 0;
     if (fixed.halfSizeReg > 0 && fixed.halfSizeReg < 32)
       initial[fixed.halfSizeReg] = 1024;
     if (function.getNumArguments()) {

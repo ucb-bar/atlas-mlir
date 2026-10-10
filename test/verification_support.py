@@ -167,6 +167,20 @@ def replace_line(machine: str, index: int, old: str, new: str) -> str:
     return rewrite_line(machine, index, change)
 
 
+def last_constant_write(machine: str, before: int, reg: int) -> int:
+    """Line index of the last LUI or ADDI writing x`reg` before line `before`."""
+    lines = machine.splitlines()
+    return max(i for i in range(before) if f"dst = {reg} : i32" in lines[i]
+               and ('"atlas.alu_imm"' in lines[i] or '"atlas.upper"' in lines[i]))
+
+
+def shift_constant(line: str, addi_step: int) -> str:
+    """The same constant write moved by one aligned step: `addi_step` through
+    ADDI, or one 4096 unit through LUI."""
+    step = 1 if '"atlas.upper"' in line else addi_step
+    return re.sub(r"immediate = (-?\d+)", lambda m: f"immediate = {int(m.group(1)) + step}", line, count=1)
+
+
 def _result(line: str) -> str:
     return re.match(r"\s*(%[\w.]+) = ", line)[1]
 

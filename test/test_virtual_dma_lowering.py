@@ -141,9 +141,10 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     dma_wait("io5", "io6"),
                 ], final="io6")
                 _, entries = self.checked(source)
-                configs = [entry["fields"]["channel"] for entry in entries
+                configs = [entry["fields"]["base_reg"] for entry in entries
                            if entry["operation"] == "atlas.dma_config"]
-                self.assertEqual(configs, [0, 1], "only channels in use are configured")
+                # One configuration sets the shared DRAM upper word from x0.
+                self.assertEqual(configs, [0])
                 launches, waits, loads = [], [], []
                 for entry, registers in observed(entries):
                     fields = entry["fields"]

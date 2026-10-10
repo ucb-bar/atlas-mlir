@@ -30,8 +30,6 @@ struct DMATransferPlacement {
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;
-  unsigned oneReg;
-  unsigned zeroReg;
   unsigned halfSizeReg;
   unsigned haltReg;
   unsigned inputBaseReg;
@@ -85,8 +83,6 @@ public:
   const DMATransferPlacement &dma(Value value) const;
   llvm::ArrayRef<int32_t> scalarArguments() const;
   const FixedResourcePlacement &fixed() const;
-  // The channels the function's explicit transfers use, in first use order.
-  llvm::ArrayRef<unsigned> dmaChannels() const { return usedDMAChannels; }
 
 private:
   LogicalResult colorValues(RegisterKind kind);
@@ -100,7 +96,6 @@ private:
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   bool mixedFp8 = false;
   bool hasPack = false;
-  llvm::SmallVector<unsigned, 4> usedDMAChannels;
   const FixedResourcePlacement fixedResources;
 };
 

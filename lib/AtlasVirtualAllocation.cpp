@@ -47,8 +47,6 @@ FixedResourcePlacement selectedResources() {
   FixedResourcePlacement resources;
   resources.tensorTemporary = kTensorPairTemporary;
   resources.scalarTemporary = 27;
-  resources.oneReg = 28;
-  resources.zeroReg = 5;
   resources.halfSizeReg = 2;
   resources.haltReg = 1;
   resources.inputBaseReg = 6;
@@ -102,7 +100,6 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   mxuResources.clear();
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
-  usedDMAChannels.clear();
   findReservations(function, mixedFp8, hasPack);
   if (failed(colorValues(RegisterKind::BF16)) ||
       failed(colorValues(RegisterKind::FP8)) ||
@@ -235,8 +232,6 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
     Value transfer = op.getResult(1);
     channels[channel] = transfer;
     *window = transfer;
-    if (!llvm::is_contained(usedDMAChannels, channel))
-      usedDMAChannels.push_back(channel);
     unsigned halves =
         isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
     uint32_t stagingWord =

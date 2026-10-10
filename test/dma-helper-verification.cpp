@@ -124,8 +124,6 @@ FixedResourcePlacement fixedPlacement() {
   FixedResourcePlacement fixed{};
   fixed.tensorTemporary = 62;
   fixed.scalarTemporary = 27;
-  fixed.oneReg = 28;
-  fixed.zeroReg = 5;
   fixed.halfSizeReg = 2;
   fixed.haltReg = 1;
   fixed.inputBaseReg = 6;
