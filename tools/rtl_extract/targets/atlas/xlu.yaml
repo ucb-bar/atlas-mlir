@@ -1,0 +1,55 @@
+# XLU engine (VTRPOSE): 32 MREG row reads into the transpose buffer, then 32 row writes.
+engine: xlu
+module: XluEngine
+description: Register-buffer transpose engine; one command at age 0 while idle.
+limit: 160
+inputs:                       # approved control inputs and their idle values
+  io_cmd_valid: 0
+  io_cmd_bits_op: 3
+  io_cmd_bits_srcMregId: 13
+  io_cmd_bits_dstMregId: 55
+  io_mregReadResp_valid: 0
+busy: io_busy
+events:
+  read:
+    valid: io_mregReadReq_valid
+    fields: {mreg: io_mregReadReq_bits_mregId, row: io_mregReadReq_bits_row}
+    row: row
+    response: {input: io_mregReadResp_valid, latency: 1}
+  write:
+    valid: io_mregWriteReq_valid
+    fields: {mreg: io_mregWriteReq_bits_mregId, row: io_mregWriteReq_bits_row}
+    row: row
+operations:
+  transpose:
+    commands:
+      0: {io_cmd_valid: 1, io_cmd_bits_op: 0, io_cmd_bits_srcMregId: 3, io_cmd_bits_dstMregId: 7}
+variants:
+  response_latency_3:         # each MREG read response arrives three cycles after its request
+    events: {read: {response: {latency: 3}}}
+  busy_command:               # a different command held valid while busy must not disturb the transpose
+    operations:
+      transpose:
+        commands:
+          "1..40": {io_cmd_valid: 1, io_cmd_bits_op: 0, io_cmd_bits_srcMregId: 21, io_cmd_bits_dstMregId: 42}
+checks:
+  - equal: [transpose.events, transpose/busy_command.events]
+    reason: operands are captured at issue and busy commands are ignored
+  - equal: [transpose.first_free_age, transpose/busy_command.first_free_age]
+# Regression values used only by test/test_rtl_extract_atlas.py; the extractor never reads them.
+expect:
+  transpose:
+    events:
+      read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {mreg: [3]}}
+      write: {first_age: 34, last_age: 65, count: 32, step: 1, row_contiguous: true, values: {mreg: [7]}}
+    first_free_age: 66
+  transpose/response_latency_3:
+    events:
+      read: {first_age: 1, count: 32, step: 1}
+      write: {first_age: 36, count: 32, step: 1}
+    first_free_age: 68
+  transpose/busy_command:
+    events:
+      read: {first_age: 1, count: 32}
+      write: {first_age: 34, count: 32}
+    first_free_age: 66

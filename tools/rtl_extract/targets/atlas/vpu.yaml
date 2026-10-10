@@ -1,0 +1,111 @@
+# Vector engine (VPU): one command at age 0 while idle; operand rows are read from MREGs, results written back per port.
+# The operation table lists the VPU opcode encoding (list index + 1) except fp8, which has no timing contract here.
+engine: vpu
+module: VectorEngineTop
+description: Vector engine top; two MREG read ports, two MREG write ports, per-opcode issue-busy mask.
+limit: 320
+inputs:                       # approved control inputs and their idle values (payload buses are not approved)
+  io_cmd_valid: 0
+  io_cmd_bits_op: 1
+  io_cmd_bits_vs1: 18
+  io_cmd_bits_vs2: 22
+  io_cmd_bits_vd: 26
+  io_mregReadResp0_valid: 0
+  io_mregReadResp1_valid: 0
+busy: io_busy
+events:
+  read0:
+    valid: io_mregReadReq0_valid
+    fields: {mreg: io_mregReadReq0_bits_mregId, row: io_mregReadReq0_bits_row}
+    row: row
+    split_by: mreg
+    response: {input: io_mregReadResp0_valid, latency: 1}
+  read1:
+    valid: io_mregReadReq1_valid
+    fields: {mreg: io_mregReadReq1_bits_mregId, row: io_mregReadReq1_bits_row}
+    row: row
+    split_by: mreg
+    response: {input: io_mregReadResp1_valid, latency: 1}
+  write0:
+    valid: io_mregWriteReq0_valid
+    fields: {mreg: io_mregWriteReq0_bits_mregId, row: io_mregWriteReq0_bits_row}
+    row: row
+    split_by: mreg
+  write1:
+    valid: io_mregWriteReq1_valid
+    fields: {mreg: io_mregWriteReq1_bits_mregId, row: io_mregWriteReq1_bits_row}
+    row: row
+    split_by: mreg
+operation_table:
+  codes:
+    add: 1
+    sub: 2
+    mul: 3
+    rcp: 4
+    sqrt: 5
+    sin: 6
+    cos: 7
+    tanh: 8
+    log: 9
+    exp: 10
+    exp2: 11
+    square: 12
+    cube: 13
+    rsum: 14
+    csum: 15
+    fp8pack: 17
+    fp8unpack: 18
+    relu: 19
+    rmax: 20
+    rmin: 21
+    cmax: 22
+    cmin: 23
+    pairmax: 24
+    pairmin: 25
+    mov: 26
+    vliOne: 27
+    vliCol: 28
+    vliRow: 29
+    vliAll: 30
+  template:
+    commands:
+      0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_vs1: 2, io_cmd_bits_vs2: 6, io_cmd_bits_vd: 10}
+    next_issue: {signal: io_issueBusy, bit: $code}
+checks:                      # timing families sharing a first-write age
+  - equal: [add.events.write0.first_age, sub.events.write0.first_age, mul.events.write0.first_age, rcp.events.write0.first_age, sqrt.events.write0.first_age, sin.events.write0.first_age, cos.events.write0.first_age, tanh.events.write0.first_age, log.events.write0.first_age, exp.events.write0.first_age, exp2.events.write0.first_age, square.events.write0.first_age, cube.events.write0.first_age, relu.events.write0.first_age, pairmax.events.write0.first_age, pairmin.events.write0.first_age, mov.events.write0.first_age, rmax.events.write0.first_age, rmin.events.write0.first_age]
+    reason: element-wise, pairwise and row max/min ops share the simple pipeline depth
+  - equal: [csum.events.write0.first_age, cmax.events.write0.first_age, cmin.events.write0.first_age]
+    reason: column reductions share one first-write age
+  - equal: [vliAll.events.write0.first_age, vliRow.events.write0.first_age, vliCol.events.write0.first_age, vliOne.events.write0.first_age]
+    reason: immediate fills share one first-write age
+# Regression values used only by test/test_rtl_extract_vpu.py; the extractor never reads them.
+expect:
+  add: {events: {read0: {first_age: 0}, write0: {first_age: 2}}, next_issue_age: 65}
+  sub: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  mul: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  rcp: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  sqrt: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  sin: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  cos: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  tanh: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  log: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  exp: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  exp2: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  square: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  cube: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  rsum: {events: {write0: {first_age: 7}}, next_issue_age: 38}
+  csum: {events: {write0: {first_age: 66}}, next_issue_age: 129}
+  fp8pack: {events: {write0: {first_age: 3, step: 2}}, next_issue_age: 65}
+  fp8unpack: {events: {write0: {first_age: 3}}, next_issue_age: 66}
+  relu: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  rmax: {events: {write0: {first_age: 2}}, next_issue_age: 33}
+  rmin: {events: {write0: {first_age: 2}}, next_issue_age: 33}
+  cmax: {events: {write0: {first_age: 66}}, next_issue_age: 129}
+  cmin: {events: {write0: {first_age: 66}}, next_issue_age: 129}
+  pairmax: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  pairmin: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  mov: {events: {write0: {first_age: 2}}, next_issue_age: 65}
+  vliOne: {events: {write0: {first_age: 1}}, next_issue_age: 32}
+  vliCol: {events: {write0: {first_age: 1}}, next_issue_age: 32}
+  vliRow: {events: {write0: {first_age: 1}}, next_issue_age: 64}
+  vliAll: {events: {write0: {first_age: 1}}, next_issue_age: 64}

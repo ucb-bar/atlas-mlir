@@ -1,0 +1,83 @@
+# Scalar load/store: ScalarCore memory control composed with the LSU scalar port in the same cycle.
+# The accepted scalar memory instruction enters at explicit cut points (issue strobes and the decoded mem_cmd);
+# hostStart stays low. VMEM read data returns one cycle after each scalar read request.
+engine: scalar_lsu
+module: ScalarCore
+recipe: coupled
+description: Scalar memory instruction issued at age 0; ScalarCore command/response wiring follows the AtlasCore direct connection.
+limit: 16
+unreset:                      # Reg without init, read only under RegInit memLoadPending (ScalarCore.scala:72-73)
+  - {path: "", name: memLoadCmd}
+inputs:                       # approved control inputs (cuts included) and their idle values
+  issueScalarLoad: 0
+  issueScalarStore: 0
+  hostStart: 0
+  mem_cmd: 0
+  io_vmemScalarReadData_valid: 0
+cuts:
+  issueScalarLoad: {value: issueScalarLoad}
+  issueScalarStore: {value: issueScalarStore}
+  hostStart: {value: hostStart}
+  mem_cmd: {instance: decoder, result: io_decoded_mem_cmd}
+probes:
+  load_pending: {value: memLoadPending}
+  load_resp_valid: {value: memLoadRespValid}
+  load_writeback: {value: isMemLoadWB}
+  scale_write: {value: seldWriteEn}
+partner:
+  module: LSU
+  inputs: [io_vmemScalarReadData_valid]
+busy: load_pending          # a load holds the scalar memory path until its response is written back
+links:                        # input <- same-cycle output of the other circuit
+  io_scalarCmd_valid: io_scalarMemCmd_valid
+  io_scalarCmd_bits_isStore: io_scalarMemCmd_bits_isStore
+  io_scalarMemResp_valid: io_scalarResp_valid
+events:
+  mem_cmd: {valid: io_scalarMemCmd_valid, fields: {store: io_scalarMemCmd_bits_isStore}}
+  vmem_read:
+    valid: io_vmemScalarRead_valid
+    response: {input: io_vmemScalarReadData_valid, latency: 1}
+  vmem_write: {valid: io_vmemScalarWrite_valid}
+  scalar_resp: {valid: io_scalarResp_valid}
+  load_pending: {valid: load_pending}
+  load_resp: {valid: load_resp_valid}
+  load_write: {valid: load_writeback}
+  scale_write: {valid: scale_write}
+  lsu_busy: {valid: io_scalarBusy}
+operations:
+  load:
+    commands:
+      0: {issueScalarLoad: 1, mem_cmd: 3}
+  scale_load:
+    commands:
+      0: {issueScalarLoad: 1, mem_cmd: 9}
+  store:
+    commands:
+      0: {issueScalarStore: 1, mem_cmd: 0}
+checks:
+  - equal: [load.events.load_write.first_age, scale_load.events.scale_write.first_age]
+    reason: scale-factor loads write back on the scalar load path
+  - equal: [load.events.vmem_read.first_age, store.events.vmem_write.first_age]
+    reason: loads and stores reach VMEM at the same age
+# Regression values used only by tests; the extractor never reads them.
+# memory age = load vmem_read.first_age, load write age = load_write.first_age, first free = first_free_age.
+expect:
+  load:
+    assumptions: {scratchpad_read_latency: 1}
+    events:
+      vmem_read: {first_age: 1, count: 1}
+      load_write: {first_age: 3, count: 1}
+      lsu_busy: {first_age: 2, last_age: 2}
+    first_free_age: 3
+  scale_load:
+    events:
+      vmem_read: {first_age: 1, count: 1}
+      scale_write: {first_age: 3, count: 1}
+      load_write: {count: 0}
+    first_free_age: 3
+  store:
+    events:
+      vmem_write: {first_age: 1, count: 1}
+      vmem_read: {count: 0}
+      load_pending: {count: 0}
+    first_free_age: 1

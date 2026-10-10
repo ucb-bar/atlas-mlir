@@ -1,0 +1,99 @@
+# MXU0 (systolic array): one MXU command at age 0 while idle; MREG read responses return one cycle after each request.
+engine: mxu0
+module: SystolicArrayTop
+description: Systolic-array MXU; opcodes follow MxuOp (0 PushWeight .. 6 MatmulAcc), operands mreg 2 / acc 0, idle mreg 22 / acc 1.
+reset_cycles: 100
+flush_cycles: 100
+limit: 160
+unreset:                      # Reg without init, read only under a RegInit valid (SystolicArraySequencer.scala:180-197,240-241)
+  - {path: seq, name: p0Cmd_op}
+  - {path: seq, name: p0Row}
+  - {path: seq, name: p1Cmd_op}
+  - {path: seq, name: p1Row}
+  - {path: seq, name: w0Cmd_op}
+  - {path: seq, name: w0Row}
+  - {path: seq, name: w1Row}
+  - {path: seq, name: inflight_0_accSel}
+  - {path: seq, name: inflight_0_rowsWritten}
+  - {path: seq, name: inflight_1_accSel}
+  - {path: seq, name: inflight_1_rowsWritten}
+  - {path: seq, name: inflight_2_accSel}
+  - {path: seq, name: inflight_2_rowsWritten}
+inputs:                       # approved control inputs and their idle values
+  io_cmd_valid: 0
+  io_cmd_bits_op: 0
+  io_cmd_bits_mregId: 22
+  io_cmd_bits_accSel: 1
+  io_cmd_bits_weightSlot: 0
+  io_mregReadResp0_valid: 0
+  io_mregReadResp1_valid: 0
+probes:                       # sequencer-to-datapath strobes inside the top
+  compute_valid: {instance: seq, result: io_compute_valid}
+  weight_write_valid: {instance: seq, result: io_weightWriteReq_valid}
+  acc_write_valid: {instance: seq, result: io_accComputeWrite_valid}
+  acc_write_row: {instance: seq, result: io_accComputeWrite_bits_rowIdx}
+  acc_read_en: {instance: seq, result: io_accComputeReadEn}
+  acc_read_row: {instance: seq, result: io_accComputeReadAddr_rowIdx}
+  acc_load_valid: {instance: seq, result: io_accLoadReq_valid}
+  acc_load_row: {instance: seq, result: io_accLoadReq_bits_rowIdx}
+  acc_store_en: {instance: seq, result: io_accStoreReadEn}
+  acc_store_row: {instance: seq, result: io_accStoreAddr_rowIdx}
+events:
+  mreg_read0:
+    valid: io_mregReadReq0_valid
+    fields: {mreg: io_mregReadReq0_bits_mregId, row: io_mregReadReq0_bits_row}
+    row: row
+    response: {input: io_mregReadResp0_valid, latency: 1}
+  mreg_read1:
+    valid: io_mregReadReq1_valid
+    fields: {mreg: io_mregReadReq1_bits_mregId, row: io_mregReadReq1_bits_row}
+    row: row
+    response: {input: io_mregReadResp1_valid, latency: 1}
+  mreg_write0:
+    valid: io_mregWriteReq0_valid
+    fields: {mreg: io_mregWriteReq0_bits_mregId, row: io_mregWriteReq0_bits_row}
+    row: row
+  mreg_write1:
+    valid: io_mregWriteReq1_valid
+    fields: {mreg: io_mregWriteReq1_bits_mregId, row: io_mregWriteReq1_bits_row}
+    row: row
+  compute: {valid: compute_valid}
+  weight_write: {valid: weight_write_valid}
+  acc_write: {valid: acc_write_valid, fields: {row: acc_write_row}, row: row}
+  acc_read: {valid: acc_read_en, fields: {row: acc_read_row}, row: row}
+  acc_load: {valid: acc_load_valid, fields: {row: acc_load_row}, row: row}
+  acc_store: {valid: acc_store_en, fields: {row: acc_store_row}, row: row}
+  data_busy: {valid: io_dataBusy}          # transfer commands (opcodes 0-4)
+  compute_busy: {valid: io_computeBusy}    # matmul commands (opcodes 5-6)
+operation_table:
+  codes: {push_weight: 0, push_acc_fp8: 1, push_acc_bf16: 2, pop_acc_fp8: 3, pop_acc_bf16: 4, matmul: 5, matmul_acc: 6}
+  template:
+    commands:
+      0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_mregId: 2, io_cmd_bits_accSel: 0}
+checks:
+  - equal: [matmul.events.acc_write.first_age, matmul_acc.events.acc_write.first_age]
+    reason: overwrite and accumulate share the accumulator write age
+# Regression values used only by tests; the extractor never reads them.
+expect:
+  matmul:
+    assumptions: {scratchpad_read_latency: 1}
+    events:
+      mreg_read0: {first_age: 0, last_age: 31, count: 32, row_contiguous: true, values: {mreg: [2]}}
+      compute: {first_age: 1, last_age: 32, count: 32}
+      acc_write: {first_age: 63, last_age: 94, count: 32, step: 1, row_contiguous: true}
+      acc_read: {count: 0}
+      compute_busy: {first_age: 1, last_age: 94, count: 94}
+  matmul_acc:
+    events:
+      acc_write: {first_age: 63, last_age: 94, count: 32, step: 1, row_contiguous: true}
+      acc_read: {first_age: 0, last_age: 31, count: 32, row_contiguous: true}
+  push_weight:
+    events:
+      mreg_read1: {first_age: 0, count: 32, values: {mreg: [2]}}
+      weight_write: {first_age: 1, last_age: 32, count: 32}
+      data_busy: {first_age: 1, last_age: 32, count: 32}
+  pop_acc_bf16:
+    events:
+      acc_store: {first_age: 0, last_age: 31, count: 32, row_contiguous: true}
+      mreg_write0: {first_age: 1, last_age: 32, count: 32, values: {mreg: [2]}}
+      mreg_write1: {first_age: 1, last_age: 32, count: 32, values: {mreg: [3]}}
