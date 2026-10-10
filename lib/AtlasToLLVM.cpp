@@ -181,9 +181,8 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
-    for (StringRef name : {"atlas.rtl_evidence", "atlas.rtl_qualification"})
-      if (Attribute value = module->getAttr(name))
-        reconstructed->setAttr(name, value);
+    if (Attribute evidence = module->getAttr("atlas.rtl_evidence"))
+      reconstructed->setAttr("atlas.rtl_evidence", evidence);
     if (module->hasAttr("atlas.generated_from_virtual"))
       reconstructed->setAttr("atlas.generated_from_virtual",
                              builder.getUnitAttr());

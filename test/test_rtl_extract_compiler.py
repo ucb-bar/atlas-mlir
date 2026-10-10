@@ -10,6 +10,7 @@ Compiler side: ATLAS_TIMING_PROBE names a built test/rtl-timing-facts-probe, or 
 RTL side: ATLAS_OP_TIMING names a merlin.op_timing.v1 JSON from tools/extract-rtl-timing.py (its
 op_timing blocks), or ATLAS_HW_IR and ATLAS_HW_EXPORTER compute them. The tests skip otherwise. `python3 test/test_rtl_extract_compiler.py --table`
 prints every comparison.
+ATLAS_EMIT (atlas-emit) additionally checks every spec decode word against the compiler's instruction encoding.
 """
 import copy
 import json
@@ -26,6 +27,10 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
 from rtl_extract import facts  # noqa: E402
+from rtl_extract.ir import load_document  # noqa: E402
+from rtl_extract.runner import extract, modules  # noqa: E402
+from rtl_extract.spec import available_engines, load_target  # noqa: E402
+EMIT = os.environ.get("ATLAS_EMIT")
 MAP = yaml.safe_load((REPO / "test/rtl-timing-facts-map.yaml").read_text())
 FIELDS = ("first_age", "last_age", "count", "step")
 STORAGE = {"MReg", "Acc", "Weight", "Vmem"}  # every compiler access to these must meet a compared fact
@@ -56,9 +61,6 @@ def load_facts():
             raise ValueError(f"{os.environ['ATLAS_OP_TIMING']}: expected schema {facts.SCHEMA}, found {document.get('schema')!r}")
         records = document["op_timing"]
     elif os.environ.get("ATLAS_HW_IR") and os.environ.get("ATLAS_HW_EXPORTER"):
-        from rtl_extract.ir import load_document
-        from rtl_extract.runner import extract, modules
-        from rtl_extract.spec import available_engines, load_target
         specs = load_target("atlas", available_engines("atlas"))
         document = load_document(os.environ["ATLAS_HW_IR"], sorted({m for s in specs.values() for m in modules(s)}),
                                  os.environ["ATLAS_HW_EXPORTER"])
@@ -201,6 +203,58 @@ class CompilerCrossCheck(unittest.TestCase):
         facts["vlsu.vload"]["first_free_age"] += 1
         failed = {(r[0], r[2].split(" ")[0]) for r in compare(facts, self.probe) if not r[6]}
         self.assertEqual(failed, {("vpu.add", "events.write0"), ("vlsu.vload", "first_free_age")})
+
+
+def compiler_ops():
+    """Compiler machine op (generic form, zero operands) for every declared decode word."""
+    regs = {"dst": 0, "src": 0}
+    ops = {("vpu", n): ("vpu_binary", {"kind": k, "dst": 0, "lhs": 0, "rhs": 0})
+           for n, k in {"add": "add", "sub": "sub", "mul": "mul", "pairmin": "min", "pairmax": "max"}.items()}
+    ops.update({("vpu", n): ("vpu_unary", {"kind": k, **regs}) for n, k in {
+        "mov": "mov", "rcp": "recip", "exp": "exp", "exp2": "exp2", "square": "square", "cube": "cube", "relu": "relu",
+        "sin": "sin", "cos": "cos", "tanh": "tanh", "log": "log2", "sqrt": "sqrt"}.items()})
+    ops.update({("vpu", n): ("vpu_reduce", {"kind": k, **regs}) for n, k in {
+        "csum": "col_sum", "cmin": "col_min", "cmax": "col_max", "rsum": "row_sum", "rmin": "row_min", "rmax": "row_max"}.items()})
+    ops.update({("vpu", n): ("vpu_pack", {"direction": d, **regs, "scale_reg": 0})
+                for n, d in {"fp8pack": "bf16_to_fp8", "fp8unpack": "fp8_to_bf16"}.items()})
+    ops.update({("vpu", f"vli{m.title()}"): ("vli", {"mode": m, "dst": 0, "immediate": 0}) for m in ("one", "col", "row", "all")})
+    for unit in (0, 1):
+        engine = f"mxu{unit}"
+        ops.update({(engine, f"push_{k}"): ("mxu_push", {"kind": k.replace("weight", "weight_fp8"), "unit": unit, "src": 0, "slot": 0})
+                    for k in ("weight", "acc_fp8", "acc_bf16")})
+        ops.update({(engine, f"pop_acc_{f}"): ("mxu_pop", {"format": f, "unit": unit, "dst": 0, "slot": 0, "scale_reg": 0}) for f in ("fp8", "bf16")})
+        ops.update({(engine, n): ("mxu_matmul", {"unit": unit, "src": 0, "weight_slot": 0, "acc_slot": 0, "accumulate": a})
+                    for n, a in (("matmul", False), ("matmul_acc", True))})
+    ops[("xlu", "vtrpose")] = ("xlu_transpose", regs)
+    ops[("vlsu", "vload")] = ("vload", {"dst": 0, "base": 0, "offset": 0, "format": "raw"})
+    ops[("vlsu", "vstore")] = ("vstore", {"src": 0, "base": 0, "offset": 0, "format": "raw"})
+    ops.update({("scalar_lsu", k): ("scalar_load", {"kind": k, "dst": 0, "base": 0, "offset": 0}) for k in ("lw", "seld")})
+    ops[("scalar_lsu", "sw")] = ("scalar_store", {"kind": "sw", "src": 0, "base": 0, "offset": 0})
+    return ops
+
+
+def mlir(ops):
+    def attr(v):
+        return ("true" if v else "false") if isinstance(v, bool) else f"{v} : i32" if isinstance(v, int) else f'"{v}"'
+    lines = ['  %s0 = "atlas.start"() : () -> !atlas.state']
+    for i, (name, attrs) in enumerate(ops, 1):
+        body = ", ".join(f"{k} = {attr(v)}" for k, v in attrs.items())
+        lines.append(f'  %s{i} = "atlas.{name}"(%s{i - 1}) {{{body}}} : (!atlas.state) -> !atlas.state')
+    return "module {\n" + "\n".join(lines) + "\n}\n"
+
+
+@unittest.skipUnless(EMIT, "requires ATLAS_EMIT (atlas-emit)")
+class CompilerWordsTest(unittest.TestCase):
+    def test_decode_words_match_compiler_encoding(self):
+        declared = {(e, n): w for e, s in load_target("atlas").items() for n, w in s.get("decode", {}).get("words", {}).items()}
+        ops = compiler_ops()
+        self.assertEqual(set(declared), set(ops))
+        keys = sorted(ops)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "words.mlir"
+            path.write_text(mlir([ops[k] for k in keys]))
+            words = [int(w, 16) for w in subprocess.check_output([EMIT, str(path)], text=True).split()]
+        self.assertEqual(dict(zip(keys, words)), {k: declared[k] for k in keys})
 
 
 if __name__ == "__main__":

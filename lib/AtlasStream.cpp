@@ -360,15 +360,15 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
         for (int ch = 0; ch < 8; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError()
-                   << "selected DMA admission allows one pending transfer; "
-                   << "channel " << ch << " requires atlas.dma_wait first";
+                   << "selected DMA allows one pending transfer; channel "
+                   << ch << " needs atlas.dma_wait first";
       if (in.release)
         for (int ch = 0; ch < 8; ++ch)
           if (!pending[ch].empty() &&
               pending[ch].back().second.exclusiveVmemUntilWait)
             return s.ops[i]->emitOpError()
-                   << "completion publication requires atlas.dma_wait for "
-                   << "pending DMA channel " << ch;
+                   << "completion publication requires atlas.dma_wait on channel "
+                   << ch;
       if (command && !pending[op.channel].empty())
         s.ops[i]->emitWarning()
             << "reuses DMA channel " << op.channel << " while "
@@ -385,8 +385,7 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
           pending[op.channel].empty())
         return s.ops[i]->emitOpError()
                << "selected DMA wait has no pending transfer on channel "
-               << op.channel << "; empty, wrong-channel, and stale waits are "
-               << "outside the admitted domain";
+               << op.channel;
       if (op.opClass == OpClass::DmaWait)
         pending[op.channel].clear();
       if (command)
@@ -458,3 +457,4 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   SmallVector<uint32_t> words;
   return collectAtlasWords(module, words, /*llvmBlock=*/false);
 }
+

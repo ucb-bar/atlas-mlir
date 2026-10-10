@@ -2,17 +2,19 @@
 #define ATLAS_RTL_SELECTION_H
 
 #include "Atlas/AtlasRTLEvidence.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/Support/LogicalResult.h"
+#include "Atlas/AtlasStream.h"
 #include <memory>
 
 namespace mlir::atlas {
-// No selection returns a null pointer. An invalid selection always fails;
-// consumers must never silently fall back to the legacy timing model.
+// Null when nothing is selected; an invalid selection fails rather than
+// falling back to the model.
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
-// Selected consumers call this before scheduling and after inserting words.
 LogicalResult checkSelectedRTLProgramSize(ModuleOp module);
+// Reads and checks the stream for a timing pass under the selected target, if
+// any. A selected stream must be one straight-line block ending in ECALL.
+FailureOr<AtlasStream> readTimedStream(ModuleOp module,
+                                       timing::TargetTiming &target);
 void registerSelectAtlasRTLEvidencePass();
 } // namespace mlir::atlas
 #endif

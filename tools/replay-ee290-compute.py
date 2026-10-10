@@ -1,96 +1,152 @@
 #!/usr/bin/env python3
-"""Selected AtlasCore compute/composition replay, conditional finite evidence only."""
+"""Verilator replay of compiler-scheduled AtlasCore programs against `merlin.op_timing.v1` facts.
+
+Each program is scheduled by atlas-opt (facts selection, dma=wait), emitted by atlas-emit,
+run on the Verilated AtlasCore, and its VCD is decoded and bound to `atlas-emit --rtl-timing-json`.
+"""
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-def bootstrap(path):
-    from collections import deque
-    import os
-    import stat
-    path = Path(path)
-    denied = lambda p: any("hammer" in x.lower() or "vlsi" in x.lower() for x in p.parts)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    if denied(path):
-        raise ValueError("restricted dependency path")
-    pending, current, links = deque(path.parts[1:]), Path(path.anchor), set()
-    while pending:
-        part = pending.popleft()
-        if part == ".": continue
-        if part == "..": current = current.parent; continue
-        candidate = current / part
-        if denied(candidate): raise ValueError("restricted dependency path")
-        if stat.S_ISLNK(candidate.lstat().st_mode):
-            if candidate in links or len(links) >= 64: raise ValueError("recursive dependency symlink")
-            links.add(candidate)
-            target = Path(os.readlink(candidate))
-            if denied(target): raise ValueError("restricted dependency symlink target")
-            if target.is_absolute():
-                current = Path(target.anchor)
-                pending.extendleft(reversed(target.parts[1:]))
-            else: pending.extendleft(reversed(target.parts))
-        else: current = candidate
-    return current
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('check_ee290_compute_export', HERE / 'check-ee290-compute-export.py')
+BIND = importlib.util.module_from_spec(spec); spec.loader.exec_module(BIND)
 
 
-def load(name):
-    path = bootstrap(Path(__file__).parent / name)
-    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+class ReplayError(Exception):
+    pass
 
 
-DMA=load('replay-ee290-dma.py')
-OBS,CAPTURE,CHECK=DMA.OBS,DMA.CAPTURE,DMA.CHECK
-BIND=load('check-ee290-compute-export.py')
+def program(ops):
+    lines = ['module {', '  %s0 = "atlas.start"() : () -> !atlas.state']
+    for n, (op, attrs) in enumerate(ops, 1):
+        lines.append(f'  %s{n} = "atlas.{op}"(%s{n-1}) {{{attrs}}} : (!atlas.state) -> !atlas.state')
+    return '\n'.join(lines + ['}', ''])
 
-def vls(direction,mreg,base):
-    return (direction,f'{"dst" if direction=="vload" else "src"} = {mreg} : i32, base = {base} : i32, offset = 0 : i32, format = "raw"')
-def delay(n): return ('delay',f'cycles = {n} : i32')
-def xlu(): return ('xlu_transpose','dst = 1 : i32, src = 0 : i32')
-def cases(omit_delays=False):
-    end=[DMA.add(1,1),('csr','kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3088 : i32'),('trap','kind = "ecall"')]
-    transpose=[DMA.add(6,0),vls('vload',0,6),delay(40),xlu(),delay(80),DMA.add(8,256),vls('vstore',1,8),delay(40),DMA.add(0,0)]
-    mul=[]
-    for bank,words in enumerate([0,256,512,768]): mul += [DMA.add(6,words),vls('vload',bank,6),delay(40)]
-    mul += [('vpu_binary','kind = "mul", dst = 4 : i32, lhs = 0 : i32, rhs = 2 : i32'),delay(80)]
-    for bank,words in [(4,1024),(5,1280)]: mul += [DMA.add(8,words),vls('vstore',bank,8),delay(40)]
-    mixed=[DMA.add(5,0),DMA.config(),DMA.add(6,0),DMA.upper(1,589824),DMA.add(2,128),DMA.dma('load',0),DMA.wait(0)]
-    mixed += transpose+[DMA.upper(3,589824),DMA.add(3,1024,3),('dma','direction = "store", channel = 1 : i32, reg = 8 : i32, dram = 3 : i32, size = 2 : i32'),DMA.wait(1)]
-    return {name:(DMA.program([op for op in ops+end if not (omit_delays and op[0]=='delay')]),name) for name,ops in [('xlu',transpose),('vmul',mul),('dma_xlu',mixed)]}
 
-COMPUTE_OBS=DMA.load('observe-ee290-vls.py')
-COMPUTE_SIGNALS=OBS.SIGNALS.copy()
-for key,path,width in [('pc','scalar.pc_ctrl.io_s1_pc',32),('valid','scalar.pc_ctrl.io_s1_valid',1),('word','scalar.decoder.io_instr',32),
- ('xcmd','xlu.io_cmd_valid',1),('xsrc','xlu.io_cmd_bits_srcMregId',6),('xdst','xlu.io_cmd_bits_dstMregId',6),
- ('xr','xlu.io_mregReadReq_valid',1),('xrid','xlu.io_mregReadReq_bits_mregId',6),('xrrow','xlu.io_mregReadReq_bits_row',5),
- ('xresp','xlu.io_mregReadResp_valid',1),('xdata','xlu.io_mregReadResp_bits',256),
- ('xw','xlu.io_mregWriteReq_valid',1),('xwid','xlu.io_mregWriteReq_bits_mregId',6),('xwrow','xlu.io_mregWriteReq_bits_row',5),('xwdata','xlu.io_mregWriteReq_bits_data',256),
- ('xar','xlu.io_activeMregRead_valid',1),('xarid','xlu.io_activeMregRead_bits',6),('xaw','xlu.io_activeMregWrite_valid',1),('xawid','xlu.io_activeMregWrite_bits',6),
- ('pcmd','vpu.io_cmd_valid',1),('pop','vpu.io_cmd_bits_op',5),('pdst','vpu.io_cmd_bits_vd',6),('psrc0','vpu.io_cmd_bits_vs1',6),('psrc1','vpu.io_cmd_bits_vs2',6)]:
-    COMPUTE_SIGNALS[key]=(path,width)
+def add(dst, value, src=0): return ('alu_imm', f'kind = "addi", dst = {dst} : i32, src = {src} : i32, immediate = {value} : i32')
+def upper(dst, value): return ('upper', f'kind = "lui", dst = {dst} : i32, immediate = {value} : i32')
+def dma(direction, channel, reg=6): return ('dma', f'direction = "{direction}", channel = {channel} : i32, reg = {reg} : i32, dram = {1 if direction == "load" else 3} : i32, size = 2 : i32')
+def wait(channel): return ('dma_wait', f'channel = {channel} : i32')
+def vls(direction, mreg, base): return (direction, f'{"dst" if direction == "vload" else "src"} = {mreg} : i32, base = {base} : i32, offset = 0 : i32, format = "raw"')
+def xlu(): return ('xlu_transpose', 'dst = 1 : i32, src = 0 : i32')
+
+
+def cases():
+    """Delay-free programs; the compiler inserts or schedules every DELAY."""
+    end = [add(1, 1), ('csr', 'kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3088 : i32'), ('trap', 'kind = "ecall"')]
+    transpose = [add(6, 0), vls('vload', 0, 6), xlu(), add(8, 256), vls('vstore', 1, 8), add(0, 0)]
+    mul = []
+    for bank, words in enumerate([0, 256, 512, 768]): mul += [add(6, words), vls('vload', bank, 6)]
+    mul += [('vpu_binary', 'kind = "mul", dst = 4 : i32, lhs = 0 : i32, rhs = 2 : i32')]
+    for bank, words in [(4, 1024), (5, 1280)]: mul += [add(8, words), vls('vstore', bank, 8)]
+    mixed = [add(5, 0), ('dma_config', 'channel = 0 : i32, base_reg = 5 : i32'), add(6, 0), upper(1, 589824), add(2, 128), dma('load', 0), wait(0)]
+    mixed += transpose + [upper(3, 589824), add(3, 1024, 3), ('dma', 'direction = "store", channel = 1 : i32, reg = 8 : i32, dram = 3 : i32, size = 2 : i32'), wait(1)]
+    return {name: program(ops + end) for name, ops in [('xlu', transpose), ('vmul', mul), ('dma_xlu', mixed)]}
+
+
+# key: (path below TOP.AtlasCore, width)
+SIGNALS = {
+    'clock': ('clock', 1), 'reset': ('reset', 1), 'fire': ('scalar.s1_fire', 1), 'launch': ('scalar.is_lsu_launch', 1),
+    'valid': ('scalar.pc_ctrl.io_s1_valid', 1), 'pc': ('scalar.pc_ctrl.io_s1_pc', 32), 'word': ('scalar.decoder.io_instr', 32),
+    'cmd': ('lsu.io_cmd_valid', 1), 'op': ('lsu.io_cmd_bits_op', 2), 'mreg': ('lsu.io_cmd_bits_mregBank', 6), 'line': ('lsu.io_cmd_bits_vmemLineAddr', 16),
+    'load_busy': ('lsu.io_vloadBusy', 1), 'store_busy': ('lsu.io_vstoreBusy', 1),
+    'vr': ('lsu.io_vmemVecRead_valid', 1), 'vr_bank': ('lsu.io_vmemVecRead_bits_bankIdx', 3), 'vr_addr': ('lsu.io_vmemVecRead_bits_bankAddr', 13),
+    'vresp': ('lsu.io_vmemVecReadData_valid', 1), 'vresp_data': ('lsu.io_vmemVecReadData_bits', 256),
+    'vw': ('lsu.io_vmemVecWrite_valid', 1), 'vw_bank': ('lsu.io_vmemVecWrite_bits_bankIdx', 3), 'vw_addr': ('lsu.io_vmemVecWrite_bits_bankAddr', 13), 'vw_data': ('lsu.io_vmemVecWrite_bits_data', 256),
+    'mr': ('lsu.io_mregReadReq_valid', 1), 'mr_id': ('lsu.io_mregReadReq_bits_mregId', 6), 'mr_row': ('lsu.io_mregReadReq_bits_row', 5),
+    'mresp': ('lsu.io_mregReadResp_valid', 1), 'mresp_data': ('lsu.io_mregReadResp_bits', 256),
+    'mw': ('lsu.io_mregWriteReq_valid', 1), 'mw_id': ('lsu.io_mregWriteReq_bits_mregId', 6), 'mw_row': ('lsu.io_mregWriteReq_bits_row', 5), 'mw_data': ('lsu.io_mregWriteReq_bits_data', 256),
+    'csr': ('csrfile.io_csr_valid', 1), 'csr_addr': ('csrfile.io_csr_addr', 12), 'csr_op': ('csrfile.io_csr_op', 3), 'csr_data': ('csrfile.io_csr_wdata', 32), 'marker': ('csrfile.reg_dbg0', 32),
+    'halt': ('csrfile.io_csr_halted', 1), 'ecall': ('csrfile.io_csr_set_ecall', 1), 'illegal': ('csrfile.io_csr_set_illegal', 1), 'ebreak': ('csrfile.io_csr_set_ebreak', 1),
+    'xcmd': ('xlu.io_cmd_valid', 1), 'xsrc': ('xlu.io_cmd_bits_srcMregId', 6), 'xdst': ('xlu.io_cmd_bits_dstMregId', 6),
+    'xr': ('xlu.io_mregReadReq_valid', 1), 'xrid': ('xlu.io_mregReadReq_bits_mregId', 6), 'xrrow': ('xlu.io_mregReadReq_bits_row', 5),
+    'xresp': ('xlu.io_mregReadResp_valid', 1), 'xdata': ('xlu.io_mregReadResp_bits', 256),
+    'xw': ('xlu.io_mregWriteReq_valid', 1), 'xwid': ('xlu.io_mregWriteReq_bits_mregId', 6), 'xwrow': ('xlu.io_mregWriteReq_bits_row', 5), 'xwdata': ('xlu.io_mregWriteReq_bits_data', 256),
+    'xar': ('xlu.io_activeMregRead_valid', 1), 'xarid': ('xlu.io_activeMregRead_bits', 6), 'xaw': ('xlu.io_activeMregWrite_valid', 1), 'xawid': ('xlu.io_activeMregWrite_bits', 6),
+    'pcmd': ('vpu.io_cmd_valid', 1), 'pop': ('vpu.io_cmd_bits_op', 5), 'pdst': ('vpu.io_cmd_bits_vd', 6), 'psrc0': ('vpu.io_cmd_bits_vs1', 6), 'psrc1': ('vpu.io_cmd_bits_vs2', 6),
+}
 for n in range(2):
-    for key,path,width in [('r','io_mregReadReq'+str(n)+'_valid',1),('rid','io_mregReadReq'+str(n)+'_bits_mregId',6),('rrow','io_mregReadReq'+str(n)+'_bits_row',5),
-                           ('resp','io_mregReadResp'+str(n)+'_valid',1),('data','io_mregReadResp'+str(n)+'_bits',256),
-                           ('w','io_mregWriteReq'+str(n)+'_valid',1),('wid','io_mregWriteReq'+str(n)+'_bits_mregId',6),('wrow','io_mregWriteReq'+str(n)+'_bits_row',5),('wdata','io_mregWriteReq'+str(n)+'_bits_data',256)]:
-        COMPUTE_SIGNALS['p'+key+str(n)]=('vpu.'+path,width)
+    for key, path, width in [('r', 'ReadReq%d_valid', 1), ('rid', 'ReadReq%d_bits_mregId', 6), ('rrow', 'ReadReq%d_bits_row', 5), ('resp', 'ReadResp%d_valid', 1), ('data', 'ReadResp%d_bits', 256),
+                             ('w', 'WriteReq%d_valid', 1), ('wid', 'WriteReq%d_bits_mregId', 6), ('wrow', 'WriteReq%d_bits_row', 5), ('wdata', 'WriteReq%d_bits_data', 256)]:
+        SIGNALS[f'p{key}{n}'] = ('vpu.io_mreg' + path % n, width)
 for n in range(4):
-    COMPUTE_SIGNALS['par'+str(n)]=('vpu.io_activeReads_'+str(n)+'_valid',1)
-    COMPUTE_SIGNALS['parid'+str(n)]=('vpu.io_activeReads_'+str(n)+'_bits',6)
-    COMPUTE_SIGNALS['paw'+str(n)]=('vpu.io_activeWrites_'+str(n)+'_valid',1)
-    COMPUTE_SIGNALS['pawid'+str(n)]=('vpu.io_activeWrites_'+str(n)+'_bits',6)
-DMA_KEYS={}
-for key,(path,width) in DMA.DMA_SIGNALS.items():
-    matches=[k for k,(p,w) in COMPUTE_SIGNALS.items() if p==path]
-    if matches: DMA_KEYS[key]=matches[0]
-    else:
-        DMA_KEYS[key]='dma_'+key;COMPUTE_SIGNALS['dma_'+key]=(path,width)
-COMPUTE_OBS.SIGNALS=COMPUTE_SIGNALS
+    SIGNALS.update({f'par{n}': (f'vpu.io_activeReads_{n}_valid', 1), f'parid{n}': (f'vpu.io_activeReads_{n}_bits', 6),
+                    f'paw{n}': (f'vpu.io_activeWrites_{n}_valid', 1), f'pawid{n}': (f'vpu.io_activeWrites_{n}_bits', 6)})
+for n in range(8):
+    SIGNALS.update({f'dma_busy{n}': (f'scalar.io_dma_busy_{n}', 1), f'dma_engine{n}': (f'dma.io_channelBusy_{n}', 1)})
+for key, path, width in [
+        ('stall', 'scalar.stall', 1), ('base', 'scalar.dmaBaseReg', 32), ('rs1', 'scalar.regfile.io_rs1_data', 32),
+        ('launch', 'scalar.io_dmaCmd_valid', 1), ('op', 'scalar.io_dmaCmd_bits_op', 3), ('vmem', 'scalar.io_dmaCmd_bits_vmemAddr', 32),
+        ('address', 'scalar.io_dmaCmd_bits_addr', 64), ('size', 'scalar.io_dmaCmd_bits_size', 32), ('launch_channel', 'scalar.io_dmaCmd_bits_channel', 3),
+        ('av', 'io_dmaTL_a_valid', 1), ('ar', 'io_dmaTL_a_ready', 1), ('ao', 'io_dmaTL_a_bits_opcode', 3), ('aa', 'io_dmaTL_a_bits_address', 37),
+        ('as', 'io_dmaTL_a_bits_source', 6), ('ad', 'io_dmaTL_a_bits_data', 256), ('dv', 'io_dmaTL_d_valid', 1), ('dr', 'io_dmaTL_d_ready', 1),
+        ('ds', 'io_dmaTL_d_bits_source', 6), ('dd', 'io_dmaTL_d_bits_data', 256), ('vr', 'dma.io_vmemRead_valid', 1), ('vrg', 'dma.io_vmemReadGrant', 1),
+        ('vrb', 'dma.io_vmemRead_bits_bankIdx', 3), ('vra', 'dma.io_vmemRead_bits_bankAddr', 13), ('vw', 'dma.io_vmemWrite_valid', 1),
+        ('vwg', 'dma.io_vmemWriteGrant', 1), ('vwb', 'dma.io_vmemWrite_bits_bankIdx', 3), ('vwa', 'dma.io_vmemWrite_bits_bankAddr', 13),
+        ('vwd', 'dma.io_vmemWrite_bits_data', 256), ('vresp', 'dma.io_vmemReadData_valid', 1), ('vdata', 'dma.io_vmemReadData_bits', 256)]:
+    SIGNALS['dma_' + key] = (path, width)
+CONTROLS = ['fire', 'launch', 'cmd', 'load_busy', 'store_busy', 'vr', 'vresp', 'vw', 'mr', 'mresp', 'mw', 'csr', 'halt', 'ecall', 'illegal', 'ebreak',
+            'valid', 'xcmd', 'xr', 'xresp', 'xw', 'xar', 'xaw', 'pcmd'] + [f'{p}{n}' for n in range(2) for p in ('pr', 'presp', 'pw')] + [f'{p}{n}' for n in range(4) for p in ('par', 'paw')]
+CONTROLS += ['dma_' + k for k in ['launch', 'stall', 'av', 'ar', 'dv', 'dr', 'vr', 'vrg', 'vw', 'vwg', 'vresp']] + [f'dma_{p}{n}' for n in range(8) for p in ('busy', 'engine')]
+PORTS = ['vr', 'vresp', 'mw', 'mr', 'mresp', 'vw']
+
+
+def vcd_edges(stream, scope='TOP.AtlasCore'):
+    """Yield {'edge', 'values'} sampled just before each rising clock; unknown or malformed VCD raises."""
+    wanted = {}
+    for key, (path, _) in SIGNALS.items(): wanted.setdefault(scope + '.' + path, []).append(key)
+    codes, scopes, tokens, values, changes = {}, [], [], {}, {}
+    stamp, edge, header = None, 0, True
+    def flush():
+        nonlocal edge
+        before = dict(values); values.update(changes)
+        if before.get(codes['clock']) == 0 and values.get(codes['clock']) == 1:
+            edge += 1
+            return {'edge': edge, 'values': {key: before.get(code) for key, code in codes.items()}}
+    for line in stream:
+        if header:
+            tokens += line.split()
+            while '$end' in tokens:
+                entry, tokens = tokens[:tokens.index('$end')], tokens[tokens.index('$end') + 1:]
+                if entry and entry[0] == '$scope': scopes.append(entry[2])
+                elif entry and entry[0] == '$upscope': scopes.pop()
+                elif entry and entry[0] == '$var':
+                    for key in wanted.get('.'.join(scopes + [entry[4]]), []):
+                        if key in codes or int(entry[2]) != SIGNALS[key][1]: raise ReplayError('ambiguous or incompatible VCD signal ' + key)
+                        codes[key] = entry[3]
+                elif entry and entry[0] == '$enddefinitions':
+                    if set(codes) != set(SIGNALS): raise ReplayError('VCD lacks signals: ' + ','.join(sorted(set(SIGNALS) - set(codes))))
+                    header = False
+            continue
+        words = line.split(); i = 0
+        while i < len(words):
+            word = words[i]; i += 1
+            if word.startswith('#'):
+                new = int(word[1:])
+                if stamp is not None:
+                    if new <= stamp: raise ReplayError('non-increasing VCD timestamp')
+                    sample = flush()
+                    if sample: yield sample
+                stamp, changes = new, {}
+            elif word.startswith('$'): continue
+            elif word[0] in 'bB': changes[words[i]] = None if set(word[1:].lower()) & set('xz') else int(word[1:], 2); i += 1
+            elif word[0] in '01xz': changes[word[1:]] = None if word[0] in 'xz' else int(word[0])
+            else: raise ReplayError('unsupported VCD value')
+    if header or stamp is None: raise ReplayError('truncated VCD')
+    sample = flush()
+    if sample: yield sample
+
+
+def pattern(offset): return sum(((37 * (offset + n) + 11) & 255) << (8 * n) for n in range(32))
+
 
 def initial_memory(mode):
     result=bytearray((0xa5^(13*i))&255 for i in range(8192))
@@ -103,7 +159,7 @@ def initial_memory(mode):
                 result[start+2*i:start+2*i+2]=code.to_bytes(2,'little')
     elif mode in ('xlu','dma_xlu'):
         for i in range(1024): result[i]=(37*i+11+3*(i//32))&255
-    else: raise OBS.ObservationError('unsupported finite compute mode')
+    else: raise ReplayError('unsupported finite compute mode')
     return result
 
 def bf16_power_product(lhs,rhs):
@@ -112,9 +168,9 @@ def bf16_power_product(lhs,rhs):
         a=int.from_bytes(lhs[offset:offset+2],'little');b=int.from_bytes(rhs[offset:offset+2],'little')
         ea=(a>>7)&255;eb=(b>>7)&255
         if a&127 or b&127 or not 1<=ea<=254 or not 1<=eb<=254:
-            raise OBS.ObservationError('outside exact finite-normal BF16 power reference')
+            raise ReplayError('outside exact finite-normal BF16 power reference')
         e=ea+eb-127
-        if not 1<=e<=254: raise OBS.ObservationError('BF16 power product outside normal domain')
+        if not 1<=e<=254: raise ReplayError('BF16 power product outside normal domain')
         result+=(((a^b)&0x8000)|(e<<7)).to_bytes(2,'little')
     return bytes(result)
 
@@ -138,11 +194,8 @@ def validate_compute_edges(samples,words,mode):
     regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0
     active=None;pending=None;outstanding={};read_queue=[];a_hold=None;d_hold=None
     began=False;ended=False;marker=None;publication=None;last_edge=0;prev_busy=None
-    controls=list(OBS.CONTROLS)+['valid','xcmd','xr','xresp','xw','xar','xaw','pcmd']
-    controls+=['pr'+str(p) for p in range(2)]+['presp'+str(p) for p in range(2)]+['pw'+str(p) for p in range(2)]
-    controls+=['par'+str(p) for p in range(4)]+['paw'+str(p) for p in range(4)]
-    controls+=list(dict.fromkeys(DMA_KEYS[k] for k in ['launch','stall','av','ar','dv','dr','vr','vrg','vw','vwg','vresp']+['busy'+str(p) for p in range(8)]+['engine'+str(p) for p in range(8)]))
-    def reject(message): raise OBS.ObservationError(message)
+    controls=CONTROLS
+    def reject(message): raise ReplayError(message)
     def row_bytes(identity,row):
         if (identity,row) not in mreg: reject('read from uninitialized logical MREG row')
         return mreg[identity,row]
@@ -150,9 +203,9 @@ def validate_compute_edges(samples,words,mode):
         edge=sample['edge'];last_edge=edge
         def v(key):
             value=sample['values'][key]
-            if type(value)!=int or not 0<=value<(1<<COMPUTE_SIGNALS[key][1]): reject('unknown/out-of-range compute signal '+key)
+            if type(value)!=int or not 0<=value<(1<<SIGNALS[key][1]): reject('unknown/out-of-range compute signal '+key)
             return value
-        def d(key): return v(DMA_KEYS[key])
+        def d(key): return v('dma_'+key)
         def data(key): return v(key).to_bytes(32,'little')
         def record(collection,**fields): collection.append({'edge':edge,**fields})
         if v('reset'):
@@ -176,7 +229,7 @@ def validate_compute_edges(samples,words,mode):
         if active and edge==active['edge']+active['release_age']:
             active['release_edge']=edge;active=None
         if active and edge>active['edge']+active['release_age']: reject('missing observed compute release')
-        expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,DMA_KEYS['launch']:False}
+        expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False}
         if v('valid') and began and not ended:
             pc=v('pc');word=v('word')
             if pc!=pc_expected or pc>=len(words) or word!=words[pc]: reject('retired/held instruction differs from selected program words')
@@ -227,9 +280,9 @@ def validate_compute_edges(samples,words,mode):
                     if (d('address'),d('vmem'),d('size'),d('launch_channel'),d('op'))!=(address,vmword,size,channel,2 if store else 1): reject('DMA launch differs from captured scalar operands')
                     expected_addr=0x90000400 if store else 0x90000000
                     if mode!='dma_xlu' or size!=128 or vmword!=(256 if store else 0) or address!=expected_addr: reject('DMA launch outside finite composition case')
-                    rows=[bytes(vm[4*vmword+32*r:4*vmword+32*(r+1)]) for r in range(4)] if store else [DMA.pattern(0,32*r).to_bytes(32,'little') for r in range(4)]
+                    rows=[bytes(vm[4*vmword+32*r:4*vmword+32*(r+1)]) for r in range(4)] if store else [pattern(32*r).to_bytes(32,'little') for r in range(4)]
                     pending={**common,'engine':'dma','op':'store' if store else 'load','channel':channel,'vmem_word':vmword,'dram_address':address,'size':size,'reference_rows':rows,'requests':[],'memory':[],'memory_responses':[],'wait_stall_edges':[]}
-                    commands.append(pending);expected_cmd[DMA_KEYS['launch']]=True
+                    commands.append(pending);expected_cmd['dma_launch']=True
                 elif opcode==0x7f:
                     channel=(word>>12)&7
                     if word>>25:
@@ -248,7 +301,7 @@ def validate_compute_edges(samples,words,mode):
         if v('launch')!=v('cmd'): reject('scalar/LSU launch mismatch')
         age=edge-active['edge'] if active else -1
         engine_kind=active['engine'] if active else None
-        expected_ports={key:False for key in list(OBS.PORTS)+['xr','xresp','xw','xar','xaw']+['pr'+str(p) for p in range(2)]+['presp'+str(p) for p in range(2)]+['pw'+str(p) for p in range(2)]}
+        expected_ports={key:False for key in PORTS+['xr','xresp','xw','xar','xaw']+['pr'+str(p) for p in range(2)]+['presp'+str(p) for p in range(2)]+['pw'+str(p) for p in range(2)]}
         if engine_kind=='vls':
             store=active['op']=='store';source,response,dest=('mr','mresp','vw') if store else ('vr','vresp','mw')
             expected_ports[source]=1<=age<=32;expected_ports[response]=2<=age<=33;expected_ports[dest]=3<=age<=34
@@ -377,145 +430,70 @@ def validate_compute_edges(samples,words,mode):
             for event in command[field]: event['age']=event['edge']-command['edge']
     return {'mode':mode,'instructions':instructions,'commands':commands,'endpoints':endpoints,'busy_transitions':busy_events,'sampled_edges':last_edge,'full_memory_checked_bytes':len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
 
-def analyze_compute(trace,words,mode):
-    with CHECK.allowed(trace).open() as stream:
-        return validate_compute_edges(COMPUTE_OBS.vcd_edges(stream,'TOP.AtlasCore'),words,mode)
+
+def sh(argv, timeout, env=None):
+    result = subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=timeout, env=env)
+    if result.returncode: raise ReplayError(f'{Path(str(argv[0])).name} failed: {result.stderr[-2000:]}')
+    return result.stdout
+
+
+def build_model(args, work):
+    objdir = work / 'obj'; cxx = shutil.which('g++')
+    argv = [args.verilator, '--cc', '--exe', '--build', '--top-module', 'AtlasCore', '--prefix', 'VAtlasCore', '--Mdir', str(objdir), '--trace', '--trace-depth', '3',
+            '--assert', '--output-split', '20000', '--output-split-cfuncs', '500', '-Wno-fatal', '-j', str(args.jobs), '-CFLAGS', '-std=c++17',
+            '-MAKEFLAGS', f"CXX={cxx} LINK={cxx} AR={shutil.which('ar')}",
+            *map(str, sorted([*args.rtl.glob('*.sv'), *args.rtl.glob('*.v')])), str(HERE.parent / 'test/ee290-compute-replay.cpp')]
+    sh(argv, args.timeout, {**os.environ, **({'VERILATOR_ROOT': str(args.verilator_root)} if args.verilator_root else {})})
+    return objdir / 'VAtlasCore'
 
 
 def run(args):
-    if not args.cases or len(set(args.cases.split(',')))!=len(args.cases.split(',')) or not set(args.cases.split(','))<=set(cases()): raise ValueError('unsupported or empty selected cases')
-    if args.consumer!='none' and (args.atlas_opt is None or any(getattr(args,key+'_evidence') is None or getattr(args,key+'_evidence_sha256') is None for key in ('vls','dma','xlu','vmul'))): raise ValueError('selected consumer requires optimizer and four explicitly hash-selected receipts')
-    checker=CHECK.Checker()
-    report_id=checker.identity(args.selected_core_replay)
-    if report_id['sha256']!=args.expected_replay_sha256: raise ValueError('selected replay hash mismatch')
-    selected=CHECK.strict_json(CHECK.allowed(args.selected_core_replay).read_bytes())
-    if selected['schema']!='atlas.selected_atlascore_replay.v0' or selected['state']!='numerical_and_boundary_replay_passed': raise ValueError('successful selected replay required')
-    original=selected['original_inputs']
-    witness=CHECK.strict_json(CHECK.allowed(original[0]['path']).read_bytes())
-    checker.verify(original[0],args.selected_core_replay.parent)
-    # Historical producer sources may evolve; bind executed retained RTL snapshots,
-    # not current copies of unrelated historical producers.
-    provenance=witness['provenance']
-    manifest=checker.verify(provenance['manifest'],args.selected_core_replay.parent)
-    hardware=checker.verify(provenance['hardware_ir'],args.selected_core_replay.parent)
-    output=OBS._fresh_output(args.output); output.mkdir(parents=True)
-    inputs=output/'inputs'; inputs.mkdir()
-    rtl=[]
-    for item in selected['rtl_snapshots']:
-        source=checker.verify(item['snapshot'],args.selected_core_replay.parent)
-        dest=inputs/Path(source['path']).name
-        dest.write_bytes(CHECK.allowed(source['path']).read_bytes())
-        snap=checker.identity(dest)
-        if (snap['sha256'],snap['bytes'])!=(source['sha256'],source['bytes']): raise ValueError('snapshot content mismatch')
-        rtl.append({'original':source,'snapshot':snap})
-    root=CHECK.allowed(Path(__file__).parent.parent)
-    harness=checker.identity(root/'test/ee290-compute-replay.cpp')
-    copy=inputs/'ee290-compute-replay.cpp';copy.write_bytes(CHECK.allowed(harness['path']).read_bytes())
-    dependencies=[]
-    for name in ['replay-ee290-compute.py','replay-ee290-dma.py','observe-ee290-vls.py','ee290_build_capture.py','check-ee290-provenance.py','fingerprint-rtl-modules.py','index-retained-hw.py','check-ee290-compute-export.py']:
-        src=checker.identity(root/'tools'/name);dest=inputs/name;dest.write_bytes(CHECK.allowed(src['path']).read_bytes());dependencies.append({'original':src,'snapshot':checker.identity(dest)})
-    tools={name:checker.identity(getattr(args,name)) for name in ('verilator','cxx','make','ar','atlas_emit')}
-    if args.consumer!='none': tools['atlas_opt']=checker.identity(args.atlas_opt)
-    runtime=CHECK.allowed(args.verilator_root)
-    env={'PATH':str(CHECK.allowed(args.make).parent)+':/bin','LC_ALL':'C','LANG':'C','VERILATOR_ROOT':str(runtime),'CXX':tools['cxx']['path'],'AR':tools['ar']['path']}
-    argv=[tools['verilator']['path'],'--cc','--exe','--build','--top-module','AtlasCore','--prefix','VAtlasCore','--Mdir','{output}/obj','--trace','--trace-depth','3','--assert','--output-split','20000','--output-split-cfuncs','500','-Wno-fatal','-j',str(args.jobs),'-CFLAGS','-std=c++17','-MAKEFLAGS','CXX='+tools['cxx']['path']+' LINK='+tools['cxx']['path']+' AR='+tools['ar']['path'],*[r['snapshot']['path'] for r in rtl],str(copy)]
-    checker.recheck()
-    build_inputs=[{'role':'tool' if n=='verilator' else n,'identity':i} for n,i in tools.items() if n in ('verilator','cxx','make','ar')]+[{'role':'selected_rtl','identity':r['snapshot']} for r in rtl]+[{'role':'harness','identity':checker.identity(copy)}]
-    if args.reuse_compile:
-        phase_id=checker.identity(args.reuse_compile)
-        phase=CHECK.strict_json(CHECK.allowed(args.reuse_compile).read_bytes())
-        if phase['state']!='phase_completed' or phase['kind']!='compute_verilator_compile' or phase['inputs_before']!=phase['inputs_after']: raise ValueError('invalid reused compile')
-        contents=lambda members: sorted((x['role'],x['identity']['sha256'],x['identity']['bytes']) for x in members)
-        if contents(phase['inputs_before'])!=contents(build_inputs): raise ValueError('reused compile inputs differ')
-        for x in phase['inputs_before']: checker.verify(x['identity'],args.reuse_compile.parent)
-        def normalized(command,members,phase_output):
-            aliases={x['identity']['path']:'INPUT:'+x['role']+':'+x['identity']['sha256'] for x in members}
-            return [aliases.get(a,a.replace(phase_output,'{output}')) for a in command]
-        if normalized(phase['command']['argv'],phase['inputs_before'],str(args.reuse_compile.parent.resolve()))!=normalized(argv,build_inputs,'{output}') or phase['command']['environment']!=env or phase['command']['returncode']!=0 or phase['command']['timed_out']: raise ValueError('reused compilation recipe differs')
-        binary=checker.identity(args.reuse_compile.parent/'obj/VAtlasCore')
-        if binary not in [f['identity'] for o in phase['outputs'] for f in o['files']]: raise ValueError('reused model not compile output')
-    else:
-        phase=CAPTURE.capture_phase(output/'compile','compute_verilator_compile',argv,build_inputs,[{'role':'model','relative_path':'obj','kind':'tree'}],env,args.timeout_seconds)
-        if phase['state']!='phase_completed': raise ValueError('compute compile failed')
-        phase_id=checker.identity(output/'compile/phase.json')
-        binary=checker.identity(output/'compile/obj/VAtlasCore')
-    receipt={'schema':'atlas.ee290_compute_replay.v0','target_config':'EE290SimConfig','state':'prepared','qualification':'conditional','scheduling_qualified':False,'selected_core_replay':report_id,'manifest':manifest,'hardware_ir':hardware,'rtl_snapshots':rtl,'harness':{'original':harness,'snapshot':checker.identity(copy)},'producer_snapshots':dependencies,'tool_identities':tools,'compile_phase':phase_id,'model':binary,'cases':[],'assumptions':['Fresh reset followed by START with selected compute engines and all DMA queues quiescent.','Serialized finite VLS, XLU transpose and paired BF16 multiplication with conservative delays; optional aligned128B DMA and matching waits.','Direct host TileLink and deterministic delayed external DMA slave; behavioral SRAM; not CPU/SoC qualification.','Opaque installed Verilator and C++ runtime; two-state clocked simulation and pre-edge fixed boundary sampling.', 'Finite VMUL numerical reference covers signed normal BF16 powers only; other values, rounding and exceptions are not numerically qualified.', 'Only selected fixture command/data streams and the captured post-halt drain are validated; no general concurrency or CPU/system qualification.']}
-    evidence={};selection=None;selected_ids=[]
-    if args.consumer!='none':
-        for key in ('vls','dma','xlu','vmul'):
-            path=getattr(args,key+'_evidence');ident=checker.identity(path)
-            if ident['sha256']!=getattr(args,key+'_evidence_sha256'): raise ValueError('selected '+key+' evidence hash mismatch')
-            selected_ids.append({'kind':key,'identity':ident})
-            evidence['evidence_sha256' if key=='vls' else key+'_evidence_sha256']=ident['sha256']
-        evidence.update(manifest_sha256=manifest['sha256'],hardware_ir_sha256=hardware['sha256'])
-        options={'evidence':selected_ids[0]['identity']['path'],'evidence-sha256':evidence['evidence_sha256'],'manifest-sha256':manifest['sha256'],'hardware-ir-sha256':hardware['sha256'],'allow-conditional':'true'}
-        for item in selected_ids[1:]:
-            key=item['kind'];options[key+'-evidence']=item['identity']['path'];options[key+'-evidence-sha256']=item['identity']['sha256']
-        selection='--select-atlas-rtl-evidence='+' '.join(k+'='+v for k,v in options.items())
-        receipt.update(schema='atlas.ee290_scheduled_compute_replay.v0',selected_evidence=selected_ids)
-        receipt['assumptions'][1]='Serialized finite VLS, XLU transpose and paired BF16 multiplication; delays come from the selected compiler consumer, optional aligned128B DMA uses matching waits.'
-    (output/'report.json').write_text(json.dumps(receipt,indent=2)+'\n')
-    consumers=('delay','schedule') if args.consumer=='both' else (args.consumer,)
-    selected_cases=cases(args.consumer!='none')
-    jobs=[(mode if consumer=='none' else mode+'_'+consumer,text,mode,consumer) for mode,(text,_) in selected_cases.items() if mode in args.cases.split(',') for consumer in consumers]
-    receipt['requested_cases']=[name for name,text,mode,consumer in jobs]
-    receipt['requested_consumer']=args.consumer
-    for name,text,mode,consumer in jobs:
-        directory=output/name;directory.mkdir()
-        source=directory/'program.mlir';source.write_text(text)
-        source_id=checker.identity(source)
-        authored_id=source_id;extra={}
-        python=checker.identity(sys.executable)
-        if consumer!='none':
-            child="import subprocess,sys; subprocess.run([sys.argv[1],*sys.argv[4:],sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
-            phase=CAPTURE.capture_phase(directory/'opt','compute_selected_consumer',[python['path'],'-c',child,tools['atlas_opt']['path'],str(source),'{output}/final.mlir',selection,'--insert-atlas-delays' if consumer=='delay' else '--schedule-atlas-stream','--verify-atlas-rtl-timing'],[{'role':'tool','identity':python},{'role':'atlas_opt','identity':tools['atlas_opt']},{'role':'program','identity':source_id}]+[{'role':item['kind']+'_evidence','identity':item['identity']} for item in selected_ids],[{'role':'selected_final_mlir','relative_path':'final.mlir','kind':'file'}],env,args.timeout_seconds)
-            if phase['state']!='phase_completed': raise ValueError('selected consumer failed '+name)
-            source=directory/'opt/final.mlir';source_id=checker.identity(source)
-            extra.update(consumer=consumer,authored_program=authored_id,optimizer_phase=checker.identity(directory/'opt/phase.json'))
-        child="import subprocess,sys; subprocess.run([sys.argv[1],sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
-        emission=CAPTURE.capture_phase(directory/'emit','compute_program_emit',[python['path'],'-c',child,tools['atlas_emit']['path'],str(source),'{output}/program.hex'], [{'role':'tool','identity':python},{'role':'atlas_emit','identity':tools['atlas_emit']},{'role':'program','identity':source_id}],[{'role':'emitted_words','relative_path':'program.hex','kind':'file'}],env,args.timeout_seconds)
-        if emission['state']!='phase_completed': raise ValueError('DMA emission failed')
-        emitted=CHECK.allowed(directory/'emit/program.hex').read_text()
-        if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+',emitted): raise ValueError('invalid emitted words')
-        words=directory/'program.hex';words.write_text(emitted);words_id=checker.identity(words)
-        execution=CAPTURE.capture_phase(directory/'execution','compute_execution',[binary['path'],str(words),'{output}/trace.vcd','100000',mode],[{'role':'tool','identity':binary},{'role':'words','identity':words_id}],[{'role':'trace','relative_path':'trace.vcd','kind':'file'}],env,args.timeout_seconds)
-        if execution['state']!='phase_completed': raise ValueError('DMA execution failed '+name)
-        log=CHECK.allowed(directory/'execution/command.stdout.log').read_text()
-        match=re.search(r'EE290_COMPUTE_PASSED mode='+mode+r' checked_vmem_bytes=8192 reads=(\d+) writes=(\d+) a_stalls=(\d+) delayed_response_cycles=(\d+) status=5 marker=1 illegal_pc=0 cycles=(\d+)',log)
-        count=4 if mode=='dma_xlu' else 0
-        if not match or int(match[1])!=count or int(match[2])!=count: raise ValueError('compute numerical mismatch')
-        trace_id=checker.identity(directory/'execution/trace.vcd')
-        observations=analyze_compute(Path(trace_id['path']),[int(w,16) for w in emitted.split()],mode)
-        transcript={'schema':'atlas.ee290_compute_events.v0','validator':'atlas.ee290.compute.fixed.v1','target_config':'EE290SimConfig','data_encoding':'little_endian_bytes_hex','sampling':'values immediately before rising clock timestamp','trace':trace_id,'words':words_id,**observations}
-        event_path=directory/'events.json';event_path.write_text(json.dumps(transcript,indent=2)+'\n')
-        if consumer!='none':
-            child="import subprocess,sys; subprocess.run([sys.argv[1],'--rtl-timing-json',sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
-            phase=CAPTURE.capture_phase(directory/'export','compute_resolved_timing_export',[python['path'],'-c',child,tools['atlas_emit']['path'],str(source),'{output}/timing.json'],[{'role':'tool','identity':python},{'role':'atlas_emit','identity':tools['atlas_emit']},{'role':'program','identity':source_id}],[{'role':'resolved_timing','relative_path':'timing.json','kind':'file'}],env,args.timeout_seconds)
-            if phase['state']!='phase_completed': raise ValueError('resolved export failed '+name)
-            timing_id=checker.identity(directory/'export/timing.json')
-            binding=BIND.bind_export(CHECK.strict_json(CHECK.allowed(timing_id['path']).read_bytes()),transcript,evidence,[int(w,16) for w in emitted.split()],'atlas.vls_dma_xlu_vmul.serialized.v1')
-            binding.update(resolved_timing=timing_id,events=checker.identity(event_path),words=words_id)
-            path=directory/'export-binding.json';path.write_text(json.dumps(binding,indent=2)+'\n')
-            extra.update(resolved_timing=timing_id,export_phase=checker.identity(directory/'export/phase.json'),export_binding=checker.identity(path))
-        receipt['cases'].append({**extra,'name':name,'events':checker.identity(event_path),'boundary_checks':{'selected_words':True,'data_streams':True,'observed_release':True,'composed_memory':True,'terminal_drain':True},'program':source_id,'words':words_id,'emission_phase':checker.identity(directory/'emit/phase.json'),'execution_phase':checker.identity(directory/'execution/phase.json'),'trace':trace_id,'numerical_checks':{'completion':True,'output':True,'guards':True},'observations':dict(zip(['reads','writes','a_stalls','delayed_response_cycles','cycles'],map(int,match.groups())))})
-    if [item['name'] for item in receipt['cases']]!=receipt['requested_cases'] or not receipt['cases']: raise ValueError('requested replay cases incomplete')
-    checker.recheck()
-    receipt['state']='finite_compute_cases_passed' if args.consumer=='none' else 'finite_scheduled_compute_cases_passed'
-    (output/'report.json').write_text(json.dumps(receipt,indent=2)+'\n')
-    return receipt
+    work = args.work.resolve(); work.mkdir(parents=True, exist_ok=True)
+    facts = args.facts.resolve(); digest = hashlib.sha256(facts.read_bytes()).hexdigest()
+    if args.facts_sha256 and args.facts_sha256 != digest: raise ReplayError('facts hash mismatch')
+    model = args.model.resolve() if args.model else build_model(args, work)
+    select = f'--select-atlas-rtl-evidence=op-timing={facts} op-timing-sha256={digest} dma=wait'
+    opt, emit = args.bin / 'atlas-opt', args.bin / 'atlas-emit'
+    available = cases(); results = []
+    for mode in args.cases.split(','):
+        for consumer in (('delay', 'schedule') if args.consumer == 'both' else (args.consumer,)):
+            name = f'{mode}_{consumer}'; out = work / name; out.mkdir(exist_ok=True)
+            (out / 'program.mlir').write_text(available[mode])
+            sh([opt, out / 'program.mlir', select, '--insert-atlas-delays' if consumer == 'delay' else '--schedule-atlas-stream', '--verify-atlas-rtl-timing', '-o', out / 'final.mlir'], args.timeout)
+            text = sh([emit, out / 'final.mlir'], args.timeout)
+            if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+', text): raise ReplayError('invalid emitted words')
+            (out / 'program.hex').write_text(text); words = [int(w, 16) for w in text.split()]
+            log = sh([model, out / 'program.hex', out / 'trace.vcd', '100000', mode], args.timeout)
+            count = 4 if mode == 'dma_xlu' else 0
+            match = re.search(r'EE290_COMPUTE_PASSED mode=' + mode + r' checked_vmem_bytes=8192 reads=(\d+) writes=(\d+) .* status=5 marker=1 illegal_pc=0 cycles=(\d+)', log)
+            if not match or int(match[1]) != count or int(match[2]) != count: raise ReplayError(name + ': numerical check failed')
+            with (out / 'trace.vcd').open() as stream: events = validate_compute_edges(vcd_edges(stream), words, mode)
+            (out / 'events.json').write_text(json.dumps(events, indent=1))
+            export = json.loads(sh([emit, '--rtl-timing-json', out / 'final.mlir'], args.timeout))
+            (out / 'timing.json').write_text(json.dumps(export, indent=1))
+            binding = BIND.bind_export(export, events, digest, words)
+            results.append({'case': name, 'cycles': int(match[3]), **{k: binding[k] for k in ('instruction_words_bound', 'memory_access_elements_bound')}})
+            print(f'PASS {name} words={len(words)} accesses_bound={binding["memory_access_elements_bound"]} dma_intervals={len(binding["dynamic_dma_intervals"])}', flush=True)
+    return results
 
-if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__)
-    for key in ('selected-core-replay','output','verilator','cxx','make','ar','atlas-emit','verilator-root'): p.add_argument('--'+key,type=Path,required=True)
-    p.add_argument('--expected-replay-sha256',required=True)
-    p.add_argument('--reuse-compile',type=Path)
-    p.add_argument('--consumer',choices=('none','delay','schedule','both'),default='none')
-    p.add_argument('--cases',default='xlu,vmul,dma_xlu')
-    p.add_argument('--atlas-opt',type=Path)
-    for key in ('vls','dma','xlu','vmul'):
-        p.add_argument('--'+key+'-evidence',type=Path)
-        p.add_argument('--'+key+'-evidence-sha256')
-    p.add_argument('--jobs',type=int,default=4)
-    p.add_argument('--timeout-seconds',type=int,default=1200)
-    try: print(json.dumps(run(p.parse_args()),indent=2))
-    except (ValueError,KeyError,OBS.ObservationError) as error: p.exit(1,str(error)+'\n')
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--facts', type=Path, required=True, help='merlin.op_timing.v1 facts JSON')
+    p.add_argument('--facts-sha256', help='optional expected SHA-256 of --facts')
+    p.add_argument('--bin', type=Path, required=True, help='directory holding atlas-opt and atlas-emit')
+    p.add_argument('--work', type=Path, required=True, help='output directory')
+    p.add_argument('--model', type=Path, help='prebuilt VAtlasCore binary (skips the Verilator build)')
+    p.add_argument('--rtl', type=Path, help='directory of AtlasCore *.sv/*.v to Verilate when --model is absent')
+    p.add_argument('--verilator', default=shutil.which('verilator') or 'verilator')
+    p.add_argument('--verilator-root', type=Path, help='VERILATOR_ROOT override (directory holding include/verilated.h)')
+    p.add_argument('--consumer', choices=('delay', 'schedule', 'both'), default='both')
+    p.add_argument('--cases', default='vmul,dma_xlu', help='comma list from: xlu,vmul,dma_xlu')
+    p.add_argument('--jobs', type=int, default=4)
+    p.add_argument('--timeout', type=int, default=1800)
+    a = p.parse_args()
+    if not a.model and not a.rtl: p.error('--model or --rtl required')
+    if not set(a.cases.split(',')) <= set(cases()): p.error('unknown case')
+    a.bin = a.bin.resolve()
+    try: run(a)
+    except (ReplayError, BIND.BindingError, subprocess.SubprocessError, OSError, KeyError) as error: sys.exit(f'FAIL: {error}')

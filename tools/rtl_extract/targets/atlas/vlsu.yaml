@@ -7,13 +7,13 @@ description: >
   derived response latency is what the memories deliver, not something the LSU enforces. VMEM row fields are line offsets
   within a bank (bankAddr); they are zero-based only for a bank-aligned base (bankAddr 0).
 limit: 80
-system: AtlasCore             # instantiates the LSU, Vmem, MregFile and the scalar decoder
-command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
-inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
+system: AtlasCore
+command: io_cmd
+inputs:
   io_cmd_bits_op: 3
   io_cmd_bits_mregBank: 60
   io_cmd_bits_vmemLineAddr: 16383
-decode:                       # command codes come from the RTL decoder; words are the ISA encodings of lib/AtlasEncoding.cpp
+decode:
   input: io_cmd_bits_op
   instruction: {instance: scalar/decoder, port: io_instr}
   words: {vload: 0x00000007, vstore: 0x00002007}
@@ -59,8 +59,7 @@ checks:
   - equal: [vstore.first_free_age, vstore/operands.first_free_age]
   - equal: [vstore.next_issue_age, vstore/operands.next_issue_age]
   - equal: [vstore.events.vmem_write.first_age, vstore/operands.events.vmem_write.first_age]
-# Regression values used only by tests; the extractor never reads them. They match the hand-derived VLS rule
-# (docs/rtl-timing/vls-timing.md): requests at ages 1..32, writes at 3..34, busy through 34, next issue at 35.
+# Regression values used only by tests; the extractor never reads them.
 expect:
   vload:
     events:

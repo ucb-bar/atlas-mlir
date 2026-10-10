@@ -1,6 +1,6 @@
 # rtl_extract: engine timing from CIRCT HW IR
 
-Computes per-operation engine timing (event ages, release, next issue) by executing the control logic of CIRCT HW IR cycle by cycle. Ported from the PR #12 rtlgraph extractor. Python stays target-agnostic; every module, port, opcode and stimulus lives in `targets/<target>/<engine>.yaml`. The output is a `merlin.op_timing.v1` document that drops into Merlin's RTL facts as the `op_timing` section (see Output).
+Computes per-operation engine timing (event ages, release, next issue) by executing the control logic of CIRCT HW IR cycle by cycle. Python stays target-agnostic; every module, port, opcode and stimulus lives in `targets/<target>/<engine>.yaml`. The output is a `merlin.op_timing.v1` document that drops into Merlin's RTL facts as the `op_timing` section (see Output). The [overview](../../docs/rtl-timing/README.md) covers the pipeline, scope and results; [verification](../../docs/rtl-timing/verification.md) the checks.
 
 ## Layout
 
@@ -34,7 +34,7 @@ python3 tools/extract-rtl-timing.py --hw-ir ee290.debug.hw.mlir --exporter build
 python3 -m unittest discover -s test -p 'test_rtl_extract_*.py'   # hardware tests need ATLAS_HW_IR, ATLAS_HW_EXPORTER
 ```
 
-Lower the selected FIRRTL with the options of `tools/retain-ee290-hw-ir.py`, adding `-O=debug --preserve-values=named` and dropping `--repl-seq-mem`/`--repl-seq-mem-file`. The default lowering removes dead ports (for example XluEngine `io_busy`) and wire names, and memory replacement turns on-chip SRAMs into external blackboxes; the extractor then reports `unresolved` rather than substituting proxies. With inline memories, VMEM and MREG appear as `seq.firmem 1, 1, undefined` (one-cycle read and write). The CLI exits 1 if any record is unresolved.
+Run on a debug lowering of the selected FIRRTL (`-O=debug --preserve-values=named`, no `--repl-seq-mem`; see the [overview](../../docs/rtl-timing/README.md#reproduce)). The default lowering removes dead ports and wire names, and memory replacement turns on-chip SRAMs into external blackboxes; the extractor then reports `unresolved` rather than substituting proxies. The CLI exits 1 if any record is unresolved.
 
 Responses are fed back after `events.<g>.response.latency` ages and reported as `assumptions.scratchpad_read_latency`. This is the on-chip VMEM/MREG read latency, fixed by the RTL: the vector and scalar LSU are always granted ahead of DMA and TileLink. External memory and DMA completion are not modeled; they are variable and governed by `dma.wait`, not by a cycle count.
 
@@ -53,7 +53,7 @@ Responses are fed back after `events.<g>.response.latency` ages and reported as 
 - Defaults: `clock: clock`, `reset: reset`, `reset_cycles: 16`, `flush_cycles: 16`, `limit: 320`, `tail: 2`.
 - `variants.<name>`: deep-merged overlay of the spec (not `engine`, `module`, `checks`, `expect`, `operation_table`, `system`, `command`, `decode`); optional `only: [ops]`. Records are named `<engine>.<op>` and `<engine>.<op>/<variant>`.
 - `checks: [{equal: ["op.events.write", "op/variant.events.write"], reason?}]`: a failure marks the named records unresolved.
-- `expect`: regression values per record, read only by `test/test_rtl_extract_atlas.py`. Never feed them into extraction.
+- `expect`: regression values per record, read only by `test/test_rtl_extract_hw.py`. Never feed them into extraction.
 
 A run resets, flushes, then requires every register in the cone of the control signals (`busy`, event `valid`s, `next_issue` signals) to be known, except those listed in `unreset`; fields must be known whenever their event is valid. Ages are absolute; age 0 is the first cycle after the flush.
 
@@ -67,7 +67,7 @@ A run resets, flushes, then requires every register in the cone of the control s
 2. Run the CLI for the engine. `Timing depends on unapproved input` means a payload reaches control (or an input is missing from `inputs`); `Unsupported timing operation` means the cone hit an op outside the whitelist; extend `ControlCircuit.allowed` only with exact semantics and a synthetic test.
 3. Engine-specific invariants (families sharing a write age, overwrite vs accumulate equality, overlap neutrality) go in `checks:` or in variants that encode the alternative stimulus, not in Python.
 4. If one circuit is not enough, add a generic recipe: register `RECIPES[name] = (build, run)` in `runner.py` and its extra spec keys in `spec.RECIPE_KEYS[name]`; extend `runner.modules(spec)` if it simulates more than `module`. `run` must return the per-age trace shape of `run_single` (`age`, `busy`, `signals`, `events`) so summaries and facts stay shared. Wiring between circuits belongs in YAML.
-5. Add `test/test_rtl_extract_<engine>.py` with a class deriving `EngineCase` from `test/test_rtl_extract_atlas.py`, ideally with one mutation (an extra register or a payload-dependent control path) that must move or reject the result.
+5. Add a class deriving `EngineCase` in `test/test_rtl_extract_hw.py`, ideally with one mutation (an extra register or a payload-dependent control path) that must move or reject the result.
 6. If the compiler models the operation, map it in `test/rtl-timing-facts-map.yaml` so the cross-check below covers it; otherwise list it there as not modeled.
 
 ## Compiler cross-check

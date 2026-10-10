@@ -32,7 +32,6 @@ struct DelayInsertion {
 };
 
 FailureOr<AtlasStream> readAtlasStream(ModuleOp module);
-// Decode a validated physical operation, including explicit DELAY, for timing.
 FailureOr<timing::Instr> atlasInstruction(Operation *op);
 // Rejects illegal delay slots and DMA hazards that no delay can cover.
 LogicalResult checkAtlasStream(const AtlasStream &stream,

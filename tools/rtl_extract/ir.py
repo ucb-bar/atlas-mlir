@@ -13,7 +13,7 @@ def export(hw_ir, modules, exporter):
 
 def load_document(hw_ir, modules, exporter):
     """Export ``modules`` and every hw.module they instantiate (extern modules stay declarations)."""
-    names, document = set(modules), None
+    names = set(modules)
     while True:
         document = export(hw_ir, names, exporter)
         require(not set(document["missing_modules"]) & set(modules),

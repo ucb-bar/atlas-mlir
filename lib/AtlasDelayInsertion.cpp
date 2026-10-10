@@ -28,8 +28,6 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   RegValues regs = s.entry[block];
   ReservationTable table(target);
   std::vector<Issued> issued;
-  // A matching DMA wait may add an unknown stall. Subsequent coordinates are
-  // lower bounds; finite reservations extend conservatively across the wait.
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
@@ -153,25 +151,9 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 }
 
 LogicalResult insertDelays(ModuleOp module) {
-  auto evidence = getSelectedRTLEvidence(module);
-  if (failed(evidence))
-    return failure();
-  if (*evidence && failed(checkSelectedRTLProgramSize(module)))
-    return failure();
   TargetTiming target;
-  if (*evidence)
-    target = (*evidence)->targetTiming();
-  FailureOr<AtlasStream> stream = readAtlasStream(module);
+  FailureOr<AtlasStream> stream = readTimedStream(module, target);
   if (failed(stream))
-    return failure();
-  if (target) {
-    if (stream->starts.size() != 1 || !stream->endsInHalt(0))
-      return module.emitError("selected RTL timing requires one straight-line stream ending in ECALL");
-    for (Instr &in : stream->instrs)
-      if (in.op->opClass == OpClass::Csr)
-        in.release = true; // Publish the completion marker only after draining.
-  }
-  if (failed(checkAtlasStream(*stream, target)))
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
   for (size_t b = 0; b < stream->starts.size(); ++b)

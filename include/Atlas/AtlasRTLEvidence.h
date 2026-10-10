@@ -11,38 +11,35 @@
 
 namespace mlir::atlas::timing {
 
-// One event group of a merlin.op_timing.v1 block; ages count cycles after issue.
+// One event group of a merlin.op_timing.v1 block; ages count from issue.
 struct OpTimingGroup {
   int firstAge = 0, lastAge = 0, count = 0;
   std::optional<int> step;
 };
 
 struct OpTimingBlock {
-  bool resolved = false; // events were computed (not null)
+  bool resolved = false; // events is an object, not null
   std::map<std::string, OpTimingGroup> events;
   std::optional<int> firstFreeAge, nextIssueAge, readLatency;
 };
 
-// Operation timing computed from the RTL (tools/rtl_extract, schema
-// merlin.op_timing.v1), selected by the SHA-256 of the facts file. Footprint
-// structure (resources, registers, pairs) comes from the compiler; ages,
-// counts, steps, holds and releases come from the mapped facts block. Any
-// mnemonic without a resolved, structurally agreeing block is rejected.
+// RTL-computed operation timing (tools/rtl_extract), pinned by the facts
+// file's SHA-256. The compiler supplies footprint structure; the facts supply
+// every age, count, step, hold and release. An operation without a resolved,
+// structurally matching block is rejected.
 class RTLEvidence {
 public:
   static constexpr const char *resolverID() { return "atlas.op_timing.serialized.v1"; }
-  static constexpr int resolverVersion() { return 1; }
-  // Reviewed ScalarCore fetch uses a 15-bit word index into InstrMem.
+  // ScalarCore fetches with a 15-bit word index.
   static constexpr unsigned maximumProgramWords() { return 32768; }
-  const char *qualificationStatus() const { return "conditional"; }
   const std::string &factsSha256() const { return sha256; }
   const std::string &hardwareIRSha256() const { return hardwareIR; }
-  // dma=wait: launch-time operand capture, synchronous config, one pending
-  // transfer, VMEM exclusive until the matching wait, no completion latency.
+  // dma=wait: operands captured at launch, synchronous config, one pending
+  // transfer, VMEM exclusive until its wait, no completion latency.
   bool dmaWait() const { return dma; }
 
-  // Every selected engine operation reserves BOTH VLS paths, deliberately
-  // serializing vector memory, XLU and VPU work.
+  // Every engine operation also holds both VLS paths, serializing VLS, XLU
+  // and VPU work.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   TargetTiming targetTiming() const;
   llvm::json::Object applicability() const;

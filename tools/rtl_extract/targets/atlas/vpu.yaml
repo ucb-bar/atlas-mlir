@@ -3,15 +3,15 @@ engine: vpu
 module: VectorEngineTop
 description: Vector engine top; two MREG read ports, two MREG write ports, per-opcode issue-busy mask.
 limit: 320
-system: AtlasCore             # instantiates the engine, MregFile and the scalar decoder
-command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
-inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
+system: AtlasCore
+command: io_cmd
+inputs:
   io_cmd_bits_op: 1
   io_cmd_bits_vs1: 18
   io_cmd_bits_vs2: 22
   io_cmd_bits_vd: 26
-decode:                       # command codes come from the RTL decoder; words are the ISA encodings of lib/AtlasEncoding.cpp
-  input: io_cmd_bits_op       # (operand fields zero); fp8 has no instruction and no timing contract here
+decode:
+  input: io_cmd_bits_op       # fp8 has no instruction and no timing contract here
   instruction: {instance: scalar/decoder, port: io_instr}
   words:
     add: 0x00000057
@@ -49,7 +49,7 @@ events:
   read1: {bundle: io_mregReadReq1, row: row, split_by: mregId, response: {input: io_mregReadResp1_valid, memory: MregFile}}
   write0: {bundle: io_mregWriteReq0, row: row, split_by: mregId}
   write1: {bundle: io_mregWriteReq1, row: row, split_by: mregId}
-operation_table:              # one operation per decode word
+operation_table:
   template:
     commands:
       0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_vs1: 2, io_cmd_bits_vs2: 6, io_cmd_bits_vd: 10}
@@ -61,7 +61,7 @@ checks:                      # timing families sharing a first-write age
     reason: column reductions share one first-write age
   - equal: [vliAll.events.write0.first_age, vliRow.events.write0.first_age, vliCol.events.write0.first_age, vliOne.events.write0.first_age]
     reason: immediate fills share one first-write age
-# Regression values used only by test/test_rtl_extract_vpu.py; the extractor never reads them.
+# Regression values used only by tests; the extractor never reads them.
 expect:
   add: {events: {read0: {first_age: 0}, write0: {first_age: 2}}, next_issue_age: 65}
   sub: {events: {write0: {first_age: 2}}, next_issue_age: 65}

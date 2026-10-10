@@ -116,10 +116,10 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   Object result{
       {"schema", dynamic ? "atlas.resolved_rtl_timing.v1" : "atlas.resolved_rtl_timing.v0"},
       {"target_config", "EE290SimConfig"},
-      {"qualification", evidence.qualificationStatus()},
+      {"qualification", "conditional"},
       {"scheduling_qualified", false},
       {"resolver", Object{{"id", RTLEvidence::resolverID()},
-                          {"version", RTLEvidence::resolverVersion()},
+                          {"version", 1},
                           {"dma_policy", dynamic ? "wait" : "none"}}},
       {"evidence", Object{{"op_timing_schema", "merlin.op_timing.v1"},
           {"op_timing_sha256", evidence.factsSha256()},

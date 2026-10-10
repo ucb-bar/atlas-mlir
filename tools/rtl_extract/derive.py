@@ -234,8 +234,5 @@ def resolve(document, spec, cache=None):
             if event["response"].get("latency") is None:
                 event["response"]["latency"] = derived["measured"]
             notes[group] = {**derived, "used": event["response"]["latency"]}
-    if "decode" in spec:
-        spec["operations"] = substitute(spec["operations"], decode(document, spec, cache))
-    else:
-        spec["operations"] = substitute(spec["operations"], {})
+    spec["operations"] = substitute(spec["operations"], decode(document, spec, cache) if "decode" in spec else {})
     return spec, ({"scratchpad_read_derivation": notes} if notes else {})

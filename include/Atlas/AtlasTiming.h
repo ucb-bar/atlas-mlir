@@ -10,10 +10,7 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
-#include <type_traits>
-#include <utility>
 #include <vector>
 
 namespace mlir::atlas::timing {
@@ -112,14 +109,10 @@ struct Footprint {
   bool writeDuringRead = false;
   int vpuLive = 0;
   int doneAge = 0;
-  // A command whose completion must be observed by a matching channel wait.
-  // This is separate from dmaCycles, which is only a legacy scheduling hint.
-  bool dmaAsync = false;
-  // Selected DMA admission serializes all VMEM work until its matching wait.
+  bool dmaAsync = false; // completes only at a matching channel wait
+  // Selected DMA: VMEM is exclusive from launch until the matching wait.
   bool exclusiveVmemUntilWait = false;
-  // Conservative mixed-engine scope: drain this finite operation before DMA,
-  // and require matching DMA completion before admitting this operation.
-  bool serializeWithDMA = false;
+  bool serializeWithDMA = false; // drains before, and waits after, a DMA
   int dmaCycles = 0;
   std::string error;
 };
@@ -127,30 +120,14 @@ struct Footprint {
 Footprint footprintOf(const Instr &in, const RegValues &regs);
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
-// Selected footprints must not silently inherit model-specific engine policy.
-// ConservativeRTL admits scalar, LSU, DMA and XLU by default. Additional
-// compute operations require an explicit policy: VmulBf16 admits only
-// vmul.bf16, Vpu every VPU operation the resolver supports.
+// A selected target supplies every footprint and drops the model's MXU
+// sequencing, MXU capacity and VPU sharing rules.
 struct TargetTiming {
-  enum class Policy { LegacyModel, ConservativeRTL };
-  enum class ComputePolicy { VmulBf16, Vpu };
   FootprintResolver resolver;
-  Policy policy = Policy::LegacyModel;
-  std::set<ComputePolicy> computePolicies;
-
-  TargetTiming() = default;
-  TargetTiming(FootprintResolver resolve)
-      : resolver(std::move(resolve)),
-        policy(resolver ? Policy::ConservativeRTL : Policy::LegacyModel) {}
-  template <typename Fn,
-            std::enable_if_t<std::is_constructible_v<FootprintResolver, Fn>,
-                             int> = 0>
-  TargetTiming(Fn resolve) : TargetTiming(FootprintResolver(std::move(resolve))) {}
-  bool usesLegacyModelPolicies() const { return policy == Policy::LegacyModel; }
-  bool allowsEngine(Engine engine) const;
-  bool allowsOperation(const OpInfo &op) const;
-  Footprint resolve(const Instr &in, const RegValues &regs) const;
-  explicit operator bool() const { return !usesLegacyModelPolicies(); }
+  Footprint resolve(const Instr &in, const RegValues &regs) const {
+    return resolver ? resolver(in, regs) : footprintOf(in, regs);
+  }
+  explicit operator bool() const { return bool(resolver); }
 };
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };

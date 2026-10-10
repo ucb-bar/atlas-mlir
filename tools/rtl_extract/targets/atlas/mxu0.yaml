@@ -19,16 +19,16 @@ unreset:                      # Reg without init, read only under a RegInit vali
   - {path: seq, name: inflight_1_rowsWritten}
   - {path: seq, name: inflight_2_accSel}
   - {path: seq, name: inflight_2_rowsWritten}
-system: AtlasCore             # instantiates the MXU, MregFile and the scalar decoder
-command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
-inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
+system: AtlasCore
+command: io_cmd
+inputs:
   io_cmd_bits_mregId: 22
   io_cmd_bits_accSel: 1
-decode:                       # command codes come from the RTL decoder (through AtlasCore's MxuOp mapping); words from lib/AtlasEncoding.cpp, unit 0
+decode:
   input: io_cmd_bits_op
   instruction: {instance: scalar/decoder, port: io_instr}
   words: {push_weight: 0x00000077, push_acc_fp8: 0x04000077, push_acc_bf16: 0x08000077, pop_acc_fp8: 0x0c000077, pop_acc_bf16: 0x10000077, matmul: 0x14000077, matmul_acc: 0x18000077}
-probes:                       # sequencer-to-datapath strobes inside the top
+probes:
   compute_valid: {instance: seq, result: io_compute_valid}
   weight_write_valid: {instance: seq, result: io_weightWriteReq_valid}
   acc_write_valid: {instance: seq, result: io_accComputeWrite_valid}
@@ -52,7 +52,7 @@ events:
   acc_store: {valid: acc_store_en, fields: {row: acc_store_row}, row: row}
   data_busy: {valid: io_dataBusy}          # transfer commands (opcodes 0-4)
   compute_busy: {valid: io_computeBusy}    # matmul commands (opcodes 5-6)
-operation_table:              # one operation per decode word
+operation_table:
   template:
     commands:
       0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_mregId: 2, io_cmd_bits_accSel: 0}

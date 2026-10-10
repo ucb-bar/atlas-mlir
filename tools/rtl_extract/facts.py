@@ -1,9 +1,7 @@
 """Extractor records and the Merlin ``op_timing`` document built from them.
 
-Records keep an internal ``status``/``reason`` pair while checks run. ``block`` converts a record to
-a named block of Merlin's ``op_timing`` facts section, following the conventions of the ``timing``
-section: ``None`` is unknown and never a guess, ``source`` names the method, and ``evidence`` is the
-one prose field (the derivation of a computed block, the reason an unresolved block has no values).
+Records carry an internal ``status``/``reason`` while checks run; ``block`` drops them. Unknown is
+``None``, never a guess, and ``evidence`` is the one prose field (the derivation, or why a block is unresolved).
 """
 import hashlib
 import json

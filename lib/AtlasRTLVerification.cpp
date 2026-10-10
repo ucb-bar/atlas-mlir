@@ -1,26 +1,18 @@
 #include "Atlas/AtlasRTLVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
-#include "Atlas/AtlasRTLSelection.h"
-#include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
-#include <algorithm>
 
 using namespace mlir;
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
-namespace {
-
-// Keep explicit DELAY streams bounded before allocating reservation entries.
-constexpr int kMaximumIssueCycle = 1000000;
-
-} // namespace
+// Bounds explicit DELAY streams before reservation entries are allocated.
+static constexpr int kMaximumIssueCycle = 1000000;
 
 LogicalResult mlir::atlas::verifySelectedAtlasRTLTiming(ModuleOp module) {
-  if (module->hasAttr("atlas.rtl_evidence") || module->hasAttr("atlas.rtl_qualification"))
-    return verifyAtlasRTLTiming(module);
-  return success();
+  return module->hasAttr("atlas.rtl_evidence") ? verifyAtlasRTLTiming(module)
+                                                : success();
 }
 
 LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
@@ -35,8 +27,8 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     return failure();
   if (!*selected)
     return module.emitError("RTL timing verification requires selected evidence");
-  if (words.size() > RTLEvidence::maximumProgramWords())
-    return module.emitError("selected RTL program exceeds the 32768-word instruction memory");
+  if (failed(checkSelectedRTLProgramSize(module)))
+    return failure();
 
   RegValues registers = unknownRegs();
   TargetTiming target = (*selected)->targetTiming();
@@ -149,17 +141,15 @@ namespace {
 struct VerifyAtlasRTLTimingPass
     : PassWrapper<VerifyAtlasRTLTimingPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VerifyAtlasRTLTimingPass)
-
   StringRef getArgument() const final { return "verify-atlas-rtl-timing"; }
   StringRef getDescription() const final {
-    return "Verify final straight-line machine timing against selected bounded RTL evidence";
+    return "Verify the final stream against the selected RTL timing";
   }
   void runOnOperation() override {
     if (failed(verifyAtlasRTLTiming(getOperation())))
       signalPassFailure();
   }
 };
-
 } // namespace
 
 void mlir::atlas::registerVerifyAtlasRTLTimingPass() {

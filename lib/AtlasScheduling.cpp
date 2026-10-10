@@ -56,8 +56,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   };
 
   ReservationTable table(target);
-  // Across a DMA wait these coordinates are lower bounds: the actual wait
-  // duration is unknown. Dependencies keep all users after its matching wait.
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -138,7 +136,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
     table.reserve(nodes[best], g.footprints[best], cycle);
     if (isWait(best))
       table.extendForWait(cycle);
-    if (g.footprints[best].dmaAsync && g.footprints[best].dmaCycles > 0) {
+    if (g.footprints[best].dmaCycles > 0) {
       // Transfers run one at a time, in issue order.
       int latency = g.footprints[best].dmaCycles;
       dmaQueueEnd = std::max(cycle + latency - 1, dmaQueueEnd + latency);
@@ -224,25 +222,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
 }
 
 LogicalResult scheduleStream(ModuleOp module) {
-  auto evidence = getSelectedRTLEvidence(module);
-  if (failed(evidence))
-    return failure();
-  if (*evidence && failed(checkSelectedRTLProgramSize(module)))
-    return failure();
   TargetTiming target;
-  if (*evidence)
-    target = (*evidence)->targetTiming();
-  FailureOr<AtlasStream> stream = readAtlasStream(module);
+  FailureOr<AtlasStream> stream = readTimedStream(module, target);
   if (failed(stream))
-    return failure();
-  if (target) {
-    if (stream->starts.size() != 1 || !stream->endsInHalt(0))
-      return module.emitError("selected RTL timing requires one straight-line stream ending in ECALL");
-    for (Instr &in : stream->instrs)
-      if (in.op->opClass == OpClass::Csr)
-        in.release = true;
-  }
-  if (failed(checkAtlasStream(*stream, target)))
     return failure();
   uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;

@@ -16,18 +16,34 @@ LogicalResult mlir::atlas::checkSelectedRTLProgramSize(ModuleOp module) {
   return success();
 }
 
+FailureOr<AtlasStream> mlir::atlas::readTimedStream(ModuleOp module,
+                                                    TargetTiming &target) {
+  auto evidence = getSelectedRTLEvidence(module);
+  if (failed(evidence) ||
+      (*evidence && failed(checkSelectedRTLProgramSize(module))))
+    return failure();
+  target = *evidence ? (*evidence)->targetTiming() : TargetTiming();
+  FailureOr<AtlasStream> stream = readAtlasStream(module);
+  if (failed(stream))
+    return failure();
+  if (target) {
+    if (stream->starts.size() != 1 || !stream->endsInHalt(0))
+      return module.emitError("selected RTL timing requires one straight-line "
+                              "stream ending in ECALL");
+    for (Instr &in : stream->instrs)
+      if (in.op->opClass == OpClass::Csr)
+        in.release = true; // publish the completion marker only once drained
+  }
+  if (failed(checkAtlasStream(*stream, target)))
+    return failure();
+  return stream;
+}
+
 FailureOr<std::shared_ptr<RTLEvidence>>
 mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   Attribute raw = module->getAttr("atlas.rtl_evidence");
-  if (!raw && module->hasAttr("atlas.rtl_qualification"))
-    return module.emitError("RTL qualification annotation has no selected evidence");
   if (!raw)
     return std::shared_ptr<RTLEvidence>();
-  if (auto status = module->getAttr("atlas.rtl_qualification")) {
-    auto text = dyn_cast<StringAttr>(status);
-    if (!text || text.getValue() != "conditional")
-      return module.emitError("selected RTL evidence has conditional qualification only");
-  }
   auto attr = dyn_cast<DictionaryAttr>(raw);
   if (!attr)
     return module.emitError("atlas.rtl_evidence must be a selection dictionary");
@@ -41,11 +57,11 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   if (Attribute policy = attr.get("dma")) {
     auto text = dyn_cast<StringAttr>(policy);
     if (!text || text.getValue() != "wait")
-      return module.emitError("unsupported DMA policy selection; only dma = \"wait\" is defined");
+      return module.emitError("unsupported DMA policy; only dma=wait is defined");
     dma = true;
   }
   if (resolver.getValue() != RTLEvidence::resolverID())
-    return module.emitError("unsupported RTL evidence resolver or capability selection");
+    return module.emitError("unsupported RTL evidence resolver");
   auto loaded = loadRTLTimingFacts(path.getValue(), hash.getValue(), dma);
   if (!loaded)
     return module.emitError("RTL evidence selection failed: ")
@@ -67,10 +83,10 @@ struct SelectAtlasRTLEvidencePass
   Option<std::string> opTimingHash{*this, "op-timing-sha256",
       llvm::cl::desc("Expected SHA-256 of the facts file")};
   Option<std::string> dmaPolicy{*this, "dma",
-      llvm::cl::desc("Optional DMA policy: wait (one pending transfer, VMEM exclusive until its matching wait)")};
+      llvm::cl::desc("Optional DMA policy: wait")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
   StringRef getDescription() const final {
-    return "Select SHA-256-identified RTL-computed timing facts for bounded timing consumers";
+    return "Select SHA-256-identified RTL-computed timing facts";
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -94,7 +110,6 @@ struct SelectAtlasRTLEvidencePass
       fields.set("dma", builder.getStringAttr("wait"));
     fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverID()));
     module->setAttr("atlas.rtl_evidence", fields.getDictionary(module.getContext()));
-    module->setAttr("atlas.rtl_qualification", builder.getStringAttr("conditional"));
   }
 };
 } // namespace

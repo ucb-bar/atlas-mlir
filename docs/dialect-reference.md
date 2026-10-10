@@ -192,7 +192,7 @@ bounded execution evidence in the census and source-discrepancy notes.
 | Operation | Attributes and verified forms | Physical meaning and limit |
 | --- | --- | --- |
 | `atlas.start` | none | Begin stream; no encoded word. |
-| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, word-addressed scalar base, signed 12-bit offset in 32-word (128-byte) units | Load one 1,024-byte VMEM tile into a tensor register; the current address convention and selected-RTL audit requirements are described in the [retention guide](rtl-timing/retained-hw.md). |
+| `atlas.vload` | `dst, base, offset, format="raw"`; tensor destination, word-addressed scalar base, signed 12-bit offset in 32-word (128-byte) units | Load one 1,024-byte VMEM tile into a tensor register; extracted engine timing is described in the [RTL timing overview](rtl-timing/README.md). |
 | `atlas.vstore` | `src, base, offset, format="raw"`; same register and offset bounds | Store one 1,024-byte tensor register to VMEM. |
 | `atlas.dma` | `direction=load/store, channel=0..7, reg, dram, size`; latter three are scalar register numbers | Launch asynchronous VMEM/DRAM transfer; completion is separate. |
 | `atlas.dma_wait` | `channel=0..7` | Wait for that DMA channel. |

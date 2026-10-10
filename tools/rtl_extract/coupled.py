@@ -19,23 +19,6 @@ def ports(document, module, direction):
     return {p["name"] for p in found[0]["ports"] if p["direction"] == direction}
 
 
-def reach(circuit, names):
-    """Registers and input names that the named outputs depend on (state feedback included)."""
-    seen, registers, inputs, stack = set(), set(), set(), [circuit.outputs[n] for n in names]
-    while stack:
-        key = stack.pop()
-        if key in seen:
-            continue
-        seen.add(key)
-        kind, operands, attrs = circuit.nodes[key]
-        if kind == "input":
-            inputs.add(attrs)
-        if key in circuit.registers:
-            registers.add(key)
-        stack.extend(operands)
-    return registers, inputs
-
-
 class CoupledCircuit:
     """Same interface as ``ControlCircuit`` (``registers``, ``state``, ``cone``, ``cycle``) over two circuits."""
 
@@ -65,7 +48,7 @@ class CoupledCircuit:
                 continue
             done.add(name)
             index = self.owner(name)
-            registers, inputs = reach(self.circuits[index], [name])
+            registers, inputs = self.circuits[index].reach([name])
             found |= {(index, k) for k in registers}
             pending += [self.links[i] for i in inputs if i in self.links]
         return found

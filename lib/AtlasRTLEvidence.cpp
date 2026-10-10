@@ -48,7 +48,7 @@ const std::map<std::string, const char *> &vpuBlocks() {
   return table;
 }
 
-// Fills a compiler-structured footprint with the numbers of one facts block.
+// Fills a compiler-structured footprint with one facts block's numbers.
 struct Fill {
   Footprint &f;
   std::string name, error;
@@ -103,7 +103,6 @@ struct Fill {
   void bank(int line, const char *key) {
     f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
   }
-  // One selected engine at a time: every engine also reserves both VLS paths.
   void engine(Unit unit, int index, int busy) {
     f.holds.push_back({unit, index, 0, busy});
     f.holds.push_back({Unit::VloadPath, 0, 0, busy});
@@ -184,11 +183,9 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
 }
 
 TargetTiming RTLEvidence::targetTiming() const {
-  TargetTiming target([facts = *this](const Instr &in, const RegValues &regs) {
+  return {[facts = *this](const Instr &in, const RegValues &regs) {
     return facts.resolve(in, regs);
-  });
-  target.computePolicies.insert(TargetTiming::ComputePolicy::Vpu);
-  return target;
+  }};
 }
 
 llvm::json::Object RTLEvidence::applicability() const {
@@ -301,7 +298,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     if (!dma) return reject("DMA requires the dma=wait selection");
     if (op.channel < 0 || op.channel >= 8) return reject("unsupported DMA channel");
     if (op.opClass == OpClass::DmaWait)
-      return f; // The stream verifier checks the matching pending generation.
+      return f; // pairing is checked by the stream verifier
     if (op.opClass == OpClass::DmaConfig) {
       if (!xreg(in.rs1) || !regs[in.rs1] || *regs[in.rs1] > 31)
         return reject("DMA configuration requires a known 5-bit upper DRAM base");
@@ -329,7 +326,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     f.accesses.push_back({Res::Dram, !load, 0, 1, 0, 0, true, true});
     f.dmaAsync = true;
     f.exclusiveVmemUntilWait = true;
-    return f; // Unknown external completion is never converted to a cycle estimate.
+    return f;
   }
 
   if (name == "lw" || name == "seld" || name == "sw") {

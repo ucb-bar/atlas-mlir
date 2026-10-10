@@ -1,256 +1,83 @@
 #!/usr/bin/env python3
-"""Run a supplied final VLS program through the integrated EE290SimConfig.
+"""Run a scheduled VLS program on the integrated EE290SimConfig VCS simulator (issue #11 witness).
 
-This runner does not schedule or certify its input. Its caller must retain the
-selected applicability/schedule checks separately. Local paths and producer
-labels belong to the output receipt only. Simulator-source linkage and memory
-response timing remain explicit unproved obligations even when data passes.
+atlas-opt selects the `merlin.op_timing.v1` facts and schedules the delay-free program, atlas-emit encodes
+it, a RISC-V host (test/ee290-vls-host.c) loads it over the bus, and `simv +loadmem` reports three data panels.
+Observer cycle counts include host polling and are not kernel timings.
 """
-from __future__ import annotations
-
 import argparse
 import hashlib
-import json
-import os
-from pathlib import Path
 import re
-import shlex
-import shutil
 import subprocess
 import sys
-import time
+from pathlib import Path
+
+HOST = Path(__file__).resolve().parents[1] / "test/ee290-vls-host.c"
+FAILURE = re.compile(r"EE290_VLS_FAILED|EE290_VLS_MISMATCH|assertion failed|\$fatal|fatal:|error:|error-", re.I)
 
 
-def allowed(path: Path) -> Path:
-    """Reject restricted components before touching a path or symlink target."""
-    for part in path.parts:
-        if any(name in part.lower() for name in ("ham" + "mer", "vl" + "si")):
-            raise ValueError("restricted path component")
-    path = Path(os.path.abspath(path))
-    for part in path.parts:
-        if any(name in part.lower() for name in ("ham" + "mer", "vl" + "si")):
-            raise ValueError("restricted path component")
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
-        current /= part
-        if current.is_symlink():
-            target = Path(os.readlink(current))
-            allowed(target if target.is_absolute() else current.parent / target)
-    return path
+def commands(args, out, digest):
+    """The four commands in order: schedule, emit, host build, simulate (the emitted words go in atlas_program.inc)."""
+    select = f"--select-atlas-rtl-evidence=op-timing={args.facts.resolve()} op-timing-sha256={digest}" + (" dma=wait" if args.dma_wait else "")
+    pass_name = "--insert-atlas-delays" if args.schedule == "delay" else "--schedule-atlas-stream"
+    host = out / "host.riscv"
+    return [
+        [str(args.atlas_opt), str(args.program), select, pass_name, "--verify-atlas-rtl-timing", "-o", str(out / "final.mlir")],
+        [str(args.atlas_emit), str(out / "final.mlir")],
+        [str(args.host_cc), "-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror", "-fno-common", "-fno-builtin-printf", "-march=rv64imafd", "-mabi=lp64d",
+         "-mcmodel=medany", "-specs=htif_nano.specs", "-static", "-T", "htif.ld", f"-I{out}", str(HOST), "-o", str(host)],
+        [str(args.simulator), "+permissive", f"+max-cycles={args.max_cycles}", f"+loadmem={host}", "+ntb_random_seed=1", *args.sim_arg, "+permissive-off", str(host)],
+    ]
 
 
-def identity(path: Path) -> dict:
-    path = allowed(path)
-    digest = hashlib.sha256()
-    count = 0
-    with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-            count += len(block)
-    return {"path": str(path), "sha256": digest.hexdigest(), "bytes": count}
+def include_file(words):
+    return f"#define ATLAS_PROGRAM_WORDS {len(words)}U\nstatic const uint32_t atlas_program[] = {{\n" + "".join(f"  0x{w}U,\n" for w in words) + "};\n"
 
 
-def verify(member: dict) -> dict:
-    actual = identity(Path(member["path"]))
-    if (actual["sha256"], actual["bytes"]) != (member["sha256"], member["bytes"]):
-        raise ValueError("manifest member identity mismatch")
-    return actual
+def judge(returncode, log):
+    """Return 'passed', 'license_unavailable' or 'failed' from the simulator exit status and log."""
+    if (returncode == 0 and log.count("EE290_VLS_PANEL_PASSED panel=") == 3 and "EE290_VLS_PASSED panels=3" in log and not FAILURE.search(log)):
+        return "passed"
+    return "license_unavailable" if re.search(r"queuing for license|license checkout failed|server node is down", log, re.I) else "failed"
 
 
-def source_files(filelist: Path) -> tuple[list[dict], list[dict]]:
-    """Read only explicit allowed file-list members; never scan the workspace."""
-    seen: set[Path] = set()
-    result = []
-    options = []
-
-    def visit(path: Path):
-        path = allowed(path)
-        if path in seen:
-            return
-        seen.add(path)
-        result.append(identity(path))
-        for number, line in enumerate(path.read_text().splitlines(), 1):
-            line = line.strip()
-            if not line or line.startswith(("#", "//")):
-                continue
-            if line.startswith("+"):
-                options.append({"filelist": str(path), "line": number, "text": line,
-                                "interpretation": "not interpreted or certified"})
-                continue
-            if line.startswith("-f "):
-                member = Path(line[3:].strip())
-                visit(member if member.is_absolute() else path.parent / member)
-            elif line.startswith("-"):
-                raise ValueError("unsupported simulator file-list option")
-            else:
-                member = Path(line)
-                member = allowed(member if member.is_absolute() else path.parent / member)
-                if member not in seen:
-                    seen.add(member)
-                    result.append(identity(member))
-
-    visit(filelist)
-    return result, options
+def run(argv, log, timeout):
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    log.write_text(result.stdout + result.stderr)
+    return result
 
 
-def run(argv: list[str], cwd: Path, log: Path, timeout: float) -> dict:
-    start = time.monotonic()
-    with log.open("wb") as stream:
-        child = subprocess.Popen(argv, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
-        try:
-            code = child.wait(timeout=timeout)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            import signal
-            os.killpg(child.pid, signal.SIGKILL)
-            code = child.wait()
-            timed_out = True
-    return {"argv": argv, "cwd": str(cwd), "returncode": code,
-            "timed_out": timed_out, "elapsed_seconds": time.monotonic() - start,
-            "log": identity(log)}
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("program", "atlas-emit", "simulator", "host-cc", "manifest", "output"):
-        parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--sim-source-list", type=Path, required=True)
-    parser.add_argument("--max-cycles", type=int, default=2000000)
-    parser.add_argument("--timeout-seconds", type=float, default=300)
-    parser.add_argument("--sim-arg", action="append", default=[])
-    args = parser.parse_args()
-    for name in ("program", "atlas_emit", "simulator", "host_cc", "manifest", "output", "sim_source_list"):
-        setattr(args, name, allowed(getattr(args, name)))
-    root = allowed(Path(__file__).absolute().parents[1]).resolve()
-    artifact_root = allowed(root / "build/rtl-timing").resolve()
-    output = args.output.resolve()
-    if output == artifact_root or not output.is_relative_to(artifact_root):
-        parser.error("output must be a new directory beneath this repository's ignored build/rtl-timing")
-    ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "--no-index", "--quiet", "--", str(output)],
-                             capture_output=True, text=True)
-    if ignored.returncode:
-        parser.error("output must be ignored by this repository")
-    args.output = output
-    if args.output.exists():
-        parser.error("output directory must not already exist")
-    if args.max_cycles <= 0 or args.timeout_seconds <= 0:
-        parser.error("cycle and timeout bounds must be positive")
-    manifest = json.loads(args.manifest.read_text())
-    if manifest.get("target_config") != "EE290SimConfig" or manifest.get("state") != "verified":
-        raise ValueError("a verified EE290SimConfig retention manifest is required")
-    sources, source_options = source_files(args.sim_source_list)
-    provenance = {"manifest": identity(args.manifest),
-                  "hardware_ir": verify(manifest["hardware_ir"]),
-                  "inputs": {key: verify(value) for key, value in manifest["inputs"].items()},
-                  "simulator": identity(args.simulator),
-                  "simulator_sources": sources,
-                  "uninterpreted_source_list_options": source_options,
-                  "program": identity(args.program),
-                  "atlas_emit": identity(args.atlas_emit), "host_cc": identity(args.host_cc)}
-    library_dir = allowed(Path(str(args.simulator) + ".daidir"))
-    libraries = []
-    with os.scandir(library_dir) as entries:
-        for entry in entries:
-            # Filter names before any stat/open, including symlink resolution.
-            if any(x in entry.name.lower() for x in ("ham" + "mer", "vl" + "si")):
-                continue
-            if entry.name.endswith(".so"):
-                libraries.append(identity(Path(entry.path)))
-    provenance["simulator_archive_libraries"] = sorted(libraries, key=lambda x: x["path"])
-    if not libraries:
-        raise ValueError("no simulator archive libraries recorded")
-    build_record = allowed(library_dir / "vcs_rebuild")
-    if build_record.exists():
-        provenance["observed_simulator_build_record"] = identity(build_record)
-        # Treat this saved command as metadata; never execute it. Its explicit
-        # package files can occur outside the -f list and must be identified.
-        metadata = build_record.read_text()
-        direct_sources = []
-        for token in shlex.split(metadata):
-            if token.startswith("/") and Path(token).suffix in (".sv", ".v", ".cc", ".cpp"):
-                direct_sources.append(identity(Path(token)))
-        provenance["observed_build_record_direct_sources"] = direct_sources
-        provenance["build_record_relationship"] = "observed command metadata; not a certified build receipt"
-    args.output.mkdir(parents=True, exist_ok=False)
-    host = allowed(root / "test/ee290-vls-host.c")
-    provenance["host_source"] = identity(host)
-    shutil.copyfile(host, args.output / "ee290-vls-host.executed.c")
-    shutil.copyfile(args.program, args.output / "program.mlir")
-    shutil.copyfile(__file__, args.output / "run-ee290-vls-witness.executed.py")
-    if build_record.exists():
-        shutil.copyfile(build_record, args.output / "simulator-build-record.txt")
-    receipt = {"schema": "atlas.ee290_vls_witness.v0", "target_config": "EE290SimConfig",
-               "state": "prepared", "integrated_execution_passed": False,
-               "scheduling_qualified": False, "provenance": provenance, "commands": [],
-               "runtime_environment": {key: os.environ[key] for key in
-                                       ("VCS_HOME", "VCS_64", "LD_LIBRARY_PATH") if key in os.environ},
-               "license_environment_configured": bool(os.environ.get("SNPSLMD_LICENSE_FILE")),
-               "limitations": ["Original RTL/Chisel sources and simulator build linkage are not certified.",
-                               "Current generated source and archive hashes plus saved VCS command metadata do not certify their build relationship.",
-                               "File-list + options are retained but not interpreted; include search and preprocessor state are not reconstructed.",
-                               "VCS system runtime libraries and host linker support libraries are not fully pinned.",
-                               "No internal request/response trace or independent memory-latency measurement is recorded.",
-                               "Caller supplies final scheduling/applicability checks; this runner does not certify them.",
-                               "Observer CSR cycle counts include host bus polling and are not kernel timing measurements.",
-                               "Only the 6144-byte initialized VMEM window is checked for preserved guards."]}
-    report = args.output / "report.json"
-
-    def save():
-        report.write_text(json.dumps(receipt, indent=2) + "\n")
-
-    save()
-    emitted = run([str(args.atlas_emit), str(args.output / "program.mlir")], args.output,
-                  args.output / "emit.log", args.timeout_seconds)
-    receipt["commands"].append(emitted)
-    if emitted["returncode"]:
-        receipt["state"] = "emission_failed"
-        save()
-        return 1
-    lines = (args.output / "emit.log").read_text().splitlines()
-    if not lines or len(lines) > 32768 or any(not re.fullmatch(r"[0-9a-fA-F]{8}", x) for x in lines):
-        raise ValueError("atlas-emit output is not a bounded instruction word stream")
-    include = args.output / "atlas_program.inc"
-    include.write_text(f"#define ATLAS_PROGRAM_WORDS {len(lines)}U\nstatic const uint32_t atlas_program[] = {{\n" +
-                       "".join(f"  0x{x}U,\n" for x in lines) + "};\n")
-    receipt["program_word_count"] = len(lines)
-    receipt["generated_include"] = identity(include)
-    binary = args.output / "host.riscv"
-    built = run([str(args.host_cc), "-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
-                 "-fno-common", "-fno-builtin-printf", "-march=rv64imafd", "-mabi=lp64d",
-                 "-mcmodel=medany", "-specs=htif_nano.specs", "-static", "-T", "htif.ld",
-                 str(args.output / "ee290-vls-host.executed.c"), "-o", str(binary)],
-                args.output, args.output / "host-build.log", args.timeout_seconds)
-    receipt["commands"].append(built)
-    if built["returncode"]:
-        receipt["state"] = "host_build_failed"
-        save()
-        return 1
-    receipt["host_binary"] = identity(binary)
-    launched = run([str(args.simulator), "+permissive", f"+max-cycles={args.max_cycles}",
-                    f"+loadmem={binary}", "+ntb_random_seed=1", *args.sim_arg,
-                    "+permissive-off", str(binary)], args.output,
-                   args.output / "simulation.log", args.timeout_seconds)
-    receipt["commands"].append(launched)
-    log = (args.output / "simulation.log").read_text(errors="replace")
-    passed = (launched["returncode"] == 0 and not launched["timed_out"] and
-              log.count("EE290_VLS_PANEL_PASSED panel=") == 3 and
-              "EE290_VLS_PASSED panels=3" in log and
-              not re.search(r"EE290_VLS_FAILED|EE290_VLS_MISMATCH|assertion failed|\$fatal|fatal:|error:|error-", log, re.I))
-    receipt["state"] = "integrated_execution_passed" if passed else "integrated_execution_failed"
-    if not passed and re.search(r"queuing for license|license checkout failed|server node is down", log, re.I):
-        receipt["state"] = "runtime_license_unavailable"
-    receipt["integrated_execution_passed"] = passed
-    receipt["observations"] = [x for x in log.splitlines() if x.startswith("EE290_VLS_")]
-    save()
-    print(json.dumps({"state": receipt["state"], "report": str(report),
-                      "scheduling_qualified": False}))
-    return 0 if passed else 1
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    for name in ("program", "facts", "atlas-opt", "atlas-emit", "simulator", "host-cc", "output"):
+        p.add_argument("--" + name, type=Path, required=True)
+    p.add_argument("--schedule", choices=("delay", "schedule"), default="schedule", help="atlas-opt consumer (default: schedule)")
+    p.add_argument("--dma-wait", action="store_true", help="select dma=wait (not needed for the VLS-only example)")
+    p.add_argument("--max-cycles", type=int, default=2000000)
+    p.add_argument("--timeout-seconds", type=float, default=300)
+    p.add_argument("--sim-arg", action="append", default=[])
+    args = p.parse_args(argv)
+    out = args.output.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    opt, emit, build, simulate = commands(args, out, hashlib.sha256(args.facts.read_bytes()).hexdigest())
+    for step, command in (("schedule", opt), ("emit", emit)):
+        result = run(command, out / f"{step}.log", args.timeout_seconds)
+        if result.returncode:
+            print(f"EE290 witness: {step} failed; see {out / (step + '.log')}", file=sys.stderr)
+            return 2
+    words = (out / "emit.log").read_text().split()
+    if not words or len(words) > 32768 or any(not re.fullmatch(r"[0-9a-fA-F]{8}", w) for w in words):
+        print("EE290 witness: atlas-emit output is not an instruction word stream", file=sys.stderr)
+        return 2
+    (out / "atlas_program.inc").write_text(include_file(words))
+    if run(build, out / "host-build.log", args.timeout_seconds).returncode:
+        print(f"EE290 witness: host build failed; see {out / 'host-build.log'}", file=sys.stderr)
+        return 2
+    result = run(simulate, out / "simulation.log", args.timeout_seconds)
+    state = judge(result.returncode, (out / "simulation.log").read_text(errors="replace"))
+    print(f"{state}: {out / 'simulation.log'}")
+    return 0 if state == "passed" else 1
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (OSError, ValueError, KeyError) as error:
-        print(f"EE290 witness: {error}", file=sys.stderr)
-        sys.exit(2)
+    sys.exit(main())

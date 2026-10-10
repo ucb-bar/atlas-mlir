@@ -21,14 +21,12 @@ def width(typ):
 class ControlCircuit:
     """Slice hierarchy at register boundaries, then execute exact finite-width control.
 
-    Only requested outputs and their transitive state updates are included. A
-    dependency on an unapproved input or unsupported operation fails construction.
-    Unreset control must be flushed by the caller before age zero. ``probes`` expose
-    values inside the hierarchy as extra outputs and ``cuts`` replace values with
-    named inputs; both take selectors ``{"instance": "a/b", "result": name}`` or
-    ``{"value": name, "path": "a/b"}`` (matched on ``name``, then ``sv.namehint``).
+    Only requested outputs and their transitive state updates are included; a dependency on an
+    unapproved input or unsupported operation fails construction. ``probes`` expose inner values as
+    extra outputs and ``cuts`` replace them with named inputs; selectors are ``{"instance": "a/b",
+    "result": name}`` or ``{"value": name, "path": "a/b"}`` (matched on ``name``, then ``sv.namehint``).
     ``unreset`` lists registers allowed to stay unknown after reset/flush as ``{"path": "a/b", "name": reg}``
-    (path ``""`` is the top); each must name exactly one register of the circuit.
+    (path ``""`` is the top); each must name exactly one register.
     """
     allowed = {"hw.constant", "hw.wire", "seq.firreg", "comb.mux", "comb.and",
                "comb.or", "comb.xor", "comb.add", "comb.sub", "comb.icmp",
@@ -160,18 +158,24 @@ class ControlCircuit:
         self.nodes[key] = (kind, args, op["attributes"])
         return key
 
-    def cone(self, names):
-        """Registers that can influence the named outputs, including state feedback."""
-        seen, found, stack = set(), set(), [self.outputs[n] for n in names]
+    def reach(self, names):
+        """Registers and input names the named outputs depend on, including state feedback."""
+        seen, registers, inputs, stack = set(), set(), set(), [self.outputs[n] for n in names]
         while stack:
             key = stack.pop()
             if key in seen:
                 continue
             seen.add(key)
+            kind, operands, attrs = self.nodes[key]
+            if kind == "input":
+                inputs.add(attrs)
             if key in self.registers:
-                found.add(key)
-            stack.extend(self.nodes[key][1])
-        return found
+                registers.add(key)
+            stack.extend(operands)
+        return registers, inputs
+
+    def cone(self, names):
+        return self.reach(names)[0]
 
     def cycle(self, inputs):
         @cache

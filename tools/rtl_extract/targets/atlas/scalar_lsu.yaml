@@ -8,13 +8,13 @@ description: Scalar memory instruction issued at age 0; ScalarCore command/respo
 limit: 16
 unreset:                      # Reg without init, read only under RegInit memLoadPending (ScalarCore.scala:72-73)
   - {path: "", name: memLoadCmd}
-system: AtlasCore             # instantiates ScalarCore, the LSU and Vmem
+system: AtlasCore
 inputs:                       # cut inputs (explicit: issue strobes follow pipeline state, not one instruction word)
   issueScalarLoad: 0
   issueScalarStore: 0
   hostStart: 0
   mem_cmd: 0
-decode:                       # mem_cmd is the decoder output for each word; words are the ISA encodings of lib/AtlasEncoding.cpp
+decode:
   input: mem_cmd
   instruction: {instance: scalar/decoder, port: io_instr}
   words: {lw: 0x00002003, seld: 0x00006003, sw: 0x00002023}

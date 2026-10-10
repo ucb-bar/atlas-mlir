@@ -7,9 +7,9 @@ namespace mlir::atlas {
 struct ResolvedRTLInstruction {
   timing::Instr instruction;
   timing::Footprint footprint;
+  // After a DMA wait, cycle is a lower bound; each matching wait starts a new
+  // epoch, and offsets are comparable only within one epoch.
   int cycle;
-  // With dynamic waits, cycle is only a lower bound. An accepted matching
-  // wait starts a new epoch; epoch offsets never imply a fixed wait duration.
   int epoch = 0;
   int epochOffset = 0;
 };
@@ -20,13 +20,11 @@ struct ResolvedRTLProgram {
   std::vector<ResolvedRTLInstruction> instructions;
 };
 
-// Recompute the final stream using the selected shared resolver. Optional
-// output is populated only on success and cleared on failure. This is the
-// same check used by the pass, not an additional scheduling oracle.
+// Rechecks the final stream with the selected resolver; `resolved` is filled
+// only on success.
 LogicalResult verifyAtlasRTLTiming(ModuleOp module,
-                                  ResolvedRTLProgram *resolved = nullptr);
-// Executable output boundaries call this after transformations. Unselected
-// legacy streams retain their existing checks; partial selection must fail.
+                                   ResolvedRTLProgram *resolved = nullptr);
+// No-op unless the module carries a selection.
 LogicalResult verifySelectedAtlasRTLTiming(ModuleOp module);
 void registerVerifyAtlasRTLTimingPass();
 } // namespace mlir::atlas

@@ -209,51 +209,9 @@ int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
   return static_cast<int>(std::max(1LL, std::max(offchip, vmem)));
 }
 
-bool TargetTiming::allowsEngine(Engine engine) const {
-  if (usesLegacyModelPolicies())
-    return true;
-  switch (engine) {
-  case Engine::Scalar:
-  case Engine::Lsu:
-  case Engine::Dma:
-  case Engine::Xlu:
-    return true;
-  case Engine::Vpu:
-    return computePolicies.count(ComputePolicy::Vpu) != 0 ||
-           computePolicies.count(ComputePolicy::VmulBf16) != 0;
-  default:
-    return false;
-  }
-}
-
-bool TargetTiming::allowsOperation(const OpInfo &op) const {
-  if (usesLegacyModelPolicies())
-    return true;
-  if (op.engine == Engine::Vpu)
-    return computePolicies.count(ComputePolicy::Vpu) != 0 ||
-           (op.name == "vmul.bf16" &&
-            computePolicies.count(ComputePolicy::VmulBf16) != 0);
-  return allowsEngine(op.engine);
-}
-
-Footprint TargetTiming::resolve(const Instr &in, const RegValues &regs) const {
-  if (!in.op || !allowsOperation(*in.op)) {
-    Footprint f;
-    f.error = "selected target timing lacks compute-engine pair, overlap and capacity policies";
-    return f;
-  }
-  if (resolver)
-    return resolver(in, regs);
-  if (usesLegacyModelPolicies())
-    return footprintOf(in, regs);
-  Footprint f;
-  f.error = "selected target timing requires supplied footprint rules";
-  return f;
-}
-
 int mlir::atlas::timing::unitCapacity(Unit u, int index,
                                      const TargetTiming &target) {
-  if (target.usesLegacyModelPolicies() && u == Unit::MxuCompute)
+  if (!target && u == Unit::MxuCompute)
     return index == 0 ? 3 : 2;
   return 1;
 }
@@ -767,16 +725,16 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
     consider(fa.doneAge + 1, EdgeKind::Order,
              "atlas.complete waits for prior fixed-latency work to complete");
 
-  if (fb.dmaAsync && fb.exclusiveVmemUntilWait) {
-    bool finiteVmem = std::any_of(fa.accesses.begin(), fa.accesses.end(),
-        [](const Access &access) {
-          return access.res == Res::Vmem && !access.atCompletion;
-        }) || std::any_of(fa.holds.begin(), fa.holds.end(),
-        [](const Hold &hold) { return hold.unit == Unit::VmemBank; });
-    if (finiteVmem || fa.serializeWithDMA)
-      consider(fa.doneAge + 1, EdgeKind::Order,
-               "selected DMA launch waits for prior VMEM work to drain");
-  }
+  if (fb.exclusiveVmemUntilWait &&
+      (fa.serializeWithDMA ||
+       std::any_of(fa.accesses.begin(), fa.accesses.end(),
+                   [](const Access &x) {
+                     return x.res == Res::Vmem && !x.atCompletion;
+                   }) ||
+       std::any_of(fa.holds.begin(), fa.holds.end(),
+                   [](const Hold &h) { return h.unit == Unit::VmemBank; })))
+    consider(fa.doneAge + 1, EdgeKind::Order,
+             "selected DMA launch waits for prior VMEM work to drain");
 
   if (A.engine == Engine::Dma && B.engine == Engine::Dma) {
     bool aWait = A.opClass == OpClass::DmaWait,
@@ -824,7 +782,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
                      std::to_string(fa.readRelease));
 
   // npu_model mxu.py sequencer rules.
-  if (target.usesLegacyModelPolicies() && A.mxu >= 0 && A.mxu == B.mxu) {
+  if (!target && A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
     std::string mx = "MXU" + std::to_string(m) + ": ";
     auto isCompute = [](const OpInfo &o) {
@@ -888,8 +846,9 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
                                                 const Footprint &f,
                                                 EdgeKind &kind) {
   if (dma.exclusiveVmemUntilWait &&
-      (f.serializeWithDMA || std::any_of(f.accesses.begin(), f.accesses.end(),
-                  [](const Access &access) { return access.res == Res::Vmem; }))) {
+      (f.serializeWithDMA ||
+       std::any_of(f.accesses.begin(), f.accesses.end(),
+                   [](const Access &x) { return x.res == Res::Vmem; }))) {
     kind = EdgeKind::Order;
     return true;
   }
@@ -1049,7 +1008,7 @@ std::vector<int> mlir::atlas::timing::criticalHeights(const DepGraph &g) {
       // A dma.wait holds the frontend until the transfer completes.
       const Instr &to = g.nodes[ed.to];
       if (to.op->opClass == OpClass::DmaWait &&
-          g.footprints[i].dmaAsync && g.footprints[i].dmaCycles > 0 &&
+          g.footprints[i].dmaCycles > 0 &&
           to.op->channel == g.nodes[i].op->channel)
         d = std::max(d, g.footprints[i].dmaCycles + 2);
       height[i] = std::max(height[i], d + height[ed.to]);
@@ -1092,8 +1051,7 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
     for (int i = 0; i < a.count; i++) {
       int element = a.first + i;
       int reg = element / 32, row = element % 32;
-      bool shareable = target_.usesLegacyModelPolicies() && !a.write &&
-                       in.op->engine == Engine::Vpu;
+      bool shareable = !target_ && !a.write && in.op->engine == Engine::Vpu;
       out.push_back({(reg % 32) * 2 + (a.write ? 1 : 0),
                      cycle + a.age + i * a.step, reg, row, shareable});
     }
@@ -1103,8 +1061,6 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
 
 std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
                                        int cycle) const {
-  if (!in.op || !target_.allowsOperation(*in.op))
-    return "selected target timing lacks compute-engine reservation policies";
   for (const Hold &h : f.holds)
     if (chooseIndex(h, cycle) < 0)
       return std::string(unitName(h.unit)) + " " + std::to_string(h.index) +
@@ -1116,8 +1072,7 @@ std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
       if (it->second.size() >= 2)
         return "both VPU slots busy";
       for (const OpInfo *other : it->second)
-        if (!target_.usesLegacyModelPolicies() ||
-            !vpuCanOverlap(*other, *in.op))
+        if (target_ || !vpuCanOverlap(*other, *in.op))
           return "VPU busy with " + other->name;
     }
   }

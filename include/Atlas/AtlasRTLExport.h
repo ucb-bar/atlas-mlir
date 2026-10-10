@@ -6,8 +6,7 @@
 #include "llvm/Support/JSON.h"
 
 namespace mlir::atlas {
-// Export the shared provider's resolved facts only after final timing checks.
-// The export preserves conditional applicability and is not a qualification.
+// Resolved timing of the final stream, exported only after it rechecks.
 FailureOr<llvm::json::Object> exportAtlasRTLTiming(ModuleOp module);
 } // namespace mlir::atlas
 

@@ -3,13 +3,13 @@ engine: xlu
 module: XluEngine
 description: Register-buffer transpose engine; one command at age 0 while idle.
 limit: 160
-system: AtlasCore             # instantiates the engine, MregFile and the scalar decoder
-command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
-inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
+system: AtlasCore
+command: io_cmd
+inputs:
   io_cmd_bits_op: 3
   io_cmd_bits_srcMregId: 13
   io_cmd_bits_dstMregId: 55
-decode:                       # command codes come from the RTL decoder; words are the ISA encodings of lib/AtlasEncoding.cpp
+decode:
   input: io_cmd_bits_op
   instruction: {instance: scalar/decoder, port: io_instr}
   words: {vtrpose: 0x0000006b}
@@ -38,7 +38,7 @@ checks:
   - equal: [transpose.events, transpose/busy_command.events]
     reason: operands are captured at issue and busy commands are ignored
   - equal: [transpose.first_free_age, transpose/busy_command.first_free_age]
-# Regression values used only by test/test_rtl_extract_atlas.py; the extractor never reads them.
+# Regression values used only by tests; the extractor never reads them.
 expect:
   transpose:
     events:

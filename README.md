@@ -13,10 +13,9 @@ an independent interpreter.
 The [physical program contract](docs/functional-stream-contract.md) gives a
 separate instruction-level functional model exact words, typed fields, and
 control-flow metadata without making it interpret virtual SSA.
-The [RTL timing walkthrough](docs/rtl-timing/extraction-walkthrough.md) follows
-one VLOAD from retained CIRCT hardware to the shared compiler timing provider.
-The [draft contract](docs/rtl-timing/README.md) records the broader operation
-coverage and obligations; implemented evidence selection remains conditional.
+The [RTL timing overview](docs/rtl-timing/README.md) describes how engine
+timing is computed from the Atlas RTL and consumed by the compiler;
+[verification](docs/rtl-timing/verification.md) lists the checks.
 The [captured MLP compiler diagnostic](docs/captured-mlp-compiler.md) shows a
 parsed PyTorch/Model2MLIR Linalg program compiled through this OOT path to a
 linked Atlas ELF, with explicit FP8/BF16 policy and standalone-core execution.
@@ -182,30 +181,10 @@ for several mailbox values; tensor contents are runtime inputs.
 To run the optional core-model checks, also set `ATLAS_ARC_MODEL` to the
 selected `.so`, `ATLAS_ARC_STATE` to its arcilator state JSON,
 `ATLAS_MODELIR_ROOT` to the ModeLIR checkout, and `ATLAS_RTL_ROOT` to the
-selected RTL checkout. The test adapter supports the current ModeLIR
-`537dd230fab5effd834422beb7978c550cf1ef59` runner's explicit `halt_signal`
-argument and the historical `add52b0a7c96d72e0079b7938e07ca5080871e82`
-runner's peek-based interface. Both require exactly one observed i1
-`scalar/halt_now` in an `AtlasCore` state manifest: the selected ScalarCore
-assigns `io.halted := halt_now`, while the optimized core omits `io_halted`.
-The adapter passes the explicit signal to the current runner; it provides a
-scoped peek alias for the historical API. Existing guards for optimized-away
-DMA opcode/size inputs remain active. A missing or wrong-width halt state
-fails before native loading; no alternate completion signal is guessed.
-
-The native library and state JSON must come from the same selected build.
-ModeLIR's `CosimCore` expects `AtlasCore_eval(void *)`, the manifest's
-`numStateBytes` and exact state offsets, plus its `clock`/`reset` inputs and
-the `imemTL`, `csrTL`, and `dmaTL` interfaces used by the runner. Raw ARC
-outputs exposing separate initialization/clock/passthrough functions need
-the corresponding native eval wrapper; an arbitrary shared library is
-insufficient. Program words are loaded over IMEM starting at byte address
-`0x20000`, DRAM inputs are supplied as `(byte_address, bytes)` preloads, and
-execution starts through CSR offset `0x18`. None of these compatibility
-checks establishes selected-core execution or engine drain. The portable
-`test_selected_core_runtime.py` tests use fake core/protocol dependencies,
-including a check of the current real runner source, and require no native
-code generation.
+selected RTL checkout. The test adapter supports both the explicit
+`halt_signal` runner and the older peek-based runner, and requires exactly one
+i1 `scalar/halt_now` in the `AtlasCore` state manifest; the native library and
+state JSON must come from the same build.
 
 An earlier diagnostic run passed 66/66 Python test
 methods with these paths supplied: the typed branch program executed one
