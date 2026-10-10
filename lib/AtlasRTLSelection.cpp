@@ -43,6 +43,8 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   auto dmaHash = attr.getAs<StringAttr>("dma_evidence_sha256");
   auto xluPath = attr.getAs<StringAttr>("xlu_path");
   auto xluHash = attr.getAs<StringAttr>("xlu_evidence_sha256");
+  auto vmulPath = attr.getAs<StringAttr>("vmul_path");
+  auto vmulHash = attr.getAs<StringAttr>("vmul_evidence_sha256");
   if (bool(dmaPath) != bool(dmaHash) ||
       (attr.get("dma_path") && !dmaPath) ||
       (attr.get("dma_evidence_sha256") && !dmaHash))
@@ -51,9 +53,14 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
       (attr.get("xlu_path") && !xluPath) ||
       (attr.get("xlu_evidence_sha256") && !xluHash))
     return module.emitError("incomplete XLU evidence selection");
-  const char *expectedResolver = RTLEvidence::resolverIDFor(bool(dmaPath), bool(xluPath));
+  if (bool(vmulPath) != bool(vmulHash) ||
+      (attr.get("vmul_path") && !vmulPath) ||
+      (attr.get("vmul_evidence_sha256") && !vmulHash))
+    return module.emitError("incomplete VMUL evidence selection");
+  const char *expectedResolver = RTLEvidence::resolverIDFor(
+      bool(dmaPath), bool(xluPath), bool(vmulPath));
   if (resolver.getValue() != expectedResolver)
-    return module.emitError("unsupported RTL evidence resolver or DMA selection");
+    return module.emitError("unsupported RTL evidence resolver or capability selection");
   ExpectedEvidenceIdentity identity{report.getValue().str(),
                                     manifest.getValue().str(),
                                     hardware.getValue().str()};
@@ -68,6 +75,10 @@ mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   if (xluPath)
     if (auto error = loadXLUEvidence(*loaded, xluPath.getValue(), xluHash.getValue()))
       return module.emitError("XLU evidence selection failed: ")
+             << llvm::toString(std::move(error));
+  if (vmulPath)
+    if (auto error = loadVmulEvidence(*loaded, vmulPath.getValue(), vmulHash.getValue()))
+      return module.emitError("VMUL evidence selection failed: ")
              << llvm::toString(std::move(error));
   return std::make_shared<RTLEvidence>(std::move(*loaded));
 }
@@ -87,6 +98,8 @@ struct SelectAtlasRTLEvidencePass
   Option<std::string> dmaEvidenceHash{*this, "dma-evidence-sha256", llvm::cl::desc("Expected DMA replay SHA-256")};
   Option<std::string> xluEvidence{*this, "xlu-evidence", llvm::cl::desc("Optional selected XLU replay report")};
   Option<std::string> xluEvidenceHash{*this, "xlu-evidence-sha256", llvm::cl::desc("Expected XLU replay SHA-256")};
+  Option<std::string> vmulEvidence{*this, "vmul-evidence", llvm::cl::desc("Optional selected BF16 multiply replay report")};
+  Option<std::string> vmulEvidenceHash{*this, "vmul-evidence-sha256", llvm::cl::desc("Expected BF16 multiply replay SHA-256")};
   Option<bool> allowConditional{*this, "allow-conditional", llvm::cl::init(false),
       llvm::cl::desc("Explicitly accept a conditional experimental scope")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
@@ -120,8 +133,17 @@ struct SelectAtlasRTLEvidencePass
       fields.set("xlu_path", builder.getStringAttr(xluEvidence));
       fields.set("xlu_evidence_sha256", builder.getStringAttr(xluEvidenceHash));
     }
+    if (vmulEvidence.empty() != vmulEvidenceHash.empty()) {
+      module.emitError("VMUL evidence path and SHA-256 must be selected together");
+      signalPassFailure();
+      return;
+    }
+    if (!vmulEvidence.empty()) {
+      fields.set("vmul_path", builder.getStringAttr(vmulEvidence));
+      fields.set("vmul_evidence_sha256", builder.getStringAttr(vmulEvidenceHash));
+    }
     fields.set("resolver", builder.getStringAttr(RTLEvidence::resolverIDFor(
-        !dmaEvidence.empty(), !xluEvidence.empty())));
+        !dmaEvidence.empty(), !xluEvidence.empty(), !vmulEvidence.empty())));
     module->setAttr("atlas.rtl_evidence", fields.getDictionary(module.getContext()));
     if (failed(getSelectedRTLEvidence(module))) {
       signalPassFailure();

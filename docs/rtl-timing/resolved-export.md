@@ -31,3 +31,5 @@ DMA scalar/base accesses have launch-relative age zero. Memory accesses instead 
 The result explicitly remains `qualification: conditional` and `scheduling_qualified: false`. The [integrated observation checker](integrated-observation-check.md) compares fixed-age VLS exports with captured system events for the exact executed programs; it does not consume the DMA extension automatically. Those finite observations do not qualify every operand admitted by a provider. The export states remaining assumptions, including quiescent competing memory requesters and one-cycle SRAM responses.
 
 The JSON omits workspace paths and does not modify the input or evidence artifacts. Keep generated exports in the ignored artifact directory alongside immutable program, compiler and observation identities.
+
+Optional VMUL selection retains `vmul_evidence_sha256` in the evidence object. Its three MREG streams each span 64 rows (two reads and one write), including both architectural halves of each pair. The export uses the same evidence-gated target policy as scheduling and final verification; adding VMUL does not turn dynamic DMA completion into a fixed cycle.

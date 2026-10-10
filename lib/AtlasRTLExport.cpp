@@ -145,5 +145,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   }
   if (evidence.hasXLUEvidence())
     (*result.getObject("evidence"))["xlu_evidence_sha256"] = evidence.xluEvidenceSha256();
+  if (evidence.hasVmulEvidence())
+    (*result.getObject("evidence"))["vmul_evidence_sha256"] = evidence.vmulEvidenceSha256();
   return result;
 }

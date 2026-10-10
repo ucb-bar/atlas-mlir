@@ -102,7 +102,7 @@ class RTLTimingExportTest(unittest.TestCase):
             result = self.export(without_delays(source))
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
-            self.assertIn("serialized VLS admission", result.stderr)
+            self.assertIn("serialized engine admission", result.stderr)
 
     def test_export_rejects_claimed_qualification_and_changed_evidence(self):
         source = next(iter(self.selected.values()))

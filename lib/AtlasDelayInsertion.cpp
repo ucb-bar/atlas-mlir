@@ -160,9 +160,7 @@ LogicalResult insertDelays(ModuleOp module) {
     return failure();
   TargetTiming target;
   if (*evidence)
-    target = TargetTiming([selected = *evidence](const Instr &in, const RegValues &regs) {
-      return selected->resolve(in, regs);
-    });
+    target = (*evidence)->targetTiming();
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream))
     return failure();

@@ -77,7 +77,7 @@ class SelectedRTLTimingTest(unittest.TestCase):
                 self.assertEqual(checked.returncode, 0, checked.stderr)
                 unsafe = run(OPT, without_delays(result.stdout), "--verify-atlas-rtl-timing")
                 self.assertNotEqual(unsafe.returncode, 0)
-                self.assertIn("serialized VLS admission", unsafe.stderr)
+                self.assertIn("serialized engine admission", unsafe.stderr)
 
     def test_mismatches_and_explicit_conditional_selection(self):
         source = program([HALT])
@@ -133,7 +133,7 @@ class SelectedRTLTimingTest(unittest.TestCase):
                                 checked = self.selected(program(ops), "--verify-atlas-rtl-timing")
                                 self.assertEqual(checked.returncode == 0, gap >= 35, checked.stderr)
                                 if gap == 34:
-                                    self.assertIn("serialized VLS admission", checked.stderr)
+                                    self.assertIn("serialized engine admission", checked.stderr)
 
     def check_operand_admission(self, setup, instruction, accepted, encoded_immediate=None):
         for consumer in ("--insert-atlas-delays", "--schedule-atlas-stream"):

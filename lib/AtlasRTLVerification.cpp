@@ -39,13 +39,11 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     return module.emitError("selected RTL program exceeds the 32768-word instruction memory");
 
   RegValues registers = unknownRegs();
-  TargetTiming target([evidence = *selected](const Instr &in, const RegValues &regs) {
-    return evidence->resolve(in, regs);
-  });
+  TargetTiming target = (*selected)->targetTiming();
   ReservationTable reservations(target);
   std::vector<ResolvedRTLInstruction> issued;
   int cycle = 0;
-  int vlsAvailable = 0;
+  int fixedEngineAvailable = 0;
   int asynchronousDone = -1;
   std::optional<Footprint> pendingDMA;
   int pendingChannel = -1;
@@ -71,7 +69,8 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     const OpClass opClass = instruction.op->opClass;
     const bool vectorMemory =
         opClass == OpClass::VLoad || opClass == OpClass::VStore;
-    const bool fixedEngine = vectorMemory || opClass == OpClass::Transpose;
+    const bool fixedEngine = vectorMemory || opClass == OpClass::Transpose ||
+                             instruction.op->engine == Engine::Vpu;
     const bool terminal = opClass == OpClass::Halt;
     const bool publication = opClass == OpClass::Csr;
     const bool wait = opClass == OpClass::DmaWait;
@@ -89,10 +88,10 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     if (terminal && previousWasDelay)
       return operation.emitOpError(
           "can halt while DELAY is stalled; an intervening NOP is required");
-    if (fixedEngine && cycle < vlsAvailable)
-      return operation.emitOpError("violates the selected serialized VLS admission")
+    if (fixedEngine && cycle < fixedEngineAvailable)
+      return operation.emitOpError("violates the selected serialized engine admission")
              << ": issue cycle " << cycle << ", first permitted cycle "
-             << vlsAvailable;
+             << fixedEngineAvailable;
     if ((terminal || publication) && cycle <= asynchronousDone)
       return operation.emitOpError(
                  "requires all prior asynchronous writes to be complete")
@@ -126,7 +125,7 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     }
     if (fixedEngine) {
       asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
-      vlsAvailable = cycle + footprint.doneAge + 1;
+      fixedEngineAvailable = cycle + footprint.doneAge + 1;
     }
     applyScalar(instruction, registers);
     previousWasDelay = opClass == OpClass::Delay;

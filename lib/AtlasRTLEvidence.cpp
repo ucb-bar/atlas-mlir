@@ -915,6 +915,15 @@ llvm::Error mlir::atlas::timing::loadDMAEvidence(RTLEvidence &evidence,
   return llvm::Error::success();
 }
 
+TargetTiming RTLEvidence::targetTiming() const {
+  TargetTiming target([evidence = *this](const Instr &in, const RegValues &regs) {
+    return evidence.resolve(in, regs);
+  });
+  if (hasVmulEvidence())
+    target.computePolicies.insert(TargetTiming::ComputePolicy::VmulBf16);
+  return target;
+}
+
 llvm::json::Object RTLEvidence::applicability() const {
   Object result{
       {"scope", "straight_line_serialized_vls_with_scalar_setup_and_completion"},
@@ -946,7 +955,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"marker_and_terminal_require_prior_writes_complete", true},
           {"delay_immediately_before_terminal_supported", false},
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
-      {"unsupported", Array{"dma_and_dynamic_completion", "other_compute_engines",
+      {"unsupported", Array{"dma_and_dynamic_completion", "unselected_compute_operations",
           "branches_and_loops", "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; finite_observations_do_not_qualify_entire_domain"}};
@@ -973,7 +982,7 @@ llvm::json::Object RTLEvidence::applicability() const {
         "fresh_host_START_resets_global_dma_base_to_zero; DMA_queues_already_quiescent");
     result.getArray("environment_assumptions")->push_back(
         "external_memory_responds_correctly_and_eventually; no_fixed_latency_bound");
-    result["unsupported"] = Array{"multiple_pending_dma_transfers", "other_compute_engines",
+    result["unsupported"] = Array{"multiple_pending_dma_transfers", "unselected_compute_operations",
         "branches_and_loops", "concurrent_engine_or_host_memory_traffic",
         "alternative_memory_implementations_without_review"};
   }
@@ -990,6 +999,25 @@ llvm::json::Object RTLEvidence::applicability() const {
         {"vls_and_xlu_serialized", true}, {"requires_dma_quiescent", true},
         {"mreg_response_cycles", 1}};
   }
+  if (hasVmulEvidence()) {
+    result["scope"] = hasDMAEvidence() ?
+        "straight_line_serialized_selected_engines_and_wait_governed_dma" :
+        "straight_line_serialized_selected_engines";
+    result.getArray("supported_operations")->push_back("vmul.bf16");
+    result["vmul_domain"] = Object{
+        {"pair_base_min", 0}, {"pair_base_max", 62}, {"pair_base_alignment", 2},
+        {"three_distinct_physical_pairs_required", true},
+        {"physical_pair", "pair_base_modulo_32"},
+        {"source_age", multiply.sourceAge}, {"destination_age", multiply.destinationAge},
+        {"rows", multiply.rows}, {"first_free_age", multiply.busyLast + 1},
+        {"read_release_age", multiply.sourceLast + 1},
+        {"mreg_response_cycles", 1}, {"selected_engines_serialized", true},
+        {"requires_dma_quiescent", true},
+        {"numerical_witness", "finite_signed_normal_bf16_powers_of_two"},
+        {"full_bf16_arithmetic_qualified", false}};
+    result.getArray("environment_assumptions")->push_back(
+        "vmul_timing_is_data_independent; finite_numerical_witness_is_not_full_arithmetic_validation");
+  }
   return result;
 }
 
@@ -997,9 +1025,35 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   Footprint f;
   auto reject = [&](const char *why) { f.error = std::string(selectedResolverID()) + ": " + why; };
   bool transposeOp = in.op && in.op->opClass == OpClass::Transpose;
-  if (!in.op || in.rd < 0 || in.rd > 63 || in.rs1 < 0 || in.rs1 > (transposeOp ? 63 : 31) ||
-      in.rs2 < 0 || in.rs2 > 31) { reject("invalid instruction operands"); return f; }
+  bool multiplyOp = in.op && in.op->engine == Engine::Vpu && in.op->name == "vmul.bf16";
+  if (!in.op || in.rd < 0 || in.rd > 63 || in.rs1 < 0 ||
+      in.rs1 > (transposeOp || multiplyOp ? 63 : 31) ||
+      in.rs2 < 0 || in.rs2 > (multiplyOp ? 63 : 31)) {
+    reject("invalid instruction operands"); return f;
+  }
   const std::string &name = in.op->name;
+  if (multiplyOp && hasVmulEvidence()) {
+    if (in.release || in.imm != 0 || (in.rd & 1) || (in.rs1 & 1) || (in.rs2 & 1) ||
+        (in.rd & 31) == (in.rs1 & 31) || (in.rd & 31) == (in.rs2 & 31) ||
+        (in.rs1 & 31) == (in.rs2 & 31)) {
+      reject("VMUL requires three distinct even physical register pairs and canonical encoding");
+      return f;
+    }
+    const Stream &s = multiply;
+    for (int source : {in.rs1, in.rs2})
+      f.accesses.push_back({Res::MReg, false, source * 32, s.rows, s.sourceAge, s.step});
+    f.accesses.push_back({Res::MReg, true, in.rd * 32, s.rows, s.destinationAge, s.step});
+    f.mregReads = {in.rs1, in.rs1 + 1, in.rs2, in.rs2 + 1};
+    f.mregWrites = {in.rd, in.rd + 1};
+    f.holds.push_back({Unit::Vpu, 0, 0, s.busyLast});
+    f.holds.push_back({Unit::VloadPath, 0, 0, s.busyLast});
+    f.holds.push_back({Unit::VstorePath, 0, 0, s.busyLast});
+    f.readRelease = s.sourceLast + 1; // Retain operands through their synchronous response.
+    f.writeRelease = s.destinationLast;
+    f.doneAge = s.busyLast;
+    f.serializeWithDMA = true;
+    return f;
+  }
   if (transposeOp && hasXLUEvidence()) {
     if (in.release || in.rs2 != 0 || in.imm != 0) {
       reject("unsupported XLU encoding or release annotation"); return f;
@@ -1447,5 +1501,441 @@ llvm::Error mlir::atlas::timing::loadXLUEvidence(RTLEvidence &evidence,
   if (!r.error.empty()) return failure(r.error);
   evidence.transpose = observed;
   evidence.xluIdentity = expectedSha256.str();
+  return llvm::Error::success();
+}
+
+llvm::Error mlir::atlas::timing::loadVmulEvidence(RTLEvidence &evidence,
+    llvm::StringRef path, llvm::StringRef expectedSha256) {
+  if (!hashSyntax(expectedSha256)) return failure("VMUL evidence SHA-256 is required");
+  Reader r;
+  auto safe = safePath(path, fs::path());
+  if (!safe) return safe.takeError();
+  const fs::path base = fs::path(*safe).parent_path();
+  std::string bytes = r.read(*safe, base);
+  if (!r.error.empty()) return failure(r.error);
+  if (digest(bytes) != expectedSha256) return failure("selected VMUL evidence hash mismatch");
+  auto json = llvm::json::parse(bytes);
+  if (!json) return failure(llvm::toString(json.takeError()));
+  const Object *report = json->getAsObject();
+  r.stringIs(report, "schema", "atlas.ee290_compute_replay.v0");
+  r.stringIs(report, "state", "finite_compute_cases_passed");
+  r.stringIs(report, "target_config", "EE290SimConfig");
+  r.stringIs(report, "qualification", "conditional");
+  r.boolIs(report, "scheduling_qualified", false);
+  const Object *manifest = r.object(report, "manifest"), *hardware = r.object(report, "hardware_ir");
+  if (r.str(manifest, "sha256") != evidence.manifestSha256() ||
+      r.str(hardware, "sha256") != evidence.hardwareIRSha256() ||
+      r.str(hardware, "sha256") != "49fa1794b3b389941dc816bf23a1e16b0190c51dd5277347c1353736a05a3ac6")
+    r.reject("VMUL/VLS selected hardware identity mismatch");
+  r.artifact(manifest, base); r.artifact(hardware, base);
+  // The reviewed retained core receipt closes the hardware-to-Verilog link;
+  // caller rehashing of a changed outer report cannot replace that closure.
+  if (r.str(r.object(report, "selected_core_replay"), "sha256") !=
+      "d02049fc151158df58658009aa757b9edf4ff1c3ea97c0a294d1577110600a01")
+    r.reject("unreviewed VMUL selected-core source closure");
+  auto coreJSON = readEvidenceJSON(r, r.object(report, "selected_core_replay"), base);
+  if (!coreJSON) return coreJSON.takeError();
+  const Object *core = coreJSON->getAsObject();
+  r.stringIs(core, "schema", "atlas.selected_atlascore_replay.v0");
+  r.stringIs(core, "state", "numerical_and_boundary_replay_passed");
+  r.stringIs(core, "target_config", "EE290SimConfig");
+  std::set<std::string> originalHashes;
+  if (const Array *originals = r.array(core, "original_inputs"))
+    for (const auto &value : *originals) originalHashes.insert(r.str(value.getAsObject(), "sha256"));
+  if (!originalHashes.count(evidence.manifestSha256()) ||
+      !originalHashes.count(evidence.hardwareIRSha256()))
+    r.reject("VMUL selected-core replay does not reference selected hardware");
+  auto compileJSON = readEvidenceJSON(r, r.object(report, "compile_phase"), base);
+  if (!compileJSON) return compileJSON.takeError();
+  const Object *compile = compileJSON->getAsObject();
+  checkCapturedPhase(r, compile, base, "compute_verilator_compile");
+  const Object *model = r.object(report, "model");
+  r.artifact(model, base);
+  if (!phaseOutput(compile, model)) r.reject("VMUL model is not a captured compiler output");
+  std::set<std::pair<std::string, int64_t>> coreSources, computeSources;
+  if (const Array *inputs = r.array(core, "rtl_snapshots")) for (const auto &value : *inputs) {
+    const Object *copy = r.object(value.getAsObject(), "snapshot");
+    coreSources.emplace(r.str(copy, "sha256"), r.integer(copy, "bytes"));
+  }
+  if (const Array *inputs = r.array(report, "rtl_snapshots")) for (const auto &value : *inputs) {
+    const Object *entry = value.getAsObject(), *copy = r.object(entry, "snapshot");
+    if (!sameIdentity(copy, r.object(entry, "original")) || !phaseInput(compile, copy) ||
+        !computeSources.emplace(r.str(copy, "sha256"), r.integer(copy, "bytes")).second)
+      r.reject("VMUL RTL snapshot/build mismatch");
+    r.artifact(copy, base);
+  }
+  if (coreSources.empty() || computeSources != coreSources)
+    r.reject("VMUL model does not use the selected AtlasCore source closure");
+  const Object *harness = r.object(report, "harness"), *harnessCopy = r.object(harness, "snapshot");
+  if (!sameIdentity(harnessCopy, r.object(harness, "original")) || !phaseInput(compile, harnessCopy) ||
+      r.str(harnessCopy, "sha256") != "42015729dd089719fa3601aebbb8a933482f854435cd222828d42423a169ceb0")
+    r.reject("unreviewed VMUL harness/build mismatch");
+  r.artifact(harnessCopy, base);
+  const std::map<std::string, std::string> producerPins = {
+    {"replay-ee290-compute.py", "45685598a5c1ca8fbbb4b805ff975b4947646745d3fd60403cfe6a742b01a73f"},
+    {"replay-ee290-dma.py", "6a86fe0c31047d77782b60c7b8235724368734ffe6feaa9233d77275151fc11d"},
+    {"observe-ee290-vls.py", "e6b65d324005d71d2bf556f4ec217f56fa61fa621e9a909a68fdc315782e2190"},
+    {"ee290_build_capture.py", "da3412786d5ff977a5980056e96724fa6380407132aff8f8c26a97b663d15efc"},
+    {"check-ee290-provenance.py", "542d2b3de6d882107c282a00c53a70aceeae8ef5de515b3fff36935dd656b8e7"},
+    {"fingerprint-rtl-modules.py", "9fad779a54b396254a5c5f27e74636f4178ae834c41937fe3ef3532950f24d3d"},
+    {"index-retained-hw.py", "5205e3909a32f708d385818be3e09818e783f3aa58e580af1589b5f790e74d2e"}};
+  std::set<std::string> producers;
+  if (const Array *inputs = r.array(report, "producer_snapshots")) for (const auto &value : *inputs) {
+    const Object *entry = value.getAsObject(), *copy = r.object(entry, "snapshot");
+    const std::string name = fs::path(r.str(copy, "path")).filename().string();
+    auto pin = producerPins.find(name);
+    if (!producers.insert(name).second || pin == producerPins.end() ||
+        r.str(copy, "sha256") != pin->second || !sameIdentity(copy, r.object(entry, "original")))
+      r.reject("unreviewed VMUL producer snapshot");
+    r.artifact(copy, base);
+  }
+  if (producers.size() != producerPins.size()) r.reject("missing VMUL producer snapshots");
+  const Object *tools = r.object(report, "tool_identities");
+  for (const char *name : {"verilator", "cxx", "make", "ar"})
+    if (!phaseInput(compile, r.object(tools, name))) r.reject("VMUL compilation/tool mismatch");
+  const Array *compileArgv = r.array(r.object(compile, "command"), "argv");
+  bool assertions = false, selectedTop = false;
+  if (compileArgv) for (size_t i = 0; i < compileArgv->size(); ++i) {
+    assertions |= (*compileArgv)[i].getAsString() == "--assert";
+    selectedTop |= i && (*compileArgv)[i - 1].getAsString() == "--top-module" &&
+                   (*compileArgv)[i].getAsString() == "AtlasCore";
+  }
+  if (!assertions || !selectedTop) r.reject("VMUL requires assertion-preserving selected AtlasCore");
+  std::set<std::pair<std::string, int64_t>> compiledSources;
+  std::set<std::string> capturedSourcePaths, commandSourcePaths;
+  std::vector<std::string> capturedSources;
+  int capturedHarnesses = 0;
+  if (const Array *inputs = r.array(compile, "inputs_before")) for (const auto &value : *inputs) {
+    const Object *input = value.getAsObject(), *id = r.object(input, "identity");
+    const std::string role = r.str(input, "role");
+    if (role != "selected_rtl" && role != "harness") continue;
+    if (!capturedSourcePaths.insert(r.str(id, "path")).second)
+      r.reject("duplicate VMUL captured source path");
+    capturedSources.push_back(r.str(id, "path"));
+    if (role == "selected_rtl") {
+      if (!compiledSources.emplace(r.str(id, "sha256"), r.integer(id, "bytes")).second)
+        r.reject("duplicate VMUL captured RTL identity");
+    } else if (++capturedHarnesses != 1 || !sameIdentity(id, harnessCopy))
+      r.reject("VMUL compilation captured an unreviewed harness");
+  }
+  if (compileArgv) for (const auto &value : *compileArgv) {
+    auto arg = value.getAsString();
+    if (!arg) { r.reject("malformed VMUL compile argument"); continue; }
+    const auto suffix = fs::path(arg->str()).extension().string();
+    if (suffix != ".sv" && suffix != ".v" && suffix != ".cpp") continue;
+    if (!commandSourcePaths.insert(arg->str()).second)
+      r.reject("duplicate VMUL compilation source argument");
+  }
+  if (compiledSources != computeSources || capturedHarnesses != 1 ||
+      capturedSourcePaths != commandSourcePaths)
+    r.reject("VMUL compilation/source argument closure mismatch");
+  // A copied --assert flag is insufficient when contradictory or unreviewed
+  // switches can change the generated model. Admit the captured recipe whole.
+  std::vector<std::string> reviewedCompile = {
+      r.str(r.object(tools, "verilator"), "path"), "--cc", "--exe", "--build",
+      "--top-module", "AtlasCore", "--prefix", "VAtlasCore", "--Mdir",
+      fs::path(r.str(model, "path")).parent_path().string(), "--trace",
+      "--trace-depth", "3", "--assert", "--output-split", "20000",
+      "--output-split-cfuncs", "500", "-Wno-fatal", "-j", "4", "-CFLAGS",
+      "-std=c++17", "-MAKEFLAGS",
+      "CXX=" + r.str(r.object(tools, "cxx"), "path") + " LINK=" +
+          r.str(r.object(tools, "cxx"), "path") + " AR=" +
+          r.str(r.object(tools, "ar"), "path")};
+  reviewedCompile.insert(reviewedCompile.end(), capturedSources.begin(), capturedSources.end());
+  if (!compileArgv || compileArgv->size() != reviewedCompile.size())
+    r.reject("unsupported VMUL compilation recipe");
+  else for (size_t i = 0; i < reviewedCompile.size(); ++i)
+    if ((*compileArgv)[i].getAsString() != reviewedCompile[i])
+      r.reject("unsupported VMUL compilation recipe");
+
+  std::set<std::string> names;
+  std::optional<llvm::json::Value> vmulJSON;
+  std::string vmulWords;
+  if (const Array *cases = r.array(report, "cases")) for (const auto &value : *cases) {
+    const Object *record = value.getAsObject();
+    const std::string name = r.str(record, "name");
+    if (!names.insert(name).second) r.reject("duplicate compute replay case");
+    const Object *program = r.object(record, "program"), *words = r.object(record, "words"),
+                 *trace = r.object(record, "trace");
+    r.artifact(program, base);
+    std::string encoded = r.artifact(words, base);
+    r.artifact(trace, base);
+    auto emissionJSON = readEvidenceJSON(r, r.object(record, "emission_phase"), base);
+    if (!emissionJSON) return emissionJSON.takeError();
+    const Object *emission = emissionJSON->getAsObject();
+    checkCapturedPhase(r, emission, base, "compute_program_emit");
+    if (!phaseInput(emission, program) || !phaseInput(emission, r.object(tools, "atlas_emit")) ||
+        !phaseOutput(emission, words)) r.reject("compute program/emitter/word mismatch");
+    const Array *emissionArgv = r.array(r.object(emission, "command"), "argv");
+    const std::string emitScript = "import subprocess,sys; subprocess.run([sys.argv[1],sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)";
+    const Object *emittedWords = nullptr;
+    if (const Array *outputs = r.array(emission, "outputs")) for (const auto &output : *outputs)
+      if (const Array *files = r.array(output.getAsObject(), "files")) for (const auto &file : *files) {
+        const Object *id = r.object(file.getAsObject(), "identity");
+        if (sameIdentity(id, words)) {
+          if (emittedWords) r.reject("duplicate compute emitted-word artifact");
+          emittedWords = id;
+        }
+      }
+    if (!emissionArgv || emissionArgv->size() != 6 ||
+        (*emissionArgv)[1].getAsString() != "-c" ||
+        (*emissionArgv)[2].getAsString() != emitScript ||
+        (*emissionArgv)[3].getAsString() != r.str(r.object(tools, "atlas_emit"), "path") ||
+        (*emissionArgv)[4].getAsString() != r.str(program, "path") ||
+        !emittedWords || (*emissionArgv)[5].getAsString() != r.str(emittedWords, "path"))
+      r.reject("compute emission command does not bind program/emitter/words");
+    auto executionJSON = readEvidenceJSON(r, r.object(record, "execution_phase"), base);
+    if (!executionJSON) return executionJSON.takeError();
+    const Object *execution = executionJSON->getAsObject();
+    checkCapturedPhase(r, execution, base, "compute_execution");
+    if (!phaseInput(execution, model) || !phaseInput(execution, words) || !phaseOutput(execution, trace))
+      r.reject("compute execution/model/words/trace mismatch");
+    const Object *command = r.object(execution, "command");
+    const Array *argv = r.array(command, "argv");
+    if (!argv || argv->size() != 5 || (*argv)[0].getAsString() != r.str(model, "path") ||
+        (*argv)[1].getAsString() != r.str(words, "path") ||
+        (*argv)[2].getAsString() != r.str(trace, "path") ||
+        (*argv)[3].getAsString() != "100000" || (*argv)[4].getAsString() != name)
+      r.reject("compute execution command does not match selected fixture");
+    std::string log = r.artifact(r.object(command, "stdout"), base);
+    if (log.find("EE290_COMPUTE_PASSED mode=" + name + " checked_vmem_bytes=8192") == std::string::npos ||
+        log.find("status=5 marker=1 illegal_pc=0") == std::string::npos)
+      r.reject("missing compute numerical/drain witness");
+    for (const char *key : {"completion", "output", "guards"})
+      r.boolIs(r.object(record, "numerical_checks"), key, true);
+    for (const char *key : {"selected_words", "data_streams", "observed_release", "composed_memory", "terminal_drain"})
+      r.boolIs(r.object(record, "boundary_checks"), key, true);
+    auto transcript = readEvidenceJSON(r, r.object(record, "events"), base);
+    if (!transcript) return transcript.takeError();
+    const Object *events = transcript->getAsObject();
+    r.stringIs(events, "schema", "atlas.ee290_compute_events.v0");
+    r.stringIs(events, "validator", "atlas.ee290.compute.fixed.v1");
+    r.stringIs(events, "target_config", "EE290SimConfig");
+    r.stringIs(events, "data_encoding", "little_endian_bytes_hex");
+    r.stringIs(events, "sampling", "values immediately before rising clock timestamp");
+    r.stringIs(events, "mode", name);
+    if (!sameIdentity(r.object(events, "trace"), trace) || !sameIdentity(r.object(events, "words"), words))
+      r.reject("compute event transcript/trace/word mismatch");
+    if (name == "vmul") { vmulWords = std::move(encoded); vmulJSON = std::move(*transcript); }
+  }
+  if (names != std::set<std::string>{"xlu", "vmul", "dma_xlu"} || !vmulJSON)
+    r.reject("incomplete compute replay coverage");
+  if (!r.error.empty()) return failure(r.error);
+
+  const Object *events = vmulJSON->getAsObject();
+  std::vector<uint32_t> words;
+  llvm::StringRef encoded(vmulWords);
+  while (!encoded.empty()) {
+    auto parts = encoded.split('\n'); encoded = parts.second;
+    auto text = parts.first.trim();
+    if (text.empty()) continue;
+    uint32_t word = 0;
+    if (text.size() != 8 || text.getAsInteger(16, word)) r.reject("invalid VMUL emitted word");
+    words.push_back(word);
+  }
+  const Array *instructions = r.array(events, "instructions"), *commands = r.array(events, "commands");
+  if (words.empty() || words.size() > RTLEvidence::maximumProgramWords() || words.back() != 0x73 ||
+      !instructions || instructions->size() + 1 != words.size() || !commands || commands->size() != 7)
+    return failure("incomplete finite VMUL instruction/command stream");
+  std::map<int64_t, const Object *> commandByWord;
+  for (const auto &value : *commands) {
+    const Object *command = value.getAsObject();
+    if (!commandByWord.emplace(r.integer(command, "word_index"), command).second)
+      r.reject("duplicate compute command index");
+  }
+  using Row = std::vector<uint8_t>;
+  std::vector<uint8_t> memory(8192);
+  for (size_t i = 0; i < memory.size(); ++i) memory[i] = (0xa5 ^ (13 * i)) & 255;
+  for (int i = 0; i < 1024; ++i) for (int side = 0; side < 2; ++side) {
+    int exponent = side ? i % 3 - 1 : i % 5 - 2;
+    bool negative = side ? i % 11 == 0 : i % 7 == 0;
+    uint16_t value = (negative ? 0x8000 : 0) | ((127 + exponent) << 7);
+    const int offset = side * 2048 + 2 * i;
+    memory[offset] = value & 255; memory[offset + 1] = value >> 8;
+  }
+  const std::vector<uint8_t> initial = memory;
+  std::map<int, Row> mregs;
+  auto rowData = [&](const Object *event) {
+    std::string hex = r.str(event, "data_hex");
+    Row result(32);
+    if (hex.size() != 64) { r.reject("malformed compute row data"); return result; }
+    for (int i = 0; i < 32; ++i) {
+      unsigned value = 0;
+      auto byte = llvm::StringRef(hex).substr(2 * i, 2);
+      if (byte.getAsInteger(16, value)) r.reject("malformed compute row byte");
+      result[i] = value;
+    }
+    return result;
+  };
+  auto multiply = [&](const Row &a, const Row &b) {
+    Row result(32);
+    for (int i = 0; i < 32; i += 2) {
+      const unsigned lhs = a[i] | (unsigned(a[i + 1]) << 8), rhs = b[i] | (unsigned(b[i + 1]) << 8);
+      const int le = (lhs >> 7) & 255, re = (rhs >> 7) & 255, exponent = le + re - 127;
+      if ((lhs & 127) || (rhs & 127) || le < 1 || le > 254 || re < 1 || re > 254 ||
+          exponent < 1 || exponent > 254) r.reject("outside finite normal BF16 power reference");
+      const unsigned value = ((lhs ^ rhs) & 0x8000) | (unsigned(exponent) << 7);
+      result[i] = value & 255; result[i + 1] = value >> 8;
+    }
+    return result;
+  };
+  auto observedRow = [&](const Array *stream, int index, int64_t edge, int age,
+                         int id, int row, int port, const Row &expected) {
+    if (!stream || index < 0 || size_t(index) >= stream->size()) { r.reject("missing compute row event"); return; }
+    const Object *event = (*stream)[index].getAsObject();
+    if (r.integer(event, "edge") != edge + age || r.integer(event, "age") != age ||
+        r.integer(event, "id") != id || r.integer(event, "row") != row ||
+        (port >= 0 && r.integer(event, "port") != port) || rowData(event) != expected)
+      r.reject("compute row identity/age/numerical mismatch");
+  };
+  std::array<std::optional<uint32_t>, 32> regs{}; regs[0] = 0;
+  int64_t priorEdge = -1, release = -1, scalarAvailable = -1;
+  int vlsCount = 0, vmulCount = 0;
+  RTLEvidence::Stream observed;
+  for (size_t index = 0; index < instructions->size(); ++index) {
+    const Object *instruction = (*instructions)[index].getAsObject();
+    const int64_t edge = r.integer(instruction, "edge");
+    const uint32_t word = words[index];
+    if (edge < 0 || edge > 1000000) return failure("invalid VMUL observed instruction edge");
+    if (r.integer(instruction, "word_index") != int64_t(index) ||
+        r.integer(instruction, "word_u32") != word || edge <= priorEdge || edge < scalarAvailable)
+      r.reject("VMUL instruction/word/order mismatch");
+    priorEdge = edge; scalarAvailable = edge + 1;
+    const unsigned opcode = word & 127, rd = (word >> 7) & 31, rs1 = (word >> 15) & 31;
+    if (opcode == 0x13 && ((word >> 12) & 7) == 0) {
+      int32_t immediate = int32_t(word) >> 20;
+      if (!regs[rs1]) r.reject("unknown captured scalar ADDI input");
+      else if (rd) regs[rd] = *regs[rs1] + immediate;
+    } else if (opcode == 0x37) {
+      if (rd) regs[rd] = word & 0xfffff000;
+    } else if (opcode == 0x67 && ((word >> 12) & 7) == 1) {
+      scalarAvailable = edge + (word >> 20) + 1;
+    } else if (opcode == 0x73) {
+      if (word != 0xc1009073 || !regs[1] || *regs[1] != 1)
+        r.reject("unsupported finite compute completion marker");
+    } else if (opcode == 0x07 || opcode == 0x57) {
+      auto found = commandByWord.find(index);
+      if (found == commandByWord.end()) { r.reject("missing decoded compute command"); continue; }
+      const Object *command = found->second;
+      if (r.integer(command, "edge") != edge || r.integer(command, "word_u32") != word || edge < release)
+        r.reject("compute command/capture/drain mismatch");
+      const Array *reads = r.array(command, "reads"), *responses = r.array(command, "responses"),
+                  *writes = r.array(command, "writes");
+      if (opcode == 0x07) {
+        r.stringIs(command, "engine", "vls");
+        const bool store = word & (1 << 13);
+        const int id = (word >> 7) & 63;
+        const int32_t immediate = int32_t(word) >> 20;
+        if (word & (1 << 14) || !regs[rs1]) { r.reject("unsupported/unknown raw VLS source"); continue; }
+        const uint32_t address = *regs[rs1] + uint32_t(32 * immediate);
+        const int line = (address >> 3) & 65535;
+        if (line % 32 || line < 0 || line + 32 > 256) { r.reject("VLS outside finite VMEM"); continue; }
+        r.stringIs(command, "op", store ? "store" : "load");
+        if (r.integer(command, "mreg") != id || r.integer(command, "line") != line ||
+            r.integer(command, "release_age") != 35 || r.integer(command, "release_edge") != edge + 35 ||
+            !reads || reads->size() != 32 || !responses || responses->size() != 32 || !writes || writes->size() != 32)
+          r.reject("VLS decoded operands/count/release mismatch");
+        for (int row = 0; row < 32; ++row) {
+          Row data;
+          if (store) {
+            auto foundRow = mregs.find(id * 32 + row);
+            if (foundRow == mregs.end()) { r.reject("VSTORE reads uninitialized MREG"); data.resize(32); }
+            else data = foundRow->second;
+          } else data.assign(memory.begin() + 32 * (line + row), memory.begin() + 32 * (line + row + 1));
+          observedRow(reads, row, edge, 1 + row, store ? id : line + row, row, -1, data);
+          observedRow(responses, row, edge, 2 + row, store ? id : line + row, row, -1, data);
+          observedRow(writes, row, edge, 3 + row, store ? line + row : id, row, -1, data);
+          if (store) std::copy(data.begin(), data.end(), memory.begin() + 32 * (line + row));
+          else mregs[id * 32 + row] = data;
+        }
+        release = edge + 35; ++vlsCount;
+      } else {
+        r.stringIs(command, "engine", "vmul"); r.stringIs(command, "op", "mul.bf16");
+        const int lhs = (word >> 13) & 63, rhs = (word >> 19) & 63, dst = (word >> 7) & 63;
+        if (word >> 25 != 3 || lhs % 2 || rhs % 2 || dst % 2 ||
+            (lhs & 31) == (rhs & 31) || (dst & 31) == (lhs & 31) ||
+            (dst & 31) == (rhs & 31) || r.integer(command, "lhs") != lhs ||
+            r.integer(command, "rhs") != rhs || r.integer(command, "dst") != dst ||
+            r.integer(command, "release_age") != 66 || r.integer(command, "release_edge") != edge + 66 ||
+            !reads || reads->size() != 128 || !responses || responses->size() != 128 || !writes || writes->size() != 64)
+          r.reject("VMUL decoded pair/count/release mismatch");
+        for (int row = 0; row < 64; ++row) {
+          Row inputs[2];
+          for (int port = 0; port < 2; ++port) {
+            const int id = (port ? rhs : lhs) + row / 32;
+            auto foundRow = mregs.find(id * 32 + row % 32);
+            if (foundRow == mregs.end()) { r.reject("VMUL reads uninitialized pair"); inputs[port].resize(32); }
+            else inputs[port] = foundRow->second;
+            observedRow(reads, 2 * row + port, edge, row, id, row % 32, port, inputs[port]);
+            observedRow(responses, 2 * row + port, edge, row + 1, id, row % 32, port, inputs[port]);
+          }
+          Row result = multiply(inputs[0], inputs[1]);
+          observedRow(writes, row, edge, row + 2, dst + row / 32, row % 32, 0, result);
+          mregs[(dst + row / 32) * 32 + row % 32] = std::move(result);
+        }
+        // Derive enabled ages from the checked observed streams, not summaries.
+        if (reads && reads->size() == 128 && writes && writes->size() == 64)
+          observed = {int(r.integer((*reads)[0].getAsObject(), "age")),
+              int(r.integer((*writes)[0].getAsObject(), "age")),
+              int(r.integer((*reads)[2].getAsObject(), "age") - r.integer((*reads)[0].getAsObject(), "age")),
+              int(writes->size()), int(r.integer((*writes)[63].getAsObject(), "age")),
+              int(r.integer((*reads)[126].getAsObject(), "age")), int(r.integer((*writes)[63].getAsObject(), "age"))};
+        release = edge + 66; ++vmulCount;
+      }
+      commandByWord.erase(found);
+    } else r.reject("unsupported instruction in finite VMUL transcript");
+  }
+  if (!commandByWord.empty() || vlsCount != 6 || vmulCount != 1)
+    r.reject("incomplete decoded VMUL command coverage");
+  std::vector<uint8_t> expected = initial;
+  for (int row = 0; row < 64; ++row) {
+    Row a(initial.begin() + 32 * row, initial.begin() + 32 * (row + 1));
+    Row b(initial.begin() + 2048 + 32 * row, initial.begin() + 2048 + 32 * (row + 1));
+    Row result = multiply(a, b);
+    std::copy(result.begin(), result.end(), expected.begin() + 4096 + 32 * row);
+  }
+  if (memory != expected || r.integer(events, "full_memory_checked_bytes") != 8192)
+    r.reject("VMUL full-memory numerical/guard mismatch");
+  const Array *endpoints = r.array(events, "endpoints");
+  int64_t marker = -1, publication = -1, halt = -1;
+  if (!endpoints || endpoints->size() != 3) r.reject("incomplete VMUL completion endpoints");
+  if (endpoints) for (const auto &value : *endpoints) {
+    const Object *endpoint = value.getAsObject();
+    const std::string kind = r.str(endpoint, "kind");
+    const int64_t edge = r.integer(endpoint, "edge");
+    if (kind == "marker_publication") { if (publication != -1) r.reject("duplicate marker publication"); publication = edge; continue; }
+    const Object *state = r.object(endpoint, "engine_state");
+    if (!state || state->size() != 10) r.reject("incomplete terminal engine state");
+    for (const char *name : {"vls_load_busy", "vls_store_busy", "xlu_read_active", "xlu_write_active",
+        "vpu_read_mask", "vpu_write_mask", "dma_scalar_mask", "dma_engine_mask", "dma_a_valid", "dma_d_valid"})
+      if (r.integer(state, name) != 0) r.reject("terminal precedes observed engine quiescence");
+    if (kind == "marker") {
+      if (marker != -1 || r.integer(endpoint, "word_index") != int64_t(words.size()) - 2 ||
+          r.integer(endpoint, "word_u32") != 0xc1009073 || edge != priorEdge || edge < release)
+        r.reject("marker precedes complete VMUL instruction/data drain");
+      marker = edge;
+    } else if (kind == "halt") {
+      if (halt != -1 || r.integer(endpoint, "word_index") != int64_t(words.size()) - 1 ||
+          r.integer(endpoint, "word_u32") != 0x73 || edge <= priorEdge || edge < release)
+        r.reject("halt precedes complete VMUL instruction/data drain");
+      halt = edge;
+    } else r.reject("unsupported VMUL completion endpoint");
+  }
+  // This fixture performs no DMA; retained DMA busy observations must agree
+  // with that decoded command stream rather than copied boundary flags.
+  const Array *busy = r.array(events, "busy_transitions");
+  if (!busy || busy->size() != 1 ||
+      r.integer((*busy)[0].getAsObject(), "scalar_mask") != 0 ||
+      r.integer((*busy)[0].getAsObject(), "engine_mask") != 0 ||
+      r.integer((*busy)[0].getAsObject(), "edge") < 0 ||
+      r.integer((*busy)[0].getAsObject(), "edge") > marker)
+    r.reject("VMUL fixture has unexpected DMA busy transitions");
+  const int64_t sampled = r.integer(events, "sampled_edges"), drain = r.integer(events, "terminal_drain_edges");
+  if (marker < 0 || publication != marker + 1 || halt < publication || sampled <= halt ||
+      drain != sampled - halt || drain < 2)
+    r.reject("missing observed VMUL post-halt drain");
+  if (!r.error.empty()) return failure(r.error);
+  evidence.multiply = observed;
+  evidence.vmulIdentity = expectedSha256.str();
   return llvm::Error::success();
 }

@@ -10,7 +10,7 @@ This companion to the [draft timing contract](README.md) inventories the legacy 
 | VLOAD/VSTORE | Full raw tiles, serialized paths, bounded known addresses | [VLS derivation/replay](vls-timing.md) and finite component/system observations; whole-domain qualification remains conditional. |
 | DMA | Separately selected load/store/config/wait, channels 0–7, one pending transfer | [Captured operands and dynamic completion](dma-timing.md); no assumed external completion latency, concurrency or CFG lifetime support. |
 | XLU | Separately selected serialized byte transpose | [Source and component replay](xlu-timing.md); one-cycle MREG response assumption, no overlap admission. |
-| VPU | No selected provider yet | [BF16 multiply audit](vpu-multiply-timing.md) and explicit policy groundwork; these do not enable an operation. |
+| VPU | Separately selected serialized BF16 multiply only | [Source and captured compute replay](vpu-multiply-timing.md); distinct even physical pairs, finite normal-power numerical witness. Other modes remain rejected. |
 | MXU, scalar memory and general control | Unsupported by selected timing | Legacy representation below is an inventory, not a fallback when selected evidence is missing. |
 
 Every optional receipt must match the same retained hardware identity. A family-specific pass or numerical witness does not qualify the other modes of its engine. The [consumer contract](compiler-consumers.md) describes how selection, dependencies, reservations and final checks share this boundary.

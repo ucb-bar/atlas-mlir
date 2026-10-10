@@ -24,18 +24,25 @@ public:
   static constexpr const char *dmaResolverID() {
     return "atlas.vls_dma.serialized.v1";
   }
-  static constexpr const char *resolverIDFor(bool dma, bool xlu) {
+  static constexpr const char *resolverIDFor(bool dma, bool xlu, bool vmul = false) {
+    if (vmul)
+      return xlu ? (dma ? "atlas.vls_dma_xlu_vmul.serialized.v1" :
+                         "atlas.vls_xlu_vmul.serialized.v1") :
+                   (dma ? "atlas.vls_dma_vmul.serialized.v1" :
+                          "atlas.vls_vmul.serialized.v1");
     return xlu ? (dma ? "atlas.vls_dma_xlu.serialized.v1" :
                        "atlas.vls_xlu.serialized.v1") :
                  (dma ? dmaResolverID() : resolverID());
   }
   const char *selectedResolverID() const {
-    return resolverIDFor(hasDMAEvidence(), hasXLUEvidence());
+    return resolverIDFor(hasDMAEvidence(), hasXLUEvidence(), hasVmulEvidence());
   }
   bool hasDMAEvidence() const { return !dmaIdentity.empty(); }
   const std::string &dmaEvidenceSha256() const { return dmaIdentity; }
   bool hasXLUEvidence() const { return !xluIdentity.empty(); }
   const std::string &xluEvidenceSha256() const { return xluIdentity; }
+  bool hasVmulEvidence() const { return !vmulIdentity.empty(); }
+  const std::string &vmulEvidenceSha256() const { return vmulIdentity; }
   // Reviewed ScalarCore fetch uses a 15-bit word index into InstrMem.
   static constexpr unsigned maximumProgramWords() { return 32768; }
   const std::string &evidenceSha256() const { return identity.evidenceSha256; }
@@ -46,6 +53,8 @@ public:
   // Resolves the explicit bounded subset. Unsupported instances carry error.
   // Every VLS reserves BOTH paths, deliberately serializing all vector memory.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
+  // All consumers use the same evidence-gated operation admission policy.
+  TargetTiming targetTiming() const;
   // Describes resolver policy and assumptions, not newly qualified domains.
   llvm::json::Object applicability() const;
   Footprint footprintOf(const Instr &in, const RegValues &regs) const {
@@ -57,16 +66,19 @@ private:
     int sourceAge = 0, destinationAge = 0, step = 0, rows = 0;
     int busyLast = 0, sourceLast = 0, destinationLast = 0;
   };
-  Stream load, store, transpose;
+  Stream load, store, transpose, multiply;
   ExpectedEvidenceIdentity identity;
   std::string dmaIdentity;
   std::string xluIdentity;
+  std::string vmulIdentity;
   friend llvm::Expected<RTLEvidence>
   loadRTLEvidence(llvm::StringRef, const ExpectedEvidenceIdentity &, bool);
   friend llvm::Error loadDMAEvidence(RTLEvidence &, llvm::StringRef,
                                      llvm::StringRef);
   friend llvm::Error loadXLUEvidence(RTLEvidence &, llvm::StringRef,
                                      llvm::StringRef);
+  friend llvm::Error loadVmulEvidence(RTLEvidence &, llvm::StringRef,
+                                    llvm::StringRef);
 };
 
 // Draft full-ISA contracts are intentionally not accepted by this loader.
@@ -80,6 +92,8 @@ loadRTLEvidence(llvm::StringRef path, const ExpectedEvidenceIdentity &expected,
 llvm::Error loadDMAEvidence(RTLEvidence &evidence, llvm::StringRef path,
                             llvm::StringRef expectedSha256);
 llvm::Error loadXLUEvidence(RTLEvidence &evidence, llvm::StringRef path,
+                            llvm::StringRef expectedSha256);
+llvm::Error loadVmulEvidence(RTLEvidence &evidence, llvm::StringRef path,
                             llvm::StringRef expectedSha256);
 
 // Exact reviewed semantic module closure for resolver v1. Location aliases
