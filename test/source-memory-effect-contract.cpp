@@ -131,13 +131,14 @@ struct Fixture {
     auto effects = buildAtlasSourceMemoryEffectContract(function, cfg, tiles);
     if (failed(effects)) return;
     contract = *effects;
-    (*issued)->setAttr("atlas.generated_from_virtual", b.getStringAttr("resource-contract-v4"));
+    (*issued)->setAttr("atlas.generated_from_virtual", b.getStringAttr("resource-contract-v5"));
     (*issued)->setAttr("atlas.timing_state", b.getStringAttr("untimed"));
     (*issued)->setAttr("atlas.virtual_dma_contract", b.getArrayAttr({}));
     (*issued)->setAttr("atlas.virtual_mxu_contract", b.getArrayAttr({}));
     (*issued)->setAttr("atlas.virtual_cfg_contract", cfg);
     (*issued)->setAttr("atlas.virtual_tile_contract", tiles);
     (*issued)->setAttr("atlas.virtual_source_memory_contract", contract);
+    (*issued)->setAttr("atlas.virtual_buffer_contract", b.getDictionaryAttr({}));
     b.setInsertionPointToEnd(issued->getBody());
     OperationState start(b.getUnknownLoc(), "atlas.start"); start.addTypes(StateType::get(&c));
     state = b.create(start)->getResult(0);
@@ -396,9 +397,9 @@ void renumbered(MLIRContext &context) {
 }
 void emptyStream(MLIRContext &context) {
   auto module = parseSourceString<ModuleOp>(R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v4", atlas.timing_state = "untimed",
+    atlas.generated_from_virtual = "resource-contract-v5", atlas.timing_state = "untimed",
     atlas.virtual_dma_contract = [], atlas.virtual_mxu_contract = [], atlas.virtual_tile_contract = [],
-    atlas.virtual_source_memory_contract = {effects = []},
+    atlas.virtual_source_memory_contract = {effects = []}, atlas.virtual_buffer_contract = {packs = [], reads = []},
     atlas.virtual_cfg_contract = {
       values = [], operations = [], edges = [],
       blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>,

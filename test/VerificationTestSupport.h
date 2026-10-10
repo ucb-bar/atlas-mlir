@@ -72,6 +72,7 @@ inline OwningOpRef<ModuleOp> parse(MLIRContext &context, llvm::StringRef text, l
 }
 
 using Suite = void (*)(MLIRContext &);
+void runBufferContract(MLIRContext &);
 void runCFGContract(MLIRContext &);
 void runDMAAllocation(MLIRContext &);
 void runDMAContract(MLIRContext &);

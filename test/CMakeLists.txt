@@ -11,6 +11,7 @@ add_test(NAME atlas-register-allocation
 # One executable runs each verification suite named by its argument (see VerificationTestSupport.h).
 add_llvm_executable(atlas-verification-test
   verification-tests.cpp
+  buffer-contract-verification.cpp
   cfg-contract-verification.cpp
   dma-allocation-verification.cpp
   dma-contract-verification.cpp
@@ -29,7 +30,7 @@ target_link_libraries(atlas-verification-test PRIVATE
   MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-test)
-foreach(suite cfg-contract dma-allocation dma-contract dma-helper mxu-allocation
+foreach(suite buffer-contract cfg-contract dma-allocation dma-contract dma-helper mxu-allocation
     mxu-contract source-memory-contract tile-contract timing-provider
     verification-context)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})

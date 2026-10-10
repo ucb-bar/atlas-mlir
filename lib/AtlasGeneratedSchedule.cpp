@@ -1,4 +1,5 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
@@ -43,6 +44,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
   if (failed(verifyAtlasGeneratedCFGContract(ctx)))
     return failure();
   if (failed(verifyAtlasGeneratedSourceMemoryEffectContract(ctx)))
+    return failure();
+  if (failed(verifyAtlasGeneratedBufferContract(ctx)))
     return failure();
   auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
   if (state && state.getValue() == "timed")

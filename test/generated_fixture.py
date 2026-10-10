@@ -1,17 +1,23 @@
-"""Hand-built generated (resource-contract-v4) artifacts for streams no lowering produces.
+"""Hand-built generated (resource-contract-v5) artifacts for streams no lowering produces.
 
 Prefer mutating lowered output (verification_support.insert_after, remove_line). `artifact` wraps a stream in a
 timed envelope and derives the rest so that only the checker under test can reject it:
 - tile records are derived from the stream unless authored (LUI/ADDI constants; unknown operands become zero);
   DMA contract records come from tile records that carry a transfer id;
-- a prologue loads every tensor register read before it is written, stages a PACK-style VSTORE endpoint for
-  VLOADs outside a completed DMA load, and writes the VMEM halves a DMA store reads that no stream VSTORE wrote;
-- CFG scaffolding has one source block per fixture block, one synthetic source operation per issued command,
-  one tensor value per VLOAD/POP destination and an `arith.constant` condition per conditional terminator;
-- source memory effects mirror the checker's derivation from the tile and CFG records.
+- a prologue loads every tensor register read before it is written, DMA-loads the VMEM half a VLOAD reads outside
+  any completed DMA load unless a same-register VSTORE precedes it, and writes once each VMEM half DMA stores read
+  that no stream VSTORE wrote; stores of one transfer identity share a half. A half both a VLOAD and a DMA store
+  read without a stream writer has no single writer, which the buffer checker rejects;
+- a VLOAD after a VSTORE is a PACK pair (the tile checker's PACK-shaped predecessor rule): it gets one
+  `atlas.virtual_pack_fp8` source operation and, before the VLOAD, a straight-line scalar copy of the raw words
+  into the selected interleave, so that the buffer checker sees the relayout;
+- CFG scaffolding has one source block per fixture block, one synthetic source operation per issued command or
+  PACK pair, one tensor value per VLOAD/POP destination outside PACK and an `arith.constant` condition per
+  conditional terminator;
+- source memory effects and buffer reads mirror their checkers' derivations from the tile and CFG records.
 The scaffolding is not a CFG oracle. Checks run in the order schedule, DMA memory, DMA, MXU, tile, CFG, source
-memory, timing, so a negative fixture may leave later scaffolding inconsistent. VPU/XLU/VLI/PACK results are only
-killed, never redefined; reading one needs real CFG records.
+memory, buffer, timing, so a negative fixture may leave later scaffolding inconsistent. VPU/XLU/VLI/PACK results
+are only killed, never redefined; reading one needs real CFG records.
 """
 
 from __future__ import annotations
@@ -29,6 +35,8 @@ LABEL, BRANCH, JUMP = "@label", "@branch", "@jump"
 # Scratch resources reserved for the prologue; fixture bodies must not rely on them.
 SIZE_REG, BASE_REG, DRAM_REG = 29, 30, 31
 STAGE_REG = 62  # the tensor register staged VSTOREs write from
+COPY_REG, RAW_REG, RELAYOUT_REG = 26, 27, 28  # PACK copy word and byte bases
+VMEM_BYTES = 1536 * 1024
 PROLOGUE_LUI = 80  # VMEM word 0x50000 (byte 0x140000, bank 5); one 16 KiB slot per register
 PROLOGUE_DRAM_LUI = 0x90800
 CONDITION_REG = 1
@@ -68,6 +76,27 @@ def attribute(value) -> str:
 def record_text(entries) -> str:
     return "[" + ", ".join("{" + ", ".join(f"{key} = {attribute(value)}" for key, value in entry.items()) + "}"
                            for entry in entries) + "]"
+
+
+def pack_word(word: int) -> int:
+    """The raw word that relayout word 8r+4h+l copies: raw word 128h+4r+l (lowerPack's PACK layout)."""
+    return (word % 8) // 4 * 128 + word // 8 * 4 + word % 4
+
+
+def constant(reg: int, value: int) -> list[Op]:
+    low = ((value + 2048) & 4095) - 2048
+    return [("upper", f'kind = "lui", dst = {reg} : i32, immediate = {((value - low) >> 12) & 0xFFFFF} : i32'),
+            ("alu_imm", f'kind = "addi", dst = {reg} : i32, src = {reg} : i32, immediate = {low} : i32')]
+
+
+def pack_copy(raw: int, relayout: int) -> list[Op]:
+    """Straight-line scalar relayout of a PACK's raw VSTORE half into its VLOAD half."""
+    ops = [*constant(RAW_REG, raw), *constant(RELAYOUT_REG, relayout)]
+    for word in range(256):
+        ops += [("scalar_load", f'kind = "lw", dst = {COPY_REG} : i32, base = {RAW_REG} : i32, offset = {4 * pack_word(word)} : i32'),
+                ("delay", 'cycles = 4 : i32, atlas.delay_reason = "scalar_load"'),
+                ("scalar_store", f'kind = "sw", src = {COPY_REG} : i32, base = {RELAYOUT_REG} : i32, offset = {4 * word} : i32')]
+    return ops
 
 
 def tensor_reads(name: str, f: dict) -> list[int]:
@@ -162,17 +191,19 @@ class _Builder:
         self.edges: list[dict] = []
         self.emitted: list[_Emitted] = []
         self.staged: list[dict] = []  # prologue VSTOREs that later DMA stores claim
+        self.completed: list[tuple[dict, int]] = []  # prologue DMA loads that later VLOADs read, with their WAIT
 
     # -- prologue -----------------------------------------------------------------
     def plan_prologue(self) -> tuple[list[int], list[int], list[int]]:
-        """Registers needing an origin before any read, VLOAD destinations needing a
-        PACK-style VSTORE predecessor because no completed DMA load contains them, and
-        VMEM halves a DMA store reads that no earlier stream VSTORE writes."""
+        """Registers needing an origin before any read, VMEM halves a VLOAD reads outside
+        any completed DMA load without an earlier same-register VSTORE, and VMEM halves a
+        DMA store reads that no earlier stream VSTORE writes."""
         defined: set[int] = set()
         origins: list[int] = []
-        stores: list[int] = []
+        loads: list[int] = []
         staged: list[int] = []
         stored: set[int] = set()
+        stored_regs: set[int] = set()
         scalars = _Scalars()
         completed: list[dict] = []
         pending: dict[int, dict] = {}
@@ -186,10 +217,13 @@ class _Builder:
                     address = (((scalars.get(f["base"]) or 0) + f["offset"] * 32) & MASK) * 4 & MASK
                     contained = any(r["vmem_byte"] <= address and address + 1024 <= r["vmem_byte"] + r["bytes"]
                                     for r in completed)
-                    if not contained and f["dst"] not in stores:
-                        stores.append(f["dst"])
+                    # Halves no DMA load can stage are rejected before the buffer check.
+                    stageable = address % 1024 == 0 and address + 1024 <= VMEM_BYTES
+                    if not contained and stageable and f["dst"] not in stored_regs and address not in loads:
+                        loads.append(address)
                 if name == "vstore" and not self.authored:
                     stored.add((((scalars.get(f["base"]) or 0) + f["offset"] * 32) & MASK) * 4 & MASK)
+                    stored_regs.add(f["src"])
                 if name == "dma" and not self.authored:
                     pending[f["channel"]] = {"kind": f["direction"], "vmem_byte": (scalars.get(f["reg"]) or 0) * 4 & MASK,
                                              "bytes": scalars.get(f["size"]) or 0}
@@ -198,7 +232,7 @@ class _Builder:
                         for address in range(launch["vmem_byte"], launch["vmem_byte"] + launch["bytes"], 1024):
                             if address in stored:
                                 stored.discard(address)
-                            else:
+                            elif address not in staged:
                                 staged.append(address)
                 if name == "dma_wait" and not self.authored and f["channel"] in pending:
                     launch = pending.pop(f["channel"])
@@ -206,17 +240,17 @@ class _Builder:
                         completed.append(launch)
                 defined.update(tensor_writes(name, f))
                 scalars.step(name, f)
-        return origins, stores, staged
+        return origins, loads, staged
 
     def prologue(self) -> list[tuple[str, str, int | None]]:
         """(name, fields, tile id) triples loading every needed register from VMEM and
         writing the VMEM halves that DMA stores read."""
-        origins, stores, staged = self.plan_prologue()
-        registers = origins + [r for r in stores if r not in origins]
+        origins, loads, staged = self.plan_prologue()
+        registers = list(origins)
         if staged and STAGE_REG not in registers:
             registers.append(STAGE_REG)
         ops: list[tuple[str, str, int | None]] = [("dma_config", "channel = 0 : i32, base_reg = 0 : i32", None)]
-        if not registers:
+        if not registers and not loads:
             return ops
         ops += [("alu_imm", f'kind = "addi", dst = {SIZE_REG} : i32, src = 0 : i32, immediate = 1024 : i32', None),
                 ("upper", f'kind = "lui", dst = {DRAM_REG} : i32, immediate = {PROLOGUE_DRAM_LUI} : i32', None)]
@@ -234,23 +268,30 @@ class _Builder:
                     ("dma_wait", "channel = 0 : i32", wait),
                     ("vload", f'dst = {reg} : i32, base = {BASE_REG} : i32, offset = 0 : i32, format = "raw"', load),
                     (*DELAY, None)]
-            if reg in stores:
-                store = len(self.records)
-                self.records.append(dict(id=store, kind="vstore", reg=reg, vmem_byte=vmem, dram_byte=0, bytes=1024,
-                                         channel=-1, transfer=-1, after=()))
-                ops += [("vstore", f'src = {reg} : i32, base = {BASE_REG} : i32, offset = 0 : i32, format = "raw"', store),
-                        (*DELAY, None)]
-        for address in staged:
+
+        def base(address: int) -> list[tuple[str, str, None]]:
             word = address // 4
             low = ((word + 2048) & 4095) - 2048
-            store = len(self.records)
-            self.staged.append(dict(id=store, kind="vstore", reg=STAGE_REG, vmem_byte=address, dram_byte=0, bytes=1024,
-                                    channel=-1, transfer=-1, after=()))
-            self.records.append(self.staged[-1])
-            ops += [("upper", f'kind = "lui", dst = {BASE_REG} : i32, immediate = {((word - low) >> 12) & 0xFFFFF} : i32', None),
-                    ("alu_imm", f'kind = "addi", dst = {BASE_REG} : i32, src = {BASE_REG} : i32, immediate = {low} : i32', None),
-                    ("vstore", f'src = {STAGE_REG} : i32, base = {BASE_REG} : i32, offset = 0 : i32, format = "raw"', store),
+            return [("upper", f'kind = "lui", dst = {BASE_REG} : i32, immediate = {((word - low) >> 12) & 0xFFFFF} : i32', None),
+                    ("alu_imm", f'kind = "addi", dst = {BASE_REG} : i32, src = {BASE_REG} : i32, immediate = {low} : i32', None)]
+
+        for address in staged:
+            record = dict(id=len(self.records), kind="vstore", reg=STAGE_REG, vmem_byte=address, dram_byte=0, bytes=1024,
+                          channel=-1, transfer=-1, after=())
+            self.records.append(record)
+            self.staged.append(record)
+            ops += [*base(address), ("vstore", f'src = {STAGE_REG} : i32, base = {BASE_REG} : i32, offset = 0 : i32, format = "raw"', record["id"]),
                     (*DELAY, None)]
+        for address in loads:
+            launch, wait = len(self.records), len(self.records) + 1
+            self.records += [dict(id=launch, kind="dma_load", reg=-1, vmem_byte=address, dram_byte=PROLOGUE_DRAM_LUI << 12,
+                                  bytes=1024, channel=0, transfer=-1, after=()),
+                             dict(id=wait, kind="dma_wait", reg=-1, vmem_byte=0, dram_byte=0, bytes=0, channel=0,
+                                  transfer=-1, after=(launch,))]
+            self.completed.append((self.records[launch], wait))
+            ops += [*base(address),
+                    ("dma", f'direction = "load", channel = 0 : i32, reg = {BASE_REG} : i32, dram = {DRAM_REG} : i32, size = {SIZE_REG} : i32', launch),
+                    ("dma_wait", "channel = 0 : i32", wait)]
         return ops
 
     # -- layout -------------------------------------------------------------------
@@ -310,14 +351,13 @@ class _Builder:
     def derive_tile_records(self) -> None:
         scalars = _Scalars()
         pending: dict[int, int] = {}
-        completed: list[tuple[dict, int]] = []
+        completed: list[tuple[dict, int]] = list(self.completed)
         unclaimed: list[dict] = list(self.staged)
-        last_store: dict[int, int] = {}
+        claimed: list[dict] = []
+        last_store: dict[int, int] = {}  # register -> its latest stream VSTORE record, a PACK raw store
         for op in self.emitted:
             f = fields(op.text)
             if op.tile is not None or op.name not in ("dma", "dma_wait", "vload", "vstore"):
-                if op.tile is not None and op.name == "vstore":
-                    last_store[f["src"]] = op.tile  # a prologue endpoint
                 scalars.step(op.name, f)
                 continue
             identity = len(self.records)
@@ -327,12 +367,14 @@ class _Builder:
                 vmem, size = (scalars.get(f["reg"]) or 0) * 4 & MASK, scalars.get(f["size"]) or 0
                 after = []
                 if f["direction"] == "store":
-                    for store in list(unclaimed):
+                    for store in [*unclaimed, *(c for c in claimed if c["transfer"] == transfer)]:
                         address = store["vmem_byte"]
                         if vmem <= address and address + 1024 <= vmem + size and all(self.records[a]["vmem_byte"] != address for a in after):
                             store["transfer"] = transfer
                             after.append(store["id"])
-                            unclaimed.remove(store)
+                            if store in unclaimed:
+                                unclaimed.remove(store)
+                                claimed.append(store)
                 self.records.append(dict(id=identity, kind=f"dma_{f['direction']}", reg=-1, vmem_byte=vmem,
                                          dram_byte=scalars.get(f["dram"]) or 0, bytes=size, channel=f["channel"],
                                          transfer=transfer, after=tuple(after)))
@@ -394,6 +436,28 @@ class _Builder:
             effects.append(effect)
         return effects
 
+    def buffer_contract(self) -> str:
+        """derive (lib/AtlasBufferContractVerification.cpp): the writer words each reader observes."""
+        packs = self.packs()
+        reads: list[dict] = []
+        for r in self.records:
+            spans = []
+            if r["kind"] == "dma_store":
+                spans = [(store, self.records[store]) for store in r["after"]]
+            elif r["id"] in packs:
+                reads.append(dict(command=r["id"], writer=packs[r["id"]], vmem_byte=r["vmem_byte"], bytes=r["bytes"], word=0, layout="pack"))
+            elif r["kind"] in ("vload", "mailbox_load") and len(r["after"]) == 1:
+                writer = r["after"][0]
+                if self.records[writer]["kind"] == "dma_wait" and len(self.records[writer]["after"]) == 1:
+                    writer = self.records[writer]["after"][0]
+                spans = [(writer, r)]
+            for writer, span in spans:
+                reads.append(dict(command=r["id"], writer=writer, vmem_byte=span["vmem_byte"], bytes=span["bytes"],
+                                  word=(span["vmem_byte"] - self.records[writer]["vmem_byte"]) // 4, layout="copy"))
+        sources = [dict(source=s["id"], store=s["tile_commands"][0], load=s["tile_commands"][1], scale_code=127)
+                   for s in self.sources if s["name"] == "atlas.virtual_pack_fp8"]
+        return f"{{packs = {record_text(sources)}, reads = {record_text(reads)}}}"
+
     def scaffold(self) -> None:
         writes: dict[int, int] = {}
         for op in self.emitted:
@@ -404,6 +468,10 @@ class _Builder:
         arguments = {id(op): self.add_value(0, fields(op.text)["dst"], "i32", "argument") for op in mailbox}
         origin: dict[int, int] = {}
         owned: list[tuple[_Emitted, dict]] = []
+        packs = self.packs()
+        pairs = {**{load: (store, load) for load, store in packs.items()}, **{store: (store, load) for load, store in packs.items()}}
+        pack_sources: dict[tuple[int, int], dict] = {}
+        followers: list[tuple[_Emitted, dict]] = []  # second PACK endpoints, owned without an operation identity
         for op in self.emitted:
             f = fields(op.text)
             op.tags.insert(0, f"atlas.virtual_cfg_block = {op.block} : i32")
@@ -420,6 +488,17 @@ class _Builder:
             # Malformed tags stay in the stream for their checker but bind no source record.
             tile, mxu = tile_id(op), integer_tag(f, MXU_TAG)
             if tile is not None and mailbox and tile < 2 + len(mailbox):
+                continue
+            if tile in pairs:
+                # The PACK result keeps its raw register's origin; the first endpoint owns the source operation.
+                pair = pairs[tile]
+                if pair in pack_sources:
+                    followers.append((op, pack_sources[pair]))
+                    continue
+                reg = f["src"] if op.name == "vstore" else f["dst"]
+                value = [origin[reg]] if reg in origin else []
+                pack_sources[pair] = self.add_source(op.block, "atlas.virtual_pack_fp8", value, value, pair)
+                owned.append((op, pack_sources[pair]))
                 continue
             operands = []
             for reg in tensor_reads(op.name, f):
@@ -451,6 +530,8 @@ class _Builder:
             source["id"] = n
         for op, source in owned:
             op.tags += [f"atlas.virtual_cfg_source = {source['id']} : i32", f"atlas.virtual_cfg_operation = {source['id']} : i32"]
+        for op, source in followers:
+            op.tags.append(f"atlas.virtual_cfg_source = {source['id']} : i32")
         for index, record in enumerate(self.block_records):
             stable = [v["id"] for v in self.values if v["type"] in ("bf16", "fp8") and v["block"] < index
                       and all(writes.get(v["reg"] + half, 0) == 1 for half in range(2 if v["type"] == "bf16" else 1))]
@@ -472,10 +553,27 @@ class _Builder:
             key = "offset_bytes" if op.name == "branch" else "offset"
             op.text += f", {key} = {2 * (target - position)} : i32"
 
+    def packs(self) -> dict[int, int]:
+        """PACK pairs as VLOAD record -> raw VSTORE record."""
+        return {r["id"]: r["after"][0] for r in self.records
+                if r["kind"] == "vload" and len(r["after"]) == 1 and self.records[r["after"][0]]["kind"] == "vstore"}
+
+    def insert_pack_copies(self) -> None:
+        packs = self.packs()
+        emitted: list[_Emitted] = []
+        for op in self.emitted:
+            load = tile_id(op)
+            if op.name == "vload" and load in packs:
+                emitted += [_Emitted(name, text, op.block)
+                            for name, text in pack_copy(self.records[packs[load]]["vmem_byte"], self.records[load]["vmem_byte"])]
+            emitted.append(op)
+        self.emitted = emitted
+
     def text(self) -> str:
         self.layout()
         if not self.authored:
             self.derive_tile_records()
+        self.insert_pack_copies()
         for op in self.emitted:
             if op.tile is not None and TILE_TAG not in op.text:
                 op.text += f", {TILE_TAG} = {op.tile} : i32"
@@ -493,7 +591,8 @@ class _Builder:
         attributes = (f"{MARKER}, {TIMED}, {PROVIDER}, atlas.virtual_dma_contract = {record_text(self.dma_records())}, "
                       f"atlas.virtual_mxu_contract = {record_text(self.mxu)}, atlas.virtual_tile_contract = {record_text(self.records)}, "
                       f"atlas.virtual_cfg_contract = {cfg}, "
-                      f"atlas.virtual_source_memory_contract = {{effects = {record_text(self.source_memory_records())}}}")
+                      f"atlas.virtual_source_memory_contract = {{effects = {record_text(self.source_memory_records())}}}, "
+                      f"atlas.virtual_buffer_contract = {self.buffer_contract()}")
         return f"module attributes {{{attributes}}} {{\n" + "\n".join(lines) + "\n}\n"
 
 

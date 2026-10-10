@@ -105,7 +105,7 @@ class DMAContractVerificationTest(unittest.TestCase):
             ("unknown version", machine.replace(VERSION, 'atlas.generated_from_virtual = "resource-contract-v999"'), UNSUPPORTED),
             ("malformed version", machine.replace(VERSION, "atlas.generated_from_virtual = 1 : i32"), UNSUPPORTED),
             ("unit legacy", machine.replace(VERSION, "atlas.generated_from_virtual"), UNSUPPORTED),
-            ("DMA legacy", machine.replace("resource-contract-v4", "dma-contract-v1"), UNSUPPORTED),
+            ("DMA legacy", machine.replace("resource-contract-v5", "dma-contract-v1"), UNSUPPORTED),
             ("nonarray", replace_contract(machine, "dma", '"bad"'), f"requires an {CONTRACT} array"),
             ("nondictionary", replace_contract(machine, "dma", "[0 : i32]"), "DMA contract"),
             ("empty explicit contract", replace_contract(machine, "dma", "[]"), "DMA contract"),

@@ -1,6 +1,6 @@
 """Every consumer classifies generated artifacts by one rule (lib/AtlasGeneratedArtifact.cpp).
 
-Only the resource-contract-v4 marker with all five contracts and a timing state is a generated
+Only the resource-contract-v5 marker with all six contracts and a timing state is a generated
 artifact; a module without marker, contracts or tags is a hand-written stream; anything else
 fails with one diagnostic.
 """
@@ -19,9 +19,9 @@ from verification_support import (
 
 CONTRACTS = ("atlas.virtual_dma_contract", "atlas.virtual_mxu_contract",
              "atlas.virtual_tile_contract", "atlas.virtual_cfg_contract",
-             "atlas.virtual_source_memory_contract")
-MARKERS = ('"resource-contract-v1"', '"resource-contract-v2"', '"resource-contract-v3"', '"dma-contract-v1"',
-           '"resource-contract-v999"', '"resource-contract-v4 "', "1 : i32", "unit")
+             "atlas.virtual_source_memory_contract", "atlas.virtual_buffer_contract")
+MARKERS = ('"resource-contract-v1"', '"resource-contract-v2"', '"resource-contract-v3"', '"resource-contract-v4"',
+           '"dma-contract-v1"', '"resource-contract-v999"', '"resource-contract-v5 "', "1 : i32", "unit")
 
 
 def remark(machine: str, marker: str) -> str:
@@ -40,7 +40,7 @@ class GeneratedArtifactClassificationTest(unittest.TestCase):
         if untimed is not None:
             assert_boundaries(self, untimed, UNTIMED_BOUNDARIES, rejects=diagnostic)
 
-    def test_lowered_resource_contract_v4_is_accepted_everywhere(self) -> None:
+    def test_lowered_resource_contract_v5_is_accepted_everywhere(self) -> None:
         assert_boundaries(self, self.timed, TIMED_BOUNDARIES)
         assert_boundaries(self, self.untimed, UNTIMED_BOUNDARIES)
 

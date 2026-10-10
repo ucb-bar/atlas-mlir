@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualToMachine.h"
+#include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
@@ -146,7 +147,8 @@ public:
     if (failed(cfgContract) || failed(dmaContract) || failed(mxuContract) || failed(tileContract))
       return failure();
     auto sourceMemoryContract = buildAtlasSourceMemoryEffectContract(function, *cfgContract, *tileContract);
-    if (failed(sourceMemoryContract))
+    auto bufferContract = buildAtlasBufferContract(function, *cfgContract, *tileContract);
+    if (failed(sourceMemoryContract) || failed(bufferContract))
       return failure();
     OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
     (*emitted)->setAttrs(module->getAttrs());
@@ -170,6 +172,7 @@ public:
     (*emitted)->setAttr(kAtlasMXUContract, *mxuContract);
     (*emitted)->setAttr(kAtlasTileContract, *tileContract);
     (*emitted)->setAttr(kAtlasSourceMemoryContract, *sourceMemoryContract);
+    (*emitted)->setAttr(kAtlasBufferContract, *bufferContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));

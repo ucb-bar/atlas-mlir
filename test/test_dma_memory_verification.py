@@ -29,8 +29,9 @@ def constant(reg: int, value: int) -> list[tuple[str, str]]:
             ("alu_imm", f'kind = "addi", dst = {reg} : i32, src = {reg} : i32, immediate = {low} : i32')]
 
 
-def launch(direction: str = "load", *, channel: int = 0, identity: int = 0, base: int = 4, dram: int = 7) -> tuple[str, str]:
-    return "dma", f'direction = "{direction}", channel = {channel} : i32, reg = {base} : i32, dram = {dram} : i32, size = 9 : i32, {TRANSFER} = {identity} : i32'
+def launch(direction: str = "load", *, channel: int = 0, identity: int | None = 0, base: int = 4, dram: int = 7) -> tuple[str, str]:
+    tag = "" if identity is None else f", {TRANSFER} = {identity} : i32"
+    return "dma", f'direction = "{direction}", channel = {channel} : i32, reg = {base} : i32, dram = {dram} : i32, size = 9 : i32{tag}'
 
 
 def vector(kind: str = "vload", *, base: int = 5, offset: int = 0) -> list[tuple[str, str]]:
@@ -101,7 +102,9 @@ class DMAMemoryVerificationTest(unittest.TestCase):
         for direction, kind in (("load", "vload"), ("load", "vstore"), ("store", "vstore")):
             with self.subTest(direction=direction, kind=kind):
                 self.checked(artifact([*constant(5, 0x2000), *vector(kind)], direction=direction), CONFLICT)
-        self.checked(artifact([*constant(5, 0x2000), *vector()], direction="store"))
+        # The memory check admits a VLOAD of the half a pending store reads; the buffer check, which runs
+        # later, rejects the fixture because no single writer serves a DMA load reader and a VSTORE reader.
+        self.checked(artifact([*constant(5, 0x2000), *vector()], direction="store"), "buffer contract: DMA store captures a word its VSTORE did not write")
 
     def test_signed_vls_offsets_are_128_bytes_each_and_boundary_ranges_are_disjoint(self) -> None:
         for offset, disjoint, aliased in ((8, 0x2000, 0x1F00), (-8, 0x2000, 0x2100)):
@@ -164,11 +167,12 @@ class DMAMemoryVerificationTest(unittest.TestCase):
 
     def test_concurrent_dram_ranges_and_read_only_vmem_aliases(self) -> None:
         # The memory check admits concurrent reads of one VMEM range; the timing provider,
-        # which runs last, still serializes them.
+        # which runs last, still serializes them. Untagged stores may capture one staged half,
+        # which each explicit transfer would own.
         for direction, address, base, diagnostic in (("store", 0x90001000, 0x2000, "may still be in flight"), ("store", 0x9000001F, 0x2000, CONFLICT + " in DRAM"), ("load", 0x90000000, 0x2100, CONFLICT + " in DRAM")):
             with self.subTest(direction=direction, dram=address):
-                ops = [*prefix(shared=True), *constant(5, base), *constant(8, address), launch("store"),
-                       launch(direction, channel=1, identity=1, base=5, dram=8), wait(channel=1, identity=1), wait()]
+                ops = [*prefix(shared=True), *constant(5, base), *constant(8, address), launch("store", identity=None),
+                       launch(direction, channel=1, identity=None, base=5, dram=8), wait(channel=1, identity=None), wait(identity=None)]
                 self.checked(program(ops), diagnostic)
         self.checked(program([*prefix(base=None, shared=True), launch("store"), *constant(4, 0x2100), *constant(8, 0x90001000),
                               launch("store", channel=1, identity=1, dram=8), wait(channel=1, identity=1), wait()]), UNCONTRACTED)

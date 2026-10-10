@@ -88,10 +88,11 @@ template <typename S> struct AtlasForwardEntries {
 };
 // Forward worklist from block 0: `transfer(block, state)` turns a copy of the
 // entry state into the exit state, and `join(into, incoming)` returns whether
-// a reached entry changed. A failed transfer aborts the walk.
-template <typename S, typename Transfer, typename Join>
+// a reached entry changed. A failed transfer aborts the walk. `successors`
+// replaces the stream's own edges, e.g. to summarize a loop at its entry.
+template <typename S, typename Transfer, typename Join, typename Successors>
 FailureOr<AtlasForwardEntries<S>>
-atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join) {
+atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors) {
   AtlasForwardEntries<S> result{std::vector<S>(stream.starts.size(), init), std::vector<bool>(stream.starts.size(), false)};
   if (stream.starts.empty())
     return result;
@@ -103,7 +104,7 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
     S state = result.entries[block];
     if (failed(transfer(block, state)))
       return failure();
-    for (size_t next : stream.succs[block]) {
+    for (size_t next : successors(block)) {
       if (!result.reached[next]) {
         result.reached[next] = true;
         result.entries[next] = state;
@@ -114,6 +115,11 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
     }
   }
   return result;
+}
+template <typename S, typename Transfer, typename Join>
+FailureOr<AtlasForwardEntries<S>>
+atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join) {
+  return atlasForwardEntries(stream, init, transfer, join, [&](size_t block) -> llvm::ArrayRef<size_t> { return stream.succs[block]; });
 }
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps

@@ -8,7 +8,7 @@ from test_virtual_lowering import run
 
 
 STATE = "!atlas.state"
-MARKER = 'atlas.generated_from_virtual = "resource-contract-v4"'
+MARKER = 'atlas.generated_from_virtual = "resource-contract-v5"'
 TIMED = 'atlas.timing_state = "timed"'
 UNTIMED_STATE = 'atlas.timing_state = "untimed"'
 PROVIDER = 'atlas.timing_provider = "npu-model-rtl-match-v1"'
@@ -20,7 +20,7 @@ MASK = 0xffffffff
 # Classification diagnostics (lib/AtlasGeneratedArtifact.cpp).
 UNSUPPORTED = "unsupported Atlas virtual-to-machine artifact marker"
 UNMARKED = "generated resource metadata requires an Atlas virtual-to-machine artifact marked"
-INCOMPLETE = "resource-contract-v4 artifact requires"
+INCOMPLETE = "resource-contract-v5 artifact requires"
 CLASSIFICATION = (UNSUPPORTED, UNMARKED, INCOMPLETE)
 
 VERIFY = ("atlas-opt", ("--verify-atlas-generated-schedule",))

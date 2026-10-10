@@ -12,10 +12,10 @@ constexpr llvm::StringRef kTags[] = {
     kAtlasTagScalarResult, kAtlasTagTensorResult, kAtlasTagScalarArgument};
 constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
                                           kAtlasTileContract, kAtlasCFGContract,
-                                          kAtlasSourceMemoryContract};
+                                          kAtlasSourceMemoryContract, kAtlasBufferContract};
 constexpr llvm::StringRef kPreserved[] = {
     kAtlasGeneratedMarker, kAtlasDMAContract, kAtlasMXUContract,
-    kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract,
+    kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract, kAtlasBufferContract,
     kAtlasTimingState, kAtlasTimingProvider};
 } // namespace
 

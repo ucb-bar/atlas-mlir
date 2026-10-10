@@ -353,7 +353,7 @@ class TileContractVerificationTest(unittest.TestCase):
             self.assertNotEqual(changed, machine)
             self.rejected(changed, "tile contract")
         for marker in ('"resource-contract-v2"', '"dma-contract-v1"', "1 : i32"):
-            self.rejected(machine.replace('"resource-contract-v4"', marker, 1), UNSUPPORTED)
+            self.rejected(machine.replace('"resource-contract-v5"', marker, 1), UNSUPPORTED)
 
     def test_structured_fields_and_words_cannot_jointly_bypass_contract(self) -> None:
         facts, operations = vector_fixture()

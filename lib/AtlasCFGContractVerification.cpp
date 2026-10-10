@@ -420,8 +420,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         }
         if (auto pack = dyn_cast<VPUPackOp>(op)) {
           if (operands.empty() || results.empty() || !tensorRead(pack.getSrc(),operands[0])) return error("PACK read lost its source tensor origin");
-          // The owned relayout preserves the logical result identity; its
-          // numerical transformation and memory layout are a helper obligation.
+          // The owned relayout preserves the logical result identity; the
+          // buffer contract checks its conversion scale and memory layout.
         }
       }
       E produced;

@@ -164,9 +164,9 @@ void rawTensorWrites(MLIRContext &context) {
 
 void emptyIssuedStream(MLIRContext &context) {
   auto module = parseSourceString<ModuleOp>(R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v4", atlas.timing_state = "untimed",
+    atlas.generated_from_virtual = "resource-contract-v5", atlas.timing_state = "untimed",
     atlas.virtual_dma_contract = [], atlas.virtual_mxu_contract = [], atlas.virtual_tile_contract = [],
-    atlas.virtual_source_memory_contract = {effects = []},
+    atlas.virtual_source_memory_contract = {effects = []}, atlas.virtual_buffer_contract = {packs = [], reads = []},
     atlas.virtual_cfg_contract = {
       values = [], operations = [], edges = [],
       blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>,
