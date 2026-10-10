@@ -218,9 +218,16 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
   memory-guard cases, with the comparison's exact precision domain recorded.
 
 The parser/input layer, scalar/CFG, admitted VPU/pack, both MXU units, and DMA
-are implemented in this repository's Python verification tooling; selected-core
-comparisons have not executed. These checks do not complete
-[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).
+are implemented in this repository's Python verification tooling. The
+selected-core comparisons in `test/test_virtual_evaluator_core.py` ran in
+required mode on 2026-10-09 against the Arc model described below: every row of
+the table (shared input, two outputs, VPU, PACK, both MXU units with
+continuation, seeding and readout, CFG, pending and reverse-completed DMA,
+scheduled variants) matched the reference, and the ReLU→MOV mutation was
+detected. The model is not RTL-simulation-qualified, so this evidence is
+bounded by the model's fidelity to the selected RTL, and
+[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when
+the team accepts that bound.
 
 ## Admitted forms and numerical sources
 
@@ -250,21 +257,21 @@ The evaluator executes the 23 virtual forms below (names follow `atlas.virtual_`
 
 Other VPU modes and pack scales other than 127 are unsupported by evaluator admission and physical lowering.
 
-| ID | Existing evidence | Remaining audit |
-| --- | --- | --- |
-| V1 | MOV raw copy and ReLU sign-bit rule over all 65,536 encodings; [ReLU](vpu-relu-observation.md) | Selected-core comparison |
-| V2 | FP32 RNE/BF16 chop path with directed signed-zero, subnormal, overflow, infinity and NaN cases; [addition](vpu-add-observation.md) | Selected-core comparison; `1 + 3/512` separates chop `0x3f80` from nearest-even `0x3f81` |
-| P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | Physical converter/transport and PACK→MXU comparisons |
-| M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | Selected-core comparison, including exceptional BF16 accumulators |
-| R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |
-| D | Owned snapshots, matching completion, raw serialization, mapped spans, guards, two-handle cases; [pointer lifetime](dma-pointer-lifetime-observation.md) | Selected-core comparison; pending-write conflicts and mixed boundary/memory write aliases unqualified |
+| ID | Existing evidence | Selected-core rows (2026-10-09) | Remaining audit |
+| --- | --- | --- | --- |
+| V1 | MOV raw copy and ReLU sign-bit rule over all 65,536 encodings; [ReLU](vpu-relu-observation.md) | `shared_relu`, `vpu`, `dma_bf16_relu`, `cfg_relu_loop_*`; ReLU→MOV mutation detected | Patterned tiles, not all 65,536 encodings, on the core |
+| V2 | FP32 RNE/BF16 chop path with directed signed-zero, subnormal, overflow, infinity and NaN cases; [addition](vpu-add-observation.md) | `vpu` and `dma_pending_work` (ADD on patterned tiles) | The `1 + 3/512` chop-versus-nearest-even literal and the directed special cases on the core |
+| P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | `mxu{0,1}_legacy_pack` and the physical converter/transport probe | PACK→MXU chains beyond `legacy_pack` |
+| M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | `mxu{0,1}_{continuation,seed_bf16,seed_fp8}`, `dma_mxu_*`, `two_chains_*` | Exceptional BF16 accumulator encodings on the core |
+| R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | None (no row reads out FP8) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |
+| D | Owned snapshots, matching completion, raw serialization, mapped spans, guards, two-handle cases; [pointer lifetime](dma-pointer-lifetime-observation.md) | `dma_pending_work`, `two_dma_reverse_await`, `dma_fp8_copy`, traffic counts | Pending-write conflicts and mixed boundary/memory write aliases unqualified |
 
 | Pin | Revision |
 | --- | --- |
 | Selected RTL | `0079c0541111197741a231c002e3843fa6f545b2` |
 | Current `npu-model` | `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6` |
 
-Core execution is pending: no comparison of these forms against a selected-core artifact has run, so the evidence above is reference-side only.
+The base reference suites (`test_*_reference.py`, handoff and inventory tests) assert the RTL pin above; the checkout the model was built from reports `2ae0bef`, so those pin assertions fail until the pin is refreshed, while their executions on the model pass.
 
 ### Core comparison prerequisites (reproduced 2026-10-09)
 
