@@ -8,6 +8,7 @@ Start with [From Atlas RTL to compiler timing](extraction-walkthrough.md): one V
 | --- | --- |
 | [Hardware retention](retained-hw.md) and [evidence index](hw-evidence.md) | Select and retain the hardware, then inspect hierarchy and event connections. |
 | [Admission audit](admission.md) and [VLS timing](vls-timing.md) | Review engine conditions, supported domains, exact timing rules and replay cases. |
+| [Computed engine timing](computed-timing.md) | Derive per-operation timing deterministically from the IR and compare it with the compiler's rules. |
 | [Selected evidence](selected-evidence.md) and [resolved export](resolved-export.md) | Compile with the conditional provider and expose its operand-specific facts. |
 | [Integrated observation check](integrated-observation-check.md) | Bind captured system execution and memory events to those compiler facts. |
 | [Handoff evidence table](selected-evidence.md#evidence-available-for-the-handoff) | See what each source, component and system validation layer establishes. |

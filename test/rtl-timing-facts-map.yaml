@@ -1,0 +1,149 @@
+# Reviewed correspondence between RTL-computed op timing (tools/extract-rtl-timing.py,
+# schema atlas.op_timing.v0-proposal) and the compiler's footprints (lib/AtlasTiming.cpp,
+# printed by test/rtl-timing-facts-probe.cpp). Used only by test/test_rtl_extract_compiler.py.
+#
+# Conventions
+# - Ages on both sides count cycles after issue (age 0 = command cycle).
+# - events: a fact event group is compared with the union of the listed compiler accesses.
+#   A selector is "<resource> <r|w> [register]"; a register is rd, rs1, rs2 or reg+1 with the
+#   probe's operands (MReg element reg*32), and without one only resource and direction match. Each
+#   access touches element i at age + i*step; the union's first_age, last_age, count (touches)
+#   and step (common spacing, null below two touches or when uneven) must equal the group's.
+#   Example: VPU vadd reads rs1 rows at age 0 and rs1+1 rows at age 32, giving read0 0..63;
+#   a column reduction reads each register twice, so one selector names two accesses.
+#   Every compiler MReg, Acc, Weight and Vmem access must belong to some compared group.
+# - scalars: [fact field, compiler expression, relation]. Expressions: write_release,
+#   read_release, vpu_live, done_age, hold.<Unit> (inclusive end of that hold; 0 without one)
+#   or events.<group>.<field> of the same record, each with an optional "+ N".
+#   Relation "=" (default) or ">=" (compiler bound at least the fact; a reservation that is
+#   conservative by design, never used to hide an equality the compiler claims).
+#   * compiler hold ends are inclusive, RTL busy ends are first free ages:
+#     first_free_age = hold end + 1 (VLS path, XLU, scalar load path).
+#   * VPU next_issue_age (issue-busy bit clears) equals write_release; VPU first_free_age
+#     (VPU busy clears) equals vpu_live + 1.
+#   * VLS next_issue_age is the per-path busy (io_vloadBusy/io_vstoreBusy) and equals the
+#     path hold end + 1; VLS write_release equals the last MReg write age.
+# - Fact event groups with a nonzero count must be compared or listed in not_modeled, and every
+#   record must be mapped or listed in not_modeled_records, so new RTL facts are not ignored.
+
+families:
+  vls_load:
+    events: {vmem_read: [Vmem r], mreg_write: [MReg w rd]}
+    scalars:
+      - [first_free_age, hold.VloadPath + 1]
+      - [next_issue_age, hold.VloadPath + 1]
+      - [events.mreg_write.last_age, write_release]
+    ops: {vlsu.vload: vload}
+  vls_store:
+    events: {mreg_read: [MReg r rd], vmem_write: [Vmem w]}
+    scalars:
+      - [first_free_age, hold.VstorePath + 1]
+      - [next_issue_age, hold.VstorePath + 1]
+      - [events.mreg_read.last_age, read_release, ">="]   # source held until 34, last read 32
+    ops: {vlsu.vstore: vstore}
+
+  xlu_transpose:
+    events: {read: [MReg r rs1], write: [MReg w rd]}
+    scalars:
+      - [first_free_age, hold.Xlu + 1]
+      - [events.write.last_age, write_release]
+      - [events.read.last_age, read_release, ">="]        # source held until 33, last read 32
+    ops: {xlu.transpose: vtrpose.xlu}
+
+  scalar_load:
+    events: {vmem_read: [Vmem r], load_write: [XReg w rd]}
+    scalars: [[first_free_age, hold.ScalarLoad + 1]]
+    not_modeled: {mem_cmd: LSU request handshake, scalar_resp: internal response, load_pending: internal, load_resp: internal response, lsu_busy: internal}
+    ops: {scalar_lsu.load: lw}
+  scale_load:
+    events: {vmem_read: [Vmem r], scale_write: [EReg w rd]}
+    scalars: [[first_free_age, hold.ScalarLoad + 1]]
+    not_modeled: {mem_cmd: LSU request handshake, scalar_resp: internal response, load_pending: internal, load_resp: internal response, lsu_busy: internal}
+    ops: {scalar_lsu.scale_load: seld}
+  scalar_store:
+    events: {vmem_write: [Vmem w]}
+    scalars: [[first_free_age, hold.ScalarLoad + 1]]       # no load-path hold: free at age 1
+    not_modeled: {mem_cmd: LSU request handshake}
+    ops: {scalar_lsu.store: sw}
+
+  vpu_binary:
+    events: {read0: [MReg r rs1, MReg r rs1+1], read1: [MReg r rs2, MReg r rs2+1], write0: [MReg w rd, MReg w rd+1]}
+    scalars: &vpu_scalars
+      - [next_issue_age, write_release]
+      - [first_free_age, vpu_live + 1]
+      - [events.write0.last_age, write_release]
+      - [events.read0.last_age, read_release]
+    ops: {vpu.add: vadd.bf16, vpu.sub: vsub.bf16, vpu.mul: vmul.bf16, vpu.pairmax: vmaximum.bf16, vpu.pairmin: vminimum.bf16}
+  vpu_unary:
+    events: {read0: [MReg r rs1, MReg r rs1+1], write0: [MReg w rd, MReg w rd+1]}
+    scalars: *vpu_scalars
+    ops: {vpu.mov: vmov, vpu.rcp: vrecip.bf16, vpu.exp: vexp.bf16, vpu.exp2: vexp2.bf16, vpu.relu: vrelu.bf16,
+          vpu.sin: vsin.bf16, vpu.cos: vcos.bf16, vpu.tanh: vtanh.bf16, vpu.log: vlog2.bf16,
+          vpu.sqrt: vsqrt.bf16, vpu.square: vsquare.bf16, vpu.cube: vcube.bf16}
+  vpu_row_reduce:
+    events: {read0: [MReg r rs1], read1: [MReg r rs1+1], write0: [MReg w rd], write1: [MReg w rd+1]}
+    scalars: *vpu_scalars
+    ops: {vpu.rsum: vredsum.row.bf16, vpu.rmax: vredmax.row.bf16, vpu.rmin: vredmin.row.bf16}
+  vpu_col_reduce:
+    events: {read0: [MReg r rs1, MReg r rs1+1], write0: [MReg w rd, MReg w rd+1]}
+    scalars: *vpu_scalars
+    ops: {vpu.csum: vredsum.bf16, vpu.cmax: vredmax.bf16, vpu.cmin: vredmin.bf16}
+  vpu_pack:
+    events: {read0: [MReg r rs2, MReg r rs2+1], write0: [MReg w rd]}
+    scalars: *vpu_scalars
+    ops: {vpu.fp8pack: vpack.bf16.fp8}
+  vpu_unpack:
+    events: {read0: [MReg r rs2], write0: [MReg w rd, MReg w rd+1]}
+    scalars: *vpu_scalars
+    ops: {vpu.fp8unpack: vunpack.fp8.bf16}
+  vpu_load_imm:
+    events: {write0: [MReg w rd, MReg w rd+1]}
+    scalars: &vli_scalars
+      - [next_issue_age, write_release]
+      - [first_free_age, vpu_live + 1]
+      - [events.write0.last_age, write_release]
+    ops: {vpu.vliAll: vli.all, vpu.vliRow: vli.row}
+  vpu_load_imm_single:
+    events: {write0: [MReg w rd]}
+    scalars: *vli_scalars
+    ops: {vpu.vliCol: vli.col, vpu.vliOne: vli.one}
+
+  mxu_matmul:
+    # The compiler reads the stationary weight slot once per row entering the array, so its
+    # Weight read is compared with the array's compute_valid cycles.
+    events: {mreg_read0: [MReg r rs1], compute: [Weight r], acc_write: [Acc w]}
+    not_modeled: &mxu_compute {compute_busy: compiler MxuCompute hold is a conservative 0..cf+31 window}
+    ops: {mxu0.matmul: vmatmul.mxu0, mxu1.matmul: vmatmul.mxu1}
+  mxu_matmul_acc:
+    events: {mreg_read0: [MReg r rs1], compute: [Weight r], acc_read: [Acc r], acc_write: [Acc w]}
+    not_modeled: *mxu_compute
+    ops: {mxu0.matmul_acc: vmatmul.acc.mxu0, mxu1.matmul_acc: vmatmul.acc.mxu1}
+  mxu_push_weight:
+    events: {mreg_read1: [MReg r rs1], weight_write: [Weight w]}
+    not_modeled: &mxu_stream {data_busy: push/pop stream busy (compiler stream and port holds are conservative windows)}
+    ops: {mxu0.push_weight: vmatpush.weight.mxu0, mxu1.push_weight: vmatpush.weight.mxu1}
+  mxu_push_acc_fp8:
+    events: {mreg_read1: [MReg r rs1], acc_load: [Acc w]}
+    not_modeled: *mxu_stream
+    ops: {mxu0.push_acc_fp8: vmatpush.acc.fp8.mxu0, mxu1.push_acc_fp8: vmatpush.acc.fp8.mxu1}
+  mxu_push_acc_bf16:
+    events: {mreg_read0: [MReg r rs1], mreg_read1: [MReg r rs1+1], acc_load: [Acc w]}
+    not_modeled: *mxu_stream
+    ops: {mxu0.push_acc_bf16: vmatpush.acc.bf16.mxu0, mxu1.push_acc_bf16: vmatpush.acc.bf16.mxu1}
+  mxu_pop_fp8:
+    events: {mreg_write0: [MReg w rd], acc_store: [Acc r]}
+    not_modeled: *mxu_stream
+    ops: {mxu0.pop_acc_fp8: vmatpop.fp8.acc.mxu0, mxu1.pop_acc_fp8: vmatpop.fp8.acc.mxu1}
+  mxu_pop_bf16:
+    events: {mreg_write0: [MReg w rd], mreg_write1: [MReg w rd+1], acc_store: [Acc r]}
+    not_modeled: *mxu_stream
+    ops: {mxu0.pop_acc_bf16: vmatpop.bf16.acc.mxu0, mxu1.pop_acc_bf16: vmatpop.bf16.acc.mxu1}
+
+not_modeled_records:
+  mxu1.matmul_acc_at_32: two-command MXU1 boundary (matmul.acc issued at age 32 behind an FP8 accumulator push writes no rows); footprints are per instruction
+  vlsu.vload/response_latency_2: compiler assumes the selected memory response latency
+  vlsu.vstore/response_latency_2: compiler assumes the selected memory response latency
+  vlsu.vload/operands: operand-variant record; the compiler's VLS timing is operand-independent
+  vlsu.vstore/operands: operand-variant record; the compiler's VLS timing is operand-independent
+  xlu.transpose/response_latency_3: compiler assumes the selected memory response latency
+  xlu.transpose/busy_command: a second command held valid while busy (ignored by the RTL); the compiler never issues into a held XLU
