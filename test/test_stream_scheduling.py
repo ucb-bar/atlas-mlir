@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import collections
-import itertools
 import re
 import unittest
 
@@ -37,8 +36,7 @@ def branch_target(ops: list[tuple[str, str, str]]) -> int:
 
 def loop_body(ops: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
     branch = next(i for i, (op, _, _) in enumerate(ops) if op == "branch")
-    # Entry drain depends on predecessor scheduling; compare body stalls only.
-    return list(itertools.dropwhile(lambda entry: entry[0] == "delay", ops[branch_target(ops):branch + 1]))
+    return ops[branch_target(ops):branch + 1]
 
 
 def work_overlapping_first_dma(ops: list[tuple[str, str, str]]) -> int:
@@ -75,7 +73,9 @@ class StreamSchedulingTest(unittest.TestCase):
                 pop = next(i for i, (op, f, _) in enumerate(scheduled)
                            if op == "mxu_pop" and "unit = 0" in f)
                 self.assertGreaterEqual(issue[pop] - issue[matmul], 64)
-                self.assertEqual(loop_body(scheduled)[0][0], "scalar_load")
+                # The back edge lands on the loop's first op, not on the
+                # drain its fall-through entry needs.
+                self.assertEqual(scheduled[branch_target(scheduled)][0], "scalar_load")
                 verified = run(OPT, result.stdout, "--verify-atlas-timing")
                 self.assertEqual(verified.returncode, 0, verified.stderr)
 

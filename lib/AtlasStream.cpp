@@ -464,11 +464,14 @@ LogicalResult mlir::atlas::checkAtlasStream(
         pending[op.channel].push_back({i, f});
       applyScalar(in, regs);
     }
+    // Timing is checked one block at a time, so a transfer must complete in
+    // the block that starts it, as verifyAtlasTimedStream requires.
     for (int ch = 0; ch < 8; ++ch)
       if (!pending[ch].empty())
-        s.ops[pending[ch].back().first]->emitWarning()
-            << "may still be in flight when its block ends; DMA hazards are "
-               "checked only within a block";
+        return s.ops[pending[ch].back().first]->emitOpError(
+            "may still be in flight when its block ends; timing requires DMA "
+            "completion before a block boundary, so add atlas.dma_wait in "
+            "this block");
   }
   return success();
 }
@@ -477,7 +480,10 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
                                             const AtlasStream &s,
                                             ArrayRef<size_t> order,
                                             ArrayRef<DelayInsertion> before,
+                                            ArrayRef<DelayInsertion> after,
                                             StringRef timedBy) {
+  assert((after.empty() || after.size() == s.starts.size()) &&
+         "trailing delays are given per block");
   OpBuilder builder(module.getContext());
   Type stateType = StateType::get(module.getContext());
   Operation *prev = &module.getBody()->front();
@@ -492,33 +498,47 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
     prev = op;
     state = op->getResult(0);
   };
-  for (size_t i : order) {
-    current = i;
-    Operation *op = s.ops[i];
-    auto carryCFGOwner = [&](Operation *padding) {
-      for (StringRef name : {kAtlasTagCFGBlock, kAtlasTagCFGEdge, kAtlasTagCFGHelper})
-        if (Attribute value = op->getAttr(name))
-          padding->setAttr(name, value);
-    };
-    const DelayInsertion &insertion = before[i];
+  // Padding takes the CFG ownership of the op it serves, so it lies in that
+  // op's source block (and edge) region.
+  auto carryCFGOwner = [&](Operation *owner, Operation *padding) {
+    for (StringRef name : {kAtlasTagCFGBlock, kAtlasTagCFGEdge, kAtlasTagCFGHelper})
+      if (Attribute value = owner->getAttr(name))
+        padding->setAttr(name, value);
+  };
+  auto emitDelays = [&](const DelayInsertion &insertion, Operation *owner) {
     StringAttr reason = builder.getStringAttr(insertion.reason);
     for (uint32_t cycles : insertion.delays) {
       builder.setInsertionPointAfter(prev);
       auto delay =
-          DelayOp::create(builder, op->getLoc(), stateType, state, cycles);
+          DelayOp::create(builder, owner->getLoc(), stateType, state, cycles);
       delay->setAttr("atlas.reason", reason);
-      carryCFGOwner(delay);
+      carryCFGOwner(owner, delay);
       append(delay);
     }
+  };
+  size_t block = 0;
+  for (size_t position = 0; position < order.size(); ++position) {
+    size_t i = order[position];
+    current = i;
+    Operation *op = s.ops[i];
+    const DelayInsertion &insertion = before[i];
+    emitDelays(insertion, op);
     if (insertion.guard) {
       builder.setInsertionPointAfter(prev);
       Operation *nop = createNop(builder, op->getLoc(), state);
       nop->setAttr("atlas.reason", builder.getStringAttr(
                                        "a halt does not wait for a delay"));
-      carryCFGOwner(nop);
+      carryCFGOwner(op, nop);
       append(nop);
     }
     append(op);
+    // A block's trailing delays follow its last op and belong to it, so a
+    // branch to the next block skips them.
+    if (position + 1 == s.blockEnd(block)) {
+      if (!after.empty())
+        emitDelays(after[block], op);
+      ++block;
+    }
   }
 
   llvm::DenseMap<Operation *, int64_t> word;

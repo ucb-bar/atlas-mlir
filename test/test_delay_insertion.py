@@ -139,6 +139,14 @@ class DelayInsertionTest(unittest.TestCase):
                 checked = run(OPT, result.stdout, "--verify-atlas-timing")
                 self.assertEqual(checked.returncode, 0, checked.stderr)
 
+    def test_stream_end_drains_work_in_flight(self) -> None:
+        vload = ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"')
+        result = run(OPT, program([addi(6, 0, 0), vload]), "--insert-atlas-delays")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([op for op, _, _ in stream(result.stdout)], ["alu_imm", "vload", "delay"])
+        checked = run(OPT, result.stdout, "--verify-atlas-timing")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_rejects_what_a_delay_cannot_fix(self) -> None:
         dma_then_vload = [
             addi(5, 0, 0), ("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),
@@ -156,6 +164,8 @@ class DelayInsertionTest(unittest.TestCase):
              "is not allowed in the input"),
             (dma_then_vload, "a delay cannot cover a DMA transfer"),
             (slow_slot, "delay-slot instruction must be single-cycle"),
+            (dma_then_vload[:-1] + [slow_slot[0], nop(), ("dma_wait", "channel = 0 : i32")],
+             "DMA completion before a block boundary"),
             ([("jump", 'kind = "jalr", dst = 0 : i32, base = 1 : i32, offset = 0 : i32'), nop()],
              "register target"),
             ([("upper", 'kind = "auipc", dst = 1 : i32, immediate = 0 : i32')], "own instruction index"),

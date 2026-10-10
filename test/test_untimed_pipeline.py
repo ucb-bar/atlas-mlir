@@ -152,7 +152,7 @@ class UntimedPipelineTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("atlas.complete", result.stderr)
 
-    def test_branch_targets_inserted_timing_prelude(self) -> None:
+    def test_back_edge_skips_the_fall_through_drain(self) -> None:
         source = program([addi(6, 0, 0), ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"'),
                           addi(1, 0, 0), ("branch", 'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = -2 : i32'),
                           nop(), ("trap", 'kind = "ecall"')])
@@ -160,7 +160,7 @@ class UntimedPipelineTest(unittest.TestCase):
         entries = instructions(timed)
         branch = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.branch")
         target = branch + entries[branch]["fields"]["offset_bytes"] // 2
-        self.assertEqual(entries[target]["operation"], "atlas.delay")
+        self.assertEqual(entries[target]["operation"], "atlas.alu_imm")
         corrupted = shorten_all_delays(timed)
         result = run("atlas-opt", corrupted, "--verify-atlas-timing")
         self.assertNotEqual(result.returncode, 0, result.stdout)

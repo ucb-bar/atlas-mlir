@@ -123,13 +123,17 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
 }
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
-// every block's ops at that block's positions. Rewriting alone leaves the
-// stream untimed; timing passes request a timed artifact by naming the
-// provider that timed it, which is stamped as atlas.timing_provider.
-// The module is then re-verified, and `stream` no longer describes it.
+// every block's ops at that block's positions. `after`, empty or one entry per
+// block, holds the delays that end a block falling through or ending the
+// stream: they drain its work, belong to it, and a branch into the next block
+// does not run them. Rewriting alone leaves the stream untimed; timing passes
+// request a timed artifact by naming the provider that timed it, which is
+// stamped as atlas.timing_provider. The module is then re-verified, and
+// `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
                                llvm::ArrayRef<DelayInsertion> before,
+                               llvm::ArrayRef<DelayInsertion> after = {},
                                llvm::StringRef timedBy = {});
 std::vector<uint32_t> idleDelays(int idle);
 bool isNop(Operation *op);

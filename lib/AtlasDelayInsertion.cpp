@@ -19,7 +19,8 @@ constexpr int kMaxSearch = 100000;
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p,
-                        std::vector<DelayInsertion> &before) {
+                        std::vector<DelayInsertion> &before,
+                        DelayInsertion &after) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
@@ -188,9 +189,13 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       return ops[i]->emitOpError(fault);
   }
 
-  if (s.fallsThrough(block) && drained() > nextFree)
-    before[end] = {idleDelays(drained() - nextFree), false,
-                   "this block finishes before the next one starts"};
+  // A block that neither branches nor halts drains before the next block, or
+  // the stream's end, as its own trailing delays.
+  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drained() > nextFree)
+    after = {idleDelays(drained() - nextFree), false,
+             s.fallsThrough(block)
+                 ? "this block finishes before the next one starts"
+                 : "work finishes before the stream ends"};
   return success();
 }
 
@@ -202,12 +207,13 @@ LogicalResult insertDelays(ModuleOp module, StringRef requested) {
   if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
+  std::vector<DelayInsertion> after(stream->starts.size());
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(timeBlock(*stream, b, *provider, before)))
+    if (failed(timeBlock(*stream, b, *provider, before, after[b])))
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);
-  return writeAtlasStream(module, *stream, order, before, provider->id);
+  return writeAtlasStream(module, *stream, order, before, after, provider->id);
 }
 
 struct InsertAtlasDelaysPass

@@ -246,7 +246,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
     order.push_back(begin + term);
     if (slot >= 0)
       order.push_back(begin + slot);
-  } else if (s.fallsThrough(block)) {
+  } else {
+    // No branch or halt: the block drains before the next one, or the
+    // stream's end.
     tailIdle = std::max(0, drain - free);
   }
   return success();
@@ -271,20 +273,21 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
                              *kind == AtlasArtifactKind::Generated,
                              order, before, tailIdle[b])))
       return failure();
-  // A block that falls through finishes before the next block's first op.
-  for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {
-    if (tailIdle[b] == 0)
-      continue;
-    DelayInsertion &next = before[order[stream->starts[b + 1]]];
-    std::vector<uint32_t> delays = idleDelays(tailIdle[b]);
-    delays.insert(delays.end(), next.delays.begin(), next.delays.end());
-    next.delays = delays;
-    std::string reason = "this block finishes before the next one starts";
-    next.reason = next.reason.empty() ? reason : reason + "; " + next.reason;
-  }
-  if (!insertDelays)
+  // A block without a branch or halt drains as its own trailing delays, so a
+  // branch into the next block does not run them.
+  std::vector<DelayInsertion> after(stream->starts.size());
+  for (size_t b = 0; b < stream->starts.size(); ++b)
+    if (tailIdle[b] > 0)
+      after[b] = {idleDelays(tailIdle[b]), false,
+                  stream->fallsThrough(b)
+                      ? "this block finishes before the next one starts"
+                      : "work finishes before the stream ends"};
+  if (!insertDelays) {
     before.assign(stream->ops.size(), DelayInsertion{});
-  if (failed(writeAtlasStream(module, *stream, order, before, insertDelays ? StringRef(provider->id) : StringRef())))
+    after.clear();
+  }
+  if (failed(writeAtlasStream(module, *stream, order, before, after,
+                              insertDelays ? StringRef(provider->id) : StringRef())))
     return failure();
   // The list scheduler spaces work with the npu-model graph; a timed result
   // under any other provider must pass that provider's verification.
