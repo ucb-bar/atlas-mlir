@@ -13,6 +13,7 @@ Computes per-operation engine timing (event ages, release, next issue) by execut
 | `derive.py` | Derives bundle ports, memory response latency and decoded command codes from the IR before a circuit is built. |
 | `runner.py` | `extract(document, spec)`: recipe registry (`RECIPES`), the generic `single` recipe, summaries, spec checks. |
 | `coupled.py` | `coupled` recipe: two circuits clocked together; same-cycle links resolved by fixed-point iteration over unknowns. |
+| `pairs.py` | Pair sweeps (prototype): operation A, then B at gap g; the gaps at which both behave as in isolation. Not part of `op_timing`. |
 | `summaries.py` | Stream summaries (first/last age, count, step, row contiguity, split streams), first-free and next-issue ages. |
 | `facts.py` | Record shape, `block` (record to `op_timing` block) and `document` (the output). Unresolved blocks carry `null` values and the reason as `evidence`. |
 
@@ -60,6 +61,15 @@ A run resets, flushes, then requires every register in the cone of the control s
 ## `coupled` recipe
 
 `recipe: coupled` simulates `module` (primary, with `cuts`/`probes`) and `partner: {module, inputs: [names], cuts?, probes?}` in lockstep; `partner.inputs` names the top-level `inputs` that belong to the partner. `links: {input: output}` drives an input port of one circuit with the same-cycle output (port or probe) of the other. Each cycle starts the linked inputs unknown and re-evaluates both circuits until the links stop changing, so evaluation order never matters and a combinational loop between the circuits leaves values unknown (unresolved). Every observed signal must be an output of exactly one circuit; the rest of the schema is that of `single`. Example: `targets/atlas/scalar_lsu.yaml`.
+
+## Pair sweeps (prototype)
+
+`targets/<target>/pairs/<engine>.yaml` declares operation pairs on one engine spec: `first`, `second`, `gaps` (`a..b`), optional `first_inputs`/`second_inputs` (operand overlays), `guards` (default: the second's `next_issue`), and file-level `equivalent` (event groups compared as one resource) and `ignore` (level-type groups). For each gap the second is issued `g` ages after the first; the gap is accepted when control stays known, busy drains, every guard is clear at the second's issue age, and the event multiset equals both isolated runs with the second shifted by `g`. Records (`rtl_extract.op_pairs.v1`) give per-gap results, `min_gap` and `stable_gap` (smallest gap from which every swept gap passes). Frontend assertions outside the engine (MREG tracker, MregFile and VMEM per-cycle checks) are not executed; see the module docstring.
+
+```sh
+PYTHONPATH=tools python3 -m rtl_extract.pairs --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
+  --pairs vlsu vpu --output build/rtl-extract/out/pairs.json
+```
 
 ## How to add an engine
 

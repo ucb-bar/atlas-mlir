@@ -1,0 +1,30 @@
+# Vector LSU pairs on distinct VMEM banks and MREGs. Engine-local evidence only: the VMEM same-bank and MREG
+# per-bank port assertions sit outside the LSU and stay with the compiler's bank and port reservations.
+engine: vlsu
+description: VLOAD/VSTORE issued back to back on the LSU's separate load and store paths.
+pairs:
+  vload_vstore:
+    first: vload
+    second: vstore
+    gaps: 1..40
+  vstore_vload:
+    first: vstore
+    second: vload
+    gaps: 1..40
+  vload_vload:
+    first: vload
+    second: vload
+    second_inputs: {io_cmd_bits_mregBank: 42, io_cmd_bits_vmemLineAddr: 41024}   # m42, bank 5
+    gaps: 1..40
+  vstore_vstore:
+    first: vstore
+    second: vstore
+    second_inputs: {io_cmd_bits_mregBank: 17, io_cmd_bits_vmemLineAddr: 24608}   # m17, bank 3
+    gaps: 1..40
+# Regression values used only by tests (full sweeps); the extractor never reads them. Gap 34 of a same-path pair is
+# blocked only by the busy guard: the events would be unchanged.
+expect:
+  vload_vstore: {min_gap: 1, stable_gap: 1}
+  vstore_vload: {min_gap: 1, stable_gap: 1}
+  vload_vload: {min_gap: 35, stable_gap: 35}
+  vstore_vstore: {min_gap: 35, stable_gap: 35}

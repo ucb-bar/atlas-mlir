@@ -71,5 +71,5 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 
 - MXU operations are extracted but not consumed by the compiler.
 - Loop-varying addresses (per-state register enumeration is the next step), engine work crossing block boundaries, and end-to-end replay of multi-block programs.
-- Overlap rules between operations; a pair recipe in the extractor is the intended route.
+- Overlap rules in the compiler. The extractor's pair recipe (`tools/rtl_extract/pairs.py`) computes minimum issue gaps between operations, for example 1 for vload→vstore on distinct banks and exp→relu, but the compiler still serializes and system-level assertions are not yet executed by the sweep.
 - Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.

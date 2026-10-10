@@ -1,0 +1,41 @@
+# VPU pairs with disjoint operand banks (second: vs1 18, vs2 22, vd 26). The guard is the second's issue-busy bit,
+# which the frontend asserts but does not stall on.
+engine: vpu
+description: Second VPU command issued while the first is in flight.
+equivalent:              # the overlap path may serve the second command on the other port pair
+  read: [read0, read1]
+  write: [write0, write1]
+pairs:
+  add_add:
+    first: add
+    second: add
+    second_inputs: &other {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}
+    gaps: 1..70
+  exp_relu:              # two single-input ops that share no lane logic
+    first: exp
+    second: relu
+    second_inputs: *other
+    gaps: 1..70
+  exp_exp2:              # shared lane logic
+    first: exp
+    second: exp2
+    second_inputs: *other
+    gaps: 1..70
+  exp_add:               # second needs both read slots
+    first: exp
+    second: add
+    second_inputs: *other
+    gaps: 1..70
+  rmax_exp:
+    first: rmax
+    second: exp
+    second_inputs: *other
+    gaps: 1..40
+# Regression values used only by tests (full sweeps); the extractor never reads them. exp_add below 65 locks the
+# engine (busy never clears) and exp_exp2 drops writes: the guard is what makes those gaps illegal.
+expect:
+  add_add: {min_gap: 65, stable_gap: 65}
+  exp_relu: {min_gap: 1, stable_gap: 1}
+  exp_exp2: {min_gap: 65, stable_gap: 65}
+  exp_add: {min_gap: 65, stable_gap: 65}
+  rmax_exp: {min_gap: 33, stable_gap: 33}
