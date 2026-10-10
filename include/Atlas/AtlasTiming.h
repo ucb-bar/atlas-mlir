@@ -151,9 +151,7 @@ struct DepGraph {
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, 8>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    uint32_t dmaRegs = 0xFFFFFFFE,
                     const IncomingDma *incomingDma = nullptr);
-uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
 

@@ -17,8 +17,7 @@ constexpr int kMaxIdle = 100000;
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
-LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
-                            uint32_t dmaRegs, bool generated,
+LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                             std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
@@ -34,7 +33,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block], dmaRegs);
+  DepGraph g = buildGraph(nodes, s.entry[block]);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Commands outside an interval cannot move into it.
@@ -264,13 +263,11 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
-  uint32_t dmaRegs = dmaOperandRegisters(stream->instrs);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, dmaRegs,
-                             *kind == AtlasArtifactKind::Generated,
+    if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
                              order, before, tailIdle[b])))
       return failure();
   // A block without a branch or halt drains as its own trailing delays, so a

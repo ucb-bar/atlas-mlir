@@ -503,6 +503,9 @@ private:
         {{"channel", i32(placement.channel)},
          {"atlas.virtual_dma_transfer", i32(placement.id)}});
     if (dst) {
+      // Transfers share the staging register, and the DMA latched its own
+      // copy at launch, so another launch may have moved it since. Set it
+      // for each VLOAD, as every scratch register is set where it is read.
       for (unsigned half = 0; half < placement.halves; ++half) {
         materializeScalar(placement.stagingReg,
                           placement.stagingWord + half * 256, loc);
