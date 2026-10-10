@@ -266,9 +266,8 @@ Other VPU modes and pack scales other than 127 are unsupported by evaluator admi
 
 Core execution is pending: no comparison of these forms against a selected-core artifact has run, so the evidence above is reference-side only.
 
-### Core comparison prerequisites (not reproduced)
+### Core comparison prerequisites (reproduced 2026-10-09)
 
-- Build the ARC model with arcilator `--inline=false`; the default inlining produced a function too large for native code generation to finish.
-- CIRCT firtool-1.75.0 needs the full arcilator LLVM pipeline; `--hw-convert-bitcasts` and `--arc-lower-arrays` are absent from it.
-- The comparison drives the model through ModeLIR `mlc.backends.cosim_atlas.run_program` with explicit `halt_signal="scalar/halt_now"`; a local ModeLIR checkout exists at `compiler/ModeLIR`.
+- Select the AtlasCore closure from the Chipyard FIRRTL, run CIRCT firtool-1.75.0's `arcilator` with its full LLVM pipeline (`--observe-registers --observe-memories --observe-named-values --state-file`; `--hw-convert-bitcasts` and `--arc-lower-arrays` are absent from that release and `--inline=false` does not help), then split the emitted LLVM IR into basic blocks of at most 128 instructions before `llc -O0 -filetype=obj -relocation-model=pic`; unsplit, the 800k-instruction `AtlasCore_passthrough` never finishes instruction selection, split it compiles in about 35 s. Link with `gcc -shared -fPIC -Wl,--no-undefined`. The splitting helper and receipts live outside this repository with the selected-core artifacts.
+- The comparison drives the model through ModeLIR `mlc.backends.cosim_atlas.run_program` with explicit `halt_signal="scalar/halt_now"`; a local ModeLIR checkout exists at `compiler/ModeLIR`. The model is an Arc model of the selected AtlasCore and is not cross-checked against Verilator or VCS.
 - Environment: `ATLAS_REQUIRE_VIRTUAL_CORE=1`, `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`, `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`; required mode fails on missing prerequisites and ordinary discovery skips these checks.

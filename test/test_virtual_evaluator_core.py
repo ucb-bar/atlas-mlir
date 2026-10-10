@@ -37,6 +37,8 @@ from test_virtual_mxu_lowering import instructions  # noqa: E402
 EXAMPLES = ROOT / "test/examples"
 INPUT_BASE, OUTPUT_BASE, CONTROL_BASE = 0x90000000, 0x90004000, 0x90008000
 RELU_OUTPUT_BASE = 0x90001000
+# The selected core prunes io_halted; the runner requires an explicit observed i1 manifest state.
+HALT_SIGNAL = "scalar/halt_now"
 SCHEDULED_PHASE, SCHEDULED_CYCLES = 3, 100000
 RANDOM_SEEDS = range(4)
 VIRTUAL_OPERATION = r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_'
@@ -125,9 +127,6 @@ def selected_core():
         original = cosim_atlas.CosimCore
 
         class SelectedCore(original):
-            def peek(self, name: str) -> int:
-                return super().peek("scalar/halt_now" if name == "io_halted" else name)
-
             def poke(self, name: str, value: int) -> None:
                 if name in ("io_dmaTL_d_bits_opcode", "io_dmaTL_d_bits_size"):
                     if name in self._S:
@@ -137,7 +136,8 @@ def selected_core():
 
         cosim_atlas.CosimCore = SelectedCore
         try:
-            yield lambda words, preload, max_cycles: cosim_atlas.run_program(model, state, words, preload=preload, max_cycles=max_cycles)
+            yield lambda words, preload, max_cycles: cosim_atlas.run_program(model, state, words, preload=preload, max_cycles=max_cycles,
+                                                                       halt_signal=HALT_SIGNAL)
         finally:
             cosim_atlas.CosimCore = original
     finally:
