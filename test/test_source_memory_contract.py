@@ -6,7 +6,7 @@ import re
 import unittest
 
 from test_virtual_lowering import lower, run
-from verification_support import TIMED_FINAL as BOUNDARIES, UNTIMED, assert_boundaries
+from verification_support import assert_boundaries, operations, reorder
 
 
 CONTRACT = "atlas.virtual_source_memory_contract"
@@ -83,10 +83,6 @@ LOOP = f'''module {{
 '''
 
 
-def operations(machine: str) -> list[str]:
-    return [line for line in machine.splitlines() if ": (!atlas.state)" in line]
-
-
 def source_operations(machine: str) -> list[tuple[int, int, str]]:
     pattern = r'\{block = (\d+) : i32, id = (\d+) : i32, mxu_commands = array<i32[^>]*>, name = "([^"]+)"'
     return [(int(block), int(identity), name) for block, identity, name in re.findall(pattern, machine)]
@@ -95,19 +91,6 @@ def source_operations(machine: str) -> list[tuple[int, int, str]]:
 def transfer_groups(machine: str) -> list[set[int]]:
     """Each explicit transfer's launch and completion source identities, in source order."""
     return [{identity, identity + 1} for _, identity, name in source_operations(machine) if name in LAUNCHES]
-
-
-def reorder(machine: str, ordered: list[str]) -> str:
-    lines = machine.splitlines()
-    first = next(n for n, line in enumerate(lines) if ": (!atlas.state)" in line)
-    last = max(n for n, line in enumerate(lines) if ": (!atlas.state)" in line)
-    previous = re.search(r"%(\w+) =", next(line for line in lines if '"atlas.start"' in line))[1]
-    rebuilt = []
-    for index, line in enumerate(ordered):
-        line = re.sub(r"^\s*%\w+ =", f"  %r{index} =", line)
-        rebuilt.append(re.sub(r'("atlas\.[^"]+"\()%\w+(\))', rf"\g<1>%{previous}\g<2>", line))
-        previous = f"r{index}"
-    return "\n".join(lines[:first] + rebuilt + lines[last + 1:]) + "\n"
 
 
 def swap_sources(machine: str, first: set[int], second: set[int]) -> str:
@@ -123,51 +106,46 @@ def swap_sources(machine: str, first: set[int], second: set[int]) -> str:
 
 
 class SourceMemoryContractTest(unittest.TestCase):
-    def check(self, machine: str, boundaries, *, rejected: str | None = None) -> None:
-        assert_boundaries(self, machine, boundaries, rejects=rejected)
-
     def test_completed_overlapping_transfers_keep_source_order(self) -> None:
         for first, second in (("store", "load"), ("load", "store"), ("store", "store")):
-            with self.subTest(first=first, second=second):
-                untimed = lower(program(first, second), timed=False)
-                self.assertIn(CONTRACT, untimed)
-                self.check(untimed, UNTIMED)
-                earlier, later, _ = transfer_groups(untimed)
-                swapped = swap_sources(untimed, earlier, later)
-                self.check(swapped, UNTIMED, rejected=ORDER)
-                delayed = run("atlas-opt", swapped, "--insert-atlas-delays")
-                self.assertNotEqual(delayed.returncode, 0)
-                self.assertIn(ORDER, delayed.stderr)
-                timed = lower(program(first, second))
-                self.check(timed, BOUNDARIES)
-                self.check(swap_sources(timed, *transfer_groups(timed)[:2]), BOUNDARIES, rejected=ORDER)
+            for timed in (False, True):
+                with self.subTest(first=first, second=second, timed=timed):
+                    machine = lower(program(first, second), timed=timed)
+                    self.assertIn(CONTRACT, machine)
+                    assert_boundaries(self, machine)
+                    swapped = swap_sources(machine, *transfer_groups(machine)[:2])
+                    assert_boundaries(self, swapped, rejects=ORDER)
+                    if not timed:
+                        delayed = run("atlas-opt", swapped, "--insert-atlas-delays")
+                        self.assertNotEqual(delayed.returncode, 0)
+                        self.assertIn(ORDER, delayed.stderr)
 
     def test_disjoint_and_read_read_reorders_remain_legal(self) -> None:
         for first, second, address in (("store", "load", X + 1024), ("load", "load", X)):
             with self.subTest(first=first, second=second):
                 untimed = lower(program(first, second, second_address=address), timed=False)
                 swapped = swap_sources(untimed, *transfer_groups(untimed)[:2])
-                self.check(swapped, UNTIMED)
+                assert_boundaries(self, swapped)
                 delayed = run("atlas-opt", swapped, "--insert-atlas-delays")
                 self.assertEqual(delayed.returncode, 0, delayed.stderr)
-                self.check(delayed.stdout, BOUNDARIES)
+                assert_boundaries(self, delayed.stdout)
 
     def test_weakened_contract_is_rejected(self) -> None:
         timed = lower(program("store", "load"))
         weakened = re.sub(r"predecessors = array<i32: [^>]*>", "predecessors = array<i32>", timed)
         self.assertNotEqual(weakened, timed)
-        self.check(weakened, BOUNDARIES, rejected=INCONSISTENT)
+        assert_boundaries(self, weakened, rejects=INCONSISTENT)
 
     def test_loop_visits_order_overlapping_effects_per_visit(self) -> None:
         untimed = lower(LOOP, timed=False)
-        self.check(untimed, UNTIMED)
-        self.check(lower(LOOP), BOUNDARIES)
+        assert_boundaries(self, untimed)
+        assert_boundaries(self, lower(LOOP))
         scheduled = run("atlas-opt", untimed, "--schedule-atlas-stream")
         self.assertEqual(scheduled.returncode, 0, scheduled.stderr)
-        self.check(scheduled.stdout, BOUNDARIES)
+        assert_boundaries(self, scheduled.stdout)
         first_read, second_read, store, load, _ = transfer_groups(untimed)
-        self.check(swap_sources(untimed, first_read, second_read), UNTIMED)
-        self.check(swap_sources(untimed, store, load), UNTIMED, rejected=ORDER)
+        assert_boundaries(self, swap_sources(untimed, first_read, second_read))
+        assert_boundaries(self, swap_sources(untimed, store, load), rejects=ORDER)
 
 
 if __name__ == "__main__":

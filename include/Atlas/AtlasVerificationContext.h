@@ -48,11 +48,10 @@ struct AtlasVerificationContext {
   AtlasVerificationContext &operator=(const AtlasVerificationContext &) = delete;
 };
 
-// Decodes, and thereby encodes, at most once. The caller has already run the
-// MLIR verifier and verifyAtlasTimingState. `generated` first runs the generated
-// structural stage (DMA launch/wait pairing, protected intervals and x0-NOP
-// redirect slots). Standalone checker entries pass requireStream to decode
-// irrespective of needsDecodedStream().
+// Decodes, and thereby encodes, at most once, after the MLIR verifier and
+// verifyAtlasTimingState. `generated` first runs the structural stage (DMA
+// pairing, protected intervals, x0-NOP redirect slots). Standalone checkers
+// pass requireStream to decode irrespective of needsDecodedStream().
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
                               bool requireStream = false);

@@ -25,69 +25,35 @@ control-flow examples.
 
 ## Evaluator interface
 
-The evaluator provides a
-[parser and typed runtime records](../tools/atlas_virtual_evaluator.py).
-Parsing checks supported signatures, types, attributes, and modes; it does not
-check state flow, dominance, handle lifetimes, DMA ranges, or hardware legality.
-[Admitted forms and numerical sources](#admitted-forms-and-numerical-sources)
-lists the operations and remaining questions for
-[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9).
+[`atlas_virtual_evaluator.py`](../tools/atlas_virtual_evaluator.py) executes the
+[admitted forms](#admitted-forms-and-numerical-sources) with audited `npu-model`
+numerics; selected RTL and matching CIRCT artifacts, not that model's timing
+assumptions, establish target behavior.
 
-Logical meaning comes from this contract, selected RTL and matching CIRCT
-artifacts establish target behavior, and audited `npu-model` components supply
-numerics; model timing assumptions do not establish RTL guarantees. The
-interface of [PR #13](https://github.com/ucb-bar/atlas-mlir/pull/13) is the
-compatibility target.
+`parse_program` checks signatures, types, attributes and modes in every block
+and keeps xDSL SSA/block identities (reparse after mutating the IR).
+`validate_inputs` requires exactly the declared indices/formats, including
+those on untaken paths, and controls in entry argument order.
+`evaluate(program, inputs, max_steps=10000)` first checks dominance, edges,
+state flow, handle rules and DMA address proofs in every block, then counts one
+step per executed operation, applies effects and numerical checks only on the
+chosen path and returns only executed outputs; unlike lowering, it accepts
+multiple returns and path-dependent outputs. `compare_results` checks output
+indices, raw BF16 bits and mapped memory bytes, ignoring output/region order and
+adjacent region partitioning but distinguishing unmapped bytes from zero.
 
-`parse_program` accepts flat IR or a selected function and retains xDSL SSA/block
-identities; reparse after mutating its IR. `validate_inputs` requires exactly
-the declared indices/formats, including untaken paths, and controls in entry
-argument order.
+A `Tile` holds 1,024 raw BF16 words or FP8 E4M3 bytes, a `Scalar` unsigned
+i1/i32 bits (-1 is `Scalar(32, 0xffffffff)`), and a `MemoryRegion` a nonempty
+byte snapshot within 32-bit DRAM; supplied regions cannot overlap. Logical tiles are
+independent of transport layout: BF16 pair-halves transport places a word at
+byte offset `(col // 16) * 1024 + (row * 16 + col % 16) * 2`, and FP8 payloads
+are 1,024 row-major bytes. Weights are `W[N,K]`, so contraction is
+`A[M,K] @ W[N,K].T`; do not derive expected values from compiler relayout.
 
-`evaluate(program, inputs, max_steps=10000)` executes BF16/FP8 boundary inputs,
-BF16 outputs, MOV/ReLU/ADD, scale-127 FP8 pack, i1/i32 controls, wrapping i32
-addition, the ten integer comparisons, branches, returns, both MXU units and
-explicit DMA with owned snapshots. It checks SSA dominance, edge types/arity and
-state flow before execution, binds branch arguments simultaneously, and counts
-each executed operation as one step; exhaustion raises `VirtualInterfaceError`
-with the block and operation position. Unsupported modes are rejected even on
-untaken paths, effects and numerical checks run only on the chosen path, and
-only executed outputs appear in the result. ADD uses FP32 nearest-even addition
-followed by BF16 truncation and canonical NaN. Multiple returns and
-path-dependent outputs are accepted although lowering excludes them.
-
-`compare_results(expected, actual)` checks identical output indices, raw BF16
-bits, and mapped memory bytes, ignoring output/region ordering and adjacent
-region partitioning but distinguishing unmapped bytes from zero. Failures report
-the first differing tile coordinate or byte address. `evaluate_tile_operation(op,
-operands)` checks a parsed pure VPU/pack operation on immutable tiles; pack uses
-`RtlNumerics.to_fp8` with scale 127 and preserves logical row-major order.
-
-```python
-from tools.atlas_virtual_evaluator import RuntimeInputs, Scalar, Tile, parse_program
-
-program = parse_program(source, function="choose_tile")
-inputs = RuntimeInputs({0: Tile("bf16", (0x3f80,) * 1024)}, (Scalar(1, 1),))
-program.validate_inputs(inputs)
-```
-
-Runtime values own immutable copies: `Tile(format, bits)` holds 1,024 raw BF16
-words or FP8 E4M3 bytes; `Scalar(width, bits)` holds unsigned i1/i32 bits
-(-1 is `Scalar(32, 0xffffffff)`); `MemoryRegion(address, data)` is a nonempty
-byte snapshot within 32-bit DRAM, and supplied regions cannot overlap.
-`RuntimeInputs(tiles, controls, memory)` and `EvaluationResult(outputs, memory)`
-carry the boundary data and final region snapshots.
-
-Logical tiles are independent of transport layout: BF16 pair-halves transport
-places a word at byte offset `(col // 16) * 1024 + (row * 16 + col % 16) * 2`,
-and FP8 payloads are 1,024 row-major bytes. Weights are `W[N,K]`, so contraction
-is `A[M,K] @ W[N,K].T`; do not derive expected values from compiler relayout.
-
-Install `tools/requirements-virtual-evaluator.txt` (xDSL 0.65.0) in an
-environment compatible with the pinned model (Python 3.14, Torch 2.11.0, NumPy
-2.4.4 in this session) with the model source root on `PYTHONPATH`. Compiler-backed
-checks also need `ATLAS_OOT_BIN_DIR` and `ATLAS_LLVM_BIN`; scheduled comparisons
-run unconditionally because the virtual scheduler is part of this compiler.
+Install `tools/requirements-virtual-evaluator.txt` in the pinned model's
+environment (Python 3.14, Torch 2.11.0, NumPy 2.4.4) with the model source root
+on `PYTHONPATH`; compiler-backed checks also need `ATLAS_OOT_BIN_DIR` and
+`ATLAS_LLVM_BIN`.
 
 ## Recommended interpreter state
 
@@ -120,11 +86,10 @@ block, operation_index = chosen_block, 0
 
 The environment can be per dynamic block visit. A global map is also possible
 if block arguments and operation results are rebound on every visit and no
-stale binding can be read. The evaluator checks SSA dominance and edge
-arity/types independently of xDSL parsing, along with static current-state
-identities on both branch edges and fresh runtime tokens on the chosen path. The
-compiler verifier additionally confines outputs to one return block, a lowering
-restriction.
+stale binding can be read. MLIR's verifier supplies static dominance and type
+checks; an interpreter still needs dynamic arity, type, current-token, and
+step-limit checks. The existing virtual stream verifier additionally requires
+the current state token on each CFG edge and one return block for outputs.
 
 ## Explicit DMA completion and scalar values
 
@@ -132,60 +97,21 @@ Channel-free DMA tile operations take ordinary i32 SSA values for DRAM byte addr
 
 An interpreter must distinguish a pending transfer from a ready tensor. `virtual_dma_load_fp8/bf16` creates a pending-load identity; its matching `virtual_dma_await_fp8/bf16` produces the usable tile. `virtual_dma_store_fp8/bf16` captures an immutable source tile into transfer-owned staging, and `virtual_dma_wait` establishes completion of the external write. Treat the staging as a private logical buffer owned through completion, not as an assigned VMEM window. An untimed interpreter may perform the copy eagerly internally, but must preserve these visibility and handle-lifetime rules.
 
-At most two transfers may be pending, awaited in either order. Completion must
-occur in the defining block, repeated or mismatched completions are rejected,
-implicit boundary I/O and VPU pack require no pending transfers, and a completed
-store counts as output (CFG stores and waits occur in the unique return block).
+Up to two pending transfers may complete in either order within their defining block ([admission](dialect-reference.md#channel-free-virtual-dma-and-scalar-ssa)); awaiting B exposes B, not A. Keep transfer identities independent of channels, staging windows and scalar helpers; scalar capture at launch does not release source memory (physical ownership and release belong to [issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10)).
 
-Awaiting B exposes B, not A. Logical completion remains separate from physical
-progress; keep identities independent of channels, staging windows, and scalar
-helpers. Scalar capture at launch does not release source memory; physical
-ownership and release belong to
-[issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10).
+Every executed transfer span must lie in supplied regions or ABI payload mappings without holes, loads must read initialized bytes, and overlap with a pending write is rejected. Boundary I/O and explicit DMA share execution-owned bytes, returned as final host-visible snapshots; unwritten output bytes and FP8 slot padding are undefined unless supplied.
 
 The environment must keep external load sources stable and exclude conflicting accesses to transfer ranges until completion. The IR checks do not prove host-side synchronization.
 
-Execution checks complete-tile lengths and addresses from i32 constants and
-wrapping additions, 32-byte alignment, addresses at or above `0x80000000`, and a
-widened end within `2^32`. Every executed span must be covered by supplied
-regions or ABI payload mappings (holes not allowed), and loads require
-initialized bytes. Executed transfers may share read ranges; overlap involving a
-pending write is rejected.
-
-ABI boundaries and explicit DMA share execution-owned bytes: returned mapped
-outputs reflect final host-visible bytes, and unwritten output bytes and FP8 slot
-padding are undefined unless supplied. No channels, VMEM windows, or cycles are
-simulated.
-
 ## Explicit MXU handle extension
 
-The dialect represents weight loading, reset contractions, accumulation, and
-BF16/FP8 readout. `!atlas.virtual_mxu_weight<unit>` identifies resident weights;
-`!atlas.virtual_mxu_acc<unit>` identifies a consumable accumulator version.
-Neither names a physical slot. Each unit admits two weights and two independent
-accumulator chains, and the interpreter must retain those distinct identities.
+Weight and accumulator-version handles are logical identities, not physical slots; the [handle rules](dialect-reference.md#explicit-virtual-mxu-resources) admit up to two weights and two accumulator chains per unit, which an interpreter must keep distinct.
 
-Each explicit MXU operation advances state. A weight load creates an identity;
-reset starts a contraction, not merely a zero accumulator. FP8/BF16 accumulator
-loads seed a chain and preserve weights; FP8 seeds decode without a scale.
-Accumulation consumes the current version and produces its successor. Either
-readout consumes that version while preserving weights. All handles must agree
-on their unit, remain in their defining block, and every accumulator must be
-read out before exit. Legacy `virtual_mxu_matmul` cannot overlap live explicit
-weights or accumulators on its unit.
+Each explicit MXU operation advances the virtual state token. Reset starts a contraction, not merely a zero accumulator.
 
 FP8 readout takes an immutable `!atlas.virtual_scale` produced by the pure `virtual_scale_constant` operation. Keep its raw code (`0..255`) in the value environment rather than treating it as a mutable physical scale register. The current slice admits constant scale definitions with ordinary dominance, but no scale block arguments or runtime scale inputs. A numerical interpreter must use the selected MXU converter, including its special-code behavior; VPU packing is not a substitute for MXU FP8 readout. FP8 readout produces the logical row-major tile layout used by virtual FP8 inputs.
 
-The compiler's structural and lifetime checks do not qualify numerical
-execution; slot and scratch-scale assignments stay outside the logical
-reference. Reuse audited `RtlNumerics` components with MXU0's per-MAC BF16
-rounding and MXU1's anchor accumulation, not a generic matmul. MXU FP8 readout
-multiplies by the scale and must not use VPU packing.
-
-Preflight counts remaining weight uses and unconsumed accumulator versions per
-block, applies the two-handle admission, rejects same-unit legacy overlap and
-cross-block handles, and requires accumulator readout before exit, including
-untaken blocks. Runtime handles bind immutable tiles afresh on each block visit.
+Reuse audited `RtlNumerics` components with MXU0's per-MAC BF16 rounding and MXU1's anchor accumulation, not a generic matmul.
 
 ## Semantic boundaries
 
@@ -217,31 +143,18 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 - Virtual versus selected-core machine results on directed numerical and
   memory-guard cases, with the comparison's exact precision domain recorded.
 
-The parser/input layer, scalar/CFG, admitted VPU/pack, both MXU units, and DMA
-are implemented in this repository's Python verification tooling. The
-selected-core comparisons in `test/test_virtual_evaluator_core.py` ran in
-required mode on 2026-10-09 against the Arc model described below: every row of
-the table (shared input, two outputs, VPU, PACK, both MXU units with
-continuation, seeding and readout, CFG, pending and reverse-completed DMA,
-scheduled variants) matched the reference, and the ReLU→MOV mutation was
-detected. The model is not RTL-simulation-qualified, so this evidence is
-bounded by the model's fidelity to the selected RTL, and
-[issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when
-the team accepts that bound.
-
 ## Admitted forms and numerical sources
 
-The evaluator executes the 23 virtual forms below (names follow `atlas.virtual_`) plus the scalar/CFG subset (`arith.constant/addi/cmpi`, `cf.br/cond_br`, `func.return`). `S/B/F/E` denote state/BF16/FP8/scale; `L8/L16/D` pending FP8-load/BF16-load/store handles; `W<u>/A<u>` weight/accumulator handles for unit `u = 0..1`. Tiles are logical 32×32 raw encodings; DMA address/length are i32 SSA operands. Letters in the last column refer to the audit table.
+The evaluator executes these 23 `atlas.virtual_*` forms plus `arith.constant/addi/cmpi` (all ten predicates), `cf.br/cond_br` and `func.return`. `S/B/F/E` are state/BF16/FP8/scale, `L8/L16/D` pending FP8-load/BF16-load/store handles and `W<u>/A<u>` weight/accumulator handles on unit `u = 0..1`; final letters name audit rows.
 
 | Suffix | Operands → results | Admission / meaning |
 | --- | --- | --- |
 | `start` | `() → S` | Unique first entry operation |
-| `input_bf16` | `S → S, B` | Nonnegative `index`; snapshot input |
-| `input_fp8` | `S → S, F` | Nonnegative `index`; snapshot input |
+| `input_bf16` / `input_fp8` | `S → S, B/F` | Nonnegative `index`; snapshot input |
 | `output_bf16` | `S, B → S` | Unique `index`; publish snapshot |
 | `vpu_unary` | `B → B` | `kind`: `mov`, `relu`; V1 |
 | `vpu_binary` | `B, B → B` | `kind`: `add`; V2 |
-| `pack_fp8` | `B → F` | `scale_code = 127`; P |
+| `pack_fp8` | `B → F` | `scale_code = 127` (`RtlNumerics.to_fp8`); P |
 | `scale_constant` | `() → E` | Raw `code = 0..255` |
 | `mxu_matmul` | `F, F → B` | `unit = 0..1`; reset contraction; M |
 | `dma_load_fp8` / `dma_load_bf16` | `S, i32, i32 → S, L8/L16` | Length 1,024 / 2,048; D |
@@ -255,26 +168,21 @@ The evaluator executes the 23 virtual forms below (names follow `atlas.virtual_`
 | `mxu_readout_bf16` | `S, A<u> → S, B` | Consume version, retain weights; M |
 | `mxu_readout_fp8` | `S, A<u>, E → S, F` | Constant scale; selected converter; R |
 
-Other VPU modes and pack scales other than 127 are unsupported by evaluator admission and physical lowering.
+In required mode on 2026-10-09, every row of `test/test_virtual_evaluator_core.py`, including scheduled variants, matched the reference on the selected-core Arc model, which is not cross-checked against Verilator or VCS; the evidence is bounded by its fidelity to the selected RTL, and [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when the team accepts that bound.
 
-| ID | Existing evidence | Selected-core rows (2026-10-09) | Remaining audit |
+| ID | Existing evidence | Selected-core rows | Remaining audit |
 | --- | --- | --- | --- |
-| V1 | MOV raw copy and ReLU sign-bit rule over all 65,536 encodings; [ReLU](vpu-relu-observation.md) | `shared_relu`, `vpu`, `dma_bf16_relu`, `cfg_relu_loop_*`; ReLU→MOV mutation detected | Patterned tiles, not all 65,536 encodings, on the core |
-| V2 | FP32 RNE/BF16 chop path with directed signed-zero, subnormal, overflow, infinity and NaN cases; [addition](vpu-add-observation.md) | `vpu` and `dma_pending_work` (ADD on patterned tiles) | The `1 + 3/512` chop-versus-nearest-even literal and the directed special cases on the core |
+| V1 | MOV raw copy and ReLU sign-bit rule, all 65,536 encodings; [ReLU](vpu-relu-observation.md) | `shared_relu`, `vpu`, `dma_bf16_relu`, `cfg_relu_loop_*`; ReLU→MOV mutation detected | Patterned tiles, not all 65,536 encodings, on the core |
+| V2 | FP32 RNE/BF16 chop path with canonical NaN and directed signed-zero, subnormal, overflow, infinity and NaN cases; [addition](vpu-add-observation.md) | `vpu` and `dma_pending_work` (ADD on patterned tiles) | The `1 + 3/512` chop-versus-nearest-even literal and the directed special cases on the core |
 | P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | `mxu{0,1}_legacy_pack` and the physical converter/transport probe | PACK→MXU chains beyond `legacy_pack` |
 | M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | `mxu{0,1}_{continuation,seed_bf16,seed_fp8}`, `dma_mxu_*`, `two_chains_*` | Exceptional BF16 accumulator encodings on the core |
 | R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | None (no row reads out FP8) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |
 | D | Owned snapshots, matching completion, raw serialization, mapped spans, guards, two-handle cases; [pointer lifetime](dma-pointer-lifetime-observation.md) | `dma_pending_work`, `two_dma_reverse_await`, `dma_fp8_copy`, traffic counts | Pending-write conflicts and mixed boundary/memory write aliases unqualified |
 
-| Pin | Revision |
-| --- | --- |
-| Selected RTL | `0079c0541111197741a231c002e3843fa6f545b2` |
-| Current `npu-model` | `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6` |
+Pins: selected RTL `0079c0541111197741a231c002e3843fa6f545b2` and `npu-model` `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6`. The base reference suites (`test_*_reference.py`, handoff and inventory tests) assert this RTL pin, but the model was built from a checkout reporting `2ae0bef`, so those pin assertions fail until refreshed; their executions on the model pass.
 
-The base reference suites (`test_*_reference.py`, handoff and inventory tests) assert the RTL pin above; the checkout the model was built from reports `2ae0bef`, so those pin assertions fail until the pin is refreshed, while their executions on the model pass.
+### Core comparison prerequisites
 
-### Core comparison prerequisites (reproduced 2026-10-09)
-
-- Select the AtlasCore closure from the Chipyard FIRRTL, run CIRCT firtool-1.75.0's `arcilator` with its full LLVM pipeline (`--observe-registers --observe-memories --observe-named-values --state-file`; `--hw-convert-bitcasts` and `--arc-lower-arrays` are absent from that release and `--inline=false` does not help), then split the emitted LLVM IR into basic blocks of at most 128 instructions before `llc -O0 -filetype=obj -relocation-model=pic`; unsplit, the 800k-instruction `AtlasCore_passthrough` never finishes instruction selection, split it compiles in about 35 s. Link with `gcc -shared -fPIC -Wl,--no-undefined`. The splitting helper and receipts live outside this repository with the selected-core artifacts.
-- The comparison drives the model through ModeLIR `mlc.backends.cosim_atlas.run_program` with explicit `halt_signal="scalar/halt_now"`; a local ModeLIR checkout exists at `compiler/ModeLIR`. The model is an Arc model of the selected AtlasCore and is not cross-checked against Verilator or VCS.
+- Select the AtlasCore closure from the Chipyard FIRRTL and run CIRCT firtool-1.75.0's `arcilator` with its full LLVM pipeline (`--observe-registers --observe-memories --observe-named-values --state-file`; that release lacks `--hw-convert-bitcasts` and `--arc-lower-arrays`). Split the emitted LLVM IR into basic blocks of at most 128 instructions before `llc -O0 -filetype=obj -relocation-model=pic` (unsplit, instruction selection on the 800k-instruction `AtlasCore_passthrough` never finishes; split, about 35 s), then link with `gcc -shared -fPIC -Wl,--no-undefined`. The splitting helper lives outside this repository with the selected-core artifacts.
+- The test drives the model through ModeLIR `mlc.backends.cosim_atlas.run_program` with explicit `halt_signal="scalar/halt_now"`.
 - Environment: `ATLAS_REQUIRE_VIRTUAL_CORE=1`, `ATLAS_OOT_BIN_DIR`, `ATLAS_LLVM_BIN`, `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`; required mode fails on missing prerequisites and ordinary discovery skips these checks.

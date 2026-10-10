@@ -28,25 +28,30 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   RegValues regs = s.entry[block];
   // The first uncovered provider rule; checked after each placement.
   std::string fault;
+  auto note = [&](const std::string &why) {
+    if (!why.empty() && fault.empty())
+      fault = why;
+  };
   auto rule = [&](auto result) {
-    if (!result.error.empty() && fault.empty())
-      fault = result.error;
+    note(result.error);
     return std::move(result.value);
+  };
+  auto reserve = [&](TimingReservations &table, const Instr &in,
+                     const Footprint &f, int cycle) {
+    std::string why = table.reserve(in, f, cycle);
+    if (why.empty() && in.op->opClass == OpClass::DmaWait)
+      why = table.onWait(in, cycle);
+    note(why);
   };
   std::vector<Issued> issued;
   // Rebuilds the provider's reservation state for the placements so far.
   auto replay = [&]() -> std::unique_ptr<TimingReservations> {
     auto table = rule(p.createReservations());
-    if (!table && fault.empty())
-      fault = "timing provider returned no reservation state";
-    for (const Issued &x : issued) {
-      if (!table) break;
-      std::string why = table->reserve(instrs[x.index], x.f, x.cycle);
-      if (why.empty() && instrs[x.index].op->opClass == OpClass::DmaWait)
-        why = table->onWait(instrs[x.index], x.cycle);
-      if (!why.empty() && fault.empty())
-        fault = why;
-    }
+    if (!table)
+      note("timing provider returned no reservation state");
+    else
+      for (const Issued &x : issued)
+        reserve(*table, instrs[x.index], x.f, x.cycle);
     return table;
   };
   std::unique_ptr<TimingReservations> table = replay();
@@ -77,16 +82,12 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (cycle > nextFree)
       before[i] = {idleDelays(cycle - nextFree), false, reason};
     const Instr &in = instrs[i];
-    std::string why = table->reserve(in, f, cycle);
-    if (why.empty() && in.op->opClass == OpClass::DmaWait)
-      why = table->onWait(in, cycle);
-    if (!why.empty() && fault.empty())
-      fault = why;
+    reserve(*table, in, f, cycle);
     issued.push_back({i, f, cycle});
     applyScalar(in, regs);
     int gap = rule(p.issueGap(in));
-    if (gap <= 0 && fault.empty())
-      fault = "timing provider issue gap exceeds positive cycle domain";
+    if (gap <= 0)
+      note("timing provider issue gap exceeds positive cycle domain");
     nextFree = cycle + gap;
   };
   auto search = [&](size_t i, int &cycle, std::string &reason,
@@ -165,9 +166,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         auto withBranch = replay();
         if (!withBranch)
           return why;
-        why = withBranch->reserve(in, f, c);
-        if (!why.empty() && fault.empty())
-          fault = why;
+        note(withBranch->reserve(in, f, c));
         why = rule(withBranch->conflict(slot, sf, c + 1));
         return why.empty() ? why : "delay slot: " + why;
       };

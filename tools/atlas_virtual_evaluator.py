@@ -198,14 +198,8 @@ _SIGNATURES = {
     "dma_wait": (("state", "dma_store"), ("state",), ()),
 }
 
-_STANDARD_PROPERTIES = {
-    "arith.constant": {"value"},
-    "arith.addi": {"overflowFlags"},
-    "arith.cmpi": {"predicate"},
-    "cf.br": set(),
-    "cf.cond_br": {"operandSegmentSizes"},
-    "func.return": set(),
-}
+_STANDARD_PROPERTIES = {"arith.constant": {"value"}, "arith.addi": {"overflowFlags"}, "arith.cmpi": {"predicate"},
+                        "cf.br": set(), "cf.cond_br": {"operandSegmentSizes"}, "func.return": set()}
 
 
 def _atlas_fields(op: Operation) -> dict[str, Attribute]:
@@ -218,7 +212,6 @@ def _atlas_fields(op: Operation) -> dict[str, Attribute]:
 def _integer_attribute(op: Operation, name: str) -> int:
     value = _atlas_fields(op).get(name)
     _require(isinstance(value, builtin.IntegerAttr) and value.type == builtin.i32, f"{operation_name(op)} requires {name} : i32")
-    assert isinstance(value, builtin.IntegerAttr)
     return value.value.data
 
 
@@ -391,9 +384,8 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
         result = RtlNumerics.to_fp8(owned[0], _integer_attribute(op, "scale_code"))
     else:
         result = RtlNumerics.unary(kind, owned[0])
-    format: TileFormat = "fp8" if kind == "pack_fp8" else "bf16"
-    raw = result.contiguous().view(torch.uint8 if format == "fp8" else torch.uint16)
-    return Tile(format, tuple(raw.flatten().tolist()))
+    fp8 = kind == "pack_fp8"
+    return Tile("fp8" if fp8 else "bf16", tuple(result.contiguous().view(torch.uint8 if fp8 else torch.uint16).flatten().tolist()))
 
 
 def _mxu_unit(op: Operation) -> int:
@@ -416,9 +408,8 @@ def _mxu_tile(kind: str, operands: tuple[Tile, ...], scale: int = 127, *, unit: 
         result = RtlNumerics.from_fp8(tensors[0], 127)
     else:
         result = RtlNumerics.acc_to_fp8(tensors[0], scale)
-    format: TileFormat = "fp8" if kind == "readout_fp8" else "bf16"
-    raw = result.contiguous().view(torch.uint8 if format == "fp8" else torch.uint16)
-    return Tile(format, tuple(raw.flatten().tolist()))
+    fp8 = kind == "readout_fp8"
+    return Tile("fp8" if fp8 else "bf16", tuple(result.contiguous().view(torch.uint8 if fp8 else torch.uint16).flatten().tolist()))
 
 
 def _check_mxu_handles(operations: tuple[Operation, ...]) -> None:
@@ -477,17 +468,13 @@ def _constant_i32(value: SSAValue, cache: dict[SSAValue, int | None]) -> int | N
     return cache[value]
 
 
-def _dma_span(op: Operation, constants: dict[SSAValue, int | None]) -> tuple[int, int, TileFormat, bool]:
-    name = operation_name(op)
-    store = "dma_store_" in name
-    format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
+def _dma_span(op: Operation, constants: dict[SSAValue, int | None]) -> tuple[int, int]:
     address, length = (_constant_i32(value, constants) for value in op.operands[-2:])
     _require(address is not None and length is not None, "DMA address/length require i32 constant/wrapping-add proof")
-    assert address is not None and length is not None
-    _require(length == (1024 if format == "fp8" else 2048), "DMA length must equal the complete tile size")
+    _require(length == (1024 if operation_name(op).endswith("fp8") else 2048), "DMA length must equal the complete tile size")
     _require(address >= 0x80000000 and address % 32 == 0, "DMA address must be selected DRAM aligned to 32 bytes")
     _require(address + length <= 1 << 32, "DMA span exceeds the 32-bit address space")
-    return address, length, format, store
+    return address, length
 
 
 def _overlaps(address: int, length: int, other: int, size: int) -> bool:
@@ -517,17 +504,17 @@ def _boundary_address(program: ParsedProgram, kind: str, index: int) -> int | No
 
 
 def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
-    pending: dict[SSAValue, tuple[int, int, TileFormat, bool]] = {}
+    pending: set[SSAValue] = set()
     for op in operations:
         name = operation_name(op).removeprefix("atlas.virtual_")
         if name.startswith(("dma_load_", "dma_store_")):
-            address, length, format, store = span = _dma_span(op, constants)
+            address, length = _dma_span(op, constants)
             _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
             _require(not any(kind == "control" and _overlaps(address, length, other, size) for other, size, kind in boundaries), "DMA must not overlap the control mailbox")
-            pending[op.results[1]] = span
+            pending.add(op.results[1])
         elif name.startswith("dma_await_") or name == "dma_wait":
             _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
-            del pending[op.operands[1]]
+            pending.remove(op.operands[1])
         elif name in ("input_bf16", "input_fp8", "output_bf16", "pack_fp8"):
             _require(not pending, f"{name}: pending DMA must complete before implicit I/O or pack")
     _require(not pending, "every pending DMA transfer must complete before block exit")
@@ -678,21 +665,10 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                 observed[index] = _tile_from_bytes(memory.read(address, 2048), "bf16")
         return EvaluationResult(observed, memory.snapshots())
 
-    def value(operand: SSAValue) -> object:
+    def value(operand: SSAValue, kind: type = object):
         _require(operand in values, "operand has no executed SSA definition")
+        _require(isinstance(values[operand], kind), f"expected a {kind.__name__.lower()} runtime value")
         return values[operand]
-
-    def scalar(operand: SSAValue) -> Scalar:
-        result = value(operand)
-        _require(isinstance(result, Scalar), "expected a scalar runtime value")
-        assert isinstance(result, Scalar)
-        return result
-
-    def tile(operand: SSAValue) -> Tile:
-        result = value(operand)
-        _require(isinstance(result, Tile), "expected a tile runtime value")
-        assert isinstance(result, Tile)
-        return result
 
     block = program.blocks[0]
     bindings: tuple[object, ...] = inputs.controls
@@ -709,18 +685,17 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                 width = op.result.type.width.data
                 values[op.result] = Scalar(width, op.value.value.data & ((1 << width) - 1))
             elif isinstance(op, arith.AddiOp):
-                values[op.result] = Scalar(32, (scalar(op.lhs).bits + scalar(op.rhs).bits) & 0xFFFFFFFF)
+                values[op.result] = Scalar(32, (value(op.lhs, Scalar).bits + value(op.rhs, Scalar).bits) & 0xFFFFFFFF)
             elif isinstance(op, arith.CmpiOp):
-                left, right = scalar(op.lhs).bits, scalar(op.rhs).bits
-                signed_left = left - (1 << 32) if left & (1 << 31) else left
-                signed_right = right - (1 << 32) if right & (1 << 31) else right
+                left, right = value(op.lhs, Scalar).bits, value(op.rhs, Scalar).bits
+                signed_left, signed_right = (bits - (1 << 32) if bits & (1 << 31) else bits for bits in (left, right))
                 predicates = (
                     left == right, left != right, signed_left < signed_right, signed_left <= signed_right,
                     signed_left > signed_right, signed_left >= signed_right, left < right, left <= right, left > right, left >= right,
                 )
                 values[op.result] = Scalar(1, int(predicates[op.predicate.value.data]))
             elif isinstance(op, (cf.BranchOp, cf.ConditionalBranchOp)):
-                edge = 0 if isinstance(op, cf.BranchOp) or scalar(op.cond).bits else 1
+                edge = 0 if isinstance(op, cf.BranchOp) or value(op.cond, Scalar).bits else 1
                 target, arguments = _edges(op)[edge]
                 # Snapshot every source before rebinding a backedge's destinations.
                 bindings = tuple(value(argument) for argument in arguments)
@@ -731,11 +706,11 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                 _require(state is None, "virtual_start cannot execute twice")
                 state = values[op.results[0]] = object()
             elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
-                values[op.results[0]] = evaluate_tile_operation(op, tuple(tile(operand) for operand in op.operands))
+                values[op.results[0]] = evaluate_tile_operation(op, tuple(value(operand, Tile) for operand in op.operands))
             elif name == "atlas.virtual_scale_constant":
                 values[op.results[0]] = _integer_attribute(op, "code")
             elif name == "atlas.virtual_mxu_matmul":
-                operands = tuple(tile(operand) for operand in op.operands) + (Tile("bf16", (0,) * 1024),)
+                operands = tuple(value(operand, Tile) for operand in op.operands) + (Tile("bf16", (0,) * 1024),)
                 values[op.results[0]] = _mxu_tile("matmul", operands, unit=_mxu_unit(op))
             else:
                 _require(state is not None and value(op.operands[0]) is state, f"{name}: expected current dynamic state token")
@@ -749,34 +724,33 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     values[op.results[1]] = original if address is None else _tile_from_bytes(memory.read(address, size), original.format)
                 elif name == "atlas.virtual_output_bf16":
                     index = _integer_attribute(op, "index")
-                    outputs[index] = tile(op.operands[1])
+                    outputs[index] = value(op.operands[1], Tile)
                     address = _boundary_address(program, "output", index)
                     if address is not None:
                         memory.write(address, _tile_bytes(outputs[index]))
                 elif name in ("atlas.virtual_mxu_load_weight", "atlas.virtual_mxu_load_acc_bf16", "atlas.virtual_mxu_readout_bf16"):
-                    values[op.results[1]] = tile(op.operands[1])
+                    values[op.results[1]] = value(op.operands[1], Tile)
                 elif name == "atlas.virtual_mxu_load_acc_fp8":
-                    values[op.results[1]] = _mxu_tile("seed_fp8", (tile(op.operands[1]),))
+                    values[op.results[1]] = _mxu_tile("seed_fp8", (value(op.operands[1], Tile),))
                 elif name in ("atlas.virtual_mxu_reset", "atlas.virtual_mxu_accumulate"):
-                    accumulator = tile(op.operands[3]) if name.endswith("accumulate") else Tile("bf16", (0,) * 1024)
-                    values[op.results[1]] = _mxu_tile("matmul", (tile(op.operands[1]), tile(op.operands[2]), accumulator), unit=_mxu_unit(op))
+                    accumulator = value(op.operands[3], Tile) if name.endswith("accumulate") else Tile("bf16", (0,) * 1024)
+                    values[op.results[1]] = _mxu_tile("matmul", (value(op.operands[1], Tile), value(op.operands[2], Tile), accumulator), unit=_mxu_unit(op))
                 elif name == "atlas.virtual_mxu_readout_fp8":
                     scale = value(op.operands[2])
                     _require(type(scale) is int and 0 <= scale <= 255, "MXU readout requires a raw constant scale code")
-                    values[op.results[1]] = _mxu_tile("readout_fp8", (tile(op.operands[1]),), scale)
+                    values[op.results[1]] = _mxu_tile("readout_fp8", (value(op.operands[1], Tile),), scale)
                 elif name.startswith(("atlas.virtual_dma_load_", "atlas.virtual_dma_store_")):
-                    address, length = (scalar(operand).bits for operand in op.operands[-2:])
+                    address, length = (value(operand, Scalar).bits for operand in op.operands[-2:])
                     format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
                     store = name.startswith("atlas.virtual_dma_store_")
                     for transfer in pending.values():
                         _require(not (store or transfer.store) or not _overlaps(address, length, transfer.address, len(transfer.data)), "DMA access conflicts with an overlapping pending write or read")
                     memory.check_span(address, length)
-                    data = _tile_bytes(tile(op.operands[1])) if store else memory.read(address, length)
+                    data = _tile_bytes(value(op.operands[1], Tile)) if store else memory.read(address, length)
                     values[op.results[1]] = pending[op.results[1]] = _Transfer(address, data, format, store)
                 elif name.startswith("atlas.virtual_dma_await_") or name == "atlas.virtual_dma_wait":
                     transfer = value(op.operands[1])
                     _require(isinstance(transfer, _Transfer), "expected an executed DMA transfer")
-                    assert isinstance(transfer, _Transfer)
                     if name == "atlas.virtual_dma_wait":
                         memory.write(transfer.address, transfer.data)
                     else:

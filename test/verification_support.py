@@ -33,9 +33,9 @@ FIELD_RE = re.compile(r'([\w.]+) = (-?\d+ : i32|"[^"]*"|true|false|array<i32[^>]
 WORD_RE = re.compile(r"atlas\.word = (-?\d+) : i32")
 
 
-def assert_boundaries(test, text: str, boundaries=TIMED_FINAL, *, rejects: str | None = None, forbid=CLASSIFICATION) -> None:
+def assert_boundaries(test, text: str, boundaries=None, *, rejects: str | None = None) -> None:
     """Accept at every boundary, or reject with `rejects` (any diagnostic when empty) and no unintended classification failure."""
-    for tool, options in boundaries:
+    for tool, options in boundaries or (TIMED_FINAL if TIMED in text else UNTIMED):
         with test.subTest(tool=tool, options=options):
             result = run(tool, text, *options)
             if rejects is None:
@@ -46,7 +46,7 @@ def assert_boundaries(test, text: str, boundaries=TIMED_FINAL, *, rejects: str |
             test.assertEqual(result.stdout, "")
             test.assertTrue(result.stderr)
             test.assertIn(rejects, result.stderr)
-            for unintended in forbid:
+            for unintended in CLASSIFICATION:
                 if unintended not in rejects:
                     test.assertNotIn(unintended, result.stderr)
 
@@ -58,10 +58,7 @@ def checked(test, text: str, *options: str, tool: str = "atlas-opt") -> str:
 
 
 def finalize_rejects(test, structured: str, diagnostic: str = "") -> None:
-    result = run("atlas-opt", structured, "--finalize-atlas-llvm-calls")
-    test.assertNotEqual(result.returncode, 0, result.stdout)
-    test.assertEqual(result.stdout, "")
-    test.assertIn(diagnostic, result.stderr)
+    assert_boundaries(test, structured, (("atlas-opt", ("--finalize-atlas-llvm-calls",)),), rejects=diagnostic)
 
 
 def value(raw: str):
@@ -79,28 +76,29 @@ def fields(text: str) -> dict:
     return {name: value(raw) for name, raw in FIELD_RE.findall(text)}
 
 
-def contract_text(machine: str, name: str) -> str:
-    """The value of module attribute atlas.virtual_<name>_contract, which may nest brackets."""
-    key = f"atlas.virtual_{name}_contract = "
-    if key not in machine:
-        raise AssertionError(f"artifact must retain the source {name} contract")
-    begin = machine.index(key) + len(key)
+def attribute_value(text: str, key: str) -> str:
+    """The value of the first attribute `key` in `text`, which may nest brackets."""
+    begin = text.index(key + " = ") + len(key) + 3
     depth, quoted = 0, False
-    for end in range(begin, len(machine)):
-        char = machine[end]
+    for end in range(begin, len(text)):
+        char = text[end]
         if char == '"':
             quoted = not quoted
         elif quoted:
             continue
-        elif not depth and char in ",}":
-            return machine[begin:end]
-        elif char in "[{":
+        elif char in "[{<(":
             depth += 1
-        elif char in "]}":
+        elif char in "]}>)" and depth:
             depth -= 1
-            if not depth:
-                return machine[begin:end + 1]
+        elif not depth and char in ",}":
+            return text[begin:end]
     raise AssertionError(f"unterminated {key}")
+
+
+def contract_text(machine: str, name: str) -> str:
+    if f"atlas.virtual_{name}_contract = " not in machine:
+        raise AssertionError(f"artifact must retain the source {name} contract")
+    return attribute_value(machine, f"atlas.virtual_{name}_contract")
 
 
 def records(machine: str, name: str) -> list[dict]:
@@ -118,21 +116,11 @@ def replace_contract(machine: str, name: str, text: str) -> str:
 
 
 def drop_attribute(machine: str, name: str) -> str:
-    """Remove one top-level module attribute, whose value may nest brackets."""
+    """Remove one top-level module attribute."""
     header, rest = machine.split("\n", 1)
-    start = header.index(name + " = ") if name + " = " in header else header.index(name)
-    end, depth, quoted = start + len(name), 0, False
-    if header.startswith(" = ", end):
-        end += 3
-        while quoted or depth or header[end] not in ",}":
-            char = header[end]
-            if char == '"' and header[end - 1] != "\\":
-                quoted = not quoted
-            elif not quoted and char in "[{<(":
-                depth += 1
-            elif not quoted and char in "]}>)":
-                depth -= 1
-            end += 1
+    old = f"{name} = {attribute_value(header, name)}" if name + " = " in header else name
+    start = header.index(old)
+    end = start + len(old)
     if header.startswith(", ", end):
         end += 2
     elif header[start - 2:start] == ", ":
@@ -181,37 +169,53 @@ def shift_constant(line: str, addi_step: int) -> str:
     return re.sub(r"immediate = (-?\d+)", lambda m: f"immediate = {int(m.group(1)) + step}", line, count=1)
 
 
-def _result(line: str) -> str:
-    return re.match(r"\s*(%[\w.]+) = ", line)[1]
+def constant(reg: int, value: int) -> list[tuple[str, str]]:
+    low = ((value + 2048) & 4095) - 2048
+    return [("upper", f'kind = "lui", dst = {reg} : i32, immediate = {((value - low) >> 12) & 0xFFFFF} : i32'),
+            ("alu_imm", f'kind = "addi", dst = {reg} : i32, src = {reg} : i32, immediate = {low} : i32')]
 
 
-def _rethread(lines: list[str], index: int, old: str, new: str) -> None:
-    if index < len(lines) and f"({old})" in lines[index]:
-        lines[index] = lines[index].replace(f"({old})", f"({new})", 1)
+def operations(machine: str) -> list[str]:
+    return [line for line in machine.splitlines() if ": (!atlas.state)" in line]
 
 
-def insert_after(machine: str, index: int, operations) -> str:
-    """Insert (name, fields) operations after line `index` of a printed artifact, owned by that line's source block."""
+def reorder(machine: str, ordered: list[str]) -> str:
+    """Replace the issued operations with `ordered`, rethreading their state."""
     lines = machine.splitlines()
-    previous = _result(lines[index])
-    block = re.search(r"atlas\.virtual_cfg_block = (\d+) : i32", lines[index])[1]
-    inserted = []
-    for offset, (name, text) in enumerate(operations):
-        result = f"%inserted{index}_{offset}"
-        inserted.append(f'  {result} = "atlas.{name}"({previous}) {{{text}, atlas.virtual_cfg_block = {block} : i32}} : ({STATE}) -> {STATE}')
-        previous = result
-    _rethread(lines, index + 1, _result(lines[index]), previous)
-    lines[index + 1:index + 1] = inserted
-    return "\n".join(lines) + "\n"
+    first = next(n for n, line in enumerate(lines) if ": (!atlas.state)" in line)
+    last = max(n for n, line in enumerate(lines) if ": (!atlas.state)" in line)
+    previous = re.search(r"%(\w+) =", next(line for line in lines if '"atlas.start"' in line))[1]
+    rebuilt = []
+    for index, line in enumerate(ordered):
+        line = re.sub(r"^\s*%\w+ =", f"  %r{index} =", line)
+        rebuilt.append(re.sub(r'("atlas\.[^"]+"\()%\w+(\))', rf"\g<1>%{previous}\g<2>", line))
+        previous = f"r{index}"
+    return "\n".join(lines[:first] + rebuilt + lines[last + 1:]) + "\n"
+
+
+def moved(machine: str, chosen, anchor) -> str:
+    """Move the operations satisfying `chosen`, in order, to just before the first other one satisfying `anchor`."""
+    ops = operations(machine)
+    group = [line for line in ops if chosen(line)]
+    rest = [line for line in ops if not chosen(line)]
+    at = next(n for n, line in enumerate(rest) if anchor(line))
+    return reorder(machine, rest[:at] + group + rest[at:])
+
+
+def insert_after(machine: str, index: int, inserted) -> str:
+    """Insert (name, fields) operations after line `index`, owned by that line's source block."""
+    line = machine.splitlines()[index]
+    block = re.search(r"atlas\.virtual_cfg_block = (\d+) : i32", line)[1]
+    ops = operations(machine)
+    at = ops.index(line) + 1
+    new = [f'%x = "atlas.{name}"(%x) {{{text}, atlas.virtual_cfg_block = {block} : i32}} : ({STATE}) -> {STATE}' for name, text in inserted]
+    return reorder(machine, ops[:at] + new + ops[at:])
 
 
 def remove_line(machine: str, index: int) -> str:
-    """Remove the operation on line `index` of a printed artifact, rethreading its state."""
-    lines = machine.splitlines()
-    operand = re.search(r'"atlas\.\w+"\((%[\w.]+)\)', lines[index])[1]
-    _rethread(lines, index + 1, _result(lines[index]), operand)
-    del lines[index]
-    return "\n".join(lines) + "\n"
+    ops = operations(machine)
+    ops.remove(machine.splitlines()[index])
+    return reorder(machine, ops)
 
 
 def structured_word(line: str, old: str, new: str, shift: int, width: int, field: int) -> str:
@@ -248,13 +252,12 @@ def handoff_chain(test, untimed: str, *, reorder: bool = True) -> dict[str, str]
         test.assertNotIn('"atlas.delay"', stages["ordered"])
     stages["timed"] = checked(test, stages.get("ordered", untimed), "--insert-atlas-delays", "--verify-atlas-timing",
                               "--verify-atlas-generated-schedule")
-    test.assertIn(TIMED, stages["timed"])
-    test.assertIn(PROVIDER, stages["timed"])
     test.assertNotIn("atlas.delay_reason", stages["timed"])
     test.assertTrue(checked(test, stages["timed"], tool="atlas-emit"))
     stages["structured"] = checked(test, stages["timed"], "--convert-atlas-to-llvm-calls")
-    test.assertIn(TIMED, stages["structured"])
-    test.assertIn(PROVIDER, stages["structured"])
+    for stage in ("timed", "structured"):
+        test.assertIn(TIMED, stages[stage])
+        test.assertIn(PROVIDER, stages[stage])
     stages["direct"] = checked(test, stages["timed"], "--convert-atlas-to-llvm")
     test.assertEqual(checked(test, stages["structured"], "--finalize-atlas-llvm-calls"), stages["direct"])
     return stages

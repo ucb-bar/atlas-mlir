@@ -339,12 +339,8 @@ LogicalResult mlir::atlas::verifyAtlasArtifact(
   auto ctx = buildAtlasVerificationContext(module, generated);
   if (failed(ctx))
     return failure();
-  if (generated && failed(verifyAtlasGeneratedSchedule(*ctx)))
-    return failure();
-  auto timingState = module->getAttrOfType<StringAttr>(kAtlasTimingState);
-  if (!generated && timingState &&
-      timingState.getValue() == "timed" &&
-      failed(verifyAtlasTiming(*ctx)))
+  if (generated ? failed(verifyAtlasGeneratedSchedule(*ctx))
+                : ctx->timed && failed(verifyAtlasTiming(*ctx)))
     return failure();
   if (!ctx->stream && failed(encodeAtlasWords(module, ctx->words)))
     return failure();

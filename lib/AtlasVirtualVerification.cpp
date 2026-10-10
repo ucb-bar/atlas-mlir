@@ -15,8 +15,7 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// Track the explicit transfers in flight within a block. They may complete in
-// any order.
+// The explicit transfers in flight within a block, completing in any order.
 struct VirtualDMATransfers {
   SmallVector<Value, kMaxPendingVirtualDMA> pending;
 
@@ -268,8 +267,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       if (!mxu.accumulators[unit].empty())
         return matmul.emitOpError(
             "legacy virtual_mxu_matmul cannot overwrite a live accumulator");
-      // Legacy matmul overwrites a weight slot and completes readout
-      // internally.
+      // Legacy matmul overwrites a weight slot and completes readout internally.
       if (!mxu.liveWeights(unit).empty())
         return matmul.emitOpError(
             "legacy virtual_mxu_matmul cannot overwrite a live weight");

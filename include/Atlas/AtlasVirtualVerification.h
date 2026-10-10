@@ -6,10 +6,8 @@
 
 namespace mlir::atlas {
 
-// What the virtual stage may hold at once: explicit DMA transfers in flight,
-// each with its own channel and staging window (the DMA latches its
-// registers at launch); and weights and accumulators per MXU unit, one per
-// hardware slot.
+// What the virtual stage may hold at once: DMA transfers in flight, each with
+// its own channel and staging window, and per-unit MXU weights/accumulators.
 constexpr unsigned kMaxPendingVirtualDMA = 2;
 constexpr unsigned kVirtualMXUSlots = 2;
 

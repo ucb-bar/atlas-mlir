@@ -18,9 +18,8 @@ LogicalResult encodeAtlasWords(ModuleOp module,
 // Number of encodeAtlasWords calls in this process, for decode-once tests.
 unsigned atlasWordEncodeCount();
 
-// Verification boundary: runs the MLIR verifier, the timing-state check and,
-// on one AtlasVerificationContext, the generated or timed checks, then appends
-// the words atomically.
+// Verification boundary: the MLIR verifier, timing-state check and, on one
+// AtlasVerificationContext, the generated or timed checks; appends atomically.
 // llvmBlock additionally requires statically in-block direct branch targets and
 // rejects unresolved JALR, since one inline assembly block has no external Atlas
 // program/ABI to resolve such jumps.

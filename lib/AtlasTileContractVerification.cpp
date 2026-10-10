@@ -70,10 +70,8 @@ DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   auto dictionary = dyn_cast<DictionaryAttr>(attr);
-  if (!dictionary || dictionary.size() != 9) {
-    module.emitOpError("tile contract record requires exactly the v2 fields");
-    return failure();
-  }
+  if (!dictionary || dictionary.size() != 9)
+    return module.emitOpError("tile contract record requires exactly the v2 fields");
   Record r;
   if (failed(readI32Fields<int32_t>(module, dictionary, "tile", {
           {"id", &r.id}, {"reg", &r.reg}, {"channel", &r.channel}, {"transfer", &r.transfer}})) ||
@@ -82,16 +80,12 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return failure();
   auto kind = dictionary.getAs<StringAttr>("kind");
   auto after = dictionary.getAs<DenseI32ArrayAttr>("after");
-  if (!kind || !after) {
-    module.emitOpError("tile contract requires string kind and dense i32 after fields");
-    return failure();
-  }
+  if (!kind || !after)
+    return module.emitOpError("tile contract requires string kind and dense i32 after fields");
   r.kind = kind.getValue();
   r.after.append(after.asArrayRef().begin(), after.asArrayRef().end());
-  if (!validRecord(r)) {
-    module.emitOpError("tile contract record has invalid v2 fields or geometry");
-    return failure();
-  }
+  if (!validRecord(r))
+    return module.emitOpError("tile contract record has invalid v2 fields or geometry");
   return r;
 }
 
@@ -155,51 +149,21 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
 // joins and PACK's generated loop. They do not prove iteration correspondence.
 LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
                                 const llvm::DenseMap<Operation *, int32_t> &tags) {
-  const size_t blocks = s.starts.size();
-  if (!blocks)
-    return success();
-  std::vector<bool> reachable(blocks, false);
-  SmallVector<size_t> worklist{0};
-  reachable[0] = true;
-  while (!worklist.empty()) {
-    size_t block = worklist.pop_back_val();
-    for (size_t successor : s.succs[block])
-      if (!reachable[successor]) {
-        reachable[successor] = true;
-        worklist.push_back(successor);
-      }
-  }
-  std::vector<SmallVector<size_t>> predecessors(blocks);
-  for (size_t block = 0; block < blocks; ++block)
-    if (reachable[block])
-      for (size_t successor : s.succs[block])
-        predecessors[successor].push_back(block);
-  std::vector<llvm::BitVector> entry(blocks, llvm::BitVector(records.size(), true));
-  std::vector<llvm::BitVector> exit = entry;
-  auto transfer = [&](size_t block, llvm::BitVector facts) {
+  auto transfer = [&](size_t block, llvm::BitVector &facts) {
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i)
       if (auto found = tags.find(s.ops[i]); found != tags.end())
         facts.set(found->second);
-    return facts;
+    return success();
   };
-  bool changed;
-  do {
-    changed = false;
-    for (size_t block = 0; block < blocks; ++block) {
-      llvm::BitVector incoming(records.size(), block != 0 && reachable[block]);
-      if (block != 0 && reachable[block])
-        for (size_t predecessor : predecessors[block])
-          incoming &= exit[predecessor];
-      auto outgoing = transfer(block, incoming);
-      if (entry[block] != incoming || exit[block] != outgoing) {
-        entry[block] = std::move(incoming);
-        exit[block] = std::move(outgoing);
-        changed = true;
-      }
-    }
-  } while (changed);
-  for (size_t block = 0; block < blocks; ++block) {
-    llvm::BitVector facts = entry[block];
+  auto join = [](llvm::BitVector &into, const llvm::BitVector &incoming) {
+    llvm::BitVector before = into;
+    into &= incoming;
+    return into != before;
+  };
+  // Unreached blocks keep the empty entry.
+  auto paths = atlasForwardEntries(s, llvm::BitVector(records.size()), transfer, join);
+  for (size_t block = 0; block < s.starts.size(); ++block) {
+    llvm::BitVector facts = paths->entries[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
       auto found = tags.find(s.ops[i]);
       if (found == tags.end())
@@ -245,10 +209,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         assignment.reg >= 64 ||
         !isa<VirtualBF16Type, VirtualFP8Type>(assignment.value.getType()) ||
         (isa<VirtualBF16Type>(assignment.value.getType()) && assignment.reg % 2) ||
-        !registers.try_emplace(assignment.value, assignment.reg).second) {
-      function.emitOpError("tile contract requires unique valid tensor register claims");
-      return failure();
-    }
+        !registers.try_emplace(assignment.value, assignment.reg).second)
+      return function.emitOpError("tile contract requires unique valid tensor register claims");
   }
   llvm::DenseMap<Value, const VirtualDMAAssignment *> transfers;
   llvm::DenseMap<uint32_t, DictionaryAttr> dmaRecords;
@@ -269,89 +231,66 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   };
   auto inputBase = sourceBase("atlas.input_dram_base");
   auto outputBase = sourceBase("atlas.output_dram_base");
-  if (!inputBase || !outputBase) {
-    function.emitOpError("tile contract requires aligned 32-bit boundary DRAM bases");
-    return failure();
-  }
+  if (!inputBase || !outputBase)
+    return function.emitOpError("tile contract requires aligned 32-bit boundary DRAM bases");
   SmallVector<Record> records;
   auto add = [&](StringRef kind, int32_t reg, uint64_t vmem, uint64_t dram,
                  uint32_t bytes, int32_t channel, int32_t transfer,
                  ArrayRef<int32_t> after = {}) -> FailureOr<int32_t> {
     if (vmem > std::numeric_limits<uint32_t>::max() ||
         dram > std::numeric_limits<uint32_t>::max() ||
-        records.size() > uint64_t(std::numeric_limits<int32_t>::max())) {
-      function.emitOpError("tile contract source transfer address or id overflows its supported range");
-      return failure();
-    }
+        records.size() > uint64_t(std::numeric_limits<int32_t>::max()))
+      return function.emitOpError("tile contract source transfer address or id overflows its supported range");
     Record r{int32_t(records.size()), kind, reg, uint32_t(vmem), uint32_t(dram),
              bytes, channel, transfer, {}};
     r.after.append(after.begin(), after.end());
-    if (!validRecord(r)) {
-      function.emitOpError("tile contract source transfer has invalid geometry or placement");
-      return failure();
-    }
+    if (!validRecord(r))
+      return function.emitOpError("tile contract source transfer has invalid geometry or placement");
     records.push_back(std::move(r));
     return int32_t(records.size() - 1);
   };
   auto addWait = [&](int32_t launch, int32_t channel, int32_t transfer) {
     return add("dma_wait", -1, 0, 0, 0, channel, transfer, {launch});
   };
-  if (scalarArgumentRegs.size() != function.getNumArguments()) {
-    function.emitOpError("tile contract requires one scalar register claim per entry argument");
-    return failure();
-  }
+  if (scalarArgumentRegs.size() != function.getNumArguments())
+    return function.emitOpError("tile contract requires one scalar register claim per entry argument");
   if (function.getNumArguments()) {
     auto controlBase = sourceBase("atlas.control_dram_base");
-    if (!controlBase || function.getNumArguments() > 256) {
-      function.emitOpError("tile contract requires an aligned bounded scalar mailbox");
-      return failure();
-    }
+    if (!controlBase || function.getNumArguments() > 256)
+      return function.emitOpError("tile contract requires an aligned bounded scalar mailbox");
     auto launch = add("dma_load", -1, uint64_t(fixed.mailboxWord) * 4,
                       *controlBase, 1024, fixed.loadChannel, -1);
-    if (failed(launch)) {
-      function.emitOpError("tile contract has invalid mailbox transfer geometry");
-      return failure();
-    }
+    if (failed(launch))
+      return function.emitOpError("tile contract has invalid mailbox transfer geometry");
     auto wait = addWait(*launch, fixed.loadChannel, -1);
     if (failed(wait))
       return failure();
     for (auto [index, reg] : llvm::enumerate(scalarArgumentRegs))
       if (failed(add("mailbox_load", reg, (uint64_t(fixed.mailboxWord) + index) * 4,
-                     0, 4, -1, -1, {*wait}))) {
-        function.emitOpError("tile contract has invalid scalar argument placement");
-        return failure();
-      }
+                     0, 4, -1, -1, {*wait})))
+        return function.emitOpError("tile contract has invalid scalar argument placement");
   }
   llvm::DenseMap<Value, int32_t> launches;
   for (Block &block : function.getBody()) {
     for (Operation &op : block) {
       auto tensorReg = [&](Value value) -> FailureOr<unsigned> {
         auto found = registers.find(value);
-        if (found == registers.end()) {
-          op.emitOpError("tile contract has no tensor register placement for source value");
-          return failure();
-        }
+        if (found == registers.end())
+          return op.emitOpError("tile contract has no tensor register placement for source value");
         return found->second;
       };
       if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op)) {
         bool output = isa<VirtualOutputBF16Op>(op);
         bool bf16 = !isa<VirtualInputFP8Op>(op);
-        Value value;
-        if (output)
-          value = cast<VirtualOutputBF16Op>(op).getValue();
-        else
-          value = op.getResult(1);
-        auto reg = tensorReg(value);
+        auto reg = tensorReg(output ? Value(cast<VirtualOutputBF16Op>(op).getValue()) : op.getResult(1));
         auto indexAttr = op.getAttrOfType<IntegerAttr>("index");
         if (failed(reg) || !indexAttr || indexAttr.getValue().isNegative() ||
             indexAttr.getValue().getActiveBits() > 32)
           return failure();
         uint64_t index = indexAttr.getValue().getZExtValue();
         uint64_t window = output ? fixed.outputWindowWords : fixed.inputWindowWords;
-        if (index >= window / 512) {
-          op.emitOpError("tile contract boundary index exceeds its fixed VMEM window");
-          return failure();
-        }
+        if (index >= window / 512)
+          return op.emitOpError("tile contract boundary index exceeds its fixed VMEM window");
         for (unsigned half = 0; half < (bf16 ? 2u : 1u); ++half) {
           uint64_t vmem = (uint64_t(output ? fixed.outputWord : fixed.inputWord) +
                            index * 512 + half * 256) * 4;
@@ -405,10 +344,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         Value handle = op.getOperand(1);
         auto assignment = transfers.find(handle);
         auto launch = launches.find(handle);
-        if (assignment == transfers.end() || launch == launches.end()) {
-          op.emitOpError("tile contract completion has no source launch");
-          return failure();
-        }
+        if (assignment == transfers.end() || launch == launches.end())
+          return op.emitOpError("tile contract completion has no source launch");
         const auto &p = assignment->second->placement;
         auto wait = addWait(launch->second, p.channel, p.id);
         if (failed(wait))
@@ -529,16 +466,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
       if (auto found = tags.find(op); found != tags.end()) {
         const Record &r = records[found->second];
         if (isVector(r)) {
-          unsigned base;
-          int64_t offset;
-          if (auto load = dyn_cast<VLoadOp>(op)) {
-            base = load.getBase();
-            offset = load.getOffsetAttr().getValue().getSExtValue();
-          } else {
-            auto store = cast<VStoreOp>(op);
-            base = store.getBase();
-            offset = store.getOffsetAttr().getValue().getSExtValue();
-          }
+          auto load = dyn_cast<VLoadOp>(op);
+          unsigned base = load ? load.getBase() : cast<VStoreOp>(op).getBase();
+          int64_t offset = (load ? load.getOffsetAttr() : cast<VStoreOp>(op).getOffsetAttr()).getValue().getSExtValue();
           std::optional<uint64_t> address;
           if (regs[base]) {
             // The scalar address ALU wraps at RV32 width. Compare its full

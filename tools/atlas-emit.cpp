@@ -16,9 +16,8 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 int main(int argc, char **argv) {
-  bool mapJson = false, programJson = false, allowUntimed = false;
+  bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
-  bool invalid = false;
   for (int i = 1; i < argc; ++i) {
     StringRef arg(argv[i]);
     if (arg == "--map-json") mapJson = true;

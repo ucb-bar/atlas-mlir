@@ -8,12 +8,10 @@ namespace mlir::atlas {
 struct AtlasVerificationContext;
 // Instruction classes permitted between a generated DMA launch and its wait.
 bool canOverlapAtlasGeneratedDMA(Operation *op);
-// Entry point for generated artifacts (AtlasGeneratedArtifact.h): DMA
-// lifecycle and redirect policy, then the memory, contract and timing checks.
-// Implicit boundary and mailbox transfers carry no transfer ID; their wait is
-// the next same-channel wait without an ID under the same interval policy.
-// The context overload runs the checkers in order on one context built with
-// `generated`; the ModuleOp overload builds that context.
+// Entry point for generated artifacts: DMA lifecycle and redirect policy, then
+// the memory, contract and timing checks, in order on one context built with
+// `generated`. Untagged boundary and mailbox transfers pair with the next
+// same-channel wait without an ID.
 LogicalResult verifyAtlasGeneratedSchedule(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedSchedule(ModuleOp module);
 void registerVerifyAtlasGeneratedSchedulePass();

@@ -1,4 +1,5 @@
 #include "Atlas/AtlasMXUAllocationVerification.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/AsmState.h"
@@ -14,13 +15,8 @@ namespace {
 constexpr unsigned kUnits = MXUOwnership::kUnits, kSlots = MXUOwnership::kSlots;
 constexpr int32_t kFree = MXUOwnership::kFree;
 
-bool isWeight(Value value) {
-  return isa<VirtualMXUWeightType>(value.getType());
-}
-
-bool isAccumulator(Value value) {
-  return isa<VirtualMXUAccType>(value.getType());
-}
+bool isWeight(Value value) { return isa<VirtualMXUWeightType>(value.getType()); }
+bool isAccumulator(Value value) { return isa<VirtualMXUAccType>(value.getType()); }
 
 unsigned handleUnit(Value value) {
   if (auto weight = dyn_cast<VirtualMXUWeightType>(value.getType()))
@@ -37,15 +33,12 @@ public:
         assemblyState(function) {}
 
   LogicalResult verify() {
+    known = sourceValues(function);
     for (Block &block : function.getBody()) {
-      for (BlockArgument argument : block.getArguments())
-        known.insert(argument);
       for (Operation &op : block) {
-        for (Value result : op.getResults()) {
-          known.insert(result);
+        for (Value result : op.getResults())
           if (isWeight(result) || isAccumulator(result))
             handles.push_back(result);
-        }
         // Recompute uses from source operations, never allocator summaries.
         for (Value operand : op.getOperands())
           if (isWeight(operand))

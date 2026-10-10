@@ -1,4 +1,5 @@
 #include "Atlas/AtlasDMAAllocationVerification.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Diagnostics.h"
@@ -34,16 +35,11 @@ public:
       : function(function), assignments(assignments), assemblyState(function) {}
 
   LogicalResult verify() {
-    for (Block &block : function.getBody()) {
-      for (BlockArgument argument : block.getArguments())
-        known.insert(argument);
-      for (Operation &op : block) {
-        for (Value result : op.getResults())
-          known.insert(result);
+    known = sourceValues(function);
+    for (Block &block : function.getBody())
+      for (Operation &op : block)
         if (isLaunch(&op))
           transfers.push_back(op.getResult(1));
-      }
-    }
 
     llvm::DenseSet<unsigned> transferIds;
     for (const VirtualDMAAssignment &assignment : assignments) {

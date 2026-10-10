@@ -12,12 +12,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
-from test_virtual_evaluator_resources import bf16_bytes, constants, input_tile, load, output, ready, store, wait, wrap  # noqa: E402
+from test_virtual_evaluator_resources import (  # noqa: E402
+    bf16_bytes, branch, constants, input_tile, load, output, ready, store, wait, wrap,
+)
 
 
 STATE = "!atlas.virtual_state"
 STORE = "!atlas.virtual_dma_store"
 BASE = 0x80000000
+INPUT, OUTPUT = 0x90000000, 0x90004000
 
 
 def tile_type(fmt):
@@ -77,19 +80,32 @@ class Stream:
 
     def pure(self, name, value, fmt, attrs):
         result = self.fresh()
-        self.lines.append(f'{result} = "atlas.virtual_{name}"({value}) {attrs} '
-                          f': ({tile_type("bf16")}) -> {tile_type(fmt)}')
+        self.lines.append(f'{result} = "atlas.virtual_{name}"({value}) {attrs} : ({tile_type("bf16")}) -> {tile_type(fmt)}')
         return result
 
-    def program(self):
-        return parse_program("module {\n" + "\n".join(self.lines) + "\n}")
+    def copy(self, source, destination, fmt="fp8"):
+        self.wait(self.store(self.await_(self.load(source, fmt), fmt), destination, fmt))
+
+    def program(self, *, input_base=None, output_base=None):
+        """Flat IR, or a function carrying the given boundary DRAM bases."""
+        if input_base is None and output_base is None:
+            return parse_program("module {\n" + "\n".join(self.lines) + "\n}")
+        attributes = ", ".join(f"atlas.{kind}_dram_base = {address} : i64" for kind, address in (("input", input_base), ("output", output_base)) if address is not None)
+        body = "\n".join((*self.lines, f"func.return {self.state} : {STATE}"))
+        return parse_program(f"module {{ func.func @aliases() -> {STATE} attributes {{{attributes}}} {{\n{body}\n}} }}")
+
+
+def run_owned(test, program, inputs):
+    original_tiles, original_memory = dict(inputs.tiles), inputs.memory
+    result = evaluate(program, inputs)
+    test.assertEqual((dict(inputs.tiles), inputs.memory), (original_tiles, original_memory))
+    return result
 
 
 class VirtualEvaluatorDmaTest(unittest.TestCase):
     def test_all_raw_fp8_codes_copy_with_guards_and_fresh_owned_snapshots(self):
         stream = Stream()
-        ready = stream.await_(stream.load(-2147483648, "fp8"), "fp8")
-        stream.wait(stream.store(ready, BASE + 0x2000, "fp8"))
+        stream.copy(-2147483648, BASE + 0x2000)
         program = stream.program()
         payload = bytes(range(256)) * 4
         source_buffer = bytearray(payload)
@@ -106,23 +122,19 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
 
     def test_bf16_load_and_store_independently_check_half_pair_layout_and_raw_bits(self):
         bits = tuple((row * 2039 + col * 137) & 0xFFFF for row in range(32) for col in range(32))
-        bits = (0x0000, 0x8000, 0x0001, 0x8001, 0x7F80, 0xFF80, 0x7FC1, 0xFFA1) + bits[8:]
-        original = Tile("bf16", bits)
-        payload = bf16_bytes(bits)
+        original = Tile("bf16", (0x0000, 0x8000, 0x0001, 0x8001, 0x7F80, 0xFF80, 0x7FC1, 0xFFA1) + bits[8:])
+        payload = bf16_bytes(original.bits)
         load = Stream()
         load.output(load.await_(load.load(BASE)))
         runtime = RuntimeInputs(memory=(MemoryRegion(BASE, payload),))
         result = evaluate(load.program(), runtime)
-        self.assertEqual(dict(result.outputs), {0: original})
-        self.assertEqual(result.memory, runtime.memory)
+        self.assertEqual((dict(result.outputs), result.memory), ({0: original}, runtime.memory))
         store = Stream()
         store.wait(store.store(store.input(), BASE + 0x2000))
         destination = MemoryRegion(BASE + 0x2000 - 7, b"before!" + b"?" * 2048 + b"after")
         inputs = RuntimeInputs({0: original}, memory=(destination,))
-        self.assertEqual(evaluate(store.program(), inputs).memory,
-                         (MemoryRegion(destination.address, b"before!" + payload + b"after"),))
-        self.assertEqual(inputs.tiles[0], original)
-        self.assertEqual(inputs.memory, (destination,))
+        self.assertEqual(evaluate(store.program(), inputs).memory, (MemoryRegion(destination.address, b"before!" + payload + b"after"),))
+        self.assertEqual((inputs.tiles[0], inputs.memory), (original, (destination,)))
 
     def test_adjacent_regions_cover_a_transfer_and_preserve_supplied_order_and_extents(self):
         payload = bytes(range(256)) * 4
@@ -132,30 +144,23 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         head = MemoryRegion(destination - 32, b"head" * 8 + b"?" * 777)
         untouched = MemoryRegion(BASE + 0x4000, b"unrelated")
         stream = Stream()
-        ready = stream.await_(stream.load(BASE, "fp8"), "fp8")
-        stream.wait(stream.store(ready, destination, "fp8"))
+        stream.copy(BASE, destination)
         runtime = RuntimeInputs(memory=(tail, source, head, untouched))
         self.assertEqual(evaluate(stream.program(), runtime).memory,
-                         (MemoryRegion(tail.address, payload[777:] + b"tail"), source,
-                          MemoryRegion(head.address, b"head" * 8 + payload[:777]), untouched))
+                         (MemoryRegion(tail.address, payload[777:] + b"tail"), source, MemoryRegion(head.address, b"head" * 8 + payload[:777]), untouched))
         # A load can cross the same unaligned region boundary, too.
-        split = RuntimeInputs(memory=(MemoryRegion(BASE + 13, payload[13:]), MemoryRegion(BASE, payload[:13]),
-                                     MemoryRegion(destination, b"?" * 1024)))
+        split = RuntimeInputs(memory=(MemoryRegion(BASE + 13, payload[13:]), MemoryRegion(BASE, payload[:13]), MemoryRegion(destination, b"?" * 1024)))
         self.assertEqual(evaluate(stream.program(), split).memory[-1], MemoryRegion(destination, payload))
         self.assertEqual(runtime.memory, (tail, source, head, untouched))
 
     def test_overlapping_reads_can_complete_in_reverse_issue_order(self):
         payload = bytes(range(256)) * 4
         stream = Stream()
-        first = stream.load(BASE, "fp8")
-        second = stream.load(BASE, "fp8")
-        second_ready = stream.await_(second, "fp8")
-        first_ready = stream.await_(first, "fp8")
+        first, second = stream.load(BASE, "fp8"), stream.load(BASE, "fp8")
+        second_ready, first_ready = stream.await_(second, "fp8"), stream.await_(first, "fp8")
         stream.wait(stream.store(second_ready, BASE + 0x2000, "fp8"))
         stream.wait(stream.store(first_ready, BASE + 0x4000, "fp8"))
-        runtime = RuntimeInputs(memory=(MemoryRegion(BASE, payload),
-                                        MemoryRegion(BASE + 0x2000, b"?" * 1024),
-                                        MemoryRegion(BASE + 0x4000, b"!" * 1024)))
+        runtime = RuntimeInputs(memory=(MemoryRegion(BASE, payload), MemoryRegion(BASE + 0x2000, b"?" * 1024), MemoryRegion(BASE + 0x4000, b"!" * 1024)))
         self.assertEqual(evaluate(stream.program(), runtime).memory,
                          (runtime.memory[0], MemoryRegion(BASE + 0x2000, payload), MemoryRegion(BASE + 0x4000, payload)))
 
@@ -169,15 +174,13 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         reloaded = stream.await_(stream.load(BASE, "fp8"), "fp8")
         # Keep both stores pending and finish them in reverse order.
         old_store = stream.store(original, BASE + 0x2000, "fp8")
-        new_store = stream.store(reloaded, BASE + 0x4000, "fp8")
-        stream.wait(new_store)
+        stream.wait(stream.store(reloaded, BASE + 0x4000, "fp8"))
         stream.wait(old_store)
         runtime = RuntimeInputs({0: Tile("fp8", tuple(new))}, memory=(MemoryRegion(BASE, old),
                                 MemoryRegion(BASE + 0x2000, b"?" * 1024), MemoryRegion(BASE + 0x4000, b"!" * 1024)))
         self.assertEqual(evaluate(stream.program(), runtime).memory,
                          (MemoryRegion(BASE, new), MemoryRegion(BASE + 0x2000, old), MemoryRegion(BASE + 0x4000, new)))
-        self.assertEqual(runtime.memory[0].data, old)
-        self.assertEqual(runtime.tiles[0].bits, tuple(new))
+        self.assertEqual((runtime.memory[0].data, runtime.tiles[0].bits), (old, tuple(new)))
 
     def test_store_captures_ready_source_before_a_later_pure_value_is_produced(self):
         tile = repeated((0xBF80, 0x3F80, 0x8000, 0x0001, 0xFFC1, 0x7FC1))
@@ -205,85 +208,43 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
                 if converter == "pack":
                     packed = stream.pure("pack_fp8", source, "fp8", "{scale_code = 127 : i32}")
                 else:
-                    acc = stream.effect("mxu_load_acc_bf16", (source,), (tile_type("bf16"),),
-                                        "!atlas.virtual_mxu_acc<0>", "{unit = 0 : i32}")
+                    acc = stream.effect("mxu_load_acc_bf16", (source,), (tile_type("bf16"),), "!atlas.virtual_mxu_acc<0>", "{unit = 0 : i32}")
                     scale = stream.fresh()
                     stream.lines.append(f'{scale} = "atlas.virtual_scale_constant"() {{code = 127 : i32}} : () -> !atlas.virtual_scale')
                     packed = stream.effect("mxu_readout_fp8", (acc, scale), ("!atlas.virtual_mxu_acc<0>", "!atlas.virtual_scale"), tile_type("fp8"))
                 stream.wait(stream.store(packed, BASE, "fp8"))
                 runtime = RuntimeInputs({0: repeated(raw)}, memory=(MemoryRegion(BASE, b"?" * 1024),))
-                payload = bytes(expected[i % len(expected)] for i in range(1024))
-                self.assertEqual(evaluate(stream.program(), runtime).memory, (MemoryRegion(BASE, payload),))
+                self.assertEqual(evaluate(stream.program(), runtime).memory, (MemoryRegion(BASE, bytes(repeated(expected, "fp8").bits)),))
                 self.assertEqual(runtime.memory[0].data, b"?" * 1024)
 
     def test_unmapped_load_is_checked_only_on_the_executed_cfg_path(self):
-        source = f'''module {{
-          func.func @choose(%take: i1) -> {STATE} {{
-            %s0 = "atlas.virtual_start"() : () -> {STATE}
-            %addr = arith.constant -2147483648 : i32
-            %size = arith.constant 2048 : i32
-            cf.cond_br %take, ^load(%s0 : {STATE}), ^done(%s0 : {STATE})
-          ^load(%ls: {STATE}):
-            %s1, %pending = "atlas.virtual_dma_load_bf16"(%ls, %addr, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_dma_load_bf16)
-            %s2, %tile = "atlas.virtual_dma_await_bf16"(%s1, %pending) : ({STATE}, !atlas.virtual_dma_load_bf16) -> ({STATE}, !atlas.virtual_bf16)
-            cf.br ^done(%s2 : {STATE})
-          ^done(%ds: {STATE}):
-            return %ds : {STATE}
-          }}
-        }}'''
-        program = parse_program(source)
+        body = branch("s0", "load", load("bf16", "bs", "s1", "pending"), ready("bf16", "s1", "s2", "pending"))
+        program = parse_program(wrap(*constants(address=-2147483648), *body, final="s2", arguments="%choose: i1"))
         untouched = MemoryRegion(BASE + 0x4000, b"guard")
-        result = evaluate(program, RuntimeInputs(controls=(Scalar(1, 0),), memory=(untouched,)))
-        self.assertEqual(dict(result.outputs), {})
-        self.assertEqual(result.memory, (untouched,))
+        result = evaluate(program, RuntimeInputs(controls=(Scalar(1, 1),), memory=(untouched,)))
+        self.assertEqual((dict(result.outputs), result.memory), ({}, (untouched,)))
         with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
-            evaluate(program, RuntimeInputs(controls=(Scalar(1, 1),), memory=(untouched,)))
+            evaluate(program, RuntimeInputs(controls=(Scalar(1, 0),), memory=(untouched,)))
 
     def test_holes_and_partial_load_or_store_spans_fail_without_mutating_inputs(self):
-        cases = (
-            (MemoryRegion(BASE, b"?" * 1023),),
-            (MemoryRegion(BASE + 1, b"?" * 1023),),
-            (MemoryRegion(BASE, b"?" * 512), MemoryRegion(BASE + 513, b"!" * 511)),
-        )
+        cases = ((MemoryRegion(BASE, b"?" * 1023),), (MemoryRegion(BASE + 1, b"?" * 1023),),
+                 (MemoryRegion(BASE, b"?" * 512), MemoryRegion(BASE + 513, b"!" * 511)))
+        tile = repeated((0x7F, 0xFF, 0x01, 0x81), "fp8")
         for direction in ("load", "store"):
             stream = Stream()
             if direction == "load":
                 stream.await_(stream.load(BASE, "fp8"), "fp8")
             else:
                 stream.wait(stream.store(stream.input("fp8"), BASE, "fp8"))
-            program = stream.program()
             for regions in cases:
                 with self.subTest(direction=direction, addresses=tuple(r.address for r in regions)):
-                    tile = repeated((0x7F, 0xFF, 0x01, 0x81), "fp8")
                     runtime = RuntimeInputs({0: tile} if direction == "store" else {}, memory=regions)
                     with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
-                        evaluate(program, runtime)
-                    self.assertEqual(runtime.memory, regions)
-                    if direction == "store":
-                        self.assertEqual(runtime.tiles[0], tile)
-
-
-INPUT, OUTPUT = 0x90000000, 0x90004000
-
-
-def program(stream: Stream, *, input_base=None, output_base=None):
-    attributes = []
-    for kind, address in (("input", input_base), ("output", output_base)):
-        if address is not None:
-            attributes.append(f"atlas.{kind}_dram_base = {address} : i64")
-    attrs = " attributes {" + ", ".join(attributes) + "}" if attributes else ""
-    body = "\n".join((*stream.lines, f"func.return {stream.state} : {STATE}"))
-    return parse_program(f"module {{ func.func @aliases() -> {STATE}{attrs} {{\n{body}\n}} }}")
+                        evaluate(stream.program(), runtime)
+                    self.assertEqual((runtime.memory, dict(runtime.tiles)), (regions, {0: tile} if direction == "store" else {}))
 
 
 class VirtualEvaluatorAliasesTest(unittest.TestCase):
-    def run_owned(self, source, inputs):
-        original_tiles, original_memory = dict(inputs.tiles), inputs.memory
-        result = evaluate(source, inputs)
-        self.assertEqual(dict(inputs.tiles), original_tiles)
-        self.assertEqual(inputs.memory, original_memory)
-        return result
-
     def test_completed_store_updates_repeated_input_but_preserves_old_ssa_tile(self):
         old, new = repeated((0x7FC1, 0x8001, 0x3F80)), repeated((0xFFA1, 0x007F, 0xBF80))
         stream = Stream()
@@ -292,23 +253,19 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         after = stream.input()
         stream.output(before)
         stream.output(after, 1)
-        original = MemoryRegion(INPUT - 3, b"old" + bf16_bytes(old.bits))
         guard = MemoryRegion(INPUT + 4096, b"guard")
-        runtime = RuntimeInputs({0: old, 1: new}, memory=(original, guard))
-        result = self.run_owned(program(stream, input_base=INPUT, output_base=OUTPUT), runtime)
+        runtime = RuntimeInputs({0: old, 1: new}, memory=(MemoryRegion(INPUT - 3, b"old" + bf16_bytes(old.bits)), guard))
+        result = run_owned(self, stream.program(input_base=INPUT, output_base=OUTPUT), runtime)
         self.assertEqual(dict(result.outputs), {0: old, 1: new})
         self.assertEqual(result.memory, (MemoryRegion(INPUT - 3, b"old" + bf16_bytes(new.bits)), guard))
 
     def test_boundary_output_initializes_bytes_for_a_later_explicit_load(self):
         original = repeated((0x8000, 0x0001, 0x7FC1, 0xFFA1))
         stream = Stream()
-        source = stream.input()
-        stream.output(source)
-        copied = stream.await_(stream.load(OUTPUT))
-        stream.output(copied, 1)
-        result = self.run_owned(program(stream, output_base=OUTPUT), RuntimeInputs({0: original}))
-        self.assertEqual(dict(result.outputs), {0: original, 1: original})
-        self.assertEqual(result.memory, ())
+        stream.output(stream.input())
+        stream.output(stream.await_(stream.load(OUTPUT)), 1)
+        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: original}))
+        self.assertEqual((dict(result.outputs), result.memory), ({0: original, 1: original}, ()))
 
     def test_boundary_output_is_the_last_writer_after_a_completed_explicit_store(self):
         first, last = repeated((0x3F80,)), repeated((0xBF80,))
@@ -317,10 +274,10 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.wait(stream.store(first_value, OUTPUT))
         stream.output(last_value)
         regions = (MemoryRegion(OUTPUT + 1500, b"?" * 548 + b"tail"), MemoryRegion(OUTPUT - 4, b"head" + b"?" * 1500))
-        result = self.run_owned(program(stream, output_base=OUTPUT), RuntimeInputs({0: first, 1: last}, memory=regions))
+        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: first, 1: last}, memory=regions))
         self.assertEqual(dict(result.outputs), {0: last})
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT + 1500, bf16_bytes(last.bits)[1500:] + b"tail"),
-                                        MemoryRegion(OUTPUT - 4, b"head" + bf16_bytes(last.bits)[:1500])))
+                                         MemoryRegion(OUTPUT - 4, b"head" + bf16_bytes(last.bits)[:1500])))
 
     def test_completed_partial_fp8_store_changes_final_host_output_without_changing_ssa(self):
         original = repeated((0x3F80,))
@@ -330,14 +287,12 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.output(source)
         stream.wait(stream.store(fp8, OUTPUT + 32, "fp8"))
         stream.output(source, 1)
-        # The write starts at physical first-half row 1, spans that half's
-        # remaining 31 rows, and ends after second-half row 0. Each word is 1234.
-        wanted = Tile("bf16", tuple(0x1234 if (col < 16 and row >= 1) or (col >= 16 and row == 0) else 0x3F80
-                                     for row in range(32) for col in range(32)))
+        # The write covers first-half rows 1..31 and second-half row 0, as 0x1234 words.
+        wanted = Tile("bf16", tuple(0x1234 if (col < 16 and row >= 1) or (col >= 16 and row == 0) else 0x3F80 for row in range(32) for col in range(32)))
         payload = bf16_bytes(original.bits)
         final = payload[:32] + bytes(replacement.bits) + payload[1056:]
         runtime = RuntimeInputs({0: original, 1: replacement}, memory=(MemoryRegion(OUTPUT - 7, b"before!" + payload + b"?" * 2048 + b"after"),))
-        result = self.run_owned(program(stream, output_base=OUTPUT), runtime)
+        result = run_owned(self, stream.program(output_base=OUTPUT), runtime)
         self.assertEqual(dict(result.outputs), {0: wanted, 1: original})
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT - 7, b"before!" + final + payload + b"after"),))
 
@@ -348,71 +303,52 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.output(replacement)
         after = stream.input()
         stream.output(before, 1)
-        # Output1 aliases input1 and overwrites it too. The already loaded
-        # replacement and reread input0 retain their immutable new bits.
+        # Output1 also overwrites input1; already loaded values keep their immutable bits.
         stream.output(after, 2)
-        result = self.run_owned(program(stream, input_base=INPUT, output_base=INPUT), RuntimeInputs({0: old, 1: new}))
+        result = run_owned(self, stream.program(input_base=INPUT, output_base=INPUT), RuntimeInputs({0: old, 1: new}))
         self.assertEqual(dict(result.outputs), {0: new, 1: old, 2: new})
 
-    def test_partial_output_snapshot_receives_only_executed_write_bytes(self):
+    def test_output_snapshots_receive_only_executed_write_bytes(self):
         original = repeated((0x8001, 0x7FC1, 0x3F80))
         stream = Stream()
         stream.output(stream.input())
         supplied = (MemoryRegion(OUTPUT + 13, b"?" * 81), MemoryRegion(OUTPUT + 2048, b"untouched"))
-        result = self.run_owned(program(stream, output_base=OUTPUT), RuntimeInputs({0: original}, memory=supplied))
+        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: original}, memory=supplied))
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT + 13, bf16_bytes(original.bits)[13:94]), supplied[1]))
+        source = wrap(input_tile("bf16"), *branch("io", "write", output("bs", "done")), final="done", arguments="%choose: i1",
+                      attributes=f"atlas.output_dram_base = {OUTPUT} : i64")
+        memory = (MemoryRegion(OUTPUT, b"?" * 2048),)
+        result = run_owned(self, parse_program(source), RuntimeInputs({0: original}, (Scalar(1, 1),), memory))
+        self.assertEqual((dict(result.outputs), result.memory), ({}, memory))
 
-    def test_output_mapping_does_not_define_uninitialized_bytes(self):
+    def test_uninitialized_output_and_fp8_input_padding_bytes_are_not_defined(self):
         stream = Stream()
         source = stream.input()
         loaded = stream.await_(stream.load(OUTPUT))
         stream.output(source)
         stream.output(loaded, 1)
-        source = program(stream, output_base=OUTPUT)
-        original = repeated((0x3F80,))
         for memory in ((), (MemoryRegion(OUTPUT, b"?" * 1024),)):
             with self.subTest(partial=bool(memory)), self.assertRaisesRegex(VirtualInterfaceError, "undefined bytes"):
-                evaluate(source, RuntimeInputs({0: original}, memory=memory))
-
-    def test_fp8_input_padding_requires_supplied_bytes(self):
+                evaluate(stream.program(output_base=OUTPUT), RuntimeInputs({0: repeated((0x3F80,))}, memory=memory))
         stream = Stream()
         stream.input("fp8")
         stream.output(stream.await_(stream.load(INPUT)))
-        source = program(stream, input_base=INPUT)
         original = Tile("fp8", (0x38,) * 1024)
         with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
-            evaluate(source, RuntimeInputs({0: original}))
+            evaluate(stream.program(input_base=INPUT), RuntimeInputs({0: original}))
         padding = MemoryRegion(INPUT + 1024, b"\x34\x12" * 512)
+        result = run_owned(self, stream.program(input_base=INPUT), RuntimeInputs({0: original}, memory=(padding,)))
         wanted = Tile("bf16", tuple(0x3838 if col < 16 else 0x1234 for row in range(32) for col in range(32)))
-        result = self.run_owned(source, RuntimeInputs({0: original}, memory=(padding,)))
-        self.assertEqual(dict(result.outputs), {0: wanted})
-        self.assertEqual(result.memory, (padding,))
-
-    def test_untaken_boundary_write_preserves_supplied_output_snapshot(self):
-        source = wrap(input_tile("bf16"), f"cf.cond_br %choose, ^write(%io : {STATE}), ^skip(%io : {STATE})",
-                      f"^write(%ws: {STATE}):", output("ws", "done"), f"func.return %done : {STATE}",
-                      f"^skip(%ss: {STATE}):", final="ss", arguments="%choose: i1", attributes=f"atlas.output_dram_base = {OUTPUT} : i64")
-        original = repeated((0x3F80,))
-        memory = (MemoryRegion(OUTPUT, b"?" * 2048),)
-        result = self.run_owned(parse_program(source), RuntimeInputs({0: original}, (Scalar(1, 0),), memory))
-        self.assertEqual(dict(result.outputs), {})
-        self.assertEqual(result.memory, memory)
+        self.assertEqual((dict(result.outputs), result.memory), ({0: wanted}, (padding,)))
 
     def test_pending_partial_write_conflicts_do_not_depend_on_wait_order(self):
         for first, second in (("load", "store"), ("store", "load"), ("store", "store")):
+            launches = [load("bf16", before, f"s{index + 1}", f"h{index}", addr) if direction == "load" else store("bf16", before, f"s{index + 1}", f"h{index}", addr=addr)
+                        for index, (direction, before, addr) in enumerate(((first, "io", "addr"), (second, "s1", "second")))]
             for reverse in (False, True):
-                launches = []
-                completions = []
-                for index, direction in enumerate((first, second)):
-                    before = "io" if index == 0 else "s1"
-                    addr = "addr" if index == 0 else "second"
-                    launches.append(load("bf16", before, f"s{index + 1}", f"h{index}", addr) if direction == "load"
-                                    else store("bf16", before, f"s{index + 1}", f"h{index}", addr=addr))
-                for position, index in enumerate((1, 0) if reverse else (0, 1)):
-                    completions.append(ready("bf16", f"s{position + 2}", f"s{position + 3}", f"h{index}", f"tile{index}") if (first, second)[index] == "load"
-                                       else wait(f"s{position + 2}", f"s{position + 3}", f"h{index}"))
-                source = wrap(input_tile("bf16"), *constants(address=INPUT), f"%second = arith.constant {INPUT + 1024} : i32",
-                              *launches, *completions, final="s4")
+                completions = [ready("bf16", f"s{position + 2}", f"s{position + 3}", f"h{index}", f"tile{index}") if (first, second)[index] == "load"
+                               else wait(f"s{position + 2}", f"s{position + 3}", f"h{index}") for position, index in enumerate((1, 0) if reverse else (0, 1))]
+                source = wrap(input_tile("bf16"), *constants(address=INPUT), f"%second = arith.constant {INPUT + 1024} : i32", *launches, *completions, final="s4")
                 runtime = RuntimeInputs({0: repeated((0x3F80,))}, memory=(MemoryRegion(INPUT, b"?" * 3072),))
                 with self.subTest(first=first, second=second, reverse=reverse), self.assertRaisesRegex(VirtualInterfaceError, "conflicts"):
                     evaluate(parse_program(source), runtime)

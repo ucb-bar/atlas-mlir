@@ -16,11 +16,9 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
-  if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp,
-          VPUBinaryOp, VLoadOp, VStoreOp>(op))
-    return true;
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
-  if (isa<ALURegOp, ALUImmOp, UpperOp>(op))
+  if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
+          VLoadOp, VStoreOp, ALURegOp, ALUImmOp, UpperOp>(op))
     return true;
   if (auto load = dyn_cast<ScalarLoadOp>(op))
     return load.getKind() == "seli";
@@ -31,26 +29,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     const AtlasVerificationContext &ctx) {
   assert(ctx.generated && "generated checks require the structural stage");
   ModuleOp module = ctx.module;
-  if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)))
+  if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)) ||
+      failed(verifyAtlasGeneratedDMAMemory(ctx)) || failed(verifyAtlasGeneratedDMAContract(ctx)) ||
+      failed(verifyAtlasGeneratedMXUContract(ctx)) || failed(verifyAtlasGeneratedTileContract(ctx)) ||
+      failed(verifyAtlasGeneratedCFGContract(ctx)) ||
+      failed(verifyAtlasGeneratedSourceMemoryEffectContract(ctx)) ||
+      failed(verifyAtlasGeneratedBufferContract(ctx)))
     return failure();
-  if (failed(verifyAtlasGeneratedDMAMemory(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedDMAContract(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedMXUContract(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedTileContract(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedCFGContract(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedSourceMemoryEffectContract(ctx)))
-    return failure();
-  if (failed(verifyAtlasGeneratedBufferContract(ctx)))
-    return failure();
-  auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
-  if (state && state.getValue() == "timed")
-    return verifyAtlasTiming(ctx);
-  return success();
+  return ctx.timed ? verifyAtlasTiming(ctx) : success();
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {

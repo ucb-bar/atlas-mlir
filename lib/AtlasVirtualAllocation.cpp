@@ -81,12 +81,9 @@ FixedResourcePlacement selectedResources() {
 RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
   bool mixedFp8, hasPack;
   findReservations(function, mixedFp8, hasPack);
-  RegisterCapacities capacities;
-  for (RegisterKind kind :
-       {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
-    capacities[static_cast<unsigned>(kind)] =
-        capacity(kind, mixedFp8, hasPack);
-  return capacities;
+  return {capacity(RegisterKind::BF16, mixedFp8, hasPack),
+          capacity(RegisterKind::FP8, mixedFp8, hasPack),
+          capacity(RegisterKind::Scalar, mixedFp8, hasPack)};
 }
 
 VirtualAllocationPlan::VirtualAllocationPlan()
@@ -116,11 +113,9 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   return success();
 }
 
-// Each weight takes the lowest slot of its unit free of live weights and
-// frees it after its last use; each accumulator chain takes the lowest free
-// accumulator slot from its start to its readout. The verifier bounds both by
-// the slot count and keeps both inside the block; the checks here state what
-// the lowering relies on.
+// Each weight holds the lowest free slot of its unit until its last use; each
+// accumulator chain holds the lowest free slot from its start to its readout.
+// The verifier already bounds both; these checks state what lowering relies on.
 LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
   using Slots = std::array<Value, kVirtualMXUSlots>;
   std::array<Slots, 2> weightSlots{}, accSlots{};
@@ -198,11 +193,10 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
   return success();
 }
 
-// Each transfer holds a channel and a staging window from its launch to its
-// completion. The DMA latches its registers at launch, so every transfer
-// uses the same three. A load takes the load channel when it is free and a
-// store the store channel, as a lone transfer always has; otherwise the
-// lowest free channel. A transfer takes the lowest free window.
+// Each transfer holds a channel and the lowest free staging window from launch
+// to completion; the DMA latches its registers at launch, so all share three.
+// A load prefers the load channel and a store the store channel, else the
+// lowest free channel.
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                                               unsigned &nextTransfer) {
   std::array<Value, kDMAChannels> channels{}, windows{};

@@ -2,12 +2,7 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
-#include "Atlas/AtlasOps.h"
 #include "VerificationTestSupport.h"
-#include "mlir/IR/Builders.h"
-#include <algorithm>
-#include <string>
-#include <vector>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -16,85 +11,62 @@ namespace {
 constexpr StringLiteral notCompleted = "overlapping source predecessor has not completed in this visit";
 constexpr StringLiteral incomplete = "source block exits before its required effects complete";
 constexpr StringLiteral pending = "source block exits with a pending DRAM effect";
-constexpr StringLiteral sourceText = R"mlir(module {
-  func.func @effects() -> !atlas.virtual_state attributes {
-    atlas.input_dram_base = 2432696320 : i64, atlas.output_dram_base = 2449473536 : i64
-  } {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %input = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    %a = arith.constant -1879048192 : i32
+constexpr StringLiteral state = "!atlas.virtual_state", fp8 = "!atlas.virtual_fp8";
+
+// An FP8 input, then `body`; `extraAttributes` extends the DRAM bases.
+std::string program(StringRef arguments, StringRef extraAttributes, StringRef body) {
+  return ("module {\n  func.func @effects(" + arguments + ") -> !atlas.virtual_state attributes {\n"
+          "    atlas.input_dram_base = 2432696320 : i64, atlas.output_dram_base = 2449473536 : i64" + extraAttributes + "\n  } {\n"
+          "    %s0 = \"atlas.virtual_start\"() : () -> !atlas.virtual_state\n"
+          "    %s1, %input = \"atlas.virtual_input_fp8\"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)\n" +
+          body + "  }\n}").str();
+}
+
+// Stores `tile` then reloads the same source span: the store is the load's source predecessor.
+std::string storeThenLoad(StringRef in, StringRef tile) {
+  return R"mlir(    %a = arith.constant -1879048192 : i32
     %b = arith.constant -1879048192 : i32
     %size = arith.constant 1024 : i32
-    %s2, %store = "atlas.virtual_dma_store_fp8"(%s1, %input, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
+    %s2, %store = "atlas.virtual_dma_store_fp8"()mlir" + in.str() + ", " + tile.str() + R"mlir(, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
     %s3 = "atlas.virtual_dma_wait"(%s2, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
     %s4, %load = "atlas.virtual_dma_load_fp8"(%s3, %b, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
     %s5, %result = "atlas.virtual_dma_await_fp8"(%s4, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    return %s5 : !atlas.virtual_state
-  }
-})mlir";
-constexpr StringLiteral loopText = R"mlir(module {
-  func.func @effects() -> !atlas.virtual_state attributes {
-    atlas.input_dram_base = 2432696320 : i64, atlas.output_dram_base = 2449473536 : i64
-  } {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %input = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    cf.br ^loop(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8)
-  ^loop(%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8):
-    %a = arith.constant -1879048192 : i32
-    %b = arith.constant -1879048192 : i32
-    %size = arith.constant 1024 : i32
-    %choose = arith.constant true
-    %s2, %store = "atlas.virtual_dma_store_fp8"(%state, %tile, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s3 = "atlas.virtual_dma_wait"(%s2, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    %s4, %load = "atlas.virtual_dma_load_fp8"(%s3, %b, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s5, %result = "atlas.virtual_dma_await_fp8"(%s4, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    cf.cond_br %choose, ^loop(%s5, %tile : !atlas.virtual_state, !atlas.virtual_fp8), ^exit(%s5 : !atlas.virtual_state)
-  ^exit(%final : !atlas.virtual_state):
-    return %final : !atlas.virtual_state
-  }
-})mlir";
-constexpr StringLiteral branchText = R"mlir(module {
-  func.func @effects(%choose : i1) -> !atlas.virtual_state attributes {
-    atlas.input_dram_base = 2432696320 : i64, atlas.output_dram_base = 2449473536 : i64,
-    atlas.control_dram_base = 2466250752 : i64
-  } {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %input = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    cf.cond_br %choose, ^left(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8), ^right(%s1 : !atlas.virtual_state)
-  ^left(%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8):
-    %a = arith.constant -1879048192 : i32
-    %b = arith.constant -1879048192 : i32
-    %size = arith.constant 1024 : i32
-    %s2, %store = "atlas.virtual_dma_store_fp8"(%state, %tile, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s3 = "atlas.virtual_dma_wait"(%s2, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    %s4, %load = "atlas.virtual_dma_load_fp8"(%s3, %b, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s5, %result = "atlas.virtual_dma_await_fp8"(%s4, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    cf.br ^join(%s5 : !atlas.virtual_state)
-  ^right(%rstate : !atlas.virtual_state):
-    %raddr = arith.constant -1879048192 : i32
+)mlir";
+}
+
+std::string blockHeader(StringRef name, StringRef arguments) { return ("  ^" + name + "(" + arguments + "):\n").str(); }
+
+const std::string sourceText = program("", "", storeThenLoad("%s1", "%input") + "    return %s5 : !atlas.virtual_state\n");
+const std::string loopText = program("", "",
+    "    cf.br ^loop(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8)\n" + blockHeader("loop", "%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8") +
+    storeThenLoad("%state", "%tile") + "    %choose = arith.constant true\n"
+    "    cf.cond_br %choose, ^loop(%s5, %tile : !atlas.virtual_state, !atlas.virtual_fp8), ^exit(%s5 : !atlas.virtual_state)\n" +
+    blockHeader("exit", "%final : !atlas.virtual_state") + "    return %final : !atlas.virtual_state\n");
+const std::string branchText = program("%choose : i1", ",\n    atlas.control_dram_base = 2466250752 : i64",
+    "    cf.cond_br %choose, ^left(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8), ^right(%s1 : !atlas.virtual_state)\n" +
+    blockHeader("left", "%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8") + storeThenLoad("%state", "%tile") +
+    "    cf.br ^join(%s5 : !atlas.virtual_state)\n" + blockHeader("right", "%rstate : !atlas.virtual_state") + R"mlir(    %raddr = arith.constant -1879048192 : i32
     %rsize = arith.constant 1024 : i32
     %r1, %rload = "atlas.virtual_dma_load_fp8"(%rstate, %raddr, %rsize) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
     %r2, %rresult = "atlas.virtual_dma_await_fp8"(%r1, %rload) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
     cf.br ^join(%r2 : !atlas.virtual_state)
-  ^join(%final : !atlas.virtual_state):
-    return %final : !atlas.virtual_state
-  }
-})mlir";
-// Literal source expectations and manually issued groups isolate this
-// obligation. Final integration separately checks complete CFG/tile/lifecycle
-// metadata and source value semantics before invoking this checker.
-struct Fixture {
-  MLIRContext &context;
-  OpBuilder b;
-  OwningOpRef<ModuleOp> source, issued;
+)mlir" + blockHeader("join", "%final : !atlas.virtual_state") + "    return %final : !atlas.virtual_state\n");
+
+// Literal source expectations and manually issued groups isolate this obligation; final integration separately
+// checks complete CFG/tile/lifecycle metadata and source value semantics before invoking this checker.
+struct Fixture : IssuedStream {
+  OwningOpRef<ModuleOp> source;
   DictionaryAttr cfg, contract;
   ArrayAttr tiles;
-  Value state;
-  std::vector<Operation *> ops;
-  int block = 0;
-  explicit Fixture(MLIRContext &c, StringRef text) : context(c), b(&c), source(parseSourceString<ModuleOp>(text, &c)), issued(ModuleOp::create(b.getUnknownLoc())) {
+  Fixture(MLIRContext &c, StringRef text, StringRef name) : IssuedStream(c), source(parseSourceString<ModuleOp>(text, &c)) {
+    block = 0;
+    build();
+    check(bool(contract), name);
+  }
+  explicit operator bool() const { return bool(contract); }
+  void build() {
     if (!source) return;
-    auto function = *source->getOps<func::FuncOp>().begin();
+    auto function = firstFunction(*source);
     SmallVector<VirtualRegisterAssignment> registers;
     SmallVector<VirtualDMAAssignment> dma;
     unsigned scalar = 19, tensor = 12, transfer = 0;
@@ -104,9 +76,9 @@ struct Fixture {
         else if (isa<VirtualFP8Type>(v.getType())) registers.push_back({v, tensor++});
         else if (isa<VirtualBF16Type>(v.getType())) { registers.push_back({v, tensor}); tensor += 2; }
       };
-      for (Value v : body.getArguments()) add(v);
+      llvm::for_each(body.getArguments(), add);
       for (Operation &op : body) {
-        for (Value v : op.getResults()) add(v);
+        llvm::for_each(op.getResults(), add);
         if (isa<VirtualDMAStoreFP8Op, VirtualDMALoadFP8Op>(op)) {
           dma.push_back({op.getResult(1), {2 + transfer, 1, transfer, 131072 + 256 * transfer, 4, 5, 9}});
           ++transfer;
@@ -114,8 +86,7 @@ struct Fixture {
       }
     }
     FixedResourcePlacement fixed{};
-    fixed.inputWindowWords = fixed.outputWindowWords = 65536;
-    fixed.outputWord = 65536;
+    fixed.inputWindowWords = fixed.outputWindowWords = fixed.outputWord = 65536;
     fixed.loadChannel = 1;
     fixed.storeChannel = 2;
     SmallVector<int32_t> arguments;
@@ -131,35 +102,14 @@ struct Fixture {
     auto effects = buildAtlasSourceMemoryEffectContract(function, cfg, tiles);
     if (failed(effects)) return;
     contract = *effects;
-    (*issued)->setAttr("atlas.generated_from_virtual", b.getStringAttr("resource-contract-v5"));
-    (*issued)->setAttr("atlas.timing_state", b.getStringAttr("untimed"));
-    (*issued)->setAttr("atlas.virtual_dma_contract", b.getArrayAttr({}));
-    (*issued)->setAttr("atlas.virtual_mxu_contract", b.getArrayAttr({}));
-    (*issued)->setAttr("atlas.virtual_cfg_contract", cfg);
-    (*issued)->setAttr("atlas.virtual_tile_contract", tiles);
-    (*issued)->setAttr("atlas.virtual_source_memory_contract", contract);
-    (*issued)->setAttr("atlas.virtual_buffer_contract", b.getDictionaryAttr({}));
-    b.setInsertionPointToEnd(issued->getBody());
-    OperationState start(b.getUnknownLoc(), "atlas.start"); start.addTypes(StateType::get(&c));
-    state = b.create(start)->getResult(0);
+    (*module)->setAttr(kAtlasGeneratedMarker, b.getStringAttr(kAtlasGeneratedVersion));
+    (*module)->setAttr(kAtlasTimingState, b.getStringAttr("untimed"));
+    for (StringRef name : {kAtlasDMAContract, kAtlasMXUContract}) (*module)->setAttr(name, b.getArrayAttr({}));
+    (*module)->setAttr(kAtlasCFGContract, cfg);
+    (*module)->setAttr(kAtlasTileContract, tiles);
+    (*module)->setAttr(kAtlasSourceMemoryContract, contract);
+    (*module)->setAttr(kAtlasBufferContract, b.getDictionaryAttr({}));
   }
-  NamedAttribute i(StringRef name, int64_t n) { return b.getNamedAttr(name, b.getI32IntegerAttr(n)); }
-  NamedAttribute text(StringRef name, StringRef s) { return b.getNamedAttr(name, b.getStringAttr(s)); }
-  Operation *emit(StringRef name, std::initializer_list<NamedAttribute> attributes, int command = -1, int edge = -1) {
-    OperationState op(b.getUnknownLoc(), name); op.addOperands(state); op.addTypes(StateType::get(&context)); op.addAttributes(attributes);
-    op.addAttribute("atlas.virtual_cfg_block", b.getI32IntegerAttr(block));
-    if (command >= 0) op.addAttribute("atlas.virtual_tile_command", b.getI32IntegerAttr(command));
-    if (edge >= 0) op.addAttribute("atlas.virtual_cfg_edge", b.getI32IntegerAttr(edge));
-    Operation *created = b.create(op); state = created->getResult(0); ops.push_back(created); return created;
-  }
-  void constant(int reg, uint32_t value) {
-    int32_t low = int32_t(value << 20) >> 20;
-    uint32_t high = (value - uint32_t(low)) >> 12;
-    if (high) emit("atlas.upper", {text("kind", "lui"), i("dst", reg), i("immediate", high)});
-    if (low || !high) emit("atlas.alu_imm", {text("kind", "addi"), i("dst", reg), i("src", high ? reg : 0), i("immediate", low)});
-  }
-  void nop() { emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 0), i("src", 0), i("immediate", 0)}); }
-  void halt() { emit("atlas.trap", {text("kind", "ecall")}); }
   DictionaryAttr tile(unsigned effect, StringRef role) {
     auto e = cast<DictionaryAttr>(contract.getAs<ArrayAttr>("effects")[effect]);
     return cast<DictionaryAttr>(tiles[e.getAs<IntegerAttr>(role).getInt()]);
@@ -168,43 +118,45 @@ struct Fixture {
   void launch(unsigned effect) {
     auto t = tile(effect, "launch");
     bool store = t.getAs<StringAttr>("kind").getValue() == "dma_store";
-    constant(4, uint32_t(t.getAs<IntegerAttr>("vmem_byte").getInt()) / 4);
-    constant(5, uint32_t(t.getAs<IntegerAttr>("dram_byte").getInt()));
-    constant(9, t.getAs<IntegerAttr>("bytes").getInt());
-    if (store) for (int id : t.getAs<DenseI32ArrayAttr>("after").asArrayRef()) {
-      auto v = cast<DictionaryAttr>(tiles[id]);
-      emit("atlas.vstore", {i("src", v.getAs<IntegerAttr>("reg").getInt()), i("base", 4), i("offset", 0), text("format", "raw")}, id);
-    }
-    emit("atlas.dma", {text("direction", store ? "store" : "load"), i("reg", 4), i("dram", 5), i("size", 9), i("channel", t.getAs<IntegerAttr>("channel").getInt())}, t.getAs<IntegerAttr>("id").getInt());
+    constant(4, uint32_t(integer(t, "vmem_byte")) / 4);
+    constant(5, uint32_t(integer(t, "dram_byte")));
+    constant(9, integer(t, "bytes"));
+    if (store) for (int id : t.getAs<DenseI32ArrayAttr>("after").asArrayRef())
+      emit("atlas.vstore", {i("src", integer(cast<DictionaryAttr>(tiles[id]), "reg")), i("base", 4), i("offset", 0), text("format", "raw")}, id);
+    emit("atlas.dma", {text("direction", store ? "store" : "load"), i("reg", 4), i("dram", 5), i("size", 9), i("channel", integer(t, "channel"))}, integer(t, "id"));
   }
   void complete(unsigned effect) {
     auto t = tile(effect, "completion");
-    int completion = t.getAs<IntegerAttr>("id").getInt();
-    emit("atlas.dma_wait", {i("channel", t.getAs<IntegerAttr>("channel").getInt())}, completion);
+    int completion = integer(t, "id");
+    emit("atlas.dma_wait", {i("channel", integer(t, "channel"))}, completion);
     if (tile(effect, "launch").getAs<StringAttr>("kind").getValue() == "dma_load") for (Attribute a : tiles) {
       auto v = cast<DictionaryAttr>(a);
       if (v.getAs<StringAttr>("kind").getValue() != "vload" || v.getAs<DenseI32ArrayAttr>("after").asArrayRef() != ArrayRef<int32_t>({completion})) continue;
-      emit("atlas.vload", {i("dst", v.getAs<IntegerAttr>("reg").getInt()), i("base", 4), i("offset", 0), text("format", "raw")}, v.getAs<IntegerAttr>("id").getInt());
+      emit("atlas.vload", {i("dst", integer(v, "reg")), i("base", 4), i("offset", 0), text("format", "raw")}, integer(v, "id"));
     }
   }
   void group(unsigned effect) { launch(effect); complete(effect); }
   void release() { emit("atlas.csr", {text("kind", "rrw"), i("dst", 0), i("source", 10), i("address", 0xc10)}); }
-  Operation *jump(int edge) { return emit("atlas.jump", {text("kind", "jal"), i("dst", 0), i("base", 0), i("offset", 0)}, -1, edge); }
-  Operation *branch() { return emit("atlas.branch", {text("kind", "bne"), i("lhs", 18), i("rhs", 0), i("offset_bytes", 0)}); }
-  void aim(Operation *redirect, Operation *target) {
-    auto find = [&](Operation *op) { return std::find(ops.begin(), ops.end(), op) - ops.begin(); };
-    redirect->setAttr(isa<BranchOp>(redirect) ? "offset_bytes" : "offset", b.getI32IntegerAttr(2 * (find(target) - find(redirect))));
+  // Block 0 runs `entry` and jumps over `skipped` to the block-1 loop header running `body`; the backedge targets
+  // `back` (default: the header).
+  void loop(function_ref<void()> entry, function_ref<void()> body, function_ref<size_t(size_t)> back = {}, function_ref<void()> skipped = {}) {
+    entry();
+    Operation *enter = jump(0); nop();
+    if (skipped) skipped();
+    block = 1; size_t header = ops.size(); body();
+    Operation *exitBranch = branch(); nop(); Operation *exit = jump(2); nop();
+    Operation *backedge = jump(1); nop(); block = 2; halt();
+    aim(enter, header); aim(exitBranch, backedge); aim(backedge, back ? back(header) : header); aim(exit, ops.back());
   }
-  bool verify() { diagnostics.clear(); return succeeded(verifyAtlasGeneratedSourceMemoryEffectContract(*issued)); }
+  bool verify() { diagnostics.clear(); return succeeded(verifyAtlasGeneratedSourceMemoryEffectContract(*module)); }
   bool rejects(StringRef message) { return !verify() && diagnosed(message); }
 };
+
 void straight(MLIRContext &context) {
   for (unsigned offset : {0u, 512u, 2048u}) {
-    std::string source = sourceText.str();
-    auto pos = source.find("%b = arith.constant -1879048192");
-    source.replace(pos, std::string("%b = arith.constant -1879048192").size(), "%b = arith.constant " + std::to_string(int32_t(0x90000000u + offset)));
+    std::string source = replace(sourceText, "%b = arith.constant -1879048192", "%b = arith.constant " + std::to_string(int32_t(0x90000000u + offset)));
     for (bool reorder : {false, true}) {
-      Fixture f(context, source); check(bool(f.contract), "literal source memory contract builds"); if (!f.contract) continue;
+      Fixture f(context, source, "literal source memory contract builds"); if (!f) continue;
       auto effects = f.contract.getAs<ArrayAttr>("effects");
       check(effects.size() == 3, "literal implicit-input/explicit-store/explicit-load cardinality");
       auto store = cast<DictionaryAttr>(effects[1]), load = cast<DictionaryAttr>(effects[2]);
@@ -216,17 +168,14 @@ void straight(MLIRContext &context) {
       check(reorder && offset < 1024 ? f.rejects(notCompleted) : f.verify(), offset >= 1024 ? "disjoint write/read groups may reorder" : reorder ? "completed overlapping groups on disjoint staging cannot reorder" : "source store completes before overlapping read issue");
     }
   }
-  // A literal second fixture replaces the first write by a read. Equal host
-  // spans then carry no source effect edge, even with completed groups swapped.
-  std::string reads = sourceText.str();
-  size_t begin = reads.find("    %s2, %store"); size_t end = reads.find("    %s4, %load");
+  // Replacing the first write by a read: equal host spans carry no source effect edge, even with completed groups swapped.
+  std::string reads = sourceText;
+  size_t begin = reads.find("    %s2, %store"), end = reads.find("    %s4, %load");
   reads.replace(begin, end - begin, R"mlir(    %s2, %first = "atlas.virtual_dma_load_fp8"(%s1, %a, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
     %s3, %first_result = "atlas.virtual_dma_await_fp8"(%s2, %first) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
 )mlir");
-  Fixture f(context, reads); check(bool(f.contract), "literal read/read source builds");
-  if (f.contract) {
-    auto last = cast<DictionaryAttr>(f.contract.getAs<ArrayAttr>("effects")[2]);
-    check(last.getAs<DenseI32ArrayAttr>("predecessors").empty(), "same-span read/read has no ordering edge");
+  if (Fixture f(context, reads, "literal read/read source builds"); f) {
+    check(cast<DictionaryAttr>(f.contract.getAs<ArrayAttr>("effects")[2]).getAs<DenseI32ArrayAttr>("predecessors").empty(), "same-span read/read has no ordering edge");
     f.group(0); f.group(2); f.group(1); f.halt(); check(f.verify(), "same-span completed read/read may reorder");
   }
 }
@@ -242,7 +191,7 @@ void boundary(MLIRContext &context) {
     }
   })mlir";
   for (bool reorder : {false, true}) {
-    Fixture f(context, text); check(bool(f.contract), "literal overlapping boundary I/O source builds"); if (!f.contract) continue;
+    Fixture f(context, text, "literal overlapping boundary I/O source builds"); if (!f) continue;
     auto effects = f.contract.getAs<ArrayAttr>("effects");
     check(effects.size() == 4, "literal boundary BF16 half-effect count");
     auto first = cast<DictionaryAttr>(effects[2]), second = cast<DictionaryAttr>(effects[3]);
@@ -250,25 +199,22 @@ void boundary(MLIRContext &context) {
           first.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef() == ArrayRef<int32_t>({0}) &&
           second.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef() == ArrayRef<int32_t>({1}),
           "boundary writes retain the literal corresponding prior source reads");
-    if (reorder) { f.group(2); f.group(0); f.group(1); f.group(3); }
-    else { f.group(0); f.group(1); f.group(2); f.group(3); }
+    const unsigned order[2][4] = {{0, 1, 2, 3}, {2, 0, 1, 3}};
+    for (unsigned effect : order[reorder]) f.group(effect);
     f.halt(); check(reorder ? f.rejects(notCompleted) : f.verify(), reorder ? "completed boundary write cannot precede its overlapping source read" : "serialized overlapping boundary I/O preserves source order");
   }
 }
 void loops(MLIRContext &context) {
   for (bool stale : {false, true}) {
-    Fixture f(context, loopText); check(bool(f.contract), "literal loop source builds"); if (!f.contract) continue;
-    f.group(0); Operation *enter = f.jump(0); f.nop();
-    f.block = 1; size_t header = f.ops.size(); f.group(1); size_t read = f.ops.size(); f.group(2);
-    Operation *branch = f.branch(); f.nop(); Operation *exit = f.jump(2); f.nop();
-    Operation *back = f.jump(1); f.nop(); f.block = 2; f.halt();
-    f.aim(enter, f.ops[header]); f.aim(branch, back); f.aim(back, f.ops[stale ? read : header]); f.aim(exit, f.ops.back());
+    Fixture f(context, loopText, "literal loop source builds"); if (!f) continue;
+    size_t read = 0;
+    f.loop([&] { f.group(0); }, [&] { f.group(1); read = f.ops.size(); f.group(2); }, [&](size_t header) { return stale ? read : header; });
     check(stale ? f.rejects(notCompleted) : f.verify(), stale ? "previous loop visit completion cannot satisfy skipped current predecessor" : "each source loop visit independently completes conflicting predecessor");
   }
 }
 void branches(MLIRContext &context) {
   for (bool reorder : {false, true}) {
-    Fixture f(context, branchText); check(bool(f.contract), "literal branch source builds"); if (!f.contract) continue;
+    Fixture f(context, branchText, "literal branch source builds"); if (!f) continue;
     auto effects = f.contract.getAs<ArrayAttr>("effects");
     check(effects.size() == 5, "mailbox/input/left-store/left-read/right-read literal effect count");
     auto leftRead = cast<DictionaryAttr>(effects[3]), rightRead = cast<DictionaryAttr>(effects[4]);
@@ -279,56 +225,44 @@ void branches(MLIRContext &context) {
     Operation *leftExit = f.jump(2); f.nop();
     f.block = 0; Operation *right = f.jump(1); f.nop(); f.block = 2; size_t rightBody = f.ops.size(); f.group(4); Operation *rightExit = f.jump(3); f.nop();
     f.block = 3; f.halt();
-    f.aim(choose, right); f.aim(left, f.ops[leftBody]); f.aim(right, f.ops[rightBody]); f.aim(leftExit, f.ops.back()); f.aim(rightExit, f.ops.back());
+    f.aim(choose, right); f.aim(left, leftBody); f.aim(right, rightBody); f.aim(leftExit, f.ops.back()); f.aim(rightExit, f.ops.back());
     check(reorder ? f.rejects(notCompleted) : f.verify(), reorder ? "branch-local completed transfers cannot reverse their source overlap" : "untaken branch predecessor is not imposed on the other branch");
   }
 }
 // Each issued stream isolates one lifecycle rejection; later failures in the same stream are not reached.
 void lifecycle(MLIRContext &context) {
-  {
-    Fixture f(context, sourceText); check(bool(f.contract), "missing-completion fixture builds");
-    if (f.contract) { f.group(0); f.group(1); f.halt(); check(f.rejects("source memory contract requires one issued launch and completion per effect"), "every effect issues exactly one launch and completion"); }
+  if (Fixture f(context, sourceText, "missing-completion fixture builds"); f) {
+    f.group(0); f.group(1); f.halt();
+    check(f.rejects("source memory contract requires one issued launch and completion per effect"), "every effect issues exactly one launch and completion");
   }
-  {
-    Fixture f(context, sourceText); check(bool(f.contract), "early-completion fixture builds");
-    if (f.contract) { f.group(0); f.complete(1); f.launch(1); f.group(2); f.halt(); check(f.rejects("completion has no matching current launch"), "completion before its launch is rejected"); }
+  if (Fixture f(context, sourceText, "early-completion fixture builds"); f) {
+    f.group(0); f.complete(1); f.launch(1); f.group(2); f.halt();
+    check(f.rejects("completion has no matching current launch"), "completion before its launch is rejected");
   }
-  {
-    Fixture f(context, sourceText); check(bool(f.contract), "issued-loop fixture builds");
-    if (f.contract) {
-      f.group(0); size_t body = f.ops.size(); f.group(1); Operation *again = f.branch(); f.nop(); f.group(2); f.halt();
-      f.aim(again, f.ops[body]);
-      check(f.rejects("effect launched twice within one source visit"), "an untagged issued loop cannot relaunch within one source visit");
-    }
+  if (Fixture f(context, sourceText, "issued-loop fixture builds"); f) {
+    f.group(0); size_t body = f.ops.size(); f.group(1); Operation *again = f.branch(); f.nop(); f.group(2); f.halt();
+    f.aim(again, body);
+    check(f.rejects("effect launched twice within one source visit"), "an untagged issued loop cannot relaunch within one source visit");
   }
-  {
-    Fixture f(context, branchText); check(bool(f.contract), "shared-channel fixture builds");
-    if (f.contract) {
-      check(f.tile(0, "launch").getAs<IntegerAttr>("channel") == f.tile(1, "launch").getAs<IntegerAttr>("channel"), "mailbox and input share their load channel");
-      f.launch(0); f.launch(1); f.complete(0); f.complete(1); f.group(2); f.group(3); f.group(4); f.halt();
-      check(f.rejects("effect channel is not idle"), "a launch cannot reuse a channel with a pending effect");
-    }
+  if (Fixture f(context, branchText, "shared-channel fixture builds"); f) {
+    check(f.tile(0, "launch").getAs<IntegerAttr>("channel") == f.tile(1, "launch").getAs<IntegerAttr>("channel"), "mailbox and input share their load channel");
+    f.launch(0); f.launch(1); f.complete(0); f.complete(1); f.group(2); f.group(3); f.group(4); f.halt();
+    check(f.rejects("effect channel is not idle"), "a launch cannot reuse a channel with a pending effect");
   }
-  {
-    Fixture f(context, loopText); check(bool(f.contract), "wrong-block fixture builds");
-    if (f.contract) {
-      f.group(0); f.group(1); Operation *enter = f.jump(0); f.nop();
-      f.block = 1; size_t header = f.ops.size(); f.group(2); Operation *branch = f.branch(); f.nop(); Operation *exit = f.jump(2); f.nop();
-      Operation *back = f.jump(1); f.nop(); f.block = 2; f.halt();
-      f.aim(enter, f.ops[header]); f.aim(branch, back); f.aim(back, f.ops[header]); f.aim(exit, f.ops.back());
-      check(f.rejects("launch belongs to a different source-block visit"), "a launch issued in another source block is rejected");
-    }
+  if (Fixture f(context, loopText, "wrong-block fixture builds"); f) {
+    f.loop([&] { f.group(0); f.group(1); }, [&] { f.group(2); });
+    check(f.rejects("launch belongs to a different source-block visit"), "a launch issued in another source block is rejected");
   }
 }
 // The store is predecessor 1 of the overlapping load (effect 2); both paths of an untagged branch join before the load.
 void joins(MLIRContext &context) {
   for (bool waitBothPaths : {true, false}) {
-    Fixture f(context, sourceText); check(bool(f.contract), "must-join fixture builds"); if (!f.contract) continue;
+    Fixture f(context, sourceText, "must-join fixture builds"); if (!f) continue;
     f.group(0); f.launch(1); Operation *skip = f.branch(); f.nop();
     if (waitBothPaths) f.nop(); else f.complete(1);
     size_t join = f.ops.size();
     if (waitBothPaths) f.complete(1);
-    f.group(2); f.halt(); f.aim(skip, f.ops[join]);
+    f.group(2); f.halt(); f.aim(skip, join);
     check(waitBothPaths ? f.verify() : f.rejects(notCompleted), waitBothPaths ? "a predecessor in flight on both paths completes at the join" : "completion on only one untagged path does not satisfy the join");
   }
 }
@@ -336,46 +270,32 @@ void joins(MLIRContext &context) {
 void exits(MLIRContext &context) {
   for (bool launched : {true, false}) {
     StringRef expected = launched ? pending : incomplete;
-    {
-      Fixture f(context, loopText); check(bool(f.contract), "edge-drain fixture builds");
-      if (f.contract) {
-        if (launched) f.launch(0);
-        Operation *enter = f.jump(0); f.nop();
-        if (!launched) f.group(0); else f.complete(0);
-        f.block = 1; size_t header = f.ops.size(); f.group(1); f.group(2); Operation *branch = f.branch(); f.nop(); Operation *exit = f.jump(2); f.nop();
-        Operation *back = f.jump(1); f.nop(); f.block = 2; f.halt();
-        f.aim(enter, f.ops[header]); f.aim(branch, back); f.aim(back, f.ops[header]); f.aim(exit, f.ops.back());
-        check(f.rejects(expected), launched ? "a tagged source edge cannot leave an effect pending" : "a tagged source edge requires its block's effects");
-      }
+    if (Fixture f(context, loopText, "edge-drain fixture builds"); f) {
+      // The entry effect is still pending (or not yet issued) when the tagged entry edge leaves block 0.
+      f.loop([&] { if (launched) f.launch(0); }, [&] { f.group(1); f.group(2); }, {}, [&] { if (launched) f.complete(0); else f.group(0); });
+      check(f.rejects(expected), launched ? "a tagged source edge cannot leave an effect pending" : "a tagged source edge requires its block's effects");
     }
-    {
-      Fixture f(context, sourceText); check(bool(f.contract), "halt-drain fixture builds");
-      if (f.contract) {
-        f.group(0); f.group(1); if (launched) f.launch(2); f.halt();
-        if (launched) f.complete(2); else f.group(2);
-        check(f.rejects(expected), launched ? "a halt cannot leave an effect pending" : "a halt requires its block's effects");
-      }
+    if (Fixture f(context, sourceText, "halt-drain fixture builds"); f) {
+      f.group(0); f.group(1); if (launched) f.launch(2); f.halt();
+      if (launched) f.complete(2); else f.group(2);
+      check(f.rejects(expected), launched ? "a halt cannot leave an effect pending" : "a halt requires its block's effects");
     }
-    {
-      Fixture f(context, sourceText); check(bool(f.contract), "fall-off fixture builds");
-      if (f.contract) {
-        f.group(0); f.group(1); if (launched) f.launch(2);
-        Operation *skip = f.jump(-1); f.nop();
-        if (launched) f.complete(2); else f.group(2);
-        f.nop(); f.aim(skip, f.ops.back());
-        check(f.rejects(expected), launched ? "falling off the stream cannot leave an effect pending" : "falling off the stream requires its block's effects");
-      }
+    if (Fixture f(context, sourceText, "fall-off fixture builds"); f) {
+      f.group(0); f.group(1); if (launched) f.launch(2);
+      Operation *skip = f.jump(); f.nop();
+      if (launched) f.complete(2); else f.group(2);
+      f.nop(); f.aim(skip, f.ops.back());
+      check(f.rejects(expected), launched ? "falling off the stream cannot leave an effect pending" : "falling off the stream requires its block's effects");
     }
   }
-  Fixture f(context, sourceText); check(bool(f.contract), "release-drain fixture builds");
-  if (f.contract) {
+  if (Fixture f(context, sourceText, "release-drain fixture builds"); f) {
     f.group(0); f.group(1); f.launch(2); f.release(); f.complete(2); f.halt();
     check(f.rejects(pending), "the completion CSR write cannot leave an effect pending");
   }
 }
 // Swapping the store/wait tiles (3-5) with the load/await tiles (6-8) in both contracts keeps them mutually consistent but inverts source order.
 void renumbered(MLIRContext &context) {
-  Fixture f(context, sourceText); check(bool(f.contract), "renumbering fixture builds"); if (!f.contract) return;
+  Fixture f(context, sourceText, "renumbering fixture builds"); if (!f) return;
   auto map = [](int32_t id) { return id >= 3 && id < 6 ? id + 3 : id >= 6 && id < 9 ? id - 3 : id; };
   auto remap = [&](DictionaryAttr d, StringRef key) {
     SmallVector<int32_t> ids;
@@ -392,22 +312,11 @@ void renumbered(MLIRContext &context) {
   for (Attribute a : f.cfg.getAs<ArrayAttr>("operations")) operations.push_back(remap(cast<DictionaryAttr>(a), "tile_commands").getDictionary(&context));
   NamedAttrList cfg(f.cfg); cfg.set("operations", f.b.getArrayAttr(operations));
   diagnostics.clear();
-  auto built = buildAtlasSourceMemoryEffectContract(*f.source->getOps<func::FuncOp>().begin(), cfg.getDictionary(&context), f.b.getArrayAttr(tiles));
+  auto built = buildAtlasSourceMemoryEffectContract(firstFunction(*f.source), cfg.getDictionary(&context), f.b.getArrayAttr(tiles));
   check(failed(built) && diagnosed("source memory contract cannot derive block-local source spans and completions"), "consistently renumbered tile ids cannot invert source order");
 }
 void emptyStream(MLIRContext &context) {
-  auto module = parseSourceString<ModuleOp>(R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v5", atlas.timing_state = "untimed",
-    atlas.virtual_dma_contract = [], atlas.virtual_mxu_contract = [], atlas.virtual_tile_contract = [],
-    atlas.virtual_source_memory_contract = {effects = []}, atlas.virtual_buffer_contract = {packs = [], reads = []},
-    atlas.virtual_cfg_contract = {
-      values = [], operations = [], edges = [],
-      blocks = [{id = 0 : i32, condition = -1 : i32, args = array<i32>,
-                 live_in = array<i32>, operations = array<i32>, edges = array<i32>}]
-    }
-  } {
-    %s = "atlas.start"() : () -> !atlas.state
-  })mlir", &context);
+  auto module = parseSourceString<ModuleOp>(emptyIssuedStream, &context);
   check(bool(module), "empty issued stream fixture parses"); if (!module) return;
   diagnostics.clear();
   check(failed(verifyAtlasGeneratedSourceMemoryEffectContract(*module)) && diagnosed("at least one encoded instruction"), "the module entry rejects an empty stream while decoding");

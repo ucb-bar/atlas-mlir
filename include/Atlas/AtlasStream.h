@@ -34,10 +34,9 @@ struct DelayInsertion {
 };
 
 enum class AtlasStreamReadMode { Scheduling, Verification };
-// Verification reads emitted delays and treats PC-dependent scalar values as
-// unknown; it only encodes, so its caller has already checked the artifact.
-// Scheduling first verifies the artifact at its boundary. `words`, when given,
-// receives the encoded stream.
+// Verification reads emitted delays, treats PC-dependent scalars as unknown and
+// only encodes; Scheduling first verifies the artifact. `words` receives the
+// encoded stream.
 FailureOr<AtlasStream> readAtlasStream(
     ModuleOp module, AtlasStreamReadMode mode = AtlasStreamReadMode::Scheduling,
     llvm::SmallVectorImpl<uint32_t> *words = nullptr);
@@ -54,10 +53,9 @@ LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
                                 const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
-// Resolves the provider a timing pass uses: `requested` when nonempty, else
-// the module's retained atlas.timing_provider, else the npu-model provider. A
-// request that differs from the retained identity, or an unregistered or
-// incomplete provider, is diagnosed on the module.
+// The provider a timing pass uses: `requested`, else the retained
+// atlas.timing_provider, else the npu-model provider. A request that differs
+// from the retained one, or an unregistered or incomplete provider, fails.
 FailureOr<timing::TimingProvider>
 selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
 // Dispatches the explicitly retained complete provider. Legacy streams without
@@ -72,9 +70,8 @@ void registerVerifyAtlasTimingPass();
 // Entry values are known only when all reachable incoming CFG edges agree.
 std::vector<std::optional<uint32_t>>
 atlasDMAUpperWordEntries(const AtlasStream &stream);
-// Instruction-order ERF facts: e0 is writable and starts unknown too. SELI
-// defines a raw code, SELD invalidates it, and reachable joins must agree.
-// These facts alone do not establish completion of an asynchronous SELD.
+// ERF entry facts (e0 included, all unknown at entry): SELI defines a raw code,
+// SELD invalidates it, and joins must agree. They do not prove SELD completion.
 std::vector<timing::RegValues>
 atlasScaleRegisterEntries(const AtlasStream &stream);
 void applyAtlasScaleRegister(const timing::Instr &in, timing::RegValues &regs);
@@ -86,10 +83,9 @@ template <typename S> struct AtlasForwardEntries {
   std::vector<S> entries;
   std::vector<bool> reached;
 };
-// Forward worklist from block 0: `transfer(block, state)` turns a copy of the
-// entry state into the exit state, and `join(into, incoming)` returns whether
-// a reached entry changed. A failed transfer aborts the walk. `successors`
-// replaces the stream's own edges, e.g. to summarize a loop at its entry.
+// Forward worklist from block 0: `transfer` turns a copy of a block's entry
+// state into its exit state (failure aborts), `join(into, incoming)` returns
+// whether a reached entry changed, and `successors` may replace the edges.
 template <typename S, typename Transfer, typename Join, typename Successors>
 FailureOr<AtlasForwardEntries<S>>
 atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors) {
@@ -126,10 +122,9 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
 // every block's ops at that block's positions. `after`, empty or one entry per
 // block, holds the delays that end a block falling through or ending the
 // stream: they drain its work, belong to it, and a branch into the next block
-// does not run them. Rewriting alone leaves the stream untimed; timing passes
-// request a timed artifact by naming the provider that timed it, which is
-// stamped as atlas.timing_provider. The module is then re-verified, and
-// `stream` no longer describes it.
+// does not run them. A nonempty `timedBy` stamps the result timed by that
+// atlas.timing_provider, else it is untimed. The module is then re-verified,
+// and `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
                                llvm::ArrayRef<DelayInsertion> before,

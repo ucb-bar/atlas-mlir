@@ -9,12 +9,7 @@ using namespace mlir::atlas;
 static LogicalResult
 verifyGeneratedStructure(ModuleOp module,
                          llvm::SmallVectorImpl<AtlasDMAInterval> &intervals) {
-  struct PendingDMA {
-    DMAOp launch;
-    std::optional<int32_t> id;
-    int64_t pc;
-  };
-  llvm::DenseMap<unsigned, PendingDMA> pending;
+  llvm::DenseMap<unsigned, AtlasDMAInterval> pending; // waitPC not yet known
   llvm::DenseSet<int32_t> launchIDs;
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
@@ -40,7 +35,7 @@ verifyGeneratedStructure(ModuleOp module,
         return op.emitOpError("another DMA launch while its channel is pending");
       if (id && !launchIDs.insert(*id).second)
         return op.emitOpError("duplicate virtual DMA transfer launch ID");
-      pending.try_emplace(dma.getChannel(), PendingDMA{dma, id, currentPC});
+      pending.try_emplace(dma.getChannel(), AtlasDMAInterval{dma.getChannel(), id, currentPC, -1, dma});
     } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
       auto transfer = pending.find(wait.getChannel());
       if (transfer == pending.end())
@@ -48,11 +43,11 @@ verifyGeneratedStructure(ModuleOp module,
       if (id != transfer->second.id)
         return op.emitOpError(
             "DMA.WAIT must match the pending DMA channel and transfer ID");
-      intervals.push_back({wait.getChannel(), id, transfer->second.pc, currentPC, transfer->second.launch});
+      transfer->second.waitPC = currentPC;
+      intervals.push_back(transfer->second);
       pending.erase(transfer);
-    } else if (!pending.empty()) {
-      if (!canOverlapAtlasGeneratedDMA(&op))
-        return op.emitOpError("unexpected instruction while DMA is pending");
+    } else if (!pending.empty() && !canOverlapAtlasGeneratedDMA(&op)) {
+      return op.emitOpError("unexpected instruction while DMA is pending");
     }
     if (isa<BranchOp, JumpOp>(op)) {
       auto slot = next ? dyn_cast<ALUImmOp>(next) : ALUImmOp{};

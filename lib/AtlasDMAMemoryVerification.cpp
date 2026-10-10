@@ -2,7 +2,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
-#include <algorithm>
+#include "llvm/ADT/STLExtras.h"
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,7 +12,6 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-
 struct Span {
   std::optional<uint64_t> start;
   std::optional<uint32_t> bytes;
@@ -54,7 +53,6 @@ LogicalResult compare(Operation *op, const Span &a, const Span &b,
   }
   return success();
 }
-
 } // namespace
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
@@ -102,8 +100,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
             return failure();
         pending.push_back(transfer);
       } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
-        auto found = std::find_if(pending.begin(), pending.end(),
-                                 [&](Transfer &transfer) {
+        auto found = llvm::find_if(pending, [&](Transfer &transfer) {
           return transfer.launch.getChannel() == wait.getChannel();
         });
         if (found == pending.end())

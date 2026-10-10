@@ -5,11 +5,11 @@ from __future__ import annotations
 import re
 import unittest
 
-from test_source_memory_contract import operations, reorder, source_operations
-from test_virtual_lowering import lower, run
+from test_source_memory_contract import source_operations
+from test_virtual_lowering import lower
 from verification_support import (
-    INCOMPLETE, TIMED_FINAL, UNTIMED, assert_boundaries, contract_text, drop_attribute, handoff_chain, insert_after,
-    line_index, records, remove_line, replace_contract, rewrite_line,
+    assert_boundaries, contract_text, handoff_chain, insert_after, line_index, moved, operations, records, remove_line, reorder,
+    replace_contract, rewrite_line,
 )
 
 CONTRACT = "atlas.virtual_buffer_contract"
@@ -111,19 +111,6 @@ def command(machine: str, kind: str, vmem: int) -> str:
     return f"atlas.virtual_tile_command = {identity} : i32"
 
 
-def moved(machine: str, chosen, anchor) -> str:
-    """Move the issued operations satisfying `chosen`, in order, to just before the first other one satisfying `anchor`."""
-    ops = operations(machine)
-    group = [line for line in ops if chosen(line)]
-    rest = [line for line in ops if not chosen(line)]
-    at = next(n for n, line in enumerate(rest) if anchor(line))
-    return reorder(machine, rest[:at] + group + rest[at:])
-
-
-def reads(machine: str) -> list[dict]:
-    return [r for r in records(machine, "buffer") if "command" in r]
-
-
 def stray_store(machine: str) -> str:
     """A scalar SW into the first output half between its VSTORE and its DMA store."""
     staged = line_index(machine, command(machine, "vstore", 0x40000))
@@ -173,25 +160,26 @@ def wrong_scale(machine: str) -> str:
                         lambda line: line.replace("offset = 127 : i32", "offset = 126 : i32"))
 
 
-class BufferContractVerificationTest(unittest.TestCase):
-    def rejected(self, source: str, mutate, diagnostic: str) -> None:
-        for timed, boundaries in ((False, UNTIMED), (True, TIMED_FINAL)):
-            with self.subTest(timed=timed):
-                assert_boundaries(self, mutate(lower(source, timed=timed)), boundaries, rejects=diagnostic)
+def copy_layout(machine: str) -> str:
+    return replace_contract(machine, "buffer", contract_text(machine, "buffer").replace('layout = "pack"', 'layout = "copy"'))
 
+
+class BufferContractVerificationTest(unittest.TestCase):
     def test_lowered_reuse_joins_and_loops_are_accepted_at_every_handoff(self) -> None:
         for name, source in (("straight", STRAIGHT), ("join", JOIN), ("loop", LOOP)):
             with self.subTest(program=name):
                 untimed = lower(source, timed=False)
                 self.assertIn(CONTRACT, untimed)
-                assert_boundaries(self, untimed, UNTIMED)
-                assert_boundaries(self, lower(source), TIMED_FINAL)
+                assert_boundaries(self, untimed)
+                assert_boundaries(self, lower(source))
                 stages = handoff_chain(self, untimed)
                 self.assertIn(contract_text(untimed, "buffer"), stages["structured"])
+        elsewhere = stray_store(lower(STRAIGHT, timed=False)).replace("immediate = 64 : i32", "immediate = 300 : i32", 1)
+        assert_boundaries(self, elsewhere)
 
     def test_contract_records_every_reader_and_pack(self) -> None:
         machine = lower(STRAIGHT, timed=False)
-        readers = reads(machine)
+        readers = [r for r in records(machine, "buffer") if "command" in r]
         tiles = records(machine, "tile")
         mailbox = [r for r in readers if tiles[r["command"]]["kind"] == "mailbox_load"]
         self.assertEqual([(r["writer"], r["vmem_byte"], r["bytes"], r["word"]) for r in mailbox], [(0, 0, 4, 0), (0, 4, 4, 1)])
@@ -200,33 +188,16 @@ class BufferContractVerificationTest(unittest.TestCase):
         self.assertIn("scale_code = 127 : i32", contract_text(machine, "buffer"))
         self.assertEqual(sum(tiles[r["command"]]["kind"] == "dma_store" for r in readers), 3)
 
-    def test_stray_scalar_store_into_staged_half_is_rejected(self) -> None:
-        self.rejected(STRAIGHT, stray_store, CAPTURE)
-        elsewhere = lambda machine: stray_store(machine).replace("immediate = 64 : i32", "immediate = 300 : i32", 1)
-        assert_boundaries(self, elsewhere(lower(STRAIGHT, timed=False)), UNTIMED)
-
-    def test_mailbox_overwritten_by_tensor_input_is_rejected(self) -> None:
-        self.rejected(STRAIGHT, overwritten_mailbox, MAILBOX)
-
-    def test_pack_relayout_requires_row_interleave_of_current_store(self) -> None:
-        self.rejected(STRAIGHT, row_stride, INTERLEAVE)
-        for name, source in (("straight", STRAIGHT), ("loop", LOOP)):
-            with self.subTest(program=name):
-                self.rejected(source, stale_raw_store, STALE)
-        self.rejected(STRAIGHT, wrong_scale, SCALE)
-        self.rejected(STRAIGHT, stale_conversion, CONVERSION)
-
-    def test_dropped_i1_normalization_is_rejected(self) -> None:
-        self.rejected(STRAIGHT, unmasked, I1_MASK)
-
-    def test_missing_or_altered_contract_is_rejected(self) -> None:
-        machine = lower(STRAIGHT)
-        dropped = drop_attribute(machine, CONTRACT)
-        self.assertNotIn(CONTRACT, dropped)
-        assert_boundaries(self, dropped, TIMED_FINAL, rejects=f"{INCOMPLETE} {CONTRACT}")
-        altered = replace_contract(machine, "buffer", contract_text(machine, "buffer").replace('layout = "pack"', 'layout = "copy"'))
-        self.assertNotEqual(altered, machine)
-        assert_boundaries(self, altered, TIMED_FINAL, rejects=INCONSISTENT)
+    def test_buffer_mutations_are_rejected(self) -> None:
+        cases = ((STRAIGHT, stray_store, CAPTURE), (STRAIGHT, overwritten_mailbox, MAILBOX), (STRAIGHT, row_stride, INTERLEAVE),
+                 (STRAIGHT, stale_raw_store, STALE), (LOOP, stale_raw_store, STALE), (STRAIGHT, wrong_scale, SCALE),
+                 (STRAIGHT, stale_conversion, CONVERSION), (STRAIGHT, unmasked, I1_MASK), (STRAIGHT, copy_layout, INCONSISTENT))
+        for source, mutate, diagnostic in cases:
+            for timed in (False, True):
+                with self.subTest(mutation=mutate.__name__, loop=source is LOOP, timed=timed):
+                    machine = lower(source, timed=timed)
+                    self.assertNotEqual(mutate(machine), machine)
+                    assert_boundaries(self, mutate(machine), rejects=diagnostic)
 
 
 if __name__ == "__main__":

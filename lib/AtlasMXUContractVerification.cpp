@@ -9,7 +9,6 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include <optional>
-#include <utility>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -63,10 +62,8 @@ DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   auto dictionary = dyn_cast<DictionaryAttr>(attr);
-  if (!dictionary || dictionary.size() != 11) {
-    module.emitOpError("MXU contract record requires exactly the v1 fields");
-    return failure();
-  }
+  if (!dictionary || dictionary.size() != 11)
+    return module.emitOpError("MXU contract record requires exactly the v1 fields");
   Record r;
   if (failed(readI32Fields<int32_t>(module, dictionary, "MXU", {
           {"id", &r.id}, {"block", &r.block}, {"unit", &r.unit}, {"reg", &r.reg},
@@ -75,15 +72,11 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
           {"scale_reg", &r.scaleReg}, {"scale", &r.scale}})))
     return failure();
   auto kind = dictionary.getAs<StringAttr>("kind");
-  if (!kind) {
-    module.emitOpError("MXU contract kind requires a string");
-    return failure();
-  }
+  if (!kind)
+    return module.emitOpError("MXU contract kind requires a string");
   r.kind = kind.getValue();
-  if (!validRecord(r)) {
-    module.emitOpError("MXU contract record has invalid v1 fields or geometry");
-    return failure();
-  }
+  if (!validRecord(r))
+    return module.emitOpError("MXU contract record has invalid v1 fields or geometry");
   return r;
 }
 
@@ -122,14 +115,12 @@ struct BlockOwnership {
   llvm::DenseMap<int32_t, unsigned> remaining;
 };
 
-LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records,
-                             ArrayRef<int32_t> order) {
+LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records) {
   llvm::DenseMap<int32_t, BlockOwnership> blocks;
   for (const Record &r : records)
     if (isMatmul(r))
       ++blocks[r.block].remaining[r.weight];
-  for (int32_t id : order) {
-    const Record &r = records[id];
+  for (const Record &r : records) {
     BlockOwnership &block = blocks[r.block];
     MXUOwnership &owners = block.owners;
     auto error = [&](StringRef message) -> LogicalResult {
@@ -243,8 +234,7 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
   // Entry owners only become unknown; must-fresh bits only become false and
   // may-pending bits only become true. Producer writes make loop transfer finite.
   auto paths = atlasForwardEntries(stream, PathOwnership(records.size()), [&](size_t block, PathOwnership &state) {
-    (void)transfer(block, state, false);
-    return success();
+    return transfer(block, state, false); // never fails without diagnosis
   }, mergeOwnership);
   for (size_t block = 0; block < stream.starts.size(); ++block) {
     if (!paths->reached[block])
@@ -288,15 +278,11 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
   for (const VirtualRegisterAssignment &assignment : registers) {
     Value value = assignment.value;
     if (!value || !known.contains(value) ||
-        !isa<VirtualFP8Type, VirtualBF16Type>(value.getType())) {
-      function.emitOpError("MXU contract tensor assignment refers to a foreign, stale, or non-tensor value");
-      return failure();
-    }
+        !isa<VirtualFP8Type, VirtualBF16Type>(value.getType()))
+      return function.emitOpError("MXU contract tensor assignment refers to a foreign, stale, or non-tensor value");
     bool pair = isa<VirtualBF16Type>(value.getType());
-    if (mapped.contains(value) || assignment.reg >= 64 || (pair && assignment.reg % 2)) {
-      function.emitOpError("MXU contract tensor assignment has duplicate value or invalid register geometry");
-      return failure();
-    }
+    if (mapped.contains(value) || assignment.reg >= 64 || (pair && assignment.reg % 2))
+      return function.emitOpError("MXU contract tensor assignment has duplicate value or invalid register geometry");
     mapped[value] = assignment.reg;
   }
   llvm::DenseMap<Value, MXUPlacement> placements;
@@ -323,20 +309,21 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
       Record r;
       r.block = blockId;
       Value tensor, handle;
-      if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
-        handle = op.getResult(1);
-        MXUPlacement placement = placements.lookup(handle);
+      auto place = [&](Value placed) {
+        MXUPlacement placement = placements.lookup(placed);
         r.unit = placement.unit;
         r.slot = placement.slot;
+      };
+      if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
+        handle = op.getResult(1);
+        place(handle);
         r.kind = isa<VirtualMXULoadWeightOp>(op) ? "weight_fp8" :
                  isa<VirtualMXULoadAccFP8Op>(op) ? "acc_fp8" : "acc_bf16";
         tensor = op.getOperand(1);
       } else if (isa<VirtualMXUResetOp, VirtualMXUAccumulateOp>(op)) {
         handle = op.getResult(1);
         Value weight = op.getOperand(2);
-        MXUPlacement placement = placements.lookup(handle);
-        r.unit = placement.unit;
-        r.slot = placement.slot;
+        place(handle);
         r.weightSlot = placements.lookup(weight).slot;
         r.weight = producer.lookup(weight);
         r.kind = isa<VirtualMXUResetOp>(op) ? "reset" : "accumulate";
@@ -345,19 +332,15 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
         tensor = op.getOperand(1);
       } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
         Value acc = op.getOperand(1);
-        MXUPlacement placement = placements.lookup(acc);
-        r.unit = placement.unit;
-        r.slot = placement.slot;
+        place(acc);
         r.previous = producer.lookup(acc);
         tensor = op.getResult(1);
         r.kind = isa<VirtualMXUReadoutBF16Op>(op) ? "pop_bf16" : "pop_fp8";
         r.scaleReg = 0;
         if (r.kind == "pop_fp8") {
           auto scale = op.getOperand(2).getDefiningOp<VirtualScaleConstantOp>();
-          if (!scale) {
-            op.emitOpError("MXU contract FP8 readout requires a source scale constant");
-            return failure();
-          }
+          if (!scale)
+            return op.emitOpError("MXU contract FP8 readout requires a source scale constant");
           r.scaleReg = fixed.scaleReg;
           r.scale = scale.getCode();
         }
@@ -413,12 +396,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
       return module.emitOpError("MXU contract ids must be consecutive and source blocks ordered");
     records.push_back(*record);
   }
-  if (failed(checkReferences(module, records)))
-    return failure();
-  SmallVector<int32_t> sourceOrder;
-  for (const Record &r : records)
-    sourceOrder.push_back(r.id);
-  if (failed(checkOwnership(module, records, sourceOrder)))
+  if (failed(checkReferences(module, records)) || failed(checkOwnership(module, records)))
     return failure();
   llvm::DenseMap<Operation *, int32_t> tagged;
   llvm::DenseSet<int32_t> seen;

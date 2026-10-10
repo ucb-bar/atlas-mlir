@@ -30,25 +30,18 @@ FailureOr<AtlasArtifactKind> mlir::atlas::classifyAtlasGeneratedArtifact(ModuleO
                     });
     if (!metadata)
       return AtlasArtifactKind::HandWritten;
-    module.emitOpError("generated resource metadata requires an Atlas virtual-to-machine artifact marked ")
+    return module.emitOpError("generated resource metadata requires an Atlas virtual-to-machine artifact marked ")
         << kAtlasGeneratedMarker << " = \"" << kAtlasGeneratedVersion << '"';
-    return failure();
   }
   auto version = dyn_cast<StringAttr>(marker);
-  if (!version || version.getValue() != kAtlasGeneratedVersion) {
-    module.emitOpError("unsupported Atlas virtual-to-machine artifact marker; only ")
+  if (!version || version.getValue() != kAtlasGeneratedVersion)
+    return module.emitOpError("unsupported Atlas virtual-to-machine artifact marker; only ")
         << kAtlasGeneratedMarker << " = \"" << kAtlasGeneratedVersion << "\" is supported";
-    return failure();
-  }
   for (StringRef name : kContracts)
-    if (!module->hasAttr(name)) {
-      module.emitOpError() << kAtlasGeneratedVersion << " artifact requires " << name;
-      return failure();
-    }
-  if (!module->hasAttr(kAtlasTimingState)) {
-    module.emitOpError() << kAtlasGeneratedVersion << " artifact requires an explicit " << kAtlasTimingState;
-    return failure();
-  }
+    if (!module->hasAttr(name))
+      return module.emitOpError() << kAtlasGeneratedVersion << " artifact requires " << name;
+  if (!module->hasAttr(kAtlasTimingState))
+    return module.emitOpError() << kAtlasGeneratedVersion << " artifact requires an explicit " << kAtlasTimingState;
   return AtlasArtifactKind::Generated;
 }
 

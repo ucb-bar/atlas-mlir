@@ -17,13 +17,10 @@ enum class DMAAwaitBasePolicy {
 
 // Requires a verified, admitted virtual CFG and live source IR. Checks the
 // supplied assignments independently of the allocator's interference graph.
-// DMA assignments must cover every source transfer. Checks ordered DMA helper
-// writes against virtual scalar liveness and preserves operands until capture.
-// For functions with explicit DMA, checks pending first-half staging bases
-// under Preserved and the persistent 1024-byte helper at implicit DMA reads,
-// using source lowering effects and conservative CFG constant propagation.
-// Choose the await policy to match lowering. Other fixed-helper contents,
-// emitted correspondence, and physical completion/timing remain separate.
+// DMA assignments must cover every source transfer; helper writes must spare
+// live scalars and uncaptured operands. With explicit DMA, the pending staging
+// base (under Preserved) and the 1024-byte helper are checked by constant
+// propagation over source lowering effects; choose the policy lowering uses.
 LogicalResult verifyAtlasRegisterAllocation(
     func::FuncOp function,
     llvm::ArrayRef<VirtualRegisterAssignment> assignments,

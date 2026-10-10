@@ -1,15 +1,9 @@
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
-#include "Atlas/AtlasGeneratedArtifact.h"
-#include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "VerificationTestSupport.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Pass/PassRegistry.h"
 #include <functional>
-#include <vector>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -44,13 +38,13 @@ bool accepts(ModuleOp module) { diagnostics.clear(); return succeeded(verifyAtla
 bool rejects(ModuleOp module, StringRef message) { return !accepts(module) && diagnosed(message); }
 int64_t i32(Operation *op, StringRef name) { return op->getAttrOfType<IntegerAttr>(name).getInt(); }
 void set(Operation *op, StringRef name, int64_t value) { op->setAttr(name, Builder(op->getContext()).getI32IntegerAttr(value)); }
-
-OwningOpRef<ModuleOp> lowered(MLIRContext &context) {
-  auto module = parseSourceString<ModuleOp>(sourceText, &context);
-  PassManager passes(&context);
-  if (!module || failed(parsePassPipeline("lower-atlas-virtual-to-machine", passes)) || failed(passes.run(*module))) return nullptr;
-  return module;
+DictionaryAttr with(DictionaryAttr record, StringRef name, Attribute value) {
+  NamedAttrList fields(record);
+  fields.set(name, value);
+  return fields.getDictionary(record.getContext());
 }
+
+OwningOpRef<ModuleOp> lowered(MLIRContext &context) { return runPipeline(context, sourceText, "lower-atlas-virtual-to-machine"); }
 Operation *find(ModuleOp module, function_ref<bool(Operation &)> wanted) {
   for (Operation &op : module.getBody()->getOperations())
     if (wanted(op)) return &op;
@@ -89,23 +83,19 @@ void records(MLIRContext &context) {
   check(accepts(*module), "lowered PACK, mailbox and boundary I/O preserve their words", diagnostics);
 
   auto source = parseSourceString<ModuleOp>(sourceText, &context);
-  auto function = *source->getOps<func::FuncOp>().begin();
+  auto function = firstFunction(*source);
   auto cfg = (*module)->getAttrOfType<DictionaryAttr>(kAtlasCFGContract);
   auto rebuilt = buildAtlasBufferContract(function, cfg, tiles);
   check(succeeded(rebuilt) && *rebuilt == contract, "the builder is a function of live source and the two contracts");
   SmallVector<Attribute> operations(cfg.getAs<ArrayAttr>("operations").begin(), cfg.getAs<ArrayAttr>("operations").end());
   for (Attribute &a : operations) {
     auto op = cast<DictionaryAttr>(a);
-    if (op.getAs<StringAttr>("name").getValue() != VirtualPackFP8Op::getOperationName()) continue;
     auto commands = op.getAs<DenseI32ArrayAttr>("tile_commands").asArrayRef();
-    NamedAttrList fields(op);
-    fields.set("tile_commands", Builder(&context).getDenseI32ArrayAttr({commands[1], commands[0]}));
-    a = fields.getDictionary(&context);
+    if (op.getAs<StringAttr>("name").getValue() == VirtualPackFP8Op::getOperationName())
+      a = with(op, "tile_commands", Builder(&context).getDenseI32ArrayAttr({commands[1], commands[0]}));
   }
-  NamedAttrList swapped(cfg);
-  swapped.set("operations", Builder(&context).getArrayAttr(operations));
   diagnostics.clear();
-  check(failed(buildAtlasBufferContract(function, swapped.getDictionary(&context), tiles)) && diagnosed("buffer contract cannot derive tile readers and PACK endpoints"), "PACK endpoints must be its raw VSTORE then its relayout VLOAD");
+  check(failed(buildAtlasBufferContract(function, with(cfg, "operations", Builder(&context).getArrayAttr(operations)), tiles)) && diagnosed("buffer contract cannot derive tile readers and PACK endpoints"), "PACK endpoints must be its raw VSTORE then its relayout VLOAD");
 }
 
 // Each case lowers afresh, corrupts one site and expects one diagnostic.
@@ -133,18 +123,14 @@ void pack(MLIRContext &context) {
       {"conversion under another scale code", "buffer contract: PACK conversion scale register does not hold its source scale code", [&](ModuleOp m) { set(find(m, scale), "offset", 126); }},
       {"retained scale code is checked against the conversion", "buffer contract: PACK conversion scale register does not hold its source scale code", [&](ModuleOp m) {
          auto contract = m->getAttrOfType<DictionaryAttr>(kAtlasBufferContract);
-         auto record = cast<DictionaryAttr>(contract.getAs<ArrayAttr>("packs")[0]);
-         NamedAttrList fields(record); fields.set("scale_code", Builder(&context).getI32IntegerAttr(126));
-         NamedAttrList dictionary(contract); dictionary.set("packs", Builder(&context).getArrayAttr({fields.getDictionary(&context)}));
-         m->setAttr(kAtlasBufferContract, dictionary.getDictionary(&context)); }},
+         auto record = with(cast<DictionaryAttr>(contract.getAs<ArrayAttr>("packs")[0]), "scale_code", Builder(&context).getI32IntegerAttr(126));
+         m->setAttr(kAtlasBufferContract, with(contract, "packs", Builder(&context).getArrayAttr({record}))); }},
       {"retained relayout layout must match its derivation", inconsistent, [&](ModuleOp m) {
          auto contract = m->getAttrOfType<DictionaryAttr>(kAtlasBufferContract);
          SmallVector<Attribute> reads;
-         for (Attribute a : contract.getAs<ArrayAttr>("reads")) {
-           NamedAttrList fields(cast<DictionaryAttr>(a)); fields.set("layout", StringAttr::get(&context, "copy")); reads.push_back(fields.getDictionary(&context));
-         }
-         NamedAttrList dictionary(contract); dictionary.set("reads", Builder(&context).getArrayAttr(reads));
-         m->setAttr(kAtlasBufferContract, dictionary.getDictionary(&context)); }},
+         for (Attribute a : contract.getAs<ArrayAttr>("reads"))
+           reads.push_back(with(cast<DictionaryAttr>(a), "layout", StringAttr::get(&context, "copy")));
+         m->setAttr(kAtlasBufferContract, with(contract, "reads", Builder(&context).getArrayAttr(reads))); }},
       {"missing contract fails classification", "resource-contract-v5 artifact requires atlas.virtual_buffer_contract", [&](ModuleOp m) { m->removeAttr(kAtlasBufferContract); }},
   };
   for (const Case &c : cases) {
@@ -176,37 +162,13 @@ void mailboxReuse(MLIRContext &context) {
   }
 }
 
-// Hand-issued streams isolate the must-join: a word survives a join or loop header only when every path keeps it.
-struct Stream {
-  MLIRContext &context;
-  OpBuilder b;
-  OwningOpRef<ModuleOp> module, source;
-  Value state;
-  std::vector<Operation *> ops;
+struct Stream : IssuedStream {
+  OwningOpRef<ModuleOp> source;
   SmallVector<Attribute> tiles;
-  explicit Stream(MLIRContext &c) : context(c), b(&c), module(ModuleOp::create(b.getUnknownLoc())),
-      source(parseSourceString<ModuleOp>("module { func.func @f() { return } }", &c)) {
-    b.setInsertionPointToEnd(module->getBody());
-    OperationState start(b.getUnknownLoc(), "atlas.start");
-    start.addTypes(StateType::get(&c));
-    state = b.create(start)->getResult(0);
-  }
-  NamedAttribute i(StringRef name, int64_t n) { return b.getNamedAttr(name, b.getI32IntegerAttr(n)); }
-  NamedAttribute text(StringRef name, StringRef s) { return b.getNamedAttr(name, b.getStringAttr(s)); }
-  Operation *emit(StringRef name, std::initializer_list<NamedAttribute> attributes, int command = -1) {
-    OperationState op(b.getUnknownLoc(), name);
-    op.addOperands(state); op.addTypes(StateType::get(&context)); op.addAttributes(attributes);
-    if (command >= 0) op.addAttribute(kAtlasTagTileCommand, b.getI32IntegerAttr(command));
-    Operation *created = b.create(op); state = created->getResult(0); ops.push_back(created); return created;
-  }
+  explicit Stream(MLIRContext &c) : IssuedStream(c), source(parseSourceString<ModuleOp>("module { func.func @f() { return } }", &c)) {}
   int record(StringRef kind, uint32_t vmem, uint32_t bytes, ArrayRef<int32_t> after = {}) {
     tiles.push_back(b.getDictionaryAttr({i("id", tiles.size()), text("kind", kind), i("vmem_byte", vmem), i("bytes", bytes), b.getNamedAttr("after", b.getDenseI32ArrayAttr(after))}));
     return tiles.size() - 1;
-  }
-  void constant(int reg, uint32_t value) {
-    int32_t low = int32_t(value << 20) >> 20;
-    emit("atlas.upper", {text("kind", "lui"), i("dst", reg), i("immediate", (value - uint32_t(low)) >> 12)});
-    emit("atlas.alu_imm", {text("kind", "addi"), i("dst", reg), i("src", reg), i("immediate", low)});
   }
   // A completed 1-KiB DMA load into `vmem`; returns the WAIT's record.
   int load(uint32_t vmem) {
@@ -220,14 +182,9 @@ struct Stream {
     constant(6, vmem / 4);
     emit(name, {i(name == "atlas.vload" ? "dst" : "src", 40), i("base", 6), i("offset", 0), text("format", "raw")}, command);
   }
-  void nop() { emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 0), i("src", 0), i("immediate", 0)}); }
-  Operation *branch() { Operation *op = emit("atlas.branch", {text("kind", "bne"), i("lhs", 18), i("rhs", 0), i("offset_bytes", 0)}); nop(); return op; }
-  void aim(Operation *redirect, size_t target) {
-    set(redirect, "offset_bytes", 2 * (int64_t(target) - int64_t(std::find(ops.begin(), ops.end(), redirect) - ops.begin())));
-  }
   // Derives the contract from the records unless one is `retained`.
   bool verify(DictionaryAttr retained = {}) {
-    emit("atlas.trap", {text("kind", "ecall")});
+    halt();
     Builder &builder = b;
     auto cfg = builder.getDictionaryAttr({builder.getNamedAttr("operations", builder.getArrayAttr({}))});
     auto function = *source->getOps<func::FuncOp>().begin();
@@ -244,30 +201,30 @@ struct Stream {
   }
 };
 constexpr uint32_t A = 0x8000; // a VMEM byte; DMA and vector bases hold word A / 4
+// Must-join: a word survives a join (a skipped overwrite) or loop header (an overwriting body) only when every path keeps it.
 void joins(MLIRContext &context) {
-  for (bool overwrite : {false, true}) {
-    Stream s(context);
-    int wait = s.load(A);
-    int read = s.record("vload", A, 1024, {wait});
-    Operation *skip = s.branch();
-    if (overwrite) s.load(A); else s.nop();
-    size_t join = s.ops.size();
-    s.vector("atlas.vload", read, A);
-    s.aim(skip, join);
-    check(overwrite ? !s.verify() && diagnosed(reader) : s.verify(), overwrite ? "a word overwritten on one path does not survive the join" : "a word kept on both paths survives the join", diagnostics);
-  }
-}
-void loops(MLIRContext &context) {
-  for (bool overwrite : {false, true}) {
-    Stream s(context);
-    int wait = s.load(A);
-    int read = s.record("vload", A, 1024, {wait});
-    size_t header = s.ops.size();
-    s.vector("atlas.vload", read, A);
-    if (overwrite) s.load(A);
-    s.aim(s.branch(), header);
-    check(overwrite ? !s.verify() && diagnosed(reader) : s.verify(), overwrite ? "a later iteration cannot read a word its body overwrote" : "a word preserved around the loop is read on every iteration", diagnostics);
-  }
+  for (bool loop : {false, true})
+    for (bool overwrite : {false, true}) {
+      Stream s(context);
+      int wait = s.load(A);
+      int read = s.record("vload", A, 1024, {wait});
+      size_t target = s.ops.size();
+      if (loop) {
+        s.vector("atlas.vload", read, A);
+        if (overwrite) s.load(A);
+      }
+      Operation *redirect = s.branch();
+      s.nop();
+      if (!loop) {
+        if (overwrite) s.load(A); else s.nop();
+        target = s.ops.size();
+        s.vector("atlas.vload", read, A);
+      }
+      s.aim(redirect, target);
+      StringRef name = loop ? (overwrite ? "a later iteration cannot read a word its body overwrote" : "a word preserved around the loop is read on every iteration")
+                            : (overwrite ? "a word overwritten on one path does not survive the join" : "a word kept on both paths survives the join");
+      check(overwrite ? !s.verify() && diagnosed(reader) : s.verify(), name, diagnostics);
+    }
 }
 // A stray scalar store between a staging VSTORE and its capture: a known word, a sub-word, elsewhere, beyond
 // VMEM (RTL address slicing aliases it into the staged half), or an unknown address.
@@ -306,16 +263,9 @@ void readback(MLIRContext &context) {
   }
 }
 void emptyStream(MLIRContext &context) {
-  AtlasVerificationContext ctx;
-  auto module = parseSourceString<ModuleOp>(R"mlir(module attributes {
-    atlas.generated_from_virtual = "resource-contract-v5", atlas.timing_state = "untimed",
-    atlas.virtual_dma_contract = [], atlas.virtual_mxu_contract = [], atlas.virtual_tile_contract = [],
-    atlas.virtual_source_memory_contract = {effects = []}, atlas.virtual_buffer_contract = {packs = [], reads = []},
-    atlas.virtual_cfg_contract = {operations = []}
-  } {
-    %s = "atlas.start"() : () -> !atlas.state
-  })mlir", &context);
+  auto module = parseSourceString<ModuleOp>(emptyIssuedStream, &context);
   if (!module) { check(false, "empty stream parses"); return; }
+  AtlasVerificationContext ctx;
   ctx.module = *module; ctx.generated = true; ctx.stream.emplace();
   diagnostics.clear();
   check(succeeded(verifyAtlasGeneratedBufferContract(ctx)), "an empty stream with no readers has no buffer obligation", diagnostics);
@@ -323,5 +273,5 @@ void emptyStream(MLIRContext &context) {
 } // namespace
 
 void atlas_test::runBufferContract(MLIRContext &context) {
-  records(context); pack(context); mailboxReuse(context); joins(context); loops(context); strayStores(context); readback(context); emptyStream(context);
+  records(context); pack(context); mailboxReuse(context); joins(context); strayStores(context); readback(context); emptyStream(context);
 }

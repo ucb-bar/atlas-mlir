@@ -594,8 +594,6 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
 
 LogicalResult mlir::atlas::verifyAtlasTimedStream(
     const AtlasStream &s, const TimingProvider &provider) {
-  if (s.ops.empty())
-    return failure();
   if (failed(checkAtlasStream(s, provider)))
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
@@ -645,13 +643,10 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       if (isControlFlow(*in.op) && int64_t(cycle) + 2 < drained)
         return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
       std::string reservationError = table.reserve(in, f, cycle);
+      if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
+        reservationError = table.onWait(in, cycle);
       if (!reservationError.empty())
         return s.ops[i]->emitOpError(reservationError);
-      if (in.op->opClass == OpClass::DmaWait) {
-        std::string waitError = table.onWait(in, cycle);
-        if (!waitError.empty())
-          return s.ops[i]->emitOpError(waitError);
-      }
       if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
         pendingDMA[in.op->channel] = s.ops[i];
       else if (in.op->opClass == OpClass::DmaWait)
@@ -743,15 +738,11 @@ struct VerifyAtlasTimingPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SmallVector<uint32_t> words;
-    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/false, words))) {
-      signalPassFailure();
-      return;
-    }
+    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/false, words)))
+      return signalPassFailure();
     auto selected = selectAtlasTimingProvider(module, provider.getValue());
-    if (failed(selected) || failed(verifyAtlasTiming(module, *selected))) {
-      signalPassFailure();
-      return;
-    }
+    if (failed(selected) || failed(verifyAtlasTiming(module, *selected)))
+      return signalPassFailure();
     Builder builder(module.getContext());
     module->setAttr(kAtlasTimingState, builder.getStringAttr("timed"));
     module->setAttr(kAtlasTimingProvider, builder.getStringAttr(selected->id));

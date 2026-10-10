@@ -58,11 +58,9 @@ public:
         for (Value v : op.getResults())
           if (cfgTracked(v)) cfgValues[v] = nextValue++;
       }
-      if (auto branch = dyn_cast<cf::BranchOp>(block.getTerminator())) {
-        cfgEdges[&block] = {nextCFGEdge++};
-      } else if (isa<cf::CondBranchOp>(block.getTerminator())) {
-        cfgEdges[&block] = {nextCFGEdge++, nextCFGEdge++};
-      }
+      if (isa<cf::BranchOp, cf::CondBranchOp>(block.getTerminator()))
+        for (unsigned n = 0; n < block.getNumSuccessors(); ++n)
+          cfgEdges[&block].push_back(nextCFGEdge++);
     }
     Location loc = function.getLoc();
     // A DMA addresses DRAM as Cat(dmaBaseReg, low word), and DMA_CONFIG sets
@@ -83,8 +81,11 @@ public:
         if (failed(lowerOperation(op)))
           return failure();
         if (planned.size() != first && !op.hasTrait<OpTrait::IsTerminator>()) {
-          for (size_t n = first; n < planned.size(); ++n)
+          for (size_t n = first; n < planned.size(); ++n) {
             planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(cfgOperations.lookup(&op)));
+            if (isa<VirtualPackFP8Op>(op))
+              planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGHelper), str("pack"));
+          }
           planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGOperation), i32(cfgOperations.lookup(&op)));
           for (Value result : op.getResults()) {
             if (!cfgTracked(result)) continue;
@@ -92,9 +93,6 @@ public:
                 ? kAtlasTagScalarResult : kAtlasTagTensorResult;
             planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
           }
-          if (isa<VirtualPackFP8Op>(op))
-            for (size_t n = first; n < planned.size(); ++n)
-              planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGHelper), str("pack"));
         }
       }
     }
@@ -108,18 +106,16 @@ public:
     SmallVector<VirtualMXUAssignment> mxuAssignments;
     SmallVector<VirtualRegisterAssignment> registers, cfgRegisters;
     auto recordPlacement = [&](Value value) {
-      if (cfgTracked(value)) {
-        unsigned reg = value.getType().isInteger(1) || value.getType().isInteger(32)
-            ? allocation.scalar(value) : isa<VirtualBF16Type>(value.getType())
-            ? allocation.tile(value) : allocation.fp8(value);
+      Type type = value.getType();
+      if (isa<VirtualBF16Type, VirtualFP8Type>(type)) {
+        unsigned reg = isa<VirtualBF16Type>(type) ? allocation.tile(value) : allocation.fp8(value);
+        registers.push_back({value, reg});
         cfgRegisters.push_back({value, reg});
-      }
-      if (isa<VirtualBF16Type>(value.getType()))
-        registers.push_back({value, allocation.tile(value)});
-      else if (isa<VirtualFP8Type>(value.getType()))
-        registers.push_back({value, allocation.fp8(value)});
-      else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(value.getType()))
+      } else if (cfgTracked(value)) {
+        cfgRegisters.push_back({value, allocation.scalar(value)});
+      } else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(type)) {
         mxuAssignments.push_back({value, allocation.mxu(value)});
+      }
     };
     for (Block &block : function.getBody()) {
       for (Value argument : block.getArguments())
@@ -454,7 +450,6 @@ private:
     add("atlas.vload", loc,
         {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
-
   }
 
   void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
@@ -466,7 +461,6 @@ private:
     add("atlas.vstore", loc,
         {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
          {"format", str("raw")}});
-
     materializeScalar(fixed().outputDramReg, dramByte, loc);
     add("atlas.dma", loc,
         {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
@@ -490,7 +484,6 @@ private:
         add("atlas.vstore", loc,
             {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
-
       }
       if (placement.halves > 1)
         materializeScalar(placement.stagingReg, placement.stagingWord, loc);
@@ -516,7 +509,6 @@ private:
         add("atlas.vload", loc,
             {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
              {"offset", i32(0)}, {"format", str("raw")}});
-
       }
     }
     return success();
@@ -543,7 +535,6 @@ private:
     add("atlas.vstore", loc,
         {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
-
     materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
     materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
     materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
@@ -580,12 +571,10 @@ private:
     add("atlas.alu_imm", loc,
         {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
          {"immediate", i32(0)}});
-
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
     add("atlas.vload", loc,
         {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
          {"offset", i32(0)}, {"format", str("raw")}});
-
     return success();
   }
 
@@ -637,7 +626,6 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
            {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
-
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
@@ -645,7 +633,6 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("acc_fp8")}, {"unit", i32(acc.unit)},
            {"src", i32(fp8(load.getSrc()))}, {"slot", i32(acc.slot)}});
-
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
@@ -653,7 +640,6 @@ private:
       add("atlas.mxu_push", loc,
           {{"kind", str("acc_bf16")}, {"unit", i32(acc.unit)},
            {"src", i32(tile(load.getSrc()))}, {"slot", i32(acc.slot)}});
-
       return success();
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
@@ -663,7 +649,6 @@ private:
           {{"unit", i32(acc.unit)}, {"src", i32(fp8(reset.getActivation()))},
            {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
            {"accumulate", boolean(false)}});
-
       return success();
     }
     if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
@@ -674,7 +659,6 @@ private:
            {"src", i32(fp8(accumulate.getActivation()))},
            {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
            {"accumulate", boolean(true)}});
-
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
@@ -683,7 +667,6 @@ private:
           {{"format", str("bf16")}, {"unit", i32(acc.unit)},
            {"dst", i32(tile(readout.getValue()))},
            {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
-
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
@@ -700,7 +683,6 @@ private:
           {{"format", str("fp8")}, {"unit", i32(acc.unit)},
            {"dst", i32(fp8(readout.getValue()))},
            {"slot", i32(acc.slot)}, {"scale_reg", i32(fixed().scaleReg)}});
-
       return success();
     }
     if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
@@ -709,18 +691,15 @@ private:
           {{"kind", str("weight_fp8")}, {"unit", i32(unit)},
            {"src", i32(fp8(matmul.getWeight()))},
            {"slot", i32(fixed().mxuWeightSlot)}});
-
       add("atlas.mxu_matmul", loc,
           {{"unit", i32(unit)}, {"src", i32(fp8(matmul.getActivation()))},
            {"weight_slot", i32(fixed().mxuWeightSlot)},
            {"acc_slot", i32(fixed().mxuAccSlot)},
            {"accumulate", boolean(false)}});
-
       add("atlas.mxu_pop", loc,
           {{"format", str("bf16")}, {"unit", i32(unit)},
            {"dst", i32(tile(matmul.getResult()))},
            {"slot", i32(fixed().mxuAccSlot)}, {"scale_reg", i32(0)}});
-
       return success();
     }
     if (auto pack = dyn_cast<VirtualPackFP8Op>(op))
@@ -738,7 +717,6 @@ private:
       add("atlas.vpu_unary", loc,
           {{"kind", unary.getKindAttr()}, {"dst", i32(tile(unary.getDst()))},
            {"src", i32(tile(unary.getSrc()))}});
-
       return success();
     }
     if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
@@ -750,7 +728,6 @@ private:
            {"dst", i32(tile(binary.getDst()))},
            {"lhs", i32(tile(binary.getLhs()))},
            {"rhs", i32(tile(binary.getRhs()))}});
-
       return success();
     }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {

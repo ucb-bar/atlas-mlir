@@ -7,9 +7,8 @@
 namespace mlir::atlas {
 struct AtlasVerificationContext;
 
-// Tile commands and DMA launches that one source operation expands to, keyed
-// by operation name. The scalar-argument mailbox prelude (DMA launch and wait)
-// precedes the per-argument LW commands and every operation's commands.
+// Tile commands and DMA launches one source operation expands to. The mailbox
+// prelude (DMA launch, wait) precedes the per-argument LWs and all of these.
 struct AtlasTileExpansion { unsigned commands, launches; };
 AtlasTileExpansion atlasTileExpansion(llvm::StringRef sourceOp);
 constexpr int32_t kMailboxPreludeCommands = 2;

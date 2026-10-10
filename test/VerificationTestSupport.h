@@ -5,18 +5,25 @@
 
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace atlas_test {
 using namespace mlir;
@@ -64,57 +71,100 @@ inline std::string replace(std::string text, llvm::StringRef from, llvm::StringR
   return text;
 }
 
-// Parses typed source that must verify.
+// Parses typed source that must verify; null otherwise.
 inline OwningOpRef<ModuleOp> parse(MLIRContext &context, llvm::StringRef text, llvm::StringRef name) {
   auto module = parseSourceString<ModuleOp>(text, &context);
-  check(module && succeeded(verify(*module)), name);
+  bool valid = module && succeeded(verify(*module));
+  check(valid, name);
+  return valid ? std::move(module) : OwningOpRef<ModuleOp>();
+}
+
+inline func::FuncOp firstFunction(ModuleOp module) { return *module.getOps<func::FuncOp>().begin(); }
+
+// Parses `text` and runs `pipeline`; null on any failure.
+inline OwningOpRef<ModuleOp> runPipeline(MLIRContext &context, llvm::StringRef text, llvm::StringRef pipeline) {
+  auto module = parseSourceString<ModuleOp>(text, &context);
+  PassManager pm = PassManager::on<ModuleOp>(&context);
+  if (!module || failed(parsePassPipeline(pipeline, pm)) || failed(pm.run(*module)))
+    return {};
   return module;
 }
+
+// A generated module whose issued stream holds no instruction.
+constexpr llvm::StringLiteral emptyIssuedStream = R"mlir(module attributes {
+    atlas.generated_from_virtual = "resource-contract-v5", atlas.timing_state = "untimed",
+    atlas.virtual_dma_contract = [], atlas.virtual_mxu_contract = [], atlas.virtual_tile_contract = [],
+    atlas.virtual_source_memory_contract = {effects = []}, atlas.virtual_buffer_contract = {packs = [], reads = []},
+    atlas.virtual_cfg_contract = {values = [], operations = [], edges = [], blocks = [{id = 0 : i32, condition = -1 : i32,
+      args = array<i32>, live_in = array<i32>, operations = array<i32>, edges = array<i32>}]}
+  } {
+    %s = "atlas.start"() : () -> !atlas.state
+  })mlir";
+
+// A hand-issued physical stream; operations carry the CFG block tag when `block` is nonnegative.
+struct IssuedStream {
+  MLIRContext &context;
+  OpBuilder b;
+  OwningOpRef<ModuleOp> module;
+  Value state;
+  std::vector<Operation *> ops;
+  int block = -1;
+  explicit IssuedStream(MLIRContext &c) : context(c), b(&c), module(ModuleOp::create(b.getUnknownLoc())) {
+    c.getOrLoadDialect<atlas::AtlasDialect>();
+    b.setInsertionPointToEnd(module->getBody());
+    OperationState start(b.getUnknownLoc(), "atlas.start");
+    start.addTypes(atlas::StateType::get(&c));
+    state = b.create(start)->getResult(0);
+  }
+  NamedAttribute i(llvm::StringRef name, int64_t n) { return b.getNamedAttr(name, b.getI32IntegerAttr(n)); }
+  NamedAttribute text(llvm::StringRef name, llvm::StringRef s) { return b.getNamedAttr(name, b.getStringAttr(s)); }
+  Operation *emit(llvm::StringRef name, std::initializer_list<NamedAttribute> attributes, int command = -1, int edge = -1) {
+    OperationState op(b.getUnknownLoc(), name);
+    op.addOperands(state);
+    op.addTypes(atlas::StateType::get(&context));
+    op.addAttributes(attributes);
+    auto tag = [&](llvm::StringRef name, int value) {
+      if (value >= 0)
+        op.addAttribute(name, b.getI32IntegerAttr(value));
+    };
+    tag(atlas::kAtlasTagCFGBlock, block);
+    tag(atlas::kAtlasTagTileCommand, command);
+    tag(atlas::kAtlasTagCFGEdge, edge);
+    ops.push_back(b.create(op));
+    state = ops.back()->getResult(0);
+    return ops.back();
+  }
+  // LUI then ADDI, omitting a zero half.
+  void constant(int reg, uint32_t value) {
+    int32_t low = int32_t(value << 20) >> 20;
+    uint32_t high = (value - uint32_t(low)) >> 12;
+    if (high)
+      emit("atlas.upper", {text("kind", "lui"), i("dst", reg), i("immediate", high)});
+    if (low || !high)
+      emit("atlas.alu_imm", {text("kind", "addi"), i("dst", reg), i("src", high ? reg : 0), i("immediate", low)});
+  }
+  void nop() { emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 0), i("src", 0), i("immediate", 0)}); }
+  void halt() { emit("atlas.trap", {text("kind", "ecall")}); }
+  Operation *jump(int edge = -1) { return emit("atlas.jump", {text("kind", "jal"), i("dst", 0), i("base", 0), i("offset", 0)}, -1, edge); }
+  Operation *branch() { return emit("atlas.branch", {text("kind", "bne"), i("lhs", 18), i("rhs", 0), i("offset_bytes", 0)}); }
+  // Points a jump or branch at ops[target].
+  void aim(Operation *redirect, size_t target) {
+    int64_t offset = 2 * (int64_t(target) - (llvm::find(ops, redirect) - ops.begin()));
+    redirect->setAttr(isa<atlas::BranchOp>(redirect) ? "offset_bytes" : "offset", b.getI32IntegerAttr(offset));
+  }
+  void aim(Operation *redirect, Operation *target) { aim(redirect, llvm::find(ops, target) - ops.begin()); }
+};
 
 using Suite = void (*)(MLIRContext &);
 void runBufferContract(MLIRContext &);
 void runCFGContract(MLIRContext &);
 void runDMAAllocation(MLIRContext &);
-void runDMAContract(MLIRContext &);
 void runDMAHelper(MLIRContext &);
 void runMXUAllocation(MLIRContext &);
 void runMXUContract(MLIRContext &);
 void runSourceMemoryContract(MLIRContext &);
 void runTileContract(MLIRContext &);
 void runTimingProvider(MLIRContext &);
-void runVerificationContext(MLIRContext &);
-
-inline int runSuite(int argc, char **argv, llvm::ArrayRef<std::pair<llvm::StringRef, Suite>> suites) {
-  const std::pair<llvm::StringRef, Suite> *selected = nullptr;
-  for (const auto &suite : suites)
-    if (argc == 2 && suite.first == argv[1])
-      selected = &suite;
-  if (!selected) {
-    llvm::errs() << "usage: " << argv[0] << " <suite>; suites:";
-    for (const auto &suite : suites)
-      llvm::errs() << ' ' << suite.first;
-    llvm::errs() << '\n';
-    return 2;
-  }
-  DialectRegistry registry;
-  registry.insert<atlas::AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
-  atlas::registerLowerAtlasVirtualToMachinePass();
-  atlas::registerInsertAtlasDelaysPass();
-  MLIRContext context(registry);
-  ScopedDiagnosticHandler handler(&context, [](Diagnostic &diagnostic) {
-    llvm::raw_string_ostream stream(diagnostics);
-    diagnostic.print(stream);
-    stream << '\n';
-    for (const Diagnostic &note : diagnostic.getNotes()) {
-      note.print(stream);
-      stream << '\n';
-    }
-    return success();
-  });
-  selected->second(context);
-  llvm::outs() << checks << ' ' << selected->first << " checks, " << failures << " failures\n";
-  return failures != 0;
-}
 } // namespace atlas_test
 
 #endif

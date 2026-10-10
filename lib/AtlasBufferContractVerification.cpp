@@ -138,10 +138,8 @@ std::optional<bool> taken(BranchOp branch, const RegValues &x) {
 FailureOr<DictionaryAttr> mlir::atlas::buildAtlasBufferContract(
     func::FuncOp function, DictionaryAttr cfgContract, ArrayAttr tileContract) {
   auto derived = derive(cfgContract, tileContract);
-  if (failed(derived)) {
-    function.emitOpError("buffer contract cannot derive tile readers and PACK endpoints");
-    return failure();
-  }
+  if (failed(derived))
+    return function.emitOpError("buffer contract cannot derive tile readers and PACK endpoints");
   // CFG operation ids number every source operation in block order.
   std::map<int32_t, int32_t> scales;
   int32_t source = 0;
@@ -152,16 +150,12 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasBufferContract(
     }
   for (Pack &p : derived->packs) {
     auto found = scales.find(p.source);
-    if (found == scales.end()) {
-      function.emitOpError("buffer contract requires its source PACK in the CFG contract");
-      return failure();
-    }
+    if (found == scales.end())
+      return function.emitOpError("buffer contract requires its source PACK in the CFG contract");
     p.scale = found->second;
   }
-  if (scales.size() != derived->packs.size()) {
-    function.emitOpError("buffer contract requires every source PACK in the CFG contract");
-    return failure();
-  }
+  if (scales.size() != derived->packs.size())
+    return function.emitOpError("buffer contract requires every source PACK in the CFG contract");
   Builder b(function.getContext());
   return encode(b, *derived);
 }

@@ -137,18 +137,14 @@ bool merge(State &to, const State &from) {
 FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
     func::FuncOp function, DictionaryAttr cfgContract, ArrayAttr tileContract) {
   auto operations = cfgContract ? cfgContract.getAs<ArrayAttr>("operations") : ArrayAttr{};
-  if (!operations || !tileContract) {
-    function.emitOpError("source memory contract requires the CFG and tile contracts");
-    return failure();
-  }
+  if (!operations || !tileContract)
+    return function.emitOpError("source memory contract requires the CFG and tile contracts");
   std::map<int32_t, DictionaryAttr> records;
   for (Attribute a : operations) {
     auto d = dyn_cast<DictionaryAttr>(a);
     auto id = d ? contractI32(d, "id") : std::nullopt;
-    if (!id || !records.emplace(*id, d).second) {
-      function.emitOpError("source memory contract requires unique source operation records");
-      return failure();
-    }
+    if (!id || !records.emplace(*id, d).second)
+      return function.emitOpError("source memory contract requires unique source operation records");
   }
   int32_t source = 0, blockID = 0;
   for (Block &block : function.getBody()) {
@@ -156,18 +152,14 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
       int32_t id = source++;
       if (!atlasTileExpansion(op.getName().getStringRef()).launches) continue;
       auto found = records.find(id);
-      if (found == records.end() || contractString(found->second, "name") != op.getName().getStringRef() || contractI32(found->second, "block") != blockID) {
-        op.emitOpError("source memory contract requires its live source identity in the CFG contract");
-        return failure();
-      }
+      if (found == records.end() || contractString(found->second, "name") != op.getName().getStringRef() || contractI32(found->second, "block") != blockID)
+        return op.emitOpError("source memory contract requires its live source identity in the CFG contract");
     }
     ++blockID;
   }
   auto effects = deriveEffects(cfgContract, tileContract);
-  if (failed(effects)) {
-    function.emitOpError("source memory contract cannot derive block-local source spans and completions");
-    return failure();
-  }
+  if (failed(effects))
+    return function.emitOpError("source memory contract cannot derive block-local source spans and completions");
   Builder b(function.getContext());
   return b.getDictionaryAttr({b.getNamedAttr("effects", encodeEffects(b, *effects))});
 }

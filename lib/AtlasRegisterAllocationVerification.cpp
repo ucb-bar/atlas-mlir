@@ -6,6 +6,7 @@
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
 #include <deque>
@@ -19,6 +20,20 @@ namespace {
 using ValueSet = llvm::DenseSet<Value>;
 using HelperRegisters = std::array<std::optional<uint32_t>, 32>;
 using HelperWriters = std::array<Operation *, 32>;
+
+// A DMA launch's transfer handle and DRAM byte and size operands; null otherwise.
+struct DMALaunch {
+  Value transfer, dram, size;
+};
+DMALaunch dmaLaunch(Operation &op) {
+  DMALaunch launch;
+  llvm::TypeSwitch<Operation *>(&op)
+      .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+            VirtualDMAStoreBF16Op>([&](auto x) {
+        launch = {x.getTransfer(), x.getDramByte(), x.getSizeBytes()};
+      });
+  return launch;
+}
 
 bool isScalar(Value value) {
   return value.getType().isInteger(1) || value.getType().isInteger(32);
@@ -298,24 +313,7 @@ private:
   }
 
   LogicalResult verifyDMAWrites(Operation &op, const ValueSet &live) {
-    Value transfer, dram, size;
-    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
-      transfer = load.getTransfer();
-      dram = load.getDramByte();
-      size = load.getSizeBytes();
-    } else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-      transfer = load.getTransfer();
-      dram = load.getDramByte();
-      size = load.getSizeBytes();
-    } else if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-      transfer = store.getTransfer();
-      dram = store.getDramByte();
-      size = store.getSizeBytes();
-    } else if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-      transfer = store.getTransfer();
-      dram = store.getDramByte();
-      size = store.getSizeBytes();
-    }
+    auto [transfer, dram, size] = dmaLaunch(op);
     if (transfer) {
       const DMATransferPlacement &placement = *dmaPlacements.lookup(transfer);
       // Lowering captures DRAM before size, then materializes staging. A
@@ -391,32 +389,15 @@ private:
       if (writers)
         (*writers)[reg] = &op;
     };
-    auto halfSizeRead = [&]() {
-      return diagnose ? helperRead(op, contents, fixed.halfSizeReg, 1024,
-          "persistent DMA half-size helper is not preserved", writers) : success();
-    };
-    Value transfer, dram, size;
-    bool store = false;
-    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
-      transfer = load.getTransfer(); dram = load.getDramByte(); size = load.getSizeBytes();
-    } else if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-      transfer = load.getTransfer(); dram = load.getDramByte(); size = load.getSizeBytes();
-    } else if (auto launch = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-      transfer = launch.getTransfer(); dram = launch.getDramByte(); size = launch.getSizeBytes(); store = true;
-    } else if (auto launch = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-      transfer = launch.getTransfer(); dram = launch.getDramByte(); size = launch.getSizeBytes(); store = true;
-    }
+    auto [transfer, dram, size] = dmaLaunch(op);
     if (transfer) {
       const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
       if (p.dramReg != registers.lookup(dram))
         write(p.dramReg, contents[registers.lookup(dram)]);
       if (p.sizeReg != registers.lookup(size))
         write(p.sizeReg, contents[registers.lookup(size)]);
+      // A BF16 store also writes its second-half base, then restores this one.
       write(p.stagingReg, p.stagingWord);
-      if (store && p.halves > 1) {
-        write(p.stagingReg, p.stagingWord + 256);
-        write(p.stagingReg, p.stagingWord);
-      }
       return success();
     }
     if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
@@ -447,7 +428,8 @@ private:
         write(input ? fixed.inputDramReg : fixed.outputDramReg,
               boundaryAddress(input ? "atlas.input_dram_base" : "atlas.output_dram_base",
                               index * 2048 + half * 1024));
-        if (failed(halfSizeRead()))
+        if (diagnose && failed(helperRead(op, contents, fixed.halfSizeReg, 1024,
+                "persistent DMA half-size helper is not preserved", writers)))
           return failure();
       }
       return success();
@@ -509,10 +491,8 @@ private:
         continue;
       unsigned saved = copies.front().first;
       // Exactly the cycle-breaking write emitted by scalar parallel copies.
-      if (fixed.scalarTemporary == 0 || fixed.scalarTemporary >= contents.size()) {
-        terminator->emitOpError("scalar parallel-copy helper requires x1..x31");
-        return failure();
-      }
+      if (fixed.scalarTemporary == 0 || fixed.scalarTemporary >= contents.size())
+        return terminator->emitOpError("scalar parallel-copy helper requires x1..x31");
       contents[fixed.scalarTemporary] = contents[saved];
       for (auto &copy : copies)
         if (copy.second == saved)

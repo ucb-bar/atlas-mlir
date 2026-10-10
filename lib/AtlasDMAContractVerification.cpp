@@ -4,12 +4,10 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include <optional>
-#include <utility>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -22,32 +20,6 @@ struct Record {
   StringRef direction;
   unsigned launches = 0, waits = 0;
 };
-
-// This proof reads only source SSA, not the lowering's planned commands or
-// scalar constant cache. Overflow flags are excluded: additions wrap in RV32.
-std::optional<uint32_t> sourceI32(
-    Value value, llvm::DenseMap<Value, std::optional<uint32_t>> &known) {
-  auto [entry, inserted] = known.try_emplace(value, std::nullopt);
-  if (!inserted)
-    return entry->second;
-  if (!value.getType().isSignlessInteger(32))
-    return std::nullopt;
-  std::optional<uint32_t> result;
-  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
-    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue());
-        integer && integer.getType().isSignlessInteger(32))
-      result = uint32_t(integer.getValue().getZExtValue());
-  } else if (auto add = value.getDefiningOp<arith::AddIOp>()) {
-    if (add.getOverflowFlags() != arith::IntegerOverflowFlags::none)
-      return std::nullopt;
-    auto lhs = sourceI32(add.getLhs(), known);
-    auto rhs = sourceI32(add.getRhs(), known);
-    if (lhs && rhs)
-      result = uint32_t(uint64_t(*lhs) + *rhs);
-  }
-  known[value] = result;
-  return result;
-}
 
 bool validGeometry(const Record &r) {
   // AtlasCore uses wordAddr[18:3], size[12:0]; DMA consumes complete
@@ -67,27 +39,21 @@ bool validGeometry(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  auto i32 = [&](uint32_t bits) {
-    return builder.getIntegerAttr(builder.getI32Type(), llvm::APInt(32, bits));
+  auto field = [&](StringRef name, uint32_t bits) {
+    return builder.getNamedAttr(name, builder.getIntegerAttr(builder.getI32Type(), llvm::APInt(32, bits)));
   };
   return builder.getDictionaryAttr({
-      builder.getNamedAttr("id", i32(r.id)),
-      builder.getNamedAttr("channel", i32(r.channel)),
+      field("id", r.id), field("channel", r.channel),
       builder.getNamedAttr("direction", builder.getStringAttr(r.direction)),
-      builder.getNamedAttr("staging_word", i32(r.stagingWord)),
-      builder.getNamedAttr("dram_byte", i32(r.dramByte)),
-      builder.getNamedAttr("size_bytes", i32(r.sizeBytes)),
-      builder.getNamedAttr("staging_reg", i32(r.stagingReg)),
-      builder.getNamedAttr("dram_reg", i32(r.dramReg)),
-      builder.getNamedAttr("size_reg", i32(r.sizeReg))});
+      field("staging_word", r.stagingWord), field("dram_byte", r.dramByte),
+      field("size_bytes", r.sizeBytes), field("staging_reg", r.stagingReg),
+      field("dram_reg", r.dramReg), field("size_reg", r.sizeReg)});
 }
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   auto dictionary = dyn_cast<DictionaryAttr>(attr);
-  if (!dictionary || dictionary.size() != 9) {
-    module.emitOpError("DMA contract record requires exactly the v1 fields");
-    return failure();
-  }
+  if (!dictionary || dictionary.size() != 9)
+    return module.emitOpError("DMA contract record requires exactly the v1 fields");
   Record r{};
   if (failed(readI32Fields<uint32_t>(module, dictionary, "DMA", {
           {"id", &r.id}, {"channel", &r.channel}, {"staging_word", &r.stagingWord},
@@ -96,15 +62,11 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
           {"size_reg", &r.sizeReg}})))
     return failure();
   auto direction = dyn_cast_or_null<StringAttr>(dictionary.get("direction"));
-  if (!direction) {
-    module.emitOpError("DMA contract direction requires a string");
-    return failure();
-  }
+  if (!direction)
+    return module.emitOpError("DMA contract direction requires a string");
   r.direction = direction.getValue();
-  if (!validGeometry(r)) {
-    module.emitOpError("DMA contract record has invalid v1 geometry or register claims");
-    return failure();
-  }
+  if (!validGeometry(r))
+    return module.emitOpError("DMA contract record has invalid v1 geometry or register claims");
   return r;
 }
 } // namespace
@@ -113,25 +75,21 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
     func::FuncOp function, ArrayRef<VirtualDMAAssignment> assignments) {
   if (failed(verifyAtlasDMAAllocation(function, assignments)))
     return failure();
-  llvm::DenseMap<Value, std::optional<uint32_t>> known;
   SmallVector<Record> records;
   for (const VirtualDMAAssignment &assignment : assignments) {
     Operation *source = assignment.transfer.getDefiningOp();
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(source);
     bool bf16 = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(source);
-    auto address = sourceI32(source->getOperand(load ? 1 : 2), known);
-    auto size = sourceI32(source->getOperand(load ? 2 : 3), known);
-    if (!address || !size) {
-      source->emitOpError("DMA contract requires proven wrapping-i32 source address and size");
-      return failure();
-    }
+    // Proven from source SSA only, never planned commands; additions wrap in RV32.
+    auto address = provenI32(source->getOperand(load ? 1 : 2));
+    auto size = provenI32(source->getOperand(load ? 2 : 3));
+    if (!address || !size)
+      return source->emitOpError("DMA contract requires proven wrapping-i32 source address and size");
     const DMATransferPlacement &p = assignment.placement;
     Record r{p.id, p.channel, p.stagingWord, *address, *size,
              p.stagingReg, p.dramReg, p.sizeReg, load ? "load" : "store"};
-    if (*size != (bf16 ? 2048u : 1024u) || !validGeometry(r)) {
-      source->emitOpError("DMA contract source must describe an aligned complete tile in the supported 32-bit address range");
-      return failure();
-    }
+    if (*size != (bf16 ? 2048u : 1024u) || !validGeometry(r))
+      return source->emitOpError("DMA contract source must describe an aligned complete tile in the supported 32-bit address range");
     records.push_back(r);
   }
   llvm::sort(records, [](const Record &a, const Record &b) { return a.id < b.id; });
