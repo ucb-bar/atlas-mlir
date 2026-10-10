@@ -12,6 +12,8 @@ struct ResolvedRTLInstruction {
   int cycle;
   int epoch = 0;
   int epochOffset = 0;
+  // Cycles and epochs restart at each basic block, which starts idle.
+  int block = 0;
 };
 
 struct ResolvedRTLProgram {

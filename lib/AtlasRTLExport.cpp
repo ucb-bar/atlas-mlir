@@ -77,6 +77,12 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   ResolvedRTLProgram program;
   if (failed(verifyAtlasRTLTiming(module, &program)))
     return failure();
+  // The export's single timeline does not describe repeated or alternative
+  // block executions, and its consumers bind events to a sequential PC.
+  if (!program.instructions.empty() && program.instructions.back().block != 0)
+    return module.emitError("resolved RTL timing export supports one "
+                            "straight-line block; control flow verifies but "
+                            "is not exported");
   Array words, instructions;
   std::vector<uint8_t> encoded;
   for (uint32_t word : program.words) {

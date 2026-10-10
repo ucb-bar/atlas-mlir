@@ -27,9 +27,8 @@ FailureOr<AtlasStream> mlir::atlas::readTimedStream(ModuleOp module,
   if (failed(stream))
     return failure();
   if (target) {
-    if (stream->starts.size() != 1 || !stream->endsInHalt(0))
-      return module.emitError("selected RTL timing requires one straight-line "
-                              "stream ending in ECALL");
+    if (failed(checkSelectedControlFlow(module, *stream)))
+      return failure();
     for (Instr &in : stream->instrs)
       if (in.op->opClass == OpClass::Csr)
         in.release = true; // publish the completion marker only once drained

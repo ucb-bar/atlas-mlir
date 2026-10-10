@@ -206,7 +206,8 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
-FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
+FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module,
+                                                    bool allowDelays) {
   SmallVector<uint32_t> words;
   if (failed(collectAtlasWords(module, words, /*llvmBlock=*/false)))
     return failure();
@@ -217,7 +218,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
       ops.push_back(&op);
 
   for (Operation *op : ops) {
-    if (isa<DelayOp>(op))
+    if (isa<DelayOp>(op) && !allowDelays)
       return op->emitOpError(
           "is not allowed in the input; delays come from the timing model");
     if (auto upper = dyn_cast<UpperOp>(op); upper && upper.getKind() == "auipc")
@@ -252,6 +253,8 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(ModuleOp module) {
   }
 
   size_t n = ops.size();
+  if (n == 0)
+    return s;
   llvm::DenseMap<Operation *, size_t> indexOf;
   std::vector<Instr> &instrs = s.instrs;
   for (auto [index, op] : llvm::enumerate(ops)) {
@@ -392,11 +395,65 @@ LogicalResult mlir::atlas::checkAtlasStream(const AtlasStream &s,
         pending[op.channel].push_back({i, f});
       applyScalar(in, regs);
     }
-    for (int ch = 0; ch < 8; ++ch)
-      if (!pending[ch].empty())
-        s.ops[pending[ch].back().first]->emitWarning()
-            << "may still be in flight when its block ends; DMA hazards are "
-               "checked only within a block";
+    for (int ch = 0; ch < 8; ++ch) {
+      if (pending[ch].empty())
+        continue;
+      Operation *launch = s.ops[pending[ch].back().first];
+      if (target)
+        return launch->emitOpError()
+               << "may still be in flight when its block ends; selected RTL "
+                  "timing requires atlas.dma_wait on channel "
+               << ch << " within the block";
+      launch->emitWarning()
+          << "may still be in flight when its block ends; DMA hazards are "
+             "checked only within a block";
+    }
+  }
+  return success();
+}
+
+LogicalResult mlir::atlas::checkSelectedControlFlow(ModuleOp module,
+                                                    const AtlasStream &s) {
+  size_t blocks = s.starts.size();
+  if (blocks == 0)
+    return module.emitError(
+        "selected RTL timing stream requires a terminal instruction");
+  std::vector<bool> reached(blocks, false);
+  std::vector<size_t> work = {0};
+  reached[0] = true;
+  while (!work.empty()) {
+    size_t b = work.back();
+    work.pop_back();
+    for (size_t next : s.succs[b])
+      if (!reached[next]) {
+        reached[next] = true;
+        work.push_back(next);
+      }
+  }
+  for (size_t b = 0; b < blocks; ++b) {
+    size_t end = s.blockEnd(b);
+    Operation *first = s.ops[s.starts[b]];
+    if (!reached[b])
+      return b > 0 && s.endsInHalt(b - 1) && !s.endsInBranch(b - 1)
+                 ? first->emitOpError("follows the terminal instruction")
+                 : first->emitOpError(
+                       "is unreachable; selected RTL timing verifies only "
+                       "reachable blocks");
+    if (s.endsInBranch(b)) {
+      Operation *branch = s.ops[end - 2];
+      if (!s.targetOf.lookup(branch))
+        return branch->emitOpError(
+            "targets the stream end; selected RTL timing requires every path "
+            "to reach ECALL");
+      if (s.instrs[end - 1].op->opClass != timing::OpClass::Alu)
+        return s.ops[end - 1]->emitOpError(
+            "is a delay-slot instruction; selected RTL timing admits only "
+            "ADDI or LUI in a delay slot");
+    } else if (!s.endsInHalt(b) && end == s.ops.size()) {
+      return s.ops[end - 1]->emitOpError(
+          "ends the stream without ECALL; selected RTL timing stream requires "
+          "a terminal instruction");
+    }
   }
   return success();
 }
@@ -429,8 +486,8 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
     if (insertion.guard) {
       builder.setInsertionPointAfter(prev);
       Operation *nop = createNop(builder, op->getLoc(), state);
-      nop->setAttr("atlas.reason", builder.getStringAttr(
-                                       "a halt does not wait for a delay"));
+      nop->setAttr("atlas.reason",
+                   builder.getStringAttr(insertion.guardReason));
       append(nop);
     }
     append(op);

@@ -12,7 +12,7 @@ import re
 import tempfile
 import unittest
 
-from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, without_delays
+from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, stream, without_delays
 
 
 FACTS = os.environ.get("ATLAS_OP_TIMING")
@@ -85,14 +85,33 @@ def word_base(dst, words):
     return [lui(dst, ((words - low) >> 12) & 0xfffff), addi(dst, dst, low)]
 
 
+def branch(kind, lhs, rhs, offset_words):
+    return ("branch", f'kind = "{kind}", lhs = {lhs} : i32, rhs = {rhs} : i32, '
+                      f'offset_bytes = {2 * offset_words} : i32')
+
+
+def jal(offset_words):
+    return ("jump", f'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = {2 * offset_words} : i32')
+
+
+def dma_setup():
+    return [*word_base(5, 0), ("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),
+            *word_base(6, 0), *word_base(1, 0x90000000), *word_base(2, 128)]
+
+
+VLOAD = vls("vload")
+DMA_LOAD = ("dma", 'direction = "load", channel = 0 : i32, reg = 6 : i32, dram = 1 : i32, size = 2 : i32')
+DMA_WAIT = ("dma_wait", "channel = 0 : i32")
+# Three iterations over a loop-invariant tile; the loop block is words 3..7.
+VLS_LOOP = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3), VLOAD,
+            vls("vstore", 4, 6, 32), addi(13, 13, 1), branch("blt", 13, 14, -3), nop(), HALT]
+
+
 def export(source):
     result = run(EMIT, source, "--rtl-timing-json")
     if result.returncode:
         raise AssertionError(result.stderr)
     return json.loads(result.stdout)
-
-
-VLOAD = vls("vload")
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -303,6 +322,92 @@ class SelectedRTLTimingTest(unittest.TestCase):
         self.check([*prefix, delay(33), nop(), HALT], True, VERIFY)
         for ops in ([addi(1, 0, 1)], [HALT, addi(1, 0, 1)]):
             self.check(ops, False, VERIFY)
+
+    def test_loop_blocks_start_and_end_idle(self):
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                result = self.check(VLS_LOOP, True, consumer, VERIFY)
+                ops = stream(result.stdout)
+                at = next(i for i, (op, _, _) in enumerate(ops) if op == "branch")
+                offset = int(re.search(r"offset_bytes = (-?\d+)", ops[at][1]).group(1))
+                self.assertEqual(ops[at + offset // 2][0], "vload")
+                # The block drains before the branch, behind a NOP.
+                self.assertEqual([op for op, _, _ in ops[at - 2:at]], ["delay", "alu_imm"])
+                self.assertEqual(ops[at - 1][2], "a redirect does not wait for a delay")
+                self.assertEqual(run(EMIT, result.stdout).returncode, 0)
+                exported = run(EMIT, result.stdout, "--rtl-timing-json")
+                self.assertNotEqual(exported.returncode, 0)
+                self.assertIn("supports one straight-line block", exported.stderr)
+                self.assertEqual(exported.stdout, "")
+                unsafe = run(OPT, without_delays(result.stdout), VERIFY)
+                self.assertNotEqual(unsafe.returncode, 0)
+
+    def test_block_exit_drain_boundary(self):
+        # vstore issues at 35 with done age 34, so successors may start at 70:
+        # the branch at 68, after addi (36), DELAY 29 (37..66) and a NOP (67).
+        def loop(tail):
+            body = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3), VLOAD, delay(33),
+                    vls("vstore", 4, 6, 32), addi(13, 13, 1), *tail]
+            return [*body, branch("blt", 13, 14, 3 - len(body)), nop(), HALT]
+        self.check(loop([delay(29), nop()]), True, VERIFY)
+        self.check(loop([delay(28), nop()]), False, VERIFY,
+                   diagnostic="leaves its block before prior work completes")
+        self.check(loop([delay(30)]), False, VERIFY, diagnostic="can redirect while DELAY is stalled")
+        # A fall-through exit drains too; ECALL after the DELAY needs a NOP.
+        fall = [addi(6, 0, 256), addi(13, 0, 1), branch("beq", 13, 0, 4), nop(), VLOAD]
+        self.check([*fall, delay(33), nop(), HALT], True, VERIFY)
+        self.check([*fall, delay(32), nop(), HALT], False, VERIFY,
+                   diagnostic="leaves its block before prior work completes")
+        # The taken branch reaches the ECALL directly.
+        to_halt = [addi(6, 0, 256), addi(13, 0, 1), branch("beq", 13, 0, 3), nop(), VLOAD, HALT]
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                result = self.check(to_halt, True, consumer, VERIFY)
+                ops = stream(result.stdout)
+                self.assertEqual([op for op, _, _ in ops[-3:]], ["delay", "alu_imm", "trap"])
+                self.assertEqual(ops[-2][2], "a halt does not wait for a delay")
+
+    def test_join_keeps_only_values_equal_on_every_path(self):
+        # beq skips to the else arm; both arms reach the join's vload.
+        def diamond(then_base, else_base):
+            return [addi(5, 0, 1), branch("beq", 5, 0, 5), nop(), addi(6, 0, then_base), jal(3), nop(),
+                    addi(6, 0, else_base), VLOAD, HALT]
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                self.check(diamond(256, 256), True, consumer, VERIFY)
+                self.check(diamond(256, 1280), False, consumer,
+                           diagnostic="unknown VLS base cannot establish bounded address domain")
+        # An induction variable is unknown at the loop header.
+        stride = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3), VLOAD, addi(6, 6, 256),
+                  addi(13, 13, 1), branch("blt", 13, 14, -3), nop(), HALT]
+        self.check(stride, False, CONSUMERS[0], diagnostic="unknown VLS base")
+
+    def test_control_flow_shape_is_checked(self):
+        for ops, diagnostic in (
+                ([addi(13, 0, 0), branch("beq", 0, 0, 2), VLOAD, HALT], "admits only ADDI or LUI"),
+                ([branch("beq", 0, 0, 2), scalar_load("lw", 5, 0, 0), HALT], "admits only ADDI or LUI"),
+                ([addi(13, 0, 0), branch("beq", 0, 0, 2), nop()], "targets the stream end"),
+                ([jal(3), nop(), addi(1, 0, 1), HALT], "is unreachable"),
+                ([addi(13, 0, 0), branch("blt", 13, 0, 3), nop(), HALT, nop()], "requires a terminal"),
+                ([("jump", 'kind = "jal", dst = 1 : i32, base = 0 : i32, offset = 4 : i32'), nop(), HALT],
+                 "link value")):
+            for consumer in (*CONSUMERS, VERIFY):
+                with self.subTest(ops=ops, consumer=consumer):
+                    self.check(ops, False, consumer, diagnostic=diagnostic)
+
+    def test_dma_must_be_waited_within_its_block(self):
+        counter = [addi(13, 0, 0), addi(14, 0, 2)]
+        across = [*dma_setup(), *counter, DMA_LOAD, addi(13, 13, 1), branch("blt", 13, 14, -2), nop(),
+                  DMA_WAIT, HALT]
+        inside = [*dma_setup(), *counter, DMA_LOAD, DMA_WAIT, addi(13, 13, 1),
+                  branch("blt", 13, 14, -3), nop(), HALT]
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                self.check(across, False, consumer, dma="wait",
+                           diagnostic="requires atlas.dma_wait on channel 0 within the block")
+                self.check(inside, True, consumer, VERIFY, dma="wait")
+        self.check(across, False, VERIFY, dma="wait",
+                   diagnostic="requires a matching DMA wait before its block ends")
 
     def test_instruction_memory_overflow_is_rejected_before_scheduling(self):
         source = program([nop()] * 32768 + [HALT])

@@ -29,13 +29,23 @@ struct DelayInsertion {
   std::vector<uint32_t> delays;
   bool guard = false; // end on a NOP: a halt does not wait for a delay
   std::string reason;
+  const char *guardReason = "a halt does not wait for a delay";
 };
 
-FailureOr<AtlasStream> readAtlasStream(ModuleOp module);
+// `allowDelays` admits explicit DELAYs, as in a final stream being verified.
+FailureOr<AtlasStream> readAtlasStream(ModuleOp module,
+                                       bool allowDelays = false);
 FailureOr<timing::Instr> atlasInstruction(Operation *op);
-// Rejects illegal delay slots and DMA hazards that no delay can cover.
+// Rejects illegal delay slots and DMA hazards that no delay can cover. With a
+// selected target, DMA must also be waited within its block.
 LogicalResult checkAtlasStream(const AtlasStream &stream,
                                const timing::TargetTiming &target = {});
+// Selected RTL timing verifies each basic block from an idle engine state, so
+// every block must be reachable and end in ECALL, in a branch or JAL whose
+// target is an instruction and whose delay slot is ADDI or LUI, or by
+// falling into the next block.
+LogicalResult checkSelectedControlFlow(ModuleOp module,
+                                       const AtlasStream &stream);
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions.

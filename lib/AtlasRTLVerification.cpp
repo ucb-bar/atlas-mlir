@@ -1,6 +1,7 @@
 #include "Atlas/AtlasRTLVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -30,105 +31,135 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
   if (failed(checkSelectedRTLProgramSize(module)))
     return failure();
 
-  RegValues registers = unknownRegs();
+  // Each basic block is checked from an idle state: a block may hand nothing
+  // but scalar register values to its successors, so all of its work must be
+  // complete by the earliest cycle a successor can issue.
+  FailureOr<AtlasStream> stream = readAtlasStream(module, /*allowDelays=*/true);
+  if (failed(stream) || failed(checkSelectedControlFlow(module, *stream)))
+    return failure();
   TargetTiming target = (*selected)->targetTiming();
-  ReservationTable reservations(target);
   std::vector<ResolvedRTLInstruction> issued;
-  int cycle = 0;
-  int fixedEngineAvailable = 0;
-  int asynchronousDone = -1;
-  std::optional<Footprint> pendingDMA;
-  int pendingChannel = -1;
-  int epoch = 0, epochOrigin = 0;
-  bool halted = false;
-  bool previousWasDelay = false;
 
-  for (Operation &operation : module.getBody()->getOperations()) {
-    if (isa<StartOp>(operation))
+  for (size_t block = 0; block < stream->starts.size(); ++block) {
+    const size_t begin = stream->starts[block], end = stream->blockEnd(block);
+    const size_t blockFirst = issued.size();
+    RegValues registers = stream->entry[block];
+    ReservationTable reservations(target);
+    int cycle = 0;
+    int fixedEngineAvailable = 0;
+    int asynchronousDone = -1;
+    std::optional<Footprint> pendingDMA;
+    int pendingChannel = -1;
+    Operation *pendingLaunch = nullptr;
+    int epoch = 0, epochOrigin = 0;
+    // A DELAY before the block start can only fall through into it.
+    bool previousWasDelay =
+        begin > 0 && stream->instrs[begin - 1].op->opClass == OpClass::Delay;
+
+    for (size_t index = begin; index < end; ++index) {
+      Operation &operation = *stream->ops[index];
+      const Instr &instruction = stream->instrs[index];
+      Footprint footprint = target.resolve(instruction, registers);
+      if (!footprint.error.empty())
+        return operation.emitOpError(footprint.error);
+      if (cycle > kMaximumIssueCycle)
+        return operation.emitOpError("exceeds the bounded RTL timing cycle limit");
+
+      const OpClass opClass = instruction.op->opClass;
+      const bool vectorMemory =
+          opClass == OpClass::VLoad || opClass == OpClass::VStore;
+      const bool fixedEngine = vectorMemory || opClass == OpClass::Transpose ||
+                               instruction.op->engine == Engine::Vpu;
+      const bool terminal = opClass == OpClass::Halt;
+      const bool publication = opClass == OpClass::Csr;
+      const bool wait = opClass == OpClass::DmaWait;
+      if (pendingDMA) {
+        if (footprint.dmaAsync)
+          return operation.emitOpError("requires a matching DMA wait before another transfer");
+        if (terminal || publication)
+          return operation.emitOpError("requires a matching DMA wait before completion publication or halt");
+        EdgeKind kind;
+        if (conflictsAtCompletion(*pendingDMA, footprint, kind))
+          return operation.emitOpError("accesses memory retained by pending DMA; matching wait required");
+      }
+      if (wait && (!pendingDMA || instruction.op->channel != pendingChannel))
+        return operation.emitOpError("DMA wait has no matching pending transfer");
+      if (terminal && previousWasDelay)
+        return operation.emitOpError(
+            "can halt while DELAY is stalled; an intervening NOP is required");
+      if (isControlFlow(*instruction.op) && previousWasDelay)
+        return operation.emitOpError(
+            "can redirect while DELAY is stalled; an intervening NOP is required");
+      if (fixedEngine && cycle < fixedEngineAvailable)
+        return operation.emitOpError("violates the selected serialized engine admission")
+               << ": issue cycle " << cycle << ", first permitted cycle "
+               << fixedEngineAvailable;
+      if ((terminal || publication) && cycle <= asynchronousDone)
+        return operation.emitOpError(
+                   "requires all prior asynchronous writes to be complete")
+               << ": issue cycle " << cycle << ", first permitted cycle "
+               << asynchronousDone + 1;
+
+      for (size_t p = blockFirst; p < issued.size(); ++p) {
+        const ResolvedRTLInstruction &prior = issued[p];
+        Dependence dependency = dependence(prior.instruction, prior.footprint,
+                                           instruction, footprint, target);
+        if (cycle - prior.cycle < dependency.distance)
+          return operation.emitOpError("violates selected RTL dependence: ")
+                 << dependency.reason << "; gap " << cycle - prior.cycle
+                 << ", required gap " << dependency.distance;
+      }
+      std::string conflict = reservations.conflict(instruction, footprint, cycle);
+      if (!conflict.empty())
+        return operation.emitOpError("violates selected RTL reservation: ")
+               << conflict;
+      reservations.reserve(instruction, footprint, cycle);
+      if (wait) {
+        pendingDMA.reset();
+        pendingChannel = -1;
+        pendingLaunch = nullptr;
+        reservations.extendForWait(cycle);
+        ++epoch;
+        epochOrigin = cycle;
+      }
+      issued.push_back({instruction, footprint, cycle, epoch,
+                        cycle - epochOrigin, static_cast<int>(block)});
+      if (footprint.dmaAsync) {
+        pendingDMA = footprint;
+        pendingChannel = instruction.op->channel;
+        pendingLaunch = &operation;
+      }
+      if (footprint.doneAge > 0)
+        asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
+      if (fixedEngine)
+        fixedEngineAvailable = cycle + footprint.doneAge + 1;
+      applyScalar(instruction, registers);
+      previousWasDelay = opClass == OpClass::Delay;
+      const int gap = naturalGap(instruction);
+      if (gap > kMaximumIssueCycle - cycle)
+        return operation.emitOpError("exceeds the bounded RTL timing cycle limit");
+      cycle += gap;
+    }
+
+    if (stream->endsInHalt(block))
       continue;
-    if (halted)
-      return operation.emitOpError("follows the terminal instruction");
-    auto decoded = atlasInstruction(&operation);
-    if (failed(decoded))
-      return failure();
-    const Instr &instruction = *decoded;
-    Footprint footprint = target.resolve(instruction, registers);
-    if (!footprint.error.empty())
-      return operation.emitOpError(footprint.error);
-    if (cycle > kMaximumIssueCycle)
-      return operation.emitOpError("exceeds the bounded RTL timing cycle limit");
-
-    const OpClass opClass = instruction.op->opClass;
-    const bool vectorMemory =
-        opClass == OpClass::VLoad || opClass == OpClass::VStore;
-    const bool fixedEngine = vectorMemory || opClass == OpClass::Transpose ||
-                             instruction.op->engine == Engine::Vpu;
-    const bool terminal = opClass == OpClass::Halt;
-    const bool publication = opClass == OpClass::Csr;
-    const bool wait = opClass == OpClass::DmaWait;
-    if (pendingDMA) {
-      if (footprint.dmaAsync)
-        return operation.emitOpError("requires a matching DMA wait before another transfer");
-      if (terminal || publication)
-        return operation.emitOpError("requires a matching DMA wait before completion publication or halt");
-      EdgeKind kind;
-      if (conflictsAtCompletion(*pendingDMA, footprint, kind))
-        return operation.emitOpError("accesses memory retained by pending DMA; matching wait required");
+    // `cycle` is the earliest issue of any successor: the instruction after
+    // the delay slot, or the next instruction on a fall-through.
+    Operation *exit = stream->ops[end - (stream->endsInBranch(block) ? 2 : 1)];
+    if (pendingDMA)
+      return pendingLaunch->emitOpError(
+          "requires a matching DMA wait before its block ends");
+    for (size_t p = blockFirst; p < issued.size(); ++p) {
+      const ResolvedRTLInstruction &prior = issued[p];
+      const int drained = prior.cycle + prior.footprint.doneAge + 1;
+      if (drained > cycle)
+        return exit->emitOpError(
+                   "leaves its block before prior work completes; selected "
+                   "RTL timing starts every block idle")
+               << ": successor issue cycle " << cycle
+               << ", first permitted cycle " << drained;
     }
-    if (wait && (!pendingDMA || instruction.op->channel != pendingChannel))
-      return operation.emitOpError("DMA wait has no matching pending transfer");
-    if (terminal && previousWasDelay)
-      return operation.emitOpError(
-          "can halt while DELAY is stalled; an intervening NOP is required");
-    if (fixedEngine && cycle < fixedEngineAvailable)
-      return operation.emitOpError("violates the selected serialized engine admission")
-             << ": issue cycle " << cycle << ", first permitted cycle "
-             << fixedEngineAvailable;
-    if ((terminal || publication) && cycle <= asynchronousDone)
-      return operation.emitOpError(
-                 "requires all prior asynchronous writes to be complete")
-             << ": issue cycle " << cycle << ", first permitted cycle "
-             << asynchronousDone + 1;
-
-    for (const ResolvedRTLInstruction &prior : issued) {
-      Dependence dependency = dependence(prior.instruction, prior.footprint,
-                                         instruction, footprint, target);
-      if (cycle - prior.cycle < dependency.distance)
-        return operation.emitOpError("violates selected RTL dependence: ")
-               << dependency.reason << "; gap " << cycle - prior.cycle
-               << ", required gap " << dependency.distance;
-    }
-    std::string conflict = reservations.conflict(instruction, footprint, cycle);
-    if (!conflict.empty())
-      return operation.emitOpError("violates selected RTL reservation: ")
-             << conflict;
-    reservations.reserve(instruction, footprint, cycle);
-    if (wait) {
-      pendingDMA.reset();
-      pendingChannel = -1;
-      reservations.extendForWait(cycle);
-      ++epoch;
-      epochOrigin = cycle;
-    }
-    issued.push_back({instruction, footprint, cycle, epoch, cycle - epochOrigin});
-    if (footprint.dmaAsync) {
-      pendingDMA = footprint;
-      pendingChannel = instruction.op->channel;
-    }
-    if (footprint.doneAge > 0)
-      asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
-    if (fixedEngine)
-      fixedEngineAvailable = cycle + footprint.doneAge + 1;
-    applyScalar(instruction, registers);
-    previousWasDelay = opClass == OpClass::Delay;
-    halted = terminal;
-    const int gap = naturalGap(instruction);
-    if (gap > kMaximumIssueCycle - cycle)
-      return operation.emitOpError("exceeds the bounded RTL timing cycle limit");
-    cycle += gap;
   }
-  if (!halted)
-    return module.emitError("selected RTL timing stream requires a terminal instruction");
   if (resolved) {
     resolved->evidence = *selected;
     resolved->words.assign(words.begin(), words.end());

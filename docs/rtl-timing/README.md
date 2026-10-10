@@ -43,6 +43,7 @@ atlas-emit --rtl-timing-json final.mlir > resolved.json
 - Registers without a reset value are accepted only when listed in a spec's `unreset`; every control output must still be known at every age.
 - Ages are absolute from the first cycle after reset and flush. Hold ends are inclusive: a last occupied age of 34 means the next VLS issues at age 35.
 - The compiler supports VLS, XLU, all VPU operations, scalar `lw`/`seld`/`sw`, `addi`/`lui`/`delay`/`ecall`/marker, and DMA under `dma=wait`.
+- Branches, loops and joins are accepted when every engine is idle and no DMA is pending at each block boundary; each block is verified from an idle state with register values merged over all paths. Branches read their registers at issue and a taken branch executes only its delay slot (ADDI or LUI). Addresses that change between loop iterations are unknown at the loop header and rejected, and `--rtl-timing-json` covers only single-block programs.
 
 ### DMA
 
@@ -69,6 +70,6 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 ## Not covered
 
 - MXU operations are extracted but not consumed by the compiler.
-- Control flow and loops.
+- Loop-varying addresses (per-state register enumeration is the next step), engine work crossing block boundaries, and end-to-end replay of multi-block programs.
 - Overlap rules between operations; a pair recipe in the extractor is the intended route.
 - Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.

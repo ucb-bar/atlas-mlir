@@ -197,15 +197,24 @@ llvm::json::Object RTLEvidence::applicability() const {
   auto vload = blocks.find("vlsu.vload");
   int latency = vload != blocks.end() ? vload->second.readLatency.value_or(0) : 0;
   Array operations{"addi", "lui", "lw", "sw", "seld", "vload", "vstore", "vtrpose.xlu",
-                   "delay", "csrrw", "ecall"};
+                   "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu",
+                   "bgeu", "jal"};
   for (const auto &[mnemonic, block] : vpuBlocks()) operations.push_back(mnemonic);
   if (dma)
     for (const char *name : {"dma.load.ch0..7", "dma.store.ch0..7",
                              "dma.config.ch0..7", "dma.wait.ch0..7"})
       operations.push_back(name);
   Object result{
-      {"scope", dma ? "straight_line_serialized_engines_and_wait_governed_dma" :
-                      "straight_line_serialized_engines_with_scalar_setup_and_completion"},
+      {"scope", dma ? "drained_basic_blocks_serialized_engines_and_wait_governed_dma" :
+                      "drained_basic_blocks_serialized_engines_with_scalar_setup_and_completion"},
+      {"control_flow", Object{
+          {"block_entry_state", "idle_engines_no_pending_dma"},
+          {"block_exit", "all_prior_work_complete_by_earliest_successor_issue"},
+          {"earliest_successor_issue", "branch_issue_plus_2"},
+          {"delay_slots", 1}, {"delay_slot_operations", Array{"addi", "lui"}},
+          {"delay_immediately_before_redirect_supported", false},
+          {"scalar_values_at_joins", "equal_on_all_paths_or_unknown"},
+          {"linking_and_register_targets_supported", false}}},
       {"timing_source", "merlin.op_timing.v1 facts computed from the RTL; footprint structure from the compiler"},
       {"supported_operations", std::move(operations)},
       {"operand_domain", Object{
@@ -239,7 +248,8 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"delay_immediately_before_terminal_supported", false},
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
       {"unsupported", Array{dma ? "multiple_pending_dma_transfers" : "dma_and_dynamic_completion",
-          "mxu_operations", "branches_and_loops",
+          "mxu_operations", "engine_work_or_dma_live_across_block_boundaries",
+          "addresses_that_vary_across_loop_iterations",
           "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};
@@ -289,6 +299,19 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     return f;
   }
   if (name == "delay" || name == "ecall") return f;
+  // Control flow reads its operands at issue like ADDI. The stream verifier
+  // drains every engine before a block's successors can start, so the redirect
+  // latency only has to be at least the delay slot.
+  if (op.opClass == OpClass::Branch) {
+    if (!xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported branch operands");
+    x(in.rs1, false);
+    x(in.rs2, false);
+    return f;
+  }
+  if (name == "jal") {
+    if (in.rd != 0 || in.rs1 != 0) return reject("JAL must not link");
+    return f;
+  }
   if (name == "csrrw" && in.rd == 0 && in.imm == 0xC10 && xreg(in.rs1)) {
     x(in.rs1, false);
     return f;

@@ -210,6 +210,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
       before[last] = {idleDelays(idle), false, termReason};
     else if (idle > 0 && halt)
       before[begin + term] = {idleDelays(idle - 1), true, termReason};
+    else if (idle > 0 && target) // a selected redirect does not wait either
+      before[begin + term] = {idleDelays(idle - 1), true, termReason,
+                              "a redirect does not wait for a delay"};
     else if (idle > 0)
       before[begin + term] = {idleDelays(idle), false, termReason};
     order.push_back(begin + term);
@@ -237,7 +240,18 @@ LogicalResult scheduleStream(ModuleOp module) {
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b) {
     if (tailIdle[b] == 0)
       continue;
-    DelayInsertion &next = before[order[stream->starts[b + 1]]];
+    size_t first = order[stream->starts[b + 1]];
+    DelayInsertion &next = before[first];
+    const OpInfo &op = *stream->instrs[first].op;
+    if (target && next.delays.empty() && !next.guard &&
+        (op.opClass == OpClass::Halt || isControlFlow(op))) {
+      // Selected ECALL and redirects do not wait for a DELAY.
+      next = {idleDelays(tailIdle[b] - 1), true,
+              "this block finishes before the next one starts",
+              op.opClass == OpClass::Halt ? "a halt does not wait for a delay"
+                                          : "a redirect does not wait for a delay"};
+      continue;
+    }
     std::vector<uint32_t> delays = idleDelays(tailIdle[b]);
     delays.insert(delays.end(), next.delays.begin(), next.delays.end());
     next.delays = delays;

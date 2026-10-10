@@ -17,6 +17,8 @@ struct Issued {
 };
 
 constexpr int kMaxSearch = 100000;
+constexpr const char *kHaltGuard = "a halt does not wait for a delay";
+constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         std::vector<DelayInsertion> &before,
@@ -132,7 +134,11 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       };
       if (failed(search(i, cycle, reason, fits)))
         return failure();
+      const int idle = cycle - nextFree;
       place(i, f, cycle, reason);
+      // Under selected timing a redirect does not wait for a DELAY either.
+      if (target && idle > 0)
+        before[i] = {idleDelays(idle - 1), true, reason, kRedirectGuard};
       place(slotIndex, sf, cycle + 1, "");
       i = slotIndex;
       continue;
@@ -144,9 +150,16 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     place(i, f, cycle, reason);
   }
 
-  if (s.fallsThrough(block) && drained() > nextFree)
-    before[end] = {idleDelays(drained() - nextFree), false,
-                   "this block finishes before the next one starts"};
+  if (s.fallsThrough(block) && drained() > nextFree) {
+    const int idle = drained() - nextFree;
+    const char *why = "this block finishes before the next one starts";
+    const OpInfo &next = *instrs[end].op;
+    if (target && (next.opClass == OpClass::Halt || isControlFlow(next)))
+      before[end] = {idleDelays(idle - 1), true, why,
+                     next.opClass == OpClass::Halt ? kHaltGuard : kRedirectGuard};
+    else
+      before[end] = {idleDelays(idle), false, why};
+  }
   return success();
 }
 
