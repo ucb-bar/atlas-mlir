@@ -1,7 +1,7 @@
 """Generic spec-driven runs of control circuits and their reduction to op_timing records."""
 import json
 
-from . import coupled, facts, summaries
+from . import coupled, derive, facts, summaries
 from .control import ControlCircuit, require
 from .spec import ages, variant
 
@@ -10,8 +10,8 @@ RUN_ONLY = {"operations", "variants", "checks", "expect", "raw", "only", "limit"
 
 
 def modules(spec):
-    """Top modules a spec simulates; recipes with several circuits extend this."""
-    return [spec["module"]] + ([spec["partner"]["module"]] if "partner" in spec else [])
+    """Modules a spec needs: the simulated tops (recipes with several circuits extend this) and derivation sources."""
+    return [spec["module"]] + ([spec["partner"]["module"]] if "partner" in spec else []) + derive.modules(spec)
 
 
 def control_signals(spec):
@@ -138,12 +138,13 @@ def apply_checks(spec, records):
 
 def extract(document, spec):
     """Records for every operation of the base spec and of each variant."""
-    records, circuits = [], {}
+    records, circuits, derived = [], {}, {}
     for name in [None, *spec["variants"]]:
         current = variant(spec, name)
         build, run = RECIPES[current["recipe"]]
-        key = signature(current)
         try:
+            current, notes = derive.resolve(document, current, derived)
+            key = signature(current)
             if key not in circuits:
                 circuits[key] = build(document, current)
             circuit = circuits[key]
@@ -162,4 +163,5 @@ def extract(document, spec):
             evidence = (f"{current['recipe']} control simulation of {current['module']}: {registers} registers, "
                         f"{len(trace)} ages after {current['reset_cycles']} reset + {current['flush_cycles']} flush cycles")
             records.append(facts.record(current, op, name, result, evidence=evidence))
+            records[-1]["assumptions"].update(notes)
     return apply_checks(spec, records)

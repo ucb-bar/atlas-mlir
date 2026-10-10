@@ -1,6 +1,6 @@
 # Scalar load/store: ScalarCore memory control composed with the LSU scalar port in the same cycle.
 # The accepted scalar memory instruction enters at explicit cut points (issue strobes and the decoded mem_cmd);
-# hostStart stays low. VMEM read data returns one cycle after each scalar read request.
+# hostStart stays low. The VMEM read latency and the mem_cmd codes are derived from the RTL.
 engine: scalar_lsu
 module: ScalarCore
 recipe: coupled
@@ -8,12 +8,16 @@ description: Scalar memory instruction issued at age 0; ScalarCore command/respo
 limit: 16
 unreset:                      # Reg without init, read only under RegInit memLoadPending (ScalarCore.scala:72-73)
   - {path: "", name: memLoadCmd}
-inputs:                       # approved control inputs (cuts included) and their idle values
+system: AtlasCore             # instantiates ScalarCore, the LSU and Vmem
+inputs:                       # cut inputs (explicit: issue strobes follow pipeline state, not one instruction word)
   issueScalarLoad: 0
   issueScalarStore: 0
   hostStart: 0
   mem_cmd: 0
-  io_vmemScalarReadData_valid: 0
+decode:                       # mem_cmd is the decoder output for each word; words are the ISA encodings of lib/AtlasEncoding.cpp
+  input: mem_cmd
+  instruction: {instance: scalar/decoder, port: io_instr}
+  words: {lw: 0x00002003, seld: 0x00006003, sw: 0x00002023}
 cuts:
   issueScalarLoad: {value: issueScalarLoad}
   issueScalarStore: {value: issueScalarStore}
@@ -33,12 +37,10 @@ links:                        # input <- same-cycle output of the other circuit
   io_scalarCmd_bits_isStore: io_scalarMemCmd_bits_isStore
   io_scalarMemResp_valid: io_scalarResp_valid
 events:
-  mem_cmd: {valid: io_scalarMemCmd_valid, fields: {store: io_scalarMemCmd_bits_isStore}}
-  vmem_read:
-    valid: io_vmemScalarRead_valid
-    response: {input: io_vmemScalarReadData_valid, latency: 1}
-  vmem_write: {valid: io_vmemScalarWrite_valid}
-  scalar_resp: {valid: io_scalarResp_valid}
+  mem_cmd: {valid: io_scalarMemCmd_valid, fields: {store: io_scalarMemCmd_bits_isStore}}   # explicit: address/data bits come from unknown register-file state
+  vmem_read: {bundle: io_vmemScalarRead, response: {input: io_vmemScalarReadData_valid, memory: Vmem}}
+  vmem_write: {bundle: io_vmemScalarWrite}
+  scalar_resp: {bundle: io_scalarResp}
   load_pending: {valid: load_pending}
   load_resp: {valid: load_resp_valid}
   load_write: {valid: load_writeback}
@@ -47,13 +49,13 @@ events:
 operations:
   load:
     commands:
-      0: {issueScalarLoad: 1, mem_cmd: 3}
+      0: {issueScalarLoad: 1, mem_cmd: $lw}
   scale_load:
     commands:
-      0: {issueScalarLoad: 1, mem_cmd: 9}
+      0: {issueScalarLoad: 1, mem_cmd: $seld}
   store:
     commands:
-      0: {issueScalarStore: 1, mem_cmd: 0}
+      0: {issueScalarStore: 1, mem_cmd: $sw}
 checks:
   - equal: [load.events.load_write.first_age, scale_load.events.scale_write.first_age]
     reason: scale-factor loads write back on the scalar load path

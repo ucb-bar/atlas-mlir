@@ -204,7 +204,7 @@ class SpecTests(unittest.TestCase):
                  "unknown top-level key": lambda s: s.update(stimulus={}),
                  "unknown event key": lambda s: s["events"]["done"].update(ready="x"),
                  "undeclared command input": lambda s: s["operations"]["pulse"]["commands"][0].update(payload=1),
-                 "undeclared response input": lambda s: s["inputs"].pop("resp"),
+                 "response without latency or memory": lambda s: s["events"]["request"]["response"].pop("latency"),
                  "bad response latency": lambda s: s["events"]["request"]["response"].update(latency=0),
                  "unknown recipe": lambda s: s.update(recipe="magic"),
                  "variant overrides module": lambda s: s["variants"].update(other={"module": "X"}),

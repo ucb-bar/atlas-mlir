@@ -1,72 +1,55 @@
 # Vector engine (VPU): one command at age 0 while idle; operand rows are read from MREGs, results written back per port.
-# The operation table lists the VPU opcode encoding (list index + 1) except fp8, which has no timing contract here.
 engine: vpu
 module: VectorEngineTop
 description: Vector engine top; two MREG read ports, two MREG write ports, per-opcode issue-busy mask.
 limit: 320
-inputs:                       # approved control inputs and their idle values (payload buses are not approved)
-  io_cmd_valid: 0
+system: AtlasCore             # instantiates the engine, MregFile and the scalar decoder
+command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
+inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
   io_cmd_bits_op: 1
   io_cmd_bits_vs1: 18
   io_cmd_bits_vs2: 22
   io_cmd_bits_vd: 26
-  io_mregReadResp0_valid: 0
-  io_mregReadResp1_valid: 0
+decode:                       # command codes come from the RTL decoder; words are the ISA encodings of lib/AtlasEncoding.cpp
+  input: io_cmd_bits_op       # (operand fields zero); fp8 has no instruction and no timing contract here
+  instruction: {instance: scalar/decoder, port: io_instr}
+  words:
+    add: 0x00000057
+    sub: 0x04000057
+    mul: 0x06000057
+    rcp: 0x82000057
+    sqrt: 0x9a000057
+    sin: 0x92000057
+    cos: 0x94000057
+    tanh: 0x96000057
+    log: 0x98000057
+    exp: 0x84000057
+    exp2: 0x86000057
+    square: 0x8c000057
+    cube: 0x8e000057
+    rsum: 0x42000057
+    csum: 0x02000057
+    fp8pack: 0x88000057
+    fp8unpack: 0x8a000057
+    relu: 0x90000057
+    rmax: 0x4c000057
+    rmin: 0x48000057
+    cmax: 0x0e000057
+    cmin: 0x0a000057
+    pairmax: 0x0c000057
+    pairmin: 0x08000057
+    mov: 0x80000057
+    vliOne: 0x0000605f
+    vliCol: 0x0000405f
+    vliRow: 0x0000205f
+    vliAll: 0x0000005f
 busy: io_busy
 events:
-  read0:
-    valid: io_mregReadReq0_valid
-    fields: {mreg: io_mregReadReq0_bits_mregId, row: io_mregReadReq0_bits_row}
-    row: row
-    split_by: mreg
-    response: {input: io_mregReadResp0_valid, latency: 1}
-  read1:
-    valid: io_mregReadReq1_valid
-    fields: {mreg: io_mregReadReq1_bits_mregId, row: io_mregReadReq1_bits_row}
-    row: row
-    split_by: mreg
-    response: {input: io_mregReadResp1_valid, latency: 1}
-  write0:
-    valid: io_mregWriteReq0_valid
-    fields: {mreg: io_mregWriteReq0_bits_mregId, row: io_mregWriteReq0_bits_row}
-    row: row
-    split_by: mreg
-  write1:
-    valid: io_mregWriteReq1_valid
-    fields: {mreg: io_mregWriteReq1_bits_mregId, row: io_mregWriteReq1_bits_row}
-    row: row
-    split_by: mreg
-operation_table:
-  codes:
-    add: 1
-    sub: 2
-    mul: 3
-    rcp: 4
-    sqrt: 5
-    sin: 6
-    cos: 7
-    tanh: 8
-    log: 9
-    exp: 10
-    exp2: 11
-    square: 12
-    cube: 13
-    rsum: 14
-    csum: 15
-    fp8pack: 17
-    fp8unpack: 18
-    relu: 19
-    rmax: 20
-    rmin: 21
-    cmax: 22
-    cmin: 23
-    pairmax: 24
-    pairmin: 25
-    mov: 26
-    vliOne: 27
-    vliCol: 28
-    vliRow: 29
-    vliAll: 30
+  read0: {bundle: io_mregReadReq0, row: row, split_by: mregId, response: {input: io_mregReadResp0_valid, memory: MregFile}}
+  read1: {bundle: io_mregReadReq1, row: row, split_by: mregId, response: {input: io_mregReadResp1_valid, memory: MregFile}}
+  write0: {bundle: io_mregWriteReq0, row: row, split_by: mregId}
+  write1: {bundle: io_mregWriteReq1, row: row, split_by: mregId}
+operation_table:              # one operation per decode word
   template:
     commands:
       0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_vs1: 2, io_cmd_bits_vs2: 6, io_cmd_bits_vd: 10}

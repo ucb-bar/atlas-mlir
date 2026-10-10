@@ -10,6 +10,7 @@ Computes per-operation engine timing (event ages, release, next issue) by execut
 | `ir.py` | `load_document(hw_ir, modules, exporter)`: exports the modules plus their instance closure. The only code that knows about the exporter. |
 | `control.py` | `ControlCircuit`: register-boundary slicing and exact finite-width execution with unknown (`None`) propagation. Fails closed on unapproved inputs, ops outside the whitelist, enabled/async registers, and foreign clocks/resets. |
 | `spec.py` | `load_spec`, `load_target`, `variant`: YAML loading and validation; unknown or missing keys fail. |
+| `derive.py` | Derives bundle ports, memory response latency and decoded command codes from the IR before a circuit is built. |
 | `runner.py` | `extract(document, spec)`: recipe registry (`RECIPES`), the generic `single` recipe, summaries, spec checks. |
 | `coupled.py` | `coupled` recipe: two circuits clocked together; same-cycle links resolved by fixed-point iteration over unknowns. |
 | `summaries.py` | Stream summaries (first/last age, count, step, row contiguity, split streams), first-free and next-issue ages. |
@@ -39,14 +40,18 @@ Responses are fed back after `events.<g>.response.latency` ages and reported as 
 
 ## Spec schema (`single` recipe)
 
-- Required: `engine` (file stem), `module` (top), `inputs` (every approved control input with its idle value), `events`.
-- `events.<group>`: `valid` (signal), optional `fields` (`{name: signal}`), `row` (field checked for 0..n-1 order), `split_by` (field that splits the group into `streams`), `response: {input, latency}` (the input pulses `latency` ages after each valid).
-- `operations.<op>.commands`: `{age | "a..b": {input: value}}` overlaid on the idle inputs for those ages; optional `next_issue: {signal, bit?}`. `operation_table: {codes: {op: code}, template: {...}}` generates operations, replacing `"$code"`.
+- Required: `engine` (file stem), `module` (top), `events`. `inputs` lists approved control inputs that are not derived, and idle-value overrides; derived inputs idle at 0.
+- `command: <prefix>`: approves `<prefix>_valid` and every `<prefix>_bits_*` input port of `module` (idle 0 unless listed in `inputs`).
+- `events.<group>`: `valid` (signal) or `bundle: <prefix>` (valid `<prefix>_valid`, an input `<prefix>_ready` is approved, fields are the `<prefix>_bits_*` outputs named by suffix that depend only on approved inputs through supported operations; payload bits drop out); optional explicit `fields` (`{name: signal}`, overrides the expansion), `row` (field checked for 0..n-1 order), `split_by` (field that splits the group into `streams`), `response: {input, memory?, latency?}` (the input, idle 0, pulses `latency` ages after each valid).
+- `system`: module instantiating the engine, its memories and the instruction decoder; required by `memory` and `decode`, and loaded with the engine.
+- `response.memory: <module>`: derives `latency`. The single `system` instance of that module must be a sibling of the single engine instance, with the event valid wired to exactly one memory input and the response input driven by exactly one memory output. That memory is simulated alone (other inputs idle 0): the ages from a one-cycle request pulse to response valid are the latency. Every `seq.firmem` `readLatency` in it must agree and not exceed the measurement; an extra register makes the measurement win. An explicit `latency` (e.g. in a variant) overrides it. Records report `assumptions.scratchpad_read_derivation.<group>` (memory instance, ports, `measured`, `memory_read_latency`, `used`).
+- `decode: {input, instruction: {instance, port}, words: {name: word}}`: command codes come from the RTL. Each declared ISA word (names and encodings are vocabulary, matching `lib/AtlasEncoding.cpp`) drives the decoder input `instruction` (instance path in `system`; its driver must be a named value or an instance result), and the code is the value reaching `input` (a port of the engine instance or a cut) in the same cycle. Codes must be known, distinct, and differ from the all-zero word's. Commands refer to codes as `"$name"`.
+- `operations.<op>.commands`: `{age | "a..b": {input: value}}` overlaid on the idle inputs for those ages; optional `next_issue: {signal, bit?}`. `operation_table: {codes?: {op: code}, template: {...}}` generates operations, replacing `"$code"`; without `codes` it generates one operation per `decode.words` name.
 - `busy`: signal; gives `first_free_age` (first age after the first command with busy low) and requires a contiguous busy interval.
 - `probes: {name: selector}` exposes values inside the hierarchy as observable signals; `cuts: {input: selector}` replaces a value by an input (declare its idle value in `inputs`). Selectors: `{instance: "a/b", result: port}` or `{path: "a/b", value: name}` (matches `name`, then `sv.namehint`).
 - `unreset`: optional list of `{path, name}` register selectors (`path` is the instance path, `""` for the top; a coupled `partner` takes its own `unreset`) that may stay unknown after reset/flush. Every other register in the control cone must be known; an entry that matches no register, lies outside the cone, or is already known after reset/flush fails the run. Control outputs and valid event fields must still be known at every age.
 - Defaults: `clock: clock`, `reset: reset`, `reset_cycles: 16`, `flush_cycles: 16`, `limit: 320`, `tail: 2`.
-- `variants.<name>`: deep-merged overlay of the spec (not `engine`, `module`, `checks`, `expect`, `operation_table`); optional `only: [ops]`. Records are named `<engine>.<op>` and `<engine>.<op>/<variant>`.
+- `variants.<name>`: deep-merged overlay of the spec (not `engine`, `module`, `checks`, `expect`, `operation_table`, `system`, `command`, `decode`); optional `only: [ops]`. Records are named `<engine>.<op>` and `<engine>.<op>/<variant>`.
 - `checks: [{equal: ["op.events.write", "op/variant.events.write"], reason?}]`: a failure marks the named records unresolved.
 - `expect`: regression values per record, read only by `test/test_rtl_extract_atlas.py`. Never feed them into extraction.
 

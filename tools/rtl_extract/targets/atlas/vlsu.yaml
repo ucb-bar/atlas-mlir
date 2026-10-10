@@ -4,44 +4,39 @@ module: LSU
 description: >
   Vector load/store paths of the LSU; one command at age 0 while idle. VLOAD reads 32 VMEM lines and writes
   32 MREG rows; VSTORE reads 32 MREG rows and writes 32 VMEM lines. The LSU never stalls on a response, so the
-  response latency is a stimulus assumption, not something the RTL enforces. VMEM row fields are line offsets
+  derived response latency is what the memories deliver, not something the LSU enforces. VMEM row fields are line offsets
   within a bank (bankAddr); they are zero-based only for a bank-aligned base (bankAddr 0).
 limit: 80
-inputs:                       # approved control inputs and their idle values
-  io_cmd_valid: 0
+system: AtlasCore             # instantiates the LSU, Vmem, MregFile and the scalar decoder
+command: io_cmd               # io_cmd_valid and io_cmd_bits_* are approved inputs (idle 0 unless overridden)
+inputs:                       # idle overrides: stimulus choices that keep idle operands distinct from issued ones
   io_cmd_bits_op: 3
   io_cmd_bits_mregBank: 60
   io_cmd_bits_vmemLineAddr: 16383
-  io_vmemVecReadData_valid: 0
-  io_mregReadResp_valid: 0
+decode:                       # command codes come from the RTL decoder; words are the ISA encodings of lib/AtlasEncoding.cpp
+  input: io_cmd_bits_op
+  instruction: {instance: scalar/decoder, port: io_instr}
+  words: {vload: 0x00000007, vstore: 0x00002007}
 busy: io_vecBusy              # load path | store path; next_issue below uses each operation's own path busy
 events:
   vmem_read:                  # VLOAD source rows
-    valid: io_vmemVecRead_valid
-    fields: {bank: io_vmemVecRead_bits_bankIdx, row: io_vmemVecRead_bits_bankAddr}
-    row: row
-    response: {input: io_vmemVecReadData_valid, latency: 1}
-  mreg_write:                 # VLOAD destination rows
-    valid: io_mregWriteReq_valid
-    fields: {mreg: io_mregWriteReq_bits_mregId, row: io_mregWriteReq_bits_row}
-    row: row
+    bundle: io_vmemVecRead
+    row: bankAddr
+    response: {input: io_vmemVecReadData_valid, memory: Vmem}
+  mreg_write: {bundle: io_mregWriteReq, row: row}          # VLOAD destination rows
   mreg_read:                  # VSTORE source rows
-    valid: io_mregReadReq_valid
-    fields: {mreg: io_mregReadReq_bits_mregId, row: io_mregReadReq_bits_row}
+    bundle: io_mregReadReq
     row: row
-    response: {input: io_mregReadResp_valid, latency: 1}
-  vmem_write:                 # VSTORE destination rows
-    valid: io_vmemVecWrite_valid
-    fields: {bank: io_vmemVecWrite_bits_bankIdx, row: io_vmemVecWrite_bits_bankAddr}
-    row: row
+    response: {input: io_mregReadResp_valid, memory: MregFile}
+  vmem_write: {bundle: io_vmemVecWrite, row: bankAddr}     # VSTORE destination rows
 operations:
   vload:
     commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: 1, io_cmd_bits_mregBank: 5, io_cmd_bits_vmemLineAddr: 8192}   # bank 1, line 0
+      0: {io_cmd_valid: 1, io_cmd_bits_op: $vload, io_cmd_bits_mregBank: 5, io_cmd_bits_vmemLineAddr: 8192}   # bank 1, line 0
     next_issue: {signal: io_vloadBusy}
   vstore:
     commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: 2, io_cmd_bits_mregBank: 9, io_cmd_bits_vmemLineAddr: 16384}  # bank 2, line 0
+      0: {io_cmd_valid: 1, io_cmd_bits_op: $vstore, io_cmd_bits_mregBank: 9, io_cmd_bits_vmemLineAddr: 16384}  # bank 2, line 0
     next_issue: {signal: io_vstoreBusy}
 variants:
   response_latency_2:         # computed fact only: the LSU does not wait, so a late response misaligns or drops rows
@@ -69,16 +64,16 @@ checks:
 expect:
   vload:
     events:
-      vmem_read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {bank: [1]}}
-      mreg_write: {first_age: 3, last_age: 34, count: 32, step: 1, row_contiguous: true, values: {mreg: [5]}}
+      vmem_read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {bankIdx: [1]}}
+      mreg_write: {first_age: 3, last_age: 34, count: 32, step: 1, row_contiguous: true, values: {mregId: [5]}}
       mreg_read: {count: 0}
       vmem_write: {count: 0}
     first_free_age: 35
     next_issue_age: 35
   vstore:
     events:
-      mreg_read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {mreg: [9]}}
-      vmem_write: {first_age: 3, last_age: 34, count: 32, step: 1, row_contiguous: true, values: {bank: [2]}}
+      mreg_read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {mregId: [9]}}
+      vmem_write: {first_age: 3, last_age: 34, count: 32, step: 1, row_contiguous: true, values: {bankIdx: [2]}}
       vmem_read: {count: 0}
       mreg_write: {count: 0}
     first_free_age: 35
@@ -97,11 +92,11 @@ expect:
     first_free_age: 35
   vload/operands:
     events:
-      vmem_read: {first_age: 1, last_age: 32, count: 32, values: {bank: [5]}}
-      mreg_write: {first_age: 3, last_age: 34, count: 32, values: {mreg: [42]}}
+      vmem_read: {first_age: 1, last_age: 32, count: 32, values: {bankIdx: [5]}}
+      mreg_write: {first_age: 3, last_age: 34, count: 32, values: {mregId: [42]}}
     first_free_age: 35
   vstore/operands:
     events:
-      mreg_read: {first_age: 1, last_age: 32, count: 32, values: {mreg: [17]}}
-      vmem_write: {first_age: 3, last_age: 34, count: 32, values: {bank: [3]}}
+      mreg_read: {first_age: 1, last_age: 32, count: 32, values: {mregId: [17]}}
+      vmem_write: {first_age: 3, last_age: 34, count: 32, values: {bankIdx: [3]}}
     first_free_age: 35
