@@ -1,5 +1,5 @@
 # Reviewed correspondence between RTL-computed op timing (tools/extract-rtl-timing.py,
-# schema atlas.op_timing.v0-proposal) and the compiler's footprints (lib/AtlasTiming.cpp,
+# schema merlin.op_timing.v1, the op_timing blocks) and the compiler's footprints (lib/AtlasTiming.cpp,
 # printed by test/rtl-timing-facts-probe.cpp). Used only by test/test_rtl_extract_compiler.py.
 #
 # Conventions

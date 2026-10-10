@@ -1,9 +1,16 @@
-"""Results shaped like a proposed Merlin ``op_timing`` facts block (pending review)."""
+"""Extractor records and the Merlin ``op_timing`` document built from them.
+
+Records keep an internal ``status``/``reason`` pair while checks run. ``block`` converts a record to
+a named block of Merlin's ``op_timing`` facts section, following the conventions of the ``timing``
+section: ``None`` is unknown and never a guess, ``source`` names the method, and ``evidence`` is the
+one prose field (the derivation of a computed block, the reason an unresolved block has no values).
+"""
 import hashlib
 import json
 from pathlib import Path
 
-SCHEMA = "atlas.op_timing.v0-proposal"
+SCHEMA = "merlin.op_timing.v1"
+SOURCE = "control_simulation"
 
 
 def sha256(path):
@@ -25,7 +32,7 @@ def record(spec, operation, variant=None, result=None, reason=None, evidence=Non
     """One record; ``result`` comes from simulation, otherwise the record is unresolved with ``reason``."""
     name = f"{spec['engine']}.{operation}" + (f"/{variant}" if variant else "")
     item = {"name": name, "engine": spec["engine"], "operation": operation, "variant": variant,
-            "module": spec["module"], "source": "control_simulation", "assumptions": assumptions(spec),
+            "module": spec["module"], "source": SOURCE, "assumptions": assumptions(spec),
             "events": None, "first_free_age": None}
     if any("next_issue" in op for op in spec["operations"].values()):
         item["next_issue_age"] = None
@@ -40,10 +47,22 @@ def unresolve(item, reason):
         item["next_issue_age"] = None
 
 
-def document(target, hw_ir, exporter, records):
-    return {"schema": SCHEMA, "target": target,
-            "hw_ir": {"path": str(Path(hw_ir).resolve()), "sha256": sha256(hw_ir)},
-            "exporter": {"path": str(Path(exporter).resolve())}, "records": records}
+def block(item):
+    """The named ``op_timing`` block for one record; an unresolved record keeps null values and its reason as evidence."""
+    out = {key: item[key] for key in ("name", "module", "engine", "operation") if key in item}
+    if item["variant"]:
+        out["variant"] = item["variant"]
+    out.update(source=item["source"], evidence=item["evidence"], assumptions=item["assumptions"],
+               events=item["events"], first_free_age=item["first_free_age"])
+    if "next_issue_age" in item:
+        out["next_issue_age"] = item["next_issue_age"]
+    return out
+
+
+def document(hw_ir, records):
+    """The extractor output: IR identity (path and SHA-256) and the ``op_timing`` named-block list."""
+    return {"schema": SCHEMA, "hw_ir": {"path": str(Path(hw_ir).resolve()), "sha256": sha256(hw_ir)},
+            "op_timing": [block(item) for item in records]}
 
 
 def write(path, value):

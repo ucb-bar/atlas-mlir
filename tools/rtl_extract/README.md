@@ -1,6 +1,6 @@
 # rtl_extract: engine timing from CIRCT HW IR
 
-Computes per-operation engine timing (event ages, release, next issue) by executing the control logic of CIRCT HW IR cycle by cycle. Ported from the PR #12 rtlgraph extractor. Python stays target-agnostic; every module, port, opcode and stimulus lives in `targets/<target>/<engine>.yaml`. Output is a proposed Merlin `op_timing` block (`atlas.op_timing.v0-proposal`, pending review).
+Computes per-operation engine timing (event ages, release, next issue) by executing the control logic of CIRCT HW IR cycle by cycle. Ported from the PR #12 rtlgraph extractor. Python stays target-agnostic; every module, port, opcode and stimulus lives in `targets/<target>/<engine>.yaml`. The output is a `merlin.op_timing.v1` document that drops into Merlin's RTL facts as the `op_timing` section (see Output).
 
 ## Layout
 
@@ -13,7 +13,13 @@ Computes per-operation engine timing (event ages, release, next issue) by execut
 | `runner.py` | `extract(document, spec)`: recipe registry (`RECIPES`), the generic `single` recipe, summaries, spec checks. |
 | `coupled.py` | `coupled` recipe: two circuits clocked together; same-cycle links resolved by fixed-point iteration over unknowns. |
 | `summaries.py` | Stream summaries (first/last age, count, step, row contiguity, split streams), first-free and next-issue ages. |
-| `facts.py` | Record and document shapes; unresolved records carry `null` values and a reason. |
+| `facts.py` | Record shape, `block` (record to `op_timing` block) and `document` (the output). Unresolved blocks carry `null` values and the reason as `evidence`. |
+
+## Output
+
+`tools/extract-rtl-timing.py` writes `{schema: "merlin.op_timing.v1", hw_ir: {path, sha256}, op_timing: [block, ...]}`. The document names only the IR it read; the target, spec set and exporter are not recorded.
+
+`op_timing` is a named-block list keyed by `name` (`<engine>.<op>` or `<engine>.<op>/<variant>`), the shape Merlin merges per block beside its per-module `timing` section. A block has `name`, `module`, `engine`, `operation`, `variant` (only for variants), `source` (`control_simulation`), `evidence`, `assumptions`, `events`, `first_free_age` and, for engines that declare one, `next_issue_age`. `null` means unknown, never a guess: an unresolved block has `events`, `first_free_age` and `next_issue_age` all `null` and its reason in `evidence`. There is no `status` field; a block is resolved when `events` is not `null`, and the CLI exits 1 otherwise.
 
 ## Build and run
 

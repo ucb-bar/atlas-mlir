@@ -7,8 +7,8 @@ Compiler side: ATLAS_TIMING_PROBE names a built test/rtl-timing-facts-probe, or 
 (os.pathsep-separated LLVM source and build include directories) builds one in a temporary directory:
   c++ -std=c++17 -O2 -I include -I <llvm-project>/llvm/include -I <llvm-build>/include \\
       test/rtl-timing-facts-probe.cpp lib/AtlasTiming.cpp -o build/rtl-extract/probe/rtl-timing-facts-probe
-RTL side: ATLAS_OP_TIMING names an op_timing JSON from tools/extract-rtl-timing.py, or ATLAS_HW_IR and
-ATLAS_HW_EXPORTER compute one. The tests skip otherwise. `python3 test/test_rtl_extract_compiler.py --table`
+RTL side: ATLAS_OP_TIMING names a merlin.op_timing.v1 JSON from tools/extract-rtl-timing.py (its
+op_timing blocks), or ATLAS_HW_IR and ATLAS_HW_EXPORTER compute them. The tests skip otherwise. `python3 test/test_rtl_extract_compiler.py --table`
 prints every comparison.
 """
 import copy
@@ -25,6 +25,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
+from rtl_extract import facts  # noqa: E402
 MAP = yaml.safe_load((REPO / "test/rtl-timing-facts-map.yaml").read_text())
 FIELDS = ("first_age", "last_age", "count", "step")
 STORAGE = {"MReg", "Acc", "Weight", "Vmem"}  # every compiler access to these must meet a compared fact
@@ -50,7 +51,10 @@ def run_probe(exe, mnemonics):
 
 def load_facts():
     if os.environ.get("ATLAS_OP_TIMING"):
-        records = json.loads(Path(os.environ["ATLAS_OP_TIMING"]).read_text())["records"]
+        document = json.loads(Path(os.environ["ATLAS_OP_TIMING"]).read_text())
+        if document.get("schema") != facts.SCHEMA:
+            raise ValueError(f"{os.environ['ATLAS_OP_TIMING']}: expected schema {facts.SCHEMA}, found {document.get('schema')!r}")
+        records = document["op_timing"]
     elif os.environ.get("ATLAS_HW_IR") and os.environ.get("ATLAS_HW_EXPORTER"):
         from rtl_extract.ir import load_document
         from rtl_extract.runner import extract, modules
@@ -58,7 +62,7 @@ def load_facts():
         specs = load_target("atlas", available_engines("atlas"))
         document = load_document(os.environ["ATLAS_HW_IR"], sorted({m for s in specs.values() for m in modules(s)}),
                                  os.environ["ATLAS_HW_EXPORTER"])
-        records = [r for s in specs.values() for r in extract(document, s)]
+        records = [facts.block(r) for s in specs.values() for r in extract(document, s)]
     else:
         return None
     return {r["name"]: r for r in records}
@@ -148,8 +152,8 @@ def coverage(facts):
         if name not in ops:
             problems.append(f"{name}: record not mapped")
             continue
-        if record["status"] != "computed":
-            problems.append(f"{name}: {record['status']}: {record.get('reason')}")
+        if record["events"] is None:
+            problems.append(f"{name}: unresolved: {record['evidence']}")
             continue
         family = ops[name][0]
         for group, event in (record["events"] or {}).items():

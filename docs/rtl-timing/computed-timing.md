@@ -38,4 +38,4 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 - Load the computed facts in the compiler's selected-timing path instead of fixed trace values.
 - Derive more spec inputs from the IR: memory latency from `seq.firmem`, opcode encodings from the decoder and command ports from their valid/ready naming.
 - Add a pair recipe for overlap checks.
-- Agree the `atlas.op_timing.v0-proposal` record shape with the Merlin Phase 0 extractor.
+- Review the `merlin.op_timing.v1` document and its Merlin facts merge (draft branch `feat/op-timing-facts`) with the Merlin Phase 0 maintainers.
