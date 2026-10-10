@@ -1,6 +1,11 @@
 #include "VerificationTestSupport.h"
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasStream.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/ADT/STLExtras.h"
@@ -288,6 +293,137 @@ void testRetainedProvider(MLIRContext &context) {
   check(failed(verifyAtlasTiming(*module, p)),
         "retained custom policy rejects incomplete supplied coverage");
 }
+const char *kStrict = "synthetic-strict-spacing-policy";
+
+// The model's rules with every positive pair distance lengthened by four.
+TimingRuleResult<TimingProvider> strictProvider(ModuleOp) {
+  auto p = npuModelTimingProvider();
+  p.id = kStrict;
+  auto model = p.dependence;
+  p.dependence = [model](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
+    auto rule = model(a, fa, b, fb);
+    if (rule.value.distance > 0)
+      rule.value.distance += 4;
+    return rule;
+  };
+  return {p, {}};
+}
+
+const char *kCopy = R"mlir(
+  module {
+    %s0 = "atlas.start"() : () -> !atlas.state
+    %s1 = "atlas.alu_imm"(%s0) {kind = "addi", dst = 6 : i32, src = 0 : i32, immediate = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s2 = "atlas.vload"(%s1) {dst = 4 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.alu_imm"(%s2) {kind = "addi", dst = 8 : i32, src = 0 : i32, immediate = 256 : i32} : (!atlas.state) -> !atlas.state
+    %s4 = "atlas.vstore"(%s3) {src = 4 : i32, base = 8 : i32, offset = 0 : i32, format = "raw"} : (!atlas.state) -> !atlas.state
+    %s5 = "atlas.trap"(%s4) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+  }
+)mlir";
+
+OwningOpRef<ModuleOp> rewrite(MLIRContext &context, StringRef source, StringRef pipeline) {
+  auto module = parseSourceString<ModuleOp>(source, &context);
+  PassManager pm = PassManager::on<ModuleOp>(&context);
+  if (!module || failed(parsePassPipeline(pipeline, pm)) || failed(pm.run(*module)))
+    return {};
+  return module;
+}
+
+int64_t delayCycles(ModuleOp module) {
+  int64_t total = 0;
+  module.walk([&](DelayOp delay) { total += delay.getCycles() + 1; });
+  return total;
+}
+
+std::string print(ModuleOp module) {
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  module.print(stream);
+  return text;
+}
+
+StringRef retainedProvider(ModuleOp module) {
+  auto id = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
+  return id ? id.getValue() : StringRef();
+}
+
+void testRegistry(MLIRContext &context) {
+  auto model = lookupTimingProvider(kNpuModelTimingProviderId.str());
+  check(model.error.empty() && model.value.id == kNpuModelTimingProviderId, "registry is seeded with the npu-model provider");
+  auto unknown = lookupTimingProvider("unknown-policy");
+  check(StringRef(unknown.error).contains("unknown Atlas timing provider"), "unknown id fails explicitly", unknown.error);
+  auto footprintOnly = lookupTimingProvider("atlas.vls.conservative.v1");
+  check(StringRef(footprintOnly.error).contains("footprint-only"), "unregistered footprint-only id keeps its rejection", footprintOnly.error);
+  auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}}; };
+  check(!registerAtlasTimingProvider(kNpuModelTimingProviderId.str(), complete).empty(), "duplicate registration fails");
+  check(!registerAtlasTimingProvider("", complete).empty(), "empty registration id fails");
+  check(!registerAtlasTimingProvider("synthetic-null-factory", {}).empty(), "null factory fails");
+  check(registerAtlasTimingProvider("synthetic-renamed-policy", complete).empty() &&
+            !lookupTimingProvider("synthetic-renamed-policy").error.empty(),
+        "factory must return the registered identity");
+  check(registerAtlasTimingProvider("synthetic-incomplete-policy", [](ModuleOp) {
+          auto p = npuModelTimingProvider();
+          p.id = "synthetic-incomplete-policy";
+          p.issueGap = {};
+          return TimingRuleResult<TimingProvider>{p, {}};
+        }).empty() && !lookupTimingProvider("synthetic-incomplete-policy").error.empty(),
+        "registered incomplete policy is not returned");
+  check(registerAtlasTimingProvider(kStrict, strictProvider).empty(), "synthetic strict policy registers");
+  check(lookupTimingProvider(kStrict).error.empty(), "registered id is found");
+
+  registerScheduleAtlasStreamPass();
+  registerVerifyAtlasTimingPass();
+  auto byModel = rewrite(context, kCopy, "insert-atlas-delays");
+  auto byDefaultName = rewrite(context, kCopy, std::string("insert-atlas-delays{provider=") + kNpuModelTimingProviderId.str() + "}");
+  auto byStrict = rewrite(context, kCopy, std::string("insert-atlas-delays{provider=") + kStrict + "}");
+  check(byModel && byDefaultName && byStrict, "delay insertion accepts each registered provider", diagnostics);
+  if (!byModel || !byDefaultName || !byStrict)
+    return;
+  check(print(*byModel) == print(*byDefaultName), "naming the default provider changes nothing");
+  check(retainedProvider(*byModel) == kNpuModelTimingProviderId && retainedProvider(*byStrict) == kStrict,
+        "delay insertion stamps the provider it used");
+  check(delayCycles(*byStrict) > delayCycles(*byModel), "stricter selected spacing emits longer delays");
+  check(succeeded(verifyAtlasTiming(*byStrict)), "registry dispatch verifies the strict result", diagnostics);
+  auto strict = strictProvider({}).value;
+  auto modelStream = readAtlasStream(*byModel, AtlasStreamReadMode::Verification);
+  diagnostics.clear();
+  check(succeeded(modelStream) && failed(verifyAtlasTimedStream(*modelStream, strict)) && diagnosed("insufficient issue spacing"),
+        "model spacing fails the strict provider's verification", diagnostics);
+
+  diagnostics.clear();
+  check(failed(verifyAtlasTiming(*byStrict, npuModelTimingProvider())) && diagnosed("disagrees with retained provider identity"),
+        "module stamped with strict rejects the model", diagnostics);
+  for (StringRef pass : {"verify-atlas-timing", "insert-atlas-delays", "schedule-atlas-stream"}) {
+    diagnostics.clear();
+    std::string pipeline = pass.str() + "{provider=" + kStrict + "}";
+    check(!rewrite(context, print(*byModel), pipeline) && diagnosed("disagrees with retained provider identity"),
+          "module stamped with the model rejects a different selection", pipeline + "\n" + diagnostics);
+  }
+  diagnostics.clear();
+  check(!rewrite(context, kCopy, "insert-atlas-delays{provider=unknown-policy}") && diagnosed("unknown Atlas timing provider"),
+        "unknown selection fails at the producer", diagnostics);
+
+  // The list scheduler spaces work with the model graph, so its timed output
+  // must pass the selected provider; reordering then inserting delays does.
+  diagnostics.clear();
+  check(!rewrite(context, kCopy, std::string("schedule-atlas-stream{provider=") + kStrict + "}") && diagnosed("insufficient issue spacing"),
+        "scheduler output is checked under a non-model provider", diagnostics);
+  auto reordered = rewrite(context, kCopy, std::string("schedule-atlas-stream{insert-delays=false provider=") + kStrict + "},insert-atlas-delays{provider=" + kStrict + "},verify-atlas-timing");
+  check(reordered && retainedProvider(*reordered) == kStrict, "reorder then strict delay insertion verifies", diagnostics);
+
+  // A module-scoped policy (as RTL evidence selection would supply) replaces a
+  // footprint-only rejection once registered.
+  check(registerAtlasTimingProvider("atlas.vls.conservative.v1", [](ModuleOp module) -> TimingRuleResult<TimingProvider> {
+          if (!module || !module->hasAttr("atlas.rtl_evidence"))
+            return {{}, "synthetic evidence policy requires selected evidence"};
+          auto p = npuModelTimingProvider();
+          p.id = "atlas.vls.conservative.v1";
+          return {p, {}};
+        }).empty(), "a footprint-only id can be registered by a complete policy");
+  auto withoutEvidence = lookupTimingProvider("atlas.vls.conservative.v1");
+  check(StringRef(withoutEvidence.error).contains("requires selected evidence"), "module-scoped factory sees no module", withoutEvidence.error);
+  (*byModel)->setAttr("atlas.rtl_evidence", UnitAttr::get(&context));
+  check(lookupTimingProvider("atlas.vls.conservative.v1", *byModel).error.empty(), "module-scoped factory reads its module");
+}
 } // namespace
 
 void atlas_test::runTimingProvider(MLIRContext &context) {
@@ -295,4 +431,5 @@ void atlas_test::runTimingProvider(MLIRContext &context) {
   testMissingCoverage(context);
   testBoundedScope(context);
   testRetainedProvider(context);
+  testRegistry(context);
 }

@@ -2,6 +2,7 @@
 #define ATLAS_TIMING_PROVIDER_H
 
 #include "Atlas/AtlasTiming.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
 
@@ -56,9 +57,20 @@ std::string validateTimingProvider(const TimingProvider &provider);
 constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
 // Explicit adapter for existing unqualified npu-model rtl-match rules.
 TimingProvider npuModelTimingProvider();
-// Only complete policies are returned. Unknown ids and the current CIRCT
-// footprint-only evidence selection fail; they never borrow model rules.
-TimingRuleResult<TimingProvider> lookupTimingProvider(const std::string &id);
+// Builds the provider for one module. Module-scoped evidence (for example a
+// selected RTL evidence attribute) is read from `module`, which may be null
+// for module-independent policies; the returned id must equal the registered id.
+using TimingProviderFactory =
+    std::function<TimingRuleResult<TimingProvider>(mlir::ModuleOp module)>;
+// Adds `id` to the process-wide registry, which is seeded with the npu-model
+// provider. Returns an error for an empty, duplicate or null registration.
+std::string registerAtlasTimingProvider(const std::string &id,
+                                        TimingProviderFactory factory);
+// Only complete registered policies are returned. Unknown ids and known
+// footprint-only CIRCT evidence ids that nothing registered fail; they never
+// borrow model rules.
+TimingRuleResult<TimingProvider> lookupTimingProvider(const std::string &id,
+                                                      mlir::ModuleOp module = {});
 
 } // namespace timing
 } // namespace mlir::atlas

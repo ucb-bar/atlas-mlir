@@ -54,6 +54,12 @@ LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
                                 const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
+// Resolves the provider a timing pass uses: `requested` when nonempty, else
+// the module's retained atlas.timing_provider, else the npu-model provider. A
+// request that differs from the retained identity, or an unregistered or
+// incomplete provider, is diagnosed on the module.
+FailureOr<timing::TimingProvider>
+selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
 // Dispatches the explicitly retained complete provider. Legacy streams without
 // timing metadata select the named model for compatibility.
 LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx);
@@ -112,12 +118,13 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions. Rewriting alone leaves the
-// stream untimed; timing passes explicitly request a checked timed artifact.
+// stream untimed; timing passes request a timed artifact by naming the
+// provider that timed it, which is stamped as atlas.timing_provider.
 // The module is then re-verified, and `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
                                llvm::ArrayRef<DelayInsertion> before,
-                               bool timed = false);
+                               llvm::StringRef timedBy = {});
 std::vector<uint32_t> idleDelays(int idle);
 bool isNop(Operation *op);
 

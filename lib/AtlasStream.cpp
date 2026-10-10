@@ -477,7 +477,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
                                             const AtlasStream &s,
                                             ArrayRef<size_t> order,
                                             ArrayRef<DelayInsertion> before,
-                                            bool timed) {
+                                            StringRef timedBy) {
   OpBuilder builder(module.getContext());
   Type stateType = StateType::get(module.getContext());
   Operation *prev = &module.getBody()->front();
@@ -539,9 +539,10 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       cast<JumpOp>(op).setOffsetAttr(builder.getI32IntegerAttr(offset));
   }
 
+  bool timed = !timedBy.empty();
   module->setAttr(kAtlasTimingState, builder.getStringAttr(timed ? "timed" : "untimed"));
   if (timed)
-    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(kNpuModelTimingProviderId));
+    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(timedBy));
   else
     module->removeAttr(kAtlasTimingProvider);
   SmallVector<uint32_t> words;
@@ -684,15 +685,21 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
   return failed(ctx) ? failure() : verifyAtlasTiming(*ctx, provider);
 }
 
-LogicalResult mlir::atlas::verifyAtlasTiming(const AtlasVerificationContext &ctx) {
-  ModuleOp module = ctx.module;
-  std::string id = kNpuModelTimingProviderId.str();
-  if (auto selected = module->getAttrOfType<StringAttr>(kAtlasTimingProvider))
-    id = selected.getValue().str();
-  auto provider = lookupTimingProvider(id);
+FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
+    ModuleOp module, StringRef requested) {
+  auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
+  if (!requested.empty() && retained && retained.getValue() != requested)
+    return module.emitOpError("supplied timing policy disagrees with retained provider identity");
+  std::string id = !requested.empty() ? requested.str() : retained ? retained.getValue().str() : kNpuModelTimingProviderId.str();
+  auto provider = lookupTimingProvider(id, module);
   if (!provider.error.empty())
     return module.emitOpError(provider.error);
-  return verifyAtlasTiming(ctx, provider.value);
+  return std::move(provider.value);
+}
+
+LogicalResult mlir::atlas::verifyAtlasTiming(const AtlasVerificationContext &ctx) {
+  auto provider = selectAtlasTimingProvider(ctx.module);
+  return failed(provider) ? failure() : verifyAtlasTiming(ctx, *provider);
 }
 
 LogicalResult mlir::atlas::verifyAtlasTiming(ModuleOp module) {
@@ -704,21 +711,30 @@ namespace {
 struct VerifyAtlasTimingPass
     : PassWrapper<VerifyAtlasTimingPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VerifyAtlasTimingPass)
+  VerifyAtlasTimingPass() = default;
+  VerifyAtlasTimingPass(const VerifyAtlasTimingPass &other) : PassWrapper(other) {}
+  Option<std::string> provider{*this, "provider",
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::init("")};
   StringRef getArgument() const final { return "verify-atlas-timing"; }
   StringRef getDescription() const final {
-    return "Check actual issue spacing using the unqualified npu-model rtl-match timing provider";
+    return "Check actual issue spacing using the selected registered timing provider";
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SmallVector<uint32_t> words;
-    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/false, words)) ||
-        failed(verifyAtlasTiming(module, npuModelTimingProvider()))) {
+    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/false, words))) {
+      signalPassFailure();
+      return;
+    }
+    auto selected = selectAtlasTimingProvider(module, provider.getValue());
+    if (failed(selected) || failed(verifyAtlasTiming(module, *selected))) {
       signalPassFailure();
       return;
     }
     Builder builder(module.getContext());
     module->setAttr(kAtlasTimingState, builder.getStringAttr("timed"));
-    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(kNpuModelTimingProviderId));
+    module->setAttr(kAtlasTimingProvider, builder.getStringAttr(selected->id));
   }
 };
 }

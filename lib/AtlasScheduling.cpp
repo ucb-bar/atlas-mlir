@@ -252,9 +252,12 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block,
   return success();
 }
 
-LogicalResult scheduleStream(ModuleOp module, bool insertDelays) {
+LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef requested) {
+  FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
+  if (failed(provider))
+    return failure();
   FailureOr<AtlasStream> stream = readAtlasStream(module);
-  if (failed(stream) || failed(checkAtlasStream(*stream, npuModelTimingProvider())))
+  if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
@@ -281,7 +284,13 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays) {
   }
   if (!insertDelays)
     before.assign(stream->ops.size(), DelayInsertion{});
-  return writeAtlasStream(module, *stream, order, before, insertDelays);
+  if (failed(writeAtlasStream(module, *stream, order, before, insertDelays ? StringRef(provider->id) : StringRef())))
+    return failure();
+  // The list scheduler spaces work with the npu-model graph; a timed result
+  // under any other provider must pass that provider's verification.
+  if (insertDelays && provider->id != kNpuModelTimingProviderId)
+    return verifyAtlasTiming(module, *provider);
+  return success();
 }
 
 struct ScheduleAtlasStreamPass
@@ -292,6 +301,9 @@ struct ScheduleAtlasStreamPass
   Option<bool> insertDelays{*this, "insert-delays",
                            llvm::cl::desc("Insert timing delays after reordering"),
                            llvm::cl::init(true)};
+  Option<std::string> provider{*this, "provider",
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::init("")};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
@@ -300,7 +312,7 @@ struct ScheduleAtlasStreamPass
   }
 
   void runOnOperation() override {
-    if (failed(scheduleStream(getOperation(), insertDelays)))
+    if (failed(scheduleStream(getOperation(), insertDelays, provider.getValue())))
       signalPassFailure();
   }
 };

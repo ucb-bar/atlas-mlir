@@ -1,4 +1,6 @@
 #include "Atlas/AtlasTimingProvider.h"
+#include "llvm/ADT/StringMap.h"
+#include <mutex>
 
 using namespace mlir::atlas::timing;
 
@@ -59,11 +61,62 @@ TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
   return p;
 }
 
+namespace {
+struct Registry {
+  std::mutex mutex;
+  llvm::StringMap<TimingProviderFactory> factories;
+};
+
+Registry &registry() {
+  static Registry *table = [] {
+    auto *r = new Registry;
+    r->factories[kNpuModelTimingProviderId] = [](mlir::ModuleOp) {
+      return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}};
+    };
+    return r;
+  }();
+  return *table;
+}
+
+// CIRCT evidence resolver ids that select footprints without a complete policy.
+bool isFootprintOnly(llvm::StringRef id) {
+  return id == "atlas.vls.conservative.v1" || id == "atlas.vls_dma.serialized.v1" || id == "atlas.vls_xlu.serialized.v1" || id == "atlas.vls_dma_xlu.serialized.v1";
+}
+} // namespace
+
+std::string mlir::atlas::timing::registerAtlasTimingProvider(
+    const std::string &id, TimingProviderFactory factory) {
+  if (id.empty()) return "timing provider requires an explicit policy id";
+  if (!factory) return "timing provider registration requires a factory: " + id;
+  Registry &r = registry();
+  std::lock_guard<std::mutex> lock(r.mutex);
+  if (!r.factories.try_emplace(id, std::move(factory)).second)
+    return "timing provider is already registered: " + id;
+  return {};
+}
+
 TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
-    const std::string &id) {
-  if (id == kNpuModelTimingProviderId)
-    return {npuModelTimingProvider(), {}};
-  if (id == "atlas.vls.conservative.v1")
-    return {{}, "selected CIRCT VLS evidence lacks a complete timing policy; footprint-only coverage cannot borrow model rules"};
-  return {{}, "unknown Atlas timing provider: " + id};
+    const std::string &id, mlir::ModuleOp module) {
+  TimingProviderFactory factory;
+  {
+    Registry &r = registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    auto found = r.factories.find(id);
+    if (found != r.factories.end())
+      factory = found->second;
+  }
+  if (!factory) {
+    if (isFootprintOnly(id))
+      return {{}, "selected CIRCT VLS evidence lacks a complete timing policy; footprint-only coverage cannot borrow model rules"};
+    return {{}, "unknown Atlas timing provider: " + id};
+  }
+  auto result = factory(module);
+  if (!result.error.empty())
+    return {{}, result.error};
+  if (result.value.id != id)
+    return {{}, "timing provider factory for " + id + " returned policy " + result.value.id};
+  std::string missing = validateTimingProvider(result.value);
+  if (!missing.empty())
+    return {{}, missing};
+  return result;
 }
