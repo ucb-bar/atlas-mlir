@@ -117,3 +117,126 @@ class CapturedComputeReplayTest(unittest.TestCase):
         self.mutate('vmul','presp1',lambda v:v['presp1'],None)
 
 if __name__=='__main__': unittest.main()
+
+SCHEDULED_REPORT=os.environ.get('ATLAS_EE290_SCHEDULED_COMPUTE_REPORT')
+
+class PortableExportBindingTest(unittest.TestCase):
+    def test_selected_word_decoding(self):
+        mnemonic,operands=COMPUTE.BIND.decoded_operands(0x06100257)
+        self.assertEqual(mnemonic,'vmul.bf16')
+        self.assertEqual((operands['rd'],operands['rs1'],operands['rs2']),(4,0,2))
+        with self.assertRaises(COMPUTE.BIND.BindingError): COMPUTE.BIND.decoded_operands(0)
+    def test_stream_expands_contiguous_pair_without_timing_table(self):
+        stream=dict(resource='mreg',write=True,first=128,count=64,age=2,step=1,anywhere=False,at_completion=False)
+        points=COMPUTE.BIND.finite_stream(stream,100)
+        self.assertEqual(points[0],('mreg',True,128,102))
+        self.assertEqual(points[-1],('mreg',True,191,165))
+        for field,value in [('anywhere',True),('age',None),('count',0),('step',0)]:
+            with self.subTest(field=field),self.assertRaises((COMPUTE.BIND.BindingError,TypeError)):
+                COMPUTE.BIND.finite_stream({**stream,field:value},100)
+
+@unittest.skipUnless(SCHEDULED_REPORT,'requires explicitly selected scheduled compute capture')
+class ScheduledExportBindingTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        checker=COMPUTE.CHECK.Checker();path=COMPUTE.CHECK.allowed(Path(SCHEDULED_REPORT));checker.identity(path)
+        report=COMPUTE.CHECK.strict_json(path.read_bytes())
+        if report['schema']!='atlas.ee290_scheduled_compute_replay.v0' or report['state']!='finite_scheduled_compute_cases_passed': raise ValueError('successful scheduled packet required')
+        cls.captures={}
+        ids={item['kind']:checker.verify(item['identity'],path.parent) for item in report['selected_evidence']}
+        expected={'evidence_sha256':ids['vls']['sha256'],**{key+'_evidence_sha256':ids[key]['sha256'] for key in ('dma','xlu','vmul')},'manifest_sha256':checker.verify(report['manifest'],path.parent)['sha256'],'hardware_ir_sha256':checker.verify(report['hardware_ir'],path.parent)['sha256']}
+        model=checker.verify(report['model'],path.parent)
+        for dependency in report['producer_snapshots']: checker.verify(dependency['snapshot'],path.parent)
+        for case in report['cases']:
+            for key in ('program','authored_program'): checker.verify(case[key],path.parent)
+            for key in ('optimizer_phase','emission_phase','export_phase','execution_phase'):
+                phase_id=checker.verify(case[key],path.parent)
+                phase=COMPUTE.CHECK.strict_json(COMPUTE.CHECK.allowed(phase_id['path']).read_bytes())
+                if phase['state']!='phase_completed' or phase['inputs_before']!=phase['inputs_after'] or phase['command']['returncode']!=0 or phase['command']['timed_out']: raise ValueError('invalid captured phase')
+                inputs={member['role']:checker.verify(member['identity'],Path(phase_id['path']).parent) for member in phase['inputs_before']}
+                outputs=[checker.verify(member['identity'],Path(phase_id['path']).parent) for output in phase['outputs'] for member in output['files']]
+                if key in ('emission_phase','export_phase') and inputs['program']!=case['program']: raise ValueError('compiler phases selected different final programs')
+                if key=='optimizer_phase' and (inputs['program']!=case['authored_program'] or any(inputs[k+'_evidence']!=ids[k] for k in ids)): raise ValueError('consumer input selection mismatch')
+                if key=='execution_phase' and (inputs['tool']!=model or inputs['words']!=case['words'] or phase['command']['argv'][:2]!=[model['path'],case['words']['path']] or case['trace'] not in outputs): raise ValueError('executed model/words/trace not captured')
+                if key=='export_phase' and case['resolved_timing'] not in outputs: raise ValueError('resolved export not captured output')
+                if key=='emission_phase' and not any((o['sha256'],o['bytes'])==(case['words']['sha256'],case['words']['bytes']) for o in outputs): raise ValueError('selected words differ from compiler output')
+            checked={key:checker.verify(case[key],path.parent) for key in ('resolved_timing','events','words','trace','export_binding')}
+            export=COMPUTE.CHECK.strict_json(COMPUTE.CHECK.allowed(checked['resolved_timing']['path']).read_bytes())
+            saved=COMPUTE.CHECK.strict_json(COMPUTE.CHECK.allowed(checked['events']['path']).read_bytes())
+            words=[int(word,16) for word in COMPUTE.CHECK.allowed(checked['words']['path']).read_text().split()]
+            mode=case['name'].rsplit('_',1)[0]
+            actual=COMPUTE.analyze_compute(Path(checked['trace']['path']),words,mode)
+            for key,value in actual.items():
+                if saved[key]!=value: raise ValueError('saved boundary transcript differs from decoded VCD')
+            cls.captures[case['name']]=(export,saved,expected,words)
+        checker.recheck()
+    def bind(self,case,export=None,events=None,evidence=None,words=None):
+        e,o,ids,w=self.captures[case]
+        return COMPUTE.BIND.bind_export(e if export is None else export,o if events is None else events,ids if evidence is None else evidence,w if words is None else words,'atlas.vls_dma_xlu_vmul.serialized.v1')
+    def test_actual_both_consumers_exact_access_release_and_epochs(self):
+        self.assertEqual(set(self.captures),{'vmul_delay','vmul_schedule','dma_xlu_delay','dma_xlu_schedule'})
+        for case in self.captures:
+            with self.subTest(case=case):
+                result=self.bind(case)
+                self.assertGreater(result['memory_access_elements_bound'],0)
+                self.assertFalse(result['scheduling_qualified'])
+                self.assertEqual(len(result['dynamic_dma_intervals']),2 if case.startswith('dma_xlu') else 0)
+    def test_export_word_operand_stream_release_and_evidence_mutations(self):
+        case='vmul_schedule';original,events,ids,words=self.captures[case]
+        compute=next(i for i in original['instructions'] if i['mnemonic']=='vmul.bf16')
+        index=compute['word_index']
+        mutations=[lambda e:e['instructions'][index]['operands'].__setitem__('rd',6),
+                   lambda e:e['instructions'][index]['footprint']['accesses'][0].__setitem__('first',32),
+                   lambda e:e['instructions'][index]['footprint']['accesses'][0].__setitem__('age',1),
+                   lambda e:e['instructions'][index]['footprint'].__setitem__('done_age',66),
+                   lambda e:e['instructions'][index].__setitem__('epoch_offset',compute['epoch_offset']+1),
+                   lambda e:e['evidence'].__setitem__('vmul_evidence_sha256','0'*64),
+                   lambda e:e.__setitem__('scheduling_qualified',True),
+                   lambda e:e['instructions'][index]['footprint']['accesses'].pop(),
+                   lambda e:e['instructions'][index]['footprint']['accesses'].append(copy.deepcopy(e['instructions'][index]['footprint']['accesses'][0])),
+                   lambda e:e['instructions'][index]['footprint']['holds'][0].__setitem__('to',66)]
+        # Lifetimes and serialized holds hidden by the combined release maximum.
+        footprint=lambda e,i=index:e['instructions'][i]['footprint']
+        vload=next(i['word_index'] for i in original['instructions'] if i['mnemonic']=='vload')
+        mutations+=[lambda e:footprint(e).__setitem__('read_release',63),
+                    lambda e:footprint(e).__setitem__('write_release',64),
+                    lambda e:footprint(e).__setitem__('done_age',64),
+                    lambda e:footprint(e)['mreg_reads'].pop(),
+                    lambda e:footprint(e)['mreg_writes'].append(6),
+                    lambda e:footprint(e)['holds'].pop(0),
+                    lambda e:footprint(e)['holds'][1].__setitem__('to',64),
+                    lambda e:footprint(e,vload)['holds'].pop(1),
+                    lambda e:footprint(e,vload).__setitem__('mreg_writes',[1])]
+        for position,mutate in enumerate(mutations):
+            changed=copy.deepcopy(original);mutate(changed)
+            with self.subTest(position=position),self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,export=changed)
+        changed=words.copy();changed[index]^=1
+        with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,words=changed)
+    def test_observed_response_operand_and_dynamic_completion_mutations(self):
+        case='vmul_delay';_,original,_,_=self.captures[case]
+        position=next(i for i,c in enumerate(original['commands']) if c['engine']=='vmul')
+        for metadata in ('target_config','data_encoding'):
+            changed=copy.deepcopy(original);changed.pop(metadata)
+            with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)
+        for field in ('responses','writes'):
+            changed=copy.deepcopy(original);changed['commands'][position][field][0]['edge']+=1
+            with self.subTest(field=field),self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)
+        changed=copy.deepcopy(original);changed['commands'][position]['writes'][0]['row']^=1
+        with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)
+        changed=copy.deepcopy(original);responses=changed['commands'][position]['responses'];responses[-1]=copy.deepcopy(responses[0])
+        with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)
+        for field,mutate in [('reads',lambda e:e.pop('port')),('responses',lambda e:e.pop('port')),
+                             ('writes',lambda e:e.pop('port')),('writes',lambda e:e.__setitem__('port',1))]:
+            changed=copy.deepcopy(original);mutate(changed['commands'][position][field][0])
+            with self.subTest(field=field),self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)
+        case='dma_xlu_schedule';export,original,_,_=self.captures[case]
+        dma=next(c for c in original['commands'] if c['engine']=='dma');index=dma['word_index']
+        for mutate in [lambda e:e['instructions'][index]['footprint'].__setitem__('done_age',50),
+                       lambda e:e['instructions'][index]['footprint']['accesses'][-1].__setitem__('at_completion',False)]:
+            changed=copy.deepcopy(export);mutate(changed)
+            with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,export=changed)
+        wait=next(i for i in export['instructions'] if i['event_kind']=='matching_wait_acceptance')
+        changed=copy.deepcopy(export);changed['instructions'][wait['word_index']]['issue_epoch']-=1
+        with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,export=changed)
+        changed=copy.deepcopy(original);c=next(c for c in changed['commands'] if c['engine']=='dma');c['memory'][0]['edge']=c['release_edge']
+        with self.assertRaises(COMPUTE.BIND.BindingError): self.bind(case,events=changed)

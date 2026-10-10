@@ -47,12 +47,13 @@ def load(name):
 
 DMA=load('replay-ee290-dma.py')
 OBS,CAPTURE,CHECK=DMA.OBS,DMA.CAPTURE,DMA.CHECK
+BIND=load('check-ee290-compute-export.py')
 
 def vls(direction,mreg,base):
     return (direction,f'{"dst" if direction=="vload" else "src"} = {mreg} : i32, base = {base} : i32, offset = 0 : i32, format = "raw"')
 def delay(n): return ('delay',f'cycles = {n} : i32')
 def xlu(): return ('xlu_transpose','dst = 1 : i32, src = 0 : i32')
-def cases():
+def cases(omit_delays=False):
     end=[DMA.add(1,1),('csr','kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3088 : i32'),('trap','kind = "ecall"')]
     transpose=[DMA.add(6,0),vls('vload',0,6),delay(40),xlu(),delay(80),DMA.add(8,256),vls('vstore',1,8),delay(40),DMA.add(0,0)]
     mul=[]
@@ -61,7 +62,7 @@ def cases():
     for bank,words in [(4,1024),(5,1280)]: mul += [DMA.add(8,words),vls('vstore',bank,8),delay(40)]
     mixed=[DMA.add(5,0),DMA.config(),DMA.add(6,0),DMA.upper(1,589824),DMA.add(2,128),DMA.dma('load',0),DMA.wait(0)]
     mixed += transpose+[DMA.upper(3,589824),DMA.add(3,1024,3),('dma','direction = "store", channel = 1 : i32, reg = 8 : i32, dram = 3 : i32, size = 2 : i32'),DMA.wait(1)]
-    return {name:(DMA.program(ops+end),name) for name,ops in [('xlu',transpose),('vmul',mul),('dma_xlu',mixed)]}
+    return {name:(DMA.program([op for op in ops+end if not (omit_delays and op[0]=='delay')]),name) for name,ops in [('xlu',transpose),('vmul',mul),('dma_xlu',mixed)]}
 
 COMPUTE_OBS=DMA.load('observe-ee290-vls.py')
 COMPUTE_SIGNALS=OBS.SIGNALS.copy()
@@ -382,6 +383,8 @@ def analyze_compute(trace,words,mode):
 
 
 def run(args):
+    if not args.cases or len(set(args.cases.split(',')))!=len(args.cases.split(',')) or not set(args.cases.split(','))<=set(cases()): raise ValueError('unsupported or empty selected cases')
+    if args.consumer!='none' and (args.atlas_opt is None or any(getattr(args,key+'_evidence') is None or getattr(args,key+'_evidence_sha256') is None for key in ('vls','dma','xlu','vmul'))): raise ValueError('selected consumer requires optimizer and four explicitly hash-selected receipts')
     checker=CHECK.Checker()
     report_id=checker.identity(args.selected_core_replay)
     if report_id['sha256']!=args.expected_replay_sha256: raise ValueError('selected replay hash mismatch')
@@ -409,14 +412,15 @@ def run(args):
     harness=checker.identity(root/'test/ee290-compute-replay.cpp')
     copy=inputs/'ee290-compute-replay.cpp';copy.write_bytes(CHECK.allowed(harness['path']).read_bytes())
     dependencies=[]
-    for name in ['replay-ee290-compute.py','replay-ee290-dma.py','observe-ee290-vls.py','ee290_build_capture.py','check-ee290-provenance.py','fingerprint-rtl-modules.py','index-retained-hw.py']:
+    for name in ['replay-ee290-compute.py','replay-ee290-dma.py','observe-ee290-vls.py','ee290_build_capture.py','check-ee290-provenance.py','fingerprint-rtl-modules.py','index-retained-hw.py','check-ee290-compute-export.py']:
         src=checker.identity(root/'tools'/name);dest=inputs/name;dest.write_bytes(CHECK.allowed(src['path']).read_bytes());dependencies.append({'original':src,'snapshot':checker.identity(dest)})
     tools={name:checker.identity(getattr(args,name)) for name in ('verilator','cxx','make','ar','atlas_emit')}
+    if args.consumer!='none': tools['atlas_opt']=checker.identity(args.atlas_opt)
     runtime=CHECK.allowed(args.verilator_root)
     env={'PATH':str(CHECK.allowed(args.make).parent)+':/bin','LC_ALL':'C','LANG':'C','VERILATOR_ROOT':str(runtime),'CXX':tools['cxx']['path'],'AR':tools['ar']['path']}
     argv=[tools['verilator']['path'],'--cc','--exe','--build','--top-module','AtlasCore','--prefix','VAtlasCore','--Mdir','{output}/obj','--trace','--trace-depth','3','--assert','--output-split','20000','--output-split-cfuncs','500','-Wno-fatal','-j',str(args.jobs),'-CFLAGS','-std=c++17','-MAKEFLAGS','CXX='+tools['cxx']['path']+' LINK='+tools['cxx']['path']+' AR='+tools['ar']['path'],*[r['snapshot']['path'] for r in rtl],str(copy)]
     checker.recheck()
-    build_inputs=[{'role':'tool' if n=='verilator' else n,'identity':i} for n,i in tools.items() if n!='atlas_emit']+[{'role':'selected_rtl','identity':r['snapshot']} for r in rtl]+[{'role':'harness','identity':checker.identity(copy)}]
+    build_inputs=[{'role':'tool' if n=='verilator' else n,'identity':i} for n,i in tools.items() if n in ('verilator','cxx','make','ar')]+[{'role':'selected_rtl','identity':r['snapshot']} for r in rtl]+[{'role':'harness','identity':checker.identity(copy)}]
     if args.reuse_compile:
         phase_id=checker.identity(args.reuse_compile)
         phase=CHECK.strict_json(CHECK.allowed(args.reuse_compile).read_bytes())
@@ -436,12 +440,38 @@ def run(args):
         phase_id=checker.identity(output/'compile/phase.json')
         binary=checker.identity(output/'compile/obj/VAtlasCore')
     receipt={'schema':'atlas.ee290_compute_replay.v0','target_config':'EE290SimConfig','state':'prepared','qualification':'conditional','scheduling_qualified':False,'selected_core_replay':report_id,'manifest':manifest,'hardware_ir':hardware,'rtl_snapshots':rtl,'harness':{'original':harness,'snapshot':checker.identity(copy)},'producer_snapshots':dependencies,'tool_identities':tools,'compile_phase':phase_id,'model':binary,'cases':[],'assumptions':['Fresh reset followed by START with selected compute engines and all DMA queues quiescent.','Serialized finite VLS, XLU transpose and paired BF16 multiplication with conservative delays; optional aligned128B DMA and matching waits.','Direct host TileLink and deterministic delayed external DMA slave; behavioral SRAM; not CPU/SoC qualification.','Opaque installed Verilator and C++ runtime; two-state clocked simulation and pre-edge fixed boundary sampling.', 'Finite VMUL numerical reference covers signed normal BF16 powers only; other values, rounding and exceptions are not numerically qualified.', 'Only selected fixture command/data streams and the captured post-halt drain are validated; no general concurrency or CPU/system qualification.']}
+    evidence={};selection=None;selected_ids=[]
+    if args.consumer!='none':
+        for key in ('vls','dma','xlu','vmul'):
+            path=getattr(args,key+'_evidence');ident=checker.identity(path)
+            if ident['sha256']!=getattr(args,key+'_evidence_sha256'): raise ValueError('selected '+key+' evidence hash mismatch')
+            selected_ids.append({'kind':key,'identity':ident})
+            evidence['evidence_sha256' if key=='vls' else key+'_evidence_sha256']=ident['sha256']
+        evidence.update(manifest_sha256=manifest['sha256'],hardware_ir_sha256=hardware['sha256'])
+        options={'evidence':selected_ids[0]['identity']['path'],'evidence-sha256':evidence['evidence_sha256'],'manifest-sha256':manifest['sha256'],'hardware-ir-sha256':hardware['sha256'],'allow-conditional':'true'}
+        for item in selected_ids[1:]:
+            key=item['kind'];options[key+'-evidence']=item['identity']['path'];options[key+'-evidence-sha256']=item['identity']['sha256']
+        selection='--select-atlas-rtl-evidence='+' '.join(k+'='+v for k,v in options.items())
+        receipt.update(schema='atlas.ee290_scheduled_compute_replay.v0',selected_evidence=selected_ids)
+        receipt['assumptions'][1]='Serialized finite VLS, XLU transpose and paired BF16 multiplication; delays come from the selected compiler consumer, optional aligned128B DMA uses matching waits.'
     (output/'report.json').write_text(json.dumps(receipt,indent=2)+'\n')
-    for name,(text,mode) in cases().items():
+    consumers=('delay','schedule') if args.consumer=='both' else (args.consumer,)
+    selected_cases=cases(args.consumer!='none')
+    jobs=[(mode if consumer=='none' else mode+'_'+consumer,text,mode,consumer) for mode,(text,_) in selected_cases.items() if mode in args.cases.split(',') for consumer in consumers]
+    receipt['requested_cases']=[name for name,text,mode,consumer in jobs]
+    receipt['requested_consumer']=args.consumer
+    for name,text,mode,consumer in jobs:
         directory=output/name;directory.mkdir()
         source=directory/'program.mlir';source.write_text(text)
         source_id=checker.identity(source)
+        authored_id=source_id;extra={}
         python=checker.identity(sys.executable)
+        if consumer!='none':
+            child="import subprocess,sys; subprocess.run([sys.argv[1],*sys.argv[4:],sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
+            phase=CAPTURE.capture_phase(directory/'opt','compute_selected_consumer',[python['path'],'-c',child,tools['atlas_opt']['path'],str(source),'{output}/final.mlir',selection,'--insert-atlas-delays' if consumer=='delay' else '--schedule-atlas-stream','--verify-atlas-rtl-timing'],[{'role':'tool','identity':python},{'role':'atlas_opt','identity':tools['atlas_opt']},{'role':'program','identity':source_id}]+[{'role':item['kind']+'_evidence','identity':item['identity']} for item in selected_ids],[{'role':'selected_final_mlir','relative_path':'final.mlir','kind':'file'}],env,args.timeout_seconds)
+            if phase['state']!='phase_completed': raise ValueError('selected consumer failed '+name)
+            source=directory/'opt/final.mlir';source_id=checker.identity(source)
+            extra.update(consumer=consumer,authored_program=authored_id,optimizer_phase=checker.identity(directory/'opt/phase.json'))
         child="import subprocess,sys; subprocess.run([sys.argv[1],sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
         emission=CAPTURE.capture_phase(directory/'emit','compute_program_emit',[python['path'],'-c',child,tools['atlas_emit']['path'],str(source),'{output}/program.hex'], [{'role':'tool','identity':python},{'role':'atlas_emit','identity':tools['atlas_emit']},{'role':'program','identity':source_id}],[{'role':'emitted_words','relative_path':'program.hex','kind':'file'}],env,args.timeout_seconds)
         if emission['state']!='phase_completed': raise ValueError('DMA emission failed')
@@ -458,9 +488,19 @@ def run(args):
         observations=analyze_compute(Path(trace_id['path']),[int(w,16) for w in emitted.split()],mode)
         transcript={'schema':'atlas.ee290_compute_events.v0','validator':'atlas.ee290.compute.fixed.v1','target_config':'EE290SimConfig','data_encoding':'little_endian_bytes_hex','sampling':'values immediately before rising clock timestamp','trace':trace_id,'words':words_id,**observations}
         event_path=directory/'events.json';event_path.write_text(json.dumps(transcript,indent=2)+'\n')
-        receipt['cases'].append({'name':name,'events':checker.identity(event_path),'boundary_checks':{'selected_words':True,'data_streams':True,'observed_release':True,'composed_memory':True,'terminal_drain':True},'program':source_id,'words':words_id,'emission_phase':checker.identity(directory/'emit/phase.json'),'execution_phase':checker.identity(directory/'execution/phase.json'),'trace':trace_id,'numerical_checks':{'completion':True,'output':True,'guards':True},'observations':dict(zip(['reads','writes','a_stalls','delayed_response_cycles','cycles'],map(int,match.groups())))})
+        if consumer!='none':
+            child="import subprocess,sys; subprocess.run([sys.argv[1],'--rtl-timing-json',sys.argv[2]],stdout=open(sys.argv[3],'wb'),check=True)"
+            phase=CAPTURE.capture_phase(directory/'export','compute_resolved_timing_export',[python['path'],'-c',child,tools['atlas_emit']['path'],str(source),'{output}/timing.json'],[{'role':'tool','identity':python},{'role':'atlas_emit','identity':tools['atlas_emit']},{'role':'program','identity':source_id}],[{'role':'resolved_timing','relative_path':'timing.json','kind':'file'}],env,args.timeout_seconds)
+            if phase['state']!='phase_completed': raise ValueError('resolved export failed '+name)
+            timing_id=checker.identity(directory/'export/timing.json')
+            binding=BIND.bind_export(CHECK.strict_json(CHECK.allowed(timing_id['path']).read_bytes()),transcript,evidence,[int(w,16) for w in emitted.split()],'atlas.vls_dma_xlu_vmul.serialized.v1')
+            binding.update(resolved_timing=timing_id,events=checker.identity(event_path),words=words_id)
+            path=directory/'export-binding.json';path.write_text(json.dumps(binding,indent=2)+'\n')
+            extra.update(resolved_timing=timing_id,export_phase=checker.identity(directory/'export/phase.json'),export_binding=checker.identity(path))
+        receipt['cases'].append({**extra,'name':name,'events':checker.identity(event_path),'boundary_checks':{'selected_words':True,'data_streams':True,'observed_release':True,'composed_memory':True,'terminal_drain':True},'program':source_id,'words':words_id,'emission_phase':checker.identity(directory/'emit/phase.json'),'execution_phase':checker.identity(directory/'execution/phase.json'),'trace':trace_id,'numerical_checks':{'completion':True,'output':True,'guards':True},'observations':dict(zip(['reads','writes','a_stalls','delayed_response_cycles','cycles'],map(int,match.groups())))})
+    if [item['name'] for item in receipt['cases']]!=receipt['requested_cases'] or not receipt['cases']: raise ValueError('requested replay cases incomplete')
     checker.recheck()
-    receipt['state']='finite_compute_cases_passed'
+    receipt['state']='finite_compute_cases_passed' if args.consumer=='none' else 'finite_scheduled_compute_cases_passed'
     (output/'report.json').write_text(json.dumps(receipt,indent=2)+'\n')
     return receipt
 
@@ -469,6 +509,12 @@ if __name__=='__main__':
     for key in ('selected-core-replay','output','verilator','cxx','make','ar','atlas-emit','verilator-root'): p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--expected-replay-sha256',required=True)
     p.add_argument('--reuse-compile',type=Path)
+    p.add_argument('--consumer',choices=('none','delay','schedule','both'),default='none')
+    p.add_argument('--cases',default='xlu,vmul,dma_xlu')
+    p.add_argument('--atlas-opt',type=Path)
+    for key in ('vls','dma','xlu','vmul'):
+        p.add_argument('--'+key+'-evidence',type=Path)
+        p.add_argument('--'+key+'-evidence-sha256')
     p.add_argument('--jobs',type=int,default=4)
     p.add_argument('--timeout-seconds',type=int,default=1200)
     try: print(json.dumps(run(p.parse_args()),indent=2))
