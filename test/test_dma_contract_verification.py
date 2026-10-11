@@ -122,6 +122,10 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("expected an Atlas virtual-to-machine artifact", result.stderr)
 
+    def test_int32_max_transfer_id_is_rejected_without_asserting(self) -> None:
+        machine = lower(copy())
+        self.rejected(machine.replace(f"{TRANSFER} = 0 : i32", f"{TRANSFER} = 2147483647 : i32"), "DMA contract has no source record for transfer id")
+
     def test_strict_record_validation(self) -> None:
         machine = lower(copy())
         contract = contract_text(machine, "dma")

@@ -8,6 +8,7 @@
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include <map>
 #include <optional>
 
 using namespace mlir;
@@ -113,7 +114,7 @@ struct BlockOwnership {
 };
 
 LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records) {
-  llvm::DenseMap<int32_t, BlockOwnership> blocks;
+  std::map<int32_t, BlockOwnership> blocks; // any block id; INT32_MAX is DenseMap's empty key
   for (const Record &r : records)
     if (isMatmul(r))
       ++blocks[r.block].remaining[r.weight];

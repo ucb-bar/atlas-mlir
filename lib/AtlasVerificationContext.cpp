@@ -2,7 +2,8 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
-#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/DenseMap.h"
+#include <set>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -16,7 +17,7 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
   };
   llvm::SmallVector<AtlasDMAInterval> intervals;
   llvm::DenseMap<unsigned, AtlasDMAInterval> pending; // waitPC not yet known
-  llvm::DenseSet<int32_t> launchIDs;
+  std::set<int32_t> launchIDs; // any tag; INT32_MAX is DenseMap's empty key
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;

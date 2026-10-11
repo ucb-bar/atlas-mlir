@@ -212,6 +212,10 @@ class MXUContractVerificationTest(BoundaryChecks, unittest.TestCase):
                 self.assertNotEqual(mutated, machine)
                 self.rejected(mutated, diagnostic)
 
+    def test_int32_max_block_ids_group_records_without_asserting(self) -> None:
+        facts, operations = chain_fixture()
+        self.accepted(artifact(operations, mxu=[dict(r, block=2147483647) for r in facts]))
+
     def test_empty_contract_admits_no_mxu_commands(self) -> None:
         machine = lower(virtual_chain(1))
         self.assertEqual(contract_text(machine, "mxu"), "[]")
