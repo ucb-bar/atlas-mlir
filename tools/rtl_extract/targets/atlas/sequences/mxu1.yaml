@@ -1,0 +1,104 @@
+# MXU1 (inner-product trees) chains at uniform spacing; operation i is issued i * gap ages after the first. No frontend guard
+# exists for MXU commands, so the event comparison alone decides. Busy flags are levels, not per-command events.
+engine: mxu1
+description: Chains of 2-6 MXU commands; accumulator and weight-slot relations between neighbors.
+ignore: [data_busy, compute_busy]
+sequences:
+  matmul_same_acc_same_slot:
+    description: back-to-back matmuls, same acc and same slot between neighbors
+    ops: [{op: matmul}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_same_acc_other_slot:
+    description: back-to-back matmuls, same acc and other slot between neighbors
+    ops: [{op: matmul}, {op: matmul, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_other_acc_same_slot:
+    description: back-to-back matmuls, other acc and same slot between neighbors
+    ops: [{op: matmul}, {op: matmul, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_other_acc_other_slot:
+    description: back-to-back matmuls, other acc and other slot between neighbors
+    ops: [{op: matmul}, {op: matmul, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1, io_cmd_bits_weightSlot: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_acc_same_acc:
+    description: back-to-back matmul_acc on one accumulator
+    ops: [{op: matmul_acc}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_acc_other_acc:
+    description: back-to-back matmul_acc alternating accumulators
+    ops: [{op: matmul_acc}, {op: matmul_acc, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_then_matmul_acc_same_acc:
+    description: matmul, then matmul_acc accumulating into the same accumulator, repeating
+    ops: [{op: matmul}, {op: matmul_acc, inputs: {io_cmd_bits_mregId: 22}}]
+    lengths: 2..5
+    gaps: 1..40
+  push_acc_matmul_acc_same_acc:
+    description: push_acc_fp8 then matmul_acc on the same accumulator, repeating
+    ops: [{op: push_acc_fp8}, {op: matmul_acc, inputs: {io_cmd_bits_mregId: 22}}]
+    lengths: 2..5
+    gaps: 1..40
+  push_acc_matmul_acc_other_acc:
+    description: push_acc_fp8 then matmul_acc, alternating accumulators
+    ops: [{op: push_acc_fp8}, {op: matmul_acc, inputs: {io_cmd_bits_mregId: 22}}, {op: push_acc_fp8, inputs: {io_cmd_bits_mregId: 26, io_cmd_bits_accSel: 1}}, {op: matmul_acc, inputs: {io_cmd_bits_mregId: 30, io_cmd_bits_accSel: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_pop_same_acc:
+    description: matmul then pop_acc_bf16 of the same accumulator, repeating
+    ops: [{op: matmul}, {op: pop_acc_bf16, inputs: {io_cmd_bits_mregId: 22}}]
+    lengths: 2..5
+    gaps: 1..40
+  matmul_pop_other_acc:
+    description: matmul then pop_acc_bf16 of the other accumulator, repeating
+    ops: [{op: matmul}, {op: pop_acc_bf16, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}}]
+    lengths: 2..5
+    gaps: 1..40
+  push_weight_matmul_pop_same:
+    description: push_weight, matmul, pop_acc_bf16 on one weight slot and accumulator, repeating
+    ops: [{op: push_weight}, {op: matmul, inputs: {io_cmd_bits_mregId: 22}}, {op: pop_acc_bf16, inputs: {io_cmd_bits_mregId: 26}}]
+    lengths: 3..6
+    gaps: 1..40
+  push_weight_matmul_pop_alternating:
+    description: push_weight, matmul, pop_acc_bf16 alternating weight slot and accumulator
+    ops: [{op: push_weight}, {op: matmul, inputs: {io_cmd_bits_mregId: 22}}, {op: pop_acc_bf16, inputs: {io_cmd_bits_mregId: 26}}, {op: push_weight, inputs: {io_cmd_bits_mregId: 30, io_cmd_bits_weightSlot: 1}}, {op: matmul, inputs: {io_cmd_bits_mregId: 34, io_cmd_bits_accSel: 1, io_cmd_bits_weightSlot: 1}}, {op: pop_acc_bf16, inputs: {io_cmd_bits_mregId: 38, io_cmd_bits_accSel: 1}}]
+    lengths: 3..6
+    gaps: 1..40
+  push_weight_matmul_other_slot:
+    description: push_weight then matmul on the other weight slot
+    ops: [{op: push_weight}, {op: matmul, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}}]
+    lengths: 2..3
+    gaps: 1..40
+  push_weight_same_slot:
+    description: back-to-back push_weight on one slot
+    ops: [{op: push_weight}]
+    lengths: 2..4
+    gaps: 1..40
+  push_weight_other_slot:
+    description: back-to-back push_weight alternating slots
+    ops: [{op: push_weight}, {op: push_weight, inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}}]
+    lengths: 2..4
+    gaps: 1..40
+# Regression values used only by tests: stable spacing per chain length. The extractor never reads them.
+expect:
+  matmul_same_acc_same_slot: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_same_acc_other_slot: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_other_acc_same_slot: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_other_acc_other_slot: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_acc_same_acc: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_acc_other_acc: {2: 32, 3: 32, 4: 32, 5: 32}
+  matmul_then_matmul_acc_same_acc: {2: 32, 3: 32, 4: 32, 5: 32}
+  push_acc_matmul_acc_same_acc: {2: 33, 3: 33, 4: 33, 5: 33}
+  push_acc_matmul_acc_other_acc: {2: 33, 3: 33, 4: 33, 5: 33}
+  matmul_pop_same_acc: {2: 4, 3: 16, 4: 16, 5: 16}
+  matmul_pop_other_acc: {2: 1, 3: 16, 4: 16, 5: 16}
+  push_weight_matmul_pop_same: {3: 32, 4: 32, 5: 32, 6: 32}
+  push_weight_matmul_pop_alternating: {3: 32, 4: 32, 5: 32, 6: 32}
+  push_weight_matmul_other_slot: {2: 1, 3: 16}
+  push_weight_same_slot: {2: 32, 3: 32, 4: 32}
+  push_weight_other_slot: {2: 32, 3: 32, 4: 32}

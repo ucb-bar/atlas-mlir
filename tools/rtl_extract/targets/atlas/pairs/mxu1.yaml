@@ -1,7 +1,7 @@
 # MXU1 (inner-product trees) pairs; second command on mreg 22. No frontend guard exists for MXU commands, so the event
 # comparison alone decides. Busy flags are levels, not per-command events, and are left out.
 engine: mxu1
-description: Second MXU1 command issued while the first is in flight, same or other accumulator / weight slot.
+description: Second MXU1 command issued while the first is in flight, same or other accumulator / weight slot (slot is the first's unless named other_slot).
 ignore: [data_busy, compute_busy]
 pairs:
   matmul_matmul_same_acc:
@@ -9,15 +9,30 @@ pairs:
     second: matmul
     second_inputs: {io_cmd_bits_mregId: 22}
     gaps: 1..40
+  matmul_matmul_same_acc_other_slot:
+    first: matmul
+    second: matmul
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}
+    gaps: 1..40
   matmul_matmul_other_acc:
     first: matmul
     second: matmul
     second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
     gaps: 1..40
+  matmul_matmul_other_acc_other_slot:
+    first: matmul
+    second: matmul
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1, io_cmd_bits_weightSlot: 1}
+    gaps: 1..40
   push_acc_fp8_matmul_acc:
     first: push_acc_fp8
     second: matmul_acc
     second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  push_acc_fp8_matmul_acc_other_acc:
+    first: push_acc_fp8
+    second: matmul_acc
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
     gaps: 1..40
   push_weight_matmul:
     first: push_weight
@@ -29,17 +44,98 @@ pairs:
     second: push_weight
     second_inputs: {io_cmd_bits_mregId: 22}
     gaps: 1..40
+  push_weight_push_weight_same_slot:
+    first: push_weight
+    second: push_weight
+    second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  push_weight_matmul_other_slot:
+    first: push_weight
+    second: matmul
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}
+    gaps: 1..40
+  matmul_push_weight_other_slot:
+    first: matmul
+    second: push_weight
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}
+    gaps: 1..40
+  push_weight_push_weight_other_slot:
+    first: push_weight
+    second: push_weight
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_weightSlot: 1}
+    gaps: 1..40
   matmul_pop_acc_bf16:
     first: matmul
     second: pop_acc_bf16
     second_inputs: {io_cmd_bits_mregId: 22}
     gaps: 1..40
+  matmul_acc_matmul_acc_same_acc:
+    first: matmul_acc
+    second: matmul_acc
+    second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  matmul_matmul_acc_same_acc:
+    first: matmul
+    second: matmul_acc
+    second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  pop_acc_bf16_matmul_same_acc:
+    first: pop_acc_bf16
+    second: matmul
+    second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  pop_acc_bf16_pop_acc_bf16_same_acc:
+    first: pop_acc_bf16
+    second: pop_acc_bf16
+    second_inputs: {io_cmd_bits_mregId: 22}
+    gaps: 1..40
+  matmul_pop_acc_bf16_other_acc:
+    first: matmul
+    second: pop_acc_bf16
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
+    gaps: 1..40
+  matmul_acc_matmul_acc_other_acc:
+    first: matmul_acc
+    second: matmul_acc
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
+    gaps: 1..40
+  matmul_matmul_acc_other_acc:
+    first: matmul
+    second: matmul_acc
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
+    gaps: 1..40
+  pop_acc_bf16_matmul_other_acc:
+    first: pop_acc_bf16
+    second: matmul
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
+    gaps: 1..40
+  pop_acc_bf16_pop_acc_bf16_other_acc:
+    first: pop_acc_bf16
+    second: pop_acc_bf16
+    second_inputs: {io_cmd_bits_mregId: 22, io_cmd_bits_accSel: 1}
+    gaps: 1..40
 # Regression values used only by tests (full sweeps); the extractor never reads them. Timing only: accumulator and
 # weight data RAW stay with the compiler's access ages.
 expect:
   matmul_matmul_same_acc: {min_gap: 32, stable_gap: 32}
+  matmul_matmul_same_acc_other_slot: {min_gap: 32, stable_gap: 32}
   matmul_matmul_other_acc: {min_gap: 32, stable_gap: 32}
+  matmul_matmul_other_acc_other_slot: {min_gap: 32, stable_gap: 32}
   push_acc_fp8_matmul_acc: {min_gap: 33, stable_gap: 33}
+  push_acc_fp8_matmul_acc_other_acc: {min_gap: 1, stable_gap: 1}
   push_weight_matmul: {min_gap: 32, stable_gap: 32}
   matmul_push_weight: {min_gap: 32, stable_gap: 32}
+  push_weight_push_weight_same_slot: {min_gap: 32, stable_gap: 32}
+  push_weight_matmul_other_slot: {min_gap: 1, stable_gap: 1}
+  matmul_push_weight_other_slot: {min_gap: 1, stable_gap: 1}
+  push_weight_push_weight_other_slot: {min_gap: 32, stable_gap: 32}
   matmul_pop_acc_bf16: {min_gap: 4, stable_gap: 4}
+  matmul_acc_matmul_acc_same_acc: {min_gap: 32, stable_gap: 32}
+  matmul_matmul_acc_same_acc: {min_gap: 32, stable_gap: 32}
+  pop_acc_bf16_matmul_same_acc: {min_gap: 1, stable_gap: 1}
+  pop_acc_bf16_pop_acc_bf16_same_acc: {min_gap: 32, stable_gap: 32}
+  matmul_pop_acc_bf16_other_acc: {min_gap: 1, stable_gap: 1}
+  matmul_acc_matmul_acc_other_acc: {min_gap: 32, stable_gap: 32}
+  matmul_matmul_acc_other_acc: {min_gap: 32, stable_gap: 32}
+  pop_acc_bf16_matmul_other_acc: {min_gap: 1, stable_gap: 1}
+  pop_acc_bf16_pop_acc_bf16_other_acc: {min_gap: 32, stable_gap: 32}

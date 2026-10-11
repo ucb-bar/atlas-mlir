@@ -14,6 +14,7 @@ Computes per-operation engine timing (event ages, release, next issue) by execut
 | `runner.py` | `extract(document, spec)`: recipe registry (`RECIPES`), the generic `single` recipe, summaries, spec checks. |
 | `coupled.py` | `coupled` recipe: two circuits clocked together; same-cycle links resolved by fixed-point iteration over unknowns. |
 | `pairs.py` | Pair sweeps (prototype): operation A, then B at gap g; the gaps at which both behave as in isolation. Not part of `op_timing`. |
+| `sequences.py` | Chains of N operations at uniform spacing, with the pair acceptance rules; gives in-flight limits. Not part of `op_timing`. |
 | `summaries.py` | Stream summaries (first/last age, count, step, row contiguity, split streams), first-free and next-issue ages. |
 | `facts.py` | Record shape, `block` (record to `op_timing` block) and `document` (the output). Unresolved blocks carry `null` values and the reason as `evidence`. |
 
@@ -69,6 +70,13 @@ A run resets, flushes, then requires every register in the cone of the control s
 ```sh
 PYTHONPATH=tools python3 -m rtl_extract.pairs --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
   --pairs vlsu vpu --output build/rtl-extract/out/pairs.json
+```
+
+`targets/<target>/sequences/<engine>.yaml` generalizes a pair to chains: an `ops` cycle (operation, operand overlay, guards), `lengths` and `gaps`. Operation i issues at `i * gap`, and a spacing is accepted under the pair rules applied to all operations at once. Records (`rtl_extract.op_sequences.v1`) give per-length `min_gap` and `stable_gap`; rejections name the missing events and the chain positions that lost them. The MXU chains confirm that the pair gaps are also the in-flight limits: MXU0 keeps at most three matmuls in flight (alternating accumulators at 32), and MXU1's issue gap of 32 never allows a third.
+
+```sh
+PYTHONPATH=tools python3 -m rtl_extract.sequences --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
+  --sequences mxu0 mxu1 --jobs 16 --output build/rtl-extract/out/sequences.json
 ```
 
 ## How to add an engine
