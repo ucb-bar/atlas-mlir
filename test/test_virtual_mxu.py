@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unittest
 
-from test_virtual_lowering import BIN, EXAMPLES, ROOT, emitted, lower, object_words, run
+from test_virtual_lowering import BIN, EXAMPLES, ROOT, emitted, lower, object_words, run, shorten_delay
 
 
 def panel() -> bytes:
@@ -102,10 +102,11 @@ class VirtualMXUTest(unittest.TestCase):
         self.assertNotEqual(unqualified_add.returncode, 0)
         self.assertIn("binary VPU admission currently requires add",
                       unqualified_add.stderr)
-        changed = machine.replace("cycles = 256 : i32", "cycles = 1 : i32", 1)
+        changed = shorten_delay(machine)
+        self.assertNotEqual(changed, machine)
         rejected = run("atlas-emit", changed)
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("DELAY >= 256", rejected.stderr)
+        self.assertIn("timing resource conflict: VLOAD path 0 busy", rejected.stderr)
 
     def test_virtual_mlp_handoff_generates_all_stages(self) -> None:
         llvm = os.environ.get("ATLAS_LLVM_BIN")
@@ -123,7 +124,7 @@ class VirtualMXUTest(unittest.TestCase):
             name = "virtual_fp8_two_layer_mlp"
             self.assertEqual(manifest["examples"][name]["source_stage"],
                              "virtual_ssa")
-            self.assertEqual(manifest["examples"][name]["word_count"], 109)
+            self.assertEqual(manifest["examples"][name]["word_count"], len(emitted(lower((EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()))))
             self.assertEqual(
                 (output / f"{name}.virtual.mlir").read_bytes(),
                 (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_bytes(),

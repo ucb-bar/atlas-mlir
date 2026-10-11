@@ -71,6 +71,7 @@ def main() -> None:
         if name == "virtual_fp8_two_layer_mlp":
             machine_text = run([
                 str(atlas / "atlas-opt"), "--lower-atlas-virtual-to-machine",
+                "--insert-atlas-delays",
                 str(source),
             ]).rstrip() + "\n"
             if 'atlas.generated_from_virtual' not in machine_text:

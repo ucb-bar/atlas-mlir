@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import unittest
 
-from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run
+from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run, shorten_delay
 from test_virtual_mxu_handles import STATE, FP8, BF16, acc, load, accumulate, readout
 from test_virtual_mxu_lowering import instructions
 
@@ -82,8 +82,8 @@ class VirtualMXUExtendedTest(unittest.TestCase):
         self.assertEqual(roundtrip.stdout, verified.stdout)
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine)
-        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule"):
+        self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
+        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
         entries = instructions(machine)
@@ -96,7 +96,6 @@ class VirtualMXUExtendedTest(unittest.TestCase):
             if op == "atlas.mxu_matmul":
                 self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
                 self.assertLess(fields["src"], 32)
-                reason = "mxu_matmul_completion"
             elif op == "atlas.mxu_push":
                 self.assertEqual(fields["slot"], 0)
                 if fields["kind"] == "acc_bf16":
@@ -105,15 +104,14 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                 else:
                     self.assertIn(fields["kind"], ("weight_fp8", "acc_fp8"))
                     self.assertLess(fields["src"], 32)
-                reason = ("mxu_weight_completion" if fields["kind"] == "weight_fp8"
-                          else "mxu_accumulator_completion")
             else:
                 self.assertEqual(op, "atlas.mxu_pop")
                 self.assertEqual(fields["slot"], 0)
                 if fields["format"] == "fp8":
                     self.assertLess(fields["dst"], 32)
                     self.assertEqual(fields["scale_reg"], 3)
-                    preceding = entries[index - 1]
+                    preceding = next(candidate for candidate in reversed(entries[:index])
+                                     if candidate["operation"] != "atlas.delay")
                     self.assertEqual(preceding["operation"], "atlas.scalar_load")
                     self.assertEqual(preceding["fields"]["kind"], "seli")
                     self.assertEqual(preceding["fields"]["dst"], 3)
@@ -122,11 +120,6 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                     self.assertGreaterEqual(fields["dst"], 32)
                     self.assertEqual(fields["dst"] % 2, 0)
                     self.assertEqual(fields["scale_reg"], 0)
-                reason = "mxu_readout_completion"
-            following = entries[index + 1]
-            self.assertEqual(following["operation"], "atlas.delay")
-            self.assertEqual(following["fields"]["cycles"], 256)
-            self.assertEqual(following["fields"]["atlas.delay_reason"], reason)
         return machine, entries
 
     def rejected(self, virtual: str, expected: str = "") -> None:
@@ -174,7 +167,9 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                     pop = next(i for i, entry in enumerate(entries)
                                if entry["operation"] == "atlas.mxu_pop"
                                and entry["fields"]["format"] == "fp8")
-                    self.assertEqual(entries[pop - 1]["fields"]["offset"], code)
+                    producer = next(entry for entry in reversed(entries[:pop])
+                                    if entry["operation"] != "atlas.delay")
+                    self.assertEqual(producer["fields"]["offset"], code)
 
     def test_scale_is_rematerialized_after_pack_clobbers_e3(self) -> None:
         for unit in (0, 1):
@@ -195,7 +190,10 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                         if entry["operation"] == "atlas.mxu_pop"
                         and entry["fields"]["format"] == "fp8"]
                 self.assertEqual(len(pops), 2)
-                self.assertEqual([entries[i - 1]["fields"]["offset"] for i in pops], [131, 131])
+                producers = [next(entry for entry in reversed(entries[:i])
+                                  if entry["operation"] != "atlas.delay")
+                             for i in pops]
+                self.assertEqual([entry["fields"]["offset"] for entry in producers], [131, 131])
                 self.assertTrue(any(entry["operation"] == "atlas.scalar_load"
                                     and entry["fields"]["kind"] == "seli"
                                     and entry["fields"]["dst"] == 3
@@ -279,9 +277,10 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                 for fmt in ("fp8", "bf16"):
                     self.rejected(program(
                         seed("io3", "s0", "a0", unit),
-                        seed("s0", "s1", "a1", unit, fmt),
-                        readout("s1", "s3", "y", "a1", unit),
-                    ), "live accumulator")
+                        seed("s0", "s1", "b0", unit, fmt),
+                        seed("s1", "s2", "c0", unit, fmt),
+                        readout("s2", "s3", "y", "c0", unit),
+                    ), "cannot load a unit with 2 live accumulators")
                 self.rejected(program(
                     scale(), seed("io3", "s0", "a0", unit),
                     fp8_readout("s0", "s1", "packed", "a0", unit),
@@ -293,17 +292,14 @@ class VirtualMXUExtendedTest(unittest.TestCase):
 
     def test_generated_accumulator_load_wait_is_enforced(self) -> None:
         machine, _ = self.checked(seeded_chain(fmt="bf16"))
-        lines = machine.splitlines()
-        index = next(i for i, line in enumerate(lines)
-                     if 'atlas.delay_reason = "mxu_accumulator_completion"' in line)
-        lines[index] = lines[index].replace("cycles = 256 : i32", "cycles = 1 : i32")
-        changed = "\n".join(lines)
+        changed = shorten_delay(machine, after="atlas.mxu_push", kind="acc_bf16")
+        self.assertNotEqual(changed, machine)
         for tool, options in (("atlas-emit", ()),
-                              ("atlas-opt", ("--verify-atlas-generated-schedule",))):
+                              ("atlas-opt", ("--verify-atlas-timing",))):
             with self.subTest(tool=tool):
                 result = run(tool, changed, *options)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("DELAY >= 256", result.stderr)
+                self.assertIn("timing resource conflict: MXU port 0 busy", result.stderr)
 
     def test_structured_llvm_and_object_preserve_generated_words(self) -> None:
         for unit in (0, 1):

@@ -87,8 +87,7 @@ class DelayInsertionTest(unittest.TestCase):
 
                 result = run(OPT, without_delays(authored), "--insert-atlas-delays")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stderr.count("warning:"), 1, result.stderr)
-                self.assertIn("reuses DMA channel 0", result.stderr)
+                self.assertEqual(result.stderr.count("warning:"), 0, result.stderr)
 
                 ops = stream(result.stdout)
                 delays = [(cycles(f), reason) for op, f, reason in ops if op == "delay"]
@@ -135,8 +134,18 @@ class DelayInsertionTest(unittest.TestCase):
                 printed = stream(result.stdout)
                 self.assertEqual([op for op, _, _ in printed],
                                  ["alu_imm", "vload", "delay", "alu_imm", "trap"])
-                self.assertEqual(cycles(printed[2][1]), 31)
+                self.assertEqual(cycles(printed[2][1]), 32)
                 self.assertEqual(printed[3][2], guard)
+                checked = run(OPT, result.stdout, "--verify-atlas-timing")
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_stream_end_drains_work_in_flight(self) -> None:
+        vload = ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"')
+        result = run(OPT, program([addi(6, 0, 0), vload]), "--insert-atlas-delays")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([op for op, _, _ in stream(result.stdout)], ["alu_imm", "vload", "delay"])
+        checked = run(OPT, result.stdout, "--verify-atlas-timing")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_rejects_what_a_delay_cannot_fix(self) -> None:
         dma_then_vload = [
@@ -155,6 +164,8 @@ class DelayInsertionTest(unittest.TestCase):
              "is not allowed in the input"),
             (dma_then_vload, "a delay cannot cover a DMA transfer"),
             (slow_slot, "delay-slot instruction must be single-cycle"),
+            (dma_then_vload[:-1] + [slow_slot[0], nop(), ("dma_wait", "channel = 0 : i32")],
+             "DMA completion before a block boundary"),
             ([("jump", 'kind = "jalr", dst = 0 : i32, base = 1 : i32, offset = 0 : i32'), nop()],
              "register target"),
             ([("upper", 'kind = "auipc", dst = 1 : i32, immediate = 0 : i32')], "own instruction index"),
