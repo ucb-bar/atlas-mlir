@@ -158,8 +158,10 @@ def coverage(facts):
             problems.append(f"{name}: unresolved: {record['evidence']}")
             continue
         family = ops[name][0]
+        scalars = {path.split(".")[1] for row in family.get("scalars", []) for path in row[:2]
+                   if path.startswith("events.")}
         for group, event in (record["events"] or {}).items():
-            if event["count"] and group not in family["events"] and group not in family.get("not_modeled", {}):
+            if event["count"] and group not in family["events"] and group not in scalars | set(family.get("not_modeled", {})):
                 problems.append(f"{name}: event group {group} neither compared nor not_modeled")
     return problems
 
@@ -201,8 +203,10 @@ class CompilerCrossCheck(unittest.TestCase):
         facts = copy.deepcopy(self.facts)
         facts["vpu.add"]["events"]["write0"]["first_age"] += 1
         facts["vlsu.vload"]["first_free_age"] += 1
+        facts["mxu0.matmul"]["events"]["compute_busy"]["last_age"] += 1
         failed = {(r[0], r[2].split(" ")[0]) for r in compare(facts, self.probe) if not r[6]}
-        self.assertEqual(failed, {("vpu.add", "events.write0"), ("vlsu.vload", "first_free_age")})
+        self.assertEqual(failed, {("vpu.add", "events.write0"), ("vlsu.vload", "first_free_age"),
+                                  ("mxu0.matmul", "events.compute_busy.last_age")})
 
 
 def compiler_ops():

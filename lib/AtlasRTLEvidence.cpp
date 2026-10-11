@@ -121,6 +121,110 @@ struct Fill {
     return f;
   }
 };
+
+// MXU command -> facts block operation (mxu<unit>.<operation>).
+const std::map<OpClass, const char *> &mxuBlocks() {
+  static const std::map<OpClass, const char *> table = {
+      {OpClass::WeightPush, "push_weight"}, {OpClass::AccPushFp8, "push_acc_fp8"},
+      {OpClass::AccPushBf16, "push_acc_bf16"}, {OpClass::PopFp8, "pop_acc_fp8"},
+      {OpClass::PopBf16, "pop_acc_bf16"}, {OpClass::MatMul, "matmul"},
+      {OpClass::MatMulAcc, "matmul_acc"}};
+  return table;
+}
+
+// The compiler names the MREG, accumulator and weight rows each event group
+// touches; the facts give every age. A command holds both MXUs and every other
+// vector engine through its last effect, so MXU work is never overlapped: the
+// selected facts carry no pair evidence. Accumulator and weight-slot hazards are
+// access rules. Weight reads are not extracted, so a matmul retains its whole
+// slot from issue through its last accumulator write.
+Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBlock> &blocks) {
+  Footprint f;
+  const OpInfo &op = *in.op;
+  auto block = mxuBlocks().find(op.opClass);
+  if (block == mxuBlocks().end() || op.mxu < 0 || op.mxu > 1) {
+    f.error = std::string(RTLEvidence::resolverID()) + ": unsupported MXU operation";
+    return f;
+  }
+  const int m = op.mxu;
+  Fill fill(f, "mxu" + std::to_string(m) + "." + block->second, blocks);
+  std::set<std::string> modeled;
+  int busy = 0;
+  auto track = [&](const char *key, int end) { modeled.insert(key); busy = std::max(busy, end); };
+  auto mregRows = [&](const char *key, int reg, bool write) {
+    if (reg < 0 || reg > 63) fill.fail("register operand out of range");
+    fill.access(key, Res::MReg, write, reg * 32, 32);
+    (write ? f.mregWrites : f.mregReads).push_back(reg);
+    int end = write ? fill.last(key) : fill.readEnd(key);
+    int &release = write ? f.writeRelease : f.readRelease;
+    release = std::max(release, end);
+    track(key, end);
+  };
+  auto slotRows = [&](const char *key, Res res, int slot, bool write) {
+    if (slot < 0 || slot > 1) fill.fail("accumulator and weight slots are 0 or 1");
+    fill.access(key, res, write, (m * 2 + slot) * 32, 32);
+    if (write) f.writeRelease = std::max(f.writeRelease, fill.last(key));
+    track(key, fill.last(key));
+  };
+  auto pair = [&](int reg) {
+    if (reg & 1) fill.fail("BF16 operands must name even register pairs");
+  };
+  if (in.imm != 0) fill.fail("unsupported MXU encoding");
+  switch (op.opClass) {
+  case OpClass::WeightPush:
+  case OpClass::AccPushFp8:
+  case OpClass::AccPushBf16: {
+    const bool weight = op.opClass == OpClass::WeightPush;
+    if (in.rs2 != 0) fill.fail("unsupported MXU encoding");
+    if (op.opClass == OpClass::AccPushBf16) {
+      pair(in.rs1);
+      mregRows("mreg_read0", in.rs1, false);
+      mregRows("mreg_read1", in.rs1 + 1, false);
+    } else {
+      mregRows("mreg_read1", in.rs1, false);
+    }
+    slotRows(weight ? "weight_write" : "acc_load", weight ? Res::Weight : Res::Acc, in.rd, true);
+    track("data_busy", fill.last("data_busy"));
+    break;
+  }
+  case OpClass::PopFp8:
+  case OpClass::PopBf16:
+    slotRows("acc_store", Res::Acc, in.rs2, false);
+    if (op.opClass == OpClass::PopBf16) {
+      if (in.rs1 != 0) fill.fail("unsupported MXU encoding");
+      pair(in.rd);
+      mregRows("mreg_write0", in.rd, true);
+      mregRows("mreg_write1", in.rd + 1, true);
+    } else {
+      // The scale register is read into the command at issue.
+      if (in.rs1 < 0 || in.rs1 > 31) fill.fail("scale register out of range");
+      f.accesses.push_back({Res::EReg, false, in.rs1, 1, 0, 1});
+      mregRows("mreg_write0", in.rd, true);
+    }
+    track("data_busy", fill.last("data_busy"));
+    break;
+  default: { // matmul, overwrite or accumulate
+    mregRows("mreg_read0", in.rs1, false);
+    track("compute", fill.last("compute"));
+    if (op.opClass == OpClass::MatMulAcc) slotRows("acc_read", Res::Acc, in.rd, false);
+    slotRows("acc_write", Res::Acc, in.rd, true);
+    track("compute_busy", fill.last("compute_busy"));
+    if (in.rs2 < 0 || in.rs2 > 1) fill.fail("accumulator and weight slots are 0 or 1");
+    for (int age : {0, fill.last("acc_write")})
+      f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * 32, 32, age, 0});
+    break;
+  }
+  }
+  if (fill.block)
+    for (const auto &[key, group] : fill.block->events)
+      if (group.count > 0 && !modeled.count(key))
+        fill.fail("event group " + key + " is not modeled for this operation");
+  for (int unit = 0; unit < 2; ++unit) f.holds.push_back({Unit::MxuCompute, unit, 0, busy});
+  for (Unit unit : {Unit::Vpu, Unit::Xlu, Unit::VloadPath, Unit::VstorePath})
+    f.holds.push_back({unit, 0, 0, busy});
+  f.serializeWithDMA = true;
+  return fill.done(busy);
+}
 } // namespace
 
 llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
@@ -200,6 +304,10 @@ llvm::json::Object RTLEvidence::applicability() const {
                    "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu",
                    "bgeu", "jal"};
   for (const auto &[mnemonic, block] : vpuBlocks()) operations.push_back(mnemonic);
+  for (const char *unit : {".mxu0", ".mxu1"})
+    for (const char *name : {"vmatpush.weight", "vmatpush.acc.fp8", "vmatpush.acc.bf16",
+                             "vmatpop.fp8.acc", "vmatpop.bf16.acc", "vmatmul", "vmatmul.acc"})
+      operations.push_back(std::string(name) + unit);
   if (dma)
     for (const char *name : {"dma.load.ch0..7", "dma.store.ch0..7",
                              "dma.config.ch0..7", "dma.wait.ch0..7"})
@@ -231,6 +339,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"mlir_offset_min", -2048}, {"mlir_offset_max", 2047},
           {"csr_constraint", "csrrw x0,0xC10,rs"},
           {"vpu_operands", "even pair bases; all register operands in distinct physical banks (register mod 32)"},
+          {"mxu_operands", "slots 0 or 1; even BF16 pair bases; acc/weight element (unit*2+slot)*32+row"},
           {"release_annotation_supported", false}}},
       {"environment_assumptions", Array{
           "reset_deasserted", "accelerator_quiescent_at_entry",
@@ -244,11 +353,13 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"selected_engines_serialized", true}, {"vls_paths_serialized", true},
           {"minimum_vls_issue_gap", firstFree("vlsu.vload")},
           {"xlu_first_free_age", firstFree("xlu.transpose")},
+          {"mxu_commands_serialized_with_both_mxus_and_vector_engines", true},
+          {"mxu_weight_slot_retained_by_matmul", "issue_through_last_accumulator_write"},
           {"marker_and_terminal_require_prior_writes_complete", true},
           {"delay_immediately_before_terminal_supported", false},
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
       {"unsupported", Array{dma ? "multiple_pending_dma_transfers" : "dma_and_dynamic_completion",
-          "mxu_operations", "engine_work_or_dma_live_across_block_boundaries",
+          "mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
           "addresses_that_vary_across_loop_iterations",
           "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
@@ -496,6 +607,8 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     fill.engine(Unit::Vpu, 0, busy);
     return fill.done(busy);
   }
+
+  if (op.mxu >= 0) return mxuFootprint(in, blocks);
 
   return reject("operation is outside the selected bounded scope");
 }

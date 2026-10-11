@@ -12,7 +12,7 @@ Four layers check the facts against the compiler and against simulated hardware.
 
 ## Selected-mode tests
 
-`test/test_rtl_timing.py` runs scheduling, delay insertion and `--verify-atlas-rtl-timing` with the facts selected, and checks that wrong digests, a missing selection, unsupported domains, early or missing terminals and unsafe streams are rejected, and that admission numbers come from the facts rather than constants. Final verification rechecks timing from the actual instruction stream, also in `atlas-emit` and the LLVM handoff, so rewrites after scheduling cannot silently invalidate it.
+`test/test_rtl_timing.py` and, for MXU, `test_rtl_mxu_timing.py` run scheduling, delay insertion and `--verify-atlas-rtl-timing` with the facts selected, and check that wrong digests, a missing selection, unsupported domains, early or missing terminals and unsafe streams are rejected, and that admission numbers come from the facts rather than constants. Final verification rechecks timing from the actual instruction stream, also in `atlas-emit` and the LLVM handoff, so rewrites after scheduling cannot silently invalidate it.
 
 ## Simulation
 

@@ -23,8 +23,11 @@
 #     (VPU busy clears) equals vpu_live + 1.
 #   * VLS next_issue_age is the per-path busy (io_vloadBusy/io_vstoreBusy) and equals the
 #     path hold end + 1; VLS write_release equals the last MReg write age.
-# - Fact event groups with a nonzero count must be compared or listed in not_modeled, and every
-#   record must be mapped or listed in not_modeled_records, so new RTL facts are not ignored.
+#   * MXU data_busy/compute_busy last ages equal the compiler's stream/compute hold ends (pop:
+#     write_release). These are the built-in footprints; selected mode builds its own from the facts.
+# - Fact event groups with a nonzero count must be compared (in events or a scalar) or listed in
+#   not_modeled, and every record must be mapped or listed in not_modeled_records, so new RTL facts
+#   are not ignored.
 
 families:
   vls_load:
@@ -112,35 +115,37 @@ families:
     # The compiler reads the stationary weight slot once per row entering the array, so its
     # Weight read is compared with the array's compute_valid cycles.
     events: {mreg_read0: [MReg r rs1], compute: [Weight r], acc_write: [Acc w]}
-    not_modeled: &mxu_compute {compute_busy: compiler MxuCompute hold is a conservative 0..cf+31 window}
+    scalars: &mxu_compute
+      - [events.compute_busy.last_age, hold.MxuCompute]
+      - [events.mreg_read0.last_age, read_release, ">="]  # source held through its response
     ops: {mxu0.matmul: vmatmul.mxu0, mxu1.matmul: vmatmul.mxu1}
   mxu_matmul_acc:
     events: {mreg_read0: [MReg r rs1], compute: [Weight r], acc_read: [Acc r], acc_write: [Acc w]}
-    not_modeled: *mxu_compute
+    scalars: *mxu_compute
     ops: {mxu0.matmul_acc: vmatmul.acc.mxu0, mxu1.matmul_acc: vmatmul.acc.mxu1}
   mxu_push_weight:
     events: {mreg_read1: [MReg r rs1], weight_write: [Weight w]}
-    not_modeled: &mxu_stream {data_busy: push/pop stream busy (compiler stream and port holds are conservative windows)}
+    scalars: [[events.data_busy.last_age, hold.MxuWeightStream]]
     ops: {mxu0.push_weight: vmatpush.weight.mxu0, mxu1.push_weight: vmatpush.weight.mxu1}
   mxu_push_acc_fp8:
     events: {mreg_read1: [MReg r rs1], acc_load: [Acc w]}
-    not_modeled: *mxu_stream
+    scalars: &mxu_acc_push [[events.data_busy.last_age, hold.MxuAccStream]]
     ops: {mxu0.push_acc_fp8: vmatpush.acc.fp8.mxu0, mxu1.push_acc_fp8: vmatpush.acc.fp8.mxu1}
   mxu_push_acc_bf16:
     events: {mreg_read0: [MReg r rs1], mreg_read1: [MReg r rs1+1], acc_load: [Acc w]}
-    not_modeled: *mxu_stream
+    scalars: *mxu_acc_push
     ops: {mxu0.push_acc_bf16: vmatpush.acc.bf16.mxu0, mxu1.push_acc_bf16: vmatpush.acc.bf16.mxu1}
   mxu_pop_fp8:
     events: {mreg_write0: [MReg w rd], acc_store: [Acc r]}
-    not_modeled: *mxu_stream
+    scalars: &mxu_pop [[events.data_busy.last_age, write_release]]
     ops: {mxu0.pop_acc_fp8: vmatpop.fp8.acc.mxu0, mxu1.pop_acc_fp8: vmatpop.fp8.acc.mxu1}
   mxu_pop_bf16:
     events: {mreg_write0: [MReg w rd], mreg_write1: [MReg w rd+1], acc_store: [Acc r]}
-    not_modeled: *mxu_stream
+    scalars: *mxu_pop
     ops: {mxu0.pop_acc_bf16: vmatpop.bf16.acc.mxu0, mxu1.pop_acc_bf16: vmatpop.bf16.acc.mxu1}
 
 not_modeled_records:
-  mxu1.matmul_acc_at_32: two-command MXU1 boundary (matmul.acc issued at age 32 behind an FP8 accumulator push writes no rows); footprints are per instruction
+  mxu1.matmul_acc_at_32: two-command MXU1 boundary (matmul.acc issued at age 32 behind an FP8 accumulator push writes no rows); footprints are per instruction, and both modes keep this pair at least 33 apart (built-in rule; selected MXU commands drain)
   vlsu.vload/response_latency_2: compiler assumes the selected memory response latency
   vlsu.vstore/response_latency_2: compiler assumes the selected memory response latency
   vlsu.vload/operands: operand-variant record; the compiler's VLS timing is operand-independent
