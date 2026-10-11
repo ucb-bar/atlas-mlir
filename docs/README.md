@@ -9,7 +9,7 @@ assembly, and ELF artifacts. Generated files belong under `out/`.
 | Document | Use it for |
 | --- | --- |
 | [Dialect and pass reference](dialect-reference.md) | Virtual and machine operations, verifiers, allocation policy, pass order, and how to add a pass. |
-| [Virtual SSA interpreter interface](virtual-ssa-interpreter-contract.md) | SSA values, block arguments, state tokens, DMA handles, and MXU state. |
+| [Virtual SSA interpreter interface](virtual-ssa-interpreter-contract.md) | SSA values, block arguments, state tokens, DMA handles, MXU state, reference execution, and admitted forms. |
 | [Physical program interface](functional-stream-contract.md) | Encoded words and control metadata for an instruction-level functional model. |
 | [LLVM handoff examples](llvm-handoff-examples.md) | Structured LLVM markers, final word block, maps, and timing-pass handoff. |
 | [Captured MLP diagnostic](captured-mlp-compiler.md) | The bounded Linalg-to-Atlas path and its explicit precision policy. |

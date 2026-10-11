@@ -501,7 +501,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
                     llvm: Path, linker: Path) -> dict[str, Any]:
     atlas_opt = str(atlas / "atlas-opt")
     atlas_emit = str(atlas / "atlas-emit")
-    machine = run([atlas_opt, "--lower-atlas-virtual-to-machine", "-"],
+    machine = run([atlas_opt, "--lower-atlas-virtual-to-machine", "--insert-atlas-delays", "-"],
                   input_text=virtual).rstrip() + "\n"
     require("atlas.generated_from_virtual" in machine,
             "virtual lowerer did not mark the generated physical stream")

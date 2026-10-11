@@ -75,8 +75,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
     def checked(self, source: str) -> tuple[str, list[dict]]:
         machine = lower(source)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine.replace(MARKER, ""))
-        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule"):
+        self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
+        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
         entries = instructions(machine)
@@ -98,10 +98,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                          registers[fields["size"]], fields[MARKER]))
                         self.assertEqual((fields["reg"], fields["dram"], fields["size"]), (4, 7, 9))
                     elif operation in vector_addresses:
-                        vector_addresses[operation].append(registers[fields["base"]] + fields["offset"] * 8)
-                        wait = entries[index + 1]
-                        self.assertEqual(wait["operation"], "atlas.delay")
-                        self.assertEqual(wait["fields"]["cycles"], 256)
+                        vector_addresses[operation].append(registers[fields["base"]] + fields["offset"] * 32)
                 self.assertEqual([launch[:5] for launch in launches],
                                  [("load", 0, STAGING_WORD, 0x80000000, size),
                                   ("store", 1, STAGING_WORD, 0x80000000, size)])
@@ -115,6 +112,55 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 reparsed = run("atlas-opt", machine)
                 self.assertEqual(reparsed.returncode, 0, reparsed.stderr)
                 self.assertEqual(reparsed.stdout, machine)
+
+    def test_pending_transfers_share_registers_and_take_separate_channels_and_staging(self) -> None:
+        # The DMA latches its registers at launch, so the second launch reuses
+        # x4/x7/x9 while the first is in flight. Each completion must still
+        # read its own staging window, whichever transfer completes first.
+        first = ("first", "a", 0, STAGING_WORD)
+        second = ("second", "b", 1, STAGING_WORD + 512)
+        for completions in ((first, second), (second, first)):
+            with self.subTest(first_completed=completions[0][0]):
+                (handle1, tile1, _, _), (handle2, tile2, _, _) = completions
+                source = wrap([
+                    f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
+                    "    %addr = arith.constant -2147483648 : i32",
+                    "    %other = arith.constant -2147481600 : i32",
+                    "    %out = arith.constant -2147479552 : i32",
+                    "    %size = arith.constant 2048 : i32",
+                    dma_load("bf16", "io0", "io1", "first"),
+                    dma_load("bf16", "io1", "io2", "second", "other"),
+                    dma_await("bf16", "io2", "io3", handle1, tile1),
+                    dma_await("bf16", "io3", "io4", handle2, tile2),
+                    f'    %sum = "atlas.virtual_vpu_binary"(%a, %b) {{kind = "add"}} '
+                    f': ({tile("bf16")}, {tile("bf16")}) -> {tile("bf16")}',
+                    dma_store("bf16", "io4", "io5", "sum").replace("%addr", "%out"),
+                    dma_wait("io5", "io6"),
+                ], final="io6")
+                _, entries = self.checked(source)
+                configs = [entry["fields"]["base_reg"] for entry in entries
+                           if entry["operation"] == "atlas.dma_config"]
+                # One configuration sets the shared DRAM upper word from x0.
+                self.assertEqual(configs, [0])
+                launches, waits, loads = [], [], []
+                for entry, registers in observed(entries):
+                    fields = entry["fields"]
+                    if entry["operation"] == "atlas.dma":
+                        launches.append((fields["channel"],
+                                         (fields["reg"], fields["dram"], fields["size"]),
+                                         registers[fields["reg"]], registers[fields["dram"]]))
+                    elif entry["operation"] == "atlas.dma_wait":
+                        waits.append(fields["channel"])
+                    elif entry["operation"] == "atlas.vload":
+                        loads.append(registers[fields["base"]] + fields["offset"] * 8)
+                self.assertEqual(launches, [
+                    (0, (4, 7, 9), STAGING_WORD, 0x80000000),
+                    (1, (4, 7, 9), STAGING_WORD + 512, 0x80000800),
+                    (1, (4, 7, 9), STAGING_WORD, 0x80001000),
+                ])
+                self.assertEqual(waits, [completions[0][2], completions[1][2], 1])
+                self.assertEqual(loads, [window + half * 256
+                                         for _, _, _, window in completions for half in (0, 1)])
 
     def test_launch_completion_separation_preserves_mxu_and_scalar_register_reuse(self) -> None:
         _, entries = self.checked(independent_work())
@@ -209,7 +255,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 for entry, registers in snapshots:
                     if entry["operation"] in addresses:
                         fields = entry["fields"]
-                        addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 8)
+                        addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 32)
                 self.assertEqual(addresses["atlas.vload"], [STAGING_WORD] * 2)
                 self.assertEqual(addresses["atlas.vstore"],
                                  [STAGING_WORD + 256 * half for half in range(halves)])
@@ -310,20 +356,20 @@ class VirtualDMALoweringTest(unittest.TestCase):
             ("extra DMA", scalar, replace_operation(lines[scalar], "dma", 'direction = "load", channel = 0 : i32, reg = 4 : i32, dram = 7 : i32, size = 9 : i32')),
             ("DMA configuration", scalar, replace_operation(lines[scalar], "dma_config", 'channel = 0 : i32, base_reg = 5 : i32')),
         ]
-        for reg in (4, 7, 9):
-            replacements.append((f"ALU clobber x{reg}", scalar,
-                                 re.sub(r"dst = \d+ : i32", f"dst = {reg} : i32", lines[scalar])))
-            replacements.append((f"upper clobber x{reg}", scalar,
-                                 replace_operation(lines[scalar], "upper", f'kind = "lui", dst = {reg} : i32, immediate = 32 : i32')))
         for index in (launch, wait):
-            replacements.append((f"missing marker at {index}", index,
-                                 re.sub(rf" \{{{re.escape(MARKER)} = \d+ : i32\}}", "", lines[index])))
+            replacement, removed = re.subn(
+                rf"{re.escape(MARKER)} = \d+ : i32, ", "", lines[index], count=1)
+            self.assertEqual(removed, 1)
+            self.assertNotIn(MARKER, replacement)
+            self.assertIn("atlas.virtual_tile_command =", replacement)
+            replacements.append((f"missing marker at {index}", index, replacement))
         for marker in ('-1 : i32', '0 : i64', '"bad"'):
             replacements.append((f"malformed marker {marker}", launch,
                                  re.sub(rf"{MARKER} = \d+ : i32", f"{MARKER} = {marker}", lines[launch])))
         orphan = next(i for i in range(launch) if '"atlas.dma_wait"' in lines[i])
         replacements.append(("orphan marker", orphan,
-                             lines[orphan].replace("}>", f"}}> {{{MARKER} = 999 : i32}}")))
+                             lines[orphan].replace("atlas.virtual_tile_command =",
+                                                   f"{MARKER} = 999 : i32, atlas.virtual_tile_command =", 1)))
         changes = []
         for name, index, replacement in replacements:
             changed = lines.copy()
@@ -349,6 +395,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertTrue(result.stderr)
                     self.assertEqual(result.stdout, "")
+                    if name == "orphan marker":
+                        self.assertIn("DMA.WAIT must match the pending DMA channel and transfer ID", result.stderr)
 
     def test_pending_seli_writes_use_the_separate_extended_register_file(self) -> None:
         machine, _ = self.checked(independent_work())
@@ -357,8 +405,13 @@ class VirtualDMALoweringTest(unittest.TestCase):
         scalar = next(i for i in range(launch + 1, len(lines)) if '"atlas.alu_imm"' in lines[i])
         for reg in (4, 7, 9):
             changed = lines.copy()
-            changed[scalar] = replace_operation(lines[scalar], "scalar_load",
-                f'kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32')
+            state = re.search(r'"atlas.alu_imm"\((%\w+)\)', lines[scalar])[1]
+            changed[scalar] = lines[scalar].replace(f"({state})", "(%seli_probe)", 1)
+            owner = re.search(r"atlas.virtual_cfg_block = \d+ : i32", lines[scalar])[0]
+            changed.insert(scalar,
+                f'  %seli_probe = "atlas.scalar_load"({state}) '
+                f'{{kind = "seli", dst = {reg} : i32, base = 0 : i32, offset = 1 : i32, {owner}}} '
+                ': (!atlas.state) -> !atlas.state')
             self.assertNotEqual(changed[scalar], lines[scalar])
             for tool, options in (("atlas-emit", ()),
                                   ("atlas-opt", ("--verify-atlas-generated-schedule",))):

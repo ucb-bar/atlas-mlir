@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import unittest
 
-from test_virtual_lowering import BIN, emitted, lower, object_words, run
+from test_virtual_lowering import BIN, emitted, lower, object_words, run, shorten_delay
 from test_virtual_mxu_handles import (
     EXAMPLE, STATE, FP8, BF16, acc, load, reset, accumulate, readout,
 )
@@ -45,8 +45,8 @@ def continuation(unit: int, *, reload_weight: bool = False) -> str:
     return source(*body)
 
 
-def instructions(machine: str) -> list[dict]:
-    exported = run("atlas-emit", machine, "--program-json")
+def instructions(machine: str, *, allow_untimed: bool = False) -> list[dict]:
+    exported = run("atlas-emit", machine, "--program-json", *(("--allow-untimed",) if allow_untimed else ()))
     if exported.returncode:
         raise AssertionError(exported.stderr)
     return json.loads(exported.stdout)["instructions"]
@@ -57,12 +57,12 @@ class VirtualMXULoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
-    def checked(self, virtual: str) -> tuple[str, list[dict]]:
+    def checked(self, virtual: str, slots: int = 1) -> tuple[str, list[dict]]:
         machine = lower(virtual)
         self.assertIn("atlas.generated_from_virtual", machine)
-        self.assertNotIn("atlas.virtual_", machine)
+        self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
         for option in ("--verify-atlas-machine-stream",
-                       "--verify-atlas-generated-schedule"):
+                       "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
             result = run("atlas-opt", machine, option)
             self.assertEqual(result.returncode, 0, result.stderr)
         entries = instructions(machine)
@@ -75,26 +75,19 @@ class VirtualMXULoweringTest(unittest.TestCase):
             fields = entry["fields"]
             self.assertIn(fields["unit"], (0, 1))
             if operation == "atlas.mxu_matmul":
-                self.assertEqual((fields["weight_slot"], fields["acc_slot"]), (0, 0))
+                self.assertLess(max(fields["weight_slot"], fields["acc_slot"]), slots)
                 self.assertLess(fields["src"], 32)
-                reason = "mxu_matmul_completion"
             else:
-                self.assertEqual(fields["slot"], 0)
+                self.assertLess(fields["slot"], slots)
                 if operation == "atlas.mxu_push":
                     self.assertEqual(fields["kind"], "weight_fp8")
                     self.assertLess(fields["src"], 32)
-                    reason = "mxu_weight_completion"
                 else:
                     self.assertEqual(operation, "atlas.mxu_pop")
                     self.assertEqual(fields["format"], "bf16")
                     self.assertGreaterEqual(fields["dst"], 32)
                     self.assertEqual(fields["dst"] % 2, 0)
                     self.assertEqual(fields["scale_reg"], 0)
-                    reason = "mxu_readout_completion"
-            following = entries[index + 1]
-            self.assertEqual(following["operation"], "atlas.delay")
-            self.assertEqual(following["fields"]["cycles"], 256)
-            self.assertEqual(following["fields"]["atlas.delay_reason"], reason)
         return machine, entries
 
     def test_reset_only_matches_legacy_matmul_words_on_both_units(self) -> None:
@@ -160,6 +153,22 @@ class VirtualMXULoweringTest(unittest.TestCase):
                               if entry["operation"] == "atlas.mxu_matmul"],
                              [False, True])
 
+    def test_two_live_weights_and_accumulators_take_separate_slots(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                _, entries = self.checked(source(
+                    load("io2", "s0", "w0", unit), load("s0", "s1", "w1", unit),
+                    reset("s1", "r0", "a0", "w0", unit), reset("r0", "r1", "b0", "w1", unit),
+                    accumulate("r1", "r2", "a1", "a0", "w1", unit),
+                    readout("r2", "r3", "y", "a1", unit), readout("r3", "s3", "z", "b0", unit),
+                ), slots=2)
+                fields = [entry["fields"] for entry in entries
+                          if entry["operation"].startswith("atlas.mxu_")]
+                self.assertEqual([f["slot"] for f in fields[:2]], [0, 1])
+                self.assertEqual([(f["weight_slot"], f["acc_slot"]) for f in fields[2:5]],
+                                 [(0, 0), (1, 1), (1, 0)])
+                self.assertEqual([f["slot"] for f in fields[5:]], [0, 1])
+
     def test_fp8_sources_can_be_reused_after_push_and_matmul(self) -> None:
         for unit in (0, 1):
             with self.subTest(unit=unit):
@@ -221,19 +230,25 @@ class VirtualMXULoweringTest(unittest.TestCase):
     def test_lowering_enforces_handle_and_state_verification(self) -> None:
         for unit in (0, 1):
             valid = continuation(unit)
-            refreshed = continuation(unit, reload_weight=True)
             cases = [
                 (valid.replace('(%s2, %a1)', '(%s2, %a0)'), "stale accumulator handle"),
                 (valid.replace('(%s1, %x, %weight, %a0)',
                                '(%s0, %x, %weight, %a0)'), "nonlinear virtual state chain"),
-                (refreshed.replace('(%refresh, %x, %replacement, %a0)',
-                                   '(%refresh, %x, %weight, %a0)'), "stale weight handle"),
+                (source(load("io2", "s0", "weight", unit),
+                        reset("s0", "s1", "a0", unit=unit),
+                        load("s1", "r0", "replacement", unit),
+                        load("r0", "r1", "third", unit),
+                        accumulate("r1", "s2", "a1", "a0", "weight", unit),
+                        accumulate("s2", "r2", "a2", "a1", "replacement", unit),
+                        readout("r2", "s3", "y", "a2", unit)),
+                 "cannot load a weight on a unit with 2 live weights"),
                 (valid.replace(acc(unit), acc(1 - unit)), "unit"),
                 (source(load("io2", "s0", "weight", unit),
                         reset("s0", "s1", "a0", unit=unit),
-                        reset("s1", "s2", "a1", unit=unit),
-                        readout("s2", "s3", "y", "a1", unit)),
-                 "cannot reset a unit with a live accumulator"),
+                        reset("s1", "r0", "b0", unit=unit),
+                        reset("r0", "s2", "c0", unit=unit),
+                        readout("s2", "s3", "y", "c0", unit)),
+                 "cannot reset a unit with 2 live accumulators"),
                 (source(load("io2", "s0", "weight", unit),
                         f"    cf.br ^next(%s0 : {STATE})",
                         f"  ^next(%next_state: {STATE}):",
@@ -257,20 +272,15 @@ class VirtualMXULoweringTest(unittest.TestCase):
 
     def test_generated_mxu_waits_are_enforced(self) -> None:
         machine, _ = self.checked(continuation(0, reload_weight=True))
-        for reason in ("mxu_weight_completion", "mxu_matmul_completion",
-                       "mxu_readout_completion"):
-            lines = machine.splitlines()
-            index = next(i for i, line in enumerate(lines)
-                         if f'atlas.delay_reason = "{reason}"' in line)
-            self.assertIn("cycles = 256 : i32", lines[index])
-            lines[index] = lines[index].replace("cycles = 256 : i32", "cycles = 1 : i32")
-            changed = "\n".join(lines)
+        for producer in ("atlas.mxu_matmul", "atlas.mxu_pop"):
+            changed = shorten_delay(machine, after=producer)
+            self.assertNotEqual(changed, machine)
             for tool, options in (("atlas-emit", ()),
-                                  ("atlas-opt", ("--verify-atlas-generated-schedule",))):
-                with self.subTest(reason=reason, tool=tool):
+                                  ("atlas-opt", ("--verify-atlas-timing",))):
+                with self.subTest(producer=producer, tool=tool):
                     result = run(tool, changed, *options)
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("DELAY >= 256", result.stderr)
+                    self.assertIn("insufficient issue spacing", result.stderr)
 
     def test_structured_llvm_handoff_preserves_continuation_flags_and_words(self) -> None:
         for unit in (0, 1):

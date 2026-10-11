@@ -24,11 +24,30 @@ def run(tool: str, source: str, *options: str) -> subprocess.CompletedProcess[st
     )
 
 
-def lower(source: str) -> str:
+def lower(source: str, *, timed: bool = True) -> str:
     result = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
     if result.returncode:
         raise AssertionError(result.stderr)
+    if timed:
+        result = run("atlas-opt", result.stdout, "--insert-atlas-delays")
+        if result.returncode:
+            raise AssertionError(result.stderr)
     return result.stdout
+
+
+def shorten_delay(machine: str, *, after: str | None = None, kind: str | None = None) -> str:
+    lines = machine.splitlines()
+    active = kind is None
+    for index, line in enumerate(lines):
+        if after and f'"{after}"' in line:
+            active = kind is None or f'kind = "{kind}"' in line
+        if not active or '"atlas.delay"' not in line or (after and kind is None and f"after {after}" not in line):
+            continue
+        cycles = re.search(r"cycles = (\d+) : i32", line)
+        if cycles and int(cycles[1]) > 1:
+            lines[index] = line.replace(cycles[0], "cycles = 1 : i32", 1)
+            return "\n".join(lines) + "\n"
+    raise AssertionError(f"expected an inserted delay greater than one cycle after {after}")
 
 
 def emitted(machine: str) -> tuple[int, ...]:
@@ -148,12 +167,13 @@ class VirtualLoweringTest(unittest.TestCase):
             with self.subTest(name=name):
                 source = (EXAMPLES / f"virtual_bf16_{name}_program.mlir").read_text()
                 machine = lower(source)
+                self.assertIn('atlas.timing_state = "timed"', machine)
                 for option in ("--verify-atlas-machine-stream",
-                               "--verify-atlas-generated-schedule"):
+                               "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
                     checked = run("atlas-opt", machine, option)
                     self.assertEqual(checked.returncode, 0, checked.stderr)
                 self.assertIn("atlas.generated_from_virtual", machine)
-                self.assertNotIn('"atlas.virtual_', machine)
+                self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
                 self.assertIn('"atlas.dma_wait"', machine)
                 self.assertIn('"atlas.branch"', machine)
                 self.assertIn('"atlas.jump"', machine)
@@ -173,17 +193,18 @@ class VirtualLoweringTest(unittest.TestCase):
         self.assertEqual(finalized.returncode, 0, finalized.stderr)
         self.assertIn("llvm.inline_asm", finalized.stdout)
 
-        old = ('atlas.fields = {atlas.delay_reason = "vload_completion", '
-               'cycles = 256 : i32}, atlas.source_op = "atlas.delay", '
-               'atlas.word = 268439655 : i32')
-        new = old.replace("cycles = 256", "cycles = 1").replace(
-            "atlas.word = 268439655", "atlas.word = 1052679")
-        changed = structured.stdout.replace(old, new, 1)
+        lines = structured.stdout.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if 'atlas.source_op = "atlas.delay"' in line
+                     and int(re.search(r"cycles = (\d+) : i32", line)[1]) > 1)
+        word = int(re.search(r"atlas.word = (-?\d+) : i32", lines[index])[1]) & 0xffffffff
+        lines[index] = re.sub(r"cycles = \d+ : i32", "cycles = 1 : i32", lines[index], count=1)
+        lines[index] = re.sub(r"atlas.word = -?\d+ : i32", f"atlas.word = {(word & 0xfffff) | (1 << 20)} : i32", lines[index], count=1)
+        changed = "\n".join(lines) + "\n"
         self.assertNotEqual(changed, structured.stdout)
-        rejected = run("atlas-opt", changed,
-                       "--finalize-atlas-llvm-calls")
+        rejected = run("atlas-opt", changed, "--finalize-atlas-llvm-calls")
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("DELAY >= 256", rejected.stderr)
+        self.assertIn("timing resource conflict: VLOAD path 0 busy", rejected.stderr)
 
     def test_scalar_control_argument_has_explicit_register_abi(self) -> None:
         source = (EXAMPLES / "virtual_bf16_dynamic_branch_program.mlir").read_text()
@@ -237,11 +258,11 @@ class VirtualLoweringTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
         machine = lower(source)
-        mutated = machine.replace("cycles = 256 : i32", "cycles = 1 : i32", 1)
+        mutated = shorten_delay(machine)
         self.assertNotEqual(mutated, machine)
         result = run("atlas-emit", mutated)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("DELAY >= 256", result.stderr)
+        self.assertIn("timing resource conflict: VLOAD path 0 busy", result.stderr)
         dynamic = (EXAMPLES / "virtual_bf16_dynamic_branch_program.mlir").read_text()
         missing_control = dynamic.replace(
             ", atlas.control_dram_base = 2415927296 : i64", "")

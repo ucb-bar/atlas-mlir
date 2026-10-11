@@ -1,7 +1,9 @@
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSelectedTarget.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Parser/Parser.h"
@@ -14,21 +16,29 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 int main(int argc, char **argv) {
-  bool mapJson = argc == 3 && llvm::StringRef(argv[1]) == "--map-json";
-  bool programJson = argc == 3 && llvm::StringRef(argv[1]) == "--program-json";
-  if ((argc != 2 && !mapJson && !programJson) ||
-      (argc == 2 && llvm::StringRef(argv[1]).starts_with("--"))) {
-    llvm::errs() << "usage: atlas-emit [--map-json|--program-json] <flat-mlir-module>\n";
+  bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
+  const char *input = nullptr;
+  for (int i = 1; i < argc; ++i) {
+    StringRef arg(argv[i]);
+    if (arg == "--map-json") mapJson = true;
+    else if (arg == "--program-json") programJson = true;
+    else if (arg == "--allow-untimed") allowUntimed = true;
+    else if (arg.starts_with("--") || input) invalid = true;
+    else input = argv[i];
+  }
+  if (invalid || !input || (mapJson && programJson)) {
+    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n";
     return 2;
   }
   DialectRegistry registry;
   registry.insert<AtlasDialect>();
   MLIRContext context(registry);
-  auto module = parseSourceFile<ModuleOp>(argv[mapJson || programJson ? 2 : 1], &context);
+  auto module = parseSourceFile<ModuleOp>(input, &context);
   if (!module || failed(verify(*module))) return 1;
 
   llvm::SmallVector<uint32_t> words;
-  if (failed(collectAtlasWords(*module, words, mapJson || programJson))) return 1;
+  if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
+  if (failed(verifyAtlasArtifact(*module, mapJson || programJson, words))) return 1;
   if (programJson) {
     // This is the physical-stream input boundary for an external functional
     // model. The encoded words remain authoritative; these typed fields and
@@ -104,6 +114,10 @@ int main(int argc, char **argv) {
         {"timing_scope", "explicit_delay_only; other availability unqualified"},
         {"instructions", std::move(instructions)},
     };
+    if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
+      root["timing_state"] = state.getValue().str();
+    if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
+      root["timing_provider"] = provider.getValue().str();
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }

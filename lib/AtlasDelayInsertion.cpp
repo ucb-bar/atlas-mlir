@@ -18,21 +18,52 @@ struct Issued {
 constexpr int kMaxSearch = 100000;
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
-                        std::vector<DelayInsertion> &before) {
+                        const TimingProvider &p,
+                        std::vector<DelayInsertion> &before,
+                        DelayInsertion &after) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   RegValues regs = s.entry[block];
-  ReservationTable table;
+  // The first uncovered provider rule; checked after each placement.
+  std::string fault;
+  auto note = [&](const std::string &why) {
+    if (!why.empty() && fault.empty())
+      fault = why;
+  };
+  auto rule = [&](auto result) {
+    note(result.error);
+    return std::move(result.value);
+  };
+  auto reserve = [&](TimingReservations &table, const Instr &in,
+                     const Footprint &f, int cycle) {
+    std::string why = table.reserve(in, f, cycle);
+    if (why.empty() && in.op->opClass == OpClass::DmaWait)
+      why = table.onWait(in, cycle);
+    note(why);
+  };
   std::vector<Issued> issued;
+  // Rebuilds the provider's reservation state for the placements so far.
+  auto replay = [&]() -> std::unique_ptr<TimingReservations> {
+    auto table = rule(p.createReservations());
+    if (!table)
+      note("timing provider returned no reservation state");
+    else
+      for (const Issued &x : issued)
+        reserve(*table, instrs[x.index], x.f, x.cycle);
+    return table;
+  };
+  std::unique_ptr<TimingReservations> table = replay();
+  if (!fault.empty())
+    return ops[begin]->emitOpError(fault);
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
   auto earliest = [&](const Instr &in, const Footprint &f, int cycle,
                       std::string &reason) {
     for (const Issued &x : issued) {
-      Dependence d = dependence(instrs[x.index], x.f, in, f);
+      Dependence d = rule(p.dependence(instrs[x.index], x.f, in, f));
       if (d.distance > 0 && x.cycle + d.distance > cycle) {
         cycle = x.cycle + d.distance;
         reason = d.reason + " after " + name(x.index);
@@ -51,17 +82,20 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (cycle > nextFree)
       before[i] = {idleDelays(cycle - nextFree), false, reason};
     const Instr &in = instrs[i];
-    table.reserve(in, f, cycle);
-    if (in.op->opClass == OpClass::DmaWait)
-      table.extendForWait(cycle);
+    reserve(*table, in, f, cycle);
     issued.push_back({i, f, cycle});
     applyScalar(in, regs);
-    nextFree = cycle + naturalGap(in);
+    int gap = rule(p.issueGap(in));
+    if (gap <= 0)
+      note("timing provider issue gap exceeds positive cycle domain");
+    nextFree = cycle + gap;
   };
   auto search = [&](size_t i, int &cycle, std::string &reason,
                     function_ref<std::string(int)> fits) -> LogicalResult {
     for (int start = cycle;; ++cycle) {
       std::string why = fits(cycle);
+      if (!fault.empty())
+        return ops[i]->emitOpError(fault);
       if (why.empty())
         return success();
       reason = why;
@@ -72,7 +106,9 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
   for (size_t i = begin; i < end; ++i) {
     const Instr &in = instrs[i];
-    Footprint f = footprintOf(in, regs);
+    Footprint f = p.footprint(in, regs);
+    if (!f.error.empty())
+      return ops[i]->emitOpError(f.error);
     std::string reason;
     int cycle = earliest(in, f, nextFree, reason);
 
@@ -80,8 +116,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       // A halt neither drains in-flight work nor waits for a delay, so its
       // stall ends on a NOP, reusing one that is already there.
       for (const Issued &x : issued)
-        if (x.cycle + x.f.doneAge > cycle) {
-          cycle = x.cycle + x.f.doneAge;
+        if (x.cycle + x.f.doneAge + 1 > cycle) {
+          cycle = x.cycle + x.f.doneAge + 1;
           reason = "halt waits for " + name(x.index) + " to finish";
         }
       int idle = cycle - nextFree;
@@ -96,6 +132,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         nextFree = cycle;
       }
       place(i, f, cycle, reason);
+      if (!fault.empty())
+        return ops[i]->emitOpError(fault);
       continue;
     }
 
@@ -105,75 +143,96 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       const Instr &slot = instrs[slotIndex];
       RegValues after = regs;
       applyScalar(in, after);
-      Footprint sf = footprintOf(slot, after);
+      Footprint sf = p.footprint(slot, after);
+      if (!sf.error.empty())
+        return ops[slotIndex]->emitOpError(sf.error);
       if (drained() - 2 > cycle) {
         cycle = drained() - 2;
         reason = "this block finishes before the branch's successors start";
       }
       auto fits = [&](int c) -> std::string {
-        std::string why = table.conflict(in, f, c);
+        std::string why = rule(table->conflict(in, f, c));
         if (!why.empty())
           return why;
         std::string slotReason;
         int slotCycle = earliest(slot, sf, c + 1, slotReason);
-        Dependence d = dependence(in, f, slot, sf);
+        Dependence d = rule(p.dependence(in, f, slot, sf));
         if (c + d.distance > slotCycle) {
           slotCycle = c + d.distance;
           slotReason = d.reason + " after " + name(i);
         }
         if (slotCycle > c + 1)
           return "delay slot: " + slotReason;
-        ReservationTable withBranch = table;
-        withBranch.reserve(in, f, c);
-        why = withBranch.conflict(slot, sf, c + 1);
+        auto withBranch = replay();
+        if (!withBranch)
+          return why;
+        note(withBranch->reserve(in, f, c));
+        why = rule(withBranch->conflict(slot, sf, c + 1));
         return why.empty() ? why : "delay slot: " + why;
       };
       if (failed(search(i, cycle, reason, fits)))
         return failure();
       place(i, f, cycle, reason);
       place(slotIndex, sf, cycle + 1, "");
+      if (!fault.empty())
+        return ops[i]->emitOpError(fault);
       i = slotIndex;
       continue;
     }
 
     if (failed(search(i, cycle, reason,
-                      [&](int c) { return table.conflict(in, f, c); })))
+                      [&](int c) { return rule(table->conflict(in, f, c)); })))
       return failure();
     place(i, f, cycle, reason);
+    if (!fault.empty())
+      return ops[i]->emitOpError(fault);
   }
 
-  if (s.fallsThrough(block) && drained() > nextFree)
-    before[end] = {idleDelays(drained() - nextFree), false,
-                   "this block finishes before the next one starts"};
+  // A block that neither branches nor halts drains before the next block, or
+  // the stream's end, as its own trailing delays.
+  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drained() > nextFree)
+    after = {idleDelays(drained() - nextFree), false,
+             s.fallsThrough(block)
+                 ? "this block finishes before the next one starts"
+                 : "work finishes before the stream ends"};
   return success();
 }
 
-LogicalResult insertDelays(ModuleOp module) {
+LogicalResult insertDelays(ModuleOp module, StringRef requested) {
+  FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
+  if (failed(provider))
+    return failure();
   FailureOr<AtlasStream> stream = readAtlasStream(module);
-  if (failed(stream) || failed(checkAtlasStream(*stream)))
+  if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
+  std::vector<DelayInsertion> after(stream->starts.size());
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(timeBlock(*stream, b, before)))
+    if (failed(timeBlock(*stream, b, *provider, before, after[b])))
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);
-  return writeAtlasStream(module, *stream, order, before);
+  return writeAtlasStream(module, *stream, order, before, after, provider->id);
 }
 
 struct InsertAtlasDelaysPass
     : PassWrapper<InsertAtlasDelaysPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InsertAtlasDelaysPass)
+  InsertAtlasDelaysPass() = default;
+  InsertAtlasDelaysPass(const InsertAtlasDelaysPass &other) : PassWrapper(other) {}
+  Option<std::string> provider{*this, "provider",
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::init("")};
 
   StringRef getArgument() const final { return "insert-atlas-delays"; }
   StringRef getDescription() const final {
-    return "Insert the minimum in-order delays of the npu_model rtl-match "
-           "timing model, ported from atlas-compiler-experiments, into a "
-           "stream without atlas.delay";
+    return "Insert the minimum in-order delays of the selected timing "
+           "provider (default: the npu_model rtl-match model, ported from "
+           "atlas-compiler-experiments) into a stream without atlas.delay";
   }
 
   void runOnOperation() override {
-    if (failed(insertDelays(getOperation())))
+    if (failed(insertDelays(getOperation(), provider.getValue())))
       signalPassFailure();
   }
 };
