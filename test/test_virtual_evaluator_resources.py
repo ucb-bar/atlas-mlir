@@ -336,8 +336,8 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
             cases.append((f"overlapping_{first}_{second}", wrap(input_tile("bf16"), *constants(), launch0, launch1, complete0, complete1, final="s2_done_done"), with_tile))
         conflict = wrap(input_tile("bf16"), *constants(), *branch("io", "bad", load("bf16", "bs", "s1", "h0"), store("bf16", "s1", "s2", "h1"),
                                                                     ready("bf16", "s2", "s3", "h0"), wait("s3", "s4", "h1")), final="s4", arguments="%choose: i1")
-        self.accepted(conflict, RuntimeInputs({0: BF16}, (Scalar(1, 1),)))
-        cases.append(("executed_conflict", conflict, RuntimeInputs({0: BF16}, (Scalar(1, 0),), regions())))
+        for choose in (0, 1):  # rejected whether or not the conflicting path executes
+            cases.append((f"conflict_choose_{choose}", conflict, RuntimeInputs({0: BF16}, (Scalar(1, choose),), regions())))
         for direction in ("load", "store"):
             launch, completion = transfer(direction, "io", "s1", "h", "s1")
             source = wrap(input_tile("bf16"), *constants(), launch, completion, final="s1_done", arguments="%choose: i1", attributes=mailbox)

@@ -504,17 +504,21 @@ def _boundary_address(program: ParsedProgram, kind: str, index: int) -> int | No
 
 
 def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
-    pending: set[SSAValue] = set()
+    pending: dict[SSAValue, tuple[int, int, bool]] = {}
     for op in operations:
         name = operation_name(op).removeprefix("atlas.virtual_")
         if name.startswith(("dma_load_", "dma_store_")):
             address, length = _dma_span(op, constants)
+            writes = name.startswith("dma_store_")
             _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
             _require(not any(kind == "control" and _overlaps(address, length, other, size) for other, size, kind in boundaries), "DMA must not overlap the control mailbox")
-            pending.add(op.results[1])
+            # As the dialect verifier requires, transfers that share DRAM bytes while either writes are never pending together.
+            _require(not any((writes or pending_writes) and _overlaps(address, length, other, size) for other, size, pending_writes in pending.values()),
+                     "DMA conflicts with a pending transfer on the same DRAM bytes while either writes them")
+            pending[op.results[1]] = (address, length, writes)
         elif name.startswith("dma_await_") or name == "dma_wait":
             _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
-            pending.remove(op.operands[1])
+            del pending[op.operands[1]]
         elif name in ("input_bf16", "input_fp8", "output_bf16", "pack_fp8"):
             _require(not pending, f"{name}: pending DMA must complete before implicit I/O or pack")
     _require(not pending, "every pending DMA transfer must complete before block exit")
@@ -567,7 +571,6 @@ class _Transfer:
     address: int
     data: bytes
     format: TileFormat
-    store: bool
 
 
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
@@ -652,7 +655,6 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             memory.write(address, payload)
     values: dict[SSAValue, object] = {}
     outputs: dict[int, Tile] = {}
-    pending: dict[SSAValue, _Transfer] = {}
     state: object | None = None
     steps = 0
 
@@ -743,11 +745,9 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     address, length = (value(operand, Scalar).bits for operand in op.operands[-2:])
                     format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
                     store = name.startswith("atlas.virtual_dma_store_")
-                    for transfer in pending.values():
-                        _require(not (store or transfer.store) or not _overlaps(address, length, transfer.address, len(transfer.data)), "DMA access conflicts with an overlapping pending write or read")
                     memory.check_span(address, length)
                     data = _tile_bytes(value(op.operands[1], Tile)) if store else memory.read(address, length)
-                    values[op.results[1]] = pending[op.results[1]] = _Transfer(address, data, format, store)
+                    values[op.results[1]] = _Transfer(address, data, format)
                 elif name.startswith("atlas.virtual_dma_await_") or name == "atlas.virtual_dma_wait":
                     transfer = value(op.operands[1])
                     _require(isinstance(transfer, _Transfer), "expected an executed DMA transfer")
@@ -756,7 +756,6 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                     else:
                         values[op.results[1]] = _tile_from_bytes(transfer.data, transfer.format)
                     del values[op.operands[1]]
-                    del pending[op.operands[1]]
                 state = values[op.results[0]] = object()
         else:
             return final_result()
