@@ -76,6 +76,32 @@ CONTROLS += ['dma_' + k for k in ['launch', 'stall', 'av', 'ar', 'dv', 'dr', 'vr
 SIGNALS.update({'vpu_busy': ('vpu.io_issueBusy', 31), 'mreg_read_busy': ('scalar.io_mregReadBusy', 64), 'mreg_write_busy': ('scalar.io_mregWriteBusy', 64)})
 CONTROLS += ['vpu_busy', 'mreg_read_busy', 'mreg_write_busy']
 
+# MXU u: command, MREG ports, sequencer weight/compute/accumulator ports and port-engine state.
+MXU_INFLIGHT = (3, 2)  # in-flight matmul tracker depth (SystolicArraySequencer / InnerProductTreesSequencer)
+for u in range(2):
+    m, s = f'mxu{u}.', f'mxu{u}.seq.'
+    group = {'cmd': (m + 'io_cmd_valid', 1), 'op': (m + 'io_cmd_bits_op', 3), 'mreg': (m + 'io_cmd_bits_mregId', 6),
+             'acc': (m + 'io_cmd_bits_accSel', 1), 'slot': (m + 'io_cmd_bits_weightSlot', 1),
+             'ww': (s + 'io_weightWriteReq_valid', 1), 'ww_slot': (s + 'io_weightWriteReq_bits_weightSlot', 1), 'ww_lane': (s + 'io_weightWriteReq_bits_laneIdx', 5),
+             'cv': (s + 'io_compute_valid', 1), 'cacc': (s + 'io_compute_bits_accumulate', 1), 'cslot': (s + 'io_compute_bits_weightBufSel', 1),
+             'aw': (s + 'io_accComputeWrite_valid', 1), 'aw_acc': (s + 'io_accComputeWrite_bits_accSel', 1), 'aw_row': (s + 'io_accComputeWrite_bits_rowIdx', 5),
+             'ar': (s + 'io_accComputeReadEn', 1), 'al': (s + 'io_accLoadReq_valid', 1),
+             'as': (s + 'io_accStoreReadEn', 1), 'as_acc': (s + 'io_accStoreAddr_accSel', 1), 'as_row': (s + 'io_accStoreAddr_rowIdx', 5),
+             'p0v': (s + 'p0CmdValid', 1), 'p1v': (s + 'p1CmdValid', 1), 'w0v': (s + 'w0CmdValid', 1), 'w1v': (s + 'w1CmdValid', 1), 'p0op': (s + 'p0Cmd_op', 3)}
+    for p in range(2):
+        group.update({f'r{p}': (m + f'io_mregReadReq{p}_valid', 1), f'rid{p}': (m + f'io_mregReadReq{p}_bits_mregId', 6), f'rrow{p}': (m + f'io_mregReadReq{p}_bits_row', 5),
+                      f'data{p}': (m + f'io_mregReadResp{p}_bits', 256), f'w{p}': (m + f'io_mregWriteReq{p}_valid', 1), f'wid{p}': (m + f'io_mregWriteReq{p}_bits_mregId', 6),
+                      f'wrow{p}': (m + f'io_mregWriteReq{p}_bits_row', 5), f'wdata{p}': (m + f'io_mregWriteReq{p}_bits_data', 256),
+                      f'actr{p}': (m + f'io_activeReads_{p}_valid', 1), f'actrid{p}': (m + f'io_activeReads_{p}_bits', 6),
+                      f'actw{p}': (m + f'io_activeWrites_{p}_valid', 1), f'actwid{p}': (m + f'io_activeWrites_{p}_bits', 6)})
+    for k in range(32):
+        group.update({f'wwd{k}': (s + f'io_weightWriteReq_bits_data_{k}', 8), f'act{k}': (s + f'io_compute_bits_act_{k}', 8),
+                      f'awd{k}': (s + f'io_accComputeWrite_bits_data_{k}', 16)})
+    group.update({f'inf{i}': (s + f'inflightValid_{i}', 1) for i in range(MXU_INFLIGHT[u])})
+    SIGNALS.update({f'm{u}_{k}': value for k, value in group.items()})
+    CONTROLS += [f'm{u}_{k}' for k in ('cmd', 'ww', 'cv', 'aw', 'ar', 'al', 'as', 'p0v', 'p1v', 'w0v', 'w1v', 'r0', 'r1', 'w0', 'w1', 'actr0', 'actr1', 'actw0', 'actw1')]
+    CONTROLS += [f'm{u}_inf{i}' for i in range(MXU_INFLIGHT[u])]
+
 
 def vcd_edges(stream, scope='TOP.AtlasCore'):
     """Yield {'edge', 'values'} sampled just before each rising clock; unknown or malformed VCD raises."""
@@ -140,8 +166,18 @@ def bf16_power_product(lhs,rhs):
 # Engine activity: a command releases at the first edge after its issue where its engine shows none.
 BUSY = {'vload': lambda v: v('load_busy'), 'vstore': lambda v: v('store_busy'), 'xlu': lambda v: v('xar') | v('xaw'),
         'vpu': lambda v: int(bool(v('vpu_busy') or any(v(p + str(n)) for p in ('par', 'paw') for n in range(4))))}
+# MXU data/compute busy as SystolicArraySequencer drives io_dataBusy | io_computeBusy (not traced): a port engine or a tracked matmul.
+for u in range(2):
+    BUSY[f'mxu{u}'] = lambda v, u=u: int(any(v(f'm{u}_{k}') for k in ('p0v', 'p1v', 'w0v', 'w1v', *(f'inf{i}' for i in range(MXU_INFLIGHT[u])))))
 STAGES = ('reads', 'responses', 'writes')
 EVENTS = {'vload': (32, 32, 32), 'vstore': (32, 32, 32), 'xlu': (32, 32, 32), 'vpu': (128, 128, 64)}
+# Replayed MXU operations: MxuOp code -> (mnemonic stem, (reads, responses, writes, compute beats)).
+MXU_OPS = {0: ('vmatpush.weight', (32, 32, 32, 0)), 4: ('vmatpop.bf16.acc', (32, 0, 64, 0)), 5: ('vmatmul', (32, 32, 32, 32))}
+UNCHECKED = object()  # a write whose value the validator cannot predict (matmul results; checked through pop and final memory)
+
+
+def event_counts(command):
+    return command['counts'] if command['engine'].startswith('mxu') else EVENTS[command['engine']] + (0,)
 # valid signal -> (engine, stage, port, address signals, data signal); VMEM addresses are (bank, row).
 PORT_EVENTS = {'vr': ('vload', 'reads', 0, ('vr_bank', 'vr_addr'), None), 'vresp': ('vload', 'responses', 0, None, 'vresp_data'),
                'mw': ('vload', 'writes', 0, ('mw_id', 'mw_row'), 'mw_data'), 'mr': ('vstore', 'reads', 0, ('mr_id', 'mr_row'), None),
@@ -150,11 +186,29 @@ PORT_EVENTS = {'vr': ('vload', 'reads', 0, ('vr_bank', 'vr_addr'), None), 'vresp
 for n in range(2):
     PORT_EVENTS.update({f'pr{n}': ('vpu', 'reads', n, (f'prid{n}', f'prrow{n}'), None), f'presp{n}': ('vpu', 'responses', n, None, f'pdata{n}'),
                         f'pw{n}': ('vpu', 'writes', n, (f'pwid{n}', f'pwrow{n}'), f'pwdata{n}')})
+# MXU events also name their resource; acc/weight ids are slots. MREG responses (m<u>_resp<p>) are derived:
+# MregFile answers a read on the next edge. Vector data are (signal prefix, lanes, bytes per lane).
+RESOURCE = {}
+for u in range(2):
+    m, kind = f'm{u}_', f'mxu{u}'
+    for n in range(2):
+        PORT_EVENTS.update({m + f'r{n}': (kind, 'reads', n, (m + f'rid{n}', m + f'rrow{n}'), None), m + f'resp{n}': (kind, 'responses', n, None, m + f'data{n}'),
+                            m + f'w{n}': (kind, 'writes', n, (m + f'wid{n}', m + f'wrow{n}'), m + f'wdata{n}')})
+        RESOURCE.update({m + f'r{n}': 'mreg', m + f'w{n}': 'mreg'})
+    PORT_EVENTS.update({m + 'ww': (kind, 'writes', 0, (m + 'ww_slot', m + 'ww_lane'), (m + 'wwd', 32, 1)),
+                        m + 'aw': (kind, 'writes', 0, (m + 'aw_acc', m + 'aw_row'), (m + 'awd', 32, 2)),
+                        m + 'as': (kind, 'reads', 0, (m + 'as_acc', m + 'as_row'), None)})
+    RESOURCE.update({m + 'ww': 'weight', m + 'aw': 'acc', m + 'as': 'acc'})
 
 
 def element(command, stage, port, n):
-    """(resource, id, row) of the n-th event of a stage on a port; VMEM ids are lines."""
+    """(resource, id, row) of the n-th event of a stage on a port; VMEM ids are lines, acc/weight ids slots."""
     engine = command['engine']
+    if engine.startswith('mxu'):
+        op = command['op']
+        if op == 0: return ('mreg', command['mreg'], n) if stage == 'reads' and port == 1 else ('weight', command['slot'], n) if port == 0 else None
+        if op == 5: return (('mreg', command['mreg'], n) if stage == 'reads' else ('acc', command['acc'], n)) if port == 0 else None
+        return ('acc', command['acc'], n) if stage == 'reads' and port == 0 else ('mreg', command['mreg'] + port, n) if stage == 'writes' else None
     if engine in ('vload', 'vstore'):
         return ('vmem', command['line'] + n, n) if (stage == 'writes') == (engine == 'vstore') else ('mreg', command['mreg'], n)
     if engine == 'xlu': return 'mreg', command['dst' if stage == 'writes' else 'src'], n
@@ -163,9 +217,13 @@ def element(command, stage, port, n):
     return 'mreg', base + n // 32, n % 32
 
 
-def produced(command, n):
+def produced(command, n, port=0):
     """Data the n-th write must carry, from the command's own observed responses; None if not yet available."""
     data = command['_data']
+    if command['engine'].startswith('mxu'):
+        if command['op'] == 5: return UNCHECKED
+        source = data[1] if command['op'] == 0 else [row[32 * port:32 * port + 32] for row in data[0]]
+        return source[n] if n < len(source) else None
     if command['engine'] in ('vload', 'vstore'): return data[0][n] if n < len(data[0]) else None
     if command['engine'] == 'xlu': return bytes(data[0][c][n] for c in range(32)) if len(data[0]) == 32 else None
     return bf16_power_product(data[0][n], data[1][n]) if n < min(map(len, data)) else None
@@ -216,11 +274,13 @@ def quiescent_state(v,d,busy,engine):
             'vpu_read_mask':sum(v('par'+str(n))<<n for n in range(4)),
             'vpu_write_mask':sum(v('paw'+str(n))<<n for n in range(4)),
             'mreg_read_busy':v('mreg_read_busy'),'mreg_write_busy':v('mreg_write_busy'),
+            **{f'mxu{u}_busy':BUSY[f'mxu{u}'](v) for u in range(2)},
+            **{f'mxu{u}_active_mask':sum(v(f'm{u}_act{d}{p}')<<(2*(d=='w')+p) for d in 'rw' for p in range(2)) for u in range(2)},
             'dma_scalar_mask':busy,'dma_engine_mask':engine,
             'dma_a_valid':d('av'),'dma_d_valid':d('dv')}
 
 def validate_compute_edges(samples,words,case):
-    vm,dram,expected_vm,expected_dram=memories(case);mreg={};starts=leaders(words)
+    vm,dram,expected_vm,expected_dram=memories(case);mreg={};mxu={};prior_reads={};starts=leaders(words)
     commands=[];instructions=[];endpoints=[];busy_events=[];entries=[]
     regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0;slot=False;redirect=None
     live={};pending=None;outstanding={};read_queue=[];a_hold=None;d_hold=None
@@ -234,12 +294,17 @@ def validate_compute_edges(samples,words,case):
         return vm[line]
     for sample in samples:
         edge=sample['edge'];last_edge=edge
+        derived={f'm{u}_resp{p}':prior_reads.get((u,p),0) for u in range(2) for p in range(2)}
+        prior_reads={(u,p):sample['values'].get(f'm{u}_r{p}') for u in range(2) for p in range(2)}
+        sample={'edge':edge,'values':{**sample['values'],**derived}}
         def v(key):
             value=sample['values'][key]
-            if type(value)!=int or not 0<=value<(1<<SIGNALS[key][1]): reject('unknown/out-of-range compute signal '+key)
+            if type(value)!=int or not 0<=value<(1<<(SIGNALS[key][1] if key in SIGNALS else 1)): reject('unknown/out-of-range compute signal '+key)
             return value
         def d(key): return v('dma_'+key)
-        def data(key): return v(key).to_bytes(32,'little')
+        def data(key):
+            if isinstance(key,tuple): return b''.join(v(f'{key[0]}{k}').to_bytes(key[2],'little') for k in range(key[1]))
+            return v(key).to_bytes(32,'little')
         def record(collection,**fields): collection.append({'edge':edge,**fields})
         def entry(pc):
             state=quiescent_state(v,d,busy,engine)
@@ -254,7 +319,7 @@ def validate_compute_edges(samples,words,case):
         if prev_busy!=(busy,engine): record(busy_events,scalar_mask=busy,engine_mask=engine);prev_busy=(busy,engine)
         if not began and not v('halt'):
             began=True
-            if busy or engine or d('av') or d('dv') or v('cmd') or v('xcmd') or v('pcmd') or any(f(v) for f in BUSY.values()): reject('nonquiescent observed execution entry')
+            if busy or engine or d('av') or d('dv') or v('cmd') or v('xcmd') or v('pcmd') or v('m0_cmd') or v('m1_cmd') or any(f(v) for f in BUSY.values()): reject('nonquiescent observed execution entry')
             if d('base')!=0: reject('START did not reset DMA base')
         if next_base is not None:
             if d('base')!=next_base: reject('CONFIG publication differs from captured scalar base')
@@ -266,11 +331,11 @@ def validate_compute_edges(samples,words,case):
         for kind in list(live):
             command=live[kind]
             if edge>command['edge'] and not BUSY[kind](v):
-                if tuple(len(command[s]) for s in STAGES)!=EVENTS[kind]: reject(kind+' released before its events completed')
+                if tuple(len(command[s]) for s in STAGES)+(len(command.get('compute',())),)!=event_counts(command): reject(kind+' released before its events completed')
                 command['release_edge']=edge;del live[kind]
         for kind,active in BUSY.items():
             if kind not in live and active(v): reject('unbound '+kind+' activity')
-        expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False}
+        expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False,'m0_cmd':False,'m1_cmd':False}
         if v('valid') and began and not ended:
             pc=v('pc');word=v('word')
             if pc!=pc_expected or pc>=len(words) or word!=words[pc]: reject('retired/held instruction differs from selected program words')
@@ -314,6 +379,16 @@ def validate_compute_edges(samples,words,case):
                     op=word>>25;lhs=(word>>13)&63;rhs=(word>>19)&63;dst=(word>>7)&63
                     if op!=3 or (v('pop'),v('psrc0'),v('psrc1'),v('pdst'))!=(op,lhs,rhs,dst) or any(i%2 for i in (lhs,rhs,dst)): reject('unsupported/mismatched paired VMUL command')
                     created={**common,'engine':'vpu','op':'mul.bf16','lhs':lhs,'rhs':rhs,'dst':dst};expected_cmd['pcmd']=True
+                elif opcode==0x77:
+                    op,unit=(word>>25)>>1,(word>>25)&1;vd=(word>>7)&63;vs1=(word>>13)&63;vs2=(word>>19)&63;u=f'm{unit}_'
+                    if op not in MXU_OPS: reject('unsupported MXU operation in the replay')
+                    fields={'mreg':vd if op==4 else vs1,'acc':vs2&1 if op==4 else vd&1,'slot':vd&1 if op==0 else vs2&1}
+                    if op==4 and (vd%2 or vs1): reject('unsupported BF16 pop operands')
+                    checked=('mreg','slot') if op==0 else ('mreg','acc') if op==4 else ('mreg','acc','slot')
+                    if v(u+'op')!=op or any(v(u+k)!=fields[k] for k in checked): reject('MXU command differs from the decoded instruction operands')
+                    stem,counts=MXU_OPS[op]
+                    created={**common,'engine':f'mxu{unit}','mnemonic':f'{stem}.mxu{unit}','op':op,**fields,'counts':counts,'compute':[],
+                             'sources':{fields['mreg']} if op!=4 else set(),'dests':{vd,vd+1} if op==4 else set()};expected_cmd[u+'cmd']=True
                 elif opcode==0x7b:
                     store=bool(word>>25);channel=(word>>12)&7
                     vmreg=rs1 if store else rd;addressreg=rd if store else rs1
@@ -349,7 +424,7 @@ def validate_compute_edges(samples,words,case):
                 command=live.get(kind)
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
                 n=sum(e.get('port',0)==port for e in command[stage])
-                if len(command[stage])>=EVENTS[kind][STAGES.index(stage)]: reject(f'excess {kind} {stage} event')
+                if len(command[stage])>=event_counts(command)[STAGES.index(stage)]: reject(f'excess {kind} {stage} event')
                 if stage=='responses':
                     if not command['_queue'][port]: reject(f'{kind} response without an outstanding read')
                     resource,identity,row,observed=command['_queue'][port].pop(0)
@@ -357,18 +432,35 @@ def validate_compute_edges(samples,words,case):
                     command['_data'][port].append(observed)
                 else:
                     place=element(command,stage,port,n)
-                    if place is None: reject(f'unsupported {kind} {key} event')
+                    if place is None or key in RESOURCE and place[0]!=RESOURCE[key]: reject(f'unsupported {kind} {key} event')
                     resource,identity,row=place
                     if tuple(v(k) for k in address)!=((identity>>13,identity&8191) if resource=='vmem' else (identity,row)): reject(f'{kind} {stage} address mismatch')
-                    if stage=='reads':
+                    if stage=='reads' and resource=='acc':
+                        observed=mxu.get((kind,'acc',identity,row)) or reject('read from an unwritten accumulator row')
+                        command['_data'][port].append(observed)
+                    elif stage=='reads':
                         observed=vm_line(identity) if resource=='vmem' else row_bytes(identity,row)
                         command['_queue'][port].append((resource,identity,row,observed))
                     else:
-                        observed=data(carried)
-                        if observed!=produced(command,n): reject(f'{kind} written data differs from its observed sources')
+                        observed=data(carried);expected=produced(command,n,port)
+                        if expected is not UNCHECKED and observed!=expected: reject(f'{kind} written data differs from its observed sources')
                         if resource=='vmem': vm_line(identity);vm[identity]=observed
-                        else: mreg[identity,row]=observed
-                record(command[stage],id=identity,row=row,data_hex=observed.hex(),**({'port':port} if kind=='vpu' else {}))
+                        elif resource=='mreg': mreg[identity,row]=observed
+                        else: mxu[kind,resource,identity,row]=observed
+                record(command[stage],id=identity,row=row,data_hex=observed.hex(),**({'port':port} if kind=='vpu' or kind.startswith('mxu') else {}),
+                       **({'resource':RESOURCE.get(key,'mreg')} if kind.startswith('mxu') else {}))
+        for u in range(2):
+            kind,m=f'mxu{u}',f'm{u}_';command=live.get(kind)
+            if v(m+'ar') or v(m+'al'): reject('unsupported MXU accumulator read/load event')
+            if v(m+'cv'):
+                if not command or command['op']!=5 or len(command['compute'])>=32: reject('unattributed or excess MXU compute beat')
+                n=len(command['compute']);act=data((m+'act',32,1))
+                if n>=len(command['_data'][0]) or act!=command['_data'][0][n] or v(m+'cslot')!=command['slot'] or v(m+'cacc'): reject('MXU compute beat differs from its activation row, slot or mode')
+                if any((kind,'weight',command['slot'],lane) not in mxu for lane in range(32)): reject('matmul reads an unwritten weight slot')
+                record(command['compute'],row=n)
+            for p in range(2):
+                for direction,allowed in (('r','sources'),('w','dests')):
+                    if v(f'{m}act{direction}{p}') and (not command or v(f'{m}act{direction}id{p}') not in command[allowed]): reject('MXU live resource operand mismatch')
         # Live markers name the active command's operands; they need not cover the launch edge.
         active=live.get('xlu')
         if v('xar') and (not active or v('xarid')!=active['src']) or v('xaw') and (not active or v('xawid')!=active['dst']): reject('XLU active operand mismatch')
@@ -441,8 +533,10 @@ def validate_compute_edges(samples,words,case):
     if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
     for command in commands:
         for key in [k for k in command if k.startswith('_')]: del command[key]
-        for field in ('reads','responses','writes'):
-            for event in command[field]: event['age']=event['edge']-command['edge']
+        for field in ('reads','responses','writes','compute'):
+            for event in command.get(field,()): event['age']=event['edge']-command['edge']
+        for key in ('sources','dests'):
+            if key in command: command[key]=sorted(command[key])
     concurrent=[[i,j] for i,a in enumerate(commands) for j,b in enumerate(commands[i+1:],i+1) if b['edge']<a['release_edge'] and a['edge']<b['release_edge']]
     return {'instructions':instructions,'block_entries':entries,'commands':commands,'concurrent_commands':concurrent,'endpoints':endpoints,'busy_transitions':busy_events,
             'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}

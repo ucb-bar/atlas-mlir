@@ -9,8 +9,10 @@ RESOLVER = 'atlas.op_timing.serialized.v1'
 SCHEMA = 'atlas.resolved_rtl_timing.v1'
 BRANCHES = {0: 'beq', 1: 'bne', 4: 'blt', 5: 'bge', 6: 'bltu', 7: 'bgeu'}
 # Observed engine -> (selected mnemonic, the engine's own hold unit).
-ENGINES = {'vload': ('vload', 'VLOAD path'), 'vstore': ('vstore', 'VSTORE path'), 'xlu': ('vtrpose.xlu', 'XLU'), 'vpu': ('vmul.bf16', 'VPU')}
-ENGINE_UNITS = {unit for _, unit in ENGINES.values()}
+ENGINES = {'vload': ('vload', 'VLOAD path'), 'vstore': ('vstore', 'VSTORE path'), 'xlu': ('vtrpose.xlu', 'XLU'), 'vpu': ('vmul.bf16', 'VPU'),
+           'mxu0': (None, 'MXU in-flight matmuls'), 'mxu1': (None, 'MXU in-flight matmuls')}  # an MXU owns both MXU units
+ENGINE_UNITS = {unit for name, unit in ENGINES.values() if name}
+MXU_STEMS = ('vmatpush.weight', 'vmatpush.acc.fp8', 'vmatpush.acc.bf16', 'vmatpop.fp8.acc', 'vmatpop.bf16.acc', 'vmatmul', 'vmatmul.acc')
 
 
 class BindingError(ValueError):
@@ -43,7 +45,7 @@ def branch_target(index, word):
 
 
 def is_command(mnemonic):
-    return mnemonic in {m for m, _ in ENGINES.values()} or mnemonic.startswith(('dma.load.ch', 'dma.store.ch'))
+    return mnemonic in {m for m, _ in ENGINES.values()} or mnemonic.startswith(('dma.load.ch', 'dma.store.ch')) or '.mxu' in mnemonic
 
 
 def decoded_operands(word):
@@ -68,6 +70,9 @@ def decoded_operands(word):
         mnemonic = 'vtrpose.xlu'; result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63)
     elif opcode == 0x57 and word >> 25 == 3:
         mnemonic = 'vmul.bf16'; result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
+    elif opcode == 0x77 and word >> 26 < len(MXU_STEMS):
+        mnemonic = f'{MXU_STEMS[word >> 26]}.mxu{(word >> 25) & 1}'
+        result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
     elif opcode == 0x7b and word >> 25 in (0, 1):
         mnemonic = 'dma.' + ('store' if word >> 25 else 'load') + '.ch' + str((word >> 12) & 7)
         result.update(rd=rd, rs1=rs1, rs2=rs2)
@@ -111,10 +116,22 @@ def bind_command(item, command, waits):
         require(len(match) == 1 and match[0]['word_index'] > command['word_index'] and match[0]['edge'] > issue, 'no matching WAIT after selected launch')
         require(all(issue <= e['edge'] < match[0]['edge'] for e in memory + command['requests'] + command['responses']), 'DMA effects do not drain before actual matching WAIT')
         return len(memory), {'word_index': command['word_index'], 'channel': channel, 'launch_edge': issue, 'matching_wait_edge': match[0]['edge'], 'observed_elapsed_edges': match[0]['edge'] - issue}
-    require(kind in ENGINES and mnemonic == ENGINES[kind][0], 'resolved operation differs from the observed engine')
-    mreg = lambda field, write: [('mreg', write, 32 * e['id'] + e['row'], e['edge']) for e in command[field]]
-    vmem_field = None
-    if kind in ('vload', 'vstore'):
+    require(kind in ENGINES and mnemonic == (ENGINES[kind][0] or command.get('mnemonic')), 'resolved operation differs from the observed engine')
+    mreg = lambda field, write: [('mreg', write, 32 * e['id'] + e['row'], e['edge']) for e in command[field] if e.get('resource', 'mreg') == 'mreg']
+    vmem_field = None; mxu = kind.startswith('mxu')
+    if mxu:
+        unit = int(kind[3:])
+        expected = {0: (command.get('slot'), command.get('mreg'), 0), 4: (command.get('mreg'), 0, command.get('acc')),
+                    5: (command.get('acc'), command.get('mreg'), command.get('slot'))}.get(command.get('op'))
+        require(expected is not None and (operands['rd'], operands['rs1'], operands['rs2']) == expected, 'resolved MXU operands mismatch')
+        slots = lambda field, write: [(e['resource'], write, (2 * unit + e['id']) * 32 + e['row'], e['edge']) for e in command[field] if e['resource'] in ('acc', 'weight')]
+        points = mreg('reads', False) + mreg('writes', True) + slots('reads', False) + slots('writes', True)
+        # A matmul's slot-wide weight ownership (step 0) must cover its observed compute beats.
+        owned = [a for a in footprint['accesses'] if a['resource'] == 'weight' and a['step'] == 0]
+        beats = [e['edge'] - issue for e in command['compute']]
+        require(len(owned) == (2 if beats else 0) and all(not a['write'] and a['count'] == 32 and a['first'] == (2 * unit + command['slot']) * 32 for a in owned) and
+                (not beats or min(a['age'] for a in owned) <= min(beats) and max(a['age'] for a in owned) >= max(beats)), 'weight-slot ownership does not cover the observed compute beats')
+    elif kind in ('vload', 'vstore'):
         require(operands['rd'] == command['mreg'], 'resolved VLS register mismatch')
         vmem_field = 'reads' if kind == 'vload' else 'writes'
         points = [('vmem', kind == 'vstore', e['id'], e['edge']) for e in command[vmem_field]] + mreg('writes' if kind == 'vload' else 'reads', kind == 'vload')
@@ -130,10 +147,11 @@ def bind_command(item, command, waits):
         points = mreg('reads', False) + mreg('writes', True)
     exported = []
     for stream in footprint['accesses']:
-        if stream['resource'] in ('mreg', 'vmem'): exported += finite_stream(stream, issue)
+        if stream['resource'] in ('mreg', 'vmem') or stream['resource'] in ('acc', 'weight') and stream['step']: exported += finite_stream(stream, issue)
+        else: require(stream['resource'] in ('xreg', 'ereg') or mxu and stream['resource'] == 'weight', 'unbound access resource ' + str(stream['resource']))
     require(sorted(exported) == sorted(points), 'observed access resource/address/age differs from resolver footprint')
-    reads = {(e.get('port', 0), e['id'], e['row']): e for e in command['reads']}
-    require(len(reads) == len(command['reads']) == len(command['responses']), 'incomplete or duplicate source stream')
+    reads = {(e.get('port', 0), e['id'], e['row']): e for e in command['reads'] if e.get('resource', 'mreg') in ('mreg', 'vmem')}
+    require(len(reads) == len(command['responses']) == len({(e.get('port', 0), e.get('resource'), e['id'], e['row']) for e in command['reads'] if e.get('resource', 'mreg') in ('mreg', 'vmem')}), 'incomplete or duplicate source stream')
     seen = set()
     for response in command['responses']:
         key = (response.get('port', 0), response['id'], response['row'])
@@ -141,17 +159,18 @@ def bind_command(item, command, waits):
         seen.add(key)
     age = lambda event: event['edge'] - issue
     release = integer(command['release_edge'] - issue, 'observed release age')
-    activity = max(map(age, command['reads'] + command['responses'] + command['writes']))
-    own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and h['index'] == 0]
-    require(len(own) == 1 and own[0]['from'] == 0 and release == integer(own[0]['to'], 'hold end') + 1, 'observed engine release differs from its own-unit hold end + 1')
+    activity = max(map(age, command['reads'] + command['responses'] + command['writes'] + command.get('compute', [])))
+    own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and (mxu or h['index'] == 0)]
+    require(len(own) == (2 if mxu else 1) and sorted(h['index'] for h in own) == list(range(len(own))) and
+            all(h['from'] == 0 and release == integer(h['to'], 'hold end') + 1 for h in own), 'observed engine release differs from its own-unit hold end + 1')
     vmem_ages = [age(e) for e in command[vmem_field]] if vmem_field else []
     for hold in footprint['holds']:
-        if hold is own[0]: continue
+        if any(hold is h for h in own): continue
         if hold['unit'] in ENGINE_UNITS: require(hold['from'] == 0 and integer(hold['to'], 'hold end') >= release - 1, 'policy ' + hold['unit'] + ' hold ends before the engine activity')
         elif hold['unit'] == 'VMEM bank': require(vmem_ages and hold['from'] <= min(vmem_ages) and hold['to'] >= max(vmem_ages), 'VMEM bank hold does not cover the observed bank accesses')
         else: raise BindingError('unbound hold unit ' + str(hold['unit']))
-    sources = command['reads'] + command['responses'] if kind != 'vload' else []
-    dests = command['writes'] if kind != 'vstore' else []
+    sources = [e for e in command['reads'] + command['responses'] if e.get('resource', 'mreg') == 'mreg'] if kind != 'vload' else []
+    dests = [e for e in command['writes'] if e.get('resource', 'mreg') == 'mreg'] if kind != 'vstore' else []
     require(sorted(footprint['mreg_reads']) == sorted({e['id'] for e in sources}) and sorted(footprint['mreg_writes']) == sorted({e['id'] for e in dests}), 'exported MREG lifetime registers differ from observed streams')
     require(footprint['read_release'] >= max(map(age, sources), default=0) and footprint['write_release'] >= max(map(age, dests), default=0) and integer(footprint['done_age'], 'done age') >= max(activity, release - 1), 'exported lifetime ends before an observed access')
     return len(points), None

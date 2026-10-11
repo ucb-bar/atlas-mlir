@@ -71,6 +71,19 @@ class PortableTest(unittest.TestCase):
         with self.assertRaises(REPLAY.ReplayError):
             REPLAY.image(dataclasses.replace(cases["xlu"], expect=lambda vm, dram: CASES.put(vm, 256, bytes(32))))
 
+    def test_mxu_reference_is_exact_and_independent(self):
+        from ee290_replay_cases import mxu
+        result = mxu.reference(mxu.ACTIVATION, mxu.WEIGHTS)
+        # C[0,0] = A[0,0] W[0,0] = 0.5 * 0.25; C[0,1] = A[0,5] W[1,5] = 1 * -0.25 (hand-computed).
+        self.assertEqual([int.from_bytes(result[o:o + 2], "little") for o in (0, 2)], [0x3e00, 0xbe80])
+        self.assertEqual(len({result[32 * r:32 * r + 32] + result[1024 + 32 * r:1056 + 32 * r] for r in range(32)}), 32)  # distinct rows
+        transposed = bytes(mxu.WEIGHTS[32 * k + j] for j in range(32) for k in range(32))
+        self.assertNotEqual(mxu.reference(mxu.ACTIVATION, transposed), result)
+        with self.assertRaises(ValueError): mxu.exact_bf16(0x10001)  # needs rounding
+        with self.assertRaises(ValueError): mxu.decode(0x7f)
+        mnemonic, operands = BIND.decoded_operands(0x14000077 | 1 << 25 | 1 << 19 | 1 << 7)
+        self.assertEqual((mnemonic, operands["rd"], operands["rs1"], operands["rs2"]), ("vmatmul.mxu1", 1, 0, 1))
+
     def test_vcd_samples_values_before_the_rising_edge(self):
         cycles = [{"pc": 4, "word": 0xdead}, {"pc": 8, "word": 0xbeef}, {"pc": 12, "word": 0}]
         samples = list(REPLAY.vcd_edges(vcd(cycles), "TOP.AtlasCore"))
@@ -108,7 +121,8 @@ class PortableTest(unittest.TestCase):
 @unittest.skipUnless(MODEL and BIN and FACTS, "requires a Verilated AtlasCore, compiler binaries and facts")
 class VerilatorReplayTest(unittest.TestCase):
     NAMES = ("vmul_delay", "vmul_schedule", "dma_xlu_delay", "dma_xlu_schedule", "loop_delay", "loop_schedule",
-             "dma_loop_schedule", "diamond_taken_delay", "diamond_fall_schedule", "overlap_vls", "overlap_vpu")
+             "dma_loop_schedule", "diamond_taken_delay", "diamond_fall_schedule", "overlap_vls", "overlap_vpu",
+             "mxu0_tile_delay", "mxu1_tile_schedule")
 
     @classmethod
     def setUpClass(cls):
@@ -285,6 +299,57 @@ class VerilatorReplayTest(unittest.TestCase):
                        lambda e: footprint(e).__setitem__("done_age", 80)):
             changed = copy.deepcopy(export); mutate(changed)
             self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)
+
+    def test_mxu_events_match_the_facts(self):
+        facts = {b["name"]: b for b in json.loads(Path(FACTS).read_text())["op_timing"]}
+        for name, unit in (("mxu0_tile_delay", 0), ("mxu1_tile_schedule", 1)):
+            commands = [c for c in self.cases[name][2]["commands"] if c["engine"] == f"mxu{unit}"]
+            self.assertEqual([c["mnemonic"] for c in commands], [f"vmatpush.weight.mxu{unit}", f"vmatmul.mxu{unit}", f"vmatpop.bf16.acc.mxu{unit}"])
+            for command, operation, group, field, resource in ((commands[0], "push_weight", "weight_write", "writes", "weight"),
+                                                               (commands[1], "matmul", "acc_write", "writes", "acc"),
+                                                               (commands[1], "matmul", "compute", "compute", None),
+                                                               (commands[2], "pop_acc_bf16", "acc_store", "reads", "acc")):
+                with self.subTest(name=name, group=group):
+                    event = facts[f"mxu{unit}.{operation}"]["events"][group]
+                    ages = [e["age"] for e in command[field] if resource in (None, e.get("resource"))]
+                    self.assertEqual((min(ages), max(ages), len(ages)), (event["first_age"], event["last_age"], event["count"]))
+
+    def test_mxu_trace_mutations_are_rejected(self):
+        mutations = [  # shifted accumulator write row, wrong slots, missing compute beat, corrupted accumulator data, early pop data
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 3, "m0_aw_row", 4),
+            ("mxu1_tile_schedule", lambda v: v["m1_ww"] and v["m1_ww_lane"] == 7, "m1_ww_slot", 0),
+            ("mxu1_tile_schedule", lambda v: v["m1_cv"], "m1_cslot", 0),
+            ("mxu1_tile_schedule", lambda v: v["m1_as"] and v["m1_as_row"] == 9, "m1_as_acc", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_cv"], "m0_cv", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 11, "m0_awd3", lambda x: x ^ 1),
+            ("mxu0_tile_delay", lambda v: v["m0_w1"] and v["m0_wrow1"] == 2, "m0_wdata1", lambda x: x ^ 1 << 40),
+            ("mxu1_tile_schedule", lambda v: v["m1_cmd"] and v["m1_op"] == 5, "m1_slot", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 31, "m0_aw", 0)]
+        for name, predicate, key, value in mutations:
+            with self.subTest(name=name, key=key):
+                self.mutate(name, lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
+
+    def test_mxu_binding_mutations_are_rejected(self):
+        name = "mxu0_tile_delay"; export, events = self.cases[name][3], self.cases[name][2]
+        index = lambda e, stem: next(i["word_index"] for i in e["instructions"] if i["mnemonic"] == stem + ".mxu0")
+        footprint = lambda e, stem: e["instructions"][index(e, stem)]["footprint"]
+        acc = lambda e: next(a for a in footprint(e, "vmatmul")["accesses"] if a["resource"] == "acc")
+        for position, mutate in enumerate([lambda e: acc(e).__setitem__("age", acc(e)["age"] + 1),            # accumulator write shifted
+                                           lambda e: acc(e).__setitem__("first", acc(e)["first"] + 32),         # wrong accumulator slot
+                                           lambda e: e["instructions"][index(e, "vmatmul")]["operands"].__setitem__("rs2", 1),
+                                           lambda e: footprint(e, "vmatmul")["holds"][1].__setitem__("to", 95),  # own hold on the other MXU
+                                           lambda e: next(h for h in footprint(e, "vmatpop.bf16.acc")["holds"] if h["unit"] == "VPU").__setitem__("to", 31),
+                                           lambda e: next(a for a in footprint(e, "vmatmul")["accesses"] if a["resource"] == "weight" and a["age"]).__setitem__("age", 31),
+                                           lambda e: footprint(e, "vmatpush.weight")["accesses"][1].__setitem__("resource", "acc")]):
+            changed = copy.deepcopy(export); mutate(changed)
+            with self.subTest(export=position): self.rejects(name, export=changed)
+        matmul = lambda o: next(c for c in o["commands"] if c["engine"] == "mxu0" and c["op"] == 5)
+        for position, mutate in enumerate([lambda o: matmul(o)["writes"][0].__setitem__("edge", matmul(o)["writes"][0]["edge"] + 1),
+                                           lambda o: matmul(o)["writes"][4].__setitem__("id", 1),
+                                           lambda o: matmul(o).__setitem__("release_edge", matmul(o)["release_edge"] + 1),
+                                           lambda o: matmul(o)["compute"].append({"edge": matmul(o)["release_edge"] + 1, "row": 32})]):
+            changed = copy.deepcopy(events); mutate(changed)
+            with self.subTest(events=position): self.rejects(name, events=changed)
 
     def test_dma_completion_stays_dynamic(self):
         name = "dma_xlu_schedule"; export, events = self.cases[name][3], self.cases[name][2]
