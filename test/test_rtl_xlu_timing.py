@@ -37,7 +37,7 @@ class SelectedXLUTimingTest(unittest.TestCase):
                     self.assertEqual(footprint["read_release"], record["events"]["read"]["last_age"] +
                                      record["assumptions"]["scratchpad_read_latency"])
                     self.assertEqual({h["unit"]: h["to"] for h in footprint["holds"]},
-                                     {u: busy for u in ("XLU", "VPU", "VLOAD path", "VSTORE path")})
+                                     {u: busy for u in ("XLU", "VPU")})
                     self.assertNotEqual(run(EMIT, without_delays(result.stdout)).returncode, 0)
 
     def test_facts_drive_the_busy_boundary(self):

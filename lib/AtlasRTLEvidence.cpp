@@ -111,25 +111,23 @@ struct Fill {
   void bank(int line, const char *key) {
     f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
   }
-  void hold(std::initializer_list<Unit> units, int from, int to, int index = 0) {
+  void hold(std::initializer_list<Unit> units, int from, int to) {
     if (from <= to)
-      for (Unit unit : units) f.holds.push_back({unit, index, from, to});
+      for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
-  // VPU and XLU exclude every engine over their busy windows; VLOAD and VSTORE
-  // hold only their own path, so they overlap on distinct banks (VmemBank holds
-  // order a shared bank). The VPU issue slot is held as VPU 0 by VLOAD and XLU
-  // and as VPU 1 by VSTORE. A VPU keeps both only until next_issue_age, which
-  // admits the next VPU command, and keeps the other engines out until
-  // first_free_age through its VLS path holds.
+  // VLOAD and VSTORE hold only their own path, so they overlap each other
+  // (VmemBank holds order a shared bank) and the VPU and XLU, which meet them
+  // only at MREG ports and release ages. The VPU and XLU exclude each other: a
+  // VPU keeps the VPU slot until next_issue_age, which admits the next VPU
+  // command, and the XLU until first_free_age; the XLU holds both throughout.
   void engine(Unit unit, int busy) {
-    hold({unit, Unit::Vpu, Unit::VloadPath, Unit::VstorePath}, 0, busy);
+    hold({unit, Unit::Vpu}, 0, busy);
     f.serializeWithDMA = true;
   }
   void vpu(int busy) {
     int issued = issueEnd(busy);
-    hold({Unit::Vpu}, 0, issued, 0);
-    hold({Unit::Vpu}, 0, issued, 1);
-    hold({Unit::VloadPath, Unit::VstorePath}, issued + 1, busy);
+    hold({Unit::Vpu}, 0, issued);
+    hold({Unit::Xlu}, issued + 1, busy);
     f.serializeWithDMA = true;
   }
   Footprint done(int busy) {
@@ -373,11 +371,12 @@ llvm::json::Object RTLEvidence::applicability() const {
           "caller_supplies_required_initial_operand_data",
           "engine_timing_is_data_independent"}},
       {"admission", Object{
-          {"selected_engines_serialized", true}, {"vls_paths_serialized", false},
+          {"selected_engines_serialized", false}, {"vls_paths_serialized", false},
           {"minimum_vls_issue_gap", firstFree("vlsu.vload")},
           {"vload_vstore_overlap", "own_path_holds_with_vmem_bank_holds"},
+          {"vls_overlaps_vpu_and_xlu", "mreg_port_and_release_rules_only"},
           {"vpu_to_vpu_issue_gap", "next_issue_age"},
-          {"vpu_to_other_engine_issue_gap", "first_free_age"},
+          {"vpu_to_xlu_issue_gap", "first_free_age"},
           {"xlu_first_free_age", firstFree("xlu.transpose")},
           {"mxu_commands_serialized_with_both_mxus_and_vector_engines", true},
           {"mxu_weight_slot_retained_by_matmul", "issue_through_last_accumulator_write"},
@@ -534,7 +533,6 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     fill.access(rows, Res::MReg, load, in.rd * 32, 32);
     int busy = fill.busyEnd();
     fill.hold({load ? Unit::VloadPath : Unit::VstorePath}, 0, busy);
-    fill.hold({Unit::Vpu}, 0, busy, load ? 0 : 1);
     fill.bank(int(line), vmem);
     if (load) {
       f.mregWrites = {in.rd};

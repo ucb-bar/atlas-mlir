@@ -3,7 +3,7 @@
 Each case runs both consumers with full issue-offset binding; `check` requires that the intended overlap
 occurred in the decoded events.
 """
-from . import END, Case, add, filler, overlapping, put, tile, upper, vload, vmul, vstore
+from . import END, Case, add, filler, overlapping, put, tile, transpose, upper, vload, vmul, vstore, xlu
 from .compute import bf16_pairs, products, raw_tiles
 
 BANK1 = 8192  # first line of VMEM bank 1
@@ -42,7 +42,31 @@ def copy(destination):
 def copied(line): return lambda vm, dram: put(vm, line, tile(vm, 0, 128))
 
 
+# A VMUL with an unrelated VLOAD from bank 1 issued under it.
+VPU_LOAD = (add(6, 0), upper(7, 16), *(vload(m, 6, 8 * m) for m in range(4)), vmul(4, 0, 2), vload(6, 7),
+            vstore(4, 6, 32), vstore(5, 6, 40), vstore(6, 6, 48))
+SECOND = bytes((29 * i + 5) & 255 for i in range(1024))
+
+
+def vpu_load(vm, dram): products(vm, dram); put(vm, 192, tile(vm, BANK1))
+
+
+# Software-pipelined load-transpose-store: tile t's transpose runs under tile t+1's load and tile t's store
+# under tile t+1's transpose.
+XLU_PIPE = (add(6, 0), upper(7, 16), vload(0, 6, 0), vload(1, 6, 8), xlu(16, 0), vstore(16, 7, 0),
+            vload(2, 6, 16), xlu(17, 1), vstore(17, 7, 8), xlu(18, 2), vstore(18, 7, 16))
+
+
+def transposed(vm, dram):
+    for t in range(3): put(vm, BANK1 + 32 * t, transpose(tile(vm, 32 * t)))
+
+
 CASES = {
+    'relax_vpu_under_vload': Case(VPU_LOAD + END, {0: bf16_pairs(), BANK1: SECOND}, vpu_load,
+                                  {'vload': 5, 'vpu': 1, 'vstore': 3}, check=lambda events: overlapping(events, 'vpu', 'vload')),
+    'relax_xlu_pipeline': Case(XLU_PIPE + END, {0: raw_tiles(), BANK1: filler(3072)}, transposed,
+                               {'vload': 3, 'xlu': 3, 'vstore': 3},
+                               check=lambda events: overlapping(events, 'xlu', 'vload') and overlapping(events, 'xlu', 'vstore')),
     'relax_copy_banks': Case(copy(upper(7, 16)) + END, {0: raw_tiles(), BANK1: filler(4096)}, copied(BANK1),
                              {'vload': 4, 'vstore': 4}, check=lambda events: overlapping(events, 'vload', 'vstore')),
     'relax_copy_same_bank': Case(copy(add(7, 1024)) + END, {0: raw_tiles()}, copied(128), {'vload': 4, 'vstore': 4},

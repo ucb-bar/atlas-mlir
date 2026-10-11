@@ -1,9 +1,9 @@
 """Selected issue gaps between VLS, VPU and XLU operations (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING).
 
-Every gap comes from the facts: a VPU admits the next VPU command at its next_issue_age and keeps the
-other engines out until its first_free_age; VLOAD and VSTORE overlap each other and keep the VPU and XLU
-out until their first_free_age, as the XLU does every engine. An MXU command excludes every engine through
-its last event. Operands are disjoint (MREG physical banks, VMEM banks), so only engine admission decides.
+Every gap comes from the facts: a VPU admits the next VPU command at its next_issue_age and the XLU at
+its first_free_age, and the XLU keeps both out until its first_free_age. VLOAD and VSTORE hold only their
+own path and overlap each other, the VPU and the XLU. An MXU command excludes every engine through its last
+event. Operands are disjoint (MREG physical banks, VMEM banks), so only engine admission decides.
 """
 import functools
 import tempfile
@@ -61,8 +61,8 @@ def expected_gap(document, first, second):
         return first_free(document, first)
     if first.startswith("vpu.") and second.startswith("vpu."):
         return block(document, first)["next_issue_age"]
-    if {first, second} == {"vlsu.vload", "vlsu.vstore"}:
-        return 1  # each holds only its own path; banks and MREGs are disjoint
+    if first.startswith("vlsu.") != second.startswith("vlsu.") or {first, second} == {"vlsu.vload", "vlsu.vstore"}:
+        return 1  # VLOAD, VSTORE and the VPU/XLU pair overlap; banks and MREGs are disjoint
     return first_free(document, first)
 
 
@@ -77,15 +77,24 @@ def cycles(printed):
     return next(cycle for op, _, cycle in issue_cycles(printed) if op == "trap")
 
 
-def tile_kernel(tiles=4):
+def tile_kernel(tiles=4, pipelined=False):
     """Per tile: load two BF16 pairs, add them, store the sum pair. Tile t uses m(8t)..m(8t+5), reads VMEM
-    bank t%3 and writes bank 3+t%3 (a later tile on the same bank uses the next lines)."""
-    ops = []
+    bank t%3 and writes bank 3+t%3 (a later tile on the same bank uses the next lines). Pipelined, tile t+1's
+    loads precede tile t's add in program order."""
+    setup, loads, compute = [], [], []
     for t in range(tiles):
         r, src, dst, line = 8 * t, 10 + 2 * t, 11 + 2 * t, 128 * (t // 3)
-        ops += [*word_base(src, (t % 3) * BANK_WORDS + line * 8), *word_base(dst, (3 + t % 3) * BANK_WORDS + line * 8)]
-        ops += [vls("vload", r + k, src, 32 * k) for k in range(4)]
-        ops += [vmul(r, r + 2, r + 4, "add"), vls("vstore", r + 4, dst), vls("vstore", r + 5, dst, 32)]
+        setup += [*word_base(src, (t % 3) * BANK_WORDS + line * 8), *word_base(dst, (3 + t % 3) * BANK_WORDS + line * 8)]
+        loads.append([vls("vload", r + k, src, 32 * k) for k in range(4)])
+        compute.append([vmul(r, r + 2, r + 4, "add"), vls("vstore", r + 4, dst), vls("vstore", r + 5, dst, 32)])
+    ops = list(setup)
+    if pipelined:
+        ops += loads[0]
+        for t in range(tiles):
+            ops += (loads[t + 1] if t + 1 < tiles else []) + compute[t]
+    else:
+        for t in range(tiles):
+            ops += loads[t] + compute[t]
     return ops + [HALT]
 
 
@@ -97,7 +106,9 @@ def copy_kernel(tiles=4):
     return ops + [HALT]
 
 
-KERNELS = {"four-tile load-load-add-store": tile_kernel, "four-tile copy": copy_kernel}
+KERNELS = {"four-tile load-load-add-store": tile_kernel,
+           "four-tile pipelined load-load-add-store": lambda: tile_kernel(pipelined=True),
+           "four-tile copy": copy_kernel}
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -128,9 +139,11 @@ class SelectedOverlapTest(unittest.TestCase):
                 with self.subTest(pair=name, consumer=consumer):
                     result = run(OPT, program([*setup, a, b, HALT]), selection(), consumer, VERIFY)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    gap = issue_gap(result.stdout, a, b)
-                    if consumer == CONSUMERS[0] or gap > 0:  # the scheduler may issue b first
-                        self.assertEqual(gap, expected_gap(document, fa, fb))
+                    gap, expected = issue_gap(result.stdout, a, b), expected_gap(document, fa, fb)
+                    if consumer == CONSUMERS[0]:
+                        self.assertEqual(gap, expected)
+                    elif gap > 0:  # the scheduler may issue b first, or b's scalar setup between them
+                        self.assertTrue(expected <= gap <= expected + len(setup), (gap, expected))
 
     def test_vpu_issue_window_fails_closed(self):
         setup = []
@@ -145,8 +158,7 @@ class SelectedOverlapTest(unittest.TestCase):
                         self.assertIn(f"{RESOLVER}: vpu.add: facts block lacks a next_issue_age", result.stderr)
             # A later next_issue_age moves only the VPU->VPU boundary.
             path = facts_variant(directory, lambda d: block(d, "vpu.add").update(next_issue_age=60))
-            vstore = SECOND["vstore"]
-            for b, setup, boundary in ((relu, setup, 60), (vstore[2], vstore[1], 66)):
+            for b, boundary in ((relu, 60), (SECOND["xlu"][2], 66)):
                 with self.subTest(second=b[0]):
                     self.assertEqual(self.verify(gapped(setup, add, b, boundary), path).returncode, 0)
                     self.assertNotEqual(self.verify(gapped(setup, add, b, boundary - 1), path).returncode, 0)

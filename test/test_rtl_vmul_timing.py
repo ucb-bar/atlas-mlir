@@ -81,11 +81,10 @@ class SelectedVmulTimingTest(unittest.TestCase):
                                             if a["resource"] == "mreg"), expected_mreg_accesses(record))
                     self.assertEqual(footprint["done_age"], busy)
                     self.assertEqual(footprint["write_release"], record["next_issue_age"])
-                    # The VPU slot frees at next_issue_age; the VLS paths stay held until first_free_age.
+                    # The VPU slot frees at next_issue_age; the XLU stays excluded until first_free_age.
                     issued = record["next_issue_age"] - 1
                     self.assertEqual({h["unit"]: (h["from"], h["to"]) for h in footprint["holds"]},
-                                     {"VPU": (0, issued), **{u: (issued + 1, busy) for u in ("VLOAD path", "VSTORE path")
-                                                             if issued < busy}})
+                                     {"VPU": (0, issued), **({"XLU": (issued + 1, busy)} if issued < busy else {})})
                     if mnemonic == "vmul.bf16":
                         self.assertEqual(footprint["read_release"], record["events"]["read0"]["last_age"] +
                                          record["assumptions"]["scratchpad_read_latency"])
@@ -104,19 +103,25 @@ class SelectedVmulTimingTest(unittest.TestCase):
                 self.assertIn(RESOLVER, self.check([op, HALT], False, CONSUMERS[0]).stderr)
 
     def test_facts_drive_the_serialized_boundary(self):
-        # The next VPU command may issue at next_issue_age, another engine at first_free_age.
+        # The next VPU command may issue at next_issue_age and the XLU at first_free_age; a VSTORE waits only
+        # for the data it reads.
+        from test_rtl_xlu_timing import transpose
         record = block(facts(), "vpu.mul")
-        for next_op, boundary in ((vmul(6, 8, 10), record["next_issue_age"]),
-                                  (vls("vstore", 4), record["first_free_age"])):
-            for gap in (boundary - 1, boundary):
+        written = max(record["next_issue_age"], record["events"]["write0"]["last_age"]) + 1
+        for next_op, boundary, reason in ((vmul(6, 8, 10), record["next_issue_age"], "serialized engine admission"),
+                                          (transpose(8, 12), record["first_free_age"], "serialized engine admission"),
+                                          (vls("vstore", 4), written, "m4 reserved for writing"),
+                                          (vls("vstore", 12), 1, None)):
+            for gap in (boundary - 1, boundary) if boundary > 1 else (boundary,):
                 with self.subTest(gap=gap, next_op=next_op):
-                    result = self.check([addi(6, 0, 0), vmul(), delay(gap - 2), next_op, delay(64), nop(), HALT],
+                    between = [] if gap == 1 else [delay(gap - 2)]
+                    result = self.check([addi(6, 0, 0), vmul(), *between, next_op, delay(64), nop(), HALT],
                                         gap >= boundary, VERIFY)
                     if gap < boundary:
-                        self.assertIn("serialized engine admission", result.stderr)
+                        self.assertIn(reason, result.stderr)
         with tempfile.TemporaryDirectory(prefix="atlas-vpu-facts-") as directory:
             slower = facts_variant(directory, lambda d: block(d, "vpu.mul").update(first_free_age=70, next_issue_age=69))
-            for next_op, boundary in ((vmul(6, 8, 10), 69), (vls("vstore", 4), 70)):
+            for next_op, boundary in ((vmul(6, 8, 10), 69), (transpose(8, 12), 70)):
                 for gap in (boundary - 1, boundary):
                     with self.subTest(gap=gap, next_op=next_op):
                         self.check([addi(6, 0, 0), vmul(), delay(gap - 2), next_op, delay(68), nop(), HALT],

@@ -37,7 +37,8 @@ atlas-emit --rtl-timing-json final.mlir > resolved.json
 
 ## Scope and assumptions
 
-- Each record describes one operation issued to an idle engine. Overlap between operations, control flow and DMA lifetimes follow the compiler's conservative serialization.
+- Each record describes one operation issued to an idle engine. Overlap between operations is admitted only where assertion-checked pair sweeps show it (see below); control flow and DMA lifetimes follow the compiler's conservative rules.
+- Engine admission comes from facts-derived unit holds. VLOAD and VSTORE each hold only their own path, so they overlap; same-bank order comes from the VMEM bank windows (load→store 30, store→load 34), and MREG port and release rules are unchanged. A VPU admits the next VPU command at `next_issue_age` and the XLU at `first_free_age`; the VPU and XLU exclude each other and the MXU, but overlap VLS subject to MREG port (`reg % 32`) and release rules. The pair sweeps behind each rule run on AtlasCore with all 177 RTL assertions checked, and `test/test_rtl_gap_coverage.py` requires every compiler gap to be at least the swept minimum.
 - On-chip VMEM and MREG reads take one cycle: the IR declares them `seq.firmem 1, 1`, and the LSU is always granted ahead of DMA and TileLink. Records report this as `scratchpad_read_latency`.
 - External memory and DMA completion are not modeled; they are variable and governed by `dma.wait`.
 - Registers without a reset value are accepted only when listed in a spec's `unreset`; every control output must still be known at every age.
@@ -52,7 +53,7 @@ A DMA launch captures its scalar operands and the global DRAM base, so scalar re
 
 ## Results
 
-Computed from the debug lowering of the selected FIRRTL; all equal the compiler's built-in rules.
+Computed from the debug lowering of the selected FIRRTL; all equal the compiler's built-in rules. With the relaxed admission rules, a pipelined load-load-add-store tile drops from 1120 to 916 cycles with delay insertion (1112 to 704 scheduled), a four-tile copy from 284 to 182 (282 to 178), and load-transpose-store from 480 to 344 (546 to 337).
 
 | Operation | Reads | Writes | Next issue / free |
 | --- | --- | --- | --- |
@@ -72,5 +73,7 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 
 - Same-MXU pipelining. The RTL allows, for example, MXU1 matmul→matmul 32 cycles apart, but some gaps (such as MXU0 matmul→weight push at 63) are not single-operation facts. Overlapping MXU commands needs pair results as a selected input and holds that may overlap within one MXU.
 - Loop-varying addresses (per-state register enumeration is the next step) and engine work crossing block boundaries.
-- Overlap rules in the compiler. The extractor's pair recipe (`tools/rtl_extract/pairs.py`) computes minimum issue gaps between operations, for example 1 for vload→vstore on distinct banks and exp→relu, and the system spec executes every AtlasCore assertion during the sweep, but the compiler still serializes.
+- VPU two-slot overlap (exp→relu is safe at gap 1, but a second VPU command still waits for `next_issue_age`), cross-engine overlap with the MXU, and DMA overlap with other engines or more than one pending transfer.
+- `next_issue_age` admission is swept for nine VPU-first pairs, not the full 29×29 table; it rests on each operation's own issue-busy bit being the last to clear (`VectorFSM.canIssueOp`).
+- A VLOAD writing an MREG bank another engine is still reading is not asserted by the RTL; the compiler's release rules order it.
 - Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.
