@@ -1,7 +1,14 @@
-# Vector LSU pairs on distinct VMEM banks and MREGs. Engine-local evidence only: the VMEM same-bank and MREG
-# per-bank port assertions sit outside the LSU and stay with the compiler's bank and port reservations.
+# Vector LSU pairs on distinct VMEM banks and MREGs, checking the LSU's own assertions (path busy, alignment,
+# same-bank VLOAD/VSTORE). VMEM, MregFile and frontend assertions run in the system pairs (core.yaml).
 engine: vlsu
 description: VLOAD/VSTORE issued back to back on the LSU's separate load and store paths.
+invariants:
+  exclude:
+    - message: "^ASSERT FAIL: scalar (load|store)"
+      reason: the scalar command port is not driven by the vlsu spec; scalar-path checks run in core.yaml
+shared:
+  - {input: io_cmd_valid, reason: one command port; two commands never share an age}
+  - {input: io_cmd_bits_op, reason: opcode of that command}
 pairs:
   vload_vstore:
     first: vload
@@ -24,7 +31,7 @@ pairs:
 # Regression values used only by tests (full sweeps); the extractor never reads them. Gap 34 of a same-path pair is
 # blocked only by the busy guard: the events would be unchanged.
 expect:
-  vload_vstore: {min_gap: 1, stable_gap: 1}
-  vstore_vload: {min_gap: 1, stable_gap: 1}
-  vload_vload: {min_gap: 35, stable_gap: 35}
-  vstore_vstore: {min_gap: 35, stable_gap: 35}
+  vload_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_vload: {min_gap: 35, stable_gap: 35, rejected_by: VLOAD issued while VLOAD path is busy}
+  vstore_vstore: {min_gap: 35, stable_gap: 35, rejected_by: VSTORE issued while VSTORE path is busy}

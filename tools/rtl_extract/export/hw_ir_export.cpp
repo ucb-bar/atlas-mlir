@@ -15,6 +15,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <set>
 #include <map>
 #include <string>
@@ -29,7 +30,12 @@ template <typename T> static std::string print(T value) {
   return text;
 }
 
-static llvm::json::Object exportModule(hw::HWModuleOp mod) {
+static const std::set<std::string> assertionKinds = {
+    "sv.error", "sv.fatal", "sv.assert", "sv.assume", "sv.assert.concurrent",
+    "sv.assume.concurrent", "verif.assert", "verif.assume", "verif.clocked_assert",
+    "verif.clocked_assume"};
+
+static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
   llvm::DenseMap<Operation *, std::string> opIds;
   llvm::DenseMap<Value, std::string> valueIds;
   llvm::json::Array arguments;
@@ -95,9 +101,24 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod) {
     }
     operations.push_back(std::move(item));
   });
-  return llvm::json::Object{{"name", mod.getName()}, {"location", print(mod.getLoc())},
+  llvm::json::Object result{{"name", mod.getName()}, {"location", print(mod.getLoc())},
           {"ports", std::move(ports)}, {"arguments", std::move(arguments)},
           {"operations", std::move(operations)}};
+  if (!assertions) return result;
+  // Each assertion op with its enclosing region ops, outermost first (the module itself excluded).
+  llvm::json::Array found;
+  mod->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!assertionKinds.count(op->getName().getStringRef().str())) return;
+    llvm::SmallVector<llvm::json::Value> chain;
+    for (Operation *child = op; child->getParentOp() != mod.getOperation(); child = child->getParentOp())
+      chain.push_back(llvm::json::Object{{"op", opIds.lookup(child->getParentOp())},
+                                         {"region", child->getParentRegion()->getRegionNumber()}});
+    std::reverse(chain.begin(), chain.end());
+    found.push_back(llvm::json::Object{{"op", opIds.lookup(op)},
+                                       {"parents", llvm::json::Array(chain)}});
+  });
+  result["assertions"] = std::move(found);
+  return result;
 }
 
 template <typename Module> static llvm::json::Object exportDeclaration(Module mod) {
@@ -114,8 +135,10 @@ template <typename Module> static llvm::json::Object exportDeclaration(Module mo
 }
 
 int main(int argc, char **argv) {
+  bool assertions = argc > 1 && StringRef(argv[1]) == "--assertions";
+  if (assertions) --argc, ++argv;
   if (argc < 3) {
-    llvm::errs() << "usage: hw_ir_export INPUT.mlir MODULE [MODULE ...]\n";
+    llvm::errs() << "usage: hw_ir_export [--assertions] INPUT.mlir MODULE [MODULE ...]\n";
     return 2;
   }
   DialectRegistry registry;
@@ -147,7 +170,7 @@ int main(int argc, char **argv) {
   });
   input->walk([&](hw::HWModuleOp mod) {
     inventory.push_back(mod.getName());
-    if (requested.erase(mod.getName().str())) modules.push_back(exportModule(mod));
+    if (requested.erase(mod.getName().str())) modules.push_back(exportModule(mod, assertions));
   });
   llvm::json::Array missing;
   for (auto &name : requested) missing.push_back(name);

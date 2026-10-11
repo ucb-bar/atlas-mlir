@@ -1,8 +1,9 @@
 """Pair recipe (tools/rtl_extract/pairs.py): synthetic sweeps, pair-file validation, and Atlas hardware regressions.
 
-Hardware tests set ATLAS_HW_IR and ATLAS_HW_EXPORTER and check a narrow window around each pair file's expected
-``stable_gap`` (the gap below it rejected, it and the next accepted); full sweeps run through
-``python3 -m rtl_extract.pairs``.
+Hardware tests set ATLAS_HW_IR and ATLAS_HW_EXPORTER (built with ``--assertions`` support) and check a narrow window
+around each pair file's expected ``stable_gap`` (the gap below it rejected, by the invariant or guard matching
+``rejected_by``; it and the next accepted) and the expected ``disjoint`` shared-control verdict; full sweeps run
+through ``python3 -m rtl_extract.pairs``.
 """
 import copy
 import os
@@ -106,24 +107,32 @@ class SyntheticPairTests(unittest.TestCase):
 class HardwarePairTests(unittest.TestCase):
     def check(self, name):
         raw, spec = pairs.load("atlas", [name])[name]
-        document = load_document(HW_IR, modules(spec), EXPORTER)
+        document = load_document(HW_IR, modules(spec), EXPORTER, pairs.needs_assertions(raw, spec))
         window = copy.deepcopy(raw)
         for pair, expected in raw["expect"].items():
             stable = expected["stable_gap"]
             window["pairs"][pair]["gaps"] = f"{max(1, stable - 1)}..{stable + 1}"
-        for record in pairs.extract(document, window, spec):
+        for record in pairs.extract(document, window, spec, jobs=8):
             pair = record["name"].split(".", 1)[1]
-            stable = raw["expect"][pair]["stable_gap"]
+            expected = raw["expect"][pair]
+            stable = expected["stable_gap"]
             with self.subTest(record["name"]):
                 self.assertEqual(record["stable_gap"], stable, record["results"])
                 if stable > 1:
                     self.assertEqual(record["min_gap"], stable, record["results"])
+                if "rejected_by" in expected:
+                    self.assertRegex(record["results"][0]["result"], expected["rejected_by"])
+                if "disjoint" in expected:
+                    self.assertEqual(record["shared_control"]["disjoint"], expected["disjoint"], record["shared_control"])
 
     def test_vlsu(self):
         self.check("vlsu")
 
     def test_vpu(self):
         self.check("vpu")
+
+    def test_core(self):
+        self.check("core")
 
     def test_mxu0(self):
         self.check("mxu0")

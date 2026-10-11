@@ -2,7 +2,7 @@
 import json
 
 from . import coupled, derive, facts, summaries
-from .control import ControlCircuit, require
+from .control import ControlCircuit, require, unmatched
 from .spec import ages, variant
 
 RUN_ONLY = {"operations", "variants", "checks", "expect", "raw", "only", "limit", "tail",
@@ -14,9 +14,14 @@ def modules(spec):
     return [spec["module"]] + ([spec["partner"]["module"]] if "partner" in spec else []) + derive.modules(spec)
 
 
+def busy_signals(spec):
+    """``busy`` is one signal or a list whose OR is the busy level."""
+    return [spec["busy"]] if isinstance(spec["busy"], str) else list(spec["busy"] or [])
+
+
 def control_signals(spec):
     """Signals whose values decide timing; they must be known after reset and flush."""
-    signals = [spec["busy"]] if spec["busy"] else []
+    signals = busy_signals(spec)
     signals += [e["valid"] for e in spec["events"].values()]
     signals += [op["next_issue"]["signal"] for op in spec["operations"].values() if "next_issue" in op]
     return list(dict.fromkeys(signals))
@@ -30,7 +35,11 @@ def observed(spec):
 def build_single(document, spec):
     outputs = [s for s in observed(spec) if s not in spec["probes"]]
     inputs = {spec["clock"], spec["reset"], *spec["inputs"]}
-    return ControlCircuit(document, spec["module"], outputs, inputs, spec["cuts"], spec["probes"], spec["clock"], spec["reset"], spec["unreset"])
+    circuit = ControlCircuit(document, spec["module"], outputs, inputs, spec["cuts"], spec["probes"], spec["clock"], spec["reset"],
+                             spec["unreset"], spec.get("invariants"))
+    if "invariants" in spec:
+        unmatched(spec["invariants"], circuit.matched)
+    return circuit
 
 
 def schedule(operation):
@@ -69,6 +78,7 @@ def run_single(circuit, spec, name):
                 values[event["response"]["input"]] = int((age, group) in pending)
         out = circuit.cycle(values)
         require(all(out[s] is not None for s in control), f"Control output unknown at age {age}")
+        violations = [(n, "unknown" if out[n] is None else "fired") for n in circuit.invariants if out[n] != 0]
         events = {}
         for group, event in spec["events"].items():
             if out[event["valid"]]:
@@ -77,8 +87,9 @@ def run_single(circuit, spec, name):
                 events[group] = fields
                 if "response" in event:
                     pending.add((age + event["response"]["latency"], group))
-        trace.append({"age": age, "busy": out[spec["busy"]] if spec["busy"] else None, "signals": out, "events": events})
-        if spec["busy"] and free is None and age > max(commands) and not out[spec["busy"]] and all(a <= age for a, _ in pending):
+        busy = int(any(out[s] for s in busy_signals(spec))) if spec["busy"] else None
+        trace.append({"age": age, "busy": busy, "signals": out, "events": events, "violations": violations})
+        if spec["busy"] and free is None and age > max(commands) and not busy and all(a <= age for a, _ in pending):
             free = age
         if free is not None and age >= free + spec["tail"]:
             break
@@ -87,6 +98,20 @@ def run_single(circuit, spec, name):
 
 RECIPES = {"single": (build_single, run_single),
            "coupled": (lambda document, spec: coupled.build(document, spec, observed(spec)), run_single)}
+
+
+def failures(circuit, trace):
+    """Invariants that fired or were unknown, each with its first age, in order of first age."""
+    first = {}
+    for entry in trace:
+        for name, how in entry["violations"]:
+            first.setdefault(name, (entry["age"], how))
+    return [{"name": n, **circuit.invariants[n], "how": how, "age": age}
+            for n, (age, how) in sorted(first.items(), key=lambda x: (x[1][0], x[0]))]
+
+
+def failure(item):
+    return f"invariant {item['message']} ({item['path'] or '/'}) {item['how']}"
 
 
 def summarize(trace, spec, name):
@@ -155,6 +180,9 @@ def extract(document, spec):
         for op in current.get("only", current["operations"]):
             try:
                 trace = run(circuit, current, op)
+                fired = failures(circuit, trace)
+                if fired:
+                    raise ValueError(f"{failure(fired[0])} at age {fired[0]['age']}")
                 result = summarize(trace, current, op)
             except ValueError as error:
                 records.append(facts.record(current, op, name, reason=str(error)))

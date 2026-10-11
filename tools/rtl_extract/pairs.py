@@ -2,9 +2,11 @@
 
 A pair file ``targets/<target>/pairs/<name>.yaml`` names an engine spec of the same target and declares pairs:
 
-    engine: <spec stem>
+    engine: <spec stem>                # targets/<target>/<stem>.yaml or targets/<target>/system/<stem>.yaml
     equivalent: {<name>: [group, ...]} # optional; groups compared as one resource (e.g. interchangeable ports)
     ignore: [group, ...]               # optional; level-type groups (busy flags) left out of the comparison
+    invariants: {exclude: [...]}       # optional; replaces the spec's invariants (see spec.invariants)
+    shared: [{input|path, reason}]     # optional; control the two operations may share (cone check below)
     pairs:
       <pair>:
         first: <operation>             # issued at its own command ages
@@ -17,26 +19,29 @@ A pair file ``targets/<target>/pairs/<name>.yaml`` names an engine spec of the s
 
 A gap is accepted when (1) no command ages collide, (2) every control output stays known and, with a ``busy``
 signal, the engine drains within ``limit``, (3) every guard is clear at the second's issue age (the issue condition a
-frontend asserts but the engine does not enforce), and (4) the per-age event multiset (group or its ``equivalent``
-name, age and fields; ``ignore`` groups excluded) equals the first's isolated events plus the second's isolated
-events shifted by ``g``. A rejected or ignored launch, a dropped, merged or delayed event, or a changed field fails
-(4). A gap blocked by a guard still reports whether the events changed ("events unchanged" marks a guard stricter
-than the engine needs).
+frontend asserts but the engine does not enforce), (4) every invariant stays 0 at every age (unknown fails), and (5)
+the per-age event multiset (group or its ``equivalent`` name, age and fields; ``ignore`` groups excluded) equals the
+first's isolated events plus the second's isolated events shifted by ``g``. A rejected or ignored launch, a dropped,
+merged or delayed event, or a changed field fails (5). A gap blocked by a guard still reports whether the events
+changed ("events unchanged" marks a guard stricter than the engine needs); ``rejected`` lists each failed part per gap.
+When the two operations' event groups are disjoint, ``shared_control`` reports the registers and inputs both groups'
+valid signals depend on, other than clock, reset and the declared ``shared`` entries.
 ``stable_gap`` is the smallest gap from which every swept gap is accepted; that is the value a scheduling rule may
 use. Python stays target-agnostic: names, operands and guards live in YAML.
 """
 from collections import Counter
 import copy
+import multiprocessing
 from pathlib import Path
 
 import yaml
 
 from . import derive
 from .control import require
-from .runner import RECIPES, observed, schedule
-from .spec import TARGETS, ages, keys, load_target
+from .runner import RECIPES, failure, failures, observed, schedule
+from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
 
-FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect"})
+FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared"})
 PAIR_KEYS = ({"first", "second", "gaps"}, {"description", "first_inputs", "second_inputs", "guards"})
 SCHEMA = "rtl_extract.op_pairs.v1"
 
@@ -52,6 +57,13 @@ def validate(raw, spec, where):
     raw.setdefault("ignore", [])
     require(isinstance(raw["ignore"], list) and set(raw["ignore"]) <= set(spec["events"]) and not set(raw["ignore"]) & set(members),
             f"{where}: ignore must name event groups outside equivalent")
+    if "invariants" in raw:
+        invariants(raw["invariants"], f"{where}: invariants")
+    raw.setdefault("shared", [])
+    require(isinstance(raw["shared"], list), f"{where}: shared must be a list")
+    for entry in raw["shared"]:
+        keys(entry, {"reason"}, {"input", "path"}, f"{where}: shared")
+        require(("input" in entry) != ("path" in entry), f"{where}: shared entries name one input or one path")
     prefix = f"{spec['command']}_" if spec.get("command") else None
     signals = set(observed(spec))
     for name, pair in raw["pairs"].items():
@@ -95,8 +107,19 @@ def load(target, names=None, specs=None):
     raws = {n: yaml.safe_load((TARGETS / target / "pairs" / f"{n}.yaml").read_text()) for n in selected}
     specs = dict(specs or {})
     missing = sorted({r["engine"] for r in raws.values()} - set(specs))
-    specs.update(load_target(target, missing) if missing else {})
+    engines = [m for m in missing if m in available_engines(target)]
+    specs.update(load_target(target, engines) if engines else {})
+    specs.update({m: load_system(target, m) for m in missing if m not in engines})
     return {n: (validate(r, specs[r["engine"]], f"pairs/{n}.yaml"), specs[r["engine"]]) for n, r in raws.items()}
+
+
+def prepared(raw, spec):
+    """The spec a pair file runs: its own ``invariants`` replace the spec's."""
+    return {**spec, "invariants": raw["invariants"]} if "invariants" in raw else spec
+
+
+def needs_assertions(raw, spec):
+    return "invariants" in prepared(raw, spec)
 
 
 def commands(spec, op, overlay, shift=0):
@@ -110,7 +133,7 @@ def run(circuit, spec, timeline):
     trial["limit"] = spec["limit"] + max(timeline) - min(timeline)  # the later command gets the full window too
     trace = RECIPES[spec["recipe"]][1](circuit, trial, "\0pair")
     drained = not spec["busy"] or trace[-1]["busy"] == 0
-    return trace, None if drained else f"busy did not clear within {trial['limit']} ages"
+    return trace, None if drained else "busy did not clear"
 
 
 def events(trace, equivalent, shift=0, ignore=()):
@@ -130,26 +153,41 @@ def clear(value, bit):
     return value is not None and not (value >> bit & 1 if bit is not None else value)
 
 
-def trial(circuit, spec, raw, pair, alone, gap):
-    """``None`` if the second may issue at ``gap``, otherwise the reason it may not."""
+def check(circuit, spec, raw, pair, alone, gap):
+    """Per-gap outcome: ``{gap, accepted, guards, invariants, events, error}`` (failed parts only)."""
     first = commands(spec, pair["first"], pair.get("first_inputs", {}))
     second = commands(spec, pair["second"], pair.get("second_inputs", {}), gap)
     if set(first) & set(second):
-        return "command ages collide"
+        return {"gap": gap, "accepted": False, "error": "command ages collide"}
     try:
         trace, problem = run(circuit, spec, {**first, **second})
     except ValueError as error:
-        return str(error)
+        return {"gap": gap, "accepted": False, "error": str(error)}
     issue = min(second)
     blocked = [f"guard {g['signal']}" + (f"[{g['bit']}]" if "bit" in g else "") + " set"
                for g in guards(spec, pair) if not clear(trace[issue]["signals"][g["signal"]], g.get("bit"))]
     expected = sorted(alone[0] + [(g, a + gap, f) for g, a, f in alone[1]])
     actual = events(trace, raw["equivalent"], ignore=raw["ignore"])
-    changed = None if actual == expected else difference(expected, actual)
-    reasons = blocked + [r for r in (problem, changed) if r]
-    if blocked and not changed and not problem:
-        reasons.append("events unchanged")
-    return "; ".join(reasons) or None
+    outcome = {"gap": gap, "guards": blocked, "invariants": failures(circuit, trace),
+               "events": None if actual == expected else difference(expected, actual), "error": problem}
+    outcome = {k: v for k, v in outcome.items() if v}
+    return {**outcome, "accepted": len(outcome) == 1}
+
+
+def describe(outcome):
+    """One line for a per-gap outcome, ``None`` when accepted."""
+    if outcome["accepted"]:
+        return None
+    parts = outcome.get("guards", []) + [failure(f) for f in outcome.get("invariants", [])]
+    parts += [outcome[k] for k in ("error", "events") if outcome.get(k)]
+    if outcome.get("guards") and len(outcome) == 3:
+        parts.append("events unchanged")
+    return "; ".join(parts)
+
+
+def trial(circuit, spec, raw, pair, alone, gap):
+    """``None`` if the second may issue at ``gap``, otherwise the reason it may not."""
+    return describe(check(circuit, spec, raw, pair, alone, gap))
 
 
 def runs(results):
@@ -164,18 +202,61 @@ def runs(results):
     return out
 
 
-def extract(document, raw, spec):
+def shared_control(circuit, spec, raw, groups):
+    """Registers and inputs reached from both operations' event valids, other than clock, reset and the declared
+    ``shared`` inputs; traversal stops at declared ``shared`` instance paths, whose conflicts invariants govern."""
+    require(hasattr(circuit, "reach"), "shared-control check needs a single circuit")
+    stop = ["".join("/" + n for n in e["path"].split("/") if n) for e in raw["shared"] if "path" in e]
+    declared = {e["input"] for e in raw["shared"] if "input" in e} | {spec["clock"], spec["reset"]}
+    cones = [circuit.reach(sorted({spec["events"][g]["valid"] for g in side}), stop) for side in groups]
+
+    def label(key):
+        attrs = circuit.nodes[key][2]
+        return f"{key[0]}/{attrs.get('name') or attrs.get('sv.namehint') or key[1]}"
+    registers = sorted(label(k) for k in cones[0][0] & cones[1][0])
+    inputs = sorted((cones[0][1] & cones[1][1]) - declared)
+    return {"groups": [sorted(g) for g in groups], "registers": [len(c[0]) for c in cones],
+            "shared_registers": registers, "shared_inputs": inputs, "disjoint": not registers and not inputs}
+
+
+TASK = None
+
+
+def check_gap(gap):
+    return check(*TASK, gap)
+
+
+def sweep(circuit, spec, raw, pair, alone, gaps, jobs=1):
+    """``check`` for every gap, in ``jobs`` forked processes when more than one."""
+    global TASK
+    if jobs <= 1 or len(gaps) < 2:
+        return [check(circuit, spec, raw, pair, alone, gap) for gap in gaps]
+    TASK = (circuit, spec, raw, pair, alone)
+    with multiprocessing.get_context("fork").Pool(min(jobs, len(gaps))) as pool:
+        return pool.map(check_gap, gaps, chunksize=1)
+
+
+def extract(document, raw, spec, jobs=1):
     """One record per pair of one pair file: per-gap results, the minimum accepted gap and the stable gap."""
-    concrete, _ = derive.resolve(document, spec, {})
+    concrete, _ = derive.resolve(document, prepared(raw, spec), {})
     circuit = RECIPES[concrete["recipe"]][0](document, concrete)
-    records = []
+    records, isolated = [], {}
     for name, pair in raw["pairs"].items():
-        alone = []
+        alone, groups = [], []
         for side in ("first", "second"):
-            trace, problem = run(circuit, concrete, commands(concrete, pair[side], pair.get(f"{side}_inputs", {})))
-            require(problem is None, f"{name}: {pair[side]} alone: {problem}")
-            alone.append(events(trace, raw["equivalent"], ignore=raw["ignore"]))
-        results = [(gap, trial(circuit, concrete, raw, pair, alone, gap)) for gap in ages(pair["gaps"])]
+            key = (pair[side], tuple(sorted(pair.get(f"{side}_inputs", {}).items())))
+            if key not in isolated:
+                trace, problem = run(circuit, concrete, commands(concrete, pair[side], dict(key[1])))
+                require(problem is None, f"{name}: {pair[side]} alone: {problem}")
+                fired = failures(circuit, trace)
+                if fired:
+                    raise ValueError(f"{name}: {pair[side]} alone: {failure(fired[0])}")
+                isolated[key] = (events(trace, raw["equivalent"], ignore=raw["ignore"]),
+                                 {g for e in trace for g in e["events"]} - set(raw["ignore"]))
+            alone.append(isolated[key][0])
+            groups.append(isolated[key][1])
+        outcomes = sweep(circuit, concrete, raw, pair, alone, ages(pair["gaps"]), jobs)
+        results = [(o["gap"], describe(o)) for o in outcomes]
         stable = None
         for gap, reason in reversed(results):
             if reason is not None:
@@ -185,8 +266,13 @@ def extract(document, raw, spec):
                         "first": pair["first"], "second": pair["second"], "gaps": [results[0][0], results[-1][0]],
                         "min_gap": min((g for g, r in results if r is None), default=None), "stable_gap": stable,
                         "guards": guards(concrete, pair), "results": runs(results),
+                        "rejected": [o for o in outcomes if not o["accepted"]],
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} gaps, "
                                     "event multisets compared with isolated runs"})
+        if "invariants" in concrete:
+            records[-1]["invariants"] = {"checked": len(circuit.invariants), "excluded": circuit.excluded}
+        if not groups[0] & groups[1]:
+            records[-1]["shared_control"] = shared_control(circuit, concrete, raw, groups)
     return records
 
 
@@ -202,10 +288,12 @@ def main(argv=None):
     parser.add_argument("--target", default="atlas")
     parser.add_argument("--pairs", nargs="+", help="pair files (default: every file under targets/<target>/pairs/)")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--jobs", type=int, default=1, help="processes per gap sweep")
     args = parser.parse_args(argv)
     loaded = load(args.target, args.pairs)
-    document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter)
-    records = [r for raw, spec in loaded.values() for r in extract(document, raw, spec)]
+    document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter,
+                             any(needs_assertions(r, s) for r, s in loaded.values()))
+    records = [r for raw, spec in loaded.values() for r in extract(document, raw, spec, args.jobs)]
     facts.write(args.output, {"schema": SCHEMA, "hw_ir": {"path": str(args.hw_ir.resolve()), "sha256": facts.sha256(args.hw_ir)},
                               "op_pairs": records})
     print(json.dumps({r["name"]: {"min_gap": r["min_gap"], "stable_gap": r["stable_gap"], "results": r["results"]}

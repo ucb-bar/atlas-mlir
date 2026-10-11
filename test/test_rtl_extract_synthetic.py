@@ -1,4 +1,5 @@
-"""Synthetic checks (no hardware IR): ControlCircuit, spec loading, runner, derivation, coupled recipe, unreset rules, op_timing document."""
+"""Synthetic checks (no hardware IR): ControlCircuit, spec loading, runner, derivation, coupled recipe, unreset rules,
+assertion invariants, op_timing document."""
 import copy
 import hashlib
 import json
@@ -10,8 +11,8 @@ import unittest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from rtl_extract import derive, facts
-from rtl_extract.control import ControlCircuit
+from rtl_extract import derive, facts, pairs
+from rtl_extract.control import ControlCircuit, assertions, select
 from rtl_extract.runner import extract, modules
 from rtl_extract.spec import load_spec, load_target, variant
 
@@ -558,6 +559,122 @@ class UnresetTests(unittest.TestCase):
         self.assertIn("matches 0 registers", self.coupled(unreset=[self.META])["reason"])
         record = self.coupled(partner_unreset=[self.META])
         self.assertEqual((record["status"], record["events"]["seen"]["first_age"]), ("computed", 2), record.get("reason"))
+
+
+def region(ident, kind, operands=(), **attrs):
+    return {"id": ident, "kind": kind, "operands": list(operands), "results": [], "result_types": [],
+            "attributes": attrs, "has_regions": kind != "sv.error", "location": "loc(\"X.scala\":1:1)"}
+
+
+def assertion(ident, condition, message, ifdef_branch=1, kind="sv.error"):
+    """Operations and site of a Chisel-style assertion (``ifdef SYNTHESIS`` / ``always posedge`` / ``if`` / macro ``if``)."""
+    ops = [region(f"{ident}.ifdef", "sv.ifdef", cond="#sv<macro.ident @SYNTHESIS>"),
+           region(f"{ident}.always", "sv.always", ["clk"], events="[0 : i32]"),
+           region(f"{ident}.if", "sv.if", [condition]),
+           {**region(f"{ident}.macro", "sv.macro.ref"), "results": [f"{ident}.macro"], "result_types": ["i1"]},
+           region(f"{ident}.verbose", "sv.if", [f"{ident}.macro"])]
+    ops.append(region(ident, kind, ["ok"] if kind == "sv.assert" else [], message=f"Assertion failed: {message}\n    at X.scala:1"))
+    parents = [f"{ident}.ifdef", f"{ident}.always", f"{ident}.if", f"{ident}.verbose"]
+    return ops, {"op": ident, "parents": [{"op": p, "region": ifdef_branch if i == 0 else 0} for i, p in enumerate(parents)]}
+
+
+def engines(shared=False, unknown=False, disabled=False):
+    """Counters A and B (``go_x`` loads 3, ``busy_x`` while counting) and one assertion: B issued while A is busy.
+    ``shared`` makes B's start wait for A, ``unknown`` ORs an unreset register into the assertion."""
+    ops = [operation("zero2", "hw.constant", [], "i2", value="0 : i2"), operation("one2", "hw.constant", [], "i2", value="1 : i2"),
+           operation("three", "hw.constant", [], "i2", value="3 : i2"), zero(), one(),
+           {"id": "clk", "kind": "seq.from_clock", "operands": ["clock"], "results": ["clk"], "result_types": ["i1"], "attributes": {}}]
+    for x in "ab":
+        start = [f"go_{x}", f"idle_{x}"] + (["idle_a"] if shared and x == "b" else [])
+        ops += [operation(f"cnt_{x}", "seq.firreg", [f"next_{x}", "clock", "reset", "zero2"], "i2", name=f"cnt_{x}"),
+                operation(f"idle_{x}", "comb.icmp", [f"cnt_{x}", "zero2"], predicate="0 : i64"),
+                operation(f"busy_{x}", "comb.icmp", [f"cnt_{x}", "zero2"], predicate="1 : i64"),
+                operation(f"dec_{x}", "comb.sub", [f"cnt_{x}", "one2"], "i2"),
+                operation(f"start_{x}", "comb.and", start),
+                operation(f"hold_{x}", "comb.mux", [f"busy_{x}", f"dec_{x}", "zero2"], "i2"),
+                operation(f"next_{x}", "comb.mux", [f"start_{x}", "three", f"hold_{x}"], "i2")]
+    ops += [operation("busy", "comb.or", ["busy_a", "busy_b"]), operation("fire", "comb.and", ["go_b", "busy_a"])]
+    if unknown:
+        ops += [operation("junk", "seq.firreg", ["junk", "clock"], name="junk"), operation("fire2", "comb.or", ["fire", "junk"])]
+    site_ops, site = assertion("err", "fire2" if unknown else "fire", "B issued while A busy", 0 if disabled else 1)
+    m = module("Two", ["go_a", "go_b"], [("out_a", "busy_a"), ("out_b", "busy_b"), ("busy", "busy")], ops + site_ops)
+    return {**m, "assertions": [site]}
+
+
+TWO = {"engine": "two", "module": "Two", "inputs": {"go_a": 0, "go_b": 0}, "busy": "busy", "limit": 24,
+       "events": {"a": {"valid": "out_a"}, "b": {"valid": "out_b"}},
+       "operations": {"a": {"commands": {0: {"go_a": 1}}}, "b": {"commands": {0: {"go_b": 1}}},
+                      "both": {"commands": {0: {"go_a": 1}, 2: {"go_b": 1}}}}}
+
+
+def two_pairs(m, invariants=None, shared=()):
+    spec = load(TWO)
+    raw = {"engine": "two", "pairs": {"ab": {"first": "a", "second": "b", "gaps": "1..6"}}, "shared": list(shared)}
+    if invariants is not None:
+        raw["invariants"] = invariants
+    return pairs.extract({"modules": [m]}, pairs.validate(raw, spec, "two.yaml"), spec)[0]
+
+
+class InvariantTests(unittest.TestCase):
+    def test_assertion_sites_follow_guards_and_macros(self):
+        found = assertions(engines())
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0]["terms"], found[0]["clock"], found[0]["live"], found[0]["problem"]), ([("fire", 1)], "clk", True, None))
+        ops, site = assertion("chk", "en", "checked", kind="sv.assert")
+        item = assertions({"operations": ops, "assertions": [site]})[0]
+        self.assertEqual(item["terms"], [("en", 1), ("ok", 0)])
+        self.assertFalse(assertions(engines(disabled=True))[0]["live"])
+
+    def test_firing_invariant_rejects_pair_gaps(self):
+        record = two_pairs(engines(), {})
+        self.assertEqual((record["min_gap"], record["stable_gap"]), (4, 4))
+        self.assertEqual(record["results"][0], {"from": 1, "to": 3, "result": "invariant B issued while A busy (/) fired"})
+        self.assertEqual(record["rejected"][0]["invariants"][0]["age"], 1)
+        self.assertEqual(record["invariants"], {"checked": 1, "excluded": []})
+
+    def test_excluded_invariant_is_accepted_with_its_reason(self):
+        record = two_pairs(engines(), {"exclude": [{"message": "B issued", "reason": "independent counters"}]})
+        self.assertEqual(record["stable_gap"], 1)
+        self.assertEqual(record["invariants"]["excluded"], [{"path": "", "message": "B issued while A busy", "reason": "independent counters"}])
+        self.assertEqual(two_pairs(engines())["stable_gap"], 1)
+
+    def test_firing_invariant_unresolves_a_record(self):
+        record = records({**TWO, "invariants": {}}, {"modules": [engines()]})
+        self.assertEqual(record["two.a"]["status"], "computed")
+        self.assertEqual(record["two.both"]["status"], "unresolved")
+        self.assertIn("invariant B issued while A busy (/) fired at age 2", record["two.both"]["reason"])
+
+    def test_unknown_invariant_fails_closed(self):
+        record = records({**TWO, "invariants": {}}, {"modules": [engines(unknown=True)]})["two.a"]
+        self.assertEqual(record["status"], "unresolved")
+        self.assertIn("unknown at age 0", record["reason"])
+        with self.assertRaisesRegex(ValueError, r"alone: invariant B issued while A busy \(/\) unknown"):
+            two_pairs(engines(unknown=True), {})
+
+    def test_disabled_assertion_is_excluded_with_the_macro_reading(self):
+        selected, excluded, _ = select({"Two": engines(disabled=True)}, "Two", {})
+        self.assertEqual((selected, [e["reason"] for e in excluded]), ([], ["not compiled in a simulation build"]))
+
+    def test_invariants_fail_closed(self):
+        m = engines()
+        cases = (("stale exclusion", {"modules": [m]}, {"exclude": [{"message": "nothing", "reason": "r"}]}, "match no assertion"),
+                 ("no assertion export", {"modules": [{k: v for k, v in m.items() if k != "assertions"}]}, {}, "exported without assertions"),
+                 ("unapproved input", {"modules": [m]}, {}, "unapproved input: go_b"))
+        for label, document, rules, message in cases:
+            spec = load({**TWO, "invariants": rules, "inputs": {"go_a": 0} if label == "unapproved input" else TWO["inputs"],
+                         "operations": {"a": TWO["operations"]["a"]}})
+            with self.subTest(label):
+                self.assertIn(message, extract(document, spec)[0]["reason"])
+        with self.assertRaisesRegex(ValueError, "missing keys"):
+            load({**TWO, "invariants": {"exclude": [{"message": "x"}]}})
+
+    def test_shared_control_detection(self):
+        self.assertEqual(two_pairs(engines())["shared_control"],
+                         {"groups": [["a"], ["b"]], "registers": [1, 1], "shared_registers": [], "shared_inputs": [], "disjoint": True})
+        shared = two_pairs(engines(shared=True))["shared_control"]
+        self.assertEqual((shared["shared_registers"], shared["disjoint"]), (["/cnt_a"], False))
+        both = two_pairs(engines(), shared=[{"input": "go_a", "reason": "r"}])["shared_control"]
+        self.assertTrue(both["disjoint"])
 
 
 class OpTimingDocument(unittest.TestCase):

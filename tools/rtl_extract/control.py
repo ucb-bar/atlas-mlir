@@ -2,6 +2,7 @@
 from functools import cache, reduce
 import json
 import operator
+import re
 
 
 def require(condition, message):
@@ -18,6 +19,53 @@ def width(typ):
     return int(typ[1:])
 
 
+FIRES_WHEN = {"sv.error": None, "sv.fatal": None, "sv.assert": 0}  # sv.assert fires when its operand is 0
+
+
+def assertions(module):
+    """Assertions of one exported module (``hw_ir_export --assertions``), one per guard.
+
+    Macros are read as in a simulation build: every ``ifdef`` macro is undefined and every ``sv.macro.ref``
+    condition (``ASSERT_VERBOSE_COND_``, ``STOP_COND_``) is 1, so an assertion is ``live`` unless it sits in an
+    ``ifdef`` then-branch or a macro else-branch. It fires when every ``(value, level)`` term holds: the enclosing
+    ``sv.if`` conditions (1 in then-, 0 in else-branches) and, for ``sv.assert``, its operand at 0. ``clock`` is the
+    enclosing single-edge ``sv.always posedge``; anything else is recorded as ``problem``. ``sv.error`` and
+    ``sv.fatal`` under the same guard are one assertion.
+    """
+    ops = {op["id"]: op for op in module["operations"]}
+    definitions = {v: op for op in module["operations"] for v in op["results"]}
+    found = {}
+    for site in module.get("assertions", []):
+        op = ops[site["op"]]
+        terms, clock, live, problem = [], None, True, None
+        if op["kind"] not in FIRES_WHEN:
+            problem = f"unsupported assertion {op['kind']}"
+        for parent in site["parents"]:
+            region, owner = parent["region"], ops[parent["op"]]
+            kind = owner["kind"]
+            if kind in ("sv.ifdef", "sv.ifdef.procedural"):
+                live &= region == 1
+            elif kind == "sv.if" and definitions.get(owner["operands"][0], {}).get("kind") == "sv.macro.ref":
+                live &= region == 0
+            elif kind == "sv.if":
+                terms.append((owner["operands"][0], int(region == 0)))
+            elif kind == "sv.always" and clock is None and owner["attributes"].get("events") == "[0 : i32]" and len(owner["operands"]) == 1:
+                clock = owner["operands"][0]
+            else:
+                problem = problem or f"assertion inside {kind}"
+        if FIRES_WHEN.get(op["kind"]) is not None:
+            terms.append((op["operands"][0], FIRES_WHEN[op["kind"]]))
+        if clock is None:
+            problem = problem or "assertion outside an always posedge block"
+        entry = found.setdefault((tuple(terms), clock, live, problem), {
+            "id": op["id"], "kinds": [], "message": None, "location": op["location"],
+            "live": live, "terms": terms, "clock": clock, "problem": problem})
+        entry["kinds"].append(op["kind"])
+        text = op["attributes"].get("message") or op["attributes"].get("label")
+        entry["message"] = entry["message"] or text
+    return list(found.values())
+
+
 class ControlCircuit:
     """Slice hierarchy at register boundaries, then execute exact finite-width control.
 
@@ -26,14 +74,16 @@ class ControlCircuit:
     extra outputs and ``cuts`` replace them with named inputs; selectors are ``{"instance": "a/b",
     "result": name}`` or ``{"value": name, "path": "a/b"}`` (matched on ``name``, then ``sv.namehint``).
     ``unreset`` lists registers allowed to stay unknown after reset/flush as ``{"path": "a/b", "name": reg}``
-    (path ``""`` is the top); each must name exactly one register.
+    (path ``""`` is the top); each must name exactly one register. ``invariants`` (see ``select``) are assertions in
+    the hierarchy whose firing conditions become extra outputs named in ``self.invariants``.
     """
     allowed = {"hw.constant", "hw.wire", "seq.firreg", "comb.mux", "comb.and",
                "comb.or", "comb.xor", "comb.add", "comb.sub", "comb.icmp",
                "comb.extract", "comb.concat", "comb.shru", "comb.shl",
                "comb.replicate", "hw.array_create", "hw.array_get"}
 
-    def __init__(self, document, top, outputs, inputs, cuts=None, probes=None, clock="clock", reset="reset", unreset=()):
+    def __init__(self, document, top, outputs, inputs, cuts=None, probes=None, clock="clock", reset="reset", unreset=(),
+                 invariants=None):
         self.modules = {m["name"]: m for m in document["modules"]}
         require(top in self.modules, f"Missing module: {top}")
         self.clock, self.reset = clock, reset
@@ -50,6 +100,11 @@ class ControlCircuit:
             self.outputs[name] = self.visit(("", ports[name]["value"]))
         for name, selector in (probes or {}).items():
             self.outputs[name] = self.visit(self.resolve(selector))
+        self.top, self.invariants, self.excluded, self.matched = top, {}, [], set()
+        if invariants is not None:
+            selected, self.excluded, self.matched = select(self.modules, top, invariants)
+            for path, item in selected:
+                self.watch(path, item)
         self.unreset = {self.register(selector) for selector in unreset}
         self.state = {node: None for node in self.registers}
 
@@ -158,12 +213,35 @@ class ControlCircuit:
         self.nodes[key] = (kind, args, op["attributes"])
         return key
 
-    def reach(self, names):
-        """Registers and input names the named outputs depend on, including state feedback."""
+    def watch(self, path, item):
+        """Add the firing condition of assertion ``item`` at instance ``path`` as an output."""
+        name = f"{self.top}{path}#{item['id']}"
+        where = f"invariant {name} ({first_line(item['message'])})"
+        require(item["problem"] is None, f"{where}: {item['problem']}")
+        context = ""
+        for part in [p for p in path.split("/") if p]:
+            context = self.enter(context, self.instance(context, part))
+        definitions, _, ports = self.contexts[context]
+        clock = definitions.get(item["clock"])
+        require(clock is not None and clock["kind"] == "seq.from_clock" and self.clock in ports and
+                clock["operands"][0] == ports[self.clock]["value"] and
+                self.clock_root((context, clock["operands"][0])) == ("", self.contexts[""][2][self.clock]["value"]),
+                f"{where}: not clocked by {self.clock}")
+        key = ("fire", context, item["id"])
+        try:
+            self.nodes[key] = ("fire", tuple(self.visit((context, v)) for v, _ in item["terms"]), tuple(l for _, l in item["terms"]))
+        except (ValueError, RecursionError) as error:
+            raise ValueError(f"{where}: {error}") from None
+        self.outputs[name] = key
+        self.invariants[name] = {"path": path, "message": first_line(item["message"]), "location": item["location"]}
+
+    def reach(self, names, stop=()):
+        """Registers and input names the named outputs depend on, including state feedback; traversal does not enter
+        nodes under the instance paths in ``stop``."""
         seen, registers, inputs, stack = set(), set(), set(), [self.outputs[n] for n in names]
         while stack:
             key = stack.pop()
-            if key in seen:
+            if key in seen or any(key[0] == p or key[0].startswith(p + "/") for p in stop):
                 continue
             seen.add(key)
             kind, operands, attrs = self.nodes[key]
@@ -192,6 +270,11 @@ class ControlCircuit:
                     yes, no = get(operands[1]), get(operands[2])
                     return yes if yes == no else None
                 return get(operands[1 if select else 2])
+            if kind == "fire":
+                values = [get(v) for v in operands]
+                if any(v is not None and v != level for v, level in zip(values, attrs)):
+                    return 0
+                return None if None in values else 1
             args = [get(v) for v in operands]
             if kind == "hw.array_create":
                 return tuple(reversed(args))
@@ -240,3 +323,52 @@ class ControlCircuit:
         outputs = {name: get(key) for name, key in self.outputs.items()}
         self.state = {key: get(args[2] if len(args) == 3 and get(args[1]) else args[0]) for key, args in self.registers.items()}
         return outputs
+
+
+def first_line(text):
+    return (text or "").split("\n")[0].removeprefix("Assertion failed: ")
+
+
+def sites(modules, top):
+    """``(path, module, assertion)`` for every assertion in the instance hierarchy under ``top``."""
+    @cache
+    def below(name):
+        module = modules[name]
+        require("assertions" in module, f"{name} was exported without assertions (hw_ir_export --assertions)")
+        found = [("", name, item) for item in assertions(module)]
+        for op in module["operations"]:
+            child = op["attributes"].get("moduleName", "").lstrip("@") if op["kind"] == "hw.instance" else None
+            if child:
+                require(child in modules, f"Assertions of {child} are not visible (extern module)")
+                found += [(f"/{op['attributes']['instanceName']}{p}", m, a) for p, m, a in below(child)]
+        return tuple(found)
+    return list(below(top))
+
+
+def select(modules, top, rules):
+    """``(selected, excluded)``: every live assertion under ``top`` except those matched by an ``exclude`` rule
+    (``{path?, module?, message?, reason}``; ``path`` is an instance path prefix, ``message`` a regular expression),
+    and the indices of the rules that matched. Disabled assertions are excluded with the macro reading as reason."""
+    selected, excluded, used = [], [], set()
+    for path, module, item in sites(modules, top):
+        if not item["live"]:
+            excluded.append({"path": path, "message": first_line(item["message"]), "reason": "not compiled in a simulation build"})
+            continue
+        hits = [i for i, rule in enumerate(rules.get("exclude", [])) if matches(rule, path, module, item)]
+        used.update(hits)
+        if hits:
+            excluded.append({"path": path, "message": first_line(item["message"]), "reason": rules["exclude"][hits[0]]["reason"]})
+        else:
+            selected.append((path, item))
+    return selected, excluded, used
+
+
+def unmatched(rules, matched):
+    unused = [rule for i, rule in enumerate(rules.get("exclude", [])) if i not in matched]
+    require(not unused, f"Invariant exclusions match no assertion: {unused}")
+
+
+def matches(rule, path, module, item):
+    prefix = "".join("/" + n for n in rule.get("path", "").split("/") if n)
+    return ((path == prefix or path.startswith(prefix + "/") or not prefix) and rule.get("module", module) == module
+            and re.search(rule.get("message", ""), first_line(item["message"])) is not None)

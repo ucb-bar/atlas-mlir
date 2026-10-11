@@ -1,0 +1,144 @@
+# System-level pairs on AtlasCore (targets/atlas/system/core.yaml): every RTL assertion in the core is an invariant,
+# including the frontend issue checks, the MREG bank tracker, MregFile per-bank ports and VMEM same-bank checks, so
+# no guards are declared. Operands are disjoint unless the pair name says otherwise.
+engine: core
+description: Second instruction issued g ages after the first through the RTL decoder; all AtlasCore assertions checked.
+equivalent:                   # the VPU overlap path may serve the second command on the other port pair
+  vpu_read: [vpu_read0, vpu_read1]
+  vpu_write: [vpu_write0, vpu_write1]
+shared:                       # control the two operations may share in the cone check
+  - {input: instruction, reason: one instruction per age through the decoder; commands never share an age}
+  - {input: fire, reason: issue strobe of that instruction}
+  - {input: address, reason: VLS address operand of that instruction}
+  - {path: mreg, reason: MREG file; per-bank port conflicts are MregFile invariants}
+  - {path: vmem, reason: VMEM banks; same-bank conflicts are Vmem invariants}
+pairs:
+  vload_vstore:               # banks 1 / 2
+    first: vload
+    second: vstore
+    gaps: 1..40
+  vstore_vload:               # banks 2 / 1
+    first: vstore
+    second: vload
+    gaps: 1..40
+  vload_vstore_same_bank:     # bank 1, lines 0 / 1024
+    first: vload
+    second: vstore_bank1
+    gaps: 1..40
+  vstore_vload_same_bank:     # bank 2, lines 0 / 1024
+    first: vstore
+    second: vload_bank2
+    gaps: 1..40
+  vload_vload:
+    first: vload
+    second: vload_bank5
+    gaps: 1..40
+  vstore_vstore:
+    first: vstore
+    second: vstore_bank3
+    gaps: 1..40
+  vload_vstore_same_mreg:     # vstore reads the m5 that vload writes
+    first: vload
+    second: vstore_m5
+    gaps: 1..40
+  add_vload:
+    first: add
+    second: vload
+    gaps: 1..70
+  vload_add:
+    first: vload
+    second: add
+    gaps: 1..40
+  add_vstore:
+    first: add
+    second: vstore
+    gaps: 1..70
+  vstore_add:
+    first: vstore
+    second: add
+    gaps: 1..40
+  add_vstore_same_mreg_bank:  # vstore reads m34 on the physical bank of add's m2
+    first: add
+    second: vstore_m34
+    gaps: 1..70
+  transpose_vload:
+    first: transpose
+    second: vload
+    gaps: 1..70
+  vload_transpose:
+    first: vload
+    second: transpose
+    gaps: 1..40
+  transpose_vstore:
+    first: transpose
+    second: vstore
+    gaps: 1..70
+  vstore_transpose:
+    first: vstore
+    second: transpose
+    gaps: 1..40
+  add_add:
+    first: add
+    second: add_hi
+    gaps: 1..70
+  exp_relu:
+    first: exp
+    second: relu_hi
+    gaps: 1..70
+  exp_exp2:
+    first: exp
+    second: exp2_hi
+    gaps: 1..70
+  exp_add:
+    first: exp
+    second: add_hi
+    gaps: 1..70
+  rmax_exp:
+    first: rmax
+    second: exp_hi
+    gaps: 1..40
+  rsum_add:
+    first: rsum
+    second: add_hi
+    gaps: 1..45
+  csum_add:
+    first: csum
+    second: add_hi
+    gaps: 1..135
+  fp8unpack_add:
+    first: fp8unpack
+    second: add_hi
+    gaps: 1..70
+  vli_all_add:
+    first: vli_all
+    second: add_hi
+    gaps: 1..70
+# Regression values used only by tests (full sweeps); the extractor never reads them. rejected_by matches the result
+# at stable_gap - 1; disjoint is the shared-control verdict. Mutations: same-bank VLS binds on the VMEM check, shared
+# MREG bank on the MregFile port check, same MREG on the tracker, VPU on its issue-busy bit.
+expect:
+  vload_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_vstore_same_bank: {min_gap: 30, stable_gap: 30, rejected_by: 'VLOAD and VSTORE target same VMEM bank \(/vmem\)', disjoint: true}
+  vstore_vload_same_bank: {min_gap: 34, stable_gap: 34, rejected_by: 'VLOAD and VSTORE target same VMEM bank \(/vmem\)', disjoint: true}
+  vload_vload: {min_gap: 35, stable_gap: 35, rejected_by: 'VLOAD issued while VLOAD path is busy \(/scalar\)'}
+  vstore_vstore: {min_gap: 35, stable_gap: 35, rejected_by: 'VSTORE issued while VSTORE path is busy \(/scalar\)'}
+  vload_vstore_same_mreg: {min_gap: 35, stable_gap: 35, rejected_by: 'MREG RAW hazard', disjoint: true}
+  add_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_vstore_same_mreg_bank: {min_gap: 31, stable_gap: 31, rejected_by: 'MregFile bank conflict: multiple read ports targeting physical bank 2 ', disjoint: true}
+  transpose_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_add: {min_gap: 65, stable_gap: 65, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  exp_relu: {min_gap: 1, stable_gap: 1}
+  exp_exp2: {min_gap: 65, stable_gap: 65, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  exp_add: {min_gap: 65, stable_gap: 65, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  rmax_exp: {min_gap: 33, stable_gap: 33, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  rsum_add: {min_gap: 38, stable_gap: 38, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  csum_add: {min_gap: 129, stable_gap: 129, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  fp8unpack_add: {min_gap: 66, stable_gap: 66, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}
+  vli_all_add: {min_gap: 64, stable_gap: 64, rejected_by: 'VPU command issued while its issue-busy bit is set \(/scalar\)'}

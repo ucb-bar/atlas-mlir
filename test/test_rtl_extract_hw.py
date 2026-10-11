@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from rtl_extract import derive
 from rtl_extract.ir import load_document
 from rtl_extract.runner import extract, modules
-from rtl_extract.spec import load_target
+from rtl_extract.spec import load_system, load_target
 
 HW_IR = os.environ.get("ATLAS_HW_IR")
 EXPORTER = os.environ.get("ATLAS_HW_EXPORTER")
@@ -195,6 +195,37 @@ class ResponseLatencyTest(unittest.TestCase):
                     with self.subTest(f"{name}.{group}"):
                         note = notes["scratchpad_read_derivation"][group]
                         self.assertEqual((note["measured"], note["memory_read_latency"], event["response"]["latency"]), (1, 1, 1))
+
+
+@unittest.skipUnless(HW_IR and EXPORTER, "requires ATLAS_HW_IR and ATLAS_HW_EXPORTER")
+class SystemTest(unittest.TestCase):
+    """The decoder-cut AtlasCore spec reproduces each engine's isolated events with every core assertion quiet."""
+    SAME = {("vlsu", "vload"): ("vload", {"vmem_read": "vmem_read", "mreg_write": "mreg_write"}),
+            ("vlsu", "vstore"): ("vstore", {"mreg_read": "mreg_read", "vmem_write": "vmem_write"}),
+            ("xlu", "transpose"): ("transpose", {"read": "xlu_read", "write": "xlu_write"}),
+            ("vpu", "add"): ("add", {"read0": "vpu_read0", "read1": "vpu_read1", "write0": "vpu_write0"})}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.spec = load_system("atlas", "core")
+        cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER, assertions=True)
+        cls.records = {r["name"].split(".", 1)[1]: r for r in extract(cls.document, cls.spec)}
+
+    def test_records_computed_with_invariants(self):
+        for name, record in self.records.items():
+            with self.subTest(name):
+                self.assertEqual(record["status"], "computed", record.get("reason"))
+
+    def test_engine_events_match(self):
+        engines = load_target("atlas", sorted({e for e, _ in self.SAME}))
+        for (engine, op), (system_op, groups) in self.SAME.items():
+            spec = {**engines[engine], "operations": {op: engines[engine]["operations"][op]}, "variants": {}, "checks": []}
+            alone = extract(self.document, spec)[0]
+            with self.subTest(f"{engine}.{op}"):
+                for group, system_group in groups.items():
+                    mine, theirs = self.records[system_op]["events"][system_group], alone["events"][group]
+                    self.assertEqual({k: mine[k] for k in TIMING}, {k: theirs[k] for k in TIMING}, group)
+                    self.assertEqual(mine["values"], {k: theirs["values"][k] for k in mine["values"]}, group)
 
 
 if __name__ == "__main__":

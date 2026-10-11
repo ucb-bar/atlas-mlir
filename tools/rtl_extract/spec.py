@@ -10,13 +10,14 @@ TARGETS = Path(__file__).resolve().parent / "targets"
 REQUIRED = {"engine", "module", "events"}
 OPTIONAL = {"description", "recipe", "clock", "reset", "reset_cycles", "flush_cycles", "limit", "tail", "inputs",
             "busy", "probes", "cuts", "operations", "operation_table", "variants", "checks", "expect", "unreset",
-            "system", "command", "decode"}
+            "system", "command", "decode", "invariants"}
 DEFAULTS = {"recipe": "single", "clock": "clock", "reset": "reset", "reset_cycles": 16, "flush_cycles": 16,
             "limit": 320, "tail": 2, "busy": None, "probes": {}, "cuts": {}, "operations": {}, "inputs": {},
             "variants": {}, "checks": [], "expect": {}, "unreset": []}
 RECIPE_KEYS = {"single": set(), "coupled": {"partner", "links"}}
 EVENT_KEYS = (set(), {"valid", "bundle", "fields", "row", "split_by", "response"})
 OPERATION_KEYS = ({"commands"}, {"description", "next_issue"})
+EXCLUDE_KEYS = ({"reason"}, {"path", "module", "message"})
 VARIANT_FIXED = {"engine", "module", "variants", "checks", "expect", "operation_table", "system", "command", "decode"}
 
 
@@ -60,6 +61,9 @@ def validate(spec, where):
     keys(spec, REQUIRED, OPTIONAL | RECIPE_KEYS[recipe] | {"only"}, where)
     spec = copy.deepcopy({**DEFAULTS, **spec})
     require(all(isinstance(v, int) for v in spec["inputs"].values()), f"{where}: input idle values must be integers")
+    require(spec["busy"] is None or isinstance(spec["busy"], str) or
+            isinstance(spec["busy"], list) and spec["busy"] and all(isinstance(b, str) for b in spec["busy"]),
+            f"{where}: busy must be a signal or a list of signals")
     words = {}
     if "decode" in spec:
         keys(spec["decode"], {"input", "instruction", "words"}, set(), f"{where}: decode")
@@ -111,8 +115,21 @@ def validate(spec, where):
             keys(op["next_issue"], {"signal"}, {"bit"}, f"{where}: operations.{name}.next_issue")
     for check in spec["checks"]:
         keys(check, {"equal"}, {"reason"}, f"{where}: checks")
+    if "invariants" in spec:
+        invariants(spec["invariants"], f"{where}: invariants")
     require(set(spec.get("only", spec["operations"])) <= set(spec["operations"]), f"{where}: only names unknown operations")
     return spec
+
+
+def invariants(value, where):
+    """``{exclude?: [{reason, path?, module?, message?}]}``: every live assertion of the simulated hierarchy except
+    the excluded ones must stay 0 (see ``control.select``)."""
+    keys(value, set(), {"exclude"}, where)
+    require(isinstance(value.setdefault("exclude", []), list), f"{where}: exclude must be a list")
+    for rule in value["exclude"]:
+        keys(rule, *EXCLUDE_KEYS, f"{where}: exclude")
+        require(isinstance(rule["reason"], str) and rule["reason"].strip(), f"{where}: exclude needs a reason")
+    return value
 
 
 def load_spec(path):
@@ -138,6 +155,18 @@ def variant(spec, name):
 
 def available_engines(target):
     return sorted(p.stem for p in (TARGETS / target).glob("*.yaml"))
+
+
+def available_systems(target):
+    return sorted(p.stem for p in (TARGETS / target / "system").glob("*.yaml"))
+
+
+def load_system(target, name):
+    """A multi-engine spec from ``targets/<target>/system/``; never part of the per-engine facts."""
+    require(name in available_systems(target), f"Unknown system spec for {target}: {name}")
+    spec = load_spec(TARGETS / target / "system" / f"{name}.yaml")
+    require(spec["engine"] == name, "Spec engine names must match their file names")
+    return spec
 
 
 def load_target(target, engines=None):

@@ -72,5 +72,5 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 
 - Same-MXU pipelining. The RTL allows, for example, MXU1 matmul→matmul 32 cycles apart, but some gaps (such as MXU0 matmul→weight push at 63) are not single-operation facts. Overlapping MXU commands needs pair results as a selected input and holds that may overlap within one MXU.
 - Loop-varying addresses (per-state register enumeration is the next step) and engine work crossing block boundaries.
-- Overlap rules in the compiler. The extractor's pair recipe (`tools/rtl_extract/pairs.py`) computes minimum issue gaps between operations, for example 1 for vload→vstore on distinct banks and exp→relu, but the compiler still serializes and system-level assertions are not yet executed by the sweep.
+- Overlap rules in the compiler. The extractor's pair recipe (`tools/rtl_extract/pairs.py`) computes minimum issue gaps between operations, for example 1 for vload→vstore on distinct banks and exp→relu, and the system spec executes every AtlasCore assertion during the sweep, but the compiler still serializes.
 - Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.

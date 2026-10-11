@@ -7,7 +7,7 @@ drives an input port of one circuit with the same-cycle value of an output (port
 Linked inputs start unknown each cycle and are refined until stable, so a combinational loop between the
 circuits leaves its values unknown and fails the run instead of picking an order.
 """
-from .control import ControlCircuit, require
+from .control import ControlCircuit, require, unmatched
 from .spec import keys
 
 PARTNER_KEYS = ({"module", "inputs"}, {"cuts", "probes", "unreset"})
@@ -26,6 +26,8 @@ class CoupledCircuit:
         self.circuits, self.links = circuits, links
         self.registers = {(i, k): v for i, c in enumerate(circuits) for k, v in c.registers.items()}
         self.unreset = {(i, k) for i, c in enumerate(circuits) for k in c.unreset}
+        self.invariants = {n: v for c in circuits for n, v in c.invariants.items()}
+        self.excluded = [e for c in circuits for e in c.excluded]
 
     @property
     def state(self):
@@ -99,5 +101,7 @@ def build(document, spec, signals):
         circuit_outputs = [n for n in wanted[i] if n not in circuit_probes]
         approved = {spec["clock"], spec["reset"], *own[i], *targets[i]}
         circuits.append(ControlCircuit(document, modules[i], circuit_outputs, approved, cuts[i], circuit_probes,
-                                       spec["clock"], spec["reset"], unreset[i]))
+                                       spec["clock"], spec["reset"], unreset[i], spec.get("invariants")))
+    if "invariants" in spec:
+        unmatched(spec["invariants"], circuits[0].matched | circuits[1].matched)
     return CoupledCircuit(circuits, links)
