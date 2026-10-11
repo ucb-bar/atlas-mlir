@@ -9,25 +9,66 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <iterator>
+#include <optional>
+#include <utility>
 
 using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// The explicit transfers in flight within a block, completing in any order.
+// The DRAM bytes [first, last) a virtual DMA launch moves, and whether it
+// writes them. The launch's op verifier proves its address and size.
+struct DRAMEffect {
+  std::optional<std::pair<uint64_t, uint64_t>> span;
+  bool write;
+};
+
+DRAMEffect dramEffect(Operation *launch) {
+  auto effect = [](Value address, Value size, bool write) {
+    std::optional<uint32_t> first = provenI32(address), bytes = provenI32(size);
+    DRAMEffect e{std::nullopt, write};
+    if (first && bytes)
+      e.span = {{*first, static_cast<uint64_t>(*first) + *bytes}};
+    return e;
+  };
+  return llvm::TypeSwitch<Operation *, DRAMEffect>(launch)
+      .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>([&](auto op) {
+        return effect(op.getDramByte(), op.getSizeBytes(), false);
+      })
+      .Case<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([&](auto op) {
+        return effect(op.getDramByte(), op.getSizeBytes(), true);
+      })
+      .Default([](Operation *) -> DRAMEffect {
+        llvm_unreachable("not a virtual DMA launch");
+      });
+}
+
+// The explicit transfers in flight within a block, completing in any order:
+// each handle and its launch.
 struct VirtualDMATransfers {
-  SmallVector<Value, kMaxPendingVirtualDMA> pending;
+  SmallVector<std::pair<Value, Operation *>, kMaxPendingVirtualDMA> pending;
 
   LogicalResult verify(Operation &op) {
     if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
       if (pending.size() == kMaxPendingVirtualDMA)
         return op.emitOpError("must complete a pending DMA before another launch; at most ")
                << kMaxPendingVirtualDMA << " may be pending";
-      pending.push_back(op.getResult(1));
+      for (auto [handle, launch] : pending)
+        if (virtualDMAConflict(&op, launch)) {
+          InFlightDiagnostic diagnostic = op.emitOpError(
+              "must not touch the DRAM bytes of a pending DMA transfer while either writes them");
+          diagnostic.attachNote(launch->getLoc()) << "pending transfer launched here";
+          return diagnostic;
+        }
+      pending.push_back({op.getResult(1), &op});
       return success();
     }
-    auto found = llvm::find(pending, op.getOperand(1));
+    auto found = llvm::find_if(pending, [&](const auto &transfer) {
+      return transfer.first == op.getOperand(1);
+    });
     if (found == pending.end())
       return op.emitOpError("must consume a pending DMA transfer");
     pending.erase(found);
@@ -436,4 +477,13 @@ LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
 
 void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
+}
+
+bool mlir::atlas::virtualDMAConflict(Operation *a, Operation *b) {
+  DRAMEffect x = dramEffect(a), y = dramEffect(b);
+  if (!x.write && !y.write)
+    return false;
+  // A span that cannot be proven may touch anything.
+  return !x.span || !y.span ||
+         (x.span->first < y.span->second && y.span->first < x.span->second);
 }

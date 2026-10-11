@@ -36,9 +36,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   DepGraph g = buildGraph(nodes, s.entry[block]);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
-    // compute to overlap. Commands outside an interval cannot move into it.
-    int wait = -1;
-    std::vector<int> outside;
+    // compute to overlap. Transfers on several channels may be pending at
+    // once, so a launch, or an instruction that cannot overlap a transfer,
+    // stays after every wait before it, as in the source. Commands outside an
+    // interval cannot move into it.
+    std::vector<int> waits, outside;
     auto edge = [&](int from, int to) {
       int index = static_cast<int>(g.edges.size());
       g.edges.push_back({from, to, 1, EdgeKind::Order,
@@ -48,16 +50,16 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     };
     for (int i = 0; i < n; ++i) {
       if (nodes[i].op->opClass == OpClass::DmaWait) {
-        wait = i;
+        waits.push_back(i);
       } else if (nodes[i].op->opClass == OpClass::DmaLoad ||
                  nodes[i].op->opClass == OpClass::DmaStore) {
-        if (wait >= 0)
+        for (int wait : waits)
           edge(wait, i);
         for (int previous : outside)
           edge(previous, i);
         outside.clear();
       } else if (!canOverlapAtlasGeneratedDMA(op(i))) {
-        if (wait >= 0)
+        for (int wait : waits)
           edge(wait, i);
         outside.push_back(i);
       }

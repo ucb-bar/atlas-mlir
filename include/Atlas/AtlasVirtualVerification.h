@@ -11,6 +11,11 @@ namespace mlir::atlas {
 constexpr unsigned kMaxPendingVirtualDMA = 2;
 constexpr unsigned kVirtualMXUSlots = 2;
 
+// Whether two virtual DMA launches may touch the same DRAM bytes while one of
+// them writes, by the address and size their op verifiers prove. Such
+// transfers are never pending together.
+bool virtualDMAConflict(Operation *a, Operation *b);
+
 // Check a pre-allocation SSA candidate and its CFG/state obligations.
 LogicalResult verifyAtlasVirtualModule(ModuleOp module);
 void registerVerifyAtlasVirtualStreamPass();

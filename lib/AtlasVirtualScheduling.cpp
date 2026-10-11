@@ -18,8 +18,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/ADT/TypeSwitch.h"
-#include "llvm/Support/ErrorHandling.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -60,10 +58,6 @@ bool isLaunch(Operation *op) {
              VirtualDMAStoreBF16Op>(op);
 }
 
-bool isStore(Operation *op) {
-  return isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
-}
-
 bool isCompletion(Operation *op) {
   return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op);
 }
@@ -73,31 +67,6 @@ bool isCompletion(Operation *op) {
 bool isImplicitMemory(Operation *op) {
   return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
              VirtualPackFP8Op>(op);
-}
-
-// The DRAM bytes a transfer moves, [first, last), proven as the transfer's
-// verifier proves them, so a verified transfer always has one.
-using DRAMRange = std::pair<uint64_t, uint64_t>;
-std::optional<DRAMRange> dramRange(Operation *launch) {
-  auto [address, size] =
-      llvm::TypeSwitch<Operation *, std::pair<Value, Value>>(launch)
-          .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-                VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([](auto op) {
-            return std::pair{op.getDramByte(), op.getSizeBytes()};
-          })
-          .Default([](Operation *) -> std::pair<Value, Value> {
-            llvm_unreachable("not a DMA launch");
-          });
-  std::optional<uint32_t> first = provenI32(address), bytes = provenI32(size);
-  if (!first || !bytes)
-    return std::nullopt;
-  return DRAMRange{*first, static_cast<uint64_t>(*first) + *bytes};
-}
-
-// A range that cannot be proven may touch anything.
-bool mayOverlap(const std::optional<DRAMRange> &a,
-                const std::optional<DRAMRange> &b) {
-  return !a || !b || (a->first < b->second && b->first < a->second);
 }
 
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
@@ -304,19 +273,13 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
   for (unsigned m : implicit)
     for (unsigned d : transfersAndCompletions)
       edge(std::min(m, d), std::max(m, d));
-  std::vector<std::optional<DRAMRange>> ranges;
-  for (unsigned launch : launches)
-    ranges.push_back(dramRange(g.nodes[launch]));
   for (unsigned a = 0; a < launches.size(); ++a)
-    for (unsigned b = a + 1; b < launches.size(); ++b) {
-      if (!isStore(g.nodes[launches[a]]) && !isStore(g.nodes[launches[b]]))
-        continue;
-      if (!mayOverlap(ranges[a], ranges[b]))
-        continue;
-      // A source that already overlaps them keeps their launch order.
-      edge(completions[a] < launches[b] ? completions[a] : launches[a],
-           launches[b]);
-    }
+    for (unsigned b = a + 1; b < launches.size(); ++b)
+      if (virtualDMAConflict(g.nodes[launches[a]], g.nodes[launches[b]])) {
+        assert(completions[a] < launches[b] &&
+               "the verifier never leaves conflicting transfers pending together");
+        edge(completions[a], launches[b]);
+      }
 
   // Slot limits. A transfer is last used by its completion, a weight by its
   // users, or by its load if it has none, and an accumulator chain by the

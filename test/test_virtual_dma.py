@@ -241,13 +241,20 @@ class VirtualDMATest(unittest.TestCase):
                 self.rejected(source.replace(dma_await("bf16"), second + "\n" + third + "\n"
                                              + dma_await("bf16", before="third_io")),
                               "must complete a pending DMA before another launch; at most 2 may be pending")
-        # A load may overlap a store, and the store may complete first.
-        self.accepted(source.replace(dma_wait(), dma_load("bf16", before="io3", after="extra_io", handle="extra")
-                                     + "\n" + dma_wait(before="extra_io", after="done_io") + "\n"
-                                     + dma_await("bf16", before="done_io", after="io4", handle="extra",
-                                                 result="extra_tile")))
-        stores = (dma_store("bf16", before="io3", after="extra_io", handle="extra") + "\n"
-                  + dma_store("bf16", before="extra_io", after="third_io", handle="third"))
+        # A load of other DRAM may overlap a store, and the store may complete
+        # first; a load of the stored bytes may not.
+        def load_beside_store(addr: str) -> str:
+            return source.replace(dma_wait(), "    %other = arith.constant -2147481600 : i32\n"
+                                  + dma_load("bf16", before="io3", after="extra_io", handle="extra", addr=addr)
+                                  + "\n" + dma_wait(before="extra_io", after="done_io") + "\n"
+                                  + dma_await("bf16", before="done_io", after="io4", handle="extra",
+                                              result="extra_tile"))
+        self.accepted(load_beside_store("other"))
+        self.rejected(load_beside_store("addr"),
+                      "must not touch the DRAM bytes of a pending DMA transfer while either writes them")
+        stores = ("    %other_addr = arith.constant -2147481600 : i32\n    %third_addr = arith.constant -2147479552 : i32\n"
+                  + dma_store("bf16", before="io3", after="extra_io", handle="extra").replace("%addr", "%other_addr") + "\n"
+                  + dma_store("bf16", before="extra_io", after="third_io", handle="third").replace("%addr", "%third_addr"))
         self.rejected(source.replace(dma_wait(), stores + "\n" + dma_wait(before="third_io")),
                       "must complete a pending DMA before another launch; at most 2 may be pending")
 

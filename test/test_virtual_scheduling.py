@@ -489,6 +489,25 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertEqual(peak, 2, "the next transfer launches before the current completes")
         self.assertIn("atlas.virtual_mxu_reset", moved)
 
+    def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
+        # A store and a load are pending and complete load first. The PACK
+        # after both, which no transfer may overlap, stays after each wait,
+        # not only the last.
+        source = function("pack", [
+            start(), inp("io0", "io1", "t", 0), const("a", -2147483648), const("b", -2147481600),
+            const("size", 2048),
+            f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %a, %size) '
+            f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
+            dma_load("io2", "io3", "eb", "b", "size", "bf16"),
+            dma_await("io3", "io4", "tb", "eb", "bf16"),
+            f'%io5 = "atlas.virtual_dma_wait"(%io4, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
+            f'%p = "atlas.virtual_pack_fp8"(%t) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            outp("io5", "o", "tb", 0), f"return %o : {S}"])
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        timed = run("atlas-opt", lowered.stdout, "--schedule-atlas-stream", "--verify-atlas-timing")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
+
     def test_transfers_that_may_share_dram_never_overlap(self) -> None:
         # A store to y, then a load of y and a load of z. The load of y waits
         # for the store; the load of z may run beside either.
