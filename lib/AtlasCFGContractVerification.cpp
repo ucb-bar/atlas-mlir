@@ -432,7 +432,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         produced = binary(kind,s.x[alu.getSrc()],literal(uint32_t(alu.getImmediateAttr().getValue().getSExtValue()))); if (alu.getDst()) s.x[alu.getDst()] = produced;
       } else if (auto upper = dyn_cast<UpperOp>(op)) { produced = upper.getKind() == "lui" ? literal(upper.getImmediate() << 12) : E{}; if (upper.getDst()) s.x[upper.getDst()] = produced; }
       else if (auto load = dyn_cast<ScalarLoadOp>(op)) {
-        if (load.getKind() == "lw") { if (load.getDst()) s.x[load.getDst()].reset(); }
+        // Every XRF load replaces its previous source origin. SELI and SELD
+        // write the separate scale bank and leave scalar origins intact.
+        if (load.getKind() != "seli" && load.getKind() != "seld" && load.getDst())
+          s.x[load.getDst()].reset();
         if (auto id = contractTag(op,kAtlasTagScalarArgument)) {
           if (*id >= int32_t(values.size()) || values[*id].def != "argument" || values[*id].block != 0 || load.getKind() != "lw" || load.getDst() != unsigned(values[*id].reg) || contractTag(op,kAtlasTagTileCommand) != kMailboxPreludeCommands + *id) return error("invalid mailbox scalar origin");
           produced = node("mailbox",{}, {},0,*id); s.x[load.getDst()] = produced;
