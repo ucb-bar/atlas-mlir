@@ -286,7 +286,7 @@ class VerilatorReplayTest(unittest.TestCase):
                                            lambda e: footprint(e).__setitem__("read_release", 63),
                                            lambda e: footprint(e)["mreg_reads"].pop(),
                                            lambda e: footprint(e)["holds"].pop(0),
-                                           lambda e: hold(e, "VPU").__setitem__("to", 63),
+                                           lambda e: [h.__setitem__("to", 63) for h in footprint(e)["holds"] if h["unit"] == "VPU"],
                                            lambda e: hold(e, "VPU").__setitem__("to", 66),
                                            lambda e: [h.__setitem__("to", min(h["to"], 64)) for h in policy(e)],
                                            lambda e: hold(e, "VMEM bank", load).__setitem__("from", 2),
@@ -297,7 +297,7 @@ class VerilatorReplayTest(unittest.TestCase):
             changed = copy.deepcopy(export); mutate(changed)
             with self.subTest(position=position): self.rejects(name, export=changed)
         # A policy hold or lifetime may outlast the engine's own activity.
-        for mutate in (lambda e: policy(e)[-1].__setitem__("to", 100), lambda e: hold(e, "VSTORE path", load).__setitem__("to", 90),
+        for mutate in (lambda e: policy(e)[-1].__setitem__("to", 100), lambda e: [h.__setitem__("to", 90) for h in footprint(e, load)["holds"] if h["unit"] in ("VPU", "VSTORE path")],
                        lambda e: footprint(e).__setitem__("done_age", 80)):
             changed = copy.deepcopy(export); mutate(changed)
             self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)

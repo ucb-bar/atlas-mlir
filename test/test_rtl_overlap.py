@@ -1,8 +1,9 @@
 """Selected issue gaps between VLS, VPU and XLU operations (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING).
 
 Every gap comes from the facts: a VPU admits the next VPU command at its next_issue_age and keeps the
-other engines out until its first_free_age; VLS and XLU keep every engine out until their first_free_age.
-An MXU command excludes every engine through its last event. Operands are disjoint (MREG physical banks, VMEM banks), so only engine admission decides.
+other engines out until its first_free_age; VLOAD and VSTORE overlap each other and keep the VPU and XLU
+out until their first_free_age, as the XLU does every engine. An MXU command excludes every engine through
+its last event. Operands are disjoint (MREG physical banks, VMEM banks), so only engine admission decides.
 """
 import functools
 import tempfile
@@ -60,6 +61,8 @@ def expected_gap(document, first, second):
         return first_free(document, first)
     if first.startswith("vpu.") and second.startswith("vpu."):
         return block(document, first)["next_issue_age"]
+    if {first, second} == {"vlsu.vload", "vlsu.vstore"}:
+        return 1  # each holds only its own path; banks and MREGs are disjoint
     return first_free(document, first)
 
 
@@ -84,6 +87,17 @@ def tile_kernel(tiles=4):
         ops += [vls("vload", r + k, src, 32 * k) for k in range(4)]
         ops += [vmul(r, r + 2, r + 4, "add"), vls("vstore", r + 4, dst), vls("vstore", r + 5, dst, 32)]
     return ops + [HALT]
+
+
+def copy_kernel(tiles=4):
+    """Stream `tiles` tiles from VMEM bank 0 to bank 1 through m(4+t)."""
+    ops = [*word_base(6, 0), *word_base(8, BANK_WORDS)]
+    for t in range(tiles):
+        ops += [vls("vload", 4 + t, 6, 32 * t), vls("vstore", 4 + t, 8, 32 * t)]
+    return ops + [HALT]
+
+
+KERNELS = {"four-tile load-load-add-store": tile_kernel, "four-tile copy": copy_kernel}
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -137,13 +151,28 @@ class SelectedOverlapTest(unittest.TestCase):
                     self.assertEqual(self.verify(gapped(setup, add, b, boundary), path).returncode, 0)
                     self.assertNotEqual(self.verify(gapped(setup, add, b, boundary - 1), path).returncode, 0)
 
-    def test_example_tile_kernel(self):
-        for consumer in CONSUMERS:
-            with self.subTest(consumer=consumer):
-                result = run(OPT, program(tile_kernel()), selection(), consumer, VERIFY)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(run(EMIT, result.stdout).returncode, 0)
-                print(f"\n{consumer}: four-tile load-load-add-store kernel halts at cycle {cycles(result.stdout)}")
+    def test_same_bank_vload_vstore_is_ordered_by_vmem_bank_windows(self):
+        # The RTL asserts on a VLOAD read and VSTORE write to one bank in the same cycle (LSU.scala).
+        load, store = block(facts(), "vlsu.vload"), block(facts(), "vlsu.vstore")
+        read, write = load["events"]["vmem_read"], store["events"]["vmem_write"]
+        setup = [*word_base(6, 0), *word_base(8, 1024)]
+        for a, b, boundary in ((vls("vload", 4, 6), vls("vstore", 9, 8), read["last_age"] - write["first_age"] + 1),
+                               (vls("vstore", 9, 8), vls("vload", 4, 6), write["last_age"] - read["first_age"] + 1)):
+            for gap in (1, boundary - 1, boundary):
+                with self.subTest(first=a[0], gap=gap):
+                    result = self.verify(gapped(setup, a, b, gap))
+                    self.assertEqual(result.returncode == 0, gap >= boundary, result.stderr)
+                    if gap < boundary:
+                        self.assertIn("VMEM bank 0 busy", result.stderr)
+
+    def test_example_kernels(self):
+        for name, kernel in KERNELS.items():
+            for consumer in CONSUMERS:
+                with self.subTest(kernel=name, consumer=consumer):
+                    result = run(OPT, program(kernel()), selection(), consumer, VERIFY)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(run(EMIT, result.stdout).returncode, 0)
+                    print(f"\n{consumer}: {name} kernel halts at cycle {cycles(result.stdout)}")
 
 
 if __name__ == "__main__":

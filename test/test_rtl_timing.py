@@ -187,22 +187,24 @@ class SelectedRTLTimingTest(unittest.TestCase):
         def slower(d):
             for name in ("vlsu.vload", "vlsu.vstore"):
                 block(d, name).update(first_free_age=40, next_issue_age=40)
+        raw = block(facts(), "vlsu.vload")["events"]["mreg_write"]["last_age"] + 1
         with tempfile.TemporaryDirectory(prefix="atlas-facts-") as directory:
             path = facts_variant(directory, slower)
-            # DELAY N occupies N+1 cycles, so the two VLS issue N+2 apart.
+            # DELAY N occupies N+1 cycles, so the two VLS issue N+2 apart. A path is busy until first_free_age.
             for gap in (35, 39, 40):
                 with self.subTest(gap=gap):
                     self.check([addi(6, 0, 256), *word_base(8, 768), VLOAD, delay(gap - 2),
-                                vls("vstore", 63, 8), delay(38), nop(), HALT], gap >= 40, VERIFY, path=path)
+                                vls("vload", 63, 8), delay(38), nop(), HALT], gap >= 40, VERIFY, path=path)
+            # VLOAD and VSTORE hold only their own path: the copy is ordered by its RAW on m4.
             for consumer in CONSUMERS:
                 with self.subTest(consumer=consumer):
                     result = self.check(VLS_COPY.read_text(), True, consumer, VERIFY, path=path)
                     vector = [i for i in export(result.stdout)["instructions"]
                               if i["mnemonic"] in ("vload", "vstore")]
-                    self.assertEqual(vector[1]["logical_issue_cycle"] - vector[0]["logical_issue_cycle"], 40)
+                    self.assertEqual(vector[1]["logical_issue_cycle"] - vector[0]["logical_issue_cycle"], raw)
                     self.assertEqual(vector[0]["footprint"]["done_age"], 39)
-                    self.assertEqual([h["to"] for h in vector[0]["footprint"]["holds"]
-                                      if h["unit"].endswith("path")], [39, 39])
+                    self.assertEqual([(h["unit"], h["to"]) for h in vector[0]["footprint"]["holds"]
+                                      if h["unit"].endswith("path")], [("VLOAD path", 39)])
 
     def test_unsupported_domains_reject_in_both_consumers(self):
         for ops in ([VLOAD, HALT], [addi(6, 0, 8), VLOAD, HALT], [("fence", ""), HALT],
@@ -211,17 +213,32 @@ class SelectedRTLTimingTest(unittest.TestCase):
                 with self.subTest(ops=ops, consumer=consumer):
                     self.check(ops, False, consumer, diagnostic=RESOLVER)
 
-    def test_exact_serialized_admission_boundary(self):
-        # Serialization applies across paths, banks and MREGs, without a RAW edge.
+    def test_exact_vls_admission_boundary(self):
+        # A path is busy until first_free_age. VLOAD and VSTORE overlap; a shared VMEM bank orders them by its
+        # read/write windows and a shared MREG by its release ages.
+        document = facts()
+        load, store = block(document, "vlsu.vload"), block(document, "vlsu.vstore")
+        events = {"vload": load["events"]["vmem_read"], "vstore": store["events"]["vmem_write"]}
+        latency = store["assumptions"]["scratchpad_read_latency"]
+        release = {"vload": load["events"]["mreg_write"]["last_age"],
+                   "vstore": store["events"]["mreg_read"]["last_age"] + latency}
         for first in ("vload", "vstore"):
             for second in ("vload", "vstore"):
-                for other_mreg, other_words in ((4, 768), (63, 65792)):
-                    for gap in (34, 35):
-                        with self.subTest(first=first, second=second, mreg=other_mreg, gap=gap):
-                            self.check([addi(6, 0, 256), *word_base(8, other_words), vls(first),
-                                        delay(gap - 2), vls(second, other_mreg, 8), delay(33), nop(), HALT],
-                                       gap >= 35, VERIFY,
-                                       diagnostic=None if gap >= 35 else "serialized engine admission")
+                for other_mreg, other_words in ((4, 768), (63, 768), (4, 65792), (63, 65792)):
+                    if first == second:
+                        boundary = block(document, f"vlsu.{first}")["first_free_age"]
+                    else:
+                        bank = events[first]["last_age"] - events[second]["first_age"] + 1 if other_words == 768 else 1
+                        boundary = max(bank, release[first] + 1 if other_mreg == 4 else 1)
+                    gaps = (boundary - 1, boundary) if boundary > 1 else (boundary,)
+                    for gap in gaps:
+                        with self.subTest(first=first, second=second, mreg=other_mreg, words=other_words, gap=gap):
+                            prefix = [addi(6, 0, 256), *word_base(8, other_words), vls(first)]
+                            between = [] if gap == 1 else [nop()] if gap == 2 else [delay(gap - 2)]
+                            result = self.check([*prefix, *between, vls(second, other_mreg, 8), delay(33), nop(), HALT],
+                                                gap >= boundary, VERIFY)
+                            if gap < boundary:
+                                self.assertRegex(result.stderr, "serialized engine admission|selected RTL dependence")
 
     def check_operand_admission(self, setup, instruction, accepted, encoded_immediate=None):
         for consumer in CONSUMERS:
