@@ -11,12 +11,9 @@ namespace mlir::atlas {
 // invariant requires; holds that owner, which may be kFree or kUnknown.
 using MXUOwnershipViolation = std::optional<int32_t>;
 
-// Logical ownership of each MXU's two weight and two accumulator slots
-// (WeightBuffers.scala and AccumulationBuffers.scala geometry, not a release
-// rule). A weight owns its slot until its last use, an accumulator version
-// chain stays in one slot until readout, no push may overwrite a live slot,
-// and every accumulator is read out before an exit. Transitions check their
-// invariant, then apply the change, so a path-propagating driver may ignore it.
+// Logical owners of Weight/AccumulationBuffers.scala slots, not a release rule:
+// a weight until last use, an accumulator version chain until readout before
+// exit; no push over live slots. Transitions apply despite reported violations.
 struct MXUOwnership {
   static constexpr unsigned kUnits = 2, kSlots = 2;
   static constexpr int32_t kFree = -1;

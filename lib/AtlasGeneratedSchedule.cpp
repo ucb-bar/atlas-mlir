@@ -1,7 +1,6 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
-#include "Atlas/AtlasDMAMemoryVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasCFGContractVerification.h"

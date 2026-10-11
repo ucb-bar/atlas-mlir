@@ -104,13 +104,12 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
   return effects;
 }
 ArrayAttr encodeEffects(Builder &b, ArrayRef<Effect> effects) {
-  auto i = [&](int32_t n) { return b.getI32IntegerAttr(n); };
-  auto f = [&](StringRef key, Attribute a) { return b.getNamedAttr(key, a); };
   SmallVector<Attribute> records;
   for (const Effect &e : effects)
     records.push_back(b.getDictionaryAttr({
-        f("id", i(e.id)), f("source", i(e.source)), f("block", i(e.block)), f("launch", i(e.launch)), f("completion", i(e.completion)),
-        f("dram_byte", i(int32_t(e.dram))), f("bytes", i(int32_t(e.bytes))), f("write", b.getBoolAttr(e.write)), f("predecessors", b.getDenseI32ArrayAttr(e.predecessors))}));
+        namedI32(b, "id", e.id), namedI32(b, "source", e.source), namedI32(b, "block", e.block),
+        namedI32(b, "launch", e.launch), namedI32(b, "completion", e.completion), namedI32(b, "dram_byte", e.dram),
+        namedI32(b, "bytes", e.bytes), b.getNamedAttr("write", b.getBoolAttr(e.write)), b.getNamedAttr("predecessors", b.getDenseI32ArrayAttr(e.predecessors))}));
   return b.getArrayAttr(records);
 }
 struct State {

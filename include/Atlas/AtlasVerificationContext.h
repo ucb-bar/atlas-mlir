@@ -13,14 +13,6 @@
 
 namespace mlir::atlas {
 
-// One generated launch/wait pair. Intervals on different channels may overlap.
-struct AtlasDMAInterval {
-  unsigned channel;
-  std::optional<int32_t> id;
-  int64_t launchPC, waitPC;
-  DMAOp launch;
-};
-
 // Facts shared by every check at one verification boundary. The context holds
 // raw operations and is stale after any module mutation; build a new one.
 struct AtlasVerificationContext {
@@ -29,7 +21,6 @@ struct AtlasVerificationContext {
   llvm::SmallVector<Operation *> ops; // program order, atlas.start excluded
   llvm::DenseMap<Operation *, size_t> pcOf;
   bool hasDMA = false, hasResourceTags = false, hasCFGContract = false, timed = false;
-  llvm::SmallVector<AtlasDMAInterval> dmaIntervals; // generated only
   llvm::SmallVector<uint32_t> words; // the decode's encoding, else empty
   std::optional<AtlasStream> stream;
   std::vector<std::optional<uint32_t>> dmaUpperEntry; // present with stream
@@ -48,13 +39,19 @@ struct AtlasVerificationContext {
   AtlasVerificationContext &operator=(const AtlasVerificationContext &) = delete;
 };
 
-// Decodes, and thereby encodes, at most once, after the MLIR verifier and
-// verifyAtlasTimingState. `generated` first runs the structural stage (DMA
-// pairing, protected intervals, x0-NOP redirect slots). Standalone checkers
-// pass requireStream to decode irrespective of needsDecodedStream().
+// After the MLIR verifier and verifyAtlasTimingState, decodes (so encodes) at
+// most once. `generated` first runs the structural stage (DMA pairing,
+// protected intervals, x0-NOP redirect slots); requireStream forces decoding.
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
                               bool requireStream = false);
+
+// The exact `addi x0, x0, 0` that generated redirect delay slots require.
+inline bool isExactAtlasNop(Operation *op) {
+  auto nop = dyn_cast_or_null<ALUImmOp>(op);
+  return nop && nop.getKind() == "addi" && nop.getDst() == 0 &&
+         nop.getSrc() == 0 && nop.getImmediate() == 0;
+}
 
 } // namespace mlir::atlas
 

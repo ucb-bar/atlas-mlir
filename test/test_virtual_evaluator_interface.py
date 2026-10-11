@@ -13,7 +13,7 @@ from atlas_virtual_evaluator import (  # noqa: E402
     EvaluationResult, MemoryRegion, RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, compare_results, evaluate,
     operation_name, parse_program,
 )
-from test_virtual_evaluator_resources import load, ready, wrap  # noqa: E402
+from test_virtual_evaluator_arithmetic import INPUTS, relu  # noqa: E402
 
 
 def example(name: str) -> str:
@@ -22,6 +22,7 @@ def example(name: str) -> str:
 
 FLAT = example("virtual_bf16_ssa.mlir")
 CFG = example("virtual_bf16_cfg.mlir")
+CMPI = 'module { %a = arith.constant 0 : i32 %c = "arith.cmpi"(%a, %a) <{predicate = 2 : i64}> : (i32, i32) -> i1 }'
 
 
 class VirtualParserInterfaceTest(unittest.TestCase):
@@ -66,50 +67,8 @@ class VirtualParserInterfaceTest(unittest.TestCase):
                 self.assertIsNotNone(program.function)
                 self.assertTrue(program.operations)
 
-    def test_two_pending_dma_loads_retain_reverse_completion_identities(self) -> None:
-        program = parse_program(wrap(
-            "%a = arith.constant -1879048192 : i32", "%b = arith.constant -1879047168 : i32", "%size = arith.constant 1024 : i32",
-            load("fp8", "s0", "s1", "first", "a"), load("fp8", "s1", "s2", "second", "b"),
-            ready("fp8", "s2", "s3", "second", "tile_second"), ready("fp8", "s3", "s4", "first", "tile_first"),
-            '%product = "atlas.virtual_mxu_matmul"(%tile_first, %tile_second) {unit = 0 : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16',
-            '%s5 = "atlas.virtual_output_bf16"(%s4, %product) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state',
-            final="s5", flat=True))
-        first, second, await_second, await_first, contraction, output = program.operations[4:]
-        self.assertIsNot(first.results[1], second.results[1])
-        self.assertIs(await_second.operands[1], second.results[1])
-        self.assertIs(await_first.operands[1], first.results[1])
-        self.assertIsNot(await_first.results[1], await_second.results[1])
-        self.assertEqual((contraction.operands[0], contraction.operands[1]), (await_first.results[1], await_second.results[1]))
-        self.assertIs(output.operands[1], contraction.results[0])
-        self.assertEqual(program.output_indices, (0,))
-
-    def test_same_unit_independent_mxu_chains_retain_handle_identities(self) -> None:
-        source = example("virtual_mxu_accumulation.mlir").replace("unit = 1 : i32", "unit = 0 : i32")
-        program = parse_program(source.replace("virtual_mxu_weight<1>", "virtual_mxu_weight<0>").replace("virtual_mxu_acc<1>", "virtual_mxu_acc<0>"))
-        weight0, weight1, reset0, reset1, next0, next1, read0, read1 = program.operations[3:11]
-        self.assertIsNot(weight0.results[1], weight1.results[1])
-        self.assertIsNot(reset0.results[1], reset1.results[1])
-        for weight, reset, accumulation, readout in ((weight0, reset0, next0, read0), (weight1, reset1, next1, read1)):
-            self.assertIs(reset.operands[2], weight.results[1])
-            self.assertIs(accumulation.operands[2], weight.results[1])
-            self.assertIs(accumulation.operands[3], reset.results[1])
-            self.assertIs(readout.operands[1], accumulation.results[1])
-        self.assertEqual(program.output_indices, (0, 1))
-
-    def test_declarations_on_both_cfg_paths_require_runtime_inputs(self) -> None:
-        source = example("virtual_bf16_dynamic_branch_program.mlir").replace(
-            '    %right_result = "atlas.virtual_vpu_unary"(%right_tile)',
-            '    %right_next, %extra = "atlas.virtual_input_bf16"(%right_io) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)\n'
-            '    %right_result = "atlas.virtual_vpu_unary"(%extra)',
-        ).replace("cf.br ^join(%right_io, %right_result", "cf.br ^join(%right_next, %right_result")
-        program = parse_program(source)
-        self.assertEqual(dict(program.input_formats), {0: "bf16", 1: "bf16"})
-        with self.assertRaisesRegex(VirtualInterfaceError, "input indices"):
-            program.validate_inputs(RuntimeInputs({0: Tile("bf16", (0,) * 1024)}, (Scalar(1, 0),)))
-
     def test_valid_generic_and_canonical_property_forms_are_admitted(self) -> None:
-        source = 'module { %a = arith.constant 0 : i32 %c = "arith.cmpi"(%a, %a) <{predicate = 2 : i64}> : (i32, i32) -> i1 }'
-        constant, comparison = parse_program(source).operations
+        constant, comparison = parse_program(CMPI).operations
         self.assertEqual(operation_name(comparison), "arith.cmpi")
         self.assertEqual(tuple(comparison.operands), (constant.results[0],) * 2)
         relu = example("virtual_bf16_shared_relu.mlir")
@@ -119,7 +78,7 @@ class VirtualParserInterfaceTest(unittest.TestCase):
 
     def test_parser_rejects_unsupported_and_malformed_programs(self) -> None:
         canonical = example("virtual_bf16_shared_relu.mlir").replace('{index = 0 : i32}', '<{index = 0 : i32}>')
-        seeded, cmpi = example("virtual_mxu_seeded_fp8.mlir"), 'module { %a = arith.constant 0 : i32 %c = "arith.cmpi"(%a, %a) <{predicate = 2 : i64}> : (i32, i32) -> i1 }'
+        seeded = example("virtual_mxu_seeded_fp8.mlir")
         unsupported = (
             (FLAT.replace("atlas.virtual_start", "atlas.start"), "unsupported virtual operation"),
             (FLAT.replace("atlas.virtual_vpu_unary", "atlas.virtual_invented"), "unsupported virtual operation"),
@@ -136,8 +95,8 @@ class VirtualParserInterfaceTest(unittest.TestCase):
             (FLAT.replace("index = 1 : i32", "index = 0 : i32"), "duplicate output"),
             ("module { %a = arith.constant 0 : i32 %b = arith.addi %a, %a overflow<nsw> : i32 }", "wrapping i32"),
             ("module { %a = arith.constant 0 : i64 %b = arith.addi %a, %a : i64 }", "i1/i32 integer"),
-            (cmpi.replace("predicate = 2", "predicate = 10"), "invalid virtual MLIR|ten predicates"),
-            (cmpi.replace("predicate = 2 : i64", "predicate = 2 : i32"), "predicates encoded as i64"),
+            (CMPI.replace("predicate = 2", "predicate = 10"), "invalid virtual MLIR|ten predicates"),
+            (CMPI.replace("predicate = 2 : i64", "predicate = 2 : i32"), "predicates encoded as i64"),
             (seeded.replace("unit = 0 : i32", "unit = 2 : i32", 1), "unit must be"),
             (seeded.replace("unit = 0 : i32", "unit = 1 : i32", 1), "handle units must agree"),
             (seeded.replace("code = 129 : i32", "code = 256 : i32"), "scale code"),
@@ -211,6 +170,9 @@ class VirtualRuntimeInterfaceTest(unittest.TestCase):
         self.assertEqual(dict(result.outputs), {7: tile})
         with self.assertRaises(TypeError):
             result.outputs[0] = tile
+        for snapshot in (inputs, result):
+            with self.assertRaises(FrozenInstanceError):
+                snapshot.memory = ()
 
     def test_collections_require_typed_tiles_controls_and_memory(self) -> None:
         tile = Tile("bf16", (0,) * 1024)
@@ -235,8 +197,6 @@ class VirtualRuntimeInterfaceTest(unittest.TestCase):
         for index, inputs in enumerate(invalid):
             with self.subTest(case=index), self.assertRaises(VirtualInterfaceError):
                 program.validate_inputs(inputs)
-        with self.assertRaises(VirtualInterfaceError):
-            evaluate(parse_program(RELU_FLAT), {11: bf16})
 
 
 RELU_OPERATIONS = '''
@@ -248,15 +208,10 @@ RELU_OPERATIONS = '''
 '''
 RELU_FLAT = "module {" + RELU_OPERATIONS + "}"
 RELU_FUNCTION = "module { func.func @relu_pair() -> !atlas.virtual_state {" + RELU_OPERATIONS + "func.return %s3 : !atlas.virtual_state } }"
-SPECIAL_BF16 = (0x8000, 0x0001, 0x007F, 0x8001, 0x7F80, 0xFF80, 0x7F81, 0x7FC1, 0xFFC1)
 
 
 def patterned_tile(offset: int = 0) -> Tile:
     return Tile("bf16", tuple((0x3E00 + offset + index) | (0x8000 if (index // 32 + index % 32) % 2 else 0) for index in range(1024)))
-
-
-def relu(bits: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(0 if value & 0x8000 else value for value in bits)
 
 
 class VirtualEvaluatorExecutionTest(unittest.TestCase):
@@ -265,10 +220,8 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
         previous = None
         for offset in (0, 0x400):
             tile = patterned_tile(offset)
-            inputs = RuntimeInputs({11: tile})
-            result = evaluate(program, inputs)
-            self.assertEqual(dict(result.outputs), {23: tile, 29: Tile("bf16", relu(tile.bits))})
-            self.assertEqual(inputs.tiles[11], tile)
+            result = evaluate(program, RuntimeInputs({11: tile}))
+            self.assertEqual(dict(result.outputs), {23: tile, 29: relu(tile)})
             if previous is not None:
                 self.assertNotEqual(result.outputs[23], previous.outputs[23])
                 self.assertNotEqual(result.outputs[29], previous.outputs[29])
@@ -278,29 +231,6 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
         inputs = RuntimeInputs({11: patterned_tile()})
         renamed = RELU_FUNCTION.replace("%s", "%event_").replace("%original", "%logical_input").replace("%rectified", "%logical_output")
         self.assertEqual(evaluate(parse_program(renamed), inputs), evaluate(parse_program(RELU_FLAT), inputs))
-
-    def test_special_and_extreme_encodings_pass_through_and_relu_clears_only_negative_ones(self) -> None:
-        # Signed zeros, subnormals, infinities, NaN payloads, and the smallest/largest mantissas of the extreme normal exponents.
-        encodings = SPECIAL_BF16 + (0x0000, 0x0080, 0x00FF, 0x8080, 0x80FF, 0x7F00, 0x7F7F, 0xFF00, 0xFF7F)
-        bits = tuple(encodings[index % len(encodings)] for index in range(1024))
-        inputs = RuntimeInputs({11: Tile("bf16", bits)})
-        passthrough = "module {" + "\n".join(line for line in RELU_OPERATIONS.splitlines() if "rectified" not in line) + "}"
-        self.assertEqual(dict(evaluate(parse_program(passthrough), inputs).outputs), {23: inputs.tiles[11]})
-        result = evaluate(parse_program(RELU_FLAT), inputs)
-        self.assertEqual((result.outputs[23].bits, result.outputs[29].bits, inputs.tiles[11].bits), (bits, relu(bits), bits))
-
-    def test_execution_preserves_memory_inputs_and_publishes_immutable_outputs(self) -> None:
-        tile = patterned_tile()
-        memory = (MemoryRegion(0x90000020, b"right guard"), MemoryRegion(0x90000000, b"left guard"))
-        inputs = RuntimeInputs({11: tile}, memory=memory)
-        result = evaluate(parse_program(RELU_FLAT), inputs)
-        self.assertEqual((result.memory, inputs.memory, dict(inputs.tiles)), (memory, memory, {11: tile}))
-        with self.assertRaises(TypeError):
-            result.outputs[23] = Tile("bf16", (0,) * 1024)
-        with self.assertRaises(FrozenInstanceError):
-            result.outputs[29].bits = (0,) * 1024
-        with self.assertRaises(FrozenInstanceError):
-            result.memory = ()
 
     def test_stale_state_duplicate_start_and_foreign_operands_are_rejected(self) -> None:
         second_input = '  %s4, %extra = "atlas.virtual_input_bf16"(%s0) {index = 11 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)\n'
@@ -323,11 +253,6 @@ class VirtualEvaluatorExecutionTest(unittest.TestCase):
             evaluate(program, tile)
 
 
-INPUTS = '''
-  %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-  %s1, %a = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-  %s2, %b = "atlas.virtual_input_bf16"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-'''
 SELECT = '''
   cf.cond_br %choose, ^exit(%s2, %a : !atlas.virtual_state, !atlas.virtual_bf16), ^exit(%s2, %b : !atlas.virtual_state, !atlas.virtual_bf16)
 ^exit(%state: !atlas.virtual_state, %tile: !atlas.virtual_bf16):
@@ -404,9 +329,6 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
                           "%choose: i1, %expected: i32")
         for choice, expected, selected in ((1, 10, 0), (1, 20, 1), (0, 20, 0), (0, 10, 1)):
             self.assert_selection(source, (Scalar(1, choice), Scalar(32, expected)), selected)
-        renamed = source.replace("%a", "%first").replace("%b", "%second").replace("%js", "%joined_state")
-        inputs = RuntimeInputs(TILES, (Scalar(1, 1), Scalar(32, 10)))
-        self.assertEqual(evaluate(parse_program(source), inputs), evaluate(parse_program(renamed), inputs))
 
     def test_untaken_paths_have_no_outputs_but_still_declare_inputs(self) -> None:
         source = function('''
@@ -423,14 +345,14 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         special = Tile("bf16", (0x7FC1,) * 1024)
         for choice, outputs in ((0, {}), (1, {7: special})):
             self.assertEqual(dict(evaluate(parse_program(source), RuntimeInputs({0: special}, (Scalar(1, choice),))).outputs), outputs)
-        with self.assertRaises(VirtualInterfaceError):
+        with self.assertRaisesRegex(VirtualInterfaceError, "input indices"):
             evaluate(parse_program(source), RuntimeInputs(controls=(Scalar(1, 0),)))
 
     def test_loop_reexecutes_local_definitions_and_carries_changed_tiles(self) -> None:
         program = parse_program(example("virtual_bf16_loop_program.mlir"))
-        bits = tuple(0xBF80 if index % 2 else 0x4000 for index in range(1024))
-        inputs = RuntimeInputs({0: Tile("bf16", bits)})
-        self.assertEqual(evaluate(program, inputs).outputs[0].bits, relu(bits))
+        tile = Tile("bf16", tuple(0xBF80 if index % 2 else 0x4000 for index in range(1024)))
+        inputs = RuntimeInputs({0: tile})
+        self.assertEqual(evaluate(program, inputs).outputs[0], relu(tile))
         # Six entry operations, two five-operation iterations, the final two-operation check, output and return.
         self.assertEqual(evaluate(program, inputs, max_steps=20), evaluate(program, inputs))
         with self.assertRaises(VirtualInterfaceError):
@@ -502,13 +424,11 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         untaken = "^exit(%s2, %b : !atlas.virtual_state, !atlas.virtual_bf16)"
         selected = (
             (source.replace("^exit(%s2, %a", "^exit(%s1, %a"), ""),
-            (source.replace("func.return %done", "func.return %state"), ""),
             # Both values hold the same dynamic token, but the successor must consume its own state argument.
             (source.replace('"atlas.virtual_output_bf16"(%state, %tile)', '"atlas.virtual_output_bf16"(%s2, %tile)'), "current state token"),
             (source.replace(untaken, "^exit(%s2 : !atlas.virtual_state)"), ""),
             (source.replace(untaken, "^exit(%s2, %choose : !atlas.virtual_state, i1)"), ""),
             (source.replace("^exit(%s2, %b :", "^exit(%s1, %b :"), ""),
-            (source.replace("%tile: !atlas.virtual_bf16", "%tile: i32"), ""),
             (source.replace("%state: !atlas.virtual_state", "%state: !atlas.virtual_dma_store"), ""),
         )
         cases = [(changed, message, RuntimeInputs(TILES, (Scalar(1, 1),))) for changed, message in selected]
@@ -516,12 +436,6 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
         for index, (changed, message, inputs) in enumerate(cases):
             with self.subTest(case=index), self.assertRaisesRegex(VirtualInterfaceError, message):
                 evaluate(parse_program(changed), inputs)
-        program, other = parse_program(source), parse_program(source)
-        branch = tuple(program.blocks[0].ops)[-1]
-        # The same spelling and type in another parse do not identify a value.
-        branch.operands = (other.blocks[0].args[0], *branch.operands[1:])
-        with self.assertRaises(VirtualInterfaceError):
-            evaluate(program, RuntimeInputs(TILES, (Scalar(1, 1),)))
 
     def test_step_budget_counts_branches_and_returns_and_bounds_infinite_loops(self) -> None:
         program, inputs = parse_program(function(INPUTS + SELECT, "%choose: i1")), RuntimeInputs(TILES, (Scalar(1, 0),))

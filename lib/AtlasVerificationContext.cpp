@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "llvm/ADT/DenseSet.h"
@@ -6,22 +7,24 @@
 using namespace mlir;
 using namespace mlir::atlas;
 
-static LogicalResult
-verifyGeneratedStructure(ModuleOp module,
-                         llvm::SmallVectorImpl<AtlasDMAInterval> &intervals) {
+static LogicalResult verifyGeneratedStructure(ModuleOp module) {
+  // One generated launch/wait pair. Intervals on different channels may overlap.
+  struct AtlasDMAInterval {
+    std::optional<int32_t> id;
+    int64_t launchPC, waitPC;
+    DMAOp launch;
+  };
+  llvm::SmallVector<AtlasDMAInterval> intervals;
   llvm::DenseMap<unsigned, AtlasDMAInterval> pending; // waitPC not yet known
   llvm::DenseSet<int32_t> launchIDs;
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;
-    if (Attribute marker = op.getAttr(kAtlasTagDMATransfer)) {
-      auto integer = dyn_cast<IntegerAttr>(marker);
-      if (!isa<DMAOp, DMAWaitOp>(op) || !integer ||
-          !integer.getType().isSignlessInteger(32) ||
-          integer.getValue().isNegative())
+    if (op.hasAttr(kAtlasTagDMATransfer)) {
+      id = contractTag(&op, kAtlasTagDMATransfer);
+      if (!isa<DMAOp, DMAWaitOp>(op) || !id)
         return op.emitOpError(
             "atlas.virtual_dma_transfer requires a nonnegative i32 on DMA or DMA.WAIT");
-      id = static_cast<int32_t>(integer.getValue().getSExtValue());
     }
     if (isa<StartOp>(op)) {
       if (!pending.empty())
@@ -29,13 +32,12 @@ verifyGeneratedStructure(ModuleOp module,
       continue;
     }
     int64_t currentPC = pc++;
-    Operation *next = op.getNextNode();
     if (auto dma = dyn_cast<DMAOp>(op)) {
       if (pending.count(dma.getChannel()))
         return op.emitOpError("another DMA launch while its channel is pending");
       if (id && !launchIDs.insert(*id).second)
         return op.emitOpError("duplicate virtual DMA transfer launch ID");
-      pending.try_emplace(dma.getChannel(), AtlasDMAInterval{dma.getChannel(), id, currentPC, -1, dma});
+      pending.try_emplace(dma.getChannel(), AtlasDMAInterval{id, currentPC, -1, dma});
     } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
       auto transfer = pending.find(wait.getChannel());
       if (transfer == pending.end())
@@ -49,13 +51,9 @@ verifyGeneratedStructure(ModuleOp module,
     } else if (!pending.empty() && !canOverlapAtlasGeneratedDMA(&op)) {
       return op.emitOpError("unexpected instruction while DMA is pending");
     }
-    if (isa<BranchOp, JumpOp>(op)) {
-      auto slot = next ? dyn_cast<ALUImmOp>(next) : ALUImmOp{};
-      if (!slot || slot.getKind() != "addi" || slot.getDst() != 0 ||
-          slot.getSrc() != 0 || slot.getImmediate() != 0)
-        return op.emitOpError(
-            "generated redirect requires a nonredirecting x0 NOP delay slot");
-    }
+    if (isa<BranchOp, JumpOp>(op) && !isExactAtlasNop(op.getNextNode()))
+      return op.emitOpError(
+          "generated redirect requires a nonredirecting x0 NOP delay slot");
   }
   if (!pending.empty())
     return pending.begin()->second.launch.emitOpError("generated DMA has no matching DMA.WAIT");
@@ -104,7 +102,7 @@ mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
   auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
   ctx.timed = state && state.getValue() == "timed";
   // The structural stage precedes decoding, which rejects every JALR.
-  if (generated && failed(verifyGeneratedStructure(module, ctx.dmaIntervals)))
+  if (generated && failed(verifyGeneratedStructure(module)))
     return failure();
   if (!requireStream && !ctx.needsDecodedStream())
     return ctx;

@@ -11,11 +11,9 @@ struct AtlasVerificationContext;
 FailureOr<DictionaryAttr> buildAtlasBufferContract(
     func::FuncOp function, DictionaryAttr cfgContract, ArrayAttr tileContract);
 
-// Checks along issued paths that each reader observes those words, executing
-// PACK's counted copy loop. Word origins are static command ids; a raw
-// conversion store is current only because the CFG and tile checks force every
-// PACK visit to issue its own VSTORE, copy and VLOAD. The ModuleOp entry relies
-// on the earlier tile, DMA-memory, structural and timing checks.
+// Runs issued paths and PACK's counted copy loop to check readers see those
+// words by static command id. CFG and tile checks keep raw PACK stores current;
+// the ModuleOp entry presumes the tile, DMA-memory, structural, timing checks.
 LogicalResult verifyAtlasGeneratedBufferContract(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedBufferContract(ModuleOp module);
 } // namespace mlir::atlas

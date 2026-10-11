@@ -335,12 +335,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         }
       }
     }
-    if (isa<BranchOp,JumpOp>(op)) {
-      auto slot = pc + 1 < ops.size() ? dyn_cast<ALUImmOp>(ops[pc+1]) : ALUImmOp{};
-      if (!slot || slot.getKind() != "addi" || slot.getDst() != 0 ||
-          slot.getSrc() != 0 || slot.getImmediate() != 0)
-        return op->emitOpError("CFG contract redirect requires an exact x0 NOP delay slot");
-    }
+    if (isa<BranchOp,JumpOp>(op) && !isExactAtlasNop(pc + 1 < ops.size() ? ops[pc+1] : nullptr))
+      return op->emitOpError("CFG contract redirect requires an exact x0 NOP delay slot");
     if (auto id = contractTag(op,kAtlasTagCFGBranch)) if (!isa<BranchOp>(op) || *id != *owner || blocks[*id].condition < 0 || !seenBranches.insert(*id).second) return op->emitOpError("CFG contract invalid source branch identity");
     if (Attribute h = op->getAttr(kAtlasTagCFGHelper)) {
       auto name = dyn_cast<StringAttr>(h);

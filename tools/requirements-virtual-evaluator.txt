@@ -1,2 +1,3 @@
-# Parser only; numerical dependencies belong to the npu-model environment.
+# Parser only. Install into the pinned npu-model environment (Python 3.14, Torch 2.11.0, NumPy 2.4.4), which supplies
+# the numerical dependencies, with the model source root on PYTHONPATH.
 xdsl==0.65.0

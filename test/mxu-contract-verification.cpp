@@ -8,37 +8,13 @@ using namespace atlas_test;
 
 namespace {
 // Source SSA and deliberately nonpreferred placements define the oracle.
-std::string source(unsigned unit) {
-  std::string u = std::to_string(unit);
-  std::string weight = "!atlas.virtual_mxu_weight<" + u + ">";
-  std::string acc = "!atlas.virtual_mxu_acc<" + u + ">";
-  std::string body = R"mlir(module { func.func @test() -> !atlas.virtual_state {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %x = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    %s2, %seed = "atlas.virtual_input_bf16"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %scale = "atlas.virtual_scale_constant"() {code = 173 : i32} : () -> !atlas.virtual_scale
-)mlir";
-  unsigned next = 2;
-  std::string current = "%s2";
-  auto effect = [&](StringRef name, std::string operands, std::string types, std::string result, std::string resultType, bool attribute = false) {
-    std::string after = "%s" + std::to_string(++next);
-    body += "    " + after + ", %" + result + " = \"atlas.virtual_mxu_" + name.str() + "\"(" + current + ", " + operands + ")";
-    if (attribute)
-      body += " {unit = " + u + " : i32}";
-    body += " : (!atlas.virtual_state, " + types + ") -> (!atlas.virtual_state, " + resultType + ")\n";
-    current = after;
-  };
-  effect("load_weight", "%x", "!atlas.virtual_fp8", "w", weight, true);
-  effect("load_acc_bf16", "%seed", "!atlas.virtual_bf16", "b", acc, true);
-  effect("readout_bf16", "%b", acc, "yb", "!atlas.virtual_bf16");
-  effect("load_acc_fp8", "%x", "!atlas.virtual_fp8", "a0", acc, true);
-  effect("accumulate", "%x, %w, %a0", "!atlas.virtual_fp8, " + weight + ", " + acc, "a1", acc);
-  effect("accumulate", "%x, %w, %a1", "!atlas.virtual_fp8, " + weight + ", " + acc, "a2", acc);
-  effect("readout_fp8", "%a2, %scale", acc + ", !atlas.virtual_scale", "yf", "!atlas.virtual_fp8");
-  effect("reset", "%x, %w", "!atlas.virtual_fp8, " + weight, "r", acc);
-  effect("readout_bf16", "%r", acc, "yr", "!atlas.virtual_bf16");
-  body += "    %legacy = \"atlas.virtual_mxu_matmul\"(%x, %x) {unit = " + u + " : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16\n";
-  return body + "    return " + current + " : !atlas.virtual_state\n} }";
+Source families(unsigned unit) {
+  Source source(173);
+  auto weight = source.weight(unit);
+  source.readout(source.seed(unit), unit);
+  source.readout(source.accumulate(weight, source.accumulate(weight, source.seed(unit, true), unit), unit), unit, true);
+  source.readout(source.reset(weight, unit), unit);
+  return source;
 }
 
 void claim(func::FuncOp function, unsigned unit, SmallVector<VirtualRegisterAssignment> &registers,
@@ -61,7 +37,9 @@ struct Expected {
 };
 
 void testSourceContract(MLIRContext &context, unsigned unit) {
-  auto module = parse(context, source(unit), "typed source includes every MXU expansion family");
+  Source source = families(unit);
+  source.legacy(unit);
+  auto module = parse(context, source.finish(), "typed source includes every MXU expansion family");
   if (!module)
     return;
   auto function = firstFunction(*module);
@@ -105,8 +83,10 @@ void testSourceContract(MLIRContext &context, unsigned unit) {
 }
 
 void testSourceBlocks(MLIRContext &context) {
-  std::string text = replace(source(1), "    %legacy", "    cf.br ^next(%s11 : !atlas.virtual_state)\n  ^next(%next_state: !atlas.virtual_state):\n    %legacy");
-  auto module = parse(context, replace(text, "return %s11", "return %next_state"), "two source blocks with block-local resident handles");
+  Source source = families(1);
+  source.edge("next", "%next_state");
+  source.legacy(1);
+  auto module = parse(context, source.finish(), "two source blocks with block-local resident handles");
   if (!module)
     return;
   auto function = firstFunction(*module);

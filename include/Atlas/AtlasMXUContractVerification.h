@@ -3,7 +3,6 @@
 
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
-#include "mlir/IR/BuiltinOps.h"
 
 namespace mlir::atlas {
 struct AtlasVerificationContext;
@@ -18,7 +17,6 @@ FailureOr<ArrayAttr> buildAtlasMXUContract(
 // Checks a generated artifact's MXU commands, versions and FP8 scales against
 // its contract. See docs/dialect-reference.md.
 LogicalResult verifyAtlasGeneratedMXUContract(const AtlasVerificationContext &ctx);
-LogicalResult verifyAtlasGeneratedMXUContract(ModuleOp module);
 
 } // namespace mlir::atlas
 

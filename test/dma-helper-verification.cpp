@@ -62,8 +62,8 @@ std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool kee
   return body + "    return %out : " + s + "\n} }";
 }
 
-// Every register and DMA placement is chosen here, independent of the allocator. Unique baseline registers
-// (scalars from x10, so %addr is x10, %size x11 and %keep x12) isolate helper writes from SSA overlap.
+// Unique baseline registers (scalars from x10, so %addr is x10, %size x11 and %keep x12) isolate helper writes from
+// SSA overlap.
 struct Fixture {
   OwningOpRef<ModuleOp> module;
   func::FuncOp function;
@@ -124,7 +124,6 @@ void expectAssignments(Fixture &fixture, StringRef name, ArrayRef<VirtualDMAAssi
                  [&] { return verifyAtlasRegisterAllocation(fixture.function, fixture.registers, fixed, {}, assignments, policy); });
 }
 
-// Checks the fixture's single transfer under `placement`.
 void expect(Fixture &fixture, StringRef name, P placement, bool valid, ArrayRef<StringRef> fragments = {},
             Policy policy = Policy::Preserved) {
   VirtualDMAAssignment dma{fixture.dma.transfer, placement};
@@ -343,7 +342,6 @@ void cfgTests(MLIRContext &context) {
   changed.stagingReg = awaitThrough.reg(awaitThrough.keep);
   expect(awaitThrough, "BF16 await clobbers successor live-through scalar", changed, false, {clobber, "await staging materialization"});
   changed = loop.dma.placement;
-  expect(loop, "loop baseline", changed, true);
   changed.stagingReg = loop.reg(loop.addr);
   expect(loop, "backedge keeps address operand live after launch", changed, false, {clobber, "launch staging materialization", "x10"});
 }

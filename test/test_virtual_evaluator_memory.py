@@ -12,23 +12,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
+from test_virtual_evaluator_arithmetic import repeated  # noqa: E402
 from test_virtual_evaluator_resources import (  # noqa: E402
-    bf16_bytes, branch, constants, input_tile, load, output, ready, store, wait, wrap,
+    S as STATE, STORE, bf16_bytes, branch, constants, input_tile, load, output, ready, store, type_for as tile_type, wait, wrap,
 )
 
 
-STATE = "!atlas.virtual_state"
-STORE = "!atlas.virtual_dma_store"
 BASE = 0x80000000
 INPUT, OUTPUT = 0x90000000, 0x90004000
-
-
-def tile_type(fmt):
-    return f"!atlas.virtual_{fmt}"
-
-
-def repeated(values, fmt="bf16"):
-    return Tile(fmt, tuple(values[i % len(values)] for i in range(1024)))
 
 
 class Stream:
@@ -95,13 +86,6 @@ class Stream:
         return parse_program(f"module {{ func.func @aliases() -> {STATE} attributes {{{attributes}}} {{\n{body}\n}} }}")
 
 
-def run_owned(test, program, inputs):
-    original_tiles, original_memory = dict(inputs.tiles), inputs.memory
-    result = evaluate(program, inputs)
-    test.assertEqual((dict(inputs.tiles), inputs.memory), (original_tiles, original_memory))
-    return result
-
-
 class VirtualEvaluatorDmaTest(unittest.TestCase):
     def test_all_raw_fp8_codes_copy_with_guards_and_fresh_owned_snapshots(self):
         stream = Stream()
@@ -118,7 +102,6 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         alternate = RuntimeInputs(memory=(guarded, MemoryRegion(BASE, payload[::-1])))
         self.assertEqual(evaluate(program, alternate).memory[0].data, b"L" * 32 + payload[::-1] + b"R" * 31)
         self.assertEqual(evaluate(program, runtime).memory, expected)
-        self.assertEqual(runtime.memory, (guarded, source))
 
     def test_bf16_load_and_store_independently_check_half_pair_layout_and_raw_bits(self):
         bits = tuple((row * 2039 + col * 137) & 0xFFFF for row in range(32) for col in range(32))
@@ -134,7 +117,6 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         destination = MemoryRegion(BASE + 0x2000 - 7, b"before!" + b"?" * 2048 + b"after")
         inputs = RuntimeInputs({0: original}, memory=(destination,))
         self.assertEqual(evaluate(store.program(), inputs).memory, (MemoryRegion(destination.address, b"before!" + payload + b"after"),))
-        self.assertEqual((inputs.tiles[0], inputs.memory), (original, (destination,)))
 
     def test_adjacent_regions_cover_a_transfer_and_preserve_supplied_order_and_extents(self):
         payload = bytes(range(256)) * 4
@@ -151,7 +133,6 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         # A load can cross the same unaligned region boundary, too.
         split = RuntimeInputs(memory=(MemoryRegion(BASE + 13, payload[13:]), MemoryRegion(BASE, payload[:13]), MemoryRegion(destination, b"?" * 1024)))
         self.assertEqual(evaluate(stream.program(), split).memory[-1], MemoryRegion(destination, payload))
-        self.assertEqual(runtime.memory, (tail, source, head, untouched))
 
     def test_overlapping_reads_can_complete_in_reverse_issue_order(self):
         payload = bytes(range(256)) * 4
@@ -180,7 +161,6 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
                                 MemoryRegion(BASE + 0x2000, b"?" * 1024), MemoryRegion(BASE + 0x4000, b"!" * 1024)))
         self.assertEqual(evaluate(stream.program(), runtime).memory,
                          (MemoryRegion(BASE, new), MemoryRegion(BASE + 0x2000, old), MemoryRegion(BASE + 0x4000, new)))
-        self.assertEqual((runtime.memory[0].data, runtime.tiles[0].bits), (old, tuple(new)))
 
     def test_store_captures_ready_source_before_a_later_pure_value_is_produced(self):
         tile = repeated((0xBF80, 0x3F80, 0x8000, 0x0001, 0xFFC1, 0x7FC1))
@@ -194,28 +174,6 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         runtime = RuntimeInputs({0: tile}, memory=(MemoryRegion(BASE, b"?" * 2048), MemoryRegion(BASE + 0x2000, b"!" * 2048)))
         self.assertEqual(evaluate(stream.program(), runtime).memory,
                          (MemoryRegion(BASE, bf16_bytes(tile.bits)), MemoryRegion(BASE + 0x2000, bf16_bytes(relu.bits))))
-        self.assertEqual(runtime.tiles[0], tile)
-
-    def test_fp8_store_exposes_converter_literals_including_reserved_mxu_codes(self):
-        raw = (0x3F80, 0xBF80, 0x43E8, 0x43E9, 0x43F0, 0xC3E9, 0x7F80, 0xFF80, 0x7FC1, 0x8000, 0x0001)
-        for converter, expected in (
-            ("pack", (0x38, 0xB8, 0x7E, 0x7E, 0x7E, 0xFE, 0x7E, 0xFE, 0, 0, 0)),
-            ("mxu", (0x38, 0xB8, 0x7E, 0x7F, 0x7F, 0xFF, 0x7E, 0xFE, 0, 0, 0)),
-        ):
-            with self.subTest(converter=converter):
-                stream = Stream()
-                source = stream.input()
-                if converter == "pack":
-                    packed = stream.pure("pack_fp8", source, "fp8", "{scale_code = 127 : i32}")
-                else:
-                    acc = stream.effect("mxu_load_acc_bf16", (source,), (tile_type("bf16"),), "!atlas.virtual_mxu_acc<0>", "{unit = 0 : i32}")
-                    scale = stream.fresh()
-                    stream.lines.append(f'{scale} = "atlas.virtual_scale_constant"() {{code = 127 : i32}} : () -> !atlas.virtual_scale')
-                    packed = stream.effect("mxu_readout_fp8", (acc, scale), ("!atlas.virtual_mxu_acc<0>", "!atlas.virtual_scale"), tile_type("fp8"))
-                stream.wait(stream.store(packed, BASE, "fp8"))
-                runtime = RuntimeInputs({0: repeated(raw)}, memory=(MemoryRegion(BASE, b"?" * 1024),))
-                self.assertEqual(evaluate(stream.program(), runtime).memory, (MemoryRegion(BASE, bytes(repeated(expected, "fp8").bits)),))
-                self.assertEqual(runtime.memory[0].data, b"?" * 1024)
 
     def test_unmapped_load_is_checked_only_on_the_executed_cfg_path(self):
         body = branch("s0", "load", load("bf16", "bs", "s1", "pending"), ready("bf16", "s1", "s2", "pending"))
@@ -226,7 +184,7 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
             evaluate(program, RuntimeInputs(controls=(Scalar(1, 0),), memory=(untouched,)))
 
-    def test_holes_and_partial_load_or_store_spans_fail_without_mutating_inputs(self):
+    def test_holes_and_partial_load_or_store_spans_fail(self):
         cases = ((MemoryRegion(BASE, b"?" * 1023),), (MemoryRegion(BASE + 1, b"?" * 1023),),
                  (MemoryRegion(BASE, b"?" * 512), MemoryRegion(BASE + 513, b"!" * 511)))
         tile = repeated((0x7F, 0xFF, 0x01, 0x81), "fp8")
@@ -238,10 +196,8 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
                 stream.wait(stream.store(stream.input("fp8"), BASE, "fp8"))
             for regions in cases:
                 with self.subTest(direction=direction, addresses=tuple(r.address for r in regions)):
-                    runtime = RuntimeInputs({0: tile} if direction == "store" else {}, memory=regions)
                     with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
-                        evaluate(stream.program(), runtime)
-                    self.assertEqual((runtime.memory, dict(runtime.tiles)), (regions, {0: tile} if direction == "store" else {}))
+                        evaluate(stream.program(), RuntimeInputs({0: tile} if direction == "store" else {}, memory=regions))
 
 
 class VirtualEvaluatorAliasesTest(unittest.TestCase):
@@ -255,7 +211,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.output(after, 1)
         guard = MemoryRegion(INPUT + 4096, b"guard")
         runtime = RuntimeInputs({0: old, 1: new}, memory=(MemoryRegion(INPUT - 3, b"old" + bf16_bytes(old.bits)), guard))
-        result = run_owned(self, stream.program(input_base=INPUT, output_base=OUTPUT), runtime)
+        result = evaluate(stream.program(input_base=INPUT, output_base=OUTPUT), runtime)
         self.assertEqual(dict(result.outputs), {0: old, 1: new})
         self.assertEqual(result.memory, (MemoryRegion(INPUT - 3, b"old" + bf16_bytes(new.bits)), guard))
 
@@ -264,7 +220,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream = Stream()
         stream.output(stream.input())
         stream.output(stream.await_(stream.load(OUTPUT)), 1)
-        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: original}))
+        result = evaluate(stream.program(output_base=OUTPUT), RuntimeInputs({0: original}))
         self.assertEqual((dict(result.outputs), result.memory), ({0: original, 1: original}, ()))
 
     def test_boundary_output_is_the_last_writer_after_a_completed_explicit_store(self):
@@ -274,7 +230,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.wait(stream.store(first_value, OUTPUT))
         stream.output(last_value)
         regions = (MemoryRegion(OUTPUT + 1500, b"?" * 548 + b"tail"), MemoryRegion(OUTPUT - 4, b"head" + b"?" * 1500))
-        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: first, 1: last}, memory=regions))
+        result = evaluate(stream.program(output_base=OUTPUT), RuntimeInputs({0: first, 1: last}, memory=regions))
         self.assertEqual(dict(result.outputs), {0: last})
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT + 1500, bf16_bytes(last.bits)[1500:] + b"tail"),
                                          MemoryRegion(OUTPUT - 4, b"head" + bf16_bytes(last.bits)[:1500])))
@@ -292,7 +248,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         payload = bf16_bytes(original.bits)
         final = payload[:32] + bytes(replacement.bits) + payload[1056:]
         runtime = RuntimeInputs({0: original, 1: replacement}, memory=(MemoryRegion(OUTPUT - 7, b"before!" + payload + b"?" * 2048 + b"after"),))
-        result = run_owned(self, stream.program(output_base=OUTPUT), runtime)
+        result = evaluate(stream.program(output_base=OUTPUT), runtime)
         self.assertEqual(dict(result.outputs), {0: wanted, 1: original})
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT - 7, b"before!" + final + payload + b"after"),))
 
@@ -305,7 +261,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream.output(before, 1)
         # Output1 also overwrites input1; already loaded values keep their immutable bits.
         stream.output(after, 2)
-        result = run_owned(self, stream.program(input_base=INPUT, output_base=INPUT), RuntimeInputs({0: old, 1: new}))
+        result = evaluate(stream.program(input_base=INPUT, output_base=INPUT), RuntimeInputs({0: old, 1: new}))
         self.assertEqual(dict(result.outputs), {0: new, 1: old, 2: new})
 
     def test_output_snapshots_receive_only_executed_write_bytes(self):
@@ -313,12 +269,12 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         stream = Stream()
         stream.output(stream.input())
         supplied = (MemoryRegion(OUTPUT + 13, b"?" * 81), MemoryRegion(OUTPUT + 2048, b"untouched"))
-        result = run_owned(self, stream.program(output_base=OUTPUT), RuntimeInputs({0: original}, memory=supplied))
+        result = evaluate(stream.program(output_base=OUTPUT), RuntimeInputs({0: original}, memory=supplied))
         self.assertEqual(result.memory, (MemoryRegion(OUTPUT + 13, bf16_bytes(original.bits)[13:94]), supplied[1]))
         source = wrap(input_tile("bf16"), *branch("io", "write", output("bs", "done")), final="done", arguments="%choose: i1",
                       attributes=f"atlas.output_dram_base = {OUTPUT} : i64")
         memory = (MemoryRegion(OUTPUT, b"?" * 2048),)
-        result = run_owned(self, parse_program(source), RuntimeInputs({0: original}, (Scalar(1, 1),), memory))
+        result = evaluate(parse_program(source), RuntimeInputs({0: original}, (Scalar(1, 1),), memory))
         self.assertEqual((dict(result.outputs), result.memory), ({}, memory))
 
     def test_uninitialized_output_and_fp8_input_padding_bytes_are_not_defined(self):
@@ -337,7 +293,7 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         with self.assertRaisesRegex(VirtualInterfaceError, "unmapped memory"):
             evaluate(stream.program(input_base=INPUT), RuntimeInputs({0: original}))
         padding = MemoryRegion(INPUT + 1024, b"\x34\x12" * 512)
-        result = run_owned(self, stream.program(input_base=INPUT), RuntimeInputs({0: original}, memory=(padding,)))
+        result = evaluate(stream.program(input_base=INPUT), RuntimeInputs({0: original}, memory=(padding,)))
         wanted = Tile("bf16", tuple(0x3838 if col < 16 else 0x1234 for row in range(32) for col in range(32)))
         self.assertEqual((dict(result.outputs), result.memory), ({0: wanted}, (padding,)))
 

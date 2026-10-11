@@ -7,71 +7,9 @@ using namespace atlas_test;
 
 namespace {
 using Assignments = SmallVector<VirtualMXUAssignment>;
-constexpr StringLiteral state = "!atlas.virtual_state", fp8 = "!atlas.virtual_fp8", bf16 = "!atlas.virtual_bf16";
 constexpr StringLiteral liveSlot = "overwrites a logically live slot";
 
-std::string type(StringRef bank, unsigned unit) { return "!atlas.virtual_mxu_" + bank.str() + "<" + std::to_string(unit) + ">"; }
-
-// Generates typed source only; placements are claimed by hand, never by the allocator or its summaries.
-struct Source {
-  std::string body = R"mlir(module { func.func @test() -> !atlas.virtual_state {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %x = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    %s2, %seed = "atlas.virtual_input_bf16"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %scale = "atlas.virtual_scale_constant"() {code = 127 : i32} : () -> !atlas.virtual_scale
-)mlir";
-  unsigned next = 2;
-  std::string current = "%s2";
-
-  std::string effect(StringRef name, std::string args, std::string types, std::string resultType, std::string attributes = "") {
-    unsigned index = ++next;
-    std::string result = "%h" + std::to_string(index), after = "%s" + std::to_string(index);
-    body += "    " + after + ", " + result + " = \"atlas.virtual_" + name.str() + "\"(" + current + ", " + args + ") " + attributes;
-    body += " : (" + state.str() + ", " + types + ") -> (" + state.str() + ", " + resultType + ")\n";
-    current = after;
-    return result;
-  }
-  std::string unitAttr(unsigned unit) { return "{unit = " + std::to_string(unit) + " : i32}"; }
-  std::string weight(unsigned unit) { return effect("mxu_load_weight", "%x", fp8.str(), type("weight", unit), unitAttr(unit)); }
-  std::string seed(unsigned unit, bool narrow = false) {
-    return effect(narrow ? "mxu_load_acc_fp8" : "mxu_load_acc_bf16", narrow ? "%x" : "%seed", narrow ? fp8.str() : bf16.str(), type("acc", unit), unitAttr(unit));
-  }
-  std::string reset(std::string weight, unsigned unit) {
-    return effect("mxu_reset", "%x, " + weight, fp8.str() + ", " + type("weight", unit), type("acc", unit));
-  }
-  std::string accumulate(std::string weight, std::string acc, unsigned unit) {
-    return effect("mxu_accumulate", "%x, " + weight + ", " + acc, fp8.str() + ", " + type("weight", unit) + ", " + type("acc", unit), type("acc", unit));
-  }
-  void readout(std::string acc, unsigned unit, bool narrow = false) {
-    effect(narrow ? "mxu_readout_fp8" : "mxu_readout_bf16", acc + (narrow ? ", %scale" : ""), type("acc", unit) + (narrow ? ", !atlas.virtual_scale" : ""), narrow ? fp8.str() : bf16.str());
-  }
-  void legacy(unsigned unit) {
-    body += "    %legacy" + std::to_string(++next) + " = \"atlas.virtual_mxu_matmul\"(%x, %x) " + unitAttr(unit) + " : (" + fp8.str() + ", " + fp8.str() + ") -> " + bf16.str() + "\n";
-  }
-  void edge(StringRef block, StringRef argument) {
-    body += "    cf.br ^" + block.str() + "(" + current + " : !atlas.virtual_state)\n  ^" + block.str() + "(" + argument.str() + ": !atlas.virtual_state):\n";
-    current = argument.str();
-  }
-  std::string finish() const {
-    return body + "    %out = \"atlas.virtual_output_bf16\"(" + current + ", %seed) {index = 0 : i32} : (" + state.str() + ", " + bf16.str() + ") -> " + state.str() + "\n    return %out : " + state.str() + "\n} }";
-  }
-};
-
-struct Fixture {
-  OwningOpRef<ModuleOp> module;
-  func::FuncOp function;
-  SmallVector<Value> handles;
-  Fixture(MLIRContext &context, StringRef source) : module(parse(context, source, "fixture is typed SSA")) {
-    if (!module)
-      return;
-    function = firstFunction(*module);
-    function.walk([&](Operation *op) {
-      for (Value result : op->getResults())
-        if (isa<VirtualMXUWeightType, VirtualMXUAccType>(result.getType()))
-          handles.push_back(result);
-    });
-  }
-};
+struct Fixture : HandleFixture<VirtualMXUWeightType, VirtualMXUAccType> { using HandleFixture::HandleFixture; };
 
 void expect(Fixture &fixture, StringRef name, const Assignments &assignments, bool valid, ArrayRef<StringRef> fragments = {},
             unsigned legacyWeight = 0, unsigned legacyAcc = 0) {
@@ -81,7 +19,6 @@ void expect(Fixture &fixture, StringRef name, const Assignments &assignments, bo
   expectVerified(name, valid, fragments, [&] { return verifyAtlasMXUAllocation(fixture.function, assignments, fixed); });
 }
 
-// Every handle claimed in `slots` order on `unit`.
 Assignments claimed(Fixture &fixture, ArrayRef<unsigned> slots, ArrayRef<unsigned> units = {}) {
   Assignments result;
   for (auto [index, slot] : llvm::enumerate(slots))
@@ -99,27 +36,22 @@ void assignmentAndChainTests(MLIRContext &context, unsigned unit) {
   if (!f.module || !foreign.module)
     return;
   const auto base = claimed(f, {1, 0, 0, 1, 1}, {unit, unit, unit, unit, unit});
-  auto mutated = [&](StringRef name, function_ref<void(Assignments &)> mutate, ArrayRef<StringRef> fragments = {}) {
-    auto changed = base;
-    mutate(changed);
-    expect(f, name, changed, fragments.empty(), fragments);
-  };
   constexpr StringLiteral untracked = "foreign, stale, or untracked", unitMismatch = "unit must match";
-  mutated("nonpreferred slots and independent weight/accumulator banks", [](Assignments &) {});
-  mutated("assignment order is irrelevant", [](Assignments &a) { std::reverse(a.begin(), a.end()); });
-  mutated("missing successor version", [](Assignments &a) { a.pop_back(); }, {"missing MXU assignment"});
-  mutated("duplicate placement", [](Assignments &a) { a.push_back(a[0]); }, {"duplicate MXU assignment"});
-  mutated("null handle", [](Assignments &a) { a[0].handle = Value{}; }, {untracked});
-  mutated("foreign handle", [&](Assignments &a) { a[0].handle = foreign.handles[0]; }, {untracked});
-  mutated("known state is not an MXU handle", [&](Assignments &a) { a[0].handle = f.function.getBody().front().front().getResult(0); },
+  mutated(f, base, "nonpreferred slots and independent weight/accumulator banks", [](Assignments &) {});
+  mutated(f, base, "assignment order is irrelevant", [](Assignments &a) { std::reverse(a.begin(), a.end()); });
+  mutated(f, base, "missing successor version", [](Assignments &a) { a.pop_back(); }, {"missing MXU assignment"});
+  mutated(f, base, "duplicate placement", [](Assignments &a) { a.push_back(a[0]); }, {"duplicate MXU assignment"});
+  mutated(f, base, "null handle", [](Assignments &a) { a[0].handle = Value{}; }, {untracked});
+  mutated(f, base, "foreign handle", [&](Assignments &a) { a[0].handle = foreign.handles[0]; }, {untracked});
+  mutated(f, base, "known state is not an MXU handle", [&](Assignments &a) { a[0].handle = f.function.getBody().front().front().getResult(0); },
           {"source handle result"});
-  mutated("wrong unit", [&](Assignments &a) { a[0].placement.unit = 1 - unit; }, {unitMismatch});
-  mutated("unit bound", [](Assignments &a) { a[0].placement.unit = 2; }, {unitMismatch});
-  mutated("slot bound", [](Assignments &a) { a[0].placement.slot = 2; }, {"slot is outside"});
-  mutated("second live weight aliases first", [](Assignments &a) { a[1].placement.slot = 1; }, {liveSlot, "weight slot 1", "current owner"});
-  mutated("seed clobbers live reset accumulator", [](Assignments &a) { a[3].placement.slot = a[4].placement.slot = 0; },
+  mutated(f, base, "wrong unit", [&](Assignments &a) { a[0].placement.unit = 1 - unit; }, {unitMismatch});
+  mutated(f, base, "unit bound", [](Assignments &a) { a[0].placement.unit = 2; }, {unitMismatch});
+  mutated(f, base, "slot bound", [](Assignments &a) { a[0].placement.slot = 2; }, {"slot is outside"});
+  mutated(f, base, "second live weight aliases first", [](Assignments &a) { a[1].placement.slot = 1; }, {liveSlot, "weight slot 1", "current owner"});
+  mutated(f, base, "seed clobbers live reset accumulator", [](Assignments &a) { a[3].placement.slot = a[4].placement.slot = 0; },
           {liveSlot, "accumulator slot 0"});
-  mutated("continuation cannot move to another slot", [](Assignments &a) { a[4].placement.slot = 0; }, {"continuation must retain"});
+  mutated(f, base, "continuation cannot move to another slot", [](Assignments &a) { a[4].placement.slot = 0; }, {"continuation must retain"});
 }
 
 void reuseAndDeadTests(MLIRContext &context) {

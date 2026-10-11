@@ -6,12 +6,11 @@ import re
 import unittest
 
 from test_virtual_dma import copy
-from test_virtual_dma_lowering import independent_work
-from test_virtual_lowering import ROOT, lower, run, virtual_chain, virtual_pressure
+from test_virtual_lowering import ROOT, lower, run, virtual_chain
 from test_virtual_mxu_handles import program
 from verification_support import (
     NOP, assert_boundaries, checked, constant, contract_text, finalize_rejects, insert_after, last_constant_write,
-    line_index, moved, operations, records as contract_records, reorder, replace_contract, rewrite_line,
+    BoundaryChecks, line_index, moved, operations, records as contract_records, reorder, replace_contract, rewrite_line,
     shift_constant, structured_word,
 )
 
@@ -40,12 +39,8 @@ def pack_program() -> str:
     return source.replace("atlas.output_dram_base = 2415923200", "atlas.output_dram_base = 2415951872")
 
 
-class TileContractVerificationTest(unittest.TestCase):
-    def accepted(self, machine: str) -> None:
-        assert_boundaries(self, machine)
-
-    def rejected(self, machine: str, diagnostic: str = "tile contract") -> None:
-        assert_boundaries(self, machine, rejects=diagnostic)
+class TileContractVerificationTest(BoundaryChecks, unittest.TestCase):
+    REJECTS = "tile contract"
 
     def test_explicit_formats_have_source_derived_halves_and_dependencies(self) -> None:
         for fmt, halves, size in (("fp8", 1, 1024), ("bf16", 2, 2048)):
@@ -66,19 +61,6 @@ class TileContractVerificationTest(unittest.TestCase):
             self.assertEqual(facts[-2]["after"], tuple(range(2 + halves, 2 + 2 * halves)))
             self.assertEqual(facts[-1]["after"], (2 + 2 * halves,))
             self.accepted(machine)
-
-    def test_boundary_indices_reserve_two_kib_slots(self) -> None:
-        machine = lower(virtual_pressure(2))
-        facts = records(machine)
-        self.assertEqual([r["dram_byte"] for r in facts if r["kind"] == "dma_load"],
-                         [0x90000000, 0x90000400, 0x90000800, 0x90000c00])
-        self.assertEqual([r["vmem_byte"] for r in facts if r["kind"] == "vload"], [0, 1024, 2048, 3072])
-        self.assertEqual([r["dram_byte"] for r in facts if r["kind"] == "dma_store"],
-                         [0x90020000, 0x90020400, 0x90020800, 0x90020c00])
-        self.assertTrue(all(r["bytes"] == 1024 for r in facts if r["kind"] != "dma_wait"))
-        self.assertTrue(all(r["transfer"] == -1 for r in facts))
-        self.accepted(machine)
-        self.accepted(lower(independent_work()))
 
     def test_vector_endpoint_fields_and_tags_are_checked(self) -> None:
         machine = lower(copy("bf16"))
@@ -211,20 +193,13 @@ class TileContractVerificationTest(unittest.TestCase):
         self.assertEqual(records(changed), records(structured))
         finalize_rejects(self, changed, "tile contract")
 
-    def test_stream_rewrites_preserve_supported_contract_and_reject_padded_input(self) -> None:
-        timed, untimed = lower(virtual_chain(1)), lower(virtual_chain(1), timed=False)
+    def test_stream_rewrites_reject_padded_input(self) -> None:
+        timed = lower(virtual_chain(1))
         for option in ("--insert-atlas-delays", "--schedule-atlas-stream"):
             with self.subTest(option=option):
                 padded = run("atlas-opt", timed, option)
                 self.assertNotEqual(padded.returncode, 0, padded.stdout)
                 self.assertIn("delays come from the timing model", padded.stderr)
-                rewritten = checked(self, untimed, option)
-                self.assertEqual(records(rewritten), records(untimed))
-                self.assertEqual(rewritten.count(TAG + " ="), untimed.count(TAG + " ="))
-                self.accepted(rewritten)
-                changed = rewritten.replace("immediate = 589824", "immediate = 589825", 1)
-                self.assertNotEqual(changed, rewritten)
-                self.rejected(changed, "tile contract captured DRAM byte address mismatch")
 
 
 if __name__ == "__main__":

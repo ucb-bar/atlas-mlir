@@ -51,6 +51,18 @@ def assert_boundaries(test, text: str, boundaries=None, *, rejects: str | None =
                     test.assertNotIn(unintended, result.stderr)
 
 
+class BoundaryChecks:
+    """TestCase mixin: accept, or reject with `REJECTS` unless a diagnostic is given, at every boundary."""
+
+    REJECTS = ""
+
+    def accepted(self, machine: str) -> None:
+        assert_boundaries(self, machine)
+
+    def rejected(self, machine: str, diagnostic: str | None = None) -> None:
+        assert_boundaries(self, machine, rejects=self.REJECTS if diagnostic is None else diagnostic)
+
+
 def checked(test, text: str, *options: str, tool: str = "atlas-opt") -> str:
     result = run(tool, text, *options)
     test.assertEqual(result.returncode, 0, result.stderr)

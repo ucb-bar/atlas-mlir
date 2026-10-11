@@ -8,32 +8,11 @@ using namespace atlas_test;
 namespace {
 using Assignments = SmallVector<VirtualDMAAssignment>;
 
-// Typed SSA bypasses the compiler's single-pending admission limit; placements are chosen here, not by the allocator.
-struct Fixture {
-  OwningOpRef<ModuleOp> module;
-  func::FuncOp function;
-  SmallVector<Value> transfers;
-  Fixture(MLIRContext &context, StringRef source, StringRef name) : module(parse(context, source, name)) {
-    if (!module)
-      return;
-    function = firstFunction(*module);
-    function.walk([&](Operation *op) {
-      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
-        transfers.push_back(op->getResult(1));
-    });
-  }
-};
+// Typed SSA bypasses the compiler's single-pending admission limit.
+struct Fixture : HandleFixture<VirtualDMALoadFP8Type, VirtualDMALoadBF16Type, VirtualDMAStoreType> { using HandleFixture::HandleFixture; };
 
 void expect(Fixture &fixture, StringRef name, const Assignments &assignments, bool valid, ArrayRef<StringRef> fragments = {}) {
   expectVerified(name, valid, fragments, [&] { return verifyAtlasDMAAllocation(fixture.function, assignments); });
-}
-
-// Applies `mutate` to `base`; the case is valid exactly when no diagnostic fragment is expected.
-void mutated(Fixture &fixture, const Assignments &base, StringRef name, function_ref<void(Assignments &)> mutate,
-             ArrayRef<StringRef> fragments = {}) {
-  auto changed = base;
-  mutate(changed);
-  expect(fixture, name, changed, fragments.empty(), fragments);
 }
 
 std::string source(StringRef body, StringRef result) {
@@ -66,10 +45,10 @@ const std::string partialRelease = source(R"mlir(
 )mlir", "%s6");
 
 Assignments mixedAssignments(Fixture &fixture) {
-  return {{fixture.transfers[0], {7, 1, 17, 0x2000, 1, 2, 3}},
-          {fixture.transfers[1], {2, 2, 41, 0x2100, 1, 2, 3}},
-          {fixture.transfers[2], {7, 2, 99, 0x2100, 31, 30, 29}},
-          {fixture.transfers[3], {2, 1, 7, 0x2000, 1, 2, 3}}};
+  return {{fixture.handles[0], {7, 1, 17, 0x2000, 1, 2, 3}},
+          {fixture.handles[1], {2, 2, 41, 0x2100, 1, 2, 3}},
+          {fixture.handles[2], {7, 2, 99, 0x2100, 31, 30, 29}},
+          {fixture.handles[3], {2, 1, 7, 0x2000, 1, 2, 3}}};
 }
 
 void completenessTests(Fixture &f, Fixture &foreign) {
@@ -80,10 +59,10 @@ void completenessTests(Fixture &f, Fixture &foreign) {
   mutated(f, base, "missing store assignment", [](Assignments &a) { a.pop_back(); }, {"missing DMA assignment", "assigned transfer"});
   mutated(f, base, "duplicate assignment", [](Assignments &a) { a.push_back(a[0]); }, {"duplicate DMA assignment"});
   mutated(f, base, "null handle", [](Assignments &a) { a[0].transfer = Value(); }, {untracked});
-  mutated(f, base, "foreign source handle", [&](Assignments &a) { a[0].transfer = foreign.transfers[0]; }, {untracked});
+  mutated(f, base, "foreign source handle", [&](Assignments &a) { a[0].transfer = foreign.handles[0]; }, {untracked});
   mutated(f, base, "known non-DMA scalar", [&](Assignments &a) { a[0].transfer = f.function.getBody().front().front().getResult(0); }, {notLaunch});
   mutated(f, base, "launch state result is not its transfer handle",
-          [&](Assignments &a) { a[0].transfer = f.transfers[0].getDefiningOp()->getResult(0); }, {notLaunch});
+          [&](Assignments &a) { a[0].transfer = f.handles[0].getDefiningOp()->getResult(0); }, {notLaunch});
 }
 
 void geometryTests(Fixture &f) {
@@ -137,9 +116,9 @@ void ownershipTests(Fixture &f, Fixture &released) {
   }, {staging, "new transfer", "pending transfer", "VMEM words [7936, 8448)", "VMEM words [8192, 8448)"});
   mutated(f, base, "FP8 store overlaps BF16 second half",
           [](Assignments &a) { a[3].placement.stagingWord = a[2].placement.stagingWord + 256; }, {staging});
-  Assignments partial = {{released.transfers[0], {5, 2, 1, 0x3100, 4, 7, 9}},
-                         {released.transfers[1], {1, 1, 2, 0x3300, 4, 7, 9}},
-                         {released.transfers[2], {5, 2, 3, 0x3100, 4, 7, 9}}};
+  Assignments partial = {{released.handles[0], {5, 2, 1, 0x3100, 4, 7, 9}},
+                         {released.handles[1], {1, 1, 2, 0x3300, 4, 7, 9}},
+                         {released.handles[2], {5, 2, 3, 0x3100, 4, 7, 9}}};
   mutated(released, partial, "await releases only its handle; completed resources reused", [](Assignments &) {});
   mutated(released, partial, "await one does not release other channel",
           [](Assignments &a) { a[2].placement.channel = a[1].placement.channel; }, {channel});

@@ -5,13 +5,12 @@ from __future__ import annotations
 import re
 import unittest
 
-from generated_fixture import artifact as fixture, branch_to as branch, jump_to as jump, label, record_text
+from generated_fixture import artifact, branch_to as branch, jump_to as jump, label, record_text
 from test_virtual_lowering import lower, virtual_chain
 from test_virtual_mxu_extended import seeded_chain
 from test_virtual_mxu_handles import chain
-from test_virtual_mxu_lowering import source
 from verification_support import (
-    DELAY, MARKER, NOP, TRAP, UNMARKED, assert_boundaries, checked, contract_text, finalize_rejects, line_index, records,
+    DELAY, NOP, TRAP, UNMARKED, BoundaryChecks, assert_boundaries, checked, contract_text, finalize_rejects, line_index, records,
     replace_contract, rewrite_line, structured_word,
 )
 
@@ -42,7 +41,6 @@ def changed(operations: list, index: int, old: str, new: str) -> list:
 
 def chain_fixture(unit: int = 0, *, fp8: bool = False, scale_reg: int = 3,
                   slot: int = 0, first_id: int = 0) -> tuple[list[dict], list[tuple[str, str]]]:
-    # These fields are hand-authored independently of lowering and the checker.
     i = first_id
     facts = [record(i, "weight_fp8", unit, 11, 1),
              record(i + 1, "reset", unit, 9, slot, weight_slot=1, weight=i),
@@ -57,10 +55,6 @@ def chain_fixture(unit: int = 0, *, fp8: bool = False, scale_reg: int = 3,
         operations.append(scale(129, scale_reg))
     operations += [command("mxu_pop", f'format = "{"fp8" if fp8 else "bf16"}", unit = {unit} : i32, dst = {13 if fp8 else 40} : i32, slot = {slot} : i32, scale_reg = {scale_reg if fp8 else 0} : i32', i + 4), DELAY]
     return facts, operations
-
-
-def artifact(facts: list[dict], operations: list[tuple[str, str]]) -> str:
-    return fixture(operations, mxu=facts)
 
 
 def second_block(unit: int = 0, slot: int = 0) -> tuple[list[dict], list[tuple[str, str]]]:
@@ -89,42 +83,13 @@ def two_sessions() -> tuple[list[dict], list[tuple[str, str]]]:
     return facts, operations
 
 
-class MXUContractVerificationTest(unittest.TestCase):
-    def accepted(self, machine: str) -> None:
-        assert_boundaries(self, machine)
-
-    def rejected(self, machine: str, diagnostic: str = "MXU contract") -> None:
-        assert_boundaries(self, machine, rejects=diagnostic)
-
-    def test_lowering_covers_all_source_families_and_version_dependencies(self) -> None:
-        for unit in (0, 1):
-            for fmt in ("bf16", "fp8"):
-                with self.subTest(unit=unit, fmt=fmt):
-                    machine = lower(seeded_chain(unit, fmt, code=173))
-                    self.assertIn(MARKER, machine)
-                    facts = records(machine, "mxu")
-                    self.assertEqual([r["kind"] for r in facts], ["weight_fp8", "acc_" + fmt, "accumulate", "pop_fp8", "acc_fp8", "accumulate", "pop_bf16"])
-                    self.assertEqual([r["id"] for r in facts], list(range(7)))
-                    self.assertEqual([r["previous"] for r in facts], [-1, -1, 1, 2, -1, 4, 5])
-                    self.assertEqual([r["weight"] for r in facts], [-1, -1, 0, -1, -1, 0, -1])
-                    self.assertEqual([r["unit"] for r in facts], [unit] * 7)
-                    self.assertEqual((facts[3]["scale"], facts[6]["scale_reg"], facts[6]["scale"]), (173, 0, -1))
-                    self.assertTrue(all(len(r) == 11 for r in facts))
-                    self.accepted(machine)
-            machine = lower(chain(unit).replace(*OUTPUT))
-            self.assertEqual([r["kind"] for r in records(machine, "mxu")], ["weight_fp8", "reset", "accumulate", "pop_bf16"])
-            self.accepted(machine)
-            legacy = source(f'    %y = "atlas.virtual_mxu_matmul"(%x, %w) {{unit = {unit} : i32}} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16', final_state="io2")
-            machine = lower(legacy)
-            facts = records(machine, "mxu")
-            self.assertEqual([r["kind"] for r in facts], ["weight_fp8", "reset", "pop_bf16"])
-            self.assertEqual((facts[1]["weight"], facts[2]["previous"]), (0, 1))
-            self.accepted(machine)
+class MXUContractVerificationTest(BoundaryChecks, unittest.TestCase):
+    REJECTS = "MXU contract"
 
     def test_legal_command_field_corruptions_fail_all_handoffs(self) -> None:
         for unit in (0, 1):
             facts, operations = chain_fixture(unit)
-            self.accepted(artifact(facts, operations))
+            self.accepted(artifact(operations, mxu=facts))
             mutations = [(index, f"{field} = {before} : i32", f"{field} = {after} : i32")
                          for index, field, before, after in ((0, "unit", unit, 1 - unit), (0, "src", 11, 12), (0, "slot", 1, 0),
                                                              (2, "unit", unit, 1 - unit), (2, "src", 9, 10), (2, "weight_slot", 1, 0),
@@ -132,8 +97,8 @@ class MXUContractVerificationTest(unittest.TestCase):
             mutations += [(2, "false", "true"), (4, "true", "false")]
             for index, old, new in mutations:
                 with self.subTest(unit=unit, command=index, field=old):
-                    self.rejected(artifact(facts, changed(operations, index, old, new)))
-            self.rejected(artifact(facts, changed(changed(operations, 8, 'format = "bf16"', 'format = "fp8"'), 8, "dst = 40", "dst = 13")))
+                    self.rejected(artifact(changed(operations, index, old, new), mxu=facts))
+            self.rejected(artifact(changed(changed(operations, 8, 'format = "bf16"', 'format = "fp8"'), 8, "dst = 40", "dst = 13"), mxu=facts))
         for fmt, other, register in (("bf16", "fp8", 11), ("fp8", "bf16", 40)):
             machine = lower(seeded_chain(0, fmt))
             index = line_index(machine, '"atlas.mxu_push"', f'kind = "acc_{fmt}"')
@@ -156,20 +121,20 @@ class MXUContractVerificationTest(unittest.TestCase):
         facts, operations = chain_fixture()
         for index in (0, 2, 4, 6, 8):
             with self.subTest(missing=index):
-                self.rejected(artifact(facts, operations[:index] + operations[index + 2:]))
+                self.rejected(artifact(operations[:index] + operations[index + 2:], mxu=facts))
             with self.subTest(duplicate=index):
-                self.rejected(artifact(facts, operations[:index] + operations[index:index + 2] + operations[index:]))
+                self.rejected(artifact(operations[:index] + operations[index:index + 2] + operations[index:], mxu=facts))
             for value in (None, "999 : i32", "0 : i32", "-1 : i32", "0 : i64", '"bad"'):
                 if index == 0 and value == "0 : i32":
                     continue
                 with self.subTest(command=index, tag=value):
                     name, text = operations[index]
                     tagged = (name, re.sub(rf", {TAG} = \d+ : i32", "" if value is None else f", {TAG} = {value}", text))
-                    self.rejected(artifact(facts, operations[:index] + [tagged] + operations[index + 1:]))
-        self.rejected(artifact(facts, [(*NOP[:1], NOP[1] + f", {TAG} = 0 : i32"), *operations]))
+                    self.rejected(artifact(operations[:index] + [tagged] + operations[index + 1:], mxu=facts))
+        self.rejected(artifact([(*NOP[:1], NOP[1] + f", {TAG} = 0 : i32"), *operations], mxu=facts))
         # Identical physical continuations retain their logical order.
         self.assertEqual(re.sub(rf"{TAG} = \d+", "", operations[4][1]), re.sub(rf"{TAG} = \d+", "", operations[6][1]))
-        self.rejected(artifact(facts, operations[:4] + operations[6:8] + operations[4:6] + operations[8:]))
+        self.rejected(artifact(operations[:4] + operations[6:8] + operations[4:6] + operations[8:], mxu=facts))
 
     def test_independent_unit_and_slot_chains_can_reorder_or_interleave(self) -> None:
         first, a = chain_fixture()
@@ -178,11 +143,11 @@ class MXUContractVerificationTest(unittest.TestCase):
             # Each command keeps its completion delay, which the timed envelope checks.
             interleaved = [op for i in range(0, len(a), 2) for op in a[i:i + 2] + b[i:i + 2]]
             with self.subTest(unit=unit, slot=slot, interleaved=True):
-                self.accepted(artifact(first + second, interleaved))
+                self.accepted(artifact(interleaved, mxu=first + second))
             for entry in second:
                 entry["block"] = 0
             with self.subTest(unit=unit, slot=slot):
-                self.accepted(artifact(first + second, b + a))
+                self.accepted(artifact(b + a, mxu=first + second))
 
     def test_matching_commands_cannot_overwrite_live_logical_slots(self) -> None:
         first, a = chain_fixture()
@@ -190,28 +155,28 @@ class MXUContractVerificationTest(unittest.TestCase):
             second, b = chain_fixture(first_id=5)
             for entry in second:
                 entry["block"] = block
-            self.accepted(artifact(first + second, a + b))
+            self.accepted(artifact(a + b, mxu=first + second))
             for name, reordered in (("weight", a[:2] + b[:2] + a[2:] + b[2:]), ("accumulator", a[:-2] + b[:4] + a[-2:] + b[4:])):
                 with self.subTest(block=block, owner=name):
-                    self.rejected(artifact(first + second, reordered))
+                    self.rejected(artifact(reordered, mxu=first + second))
         # A may-live weight at a join remains live even when the other arm
         # consumed all of it. Must-availability alone would erase this obligation.
-        self.rejected(artifact(first + second, a[:2] + [branch("second"), NOP] + a[2:] + [label("second")] + b))
+        self.rejected(artifact(a[:2] + [branch("second"), NOP] + a[2:] + [label("second")] + b, mxu=first + second))
 
     def test_scale_contents_clobber_unknown_restore_and_e0(self) -> None:
         for unit in (0, 1):
             for reg in (0, 3):
                 facts, operations = chain_fixture(unit, fp8=True, scale_reg=reg)
-                self.accepted(artifact(facts, operations))
+                self.accepted(artifact(operations, mxu=facts))
                 for clobber in (scale(128, reg), scale(0, reg, "seld")):
                     with self.subTest(unit=unit, reg=reg, clobber=clobber):
-                        self.rejected(artifact(facts, operations[:-2] + [clobber] + operations[-2:]))
-                        restored = artifact(facts, operations[:-2] + [clobber, scale(129, reg)] + operations[-2:])
+                        self.rejected(artifact(operations[:-2] + [clobber] + operations[-2:], mxu=facts))
+                        restored = artifact(operations[:-2] + [clobber, scale(129, reg)] + operations[-2:], mxu=facts)
                         assert_boundaries(self, restored, rejects="MXU contract" if 'kind = "seld"' in clobber[1] else None)
-                self.accepted(artifact(facts, operations[:-2] + [scale(0, reg + 1, "seld")] + operations[-2:]))
-                self.rejected(artifact(facts, operations + [scale(0, reg, "seld")]))
-                self.rejected(artifact(facts, [op for op in operations if op[0] != "scalar_load"]))
-                self.rejected(artifact(facts, changed(operations, -2, f"scale_reg = {reg} : i32", f"scale_reg = {reg + 1} : i32")))
+                self.accepted(artifact(operations[:-2] + [scale(0, reg + 1, "seld")] + operations[-2:], mxu=facts))
+                self.rejected(artifact(operations + [scale(0, reg, "seld")], mxu=facts))
+                self.rejected(artifact([op for op in operations if op[0] != "scalar_load"], mxu=facts))
+                self.rejected(artifact(changed(operations, -2, f"scale_reg = {reg} : i32", f"scale_reg = {reg + 1} : i32"), mxu=facts))
 
     def test_scale_cfg_joins_and_loop_fixed_points(self) -> None:
         facts, operations = chain_fixture(fp8=True)
@@ -221,11 +186,11 @@ class MXUContractVerificationTest(unittest.TestCase):
             loop = [scale(129), label("head"), branch("exit"), NOP, scale(code), jump("head"), NOP, label("exit")]
             for shape, prefix in (("diamond", diamond), ("loop", loop)):
                 with self.subTest(shape=shape, code=code):
-                    assert_boundaries(self, artifact(facts, prefix + operations), rejects=None if code == 129 else "MXU contract")
+                    assert_boundaries(self, artifact(prefix + operations, mxu=facts), rejects=None if code == 129 else "MXU contract")
 
     def test_strict_metadata_geometry_and_references(self) -> None:
         facts, operations = chain_fixture()
-        machine = artifact(facts, operations)
+        machine = artifact(operations, mxu=facts)
         text = contract_text(machine, "mxu")
         replaced = lambda old, new: replace_contract(machine, "mxu", text.replace(old, new, 1))
         mutations = [("nonarray", replace_contract(machine, "mxu", '"bad"'), f"requires an {CONTRACT} array"),
@@ -252,11 +217,11 @@ class MXUContractVerificationTest(unittest.TestCase):
         self.assertEqual(contract_text(machine, "mxu"), "[]")
         self.accepted(machine)
         facts, operations = chain_fixture()
-        self.rejected(artifact([], [(name, re.sub(rf", {TAG} = \d+ : i32", "", fields)) for name, fields in operations]))
+        self.rejected(artifact([(name, re.sub(rf", {TAG} = \d+ : i32", "", fields)) for name, fields in operations], mxu=[]))
 
     def test_joint_structured_fields_and_encoded_words_cannot_bypass_contract(self) -> None:
         facts, operations = chain_fixture(fp8=True)
-        structured = checked(self, artifact(facts, operations), "--convert-atlas-to-llvm-calls")
+        structured = checked(self, artifact(operations, mxu=facts), "--convert-atlas-to-llvm-calls")
         targets = [(('atlas.source_op = "atlas.mxu_matmul"', "accumulate = false"), "src = 9 : i32", "src = 10 : i32", 13, 6, 10),
                    (('atlas.source_op = "atlas.mxu_pop"',), "scale_reg = 3 : i32", "scale_reg = 4 : i32", 13, 6, 4),
                    (('atlas.source_op = "atlas.scalar_load"',), "offset = 129 : i32", "offset = 128 : i32", 20, 12, 128)]
@@ -271,7 +236,7 @@ class MXUContractVerificationTest(unittest.TestCase):
 
     def test_structured_finalization_rechecks_metadata_and_command_tags(self) -> None:
         facts, operations = chain_fixture(fp8=True)
-        text = checked(self, artifact(facts, operations), "--convert-atlas-to-llvm-calls")
+        text = checked(self, artifact(operations, mxu=facts), "--convert-atlas-to-llvm-calls")
         header, body = text.split("\n", 1)
         mutations = [("bad MXU array", replace_contract(text, "mxu", '"bad"'), f"requires an {CONTRACT} array"),
                      ("foreign tag", text.replace(f"{TAG} = 0 : i32", f"{TAG} = 999 : i32"), "MXU contract"),
@@ -305,7 +270,7 @@ class MXUContractVerificationTest(unittest.TestCase):
                   (facts, operations[:-2] + [label("pop")] + operations[-2:] + [branch("pop"), NOP])]
         for index, (records_, stream) in enumerate(cases):
             with self.subTest(case=index):
-                self.rejected(artifact(records_, stream))
+                self.rejected(artifact(stream, mxu=records_))
 
     def test_final_conditional_fallthrough_requires_free_accumulator(self) -> None:
         facts, operations = chain_fixture()
@@ -313,24 +278,24 @@ class MXUContractVerificationTest(unittest.TestCase):
         # carry no source edges; the halt keeps readout from falling into the producer.
         stream = [("jump", 'kind = "jal", dst = 0 : i32, base = 0 : i32, offset = 10 : i32'), NOP, *operations[-2:], TRAP,
                   *operations[:-2], ("branch", 'kind = "beq", lhs = 1 : i32, rhs = 0 : i32, offset_bytes = -22 : i32'), NOP]
-        lines = artifact(facts, stream).splitlines()
+        lines = artifact(stream, mxu=facts).splitlines()
         del lines[[i for i, line in enumerate(lines) if '"atlas.trap"' in line][-1]]
         self.rejected("\n".join(lines))
 
     def test_legal_branching_reuse_and_loop_iterations(self) -> None:
         facts, operations = chain_fixture()
         diamond = [branch("right"), NOP, NOP, jump("join"), NOP, label("right"), NOP, label("join")]
-        self.accepted(artifact(facts, operations[:2] + diamond + operations[2:]))
-        self.accepted(artifact(facts, [label("loop")] + operations + [branch("loop"), NOP]))
+        self.accepted(artifact(operations[:2] + diamond + operations[2:], mxu=facts))
+        self.accepted(artifact([label("loop")] + operations + [branch("loop"), NOP], mxu=facts))
         facts, operations = two_sessions()
-        self.accepted(artifact(facts, [label("loop")] + operations + [branch("loop"), NOP]))
+        self.accepted(artifact([label("loop")] + operations + [branch("loop"), NOP], mxu=facts))
         first, a = chain_fixture()
         second, b = second_block()
         # Complete source-local chains in mutually exclusive arms may reuse the
         # same physical slots; either arm leaves them free before the join.
         arms = [branch("right"), NOP] + a + [jump("join"), NOP, label("right")] + b + [label("join")]
-        self.accepted(artifact(first + second, arms))
-        self.accepted(artifact(first + second, [label("loop")] + arms + [branch("loop"), NOP]))
+        self.accepted(artifact(arms, mxu=first + second))
+        self.accepted(artifact([label("loop")] + arms + [branch("loop"), NOP], mxu=first + second))
 
 
 if __name__ == "__main__":

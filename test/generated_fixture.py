@@ -62,8 +62,6 @@ def record_text(entries) -> str:
 
 
 def tensor_reads(name: str, f: dict) -> list[int]:
-    if name == "mxu_push" and f["kind"] == "acc_bf16":
-        return [f["src"], f["src"] + 1]
     return [f["src"]] if name in ("vstore", "mxu_push", "mxu_matmul") else []
 
 
@@ -74,7 +72,7 @@ def tensor_writes(name: str, f: dict) -> list[int]:
 
 
 class _Scalars:
-    """Constants materialized by LUI/ADDI/ADD, as the checkers recompute them."""
+    """Constants materialized by LUI/ADDI, as the checkers recompute them."""
 
     def __init__(self) -> None:
         self.known = {0: 0}
@@ -85,8 +83,6 @@ class _Scalars:
             self.known[dst] = (f["immediate"] << 12) & MASK
         elif name == "alu_imm" and f["kind"] == "addi" and f["src"] in self.known:
             self.known[dst] = (self.known[f["src"]] + f["immediate"]) & MASK
-        elif name == "alu_reg" and f["kind"] == "add" and f["lhs"] in self.known and f["rhs"] in self.known:
-            self.known[dst] = (self.known[f["lhs"]] + self.known[f["rhs"]]) & MASK
         elif name in ("upper", "alu_imm", "alu_reg", "scalar_load", "csr") and dst:
             self.known.pop(dst, None)
         self.known[0] = 0

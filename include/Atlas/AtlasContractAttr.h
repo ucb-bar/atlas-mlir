@@ -1,7 +1,9 @@
 #ifndef ATLAS_CONTRACT_ATTR_H
 #define ATLAS_CONTRACT_ATTR_H
 
+#include "Atlas/AtlasTiming.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseSet.h"
@@ -49,6 +51,11 @@ LogicalResult readI32Fields(ModuleOp module, DictionaryAttr d, StringRef prefix,
   return success();
 }
 
+// A signless i32 contract field; int32_t values keep their bit pattern.
+inline NamedAttribute namedI32(Builder &b, StringRef name, uint32_t bits) {
+  return b.getNamedAttr(name, b.getIntegerAttr(b.getI32Type(), llvm::APInt(32, bits)));
+}
+
 inline LogicalResult checkCaptured(Operation *op, StringRef prefix, StringRef field,
                                    std::optional<uint64_t> actual, uint64_t expected) {
   if (!actual)
@@ -56,6 +63,14 @@ inline LogicalResult checkCaptured(Operation *op, StringRef prefix, StringRef fi
   if (*actual != expected)
     return op->emitOpError(prefix) << " contract captured " << field << " mismatch: expected " << expected << ", got " << *actual;
   return success();
+}
+
+// AtlasCore uses wordAddr[18:3], size[12:0]; DMA consumes complete
+// 32-byte beats. Full FP8/BF16 tiles are 1/2 KiB in selected VMEM.
+inline bool validDMATileGeometry(uint64_t vmemByte, uint64_t dramByte, uint64_t bytes) {
+  return (bytes == 1024 || bytes == 2048) && vmemByte % 1024 == 0 &&
+         vmemByte + bytes <= timing::kVmemBytes && dramByte >= 0x80000000u &&
+         dramByte % 32 == 0 && dramByte + bytes <= (uint64_t(1) << 32);
 }
 
 // Every block argument and operation result of `function`.

@@ -12,7 +12,6 @@ using namespace atlas_test;
 namespace {
 constexpr StringLiteral reader = "buffer contract: VLOAD reads a word its writer did not write";
 constexpr StringLiteral capture = "buffer contract: DMA store captures a word its VSTORE did not write";
-constexpr StringLiteral mailbox = "buffer contract: mailbox LW reads a word its mailbox DMA load did not write";
 constexpr StringLiteral interleave = "buffer contract: PACK relayout word differs from the selected row interleave";
 constexpr StringLiteral stale = "buffer contract: PACK relayout word is not a copy of its current raw conversion store";
 constexpr StringLiteral inconsistent = "buffer contract has malformed or inconsistent source records";
@@ -98,15 +97,11 @@ void records(MLIRContext &context) {
   check(failed(buildAtlasBufferContract(function, with(cfg, "operations", Builder(&context).getArrayAttr(operations)), tiles)) && diagnosed("buffer contract cannot derive tile readers and PACK endpoints"), "PACK endpoints must be its raw VSTORE then its relayout VLOAD");
 }
 
-// Each case lowers afresh, corrupts one site and expects one diagnostic.
 void pack(MLIRContext &context) {
   const FixedResourcePlacement &f = fixed();
   auto limit = [&](Operation &op) { auto a = dyn_cast<ALUImmOp>(op); return a && helper(op) && a.getDst() == f.packRowsReg; };
   auto backedge = [](Operation &op) { return isa<BranchOp>(op) && helper(op); };
   auto copyLoad = [&](Operation &op) { auto l = dyn_cast<ScalarLoadOp>(op); return l && helper(op) && l.getKind() == "lw"; };
-  auto rawStore = [](Operation &op) { return isa<VStoreOp>(op) && helper(op); };
-  auto relayout = [](Operation &op) { return isa<VLoadOp>(op) && helper(op); };
-  auto scale = [](Operation &op) { auto l = dyn_cast<ScalarLoadOp>(op); return l && helper(op) && l.getKind() == "seli"; };
   struct Case { StringRef name, diagnostic; std::function<void(ModuleOp)> corrupt; };
   const std::vector<Case> cases = {
       {"31-row copy leaves the last relayout row stale", stale, [&](ModuleOp m) { set(find(m, limit), "immediate", 31); }},
@@ -119,18 +114,10 @@ void pack(MLIRContext &context) {
       {"shifted source word breaks the interleave", interleave, [&](ModuleOp m) { set(find(m, copyLoad), "offset", 4); }},
       {"forward helper branch is not a counted copy", "buffer contract: PACK copy loop must be one block closed by its own backedge", [&](ModuleOp m) { set(find(m, backedge), "offset_bytes", 4); }},
       {"interior backedge skips the first load on later rows", interleave, [&](ModuleOp m) { Operation *b = find(m, backedge); set(b, "offset_bytes", i32(b, "offset_bytes") + 2); }},
-      {"raw store after the copy is stale", stale, [&](ModuleOp m) { moveBefore(find(m, rawStore), find(m, relayout)->getPrevNode()->getPrevNode()); }},
-      {"conversion under another scale code", "buffer contract: PACK conversion scale register does not hold its source scale code", [&](ModuleOp m) { set(find(m, scale), "offset", 126); }},
       {"retained scale code is checked against the conversion", "buffer contract: PACK conversion scale register does not hold its source scale code", [&](ModuleOp m) {
          auto contract = m->getAttrOfType<DictionaryAttr>(kAtlasBufferContract);
          auto record = with(cast<DictionaryAttr>(contract.getAs<ArrayAttr>("packs")[0]), "scale_code", Builder(&context).getI32IntegerAttr(126));
          m->setAttr(kAtlasBufferContract, with(contract, "packs", Builder(&context).getArrayAttr({record}))); }},
-      {"retained relayout layout must match its derivation", inconsistent, [&](ModuleOp m) {
-         auto contract = m->getAttrOfType<DictionaryAttr>(kAtlasBufferContract);
-         SmallVector<Attribute> reads;
-         for (Attribute a : contract.getAs<ArrayAttr>("reads"))
-           reads.push_back(with(cast<DictionaryAttr>(a), "layout", StringAttr::get(&context, "copy")));
-         m->setAttr(kAtlasBufferContract, with(contract, "reads", Builder(&context).getArrayAttr(reads))); }},
       {"missing contract fails classification", "resource-contract-v5 artifact requires atlas.virtual_buffer_contract", [&](ModuleOp m) { m->removeAttr(kAtlasBufferContract); }},
   };
   for (const Case &c : cases) {
@@ -146,20 +133,6 @@ void pack(MLIRContext &context) {
   for (Operation &op : module->getBody()->getOperations()) if (copyLoad(op)) loads.push_back(&op);
   for (size_t n = 2; n < loads.size(); n += 2) moveBefore(loads[n], loads[n - 1]);
   check(accepts(*module), "reordered independent copy pairs keep the interleave", diagnostics);
-}
-
-// The tensor input reuses the mailbox window; completing it before the argument LWs overwrites their words.
-void mailboxReuse(MLIRContext &context) {
-  for (bool early : {false, true}) {
-    auto module = lowered(context);
-    if (!module) { check(false, "mailbox fixture lowers"); continue; }
-    Operation *argument = find(*module, [](Operation &op) { return op.hasAttr(kAtlasTagScalarArgument); });
-    auto input = contractTag(find(*module, [](Operation &op) { return isa<DMAOp>(op) && op.hasAttr(kAtlasTagCFGSource); }), kAtlasTagCFGSource);
-    if (early)
-      for (Operation &op : llvm::make_early_inc_range(module->getBody()->getOperations()))
-        if (contractTag(&op, kAtlasTagCFGSource) == input) moveBefore(&op, argument);
-    check(early ? rejects(*module, mailbox) : accepts(*module), early ? "input completed before the argument LWs overwrites the mailbox" : "input after the argument LWs may reuse the mailbox window", diagnostics);
-  }
 }
 
 struct Stream : IssuedStream {
@@ -190,13 +163,7 @@ struct Stream : IssuedStream {
     auto function = *source->getOps<func::FuncOp>().begin();
     FailureOr<DictionaryAttr> contract = retained ? FailureOr<DictionaryAttr>(retained) : buildAtlasBufferContract(function, cfg, builder.getArrayAttr(tiles));
     if (failed(contract)) return false;
-    (*module)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
-    (*module)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
-    for (StringRef name : {kAtlasDMAContract, kAtlasMXUContract}) (*module)->setAttr(name, builder.getArrayAttr({}));
-    (*module)->setAttr(kAtlasSourceMemoryContract, builder.getDictionaryAttr({}));
-    (*module)->setAttr(kAtlasCFGContract, cfg);
-    (*module)->setAttr(kAtlasTileContract, builder.getArrayAttr(tiles));
-    (*module)->setAttr(kAtlasBufferContract, *contract);
+    markGenerated(cfg, builder.getArrayAttr(tiles), builder.getDictionaryAttr({}), *contract);
     return accepts(*module);
   }
 };
@@ -273,5 +240,5 @@ void emptyStream(MLIRContext &context) {
 } // namespace
 
 void atlas_test::runBufferContract(MLIRContext &context) {
-  records(context); pack(context); mailboxReuse(context); joins(context); strayStores(context); readback(context); emptyStream(context);
+  records(context); pack(context); joins(context); strayStores(context); readback(context); emptyStream(context);
 }

@@ -85,14 +85,14 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
 }
 
 DictionaryAttr encode(Builder &b, const Derived &d) {
-  auto i = [&](int64_t n) { return b.getI32IntegerAttr(n); };
-  auto f = [&](StringRef key, Attribute a) { return b.getNamedAttr(key, a); };
   SmallVector<Attribute> reads, packs;
   for (const Read &r : d.reads)
-    reads.push_back(b.getDictionaryAttr({f("command", i(r.command)), f("writer", i(r.writer)), f("vmem_byte", i(r.vmem)), f("bytes", i(r.bytes)), f("word", i(r.word)), f("layout", b.getStringAttr(r.pack ? "pack" : "copy"))}));
+    reads.push_back(b.getDictionaryAttr({
+        namedI32(b, "command", r.command), namedI32(b, "writer", r.writer), namedI32(b, "vmem_byte", r.vmem), namedI32(b, "bytes", r.bytes),
+        namedI32(b, "word", r.word), b.getNamedAttr("layout", b.getStringAttr(r.pack ? "pack" : "copy"))}));
   for (const Pack &p : d.packs)
-    packs.push_back(b.getDictionaryAttr({f("source", i(p.source)), f("store", i(p.store)), f("load", i(p.load)), f("scale_code", i(p.scale))}));
-  return b.getDictionaryAttr({f("reads", b.getArrayAttr(reads)), f("packs", b.getArrayAttr(packs))});
+    packs.push_back(b.getDictionaryAttr({namedI32(b, "source", p.source), namedI32(b, "store", p.store), namedI32(b, "load", p.load), namedI32(b, "scale_code", p.scale)}));
+  return b.getDictionaryAttr({b.getNamedAttr("reads", b.getArrayAttr(reads)), b.getNamedAttr("packs", b.getArrayAttr(packs))});
 }
 
 // An opaque 32-bit VMEM word: word `word` of tile command `writer`'s data.

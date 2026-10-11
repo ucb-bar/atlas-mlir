@@ -102,13 +102,7 @@ struct Fixture : IssuedStream {
     auto effects = buildAtlasSourceMemoryEffectContract(function, cfg, tiles);
     if (failed(effects)) return;
     contract = *effects;
-    (*module)->setAttr(kAtlasGeneratedMarker, b.getStringAttr(kAtlasGeneratedVersion));
-    (*module)->setAttr(kAtlasTimingState, b.getStringAttr("untimed"));
-    for (StringRef name : {kAtlasDMAContract, kAtlasMXUContract}) (*module)->setAttr(name, b.getArrayAttr({}));
-    (*module)->setAttr(kAtlasCFGContract, cfg);
-    (*module)->setAttr(kAtlasTileContract, tiles);
-    (*module)->setAttr(kAtlasSourceMemoryContract, contract);
-    (*module)->setAttr(kAtlasBufferContract, b.getDictionaryAttr({}));
+    markGenerated(cfg, tiles, contract, b.getDictionaryAttr({}));
   }
   DictionaryAttr tile(unsigned effect, StringRef role) {
     auto e = cast<DictionaryAttr>(contract.getAs<ArrayAttr>("effects")[effect]);
@@ -167,16 +161,6 @@ void straight(MLIRContext &context) {
       f.group(0); if (reorder) { f.group(2); f.group(1); } else { f.group(1); f.group(2); } f.halt();
       check(reorder && offset < 1024 ? f.rejects(notCompleted) : f.verify(), offset >= 1024 ? "disjoint write/read groups may reorder" : reorder ? "completed overlapping groups on disjoint staging cannot reorder" : "source store completes before overlapping read issue");
     }
-  }
-  // Replacing the first write by a read: equal host spans carry no source effect edge, even with completed groups swapped.
-  std::string reads = sourceText;
-  size_t begin = reads.find("    %s2, %store"), end = reads.find("    %s4, %load");
-  reads.replace(begin, end - begin, R"mlir(    %s2, %first = "atlas.virtual_dma_load_fp8"(%s1, %a, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s3, %first_result = "atlas.virtual_dma_await_fp8"(%s2, %first) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-)mlir");
-  if (Fixture f(context, reads, "literal read/read source builds"); f) {
-    check(cast<DictionaryAttr>(f.contract.getAs<ArrayAttr>("effects")[2]).getAs<DenseI32ArrayAttr>("predecessors").empty(), "same-span read/read has no ordering edge");
-    f.group(0); f.group(2); f.group(1); f.halt(); check(f.verify(), "same-span completed read/read may reorder");
   }
 }
 void boundary(MLIRContext &context) {

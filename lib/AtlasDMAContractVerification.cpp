@@ -8,6 +8,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include <optional>
+#include <string>
+#include <vector>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -22,15 +24,9 @@ struct Record {
 };
 
 bool validGeometry(const Record &r) {
-  // AtlasCore uses wordAddr[18:3], size[12:0]; DMA consumes complete
-  // 32-byte beats. Full FP8/BF16 tiles are 1/2 KiB in selected VMEM.
   return r.id <= 0x7fffffff && r.channel < 8 &&
          (r.direction == "load" || r.direction == "store") &&
-         (r.sizeBytes == 1024 || r.sizeBytes == 2048) &&
-         r.stagingWord % 256 == 0 &&
-         uint64_t(r.stagingWord) * 4 + r.sizeBytes <= kVmemBytes &&
-         r.dramByte >= 0x80000000u && r.dramByte % 32 == 0 &&
-         uint64_t(r.dramByte) + r.sizeBytes <= (uint64_t(1) << 32) &&
+         validDMATileGeometry(uint64_t(r.stagingWord) * 4, r.dramByte, r.sizeBytes) &&
          r.stagingReg > 0 && r.stagingReg < 32 &&
          r.dramReg > 0 && r.dramReg < 32 &&
          r.sizeReg > 0 && r.sizeReg < 32 &&
@@ -39,15 +35,12 @@ bool validGeometry(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  auto field = [&](StringRef name, uint32_t bits) {
-    return builder.getNamedAttr(name, builder.getIntegerAttr(builder.getI32Type(), llvm::APInt(32, bits)));
-  };
   return builder.getDictionaryAttr({
-      field("id", r.id), field("channel", r.channel),
+      namedI32(builder, "id", r.id), namedI32(builder, "channel", r.channel),
       builder.getNamedAttr("direction", builder.getStringAttr(r.direction)),
-      field("staging_word", r.stagingWord), field("dram_byte", r.dramByte),
-      field("size_bytes", r.sizeBytes), field("staging_reg", r.stagingReg),
-      field("dram_reg", r.dramReg), field("size_reg", r.sizeReg)});
+      namedI32(builder, "staging_word", r.stagingWord), namedI32(builder, "dram_byte", r.dramByte),
+      namedI32(builder, "size_bytes", r.sizeBytes), namedI32(builder, "staging_reg", r.stagingReg),
+      namedI32(builder, "dram_reg", r.dramReg), namedI32(builder, "size_reg", r.sizeReg)});
 }
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
@@ -123,10 +116,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
 
   llvm::DenseMap<Operation *, uint32_t> tagged;
   for (Operation &op : module.getBody()->getOperations()) {
-    auto id = op.getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
+    auto id = contractTag(&op, kAtlasTagDMATransfer);
     if (!id)
       continue;
-    uint32_t value = uint32_t(id.getValue().getZExtValue());
+    uint32_t value = uint32_t(*id);
     auto found = records.find(value);
     if (found == records.end())
       return op.emitOpError("DMA contract has no source record for transfer id ") << value;
@@ -173,6 +166,130 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
       }
       applyScalar(s.instrs[i], regs);
     }
+  }
+  return success();
+}
+
+namespace {
+struct Span {
+  std::optional<uint64_t> start;
+  std::optional<uint32_t> bytes;
+  bool write;
+};
+
+struct Transfer {
+  DMAOp launch;
+  Span vmem, dram;
+};
+
+// AtlasCore slices wordAddr[18:3]; DMA and LSU then address 32-byte lines.
+uint64_t vmemStart(uint32_t wordAddress) {
+  return uint64_t((wordAddress >> 3) & 0xffff) * 32;
+}
+
+std::string describe(const Span &span) {
+  return std::string(span.write ? "write" : "read") + " byte start=" +
+         (span.start ? std::to_string(*span.start) : "unknown") + " bytes=" +
+         (span.bytes ? std::to_string(*span.bytes) : "unknown");
+}
+
+LogicalResult compare(Operation *op, const Span &a, const Span &b,
+                      StringRef space, DMAOp launch) {
+  if (!a.write && !b.write)
+    return success();
+  bool unknown = !a.start || !b.start || !a.bytes || !b.bytes;
+  // Unsigned distances avoid constructing an overflowing interval endpoint.
+  if (unknown || uint64_t(*a.start - *b.start) < *b.bytes ||
+      uint64_t(*b.start - *a.start) < *a.bytes) {
+    auto diagnostic = op->emitOpError(
+        unknown ? "cannot prove DMA memory disjointness in "
+                : "DMA memory conflict in ");
+    diagnostic << space << ": access {" << describe(a) << "}, pending {"
+               << describe(b) << "}";
+    diagnostic.attachNote(launch.getLoc())
+        << "captured DMA launch on channel " << launch.getChannel();
+    return failure();
+  }
+  return success();
+}
+} // namespace
+
+LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
+    const AtlasVerificationContext &ctx) {
+  if (!ctx.hasDMA)
+    return success();
+  assert(ctx.stream && "a DMA stream is decoded");
+  const AtlasStream &s = *ctx.stream;
+  const auto &bases = ctx.dmaUpperEntry;
+  for (size_t block = 0; block < s.starts.size(); ++block) {
+    RegValues regs = s.entry[block];
+    auto base = bases[block];
+    std::vector<Transfer> pending;
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      Operation *op = s.ops[i];
+      if (auto config = dyn_cast<DMAConfigOp>(op)) {
+        base = regs[config.getBaseReg()];
+      } else if (auto dma = dyn_cast<DMAOp>(op)) {
+        bool store = dma.getDirection() == "store";
+        Transfer transfer{dma, {std::nullopt, std::nullopt, !store},
+                          {std::nullopt, std::nullopt, store}};
+        // AtlasCore truncates size to 13 bits; DMA.scala uses floor(size/32).
+        if (auto size = regs[dma.getSize()]) {
+          uint32_t bytes = (*size & 0x1fff) & ~uint32_t(31);
+          if (!bytes)
+            return op->emitOpError("DMA memory transfer has zero complete beats");
+          transfer.vmem.bytes = transfer.dram.bytes = bytes;
+        }
+        if (auto address = regs[dma.getReg()])
+          transfer.vmem.start = vmemStart(*address);
+        // TileLinkAdapter aligns requests down to 32 bytes, then narrows to
+        // negotiated addressBits. Only the bounded zero-upper ABI is qualified
+        // here; different unqualified upper words cannot prove disjointness.
+        if (base && *base == 0 && regs[dma.getDram()])
+          transfer.dram.start = uint64_t(*regs[dma.getDram()]) & ~uint64_t(31);
+        if (transfer.dram.start && transfer.dram.bytes &&
+            *transfer.dram.start + *transfer.dram.bytes > (uint64_t(1) << 32))
+          transfer.dram.start.reset();
+        if (transfer.vmem.start && transfer.vmem.bytes &&
+            *transfer.vmem.start + *transfer.vmem.bytes > kVmemBytes)
+          return op->emitOpError("DMA memory transfer exceeds VMEM capacity");
+        for (Transfer &other : pending)
+          if (failed(compare(op, transfer.vmem, other.vmem, "VMEM", other.launch)) ||
+              failed(compare(op, transfer.dram, other.dram, "DRAM", other.launch)))
+            return failure();
+        pending.push_back(transfer);
+      } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
+        auto found = llvm::find_if(pending, [&](Transfer &transfer) {
+          return transfer.launch.getChannel() == wait.getChannel();
+        });
+        if (found == pending.end())
+          return op->emitOpError("DMA memory wait has no captured transfer");
+        pending.erase(found);
+      } else if (isa<VLoadOp, VStoreOp>(op)) {
+        const Instr &in = s.instrs[i];
+        Span access{std::nullopt, 1024, isa<VStoreOp>(op)};
+        if (auto address = regs[in.rs1]) {
+          // ScalarDecoder shifts signed imm12 by 5 WORDS, then RV32 ADD wraps.
+          uint32_t word = *address +
+                          uint32_t(signExtend(in.imm, 12) * 32);
+          access.start = vmemStart(word);
+          // LSU accepts aligned 1KiB vectors contained in one 256KiB bank.
+          if (*access.start % 1024 || *access.start + 1024 > kVmemBytes ||
+              *access.start / kVmemBankBytes !=
+                  (*access.start + 1023) / kVmemBankBytes)
+            return op->emitOpError("vector DMA memory access has invalid VMEM span");
+        }
+        for (Transfer &other : pending)
+          if (failed(compare(op, access, other.vmem, "VMEM", other.launch)))
+            return failure();
+      }
+      // Only scalar ALU operations yield constants. Loads, AUIPC and link
+      // results conservatively become unknown; SELI leaves scalar regs alone.
+      applyScalar(s.instrs[i], regs);
+    }
+    if (!pending.empty())
+      return pending.front().launch.emitOpError(
+          "DMA memory transfer crosses a basic-block boundary");
   }
   return success();
 }

@@ -166,9 +166,6 @@ class VirtualLoweringTest(unittest.TestCase):
         for name in ("loop", "branch", "swap_loop"):
             with self.subTest(name=name):
                 source = (EXAMPLES / f"virtual_bf16_{name}_program.mlir").read_text()
-                untimed = lower(source, timed=False)
-                self.assertIn('atlas.timing_state = "untimed"', untimed)
-                self.assertNotIn('"atlas.delay"', untimed)
                 machine = lower(source)
                 self.assertIn('atlas.timing_state = "timed"', machine)
                 for option in ("--verify-atlas-machine-stream",

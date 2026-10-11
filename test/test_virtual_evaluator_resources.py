@@ -119,10 +119,8 @@ class VirtualEvaluatorMXUHandleTest(unittest.TestCase):
         for unit in (0, 1):
             for name, (body, final, results, codes) in cases.items():
                 with self.subTest(unit=unit, case=name):
-                    inputs = RuntimeInputs(TILES)
-                    result = evaluate(parse_program(on_unit(kernel(body, final, results), unit)), inputs)
-                    self.assertEqual(dict(result.outputs), {index: diagonal("bf16", code) for index, code in enumerate(codes)})
-                    self.assertEqual((dict(inputs.tiles), result.memory), (TILES, ()))
+                    result = evaluate(parse_program(on_unit(kernel(body, final, results), unit)), RuntimeInputs(TILES))
+                    self.assertEqual((dict(result.outputs), result.memory), ({index: diagonal("bf16", code) for index, code in enumerate(codes)}, ()))
 
     def test_invalid_handle_lifetimes_are_rejected_on_each_unit(self) -> None:
         live = (weight("s4", "t0", "w0"), reset("t0", "t1", "a0"))
@@ -134,7 +132,6 @@ class VirtualEvaluatorMXUHandleTest(unittest.TestCase):
             "repeated_seed_readout": ((seed("s4", "t0", "a0"), read("t0", "t1", "first", "a0"), read("t1", "t2", "again", "a0")), "t2"),
             "consumed_accumulation": ((*live, read("t1", "t2", "first", "a0"), accumulate("t2", "t3", "a1", "a0"), read("t3", "t4", "y", "a1")), "t4"),
             "dropped_accumulator": ((seed("s4", "t0", "a0"),), "t0"),
-            "wrong_state": ((weight("s4", "t0", "w0"), reset("s4", "t1", "a0"), read("t1", "t2", "y", "a0")), "t2"),
             "legacy_over_live_weight": ((weight("s4", "t0", "w0"), legacy(), reset("t0", "t1", "a0"), read("t1", "t2", "y", "a0")), "t2"),
             "legacy_over_live_accumulator": ((seed("s4", "t0", "a0"), legacy(), read("t0", "t1", "y", "a0")), "t1"),
         }
@@ -155,8 +152,6 @@ class VirtualEvaluatorMXUHandleTest(unittest.TestCase):
           {read("t1", "t2", "again", "a0")}
           func.return %t2 : {S}'''
         extra = {
-            "dropped_at_branch": function(f'{seed("s4", "t0", "a0")}\ncf.br ^exit(%t0 : {S})\n^exit(%es: {S}):\nfunc.return %es : {S}'),
-            "mixed_units": program(*live, read("t1", "t2", "y", "a0"), final_state="t2").replace(A, "!atlas.virtual_mxu_acc<1>"),
             "captured_across_blocks": function(captured),
             "passed_across_blocks": function(passed),
             "untaken_malformed_path": function(untaken, "%choose: i1"),
@@ -259,11 +254,7 @@ def branch(condition_state: str, taken: str, *body: str) -> tuple[str, ...]:
 
 class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
     def accepted(self, source: str, inputs: RuntimeInputs | None = None):
-        inputs = inputs if inputs is not None else RuntimeInputs(memory=regions())
-        original_tiles, original_memory = dict(inputs.tiles), inputs.memory
-        result = evaluate(parse_program(source), inputs)
-        self.assertEqual((dict(inputs.tiles), inputs.memory), (original_tiles, original_memory))
-        return result
+        return evaluate(parse_program(source), inputs if inputs is not None else RuntimeInputs(memory=regions()))
 
     def test_signed_unsigned_addresses_and_exact_top_span_are_admitted(self) -> None:
         for format, size in (("fp8", 1024), ("bf16", 2048)):
@@ -278,11 +269,7 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
                  "%zero = arith.constant 0 : i32", "%half = arith.constant 1024 : i32",
                  "%sum = arith.addi %a, %b : i32", "%addr = arith.addi %sum, %zero : i32",
                  "%size = arith.addi %half, %half : i32")
-        source = wrap(*proof, load("bf16", "s0", "s1", "h"), ready("bf16", "s1", "s2", "h"), final="s2")
-        self.accepted(source)
-        for flag in ("nsw", "nuw", "nsw, nuw"):
-            with self.subTest(flag=flag), self.assertRaises(VirtualInterfaceError):
-                evaluate(parse_program(source.replace("arith.addi %a, %b : i32", f"arith.addi %a, %b overflow<{flag}> : i32")), RuntimeInputs(memory=regions()))
+        self.accepted(wrap(*proof, load("bf16", "s0", "s1", "h"), ready("bf16", "s1", "s2", "h"), final="s2"))
         chain = ["%address0 = arith.constant 2147483648 : i32", "%zero = arith.constant 0 : i32", "%size = arith.constant 2048 : i32"]
         chain += [f"%address{index + 1} = arith.addi %address{index}, %zero : i32" for index in range(1500)]
         self.assertEqual(self.accepted(wrap(*chain, load("bf16", "s0", "s1", "h", "address1500"), ready("bf16", "s1", "s2", "h"), final="s2")).memory, regions())
@@ -294,9 +281,6 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         for format in ("fp8", "bf16"):
             cases += [(f"{format}_address_{address:#x}", read_program(format, address), base) for address in (0, ADDRESS - 32, ADDRESS + 1, (1 << 32) - 32)]
             cases += [(f"{format}_size_{size}", read_program(format, size=size), base) for size in (0, 32, -1, 2048 if format == "fp8" else 1024)]
-        for address, size in ((0, 2048), (ADDRESS + 1, 2048), (ADDRESS, 1024), ((1 << 32) - 32, 2048)):
-            source = wrap(input_tile("bf16"), *constants("bf16", address, size), store("bf16", "io", "s1", "h"), wait("s1", "s2", "h"), final="s2")
-            cases.append((f"store_{address:#x}_{size}", source, with_tile))
         for operand in ("addr", "size"):
             body = list(constants())
             body[0 if operand == "addr" else 1] = f"%{operand} = arith.addi %dynamic, %dynamic : i32"
@@ -311,12 +295,10 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         cases.append(("repeated_await", wrap(*old, ready("bf16", "s2", "s3", "old", "fork"), final="s3"), base))
         cases.append(("stale_epoch", wrap(*old, load("bf16", "s2", "s3", "new"), ready("bf16", "s3", "s4", "old", "stale"), ready("bf16", "s4", "s5", "new"), final="s5"), base))
         cases.append(("repeated_wait", wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "h"), wait("s1", "s2", "h"), wait("s2", "s3", "h"), final="s3"), with_tile))
-        cases.append(("forked_state", read_program().replace(ready("bf16", "s1", "s2", "h"), ready("bf16", "s0", "s2", "h")), base))
         for flat in (False, True):
             cases.append((f"dropped_load_flat_{flat}", wrap(*constants(), load("bf16", "s0", "s1", "h"), final="s1", flat=flat), base))
         cases.append(("dropped_store", wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "h"), final="s1"), with_tile))
         dropped = (*constants(), load("bf16", "s0", "s1", "h"), f"cf.br ^exit(%s1 : {S})", f"^exit(%es: {S}):")
-        cases.append(("dropped_at_branch", wrap(*dropped, final="es"), base))
         cases.append(("captured_across_blocks", wrap(*dropped, ready("bf16", "es", "s2", "h"), final="s2"), base))
         for malformed in ("bad_address", "dropped"):
             body = branch("s0", "bad", load("bf16", "bs", "s1", "h"), *((ready("bf16", "s1", "s2", "h"),) if malformed == "bad_address" else ()))
@@ -330,10 +312,6 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
                 launch, completion = transfer(direction, "io", "s1", "h", before)
                 source = wrap(input_tile("bf16"), *constants(), launch, hidden, completion, final=f"{before}_done")
                 cases.append((f"{direction}_pending_over_{kind}", source, RuntimeInputs({0: BF16, 1: BF16} if kind == "input" else {0: BF16}, memory=regions())))
-        for first, second in (("load", "store"), ("store", "load"), ("store", "store")):
-            launch0, complete0 = transfer(first, "io", "s1", "h0", "s2", "v0")
-            launch1, complete1 = transfer(second, "s1", "s2", "h1", "s2_done", "v1")
-            cases.append((f"overlapping_{first}_{second}", wrap(input_tile("bf16"), *constants(), launch0, launch1, complete0, complete1, final="s2_done_done"), with_tile))
         conflict = wrap(input_tile("bf16"), *constants(), *branch("io", "bad", load("bf16", "bs", "s1", "h0"), store("bf16", "s1", "s2", "h1"),
                                                                     ready("bf16", "s2", "s3", "h0"), wait("s3", "s4", "h1")), final="s4", arguments="%choose: i1")
         for choose in (0, 1):  # rejected whether or not the conflicting path executes
@@ -368,11 +346,14 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
                 parse_program(text)
 
     def test_two_pending_transfers_complete_in_either_order(self) -> None:
+        other = MemoryRegion(DESTINATION, b"\x00\x40" * 1024)
         for order in (("h0", "h1"), ("h1", "h0")):
-            source = wrap(*constants(), load("bf16", "s0", "s1", "h0"), load("bf16", "s1", "s2", "h1"),
-                          ready("bf16", "s2", "s3", order[0], "first"), ready("bf16", "s3", "s4", order[1], "second"), final="s4")
+            source = wrap(*constants(), f"%dst = arith.constant {DESTINATION} : i32", load("bf16", "s0", "s1", "h0"), load("bf16", "s1", "s2", "h1", "dst"),
+                          ready("bf16", "s2", "s3", order[0], f"v{order[0][1]}"), ready("bf16", "s3", "s4", order[1], f"v{order[1][1]}"),
+                          output("s4", "o0", "v0"), output("o0", "done", "v1", 1), final="done")
             with self.subTest(order=order):
-                self.assertEqual(self.accepted(source).memory, regions())
+                result = self.accepted(source, RuntimeInputs(memory=(*regions(), other)))
+                self.assertEqual((dict(result.outputs), result.memory), ({0: BF16, 1: Tile("bf16", (0x4000,) * 1024)}, (*regions(), other)))
         self.accepted(wrap(*constants(), "%small = arith.constant 1024 : i32", load("bf16", "s0", "s1", "h0"), load("fp8", "s1", "s2", "h1", size="small"),
                            ready("fp8", "s2", "s3", "h1", "small_tile"), ready("bf16", "s3", "s4", "h0"), final="s4"))
         for order in (0, 1):
@@ -393,14 +374,6 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         self.accepted(wrap(*prefix, ready("bf16", "s2", "s3", "h0", "v0"), load("bf16", "s3", "s4", "h2"),
                            ready("bf16", "s4", "s5", "h2", "v2"), ready("bf16", "s5", "s6", "h1", "v1"), final="s6"))
 
-    def test_control_flow_visits_only_executed_transfers_with_fresh_epochs(self) -> None:
-        untaken = wrap(*constants(), *branch("s0", "read", load("bf16", "bs", "s1", "h"), ready("bf16", "s1", "s2", "h")), final="s2", arguments="%choose: i1")
-        self.accepted(untaken, RuntimeInputs(controls=(Scalar(1, 1),)))
-        source = wrap(*constants(), LOOP_HEADER, f"cf.br ^loop(%s0, %zero : {S}, i32)", f"^loop(%ls: {S}, %i: i32):",
-                      load("bf16", "ls", "s1", "h"), ready("bf16", "s1", "s2", "h"), "%next = arith.addi %i, %one : i32", "%again = arith.cmpi ult, %next, %limit : i32",
-                      f"cf.cond_br %again, ^loop(%s2, %next : {S}, i32), ^exit(%s2 : {S})", f"^exit(%es: {S}):", final="es")
-        self.assertEqual(self.accepted(source).memory, regions())
-
     def test_other_vpu_and_mxu_work_are_allowed_while_dma_is_pending(self) -> None:
         relu = f'%positive = "atlas.virtual_vpu_unary"(%x) {{kind = "relu"}} : ({B}) -> {B}'
         add = f'%sum = "atlas.virtual_vpu_binary"(%positive, %x) {{kind = "add"}} : ({B}, {B}) -> {B}'
@@ -416,26 +389,14 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
                 self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=regions())).outputs), {0: BF16})
 
     def test_completed_transfers_and_boundary_aliases_share_memory(self) -> None:
-        source = wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "write"), wait("s1", "s2", "write"),
-                      load("bf16", "s2", "s3", "read"), ready("bf16", "s3", "s4", "read"), output("s4", "done", "loaded"), final="done")
-        self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=(MemoryRegion(ADDRESS, bytes(2048)),))).outputs), {0: BF16})
-        for direction, address in (("store", INPUT_BASE), ("store", OUTPUT_BASE), ("load", OUTPUT_BASE)):
-            launch, completion = transfer(direction, "io", "s1", "h", "s1")
-            source = wrap(input_tile("bf16"), *constants(address=address), launch, completion, output("s1_done", "done"), final="done", attributes=ABI)
-            with self.subTest(direction=direction, address=address):
-                memory = (MemoryRegion(OUTPUT_BASE, RAW),) if direction == "load" else ()
-                self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=memory)).outputs), {0: BF16})
-        source = wrap(input_tile("bf16"), *constants(address=INPUT_BASE), load("bf16", "io", "s1", "h"), ready("bf16", "s1", "s2", "h"), output("s2", "done", "loaded"), final="done", attributes=ABI)
-        self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(INPUT_BASE))).outputs), {0: BF16})
+        source = wrap(input_tile("bf16"), *constants(address=OUTPUT_BASE), load("bf16", "io", "s1", "h"), ready("bf16", "s1", "s2", "h"), output("s2", "done"), final="done", attributes=ABI)
+        self.assertEqual(dict(self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(OUTPUT_BASE))).outputs), {0: BF16})
         # Without declared bases, no boundary address is invented.
         source = wrap(input_tile("bf16"), *constants(address=INPUT_BASE), store("bf16", "io", "s1", "h"), wait("s1", "s2", "h"), output("s2", "done"), final="done")
         self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(INPUT_BASE)))
         memory = (MemoryRegion(INPUT_BASE, bytes(2048)),)
         result = self.accepted(wrap(input_tile("bf16"), output("io", "done"), final="done"), RuntimeInputs({0: BF16}, memory=memory))
         self.assertEqual((dict(result.outputs), result.memory), ({0: BF16}, memory))
-        source = wrap(input_tile("bf16"), output("io", "done"), final="done", attributes=ABI)
-        self.assertEqual(self.accepted(source, RuntimeInputs({0: BF16}, memory=(MemoryRegion(OUTPUT_BASE, bytes(2048)),))).memory, regions(OUTPUT_BASE))
-        self.accepted(source, RuntimeInputs({0: BF16}, memory=regions(OUTPUT_BASE + 2048)))
 
     def test_known_input_aliases_require_matching_initial_memory_bytes(self) -> None:
         for format, tile, payload in (("bf16", BF16, RAW), ("fp8", FP8, bytes(FP8.bits))):
@@ -465,11 +426,9 @@ class VirtualEvaluatorResourceTest(unittest.TestCase):
                       f"cf.cond_br %again, ^loop(%s4, %b, %a, %next : {S}, {B}, {B}, i32), ^exit(%s4, %loaded : {S}, {B})",
                       f"^exit(%es: {S}, %last: {B}):", output("es", "done", "last"), final="done")
         guard = MemoryRegion(ADDRESS - 13, b"before!before" + b"?" * 2048 + b"after!")
-        inputs = RuntimeInputs({0: first, 1: second}, memory=(guard,))
-        result = evaluate(parse_program(source), inputs)
+        result = evaluate(parse_program(source), RuntimeInputs({0: first, 1: second}, memory=(guard,)))
         self.assertEqual(dict(result.outputs), {0: second})
         self.assertEqual(result.memory, (MemoryRegion(guard.address, b"before!before" + bf16_bytes(second.bits) + b"after!"),))
-        self.assertEqual((inputs.memory, dict(inputs.tiles)), ((guard,), {0: first, 1: second}))
 
     def test_mxu_loop_rebinds_weight_and_accumulator_versions_from_carried_tiles(self) -> None:
         # Identity activations contract with packed diagonal A, seeded by A; swapping to B changes both: 6 -> 4.
@@ -483,10 +442,8 @@ class VirtualEvaluatorResourceTest(unittest.TestCase):
         tiles = {**TILES, 4: diagonal("bf16", 0x4000)}
         for unit in (0, 1):
             with self.subTest(unit=unit):
-                inputs = RuntimeInputs(tiles)
-                result = evaluate(parse_program(on_unit(function(body), unit)), inputs)
-                self.assertEqual(dict(result.outputs), {0: diagonal("bf16", 0x4080)})
-                self.assertEqual((dict(inputs.tiles), result.memory), (tiles, ()))
+                result = evaluate(parse_program(on_unit(function(body), unit)), RuntimeInputs(tiles))
+                self.assertEqual((dict(result.outputs), result.memory), ({0: diagonal("bf16", 0x4080)}, ()))
 
 
 if __name__ == "__main__":

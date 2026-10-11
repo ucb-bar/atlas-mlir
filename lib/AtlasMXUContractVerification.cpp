@@ -48,16 +48,13 @@ bool validRecord(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  auto field = [&](StringRef name, int32_t value) {
-    return builder.getNamedAttr(name, builder.getI32IntegerAttr(value));
-  };
   return builder.getDictionaryAttr({
-      field("id", r.id), field("block", r.block),
+      namedI32(builder, "id", r.id), namedI32(builder, "block", r.block),
       builder.getNamedAttr("kind", builder.getStringAttr(r.kind)),
-      field("unit", r.unit), field("reg", r.reg), field("slot", r.slot),
-      field("weight_slot", r.weightSlot), field("weight", r.weight),
-      field("previous", r.previous), field("scale_reg", r.scaleReg),
-      field("scale", r.scale)});
+      namedI32(builder, "unit", r.unit), namedI32(builder, "reg", r.reg), namedI32(builder, "slot", r.slot),
+      namedI32(builder, "weight_slot", r.weightSlot), namedI32(builder, "weight", r.weight),
+      namedI32(builder, "previous", r.previous), namedI32(builder, "scale_reg", r.scaleReg),
+      namedI32(builder, "scale", r.scale)});
 }
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
@@ -405,10 +402,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
     bool command = isa<MXUPushOp, MXUMatmulOp, MXUPopOp>(op);
     if (!attr && !command)
       continue;
-    auto id = dyn_cast_or_null<IntegerAttr>(attr);
-    if (!command || !id || !id.getType().isSignlessInteger(32) || id.getValue().isNegative())
+    auto id = contractTag(&op, kAtlasTagMXUCommand);
+    if (!command || !id)
       return op.emitOpError("MXU contract requires a nonnegative i32 command tag on every MXU command only");
-    uint64_t value = id.getValue().getZExtValue();
+    uint64_t value = *id;
     if (value >= records.size())
       return op.emitOpError("MXU contract has no source record for command id ") << value;
     if (!seen.insert(value).second)
@@ -450,9 +447,4 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
     }
   }
   return success();
-}
-
-LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(ModuleOp module) {
-  auto ctx = buildAtlasVerificationContext(module, /*generated=*/false, /*requireStream=*/true);
-  return failed(ctx) ? failure() : verifyAtlasGeneratedMXUContract(*ctx);
 }

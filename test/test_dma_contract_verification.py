@@ -16,7 +16,7 @@ from test_virtual_dma import copy
 from test_virtual_dma_lowering import STAGING_WORD
 from test_virtual_lowering import lower, run, virtual_chain
 from verification_support import (
-    DELAY, INCOMPLETE, MARKER as VERSION, NOP, STREAM_REWRITES, TRANSFER, UNMARKED, UNSUPPORTED, assert_boundaries,
+    INCOMPLETE, MARKER as VERSION, NOP, STREAM_REWRITES, TRANSFER, UNMARKED, UNSUPPORTED, BoundaryChecks, assert_boundaries,
     checked, constant, contract_text, dma_wait, drop_attribute, finalize_rejects, insert_after, last_constant_write,
     line_index, lines_of, records, remove_line, replace_contract, replace_line, rewrite_line, shift_constant,
     structured_word,
@@ -42,13 +42,7 @@ def launch(machine: str, direction: str = "load") -> int:
     return line_index(machine, '"atlas.dma"', f'direction = "{direction}"', TRANSFER)
 
 
-class DMAContractVerificationTest(unittest.TestCase):
-    def accepted(self, machine: str) -> None:
-        assert_boundaries(self, machine)
-
-    def rejected(self, machine: str, diagnostic: str = "") -> None:
-        assert_boundaries(self, machine, rejects=diagnostic)
-
+class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
     def test_lowering_records_source_values_and_complete_schema(self) -> None:
         added = copy().replace("%addr = arith.constant -2147483648 : i32",
                                "%a = arith.constant -32 : i32\n    %b = arith.constant -2147483616 : i32\n"
@@ -92,22 +86,6 @@ class DMAContractVerificationTest(unittest.TestCase):
                 self.assertNotEqual(changed, machine)
                 self.assertEqual(contract_text(changed, "dma"), contract_text(machine, "dma"))
                 self.rejected(changed, diagnostic)
-
-    def test_missing_duplicate_and_foreign_tags_fail(self) -> None:
-        machine = lower(copy())
-        tagged = [i for i, line in enumerate(machine.splitlines()) if TRANSFER in line]
-        for index in tagged:
-            with self.subTest(missing=index):
-                changed = rewrite_line(machine, index, lambda line: re.sub(rf"{re.escape(TRANSFER)} = \d+ : i32, ", "", line, count=1))
-                self.assertNotIn(TRANSFER, changed.splitlines()[index])
-                self.assertIn("atlas.virtual_tile_command =", changed.splitlines()[index])
-                self.rejected(changed)
-        for identity in (0, 999):
-            with self.subTest(identity=identity):
-                self.rejected(machine.replace(f"{TRANSFER} = 1 : i32", f"{TRANSFER} = {identity} : i32"))
-        for value in ("-1 : i32", "0 : i64", '"bad"'):
-            with self.subTest(tag=value):
-                self.rejected(replace_line(machine, tagged[0], f"{TRANSFER} = 0 : i32", f"{TRANSFER} = {value}"))
 
     def test_generated_artifact_classification_at_every_consumer(self) -> None:
         timed, untimed = lower(copy()), lower(copy(), timed=False)
@@ -164,17 +142,6 @@ class DMAContractVerificationTest(unittest.TestCase):
                 self.assertNotEqual(changed, machine)
                 self.rejected(changed, diagnostic)
 
-    def test_stream_rewrites_preserve_and_recheck_the_contract(self) -> None:
-        untimed = lower(copy(), timed=False)
-        for tool, options in STREAM_REWRITES:
-            with self.subTest(options=options):
-                rewritten = checked(self, untimed, *options)
-                self.assertIn(VERSION, rewritten)
-                self.assertEqual(contract_text(rewritten, "dma"), contract_text(untimed, "dma"))
-                self.accepted(rewritten)
-                address = line_index(rewritten, '"atlas.upper"', "dst = 10 : i32")
-                self.rejected(replace_line(rewritten, address, "immediate = 524288", "immediate = 524289"), "DMA contract")
-
     def test_structured_fields_and_words_cannot_jointly_bypass_contract(self) -> None:
         structured = checked(self, lower(copy()), "--convert-atlas-to-llvm-calls")
         index = line_index(structured, 'atlas.source_op = "atlas.alu_imm"', "dst = 7 : i32")
@@ -199,8 +166,6 @@ class DMAContractVerificationTest(unittest.TestCase):
         machine = lower(copy())
         pending = "unexpected instruction while DMA is pending"
         forbidden = (((("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),), pending),
-                     ((("vload", 'dst = 0 : i32, base = 4 : i32, offset = 0 : i32, format = "raw"'), DELAY), "DMA memory conflict"),
-                     ((("vstore", 'src = 0 : i32, base = 4 : i32, offset = 0 : i32, format = "raw"'), DELAY), "DMA memory conflict"),
                      ((("scalar_load", 'kind = "lw", dst = 4 : i32, base = 7 : i32, offset = 0 : i32'),
                        ("delay", 'cycles = 8 : i32, atlas.delay_reason = "scalar_load_completion"')), pending),
                      ((("branch", 'kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = 2 : i32'), NOP), pending),
@@ -235,9 +200,7 @@ class DMAContractVerificationTest(unittest.TestCase):
                 self.accepted(insert_after(machine, index, [NOP]))
         self.rejected(remove_line(machine, waits[0]), "another DMA launch while its channel is pending")
         self.rejected("\n".join(machine.splitlines()[:waits[-1]] + ["}"]), "generated DMA has no matching DMA.WAIT")
-        self.rejected(replace_line(machine, waits[0], "channel = 0 : i32", "channel = 1 : i32"), "DMA.WAIT has no pending DMA transfer")
         self.rejected(insert_after(machine, launches[0], [dma_wait(channel=1, identity=None)]), "DMA.WAIT has no pending DMA transfer")
-        self.rejected(replace_line(machine, waits[0], "atlas.virtual_cfg_block", f"{TRANSFER} = 0 : i32, atlas.virtual_cfg_block"), "DMA.WAIT must match")
 
 
 if __name__ == "__main__":

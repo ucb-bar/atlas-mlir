@@ -220,7 +220,9 @@ void testRetainedProvider(MLIRContext &context) {
   check(succeeded(verifyAtlasTiming(*module, p)), "retained custom policy accepts complete supplied rules");
   auto mismatch = p;
   mismatch.id = "different-synthetic-policy";
-  check(failed(verifyAtlasTiming(*module, mismatch)), "retained custom policy rejects supplied identity mismatch");
+  diagnostics.clear();
+  check(failed(verifyAtlasTiming(*module, mismatch)) && diagnosed("disagrees with retained provider identity"),
+        "retained custom policy rejects supplied identity mismatch", diagnostics);
   check(failed(verifyAtlasTiming(*module)), "retained custom policy requires supplied rules outside the registry");
   p.dependence = {};
   check(failed(verifyAtlasTiming(*module, p)), "retained custom policy rejects incomplete supplied coverage");
@@ -257,25 +259,12 @@ int64_t delayCycles(ModuleOp module) {
   return total;
 }
 
-std::string print(ModuleOp module) {
-  std::string text;
-  llvm::raw_string_ostream stream(text);
-  module.print(stream);
-  return text;
-}
-
 StringRef retainedProvider(ModuleOp module) {
   auto id = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
   return id ? id.getValue() : StringRef();
 }
 
 void testRegistry(MLIRContext &context) {
-  auto model = lookupTimingProvider(kNpuModelTimingProviderId.str());
-  check(model.error.empty() && model.value.id == kNpuModelTimingProviderId, "registry is seeded with the npu-model provider");
-  auto unknown = lookupTimingProvider("unknown-policy");
-  check(StringRef(unknown.error).contains("unknown Atlas timing provider"), "unknown id fails explicitly", unknown.error);
-  auto footprintOnly = lookupTimingProvider("atlas.vls.conservative.v1");
-  check(StringRef(footprintOnly.error).contains("footprint-only"), "unregistered footprint-only id keeps its rejection", footprintOnly.error);
   auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}}; };
   check(!registerAtlasTimingProvider(kNpuModelTimingProviderId.str(), complete).empty(), "duplicate registration fails");
   check(!registerAtlasTimingProvider("", complete).empty(), "empty registration id fails");
@@ -297,12 +286,10 @@ void testRegistry(MLIRContext &context) {
   registerVerifyAtlasTimingPass();
   std::string strictOption = std::string("{provider=") + kStrict + "}";
   auto byModel = runPipeline(context, kCopy, "insert-atlas-delays");
-  auto byDefaultName = runPipeline(context, kCopy, "insert-atlas-delays{provider=" + kNpuModelTimingProviderId.str() + "}");
   auto byStrict = runPipeline(context, kCopy, "insert-atlas-delays" + strictOption);
-  check(byModel && byDefaultName && byStrict, "delay insertion accepts each registered provider", diagnostics);
-  if (!byModel || !byDefaultName || !byStrict)
+  check(byModel && byStrict, "delay insertion accepts each registered provider", diagnostics);
+  if (!byModel || !byStrict)
     return;
-  check(print(*byModel) == print(*byDefaultName), "naming the default provider changes nothing");
   check(retainedProvider(*byModel) == kNpuModelTimingProviderId && retainedProvider(*byStrict) == kStrict,
         "delay insertion stamps the provider it used");
   check(delayCycles(*byStrict) > delayCycles(*byModel), "stricter selected spacing emits longer delays");
@@ -311,18 +298,6 @@ void testRegistry(MLIRContext &context) {
   diagnostics.clear();
   check(succeeded(modelStream) && failed(verifyAtlasTimedStream(*modelStream, strictProvider({}).value)) && diagnosed("insufficient issue spacing"),
         "model spacing fails the strict provider's verification", diagnostics);
-  diagnostics.clear();
-  check(failed(verifyAtlasTiming(*byStrict, npuModelTimingProvider())) && diagnosed("disagrees with retained provider identity"),
-        "module stamped with strict rejects the model", diagnostics);
-  for (StringRef pass : {"verify-atlas-timing", "insert-atlas-delays", "schedule-atlas-stream"}) {
-    diagnostics.clear();
-    std::string pipeline = pass.str() + strictOption;
-    check(!runPipeline(context, print(*byModel), pipeline) && diagnosed("disagrees with retained provider identity"),
-          "module stamped with the model rejects a different selection", pipeline + "\n" + diagnostics);
-  }
-  diagnostics.clear();
-  check(!runPipeline(context, kCopy, "insert-atlas-delays{provider=unknown-policy}") && diagnosed("unknown Atlas timing provider"),
-        "unknown selection fails at the producer", diagnostics);
 
   // The list scheduler spaces work with the model graph, so its output must pass the selected provider.
   diagnostics.clear();

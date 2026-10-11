@@ -50,11 +50,6 @@ byte offset `(col // 16) * 1024 + (row * 16 + col % 16) * 2`, and FP8 payloads
 are 1,024 row-major bytes. Weights are `W[N,K]`, so contraction is
 `A[M,K] @ W[N,K].T`; do not derive expected values from compiler relayout.
 
-Install `tools/requirements-virtual-evaluator.txt` in the pinned model's
-environment (Python 3.14, Torch 2.11.0, NumPy 2.4.4) with the model source root
-on `PYTHONPATH`; compiler-backed checks also need `ATLAS_OOT_BIN_DIR` and
-`ATLAS_LLVM_BIN`.
-
 ## Recommended interpreter state
 
 Keep three distinct things:
@@ -97,7 +92,7 @@ Channel-free DMA tile operations take ordinary i32 SSA values for DRAM byte addr
 
 An interpreter must distinguish a pending transfer from a ready tensor. `virtual_dma_load_fp8/bf16` creates a pending-load identity; its matching `virtual_dma_await_fp8/bf16` produces the usable tile. `virtual_dma_store_fp8/bf16` captures an immutable source tile into transfer-owned staging, and `virtual_dma_wait` establishes completion of the external write. Treat the staging as a private logical buffer owned through completion, not as an assigned VMEM window. An untimed interpreter may perform the copy eagerly internally, but must preserve these visibility and handle-lifetime rules.
 
-Up to two pending transfers may complete in either order within their defining block ([admission](dialect-reference.md#channel-free-virtual-dma-and-scalar-ssa)); awaiting B exposes B, not A. Two transfers whose proven spans share DRAM bytes while either writes are never pending together, as the dialect verifier requires. Keep transfer identities independent of channels, staging windows and scalar helpers; scalar capture at launch does not release source memory (physical ownership and release belong to [issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10)).
+Up to two pending transfers may complete in either order within their defining block ([admission](dialect-reference.md#channel-free-virtual-dma-and-scalar-ssa)); awaiting B exposes B, not A. Keep transfer identities independent of channels, staging windows and scalar helpers; scalar capture at launch does not release source memory (physical ownership and release belong to [issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10)).
 
 Every executed transfer span must lie in supplied regions or ABI payload mappings without holes, and loads must read initialized bytes. Boundary I/O and explicit DMA share execution-owned bytes, returned as final host-visible snapshots; unwritten output bytes and FP8 slot padding are undefined unless supplied.
 
@@ -105,13 +100,11 @@ The environment must keep external load sources stable and exclude conflicting a
 
 ## Explicit MXU handle extension
 
-Weight and accumulator-version handles are logical identities, not physical slots; the [handle rules](dialect-reference.md#explicit-virtual-mxu-resources) admit up to two weights and two accumulator chains per unit, which an interpreter must keep distinct.
+Weight and accumulator-version handles are logical identities, not physical slots, that an interpreter must keep distinct ([handle rules](dialect-reference.md#explicit-virtual-mxu-resources)).
 
 Each explicit MXU operation advances the virtual state token. Reset starts a contraction, not merely a zero accumulator.
 
 FP8 readout takes an immutable `!atlas.virtual_scale` produced by the pure `virtual_scale_constant` operation. Keep its raw code (`0..255`) in the value environment rather than treating it as a mutable physical scale register. The current slice admits constant scale definitions with ordinary dominance, but no scale block arguments or runtime scale inputs. A numerical interpreter must use the selected MXU converter, including its special-code behavior; VPU packing is not a substitute for MXU FP8 readout. FP8 readout produces the logical row-major tile layout used by virtual FP8 inputs.
-
-Reuse audited `RtlNumerics` components with MXU0's per-MAC BF16 rounding and MXU1's anchor accumulation, not a generic matmul.
 
 ## Semantic boundaries
 
@@ -168,7 +161,7 @@ The evaluator executes these 23 `atlas.virtual_*` forms plus `arith.constant/add
 | `mxu_readout_bf16` | `S, A<u> → S, B` | Consume version, retain weights; M |
 | `mxu_readout_fp8` | `S, A<u>, E → S, F` | Constant scale; selected converter; R |
 
-In required mode on 2026-10-09, every row of `test/test_virtual_evaluator_core.py`, including scheduled variants, matched the reference on the selected-core Arc model, which is not cross-checked against Verilator or VCS; the evidence is bounded by its fidelity to the selected RTL, and [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when the team accepts that bound.
+In required mode on 2026-10-09 and again on 2026-10-10 at the branch head, every row of `test/test_virtual_evaluator_core.py`, including scheduled variants, matched the reference on the selected-core Arc model, which is not cross-checked against Verilator or VCS; the evidence is bounded by its fidelity to the selected RTL, and [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when the team accepts that bound.
 
 | ID | Existing evidence | Selected-core rows | Remaining audit |
 | --- | --- | --- | --- |

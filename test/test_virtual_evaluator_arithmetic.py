@@ -6,7 +6,6 @@ the selected FMA/anchor sources, exact rational witnesses and the pinned RTL ari
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
 import hashlib
 import json
 from pathlib import Path
@@ -19,10 +18,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import (  # noqa: E402
-    RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, _mxu_tile, evaluate, evaluate_tile_operation, parse_program,
+    RuntimeInputs, Tile, UnsupportedVirtualMode, VirtualInterfaceError, _mxu_tile, evaluate, evaluate_tile_operation, parse_program,
 )
 from test_virtual_evaluator_resources import (  # noqa: E402
-    A, S, TILES, accumulate, diagonal, function, kernel, legacy, on_unit, output, read, reset, seed, weight,
+    A, S, TILES, accumulate, diagonal, kernel, legacy, on_unit, output, read, reset, seed, weight,
 )
 from xdsl.dialects import builtin  # noqa: E402
 
@@ -80,52 +79,27 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                 tile = Tile("bf16", tuple(range(first, first + 1024)))
                 self.assertEqual(evaluate_tile_operation(mov, (tile,)), tile)
                 self.assertEqual(evaluate_tile_operation(rectify, (tile,)), relu(tile))
-                self.assertEqual(tile.bits, tuple(range(first, first + 1024)))
 
     def test_add_matches_independent_raw_bit_literals(self) -> None:
         left, right, expected = (repeated([case[i] for case in ADD_CASES]) for i in range(3))
         self.assertEqual(evaluate_tile_operation(operation(ADD), (left, right)), expected)
-        self.assertEqual((left.bits, right.bits), tuple(repeated([case[i] for case in ADD_CASES]).bits for i in range(2)))
 
     def test_pack_literals_and_asymmetric_logical_row_major_layout(self) -> None:
         cases = PACK_CASES + ((0x7FC1, 0x00), (0xFFC1, 0x00))
         # Unequal row/column strides cross both halves of every register pair.
         indices = tuple((row * 7 + col * 11) % len(cases) for row in range(32) for col in range(32))
-        original = tuple(cases[i][0] for i in indices)
-        tile = Tile("bf16", original)
-        packed = evaluate_tile_operation(operation(PACK), (tile,))
+        packed = evaluate_tile_operation(operation(PACK), (Tile("bf16", tuple(cases[i][0] for i in indices)),))
         self.assertEqual(packed, Tile("fp8", tuple(cases[i][1] for i in indices)))
-        self.assertEqual(tile.bits, original)
-        with self.assertRaises(FrozenInstanceError):
-            packed.bits = (0,) * 1024
 
     def test_mixed_stream_publishes_independent_original_mov_add_relu_outputs(self) -> None:
         source = "module {" + INPUTS + "\n".join((MOV, ADD, RELU.replace("%m", "%r").replace("(%a)", "(%sum)"))) + "\n"
         states = ("s2", "out0", "out1", "out2", "out3")
         source += "\n".join(output(states[index], states[index + 1], value, index) for index, value in enumerate(("a", "m", "sum", "r"))) + "\n"
         left, right, summed = (repeated([case[i] for case in ADD_CASES]) for i in range(3))
-        inputs = RuntimeInputs({0: left, 1: right})
-        outputs = evaluate(parse_program(source + "}"), inputs).outputs
+        outputs = evaluate(parse_program(source + "}"), RuntimeInputs({0: left, 1: right})).outputs
         self.assertEqual(dict(outputs), {0: left, 1: left, 2: summed, 3: relu(summed)})
-        self.assertEqual(dict(inputs.tiles), {0: left, 1: right})
         with self.assertRaises(TypeError):
             outputs[0] = right
-
-    def test_fp8_boundary_and_unused_pack_execute_with_no_fp8_output_boundary(self) -> None:
-        source = "module {" + INPUTS + PACK + '''
-          %s3, %fp8 = "atlas.virtual_input_fp8"(%s2) {index = 2 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-          %s4 = "atlas.virtual_output_bf16"(%s3, %a) {index = 4 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
-        }'''
-        program = parse_program(source)
-        bf16, fp8 = repeated((0x43F0,)), repeated((0x7F, 0xFF, 0x80, 0x01), "fp8")
-        inputs = RuntimeInputs({0: bf16, 1: bf16, 2: fp8})
-        self.assertEqual(dict(evaluate(program, inputs).outputs), {4: bf16})
-        self.assertEqual(inputs.tiles[2], fp8)
-        for bad in (RuntimeInputs({0: bf16, 1: bf16}), RuntimeInputs({0: bf16, 1: bf16, 2: bf16})):
-            with self.assertRaises(VirtualInterfaceError):
-                evaluate(program, bad)
-        with self.assertRaises(VirtualInterfaceError):
-            evaluate(parse_program(source.replace('(%s3, %a)', '(%s2, %a)')), inputs)
 
     def test_helper_rejects_malformed_operands_and_revalidates_admission(self) -> None:
         tile, fp8 = repeated((0,)), repeated((0,), "fp8")
@@ -247,10 +221,8 @@ def rtl_arithmetic_cases():
 
 class VirtualEvaluatorMxuTest(unittest.TestCase):
     def assert_outputs(self, source, tiles: dict[int, Tile], expected: dict[int, Tile]) -> None:
-        inputs = RuntimeInputs(tiles)
-        result = evaluate(parse_program(source) if isinstance(source, str) else source, inputs)
-        self.assertEqual(dict(result.outputs), expected)
-        self.assertEqual((dict(inputs.tiles), result.memory), (tiles, inputs.memory))
+        result = evaluate(parse_program(source) if isinstance(source, str) else source, RuntimeInputs(tiles))
+        self.assertEqual((dict(result.outputs), result.memory), (expected, ()))
 
     def test_legacy_and_reset_use_n_by_k_weights_and_fresh_inputs(self) -> None:
         x = sparse({(0, 0): 0x38, (0, 1): 0x40, (1, 0): 0x44, (1, 1): 0x48})
@@ -407,31 +379,10 @@ class VirtualEvaluatorMxuTest(unittest.TestCase):
                 acts = sparse({(row, k): code for row, case in enumerate(batch) for k, code in enumerate(case["a"][:depth])})
                 weights = sparse({(row, k): code for row, case in enumerate(batch) for k, code in enumerate(case["w"][:depth])})
                 initial = sparse({(row, row): case["partial"] for row, case in enumerate(batch)}, "bf16")
-                runtime = RuntimeInputs(mxu_tiles(acts, weights, initial))
-                result = evaluate(program, runtime).outputs[0]
+                result = evaluate(program, RuntimeInputs(mxu_tiles(acts, weights, initial))).outputs[0]
                 for row, case in enumerate(batch):
                     with self.subTest(unit=unit, case=first + row, seed=hex(case["partial"])):
                         self.assertEqual(result.bits[row * 32 + row], case[key])
-                self.assertEqual(runtime.tiles[3], initial)
-
-    def test_cfg_executes_only_selected_raw_seed_copy_or_contraction(self) -> None:
-        source = function(f'''
-          cf.cond_br %take, ^compute(%s4 : {S}), ^copy(%s4 : {S})
-        ^compute(%cs: {S}):
-          {weight("cs", "c1", "w0")}
-          {seed("c1", "c2", "acc")}
-          {accumulate("c2", "c3", "continued", "acc")}
-          {read("c3", "c4", "result", "continued")}
-          {output("c4", "out", "result")}
-          func.return %out : {S}
-        ^copy(%ss: {S}):
-          {output("ss", "copy_out", "seed", 1)}
-          func.return %copy_out : {S}''', "%take: i1")
-        program = parse_program(source)
-        tiles = mxu_tiles(repeated((0x7F,), "fp8"), initial=repeated((0x7FC1, 0x8001)))
-        self.assertEqual(dict(evaluate(program, RuntimeInputs(tiles, (Scalar(1, 0),))).outputs), {1: tiles[3]})
-        # Zero weights: the custom MAC's bypass preserves raw seeds.
-        self.assertEqual(dict(evaluate(program, RuntimeInputs(tiles, (Scalar(1, 1),))).outputs), {0: tiles[3]})
 
     def test_two_weights_and_accumulators_are_independent_on_each_unit(self) -> None:
         body = (

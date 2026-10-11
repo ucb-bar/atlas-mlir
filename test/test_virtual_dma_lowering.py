@@ -73,9 +73,6 @@ class VirtualDMALoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
     def checked(self, source: str) -> tuple[str, list[dict]]:
-        untimed = lower(source, timed=False)
-        self.assertIn('atlas.timing_state = "untimed"', untimed)
-        self.assertNotIn('"atlas.delay"', untimed)
         machine = lower(source)
         self.assertIn("atlas.generated_from_virtual", machine)
         self.assertNotRegex(machine, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')

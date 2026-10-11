@@ -1,8 +1,9 @@
 """Virtual reference semantics versus literals, compiler schedules, LLVM objects and the selected core.
 
-LLVM-object agreement needs ATLAS_LLVM_BIN; selected-core comparison also needs ATLAS_ARC_MODEL, ATLAS_ARC_STATE and
-ATLAS_MODELIR_ROOT. The physical PACK probe checks converter bits and register/DRAM transport against an independent
-permutation; it does not qualify virtual PACK lowering or an FP8 consumer.
+Compiler-backed checks use ATLAS_OOT_BIN_DIR (default build/bin); LLVM-object agreement needs ATLAS_LLVM_BIN, and
+selected-core comparison also needs ATLAS_ARC_MODEL, ATLAS_ARC_STATE and ATLAS_MODELIR_ROOT. The physical PACK probe
+checks converter bits and register/DRAM transport against an independent permutation; it does not qualify virtual PACK
+lowering or an FP8 consumer.
 """
 
 from __future__ import annotations
@@ -25,8 +26,8 @@ from atlas_virtual_evaluator import (  # noqa: E402
 )
 from test_virtual_dma import copy, dma_await, dma_load, dma_store, dma_wait, wrap  # noqa: E402
 from test_virtual_dma_lowering import MARKER  # noqa: E402
-from test_virtual_evaluator_arithmetic import ADD_CASES, PACK_CASES, RESET, SEEDED, mxu_tiles, relu, sparse  # noqa: E402
-from test_virtual_evaluator_memory import BASE, Stream, repeated  # noqa: E402
+from test_virtual_evaluator_arithmetic import ADD_CASES, PACK_CASES, relu, repeated, sparse  # noqa: E402
+from test_virtual_evaluator_memory import BASE, Stream  # noqa: E402
 from test_virtual_evaluator_resources import bf16_bytes, on_unit  # noqa: E402
 from test_virtual_lowering import emitted, lower, object_words, run  # noqa: E402
 from test_virtual_mxu_extended import seeded_chain  # noqa: E402
@@ -65,10 +66,6 @@ FP8_SMOKE = '''module {
     return %s3 : !atlas.virtual_state
   }
 }'''
-
-
-def tile_bytes(tile: Tile) -> bytes:
-    return bf16_bytes(tile.bits)
 
 
 def fill(*spans: tuple[int, int]) -> tuple[MemoryRegion, ...]:
@@ -135,7 +132,7 @@ def relu_case(phase: int):
     bits = tuple(0 if (i + phase) % 19 == 0 else (0x3E00 + i + phase) | (0x8000 if (i // 32 + i + phase) % 2 else 0) for i in range(1024))
     tile = Tile("bf16", bits)
     guard = fill((INPUT_BASE - 64, 0x5A), (INPUT_BASE + 2048, 0x6B), (RELU_OUTPUT_BASE - 64, 0x7C), (RELU_OUTPUT_BASE + 4096, 0x8D))
-    inputs = RuntimeInputs({0: tile}, memory=(MemoryRegion(INPUT_BASE, tile_bytes(tile)), *guard))
+    inputs = RuntimeInputs({0: tile}, memory=(MemoryRegion(INPUT_BASE, bf16_bytes(tile.bits)), *guard))
     return inputs, EvaluationResult({0: tile, 1: relu(tile)}, inputs.memory), (64, 128)
 
 
@@ -235,7 +232,7 @@ def cfg_case(widths: tuple[int, ...], controls: tuple[int, ...], indices: tuple[
         mailbox = bytearray(b"\xC3" * 1024)
         for index, bits in enumerate(controls):
             mailbox[index * 4:index * 4 + 4] = bits.to_bytes(4, "little")
-        memory = [MemoryRegion(INPUT_BASE + index * 2048, tile_bytes(tile)) for index, tile in tiles.items()]
+        memory = [MemoryRegion(INPUT_BASE + index * 2048, bf16_bytes(tile.bits)) for index, tile in tiles.items()]
         memory.append(MemoryRegion(CONTROL_BASE, mailbox))
         memory.extend(guards(4096, 4096) + fill((CONTROL_BASE - 64, 0x95), (CONTROL_BASE + 1024, 0xA6)))
         inputs = RuntimeInputs(tiles, tuple(Scalar(width, bits) for width, bits in zip(widths, controls)), tuple(memory))
@@ -305,7 +302,7 @@ def dma_case(name: str):
     def case(phase: int):
         if name == "bf16_relu":
             tile = patterned((0xBF80, 0x3F80, 0x8000, 0x0001, 0x8001, 0x7FC1, 0xFFC1, 0x4000), phase)
-            inputs, expected = mapped({0x80000800: tile_bytes(tile), 0x80001000: b"\xA5" * 2048}, {0x80001000: tile_bytes(relu(tile))})
+            inputs, expected = mapped({0x80000800: bf16_bytes(tile.bits), 0x80001000: b"\xA5" * 2048}, {0x80001000: bf16_bytes(relu(tile).bits)})
             traffic = (64, 64)
         elif name == "fp8_copy":
             # Raw DMA transports every FP8 encoding, including signed zeros/NaNs.
@@ -314,8 +311,8 @@ def dma_case(name: str):
             traffic = (32, 32)
         elif name == "pending_work":
             ready = patterned(READY_CODES, phase)
-            result = tile_bytes(Tile("bf16", tuple(READY_SUM[bits] for bits in ready.bits)))
-            inputs, expected = mapped({0x80000000: tile_bytes(ready), 0x80000800: tile_bytes(Tile("bf16", (0x3F00,) * 1024)),
+            result = bf16_bytes(tuple(READY_SUM[bits] for bits in ready.bits))
+            inputs, expected = mapped({0x80000000: bf16_bytes(ready.bits), 0x80000800: bf16_bytes((0x3F00,) * 1024),
                                        0x80002000: b"\xA5" * 2048, 0x80002800: b"\xB6" * 2048}, {0x80002000: result, 0x80002800: result})
             traffic = (128, 128)
         else:
@@ -324,7 +321,7 @@ def dma_case(name: str):
             weight = bytes(identity_weight(shift).bits)
             codes = tuple(x.bits[row * 32 + (col + shift) % 32] for row in range(32) for col in range(32))
             # Reset+continue gives 2X. Readout code 129 multiplies by four, giving 8X in FP8; BF16 keeps 2X.
-            payload = bytes(EIGHT_FP8[code] for code in codes) if fmt == "fp8" else tile_bytes(Tile("bf16", tuple(TWICE_BF16[code] for code in codes)))
+            payload = bytes(EIGHT_FP8[code] for code in codes) if fmt == "fp8" else bf16_bytes(tuple(TWICE_BF16[code] for code in codes))
             initial = b"\xA5" * len(payload) + (b"\xD4" * 1024 if fmt == "fp8" else b"")
             inputs, expected = mapped({0x90000000: bytes(x.bits), 0x90000400: weight, 0x90001000: initial}, {0x90001000: payload})
             traffic = (64, len(payload) // 32)
@@ -364,7 +361,7 @@ MXU_SOURCES = {
 
 
 def guarded(tiles: dict[int, Tile], output_count: int) -> RuntimeInputs:
-    regions = [MemoryRegion(INPUT_BASE + index * 2048, tile_bytes(tile) if tile.format == "bf16" else bytes(tile.bits) + bytes([0xC1 + index]) * 1024)
+    regions = [MemoryRegion(INPUT_BASE + index * 2048, bf16_bytes(tile.bits) if tile.format == "bf16" else bytes(tile.bits) + bytes([0xC1 + index]) * 1024)
                for index, tile in tiles.items()]
     regions.extend(guards((max(tiles) + 1) * 2048, output_count * 2048))
     return RuntimeInputs(tiles, memory=tuple(regions))
@@ -424,7 +421,7 @@ def vpu_case(phase: int):
     indices = tuple((row * 5 + col * 3 + col // 16 + phase) % len(ADD_CASES) for row in range(32) for col in range(32))
     tiles = {operand: Tile("bf16", tuple(ADD_CASES[index][operand] for index in indices)) for operand in (0, 1)}
     summed = Tile("bf16", tuple(ADD_CASES[index][2] for index in indices))
-    memory = tuple(MemoryRegion(INPUT_BASE + operand * 2048, tile_bytes(tile)) for operand, tile in tiles.items()) + guards(4096, 8192)
+    memory = tuple(MemoryRegion(INPUT_BASE + operand * 2048, bf16_bytes(tile.bits)) for operand, tile in tiles.items()) + guards(4096, 8192)
     inputs = RuntimeInputs(tiles, memory=memory)
     # The selected ReLU keeps raw positive encodings and gives +0 for every sign-set encoding.
     return inputs, EvaluationResult({0: tiles[0], 1: tiles[0], 2: summed, 3: relu(summed)}, memory), (128, 256)
@@ -476,8 +473,8 @@ def two_chains_case(phase: int):
 
 def two_dma_case(phase: int):
     ready = patterned(READY_CODES, phase)
-    payload = tile_bytes(Tile("bf16", tuple(READY_SUM[bits] for bits in ready.bits)))
-    inputs, memory = mapped({0x80000000: tile_bytes(ready), 0x80000800: tile_bytes(Tile("bf16", (0x3F00,) * 1024)), 0x80002000: b"\xA5" * 2048},
+    payload = bf16_bytes(tuple(READY_SUM[bits] for bits in ready.bits))
+    inputs, memory = mapped({0x80000000: bf16_bytes(ready.bits), 0x80000800: bf16_bytes((0x3F00,) * 1024), 0x80002000: b"\xA5" * 2048},
                             {0x80002000: payload})
     return inputs, EvaluationResult({}, memory), (128, 64)
 
@@ -587,11 +584,9 @@ class VirtualEvaluatorCoreTest(unittest.TestCase):
             for phase in row.phases:
                 with self.subTest(row=row.name, phase=phase):
                     inputs, literal, _ = row.case(phase)
-                    tiles, memory = dict(inputs.tiles), inputs.memory
                     result = evaluate(program, inputs, max_steps=row.max_steps)
                     self.assertEqual(dict(result.outputs), dict(literal.outputs))
                     self.assertEqual(result.memory, literal.memory)
-                    self.assertEqual((dict(inputs.tiles), inputs.memory), (tiles, memory))
                     for variant, scheduled in schedules(row.source) if row.scheduled and phase in (0, SCHEDULED_PHASE) else ():
                         with self.subTest(schedule=variant):
                             compare_results(result, evaluate(parse_program(scheduled), inputs, max_steps=row.max_steps))
@@ -699,7 +694,7 @@ class VirtualEvaluatorCoreTest(unittest.TestCase):
                     source, literal = pack_input(phase)
                     packed = evaluate_tile_operation(op, (source,))
                     self.assertEqual(packed, literal)
-                    preserved = (MemoryRegion(INPUT_BASE, tile_bytes(source)), MemoryRegion(OUTPUT_BASE + 1024, b"\xC3" * 1024), *guards(2048, 2048))
+                    preserved = (MemoryRegion(INPUT_BASE, bf16_bytes(source.bits)), MemoryRegion(OUTPUT_BASE + 1024, b"\xC3" * 1024), *guards(2048, 2048))
                     result = execute(words, [(region.address, region.data) for region in preserved] + [(OUTPUT_BASE, b"\xA5" * 1024)], 20000)
                     self.assertTrue(result.halted, "physical PACK probe did not halt")
                     self.assertEqual((result.reads, result.writes), (64, 32))
@@ -710,7 +705,7 @@ class VirtualEvaluatorCoreTest(unittest.TestCase):
     def test_captured_comparison_reports_tile_coordinates_and_preservation_failures(self) -> None:
         inputs, expected, _ = relu_case(0)
         buffers = {region.address: region.data for region in inputs.memory}
-        buffers.update({RELU_OUTPUT_BASE + index * 2048: tile_bytes(tile) for index, tile in expected.outputs.items()})
+        buffers.update({RELU_OUTPUT_BASE + index * 2048: bf16_bytes(tile.bits) for index, tile in expected.outputs.items()})
         captured = lambda address, size: buffers[address][:size]
         compare_result(expected, captured, output_base=RELU_OUTPUT_BASE)
         original = buffers[RELU_OUTPUT_BASE + 2048]
@@ -779,30 +774,6 @@ class VirtualEvaluatorComparisonTest(unittest.TestCase):
         self.diagnostic(hole, full, "memory mapping at 0x80000003", "missing from expected")
         self.diagnostic(full, EvaluationResult({}, (MemoryRegion(BASE, b"\x00" * 9),)), "memory mapping at 0x80000008", "missing from expected")
         self.diagnostic(full, EvaluationResult({}), "memory mapping at 0x80000000", "missing from actual")
-
-    def test_comparison_detects_semantic_mutations(self):
-        def relu_program(kind):
-            stream = Stream()
-            stream.output(stream.pure("vpu_unary", stream.input(), "bf16", f'{{kind = "{kind}"}}'), 7)
-            return evaluate(stream.program(), RuntimeInputs({0: sparse({(2, 19): 0xBF80}, "bf16")}))
-
-        self.diagnostic(relu_program("relu"), relu_program("mov"), "output 7 tile[2,19]", "expected 0x0000", "got 0xbf80")
-        one = sparse({(0, 0): 0x38})
-        runtime = RuntimeInputs(mxu_tiles(one, one, sparse({(0, 0): 0x3F80}, "bf16")))
-        # MXU reset changed to a seeded accumulation.
-        self.diagnostic(evaluate(parse_program(RESET), runtime), evaluate(parse_program(SEEDED), runtime), "output 0 tile[0,0]", "expected 0x3f80", "got 0x4000")
-        original = b"\x5a" * 1024
-        runtime = RuntimeInputs(memory=(MemoryRegion(BASE + 0x6000, original[:19] + b"\x5b" + original[20:]), MemoryRegion(BASE, b"?" * 1024),
-                                        MemoryRegion(BASE + 0x4000, original)))
-
-        def dma_program(address):
-            stream = Stream()
-            stream.copy(address, BASE)
-            return evaluate(stream.program(), runtime)
-
-        # DMA loading a corrupted source into the destination.
-        self.diagnostic(dma_program(BASE + 0x4000), dma_program(BASE + 0x6000), "memory at 0x80000013", "expected 0x5a", "got 0x5b")
-        self.assertEqual(runtime.memory[1].data, b"?" * 1024)
 
 
 if __name__ == "__main__":

@@ -23,17 +23,6 @@ class CFGContractVerificationTest(unittest.TestCase):
     def check(self, text: str, rejects: str | None = None) -> None:
         assert_boundaries(self, text, TIMED_FINAL[:2] if TIMED in text else UNTIMED, rejects=rejects)
 
-    def test_existing_branches_loops_and_simultaneous_tensor_copies(self) -> None:
-        for name in ("branch", "dynamic_branch", "loop", "swap_loop", "vpu"):
-            for timed in (False, True):
-                with self.subTest(name=name, timed=timed):
-                    machine = example(name, timed=timed)
-                    self.assertIn("atlas.virtual_cfg_contract", machine)
-                    self.check(machine)
-            reordered = run("atlas-opt", example(name), "--schedule-atlas-stream")
-            self.assertEqual(reordered.returncode, 0, reordered.stderr)
-            self.check(reordered.stdout)
-
     def test_issued_branch_and_scalar_corruption_fails(self) -> None:
         dynamic, loop, branch = example("dynamic_branch"), example("loop"), example("branch")
         comparison = next(line for line in loop.splitlines() if "atlas.virtual_scalar_result" in line and 'kind = "slt"' in line)

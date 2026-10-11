@@ -40,10 +40,7 @@ bool validRecord(const Record &r) {
            r.bytes == 0 && r.channel >= 0 && r.channel < 8;
   if (isDMA(r))
     return r.reg == -1 && r.channel >= 0 && r.channel < 8 &&
-           (r.bytes == 1024 || r.bytes == 2048) && r.vmemByte % 1024 == 0 &&
-           uint64_t(r.vmemByte) + r.bytes <= kVmemBytes &&
-           r.dramByte >= 0x80000000u && r.dramByte % 32 == 0 &&
-           uint64_t(r.dramByte) + r.bytes <= (uint64_t(1) << 32);
+           validDMATileGeometry(r.vmemByte, r.dramByte, r.bytes);
   if (r.channel != -1 || r.dramByte != 0)
     return false;
   if (isVector(r))
@@ -56,15 +53,11 @@ bool validRecord(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  auto field = [&](StringRef name, uint32_t bits) {
-    return builder.getNamedAttr(name, builder.getIntegerAttr(
-        builder.getI32Type(), llvm::APInt(32, bits)));
-  };
   return builder.getDictionaryAttr({
-      field("id", r.id), builder.getNamedAttr("kind", builder.getStringAttr(r.kind)),
-      field("reg", r.reg), field("vmem_byte", r.vmemByte),
-      field("dram_byte", r.dramByte), field("bytes", r.bytes),
-      field("channel", r.channel), field("transfer", r.transfer),
+      namedI32(builder, "id", r.id), builder.getNamedAttr("kind", builder.getStringAttr(r.kind)),
+      namedI32(builder, "reg", r.reg), namedI32(builder, "vmem_byte", r.vmemByte),
+      namedI32(builder, "dram_byte", r.dramByte), namedI32(builder, "bytes", r.bytes),
+      namedI32(builder, "channel", r.channel), namedI32(builder, "transfer", r.transfer),
       builder.getNamedAttr("after", builder.getDenseI32ArrayAttr(r.after))});
 }
 
@@ -415,11 +408,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
         return op.emitOpError("tile contract requires a command tag on every generated tile transfer");
       continue;
     }
-    auto id = dyn_cast<IntegerAttr>(attr);
-    if (!id || !id.getType().isSignlessInteger(32) || id.getValue().isNegative() ||
-        id.getValue().getZExtValue() >= records.size())
+    auto id = contractTag(&op, kAtlasTagTileCommand);
+    if (!id || size_t(*id) >= records.size())
       return op.emitOpError("tile contract command tag requires a known nonnegative i32 id");
-    int32_t value = int32_t(id.getValue().getSExtValue());
+    int32_t value = *id;
     if (seen.test(value))
       return op.emitOpError("tile contract has duplicate command id ") << value;
     seen.set(value);
@@ -440,9 +432,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
       return op.emitOpError("tile contract command kind, format, register, or channel mismatch");
     if (isa<DMAOp, DMAWaitOp>(op)) {
       auto transfer = op.getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
-      if ((r.transfer == -1 && transfer) ||
-          (r.transfer >= 0 && (!transfer || !transfer.getType().isSignlessInteger(32) ||
-                              transfer.getInt() != r.transfer)))
+      if (r.transfer == -1 ? bool(transfer) : contractTag(&op, kAtlasTagDMATransfer) != r.transfer)
         return op.emitOpError("tile contract explicit transfer identity mismatch");
     }
     tags[&op] = value;

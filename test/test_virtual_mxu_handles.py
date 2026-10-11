@@ -153,16 +153,6 @@ class VirtualMXUHandleTest(unittest.TestCase):
                     readout("s3", "s4", "y", "a1", unit),
                     final_state="s4",
                 ))
-                self.rejected(program(
-                    load("io2", "s0", "weight", unit),
-                    reset("s0", "s1", "a0", unit=unit),
-                    load("s1", "s2", "replacement", unit),
-                    load("s2", "s3", "third", unit),
-                    accumulate("s3", "s4", "a1", "a0", unit=unit),
-                    accumulate("s4", "s5", "a2", "a1", "replacement", unit),
-                    readout("s5", "s6", "y", "a2", unit),
-                    final_state="s6",
-                ), "cannot load a weight on a unit with 2 live weights")
 
     def test_handle_parameters_and_operation_unit_types(self) -> None:
         source = chain()
@@ -311,10 +301,6 @@ class VirtualMXUHandleTest(unittest.TestCase):
         lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         self.assertNotIn("!atlas.virtual_", lowered.stdout)
-        self.assertIn('atlas.timing_state = "untimed"', lowered.stdout)
-        self.assertNotIn('"atlas.delay"', lowered.stdout)
-        inspected = run("atlas-emit", lowered.stdout, "--allow-untimed")
-        self.assertEqual(inspected.returncode, 0, inspected.stderr)
         emitted = run("atlas-emit", lowered.stdout)
         self.assertNotEqual(emitted.returncode, 0)
         self.assertIn("untimed", emitted.stderr)

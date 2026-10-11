@@ -16,6 +16,10 @@ FailureOr<ArrayAttr> buildAtlasDMAContract(
 // contract, after the structural stage. See docs/dialect-reference.md.
 LogicalResult verifyAtlasGeneratedDMAContract(const AtlasVerificationContext &ctx);
 
+// Checks pending DMA ranges against VMEM/DRAM accesses recomputed from the
+// emitted stream (zero-upper DRAM ABI only). See docs/dialect-reference.md.
+LogicalResult verifyAtlasGeneratedDMAMemory(const AtlasVerificationContext &ctx);
+
 } // namespace mlir::atlas
 
 #endif

@@ -17,7 +17,6 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasRegisterAllocationVerification.cpp
   AtlasDMAAllocationVerification.cpp
   AtlasMXUAllocationVerification.cpp
-  AtlasDMAMemoryVerification.cpp
   AtlasDMAContractVerification.cpp
   AtlasMXUContractVerification.cpp
   AtlasTileContractVerification.cpp

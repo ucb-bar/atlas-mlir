@@ -1,5 +1,6 @@
 // Shared checks for the C++ verification suites. One executable runs the suite named by its argument; each suite
-// gets a fresh context whose diagnostics (with notes) accumulate in `diagnostics` instead of being printed.
+// gets a fresh context whose diagnostics (with notes) accumulate in `diagnostics` instead of being printed. Typed-SSA
+// fixtures claim resource placements by hand, never through the allocator.
 #ifndef ATLAS_TEST_VERIFICATIONTESTSUPPORT_H
 #define ATLAS_TEST_VERIFICATIONTESTSUPPORT_H
 
@@ -81,6 +82,82 @@ inline OwningOpRef<ModuleOp> parse(MLIRContext &context, llvm::StringRef text, l
 
 inline func::FuncOp firstFunction(ModuleOp module) { return *module.getOps<func::FuncOp>().begin(); }
 
+template <typename... HandleTypes> struct HandleFixture {
+  OwningOpRef<ModuleOp> module;
+  func::FuncOp function;
+  SmallVector<Value> handles;
+  HandleFixture(MLIRContext &context, llvm::StringRef source, llvm::StringRef name = "fixture is typed SSA")
+      : module(parse(context, source, name)) {
+    if (!module)
+      return;
+    function = firstFunction(*module);
+    function.walk([&](Operation *op) {
+      for (Value result : op->getResults())
+        if (isa<HandleTypes...>(result.getType()))
+          handles.push_back(result);
+    });
+  }
+};
+
+// Applies `mutate` to a copy of `base` and checks it with the suite's `expect`; the case is valid exactly when no
+// diagnostic fragment is expected.
+template <typename Fixture, typename Assignments, typename Mutate>
+void mutated(Fixture &fixture, const Assignments &base, llvm::StringRef name, Mutate mutate,
+             llvm::ArrayRef<llvm::StringRef> fragments = {}) {
+  auto changed = base;
+  mutate(changed);
+  expect(fixture, name, changed, fragments.empty(), fragments);
+}
+
+// Generates typed MXU source only, threading one virtual state through its effects.
+struct Source {
+  static constexpr llvm::StringLiteral state = "!atlas.virtual_state", fp8 = "!atlas.virtual_fp8", bf16 = "!atlas.virtual_bf16";
+  std::string body;
+  unsigned next = 2;
+  std::string current = "%s2";
+
+  explicit Source(unsigned scaleCode = 127)
+      : body(R"mlir(module { func.func @test() -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %s1, %x = "atlas.virtual_input_fp8"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    %s2, %seed = "atlas.virtual_input_bf16"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %scale = "atlas.virtual_scale_constant"() {code = )mlir" + std::to_string(scaleCode) + R"mlir( : i32} : () -> !atlas.virtual_scale
+)mlir") {}
+  static std::string type(llvm::StringRef bank, unsigned unit) { return "!atlas.virtual_mxu_" + bank.str() + "<" + std::to_string(unit) + ">"; }
+  std::string effect(llvm::StringRef name, std::string args, std::string types, std::string resultType, std::string attributes = "") {
+    unsigned index = ++next;
+    std::string result = "%h" + std::to_string(index), after = "%s" + std::to_string(index);
+    body += "    " + after + ", " + result + " = \"atlas.virtual_" + name.str() + "\"(" + current + ", " + args + ") " + attributes;
+    body += " : (" + state.str() + ", " + types + ") -> (" + state.str() + ", " + resultType + ")\n";
+    current = after;
+    return result;
+  }
+  std::string unitAttr(unsigned unit) { return "{unit = " + std::to_string(unit) + " : i32}"; }
+  std::string weight(unsigned unit) { return effect("mxu_load_weight", "%x", fp8.str(), type("weight", unit), unitAttr(unit)); }
+  std::string seed(unsigned unit, bool narrow = false) {
+    return effect(narrow ? "mxu_load_acc_fp8" : "mxu_load_acc_bf16", narrow ? "%x" : "%seed", narrow ? fp8.str() : bf16.str(), type("acc", unit), unitAttr(unit));
+  }
+  std::string reset(std::string weight, unsigned unit) {
+    return effect("mxu_reset", "%x, " + weight, fp8.str() + ", " + type("weight", unit), type("acc", unit));
+  }
+  std::string accumulate(std::string weight, std::string acc, unsigned unit) {
+    return effect("mxu_accumulate", "%x, " + weight + ", " + acc, fp8.str() + ", " + type("weight", unit) + ", " + type("acc", unit), type("acc", unit));
+  }
+  void readout(std::string acc, unsigned unit, bool narrow = false) {
+    effect(narrow ? "mxu_readout_fp8" : "mxu_readout_bf16", acc + (narrow ? ", %scale" : ""), type("acc", unit) + (narrow ? ", !atlas.virtual_scale" : ""), narrow ? fp8.str() : bf16.str());
+  }
+  void legacy(unsigned unit) {
+    body += "    %legacy" + std::to_string(++next) + " = \"atlas.virtual_mxu_matmul\"(%x, %x) " + unitAttr(unit) + " : (" + fp8.str() + ", " + fp8.str() + ") -> " + bf16.str() + "\n";
+  }
+  void edge(llvm::StringRef block, llvm::StringRef argument) {
+    body += "    cf.br ^" + block.str() + "(" + current + " : !atlas.virtual_state)\n  ^" + block.str() + "(" + argument.str() + ": !atlas.virtual_state):\n";
+    current = argument.str();
+  }
+  std::string finish() const {
+    return body + "    %out = \"atlas.virtual_output_bf16\"(" + current + ", %seed) {index = 0 : i32} : (" + state.str() + ", " + bf16.str() + ") -> " + state.str() + "\n    return %out : " + state.str() + "\n} }";
+  }
+};
+
 // Parses `text` and runs `pipeline`; null on any failure.
 inline OwningOpRef<ModuleOp> runPipeline(MLIRContext &context, llvm::StringRef text, llvm::StringRef pipeline) {
   auto module = parseSourceString<ModuleOp>(text, &context);
@@ -144,6 +221,15 @@ struct IssuedStream {
       emit("atlas.alu_imm", {text("kind", "addi"), i("dst", reg), i("src", high ? reg : 0), i("immediate", low)});
   }
   void nop() { emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 0), i("src", 0), i("immediate", 0)}); }
+  void markGenerated(DictionaryAttr cfg, ArrayAttr tiles, DictionaryAttr sourceMemory, DictionaryAttr buffer) {
+    (*module)->setAttr(atlas::kAtlasGeneratedMarker, b.getStringAttr(atlas::kAtlasGeneratedVersion));
+    (*module)->setAttr(atlas::kAtlasTimingState, b.getStringAttr("untimed"));
+    for (llvm::StringRef name : {atlas::kAtlasDMAContract, atlas::kAtlasMXUContract}) (*module)->setAttr(name, b.getArrayAttr({}));
+    (*module)->setAttr(atlas::kAtlasCFGContract, cfg);
+    (*module)->setAttr(atlas::kAtlasTileContract, tiles);
+    (*module)->setAttr(atlas::kAtlasSourceMemoryContract, sourceMemory);
+    (*module)->setAttr(atlas::kAtlasBufferContract, buffer);
+  }
   void halt() { emit("atlas.trap", {text("kind", "ecall")}); }
   Operation *jump(int edge = -1) { return emit("atlas.jump", {text("kind", "jal"), i("dst", 0), i("base", 0), i("offset", 0)}, -1, edge); }
   Operation *branch() { return emit("atlas.branch", {text("kind", "bne"), i("lhs", 18), i("rhs", 0), i("offset_bytes", 0)}); }
