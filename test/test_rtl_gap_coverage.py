@@ -6,8 +6,10 @@ finds the smallest accepted issue gap; it must be at least the record's stable_g
 selected resolver rejects are reported as unsupported. An informational legacy run lists pairs
 whose built-in rules (insert-atlas-delays without a selection) fall below stable_gap.
 
-ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated); the default is pairs-vlsu.json and
-pairs-vpu.json in ../explore next to ATLAS_OP_TIMING's directory. Missing files are skipped.
+ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated); the default is every pairs-*.json next to
+ATLAS_OP_TIMING. Missing files are skipped. System pairs
+(engine `core`) feed instruction words to AtlasCore's decoder; they are decoded into compiler operations that
+must encode to the same words.
 """
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -16,9 +18,10 @@ from pathlib import Path
 import sys
 import unittest
 
-from test_delay_insertion import OPT, ROOT, addi, nop, program, run, stream
+from test_delay_insertion import EMIT, OPT, ROOT, addi, nop, program, run, stream
 from test_rtl_timing import FACTS, HALT, RESOLVER, VERIFY, delay, selection, vls, word_base
-from test_rtl_vmul_timing import reduce, unary, vli, vmul
+from test_rtl_vmul_timing import pack, reduce, unary, vli, vmul
+from test_rtl_xlu_timing import transpose
 
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -37,8 +40,7 @@ def sweep_paths():
         return [Path(p) for p in listed.split(os.pathsep) if p]
     if not FACTS:
         return []
-    explore = Path(FACTS).resolve().parent.parent / "explore"
-    return [explore / "pairs-vlsu.json", explore / "pairs-vpu.json"]
+    return sorted(Path(FACTS).resolve().parent.glob("pairs-*.json"))
 
 
 def records():
@@ -86,6 +88,34 @@ def operation(engine, name, fields, base):
     return None
 
 
+def core_operation(fields, base):
+    """(setup, op) for an instruction word entering AtlasCore's decoder (system pairs), or None. The VLS
+    word address arrives on the ALU cut."""
+    import yaml
+    word, opcode = fields["instruction"], fields["instruction"] & 127
+    vd, vs1, vs2 = (word >> 7) & 63, (word >> 13) & 63, (word >> 19) & 63
+    if opcode == 0x07 and word >> 20 == 0:
+        kind = "vstore" if word & (1 << 13) else "vload"
+        return word_base(base, fields["address"]), vls(kind, vd, base)
+    if opcode == 0x6b:
+        return [], transpose(vs1, vd)
+    words = yaml.safe_load((ROOT / "tools/rtl_extract/targets/atlas/vpu.yaml").read_text())["decode"]["words"]
+    name = next((n for n, w in words.items() if w & 127 == opcode and
+                 (w >> 25 == word >> 25 if opcode == 0x57 else (w >> 12) & 7 == (word >> 12) & 7)), None)
+    if name in ("fp8unpack", "fp8pack"):
+        return [], pack("fp8_to_bf16" if name == "fp8unpack" else "bf16_to_fp8", vs2, vd, vs1)
+    if name in VLI:
+        return [], vli(VLI[name], vd, word >> 15)
+    return operation("vpu", name, {"io_cmd_bits_vs1": vs1, "io_cmd_bits_vs2": vs2, "io_cmd_bits_vd": vd}, base) \
+        if name else None
+
+
+def encodes(setup, op, word, ignored):
+    """The compiler encodes `op` as the RTL instruction word outside the `ignored` bits."""
+    emitted = run(EMIT, program([*setup, op, HALT]))
+    return emitted.returncode == 0 and (int(emitted.stdout.split()[-2], 16) ^ word) & ~ignored == 0
+
+
 def pair_program(record):
     """(setup, first, second) for a record, from its pair file's commands and overlays."""
     pairs, files = pair_files()
@@ -100,7 +130,15 @@ def pair_program(record):
         commands = pairs.commands(spec, pair[side], overlay)
         if list(commands) != [0]:
             return None
-        sides.append(operation(engine, pair[side], {**spec["inputs"], **commands[0]}, base))
+        fields = {**spec["inputs"], **commands[0]}
+        if engine != "core":
+            sides.append(operation(engine, pair[side], fields, base))
+            continue
+        built, word = core_operation(fields, base), fields["instruction"]
+        # A VLS names its base register where the cut feeds x0; single-input VPU ops do not read vs2
+        # (VectorFSM opReadsSecondaryPair).
+        ignored = 31 << 15 if word & 127 == 0x07 else 63 << 19 if built and built[1][0] in ("vpu_unary", "vpu_reduce") else 0
+        sides.append(built if built and encodes(*built, word, ignored) else None)
     if None in sides:
         return None
     return sides[0][0] + sides[1][0], sides[0][1], sides[1][1]
