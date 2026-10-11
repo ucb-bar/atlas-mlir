@@ -10,6 +10,8 @@ Four layers check the facts against the compiler and against simulated hardware.
 
 `test/test_rtl_extract_compiler.py` compares each extracted record with the compiler's built-in footprints (`lib/AtlasTiming.cpp`, via `test/rtl-timing-facts-probe.cpp`) and fails on any difference. `test/rtl-timing-facts-map.yaml` maps records to compiler mnemonics and states the conventions; every record is compared or listed as not modeled. This detects drift between the compiler's constants and the RTL. Commands are in the [extractor reference](../../tools/rtl_extract/README.md#compiler-cross-check).
 
+`test/test_rtl_gap_coverage.py` checks pair sweeps the other way round: for every `rtl_extract.op_pairs.v1` record (`ATLAS_PAIR_SWEEPS`), the smallest gap `--verify-atlas-rtl-timing` accepts must be at least the record's `stable_gap`. It prints the slack, and, for information, the built-in rules' gaps, which equal `stable_gap` for every swept pair except two MXU pairs where they are larger.
+
 ## Selected-mode tests
 
 `test/test_rtl_timing.py` and, for MXU, `test_rtl_mxu_timing.py` run scheduling, delay insertion and `--verify-atlas-rtl-timing` with the facts selected, and check that wrong digests, a missing selection, unsupported domains, early or missing terminals and unsafe streams are rejected, and that admission numbers come from the facts rather than constants. Final verification rechecks timing from the actual instruction stream, also in `atlas-emit` and the LLVM handoff, so rewrites after scheduling cannot silently invalidate it.
