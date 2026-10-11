@@ -8,7 +8,7 @@ import struct
 import unittest
 
 from test_delay_insertion import OPT, EMIT, ROOT, run, without_delays
-from test_rtl_timing import CONSUMERS, FACTS, RESOLVER, VLS_COPY, block, facts, selection, sha256
+from test_rtl_timing import CONSUMERS, FACTS, RESOLVER, VERIFY, VLS_COPY, VLS_LOOP, block, facts, selected, selection, sha256
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -83,6 +83,33 @@ class RTLTimingExportTest(unittest.TestCase):
         self.assertIn("vmul.bf16", applicability["supported_operations"])
         self.assertNotIn(str(ROOT), result.stdout)
         self.assertNotIn(str(Path(FACTS)), result.stdout)
+
+    def test_each_block_has_its_own_cycle_origin(self):
+        single = json.loads(self.export(self.selected[CONSUMERS[0]]).stdout)
+        self.assertEqual([(b["first_word"], b["word_count"], b["exit"], b["successors"]) for b in single["blocks"]],
+                         [(0, len(single["instructions"]), "halt", [])])
+        self.assertEqual({i["block"] for i in single["instructions"]}, {0})
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                result = selected(VLS_LOOP, consumer, VERIFY, dma="wait")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                exported = self.export(result.stdout)
+                self.assertEqual(exported.returncode, 0, exported.stderr)
+                exported = json.loads(exported.stdout)
+                blocks, instructions = exported["blocks"], exported["instructions"]
+                self.assertEqual(exported["schema"], "atlas.resolved_rtl_timing.v1")
+                self.assertEqual([(b["exit"], b["successors"]) for b in blocks],
+                                 [("fall_through", [1]), ("branch_with_delay_slot", [1, 2]), ("halt", [])])
+                for number, b in enumerate(blocks):
+                    members = instructions[b["first_word"]:b["first_word"] + b["word_count"]]
+                    self.assertEqual({i["block"] for i in members}, {number})
+                    self.assertEqual((members[0]["minimum_issue_cycle"], members[0]["issue_epoch"], members[0]["epoch_offset"]), (0, 0, 0))
+                    self.assertEqual(b["entry_state"], "idle_engines_no_pending_dma")
+                self.assertEqual(sum(b["word_count"] for b in blocks), len(instructions))
+                branch = next(i for i in instructions if i["mnemonic"] == "blt")
+                self.assertEqual(blocks[1]["successor_issue_offset"], branch["minimum_issue_cycle"] + 2)
+                self.assertEqual(blocks[0]["successor_issue_offset"], blocks[0]["word_count"])
+                self.assertIsNone(blocks[2]["successor_issue_offset"])
 
     def test_export_fails_closed(self):
         source = self.selected[CONSUMERS[0]]

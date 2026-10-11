@@ -23,9 +23,6 @@ class Replay {
   std::deque<Response> pending;
   std::map<uint64_t,uint8_t> dram;
   unsigned reads=0,writes=0,astalls=0,dwaits=0;
-  unsigned expected=0, repeats=1;
-  static constexpr uint64_t A=0x90000000ULL,B=0x90001000ULL,O=0x90000400ULL;
-  uint8_t byte(unsigned i,unsigned which) { return which ? (53*i+79)&255 : (37*i+11)&255; }
   void service() {
     dut.io_dmaTL_a_ready = cycles%11 < 4;
     dut.io_dmaTL_d_valid = !pending.empty() && pending.front().due <= cycles;
@@ -168,72 +165,74 @@ public:
     return result;
   }
 
-  uint8_t raw(unsigned i) { return (37*i+11+3*(i/32))&255; }
-  uint16_t bf(unsigned i,bool rhs) {
-    int e=rhs?int(i%3)-1:int(i%5)-2;
-    bool negative=rhs?i%11==0:i%7==0;
-    return (negative?0x8000:0)|uint16_t((127+e)<<7);
+  // Memory contents come from the case image; every initialized byte is checked.
+  struct Region { uint64_t base; std::vector<uint8_t> bytes; };
+  std::vector<Region> vmemInit, dramInit, vmemExpect, dramExpect;
+  unsigned expectedReads = 0, expectedWrites = 0;
+  static std::vector<uint8_t> hex(const std::string &text) {
+    if (text.size() % 2) throw std::runtime_error("odd image hex length");
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i < text.size(); i += 2) bytes.push_back(std::stoul(text.substr(i, 2), nullptr, 16));
+    return bytes;
   }
-  uint16_t product(unsigned i) {
-    int e=int(i%5)-2+int(i%3)-1;
-    bool negative=(i%11==0)!=(i%7==0);
-    return (negative?0x8000:0)|uint16_t((127+e)<<7);
-  }
-  void run(const std::vector<uint32_t> &program,const std::string &mode) {
-    if(mode!="xlu"&&mode!="vmul"&&mode!="dma_xlu") throw std::runtime_error("unknown mode");
-    std::vector<uint8_t> initial(8192),expectedMemory;
-    for(unsigned i=0;i<initial.size();++i) initial[i]=(0xa5^(13*i))&255;
-    if(mode=="vmul") {
-      for(unsigned i=0;i<1024;++i) {
-        auto lhs=bf(i,false),rhs=bf(i,true);
-        initial[2*i]=lhs&255;initial[2*i+1]=lhs>>8;
-        initial[2048+2*i]=rhs&255;initial[2049+2*i]=rhs>>8;
-      }
-    } else for(unsigned i=0;i<1024;++i) initial[i]=raw(i);
-    expectedMemory=initial;
-    if(mode=="vmul") {
-      for(unsigned i=0;i<1024;++i) { auto p=product(i);expectedMemory[4096+2*i]=p&255;expectedMemory[4097+2*i]=p>>8; }
-    } else {
-      if(mode=="dma_xlu") for(unsigned i=0;i<128;++i) expectedMemory[i]=byte(i,0);
-      for(unsigned r=0;r<32;++r) for(unsigned c=0;c<32;++c) expectedMemory[1024+32*r+c]=expectedMemory[32*c+r];
+  void load(const char *path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("cannot read case image");
+    std::string kind, data; uint64_t base;
+    while (input >> kind) {
+      if (kind == "dma") { input >> expectedReads >> expectedWrites; continue; }
+      if (!(input >> base >> data)) throw std::runtime_error("malformed case image");
+      Region region{base, hex(data)};
+      bool vmem = kind == "vmem" || kind == "expect_vmem";
+      if (vmem && (region.bytes.empty() || region.bytes.size() % 32)) throw std::runtime_error("VMEM region is not whole lines");
+      if (kind == "vmem") vmemInit.push_back(region);
+      else if (kind == "dram") dramInit.push_back(region);
+      else if (kind == "expect_vmem") vmemExpect.push_back(region);
+      else if (kind == "expect_dram") dramExpect.push_back(region);
+      else throw std::runtime_error("unknown case image record");
     }
-    for(unsigned i=0;i<128;++i) { dram[A+i]=byte(i,0);dram[B+i]=byte(i,1);dram[A+(1ULL<<32)+i]=0xe7; }
-    for(unsigned i=0;i<192;++i) dram[O-32+i]=0xa5;
+    if (!input.eof()) throw std::runtime_error("malformed case image");
+  }
+  void run(const std::vector<uint32_t> &program, const char *image) {
+    load(image);
+    for (auto &r : dramInit) for (size_t i = 0; i < r.bytes.size(); ++i) dram[r.base + i] = r.bytes[i];
     scalar(true,true,0x40018,0);
     if(!(scalar(true,false,0x40008)&1)) throw std::runtime_error("initial halt missing");
     for(unsigned i=0;i<program.size();++i) scalar(false,true,0x20000+4*i,program[i]);
     for(unsigned i=0;i<program.size();++i) if(scalar(false,false,0x20000+4*i)!=program[i]) throw std::runtime_error("IMEM mismatch");
-    for(unsigned line=0;line<256;++line) {
-      std::array<uint32_t,8> d{};
-      for(unsigned i=0;i<32;++i) d[i/4]|=uint32_t(initial[line*32+i])<<(8*(i%4));
-      memory(true,line,d);
-    }
+    for (auto &r : vmemInit)
+      for (size_t line = 0; line < r.bytes.size() / 32; ++line) {
+        std::array<uint32_t,8> d{};
+        for(unsigned i=0;i<32;++i) d[i/4]|=uint32_t(r.bytes[32*line+i])<<(8*(i%4));
+        memory(true,r.base+line,d);
+      }
     for(uint32_t offset:{0x10U,0x14U,0U,4U}) scalar(true,true,0x40000+offset,0);
     scalar(true,true,0x40018,1);
     uint32_t status=0,marker=0;unsigned poll=0;
     for(;poll<10000;++poll) { status=scalar(true,false,0x40008);marker=scalar(true,false,0x40010);if((status&1)&&((status>>1)&3)) break; }
     auto illegal=scalar(true,false,0x4000c);
     if(status!=5||marker!=1||illegal||poll==10000||!pending.empty()) throw std::runtime_error("completion mismatch");
-    unsigned transactions=mode=="dma_xlu"?4:0;
-    if(reads!=transactions||writes!=transactions) throw std::runtime_error("transaction count mismatch");
-    for(unsigned i=0;i<128;++i) {
-      if(dram[A+i]!=byte(i,0)||dram[B+i]!=byte(i,1)||dram[A+(1ULL<<32)+i]!=0xe7) throw std::runtime_error("source mutation");
-      if(dram[O+i]!=(transactions?expectedMemory[1024+i]:0xa5)) throw std::runtime_error("DMA composition output mismatch");
-    }
-    for(unsigned i=0;i<32;++i) if(dram[O-32+i]!=0xa5||dram[O+128+i]!=0xa5) throw std::runtime_error("DRAM guard mismatch");
-    for(unsigned line=0;line<256;++line) {
-      auto d=memory(false,line);
-      for(unsigned i=0;i<32;++i) if(((d[i/4]>>(8*(i%4)))&255)!=expectedMemory[32*line+i]) {
-        std::cerr<<"VMEM byte mismatch mode="<<mode<<" byte="<<32*line+i<<'\n';throw std::runtime_error("compute output/guard mismatch");
+    if(reads!=expectedReads||writes!=expectedWrites) throw std::runtime_error("transaction count mismatch");
+    size_t dramBytes = 0, vmemBytes = 0;
+    for (auto &r : dramExpect)
+      for (size_t i = 0; i < r.bytes.size(); ++i, ++dramBytes)
+        if (!dram.count(r.base + i) || dram.at(r.base + i) != r.bytes[i]) {
+          std::cerr<<"DRAM byte mismatch address="<<r.base+i<<'\n';throw std::runtime_error("DRAM output/guard mismatch");
+        }
+    for (auto &r : vmemExpect)
+      for (size_t line = 0; line < r.bytes.size() / 32; ++line) {
+        auto d=memory(false,r.base+line);
+        for(unsigned i=0;i<32;++i,++vmemBytes) if(((d[i/4]>>(8*(i%4)))&255)!=r.bytes[32*line+i]) {
+          std::cerr<<"VMEM byte mismatch line="<<r.base+line<<" byte="<<i<<'\n';throw std::runtime_error("compute output/guard mismatch");
+        }
       }
-    }
-    std::cout<<"EE290_COMPUTE_PASSED mode="<<mode<<" checked_vmem_bytes=8192 reads="<<reads<<" writes="<<writes<<" a_stalls="<<astalls<<" delayed_response_cycles="<<dwaits<<" status="<<status<<" marker="<<marker<<" illegal_pc="<<illegal<<" cycles="<<cycles<<'\n';
+    std::cout<<"EE290_COMPUTE_PASSED checked_vmem_bytes="<<vmemBytes<<" checked_dram_bytes="<<dramBytes<<" reads="<<reads<<" writes="<<writes<<" a_stalls="<<astalls<<" delayed_response_cycles="<<dwaits<<" status="<<status<<" marker="<<marker<<" illegal_pc="<<illegal<<" cycles="<<cycles<<'\n';
   }
 
 };
 
 int main(int argc, char **argv) {
-  if (argc != 5) { std::cerr << "words.hex trace.vcd max-cycles mode required\n"; return 2; }
+  if (argc != 5) { std::cerr << "words.hex trace.vcd max-cycles case-image required\n"; return 2; }
   try {
     std::ifstream input(argv[1]);
     if (!input) throw std::runtime_error("cannot read selected program words");

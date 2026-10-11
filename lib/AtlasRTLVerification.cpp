@@ -39,6 +39,7 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     return failure();
   TargetTiming target = (*selected)->targetTiming();
   std::vector<ResolvedRTLInstruction> issued;
+  std::vector<ResolvedRTLBlock> blocks;
 
   for (size_t block = 0; block < stream->starts.size(); ++block) {
     const size_t begin = stream->starts[block], end = stream->blockEnd(block);
@@ -141,6 +142,10 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
       cycle += gap;
     }
 
+    blocks.push_back({begin, end, {stream->succs[block].begin(),
+                                   stream->succs[block].end()},
+                      stream->endsInHalt(block) ? -1 : cycle,
+                      stream->endsInBranch(block)});
     if (stream->endsInHalt(block))
       continue;
     // `cycle` is the earliest issue of any successor: the instruction after
@@ -164,6 +169,7 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     resolved->evidence = *selected;
     resolved->words.assign(words.begin(), words.end());
     resolved->instructions = std::move(issued);
+    resolved->blocks = std::move(blocks);
   }
   return success();
 }

@@ -335,10 +335,11 @@ class SelectedRTLTimingTest(unittest.TestCase):
                 self.assertEqual([op for op, _, _ in ops[at - 2:at]], ["delay", "alu_imm"])
                 self.assertEqual(ops[at - 1][2], "a redirect does not wait for a delay")
                 self.assertEqual(run(EMIT, result.stdout).returncode, 0)
-                exported = run(EMIT, result.stdout, "--rtl-timing-json")
-                self.assertNotEqual(exported.returncode, 0)
-                self.assertIn("supports one straight-line block", exported.stderr)
-                self.assertEqual(exported.stdout, "")
+                exported = export(result.stdout); blocks = exported["blocks"]
+                self.assertEqual([(b["first_word"], b["successors"], b["exit"]) for b in blocks],
+                                 [(0, [1], "fall_through"), (3, [1, 2], "branch_with_delay_slot"), (at + 2, [], "halt")])
+                self.assertEqual(blocks[1]["successor_issue_offset"], exported["instructions"][at]["logical_issue_cycle"] + 2)
+                self.assertEqual([i["block"] for i in exported["instructions"]], [0] * 3 + [1] * (at - 1) + [2])
                 unsafe = run(OPT, without_delays(result.stdout), VERIFY)
                 self.assertNotEqual(unsafe.returncode, 0)
 

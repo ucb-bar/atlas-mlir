@@ -16,10 +16,19 @@ struct ResolvedRTLInstruction {
   int block = 0;
 };
 
+struct ResolvedRTLBlock {
+  size_t first = 0, end = 0;
+  std::vector<size_t> successors;
+  // Block-relative earliest successor issue; -1 when the block halts.
+  int successorIssue = -1;
+  bool branch = false;
+};
+
 struct ResolvedRTLProgram {
   std::shared_ptr<timing::RTLEvidence> evidence;
   std::vector<uint32_t> words;
   std::vector<ResolvedRTLInstruction> instructions;
+  std::vector<ResolvedRTLBlock> blocks;
 };
 
 // Rechecks the final stream with the selected resolver; `resolved` is filled

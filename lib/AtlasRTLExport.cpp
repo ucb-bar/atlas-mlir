@@ -77,13 +77,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   ResolvedRTLProgram program;
   if (failed(verifyAtlasRTLTiming(module, &program)))
     return failure();
-  // The export's single timeline does not describe repeated or alternative
-  // block executions, and its consumers bind events to a sequential PC.
-  if (!program.instructions.empty() && program.instructions.back().block != 0)
-    return module.emitError("resolved RTL timing export supports one "
-                            "straight-line block; control flow verifies but "
-                            "is not exported");
-  Array words, instructions;
+  Array words, instructions, blocks;
   std::vector<uint8_t> encoded;
   for (uint32_t word : program.words) {
     words.push_back(static_cast<int64_t>(word));
@@ -102,6 +96,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
         {"mnemonic", in.op->name},
         {"operands", Object{{"rd", in.rd}, {"rs1", in.rs1}, {"rs2", in.rs2},
             {"immediate", static_cast<int64_t>(in.imm)}, {"release", in.release}}},
+        {"block", entry.block},
         {"logical_issue_cycle", entry.cycle},
         {"event_kind", in.op->opClass == OpClass::Halt ?
             "terminal_acceptance" : "instruction_issue"},
@@ -119,6 +114,25 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
     }
     instructions.push_back(std::move(entryJSON));
   }
+  // Every block starts idle at its own cycle origin, so each dynamic block
+  // instance binds to the same block-relative offsets.
+  for (size_t b = 0; b < program.blocks.size(); ++b) {
+    const ResolvedRTLBlock &block = program.blocks[b];
+    Array successors;
+    for (size_t next : block.successors)
+      successors.push_back(static_cast<int64_t>(next));
+    Object blockJSON{{"index", static_cast<int64_t>(b)},
+        {"first_word", static_cast<int64_t>(block.first)},
+        {"word_count", static_cast<int64_t>(block.end - block.first)},
+        {"exit", block.successorIssue < 0 ? "halt" :
+                 block.branch ? "branch_with_delay_slot" : "fall_through"},
+        {"successors", std::move(successors)},
+        {"successor_issue_offset", nullptr},
+        {"entry_state", "idle_engines_no_pending_dma"}};
+    if (block.successorIssue >= 0)
+      blockJSON["successor_issue_offset"] = block.successorIssue;
+    blocks.push_back(std::move(blockJSON));
+  }
   Object result{
       {"schema", dynamic ? "atlas.resolved_rtl_timing.v1" : "atlas.resolved_rtl_timing.v0"},
       {"target_config", "EE290SimConfig"},
@@ -135,16 +149,17 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"words_sha256", llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true)},
           {"hash_encoding", "little_endian_u32"}}},
       {"conventions", Object{
-          {"cycle_origin", "first_instruction_logical_issue"},
+          {"cycle_origin", "per_block_instance:first_instruction_logical_issue"},
           {"ages", "relative_to_instruction_issue; holds_have_inclusive_endpoints"},
           {"access_elements", "xreg/ereg:register; mreg:register*32+row; vmem:32_byte_line"},
           {"timeline", "conditional_model_timeline_not_measured_elapsed_cycles"},
           {"terminal", "acceptance_not_retirement; ECALL_suppresses_scalar_fire"}}},
       {"applicability", evidence.applicability()},
+      {"blocks", std::move(blocks)},
       {"instructions", std::move(instructions)}};
   if (dynamic) {
     auto *conventions = result.getObject("conventions");
-    (*conventions)["cycle_origin"] = "epoch0:first_instruction; later_epochs:matching_wait_acceptance";
+    (*conventions)["cycle_origin"] = "per_block_instance; epoch0:first_instruction_of_block; later_epochs:matching_wait_acceptance";
     (*conventions)["timeline"] = "minimum_issue_cycle_is_lower_bound; compare_offsets_only_within_epoch";
     (*conventions)["dynamic_completion"] = "memory_lifetime_ends_at_matching_wait; null_age_is_unknown_not_zero";
     (*conventions)["access_elements"] = "xreg/ereg:register; mreg:register*32+row; vmem:32_byte_line; dram:conservative_anywhere";
