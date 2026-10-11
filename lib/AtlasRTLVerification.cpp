@@ -47,7 +47,6 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
     RegValues registers = stream->entry[block];
     ReservationTable reservations(target);
     int cycle = 0;
-    int fixedEngineAvailable = 0;
     int asynchronousDone = -1;
     std::optional<Footprint> pendingDMA;
     int pendingChannel = -1;
@@ -91,10 +90,20 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
       if (isControlFlow(*instruction.op) && previousWasDelay)
         return operation.emitOpError(
             "can redirect while DELAY is stalled; an intervening NOP is required");
-      if (fixedEngine && cycle < fixedEngineAvailable)
-        return operation.emitOpError("violates the selected serialized engine admission")
-               << ": issue cycle " << cycle << ", first permitted cycle "
-               << fixedEngineAvailable;
+      // Engine admission is carried by the resolver's unit holds.
+      if (fixedEngine) {
+        Footprint holds;
+        holds.holds = footprint.holds;
+        std::string busy = reservations.conflict(instruction, holds, cycle);
+        if (!busy.empty()) {
+          int permitted = cycle + 1;
+          while (!reservations.conflict(instruction, holds, permitted).empty())
+            ++permitted;
+          return operation.emitOpError("violates the selected serialized engine admission: ")
+                 << busy << "; issue cycle " << cycle << ", first permitted cycle "
+                 << permitted;
+        }
+      }
       if ((terminal || publication) && cycle <= asynchronousDone)
         return operation.emitOpError(
                    "requires all prior asynchronous writes to be complete")
@@ -132,8 +141,6 @@ LogicalResult mlir::atlas::verifyAtlasRTLTiming(ModuleOp module,
       }
       if (footprint.doneAge > 0)
         asynchronousDone = std::max(asynchronousDone, cycle + footprint.doneAge);
-      if (fixedEngine)
-        fixedEngineAvailable = cycle + footprint.doneAge + 1;
       applyScalar(instruction, registers);
       previousWasDelay = opClass == OpClass::Delay;
       const int gap = naturalGap(instruction);

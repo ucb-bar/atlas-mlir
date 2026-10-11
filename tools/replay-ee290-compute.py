@@ -328,7 +328,12 @@ def validate_compute_edges(samples,words,case):
         if engine&~busy: reject('engine busy omitted from scalar bridge')
         if pending is None and busy: reject('busy without observed pending DMA')
         if pending and (busy&~(1<<pending['channel']) or (edge>pending['edge'] and len(pending['responses'])<pending['beats'] and busy!=(1<<pending['channel']))): reject('pending DMA lost busy protection')
-        for kind in list(live):
+        # A VPU command drains its last writes after the next VPU command issued (next_issue_age); it releases
+        # once those are done and no write marker names its destination.
+        drain=live.get('vpu_drain')
+        if drain and len(drain['writes'])==EVENTS['vpu'][2] and not any(v('paw'+str(n)) and v('pawid'+str(n)) in (drain['dst'],drain['dst']+1) for n in range(4)):
+            drain['release_edge']=edge;del live['vpu_drain']
+        for kind in [k for k in live if k!='vpu_drain']:
             command=live[kind]
             if edge>command['edge'] and not BUSY[kind](v):
                 if tuple(len(command[s]) for s in STAGES)+(len(command.get('compute',())),)!=event_counts(command): reject(kind+' released before its events completed')
@@ -408,7 +413,10 @@ def validate_compute_edges(samples,words,case):
                         next_base=regs[rs1];record(endpoints,kind='config',base=next_base,word_index=pc,word_u32=word)
                 elif not (opcode==0x73 and funct3==1): reject('unsupported scalar instruction in finite compute trace')
                 if created:
-                    if created['engine'] in live: reject('command issued while its engine is live')
+                    previous=live.get(created['engine'])
+                    if created['engine']=='vpu' and previous and 'vpu_drain' not in live and not v('vpu_busy')>>op&1 and all(len(previous[s])==n for s,n in zip(STAGES[:2],EVENTS['vpu'])):
+                        live['vpu_drain']=live.pop('vpu')
+                    elif previous: reject('command issued while its engine is live')
                     created.update(_queue=([],[]),_data=([],[]));live[created['engine']]=created;commands.append(created)
                 pc_expected=target if in_slot and target is not None else pc+1
             elif (v('word')&127)==0x7f and v('word')>>25 and pending:
@@ -421,7 +429,7 @@ def validate_compute_edges(samples,words,case):
         for stage in STAGES:
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
-                command=live.get(kind)
+                command=live.get('vpu_drain') if kind=='vpu' and stage=='writes' and 'vpu_drain' in live else live.get(kind)
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
                 n=sum(e.get('port',0)==port for e in command[stage])
                 if len(command[stage])>=event_counts(command)[STAGES.index(stage)]: reject(f'excess {kind} {stage} event')
@@ -467,8 +475,8 @@ def validate_compute_edges(samples,words,case):
         for port in range(4):
             for direction in ('par','paw'):
                 if v(direction+str(port)):
-                    active=live.get('vpu') or reject('unbound VPU live resource marker')
-                    allowed=[active['lhs'],active['lhs']+1,active['rhs'],active['rhs']+1] if direction=='par' else [active['dst'],active['dst']+1]
+                    actives=[c for c in (live.get('vpu'),live.get('vpu_drain')) if c] or reject('unbound VPU live resource marker')
+                    allowed=[r for c in actives for r in ([c['lhs'],c['lhs']+1,c['rhs'],c['rhs']+1] if direction=='par' else [c['dst'],c['dst']+1])]
                     if v(direction+'id'+str(port)) not in allowed: reject('VPU live resource operand mismatch')
         if d('av'):
             request=(d('ao'),d('aa'),d('as'),d('ad'))

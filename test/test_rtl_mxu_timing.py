@@ -158,7 +158,7 @@ class SelectedMXUTimingTest(unittest.TestCase):
             (mxu("pop_acc_bf16", 0), vls("vstore", 22), busy(block(document, "mxu0.pop_acc_bf16")) + 1),
             (vls("vload", 22), mxu("push_weight", 1), self.hold_end(vls("vload", 22), "VLOAD path") + 1),
             (vls("vstore", 22), mxu("pop_acc_bf16", 1), self.hold_end(vls("vstore", 22), "VSTORE path") + 1),
-            (add, mxu("matmul", 0), self.hold_end(add, "VPU") + 1),
+            (add, mxu("matmul", 0), block(document, "vpu.add")["first_free_age"]),
         ]
         for first, second, gap in cases:
             with self.subTest(first=first[1], second=second[1]):

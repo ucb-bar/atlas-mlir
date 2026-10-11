@@ -100,13 +100,33 @@ struct Fill {
     return block && block->firstFreeAge ? *block->firstFreeAge - 1 : 0;
   }
   int nextIssue() { return block && block->nextIssueAge ? *block->nextIssueAge : 0; }
+  // Last age of the VPU's own issue window. next_issue_age is when the RTL's
+  // issue-busy bit for the same opcode clears; an opcode shares logic with
+  // itself, so no next VPU opcode is admitted later (VectorFSM canIssueOp).
+  int issueEnd(int busy) {
+    if (block && (!block->nextIssueAge || *block->nextIssueAge < 1 || *block->nextIssueAge > busy + 1))
+      fail("facts block lacks a next_issue_age within its busy window");
+    return nextIssue() - 1;
+  }
   void bank(int line, const char *key) {
     f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
   }
-  void engine(Unit unit, int index, int busy) {
-    f.holds.push_back({unit, index, 0, busy});
-    f.holds.push_back({Unit::VloadPath, 0, 0, busy});
-    f.holds.push_back({Unit::VstorePath, 0, 0, busy});
+  void hold(std::initializer_list<Unit> units, int from, int to) {
+    if (from <= to)
+      for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
+  }
+  // VLS, VPU and XLU exclude each other over their busy windows. Every engine
+  // holds the VPU issue slot, so a VPU, which keeps its own slot only until
+  // next_issue_age, admits the next VPU command there while still keeping the
+  // other engines out through its VLS path holds.
+  void engine(Unit unit, int busy) {
+    hold({unit, Unit::Vpu, Unit::VloadPath, Unit::VstorePath}, 0, busy);
+    f.serializeWithDMA = true;
+  }
+  void vpu(int busy) {
+    int issued = issueEnd(busy);
+    hold({Unit::Vpu}, 0, issued);
+    hold({Unit::VloadPath, Unit::VstorePath}, issued + 1, busy);
     f.serializeWithDMA = true;
   }
   Footprint done(int busy) {
@@ -352,6 +372,8 @@ llvm::json::Object RTLEvidence::applicability() const {
       {"admission", Object{
           {"selected_engines_serialized", true}, {"vls_paths_serialized", true},
           {"minimum_vls_issue_gap", firstFree("vlsu.vload")},
+          {"vpu_to_vpu_issue_gap", "next_issue_age"},
+          {"vpu_to_other_engine_issue_gap", "first_free_age"},
           {"xlu_first_free_age", firstFree("xlu.transpose")},
           {"mxu_commands_serialized_with_both_mxus_and_vector_engines", true},
           {"mxu_weight_slot_retained_by_matmul", "issue_through_last_accumulator_write"},
@@ -507,8 +529,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     fill.access(vmem, Res::Vmem, !load, int(line), 32);
     fill.access(rows, Res::MReg, load, in.rd * 32, 32);
     int busy = fill.busyEnd();
-    f.holds.push_back({Unit::VloadPath, 0, 0, busy});
-    f.holds.push_back({Unit::VstorePath, 0, 0, busy});
+    fill.hold({Unit::VloadPath, Unit::VstorePath, Unit::Vpu}, 0, busy);
     fill.bank(int(line), vmem);
     if (load) {
       f.mregWrites = {in.rd};
@@ -532,7 +553,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     f.readRelease = fill.readEnd("read");
     f.writeRelease = fill.last("write");
     int busy = fill.busyEnd();
-    fill.engine(Unit::Xlu, 0, busy);
+    fill.engine(Unit::Xlu, busy);
     return fill.done(busy);
   }
 
@@ -604,7 +625,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     f.writeRelease = fill.nextIssue();
     for (const char *key : writes) f.writeRelease = std::max(f.writeRelease, fill.last(key));
     int busy = fill.busyEnd();
-    fill.engine(Unit::Vpu, 0, busy);
+    fill.vpu(busy);
     return fill.done(busy);
   }
 

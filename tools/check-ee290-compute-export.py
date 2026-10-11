@@ -161,12 +161,18 @@ def bind_command(item, command, waits):
     release = integer(command['release_edge'] - issue, 'observed release age')
     activity = max(map(age, command['reads'] + command['responses'] + command['writes'] + command.get('compute', [])))
     own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and (mxu or h['index'] == 0)]
+    # A VPU admits its next command at next_issue_age, before it releases: its VPU-unit holds may end there,
+    # and policy holds may start there, provided they last through the activity.
     require(len(own) == (2 if mxu else 1) and sorted(h['index'] for h in own) == list(range(len(own))) and
-            all(h['from'] == 0 and release == integer(h['to'], 'hold end') + 1 for h in own), 'observed engine release differs from its own-unit hold end + 1')
+            all(h['from'] == 0 and (release == integer(h['to'], 'hold end') + 1 or kind == 'vpu' and h['to'] < release) for h in own),
+            'observed engine release differs from its own-unit hold end + 1')
+    issued = own[0]['to'] + 1 if kind == 'vpu' else 0
     vmem_ages = [age(e) for e in command[vmem_field]] if vmem_field else []
     for hold in footprint['holds']:
         if any(hold is h for h in own): continue
-        if hold['unit'] in ENGINE_UNITS: require(hold['from'] == 0 and integer(hold['to'], 'hold end') >= release - 1, 'policy ' + hold['unit'] + ' hold ends before the engine activity')
+        if hold['unit'] in ENGINE_UNITS:
+            head = hold['unit'] == 'VPU' and hold['from'] == 0 and hold['to'] + 1 == issued
+            require(head or hold['from'] in (0, issued) and integer(hold['to'], 'hold end') >= release - 1, 'policy ' + hold['unit'] + ' hold ends before the engine activity')
         elif hold['unit'] == 'VMEM bank': require(vmem_ages and hold['from'] <= min(vmem_ages) and hold['to'] >= max(vmem_ages), 'VMEM bank hold does not cover the observed bank accesses')
         else: raise BindingError('unbound hold unit ' + str(hold['unit']))
     sources = [e for e in command['reads'] + command['responses'] if e.get('resource', 'mreg') == 'mreg'] if kind != 'vload' else []

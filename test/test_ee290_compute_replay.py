@@ -277,6 +277,8 @@ class VerilatorReplayTest(unittest.TestCase):
         load = next(i["word_index"] for i in export["instructions"] if i["mnemonic"] == "vload")
         footprint = lambda e, n=index: e["instructions"][n]["footprint"]
         hold = lambda e, unit, n=index: next(h for h in footprint(e, n)["holds"] if h["unit"] == unit)
+        # The VMUL's holds on other engines (they may start at next_issue_age, when the VPU admits a command).
+        policy = lambda e: [h for h in footprint(e)["holds"] if h["unit"] in ("VLOAD path", "VSTORE path", "XLU")]
         for position, mutate in enumerate([lambda e: e["instructions"][index]["operands"].__setitem__("rd", 6),
                                            lambda e: footprint(e)["accesses"][0].__setitem__("first", 32),
                                            lambda e: footprint(e)["accesses"][0].__setitem__("age", 1),
@@ -284,9 +286,9 @@ class VerilatorReplayTest(unittest.TestCase):
                                            lambda e: footprint(e).__setitem__("read_release", 63),
                                            lambda e: footprint(e)["mreg_reads"].pop(),
                                            lambda e: footprint(e)["holds"].pop(0),
-                                           lambda e: hold(e, "VPU").__setitem__("to", 64),
+                                           lambda e: hold(e, "VPU").__setitem__("to", 63),
                                            lambda e: hold(e, "VPU").__setitem__("to", 66),
-                                           lambda e: hold(e, "VLOAD path").__setitem__("to", 64),
+                                           lambda e: [h.__setitem__("to", min(h["to"], 64)) for h in policy(e)],
                                            lambda e: hold(e, "VMEM bank", load).__setitem__("from", 2),
                                            lambda e: hold(e, "VMEM bank", load).__setitem__("unit", "MXU port"),
                                            lambda e: e["instructions"][index].__setitem__("epoch_offset", e["instructions"][index]["epoch_offset"] + 1),
@@ -295,7 +297,7 @@ class VerilatorReplayTest(unittest.TestCase):
             changed = copy.deepcopy(export); mutate(changed)
             with self.subTest(position=position): self.rejects(name, export=changed)
         # A policy hold or lifetime may outlast the engine's own activity.
-        for mutate in (lambda e: hold(e, "VLOAD path").__setitem__("to", 100), lambda e: hold(e, "VSTORE path", load).__setitem__("to", 90),
+        for mutate in (lambda e: policy(e)[-1].__setitem__("to", 100), lambda e: hold(e, "VSTORE path", load).__setitem__("to", 90),
                        lambda e: footprint(e).__setitem__("done_age", 80)):
             changed = copy.deepcopy(export); mutate(changed)
             self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)
