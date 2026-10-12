@@ -5,6 +5,8 @@
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
 #include <array>
+#include <optional>
+#include <set>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -55,34 +57,153 @@ bool vlsOverlapsWindow(const Footprint &dma, const Footprint &f) {
   return false;
 }
 
+bool isEngineHold(const Hold &h) { return h.unit == Unit::Vpu || h.unit == Unit::Xlu; }
+
+Footprint holdsWhere(const Footprint &f, bool engine) {
+  Footprint out = engine ? Footprint{} : f;
+  out.holds.clear();
+  for (const Hold &h : f.holds)
+    if (isEngineHold(h) == engine) out.holds.push_back(h);
+  return out;
+}
+
+// Physical MREG banks (register mod 32) a command names.
+std::set<int> mregBanks(const Footprint &f) {
+  std::set<int> banks;
+  for (const std::vector<int> *regs : {&f.mregReads, &f.mregWrites})
+    for (int reg : *regs) banks.insert(reg & 31);
+  return banks;
+}
+
+// Selected pair facts admit two VPU commands at once: a later command may
+// issue while an earlier one is live (issue through next_issue_age) only where
+// a pair fact covers that gap for their operands, and at most the engine's
+// observed live capacity run together. VPU commands keep their VPU and XLU
+// holds in `engines`, which excludes XLU and MXU work as one table would.
+class VpuSlots {
+public:
+  explicit VpuSlots(const RTLEvidence &evidence) : evidence(evidence), facts(*evidence.pairFacts()) {}
+
+  struct Command {
+    const OpInfo *op = nullptr;
+    std::string block, engine;
+    std::set<int> banks;
+    int issue = 0, window = 0;
+  };
+
+  std::optional<Command> command(const Instr &in, const Footprint &f, int cycle) const {
+    const char *name = in.op && in.op->engine == Engine::Vpu ? RTLEvidence::vpuBlockName(in.op->name) : nullptr;
+    const OpTimingBlock *b = name ? evidence.block(name) : nullptr;
+    if (!b || !b->nextIssueAge) return std::nullopt;
+    return Command{in.op, name, b->engine, mregBanks(f), cycle, *b->nextIssueAge};
+  }
+
+  std::string conflict(const Command &next) const {
+    std::vector<const Command *> overlapping;
+    for (const Command &live : commands) {
+      const Command &first = live.issue <= next.issue ? live : next;
+      const Command &second = live.issue <= next.issue ? next : live;
+      int gap = second.issue - first.issue;
+      if (gap >= first.window) continue;
+      overlapping.push_back(&live);
+      if (!admits(first, second, gap))
+        return "VPU slot held by " + live.op->name + " issued at cycle " + std::to_string(live.issue) +
+               " until cycle " + std::to_string(live.issue + live.window) + "; no pair fact admits " +
+               second.op->name + " " + std::to_string(gap) + " cycles after " + first.op->name +
+               " with these operands";
+    }
+    auto limit = facts.capacity.find(next.engine);
+    int capacity = limit == facts.capacity.end() ? 1 : limit->second;
+    for (int start = next.issue; start < next.issue + next.window; ++start) {
+      int live = 1;
+      for (const Command *other : overlapping)
+        live += other->issue <= start && start < other->issue + other->window;
+      if (live > capacity)
+        return "all " + std::to_string(capacity) + " VPU slots busy at cycle " + std::to_string(start) +
+               " (live capacity from the pair facts)";
+    }
+    return {};
+  }
+
+  void reserve(Command command) { commands.push_back(std::move(command)); }
+
+private:
+  // A pair fact covers gaps from its stable gap through the end of its sweep,
+  // which must reach the first command's next_issue_age.
+  bool admits(const Command &first, const Command &second, int gap) const {
+    auto found = facts.pairs.find({first.block, second.block});
+    if (found == facts.pairs.end() || gap < 1) return false;
+    for (const OpPairFact &fact : found->second)
+      if (fact.stableGap <= gap && fact.lastGap + 1 >= first.window && satisfied(fact, first, second))
+        return true;
+    return false;
+  }
+  // Every relation must be stated in a known vocabulary and hold.
+  static bool satisfied(const OpPairFact &fact, const Command &first, const Command &second) {
+    if (fact.relation.empty()) return false;
+    for (const auto &[name, value] : fact.relation) {
+      if (name != "mreg_banks" || value != "disjoint") return false;
+      for (int bank : first.banks)
+        if (second.banks.count(bank)) return false;
+    }
+    return true;
+  }
+
+  const RTLEvidence &evidence;
+  const RTLPairFacts &facts;
+  std::vector<Command> commands;
+};
+
 class RTLReservations final : public TimingReservations {
 public:
+  explicit RTLReservations(std::shared_ptr<const RTLEvidence> evidence) : evidence(std::move(evidence)) {
+    if (this->evidence && this->evidence->pairFacts()) slots.emplace(*this->evidence);
+  }
   TimingRuleResult<std::string>
   conflict(const Instr &in, const Footprint &f, int cycle) const override {
     if (cycle > kMaximumIssueCycle)
       return {{}, "exceeds the bounded RTL timing cycle limit"};
-    std::string busy = table.conflict(in, f, cycle);
+    std::string busy = busyAt(in, f, cycle);
     if (busy.empty())
       return {};
     int permitted = cycle + 1;
-    while (permitted - cycle < kMaximumPermittedSearch &&
-           !table.conflict(in, f, permitted).empty())
+    while (permitted - cycle < kMaximumPermittedSearch && !busyAt(in, f, permitted).empty())
       ++permitted;
     return {busy + "; issue cycle " + std::to_string(cycle) +
                 ", first permitted cycle " + std::to_string(permitted),
             {}};
   }
   std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
+    if (auto command = slots ? slots->command(in, f, cycle) : std::nullopt) {
+      table.reserve(in, holdsWhere(f, false), cycle);
+      engines.reserve(in, holdsWhere(f, true), cycle);
+      slots->reserve(std::move(*command));
+      return {};
+    }
     table.reserve(in, f, cycle);
     return {};
   }
   std::string onWait(const Instr &, int cycle) override {
     table.extendForWait(cycle);
+    engines.extendForWait(cycle);
     return {};
   }
 
 private:
+  // Without pair facts every unit, the VPU included, is exclusive in `table`.
+  std::string busyAt(const Instr &in, const Footprint &f, int cycle) const {
+    std::string busy = table.conflict(in, f, cycle);
+    if (!busy.empty() || !slots)
+      return busy;
+    if (auto command = slots->command(in, f, cycle))
+      return slots->conflict(*command);
+    return engines.conflict(in, holdsWhere(f, true), cycle);
+  }
+
+  std::shared_ptr<const RTLEvidence> evidence;
   ReservationTable table{ReservationPolicy::Exclusive};
+  ReservationTable engines{ReservationPolicy::Exclusive};
+  std::optional<VpuSlots> slots;
 };
 
 // Every block is verified from an idle state, so every path must reach ECALL
@@ -189,9 +310,9 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };
   p.issueGap = [](const Instr &in) { return TimingRuleResult<int>{naturalGap(in), {}}; };
-  p.createReservations = [] {
+  p.createReservations = [evidence] {
     TimingRuleResult<std::unique_ptr<TimingReservations>> result;
-    result.value = std::make_unique<RTLReservations>();
+    result.value = std::make_unique<RTLReservations>(evidence);
     return result;
   };
   return p;

@@ -1,8 +1,8 @@
 """Compute replay checks: synthetic VCD/checker tests always run; the Verilator run is env-gated.
 
 The real run needs ATLAS_EE290_COMPUTE_MODEL (a VAtlasCore built with test/ee290-compute-replay.cpp),
-ATLAS_OOT_BIN_DIR (atlas-opt, atlas-emit) and ATLAS_OP_TIMING (merlin.op_timing.v1 facts). It replays every
-case in tools/ee290_replay_cases, then mutates the captured traces, events and exports to confirm each check bites.
+ATLAS_OOT_BIN_DIR (atlas-opt, atlas-emit) and ATLAS_OP_TIMING (merlin.op_timing.v1 facts); with ATLAS_PAIR_FACTS
+(pair facts) the cases that need them run too. It replays every case in tools/ee290_replay_cases, then mutates the captured traces, events and exports to confirm each check bites.
 """
 import copy
 import dataclasses
@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("replay", ROOT / "tools/replay-ee290-compute.py")
 REPLAY = importlib.util.module_from_spec(spec); spec.loader.exec_module(REPLAY)
 BIND, CASES = REPLAY.BIND, REPLAY.CASES
-MODEL, BIN, FACTS = (os.environ.get(k) for k in ("ATLAS_EE290_COMPUTE_MODEL", "ATLAS_OOT_BIN_DIR", "ATLAS_OP_TIMING"))
+MODEL, BIN, FACTS, PAIRS = (os.environ.get(k) for k in ("ATLAS_EE290_COMPUTE_MODEL", "ATLAS_OOT_BIN_DIR", "ATLAS_OP_TIMING", "ATLAS_PAIR_FACTS"))
 
 
 def vcd(cycles, drop=None):
@@ -186,7 +186,8 @@ class VerilatorReplayTest(unittest.TestCase):
              "mxu0_tile_delay", "mxu1_tile_schedule", "vpu_relu_delay", "vpu_binary_schedule", "vpu_unary_delay", "vpu_reduce_schedule",
              "vpu_vli_delay", "vpu_pack_schedule", "mxu0_acc_bf16_delay", "mxu1_acc_bf16_schedule", "mxu0_acc_fp8_delay",
              "mxu1_acc_fp8_schedule", "dma_pair_in_flight", "virtual_relu_delay", "virtual_relu_schedule",
-             "virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule")
+             "virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule",
+             *(("slots_exp_relu_delay", "slots_chain_delay", "slots_chain_schedule") if PAIRS else ()))
     # Selected mnemonic -> facts block (vpu.<op>, mxu<u>.<op>).
     FACTS = {"vadd.bf16": "add", "vsub.bf16": "sub", "vmul.bf16": "mul", "vmaximum.bf16": "pairmax", "vminimum.bf16": "pairmin", "vmov": "mov",
              "vexp.bf16": "exp", "vexp2.bf16": "exp2", "vsquare.bf16": "square", "vcube.bf16": "cube", "vrelu.bf16": "relu",
@@ -198,8 +199,8 @@ class VerilatorReplayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(); cls.work = Path(cls.temporary.name)
-        run = subprocess.run([sys.executable, str(ROOT / "tools/replay-ee290-compute.py"), "--facts", FACTS, "--bin", BIN, "--model", MODEL, "--work", str(cls.work)],
-                             capture_output=True, text=True)
+        run = subprocess.run([sys.executable, str(ROOT / "tools/replay-ee290-compute.py"), "--facts", FACTS, "--bin", BIN, "--model", MODEL, "--work", str(cls.work),
+                              *(("--pairs", PAIRS) if PAIRS else ())], capture_output=True, text=True)
         if run.returncode: raise AssertionError(run.stdout + run.stderr)
         cls.log = run.stdout
         cls.digest = hashlib.sha256(Path(FACTS).read_bytes()).hexdigest()
@@ -256,7 +257,7 @@ class VerilatorReplayTest(unittest.TestCase):
                 self.assertTrue(self.bind(name)["dynamic_dma_intervals"])
 
     def test_replays_pass_with_full_drain(self):
-        self.assertEqual(self.log.count("PASS "), sum(len(c.consumers) for c in CASES.load().values()))
+        self.assertEqual(self.log.count("PASS "), sum(len(c.consumers) for c in CASES.load().values() if PAIRS or not c.pairs))
         for name in self.cases:
             with self.subTest(name=name):
                 result = self.validate(name)
@@ -314,6 +315,26 @@ class VerilatorReplayTest(unittest.TestCase):
                 self.assertEqual((commands[first]["engine"], commands[second]["engine"]), pair)
                 self.assertEqual(commands[second]["edge"] - commands[first]["edge"], 1)
                 self.assertGreater(self.bind(name)["memory_access_elements_bound"], 0)
+
+    @unittest.skipUnless(PAIRS, "requires pair facts (ATLAS_PAIR_FACTS)")
+    def test_two_vpu_commands_run_in_their_own_slots(self):
+        for name, slots in (("slots_exp_relu_delay", [0, 0, 1]), ("slots_chain_delay", [0, 0, 1, 0]), ("slots_chain_schedule", [0, 0, 1, 0])):
+            with self.subTest(name=name):
+                vpus = [c for c in self.cases[name][2]["commands"] if c["engine"] == "vpu"]
+                self.assertEqual([c["slot"] for c in vpus], slots)
+                # Every command after the first VPU one issues while the one before it is live, in the other slot.
+                self.assertTrue(all(b["edge"] < a["release_edge"] and a["slot"] != b["slot"] for a, b in zip(vpus[1:], vpus[2:])))
+                self.assertGreater(self.bind(name)["memory_access_elements_bound"], 0)
+        first, second = [c for c in self.cases["slots_exp_relu_delay"][2]["commands"] if c["engine"] == "vpu"][1:]
+        self.assertEqual(second["edge"] - first["edge"], 1)
+        # A read of the second slot moved to the first slot's port, or the second slot's write dropped, is rejected.
+        overlap = lambda key: lambda v, edge: v[key] and second["edge"] <= edge < first["release_edge"]
+        self.mutate("slots_exp_relu_delay", overlap("pr1"), lambda v: v.update(pr0=1, pr1=0, prid0=v["prid1"], prrow0=v["prrow1"]))
+        self.mutate("slots_exp_relu_delay", overlap("pw1"), lambda v: v.__setitem__("pw1", 0))
+        changed = copy.deepcopy(self.cases["slots_exp_relu_delay"][2])
+        command = next(c for c in changed["commands"] if c["edge"] == second["edge"])
+        command["reads"][3]["edge"] += 1
+        self.rejects("slots_exp_relu_delay", events=changed)
 
     def test_vmul_trace_mutations_are_rejected(self):
         for key, predicate, value in [("prid0", lambda v: v["pr0"] and v["prid0"] == 1, 0), ("prrow0", lambda v: v["pr0"], lambda x: x ^ 1),

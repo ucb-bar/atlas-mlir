@@ -20,6 +20,7 @@ class Case:
     consumers: tuple = ('delay', 'schedule')
     source: str = ''      # a virtual program instead of `ops`; `pipeline` lowers it before facts selection
     pipeline: tuple = ()
+    pairs: bool = False   # scheduled with the pair facts selected (replay --pairs)
 
     def mlir(self, ops=None):
         if self.source and ops is None: return self.source

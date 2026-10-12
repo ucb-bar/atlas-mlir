@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verilator replay of AtlasCore programs against `merlin.op_timing.v1` facts.
 
-Each case in tools/ee290_replay_cases is scheduled by atlas-opt (facts selection, dma=wait) or taken as a
-final stream, emitted by atlas-emit and run on the Verilated AtlasCore. The VCD is decoded per engine,
+Each case in tools/ee290_replay_cases is scheduled by atlas-opt (facts selection, dma=wait, and for cases that
+need them the `--pairs` pair facts) or taken as a final stream, emitted by atlas-emit and run on the Verilated AtlasCore. The VCD is decoded per engine,
 following the PC through branches, and bound to `atlas-emit --rtl-timing-json`.
 """
 import argparse
@@ -346,6 +346,19 @@ def validate_compute_edges(samples,words,case):
     def vm_line(line):
         if line not in vm: reject('VMEM access outside the case-initialized lines')
         return vm[line]
+    # Live VPU commands, oldest first. VectorFSM runs two slots: a two-port command (binary, row) takes both port
+    # pairs, a single-port command the slot whose port pair it uses (`slot`); events record the command's own port.
+    def vpus(): return live.get('vpu_drain',[])+([live['vpu']] if 'vpu' in live else [])
+    def vpu_ports(c): return {0,1} if c['layout'] in ('binary','row') else {c['slot']}
+    def vpu_left(c,stage,port):
+        logical=port-c['slot']
+        if not 0<=logical<2: return 0
+        return VPU_PORTS[c['layout']][stage=='writes'][logical]-sum(e['port']==logical for e in c[stage])
+    # A slot frees on the edge its last write fires (VectorFSM done1/done2).
+    def vpu_done(c):
+        return not any(vpu_left(c,s,p) for s in STAGES[:2] for p in range(2)) and all(vpu_left(c,'writes',p)<=(1 if v('pw'+str(p)) else 0) for p in range(2))
+    def vpu_released(c):
+        return not any(vpu_left(c,s,p) for s in STAGES for p in range(2)) and not any(v('paw'+str(n)) and v('pawid'+str(n)) in c['dests'] for n in range(4))
     for sample in samples:
         edge=sample['edge'];last_edge=edge
         derived={f'm{u}_resp{p}':prior_reads.get((u,p),0) for u in range(2) for p in range(2)}
@@ -382,18 +395,19 @@ def validate_compute_edges(samples,words,case):
         if engine&~busy: reject('engine busy omitted from scalar bridge')
         if busy&~sum(1<<c for c in pending): reject('busy without observed pending DMA')
         if any(edge>c['edge'] and len(c['responses'])<c['beats'] and not busy>>ch&1 for ch,c in pending.items()): reject('pending DMA lost busy protection')
-        # A VPU command drains its last writes after the next VPU command issued (next_issue_age); it releases
-        # once those are done and no write marker names its destination.
-        drain=live.get('vpu_drain')
-        if drain and len(drain['writes'])==drain['counts'][2] and not any(v('paw'+str(n)) and v('pawid'+str(n)) in drain['dests'] for n in range(4)):
-            drain['release_edge']=edge;del live['vpu_drain']
+        # A VPU command issued before the newest one (at its next_issue_age, or beside it in the other slot) releases
+        # once its events are done and no write marker names its destination; so does the newest while it has company.
+        for drain in list(live.get('vpu_drain',())):
+            if vpu_released(drain):
+                drain['release_edge']=edge;live['vpu_drain'].remove(drain)
+                if not live['vpu_drain']: del live['vpu_drain']
         for kind in [k for k in live if k!='vpu_drain']:
             command=live[kind]
-            if edge>command['edge'] and not BUSY[kind](v):
+            if edge>command['edge'] and (vpu_released(command) if kind=='vpu' and 'vpu_drain' in live else not BUSY[kind](v)):
                 if tuple(len(command[s]) for s in STAGES)+(len(command.get('compute',())),)!=event_counts(command): reject(kind+' released before its events completed')
                 command['release_edge']=edge;del live[kind]
         for kind,active in BUSY.items():
-            if kind not in live and active(v): reject('unbound '+kind+' activity')
+            if kind not in live and not (kind=='vpu' and 'vpu_drain' in live) and active(v): reject('unbound '+kind+' activity')
         expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False,'m0_cmd':False,'m1_cmd':False}
         if v('valid') and began and not ended:
             pc=v('pc');word=v('word')
@@ -496,8 +510,15 @@ def validate_compute_edges(samples,words,case):
                 elif not (opcode==0x73 and funct3==1): reject('unsupported scalar instruction in finite compute trace')
                 if created:
                     previous=live.get(created['engine'])
-                    if created['engine']=='vpu' and previous and 'vpu_drain' not in live and not v('vpu_busy')>>created['op']&1 and all(len(previous[s])==n for s,n in zip(STAGES[:2],previous['counts'])):
-                        live['vpu_drain']=live.pop('vpu')
+                    if created['engine']=='vpu':
+                        # Beside live VPU work the issue-busy bit must be clear and the command's port pairs free:
+                        # held by no command, or by one whose last write fires on this edge.
+                        if vpus() and v('vpu_busy')>>created['op']&1: reject('VPU command issued while its issue-busy bit is set')
+                        held={p for c in vpus() if not vpu_done(c) for p in vpu_ports(c)}
+                        both=created['layout'] in ('binary','row')
+                        created['slot']=next((s for s in (0,1) if not held&({0,1} if both else {s})),None)
+                        if created['slot'] is None: reject('VPU command issued while its port pairs are live')
+                        if previous: live.setdefault('vpu_drain',[]).append(live.pop('vpu'))
                     elif previous: reject('command issued while its engine is live')
                     created.update(_queue=([],[]),_data=([],[],[]));live[created['engine']]=created;commands.append(created)
                 pc_expected=target if in_slot and target is not None else pc+1
@@ -539,9 +560,9 @@ def validate_compute_edges(samples,words,case):
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
                 command=live.get(kind)
-                drain=live.get('vpu_drain') if kind=='vpu' and stage=='writes' else None
-                if drain and sum(e['port']==port for e in drain['writes'])<VPU_PORTS[drain['layout']][1][port]: command=drain
+                if kind=='vpu': command=next((c for c in vpus() if vpu_left(c,stage,port)>0),None)
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
+                if kind=='vpu': port-=command['slot']
                 n=sum(e.get('port',0)==port for e in command[stage])
                 if len(command[stage])>=event_counts(command)[STAGES.index(stage)]: reject(f'excess {kind} {stage} event')
                 if stage=='responses':
@@ -586,7 +607,7 @@ def validate_compute_edges(samples,words,case):
         for port in range(4):
             for direction in ('par','paw'):
                 if v(direction+str(port)):
-                    actives=[c for c in (live.get('vpu'),live.get('vpu_drain')) if c] or reject('unbound VPU live resource marker')
+                    actives=vpus() or reject('unbound VPU live resource marker')
                     if v(direction+'id'+str(port)) not in {r for c in actives for r in c['sources' if direction=='par' else 'dests']}: reject('VPU live resource operand mismatch')
         # DMA: A requests follow launch order; responses carry their source's command; a load response is written to VMEM in the
         # edge it is accepted (D ready is the VMEM write grant), and a store reads VMEM for the command being requested.
@@ -734,12 +755,19 @@ def run(args):
     if args.facts_sha256 and args.facts_sha256 != digest: raise ReplayError('facts hash mismatch')
     model = args.model.resolve() if args.model else build_model(args, work)
     select = f'--select-atlas-rtl-evidence=op-timing={facts} op-timing-sha256={digest} dma=wait'
+    if args.pairs:
+        pairs = args.pairs.resolve()
+        paired = select + f' op-pairs={pairs} op-pairs-sha256={hashlib.sha256(pairs.read_bytes()).hexdigest()}'
     available = CASES.load(); results = []
+    names = available if args.cases == 'all' else args.cases.split(',')
+    if args.cases != 'all' and not args.pairs and any(available[name].pairs for name in names): raise ReplayError('selected cases need --pairs')
+    for name in [n for n in names if available[n].pairs and not args.pairs]: print(f'SKIP {name}: needs --pairs', flush=True)
     runs = [(available[name], name if consumer == 'final' else f'{name}_{consumer}', consumer)
-            for name in (available if args.cases == 'all' else args.cases.split(','))
+            for name in names if args.pairs or not available[name].pairs
             for consumer in available[name].consumers if args.consumer in ('both', consumer) or consumer == 'final']
     with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
-        for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, select, digest, model) for case, label, consumer in runs]):
+        for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, paired if case.pairs else select, digest, model)
+                                                for case, label, consumer in runs]):
             try: result, line = future.result()
             except (ReplayError, BIND.BindingError) as error: raise type(error)(f'{label}: {error}') from error
             results.append(result); print(line, flush=True)
@@ -750,6 +778,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--facts', type=Path, required=True, help='merlin.op_timing.v1 facts JSON')
     p.add_argument('--facts-sha256', help='optional expected SHA-256 of --facts')
+    p.add_argument('--pairs', type=Path, help='merlin.op_pairs.v1 pair facts derived from --facts; cases marked `pairs` need them')
     p.add_argument('--bin', type=Path, required=True, help='directory holding atlas-opt and atlas-emit')
     p.add_argument('--work', type=Path, required=True, help='output directory')
     p.add_argument('--model', type=Path, help='prebuilt VAtlasCore binary (skips the Verilator build)')

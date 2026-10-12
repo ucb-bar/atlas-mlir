@@ -7,7 +7,7 @@ selected provider rejects are reported as unsupported. An informational legacy r
 whose built-in rules (insert-atlas-delays without a selection) fall below stable_gap.
 
 ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated); the default is every pairs-*.json next to
-ATLAS_OP_TIMING. Missing files are skipped. System pairs
+ATLAS_OP_TIMING. Missing files are skipped. With ATLAS_PAIR_FACTS the pair facts are selected too. System pairs
 (engines `core` and `core_dma`) feed instruction words to AtlasCore's decoder; they are decoded into compiler
 operations that must encode to the same words, with register fields fed by cuts (VLS base, DMA operands) set up
 from the cut values.
@@ -26,7 +26,7 @@ import sys
 import unittest
 
 from test_delay_insertion import EMIT, OPT, ROOT, addi, nop, program, run, stream
-from test_rtl_timing import FACTS, HALT, PROVIDER, VERIFY, delay, selection, vls, word_base
+from test_rtl_timing import FACTS, HALT, PAIRS, PROVIDER, VERIFY, delay, selection, vls, word_base
 from test_rtl_vmul_timing import pack, reduce, unary, vli, vmul
 from test_rtl_xlu_timing import transpose
 from test_rtl_dma_timing import IN_FLIGHT, transfer, wait
@@ -187,8 +187,8 @@ def pair_program(record, source=""):
 
 
 def options(tail):
-    """The facts selection, with the DMA policy when the pair launches a transfer."""
-    return selection(dma="wait") if tail else selection()
+    """The facts selection (with ATLAS_PAIR_FACTS, the pair facts too), with the DMA policy when the pair launches a transfer."""
+    return selection(dma="wait" if tail else None, pairs=PAIRS)
 
 
 def bound(record):

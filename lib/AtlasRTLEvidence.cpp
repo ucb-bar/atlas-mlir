@@ -462,6 +462,8 @@ llvm::json::Object RTLEvidence::applicability() const {
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};
   if (pairs) {
+    Object *admission = result.getObject("admission");
+    (*admission)["vpu_to_vpu_issue_gap"] = "pair_fact_stable_gap_when_operands_satisfy_its_relation_else_next_issue_age";
     Object capacity;
     for (const auto &[engine, live] : pairs->capacity) capacity[engine] = live;
     result["pair_facts"] = Object{{"schema", "merlin.op_pairs.v1"}, {"sha256", pairs->sha256},
