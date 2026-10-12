@@ -134,7 +134,7 @@ class VirtualRTLTimingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="atlas-virtual-facts-") as directory:
             missing = facts_variant(directory, lambda d: d["op_timing"].remove(block(d, "vpu.relu")))
             rejected(self, virtual_chain(1), selection(missing, dma="wait"), "--schedule-atlas-virtual",
-                     diagnostic="virtual cost of vrelu.bf16: rtl-op-timing-v1: vpu.relu: facts block is missing")
+                     diagnostic=f"virtual cost of vrelu.bf16: {PROVIDER}: vpu.relu: facts block is missing")
 
 
 if __name__ == "__main__":

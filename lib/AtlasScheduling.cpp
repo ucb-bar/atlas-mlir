@@ -350,7 +350,7 @@ struct ScheduleAtlasStreamPass
                            llvm::cl::desc("Insert timing delays after reordering"),
                            llvm::cl::init(true)};
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else rtl-op-timing-v1 over selected evidence, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else the RTL provider over selected evidence, else npu-model-rtl-match-v1)"),
                                llvm::cl::init("")};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }

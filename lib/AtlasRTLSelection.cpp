@@ -257,7 +257,7 @@ struct SelectAtlasRTLEvidencePass
       llvm::cl::desc("Optional DMA policy: wait")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
   StringRef getDescription() const final {
-    return "Select SHA-256-identified RTL-computed timing facts for the rtl-op-timing-v1 provider";
+    return "Select SHA-256-identified RTL-computed timing facts for the RTL timing provider";
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();

@@ -18,6 +18,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_rtl_timing import PROVIDER
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("replay", ROOT / "tools/replay-ee290-compute.py")
 REPLAY = importlib.util.module_from_spec(spec); spec.loader.exec_module(REPLAY)
@@ -237,7 +239,7 @@ class VerilatorReplayTest(unittest.TestCase):
                 self.assertIn('atlas.timing_state = "untimed"', lowered)
                 self.assertNotIn("atlas.rtl_evidence", lowered)
                 self.assertIn('atlas.timing_state = "timed"', final)
-                self.assertIn('atlas.timing_provider = "rtl-op-timing-v1"', final)
+                self.assertIn(f'atlas.timing_provider = "{PROVIDER}"', final)
                 self.assertIn(f'op_timing_sha256 = "{self.digest}"', final)
                 words = (directory / "program.hex").read_text().split()
                 structured = subprocess.run([Path(BIN) / "atlas-opt", directory / "final.mlir", "--convert-atlas-to-llvm-calls", "--finalize-atlas-llvm-calls"],
@@ -245,7 +247,7 @@ class VerilatorReplayTest(unittest.TestCase):
                 self.assertEqual(structured.returncode, 0, structured.stderr)
                 self.assertEqual([w[2:] for w in re.findall(r"\.word (0x[0-9a-f]{8})", structured.stdout)], words)
                 export = self.cases[name][3]
-                self.assertEqual(export["provider"]["id"], "rtl-op-timing-v1")
+                self.assertEqual(export["provider"]["id"], PROVIDER)
                 self.assertEqual([i["mnemonic"] for i in export["instructions"] if i["mnemonic"].startswith(("dma.", "vload", "vstore", "vrelu"))].count("vrelu.bf16"), 1)
                 self.assertTrue(self.bind(name)["dynamic_dma_intervals"])
 

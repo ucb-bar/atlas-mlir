@@ -873,7 +873,7 @@ struct ScheduleAtlasVirtualPass
   Option<std::string> provider{
       *this, "provider",
       llvm::cl::desc("Registered timing provider whose footprints and reservations cost "
-                     "the operations (default: rtl-op-timing-v1 over selected evidence, else "
+                     "the operations (default: the RTL provider over selected evidence, else "
                      "npu-model-rtl-match-v1); DMA transfers keep the model's estimate"),
       llvm::cl::init("")};
 
