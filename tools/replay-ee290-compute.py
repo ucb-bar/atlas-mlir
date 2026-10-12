@@ -51,8 +51,10 @@ SIGNALS = {
     'xar': ('xlu.io_activeMregRead_valid', 1), 'xarid': ('xlu.io_activeMregRead_bits', 6), 'xaw': ('xlu.io_activeMregWrite_valid', 1), 'xawid': ('xlu.io_activeMregWrite_bits', 6),
     'pcmd': ('vpu.io_cmd_valid', 1), 'pop': ('vpu.io_cmd_bits_op', 5), 'pdst': ('vpu.io_cmd_bits_vd', 6), 'psrc0': ('vpu.io_cmd_bits_vs1', 6), 'psrc1': ('vpu.io_cmd_bits_vs2', 6),
     'pimm': ('vpu.io_cmd_bits_imm', 16), 'pscale': ('vpu.io_cmd_bits_scaleE8M0', 8),
-    # Scalar LSU (SELD) and the scale register write it ends in.
+    # Scalar LSU (LW, SW, SELD), the register or scale register write a load ends in, and SELI's scale write.
     'scmd': ('lsu.io_scalarCmd_valid', 1), 'scmd_store': ('lsu.io_scalarCmd_bits_isStore', 1), 'scmd_addr': ('lsu.io_scalarCmd_bits_byteAddr', 21),
+    'scmd_wdata': ('lsu.io_scalarCmd_bits_wdata', 32), 'scmd_wmask': ('lsu.io_scalarCmd_bits_wmask', 4),
+    'xw_en': ('scalar.regfile.io_wr_en', 1), 'xw_addr': ('scalar.regfile.io_wr_addr', 5), 'xw_data': ('scalar.regfile.io_wr_data', 32),
     'sresp': ('lsu.io_scalarResp_valid', 1), 'sresp_data': ('lsu.io_scalarResp_bits', 32),
     'sew': ('scalar.scaleRF.io_writeEn', 1), 'sew_idx': ('scalar.scaleRF.io_writeIdx', 5), 'sew_data': ('scalar.scaleRF.io_writeData', 8),
 }
@@ -77,7 +79,7 @@ for key, path, width in [
         ('vwd', 'dma.io_vmemWrite_bits_data', 256), ('vresp', 'dma.io_vmemReadData_valid', 1), ('vdata', 'dma.io_vmemReadData_bits', 256)]:
     SIGNALS['dma_' + key] = (path, width)
 CONTROLS = ['fire', 'launch', 'cmd', 'load_busy', 'store_busy', 'vr', 'vresp', 'vw', 'mr', 'mresp', 'mw', 'csr', 'halt', 'ecall', 'illegal', 'ebreak',
-            'valid', 'xcmd', 'xr', 'xresp', 'xw', 'xar', 'xaw', 'pcmd', 'scmd', 'sresp', 'sew'] + [f'{p}{n}' for n in range(2) for p in ('pr', 'presp', 'pw')] + [f'{p}{n}' for n in range(4) for p in ('par', 'paw')]
+            'valid', 'xcmd', 'xr', 'xresp', 'xw', 'xar', 'xaw', 'pcmd', 'scmd', 'sresp', 'sew', 'xw_en'] + [f'{p}{n}' for n in range(2) for p in ('pr', 'presp', 'pw')] + [f'{p}{n}' for n in range(4) for p in ('par', 'paw')]
 CONTROLS += ['dma_' + k for k in ['launch', 'stall', 'av', 'ar', 'dv', 'dr', 'vr', 'vrg', 'vw', 'vwg', 'vresp']] + [f'dma_{p}{n}' for n in range(8) for p in ('busy', 'engine')]
 
 SIGNALS.update({'vpu_busy': ('vpu.io_issueBusy', 31), 'mreg_read_busy': ('scalar.io_mregReadBusy', 64), 'mreg_write_busy': ('scalar.io_mregWriteBusy', 64)})
@@ -333,7 +335,7 @@ def quiescent_state(v,d,busy,engine):
 def validate_compute_edges(samples,words,case):
     vm,dram,expected_vm,expected_dram=memories(case);mreg={};mxu={};prior_reads={};starts=leaders(words)
     commands=[];instructions=[];endpoints=[];busy_events=[];entries=[];scale_loads=[]
-    regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0;slot=False;redirect=None;scale=[0]*32;scalar_load=None
+    regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0;slot=False;redirect=None;scale=[0]*32;scalar_load=None;scalar_store=None;seli=None;scalar_memory=[]
     # DMA: pending maps channel -> launched command; the engine requests commands in launch order (fifo).
     live={};pending={};fifo=[];outstanding={};read_queue=[];a_hold=None;d_hold=None
     began=False;ended=False;marker=None;publication=None;last_edge=0;prev_busy=None;delayed=False
@@ -360,8 +362,8 @@ def validate_compute_edges(samples,words,case):
         def record(collection,**fields): collection.append({'edge':edge,**fields})
         def entry(pc):
             state=quiescent_state(v,d,busy,engine)
-            if live or pending or outstanding or read_queue or scalar_load or any(state.values()): reject('block entry is not quiescent')
-            record(entries,word_index=pc,engine_state=state)
+            if live or pending or outstanding or read_queue or scalar_load or scalar_store or any(state.values()): reject('block entry is not quiescent')
+            record(entries,word_index=pc,engine_state=state,registers={f'x{r}':regs[r] for r in range(1,32) if regs[r] is not None})
         if v('reset'):
             if began: reject('reset interrupted compute envelope')
             continue
@@ -420,12 +422,22 @@ def validate_compute_edges(samples,words,case):
                         if funct3 in (4,5): a,b=a-(a>>31<<32),b-(b>>31<<32)
                         taken={0:a==b,1:a!=b,4:a<b,5:a>=b,6:a<b,7:a>=b}[funct3]
                     slot=True;redirect=BIND.branch_target(pc,word) if taken else None
-                elif opcode==0x03 and funct3==6:
-                    # SELD: scalar LSU reads the aligned VMEM word; its low byte becomes scale register rd.
+                elif opcode==0x03 and funct3 in (2,6):
+                    # LW/SELD: scalar LSU reads the aligned VMEM word; it becomes register rd, or its low byte scale register rd.
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
-                    if scalar_load or regs[rs1] is None: reject('overlapping/unknown SELD')
-                    scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd}
+                    if scalar_load or regs[rs1] is None: reject('overlapping/unknown scalar load')
+                    scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd,'kind':'seld' if funct3==6 else 'lw'}
+                    if scalar_load['address']%4: reject('unaligned scalar load')
                     vm_line(scalar_load['address']>>5)
+                    if funct3==2 and rd: regs[rd]=None
+                elif opcode==0x03 and funct3==7:
+                    seli=(rd,(word>>20)&255)
+                elif opcode==0x23 and funct3==2:
+                    immediate=((word>>25)<<5)|((word>>7)&31);immediate=immediate-4096 if immediate&2048 else immediate
+                    if scalar_store or regs[rs1] is None or regs[rs2] is None: reject('overlapping/unknown scalar store')
+                    scalar_store={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'data':regs[rs2],'kind':'sw'}
+                    if scalar_store['address']%4: reject('unaligned scalar store')
+                    vm_line(scalar_store['address']>>5)
                 elif opcode==0x07:
                     store=bool(word&(1<<13));identity=(word>>7)&63
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
@@ -497,16 +509,32 @@ def validate_compute_edges(samples,words,case):
         for key,expected in expected_cmd.items():
             if bool(v(key))!=expected: reject('unbound or missing decoded command '+key)
         if v('launch')!=v('cmd'): reject('scalar/LSU launch mismatch')
-        # SELD: command (byte address), response (aligned word), then the scale register write; reads at issue see the old value.
+        # LW/SELD: command (byte address), response (aligned word), then the register or scale register write; reads at issue
+        # see the old value. SW: one masked word write with its command. SELI writes its scale register as it fires.
         if v('scmd'):
-            if not scalar_load or 'word' in scalar_load or v('scmd_store') or v('scmd_addr')!=scalar_load['address']&(1<<21)-1: reject('unbound or mismatched scalar memory command')
-            offset=scalar_load['address']&28;scalar_load.update(word=int.from_bytes(vm_line(scalar_load['address']>>5)[offset:offset+4],'little'),command_edge=edge)
+            if v('scmd_store'):
+                if not scalar_store or v('scmd_addr')!=scalar_store['address']&(1<<21)-1 or (v('scmd_wdata'),v('scmd_wmask'))!=(scalar_store['data'],15): reject('unbound or mismatched scalar store command')
+                offset=scalar_store['address']&28;line=vm_line(scalar_store['address']>>5)
+                vm[scalar_store['address']>>5]=line[:offset]+scalar_store['data'].to_bytes(4,'little')+line[offset+4:]
+                scalar_memory.append({**scalar_store,'command_edge':edge});scalar_store=None
+            else:
+                if not scalar_load or 'word' in scalar_load or v('scmd_addr')!=scalar_load['address']&(1<<21)-1: reject('unbound or mismatched scalar memory command')
+                offset=scalar_load['address']&28;scalar_load.update(word=int.from_bytes(vm_line(scalar_load['address']>>5)[offset:offset+4],'little'),command_edge=edge)
         if v('sresp'):
             if not scalar_load or 'word' not in scalar_load or 'response_edge' in scalar_load or v('sresp_data')!=scalar_load['word']: reject('unbound or mismatched scalar memory response')
             scalar_load['response_edge']=edge
+        if scalar_load and scalar_load['kind']=='lw' and 'response_edge' in scalar_load and (not scalar_load['rd'] or v('xw_en') and v('xw_addr')==scalar_load['rd']):
+            if scalar_load['rd'] and v('xw_data')!=scalar_load['word']: reject('scalar load writes a different register value')
+            regs[scalar_load['rd']]=scalar_load['word'] if scalar_load['rd'] else 0
+            scalar_memory.append({**scalar_load,'write_edge':edge if scalar_load['rd'] else None});scalar_load=None
         if v('sew'):
-            if not scalar_load or 'response_edge' not in scalar_load or (v('sew_idx'),v('sew_data'))!=(scalar_load['rd'],scalar_load['word']&255): reject('unbound or mismatched scale register write')
-            scale[scalar_load['rd']]=scalar_load['word']&255;scale_loads.append({**scalar_load,'write_edge':edge});scalar_load=None
+            if seli:
+                if (v('sew_idx'),v('sew_data'))!=seli: reject('mismatched SELI scale register write')
+                scale[seli[0]]=seli[1];seli=None
+            else:
+                if not scalar_load or scalar_load['kind']!='seld' or 'response_edge' not in scalar_load or (v('sew_idx'),v('sew_data'))!=(scalar_load['rd'],scalar_load['word']&255): reject('unbound or mismatched scale register write')
+                scale[scalar_load['rd']]=scalar_load['word']&255;scale_loads.append({**scalar_load,'write_edge':edge});scalar_load=None
+        if seli: reject('SELI without its scale register write')
         for stage in STAGES:
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
@@ -612,14 +640,14 @@ def validate_compute_edges(samples,words,case):
             if edge!=publication or v('marker')!=1: reject('marker publication did not follow write')
             record(endpoints,kind='marker_publication');publication=None
         if v('csr'):
-            if live or pending or outstanding or scalar_load or marker is not None or (v('csr_addr'),v('csr_op'),v('csr_data'))!=(0xc10,1,1): reject('marker precedes observed engine drain')
+            if live or pending or outstanding or scalar_load or scalar_store or marker is not None or (v('csr_addr'),v('csr_op'),v('csr_data'))!=(0xc10,1,1): reject('marker precedes observed engine drain')
             marker=edge;publication=edge+1;record(endpoints,kind='marker',word_index=v('pc'),word_u32=v('word'),engine_state=quiescent_state(v,d,busy,engine))
         if v('ecall'):
             if not began or ended or live or pending or outstanding or read_queue or scalar_load or slot or marker is None or v('marker')!=1 or not v('halt') or v('fire') or v('pc')!=pc_expected or pc_expected>=len(words) or v('word')!=words[pc_expected] or words[pc_expected]!=0x73: reject('terminal precedes complete selected-word/engine drain')
             if pc_expected in starts: entry(pc_expected)
             ended=True;record(endpoints,kind='halt',word_index=v('pc'),word_u32=v('word'),engine_state=quiescent_state(v,d,busy,engine))
         elif began and not ended and v('halt'): reject('unexpected halt in compute envelope')
-    if not ended or live or pending or outstanding or read_queue or scalar_load or publication is not None: reject('incomplete compute/terminal drain trace')
+    if not ended or live or pending or outstanding or read_queue or scalar_load or scalar_store or publication is not None: reject('incomplete compute/terminal drain trace')
     if last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')<2: reject('trace lacks bounded post-halt drain samples')
     if collections.Counter(c['engine'] for c in commands)!=collections.Counter({k:n for k,n in case.commands.items() if n}): reject('wrong dynamic compute command coverage')
     if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
@@ -630,9 +658,10 @@ def validate_compute_edges(samples,words,case):
         for key in ('sources','dests'):
             if key in command: command[key]=sorted(command[key])
     for load in scale_loads: load.update({f'{k}_age':load[f'{k}_edge']-load['edge'] for k in ('command','response','write')})
+    for access in scalar_memory: access.update({f'{k}_age':access[f'{k}_edge']-access['edge'] for k in ('command','response','write') if access.get(f'{k}_edge') is not None})
     concurrent=[[i,j] for i,a in enumerate(commands) for j,b in enumerate(commands[i+1:],i+1) if b['edge']<a['release_edge'] and a['edge']<b['release_edge']]
     return {'instructions':instructions,'block_entries':entries,'commands':commands,'concurrent_commands':concurrent,'endpoints':endpoints,'busy_transitions':busy_events,
-            'scale_loads':scale_loads,'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
+            'scale_loads':scale_loads,'scalar_memory':scalar_memory,'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
 
 
 

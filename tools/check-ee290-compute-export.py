@@ -82,8 +82,11 @@ def decoded_operands(word):
         mnemonic = VPU_MNEMONICS[word >> 25]; result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
     elif opcode == 0x5f and (word >> 13) & 7 < 4:
         mnemonic = VLI_MNEMONICS[(word >> 13) & 7]; result.update(rd=(word >> 7) & 63, immediate=word >> 16)
-    elif opcode == 0x03 and (word >> 12) & 7 == 6:
-        mnemonic = 'seld'; result.update(rd=rd, rs1=rs1, immediate=signed)
+    elif opcode == 0x03 and (word >> 12) & 7 in (2, 6, 7):
+        mnemonic = {2: 'lw', 6: 'seld', 7: 'seli'}[(word >> 12) & 7]; result.update(rd=rd, rs1=rs1, immediate=signed)
+    elif opcode == 0x23 and (word >> 12) & 7 == 2:
+        stored = (word >> 25) << 5 | (word >> 7) & 31
+        mnemonic = 'sw'; result.update(rs1=rs1, rs2=rs2, immediate=stored - 4096 if stored & 2048 else stored)
     elif opcode == 0x77 and word >> 26 < len(MXU_STEMS):
         mnemonic = f'{MXU_STEMS[word >> 26]}.mxu{(word >> 25) & 1}'
         result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
@@ -211,6 +214,27 @@ def bind_scale_load(item, load):
     return 2
 
 
+def bind_scalar_memory(item, access):
+    """An LW's VMEM read and register write, or an SW's VMEM write, must land at its observed LSU command and write ages."""
+    require(item['mnemonic'] == access['kind'] and item['word_u32'] == access['word_u32'], 'scalar memory access differs from its exported instruction')
+    effects = sorted((a['resource'], a['write'], a['first'], a['count'], a['age']) for a in item['footprint']['accesses'] if a['resource'] != 'xreg' or a['write'])
+    expected = [('vmem', access['kind'] == 'sw', access['address'] >> 5, 1, access['command_age'])]
+    if access['kind'] == 'lw' and access['rd']: expected.append(('xreg', True, access['rd'], 1, access['write_age']))
+    require(effects == sorted(expected), 'observed scalar VMEM access or register write differs from its exported footprint')
+    return len(expected)
+
+
+def context_items(export, block, registers):
+    """The block's instructions with the footprints of each entry-context group the observed entry registers hold."""
+    first = block['first_word']; items = export['instructions'][first:first + block['word_count']]
+    if 'entry_contexts' not in block:
+        require(all(item['footprint'] is not None for item in items), 'instruction lacks its exported footprint')
+        return [items]
+    groups = [group for group in block['entry_contexts'] if any(all(registers.get(r) == v for r, v in entry.items()) for entry in group['entries'])]
+    require(groups and all(len(group['footprints']) == len(items) for group in groups), 'observed block entry matches no exported entry context')
+    return [[{**item, 'footprint': footprint} for item, footprint in zip(items, group['footprints'])] for group in groups]
+
+
 def bind_blocks(export, words):
     blocks, instructions = export['blocks'], export['instructions']
     starts = {block['first_word']: block['index'] for block in blocks}; first = 0
@@ -276,13 +300,27 @@ def bind_export(export, observed, facts_sha256, words):
     require(not any(any(e['engine_state'].values()) for e in entries), 'engines not idle at a block entry')
     keys = [(c['word_index'], c['edge']) for c in observed['commands']]
     require(len(set(keys)) == len(keys) and set(keys) == {f for f in fired if is_command(instructions[f[0]]['mnemonic'])}, 'observed commands differ from executed compute instructions')
+    # Each dynamic instance binds to the footprints of every entry-context group its observed entry registers hold.
+    for instance, entry in zip(instances, entries):
+        instance['groups'] = context_items(export, blocks[instance['block']], entry.get('registers', {}))
+    owner = {}
+    for word, edge in fired:
+        owner[word, edge] = max((i for i in instances if i['entry_edge'] <= edge), key=lambda i: i['entry_edge'])
+    def bound(word, edge, bind):
+        instance = owner[word, edge]; offset = word - blocks[instance['block']]['first_word']
+        results = [bind(group[offset]) for group in instance['groups']]
+        return results[0]
     checked, intervals = 0, []
     for command in observed['commands']:
-        elements, interval = bind_command(instructions[command['word_index']], command, list(waits.values()))
+        elements, interval = bound(command['word_index'], command['edge'], lambda item: bind_command(item, command, list(waits.values())))
         checked += elements; intervals += [interval] if interval else []
     loads = observed.get('scale_loads', [])
     require(sorted((l['word_index'], l['edge']) for l in loads) == sorted(f for f in fired if instructions[f[0]]['mnemonic'] == 'seld'), 'observed scale loads differ from executed SELDs')
-    checked += sum(bind_scale_load(instructions[l['word_index']], l) for l in loads)
+    checked += sum(bound(l['word_index'], l['edge'], lambda item: bind_scale_load(item, l)) for l in loads)
+    accesses = observed.get('scalar_memory', [])
+    require(sorted((a['word_index'], a['edge']) for a in accesses) == sorted(f for f in fired if instructions[f[0]]['mnemonic'] in ('lw', 'sw')), 'observed scalar memory accesses differ from executed LW/SW')
+    checked += sum(bound(a['word_index'], a['edge'], lambda item: bind_scalar_memory(item, a)) for a in accesses)
+    for instance in instances: instance['entry_context_groups'] = len(instance.pop('groups'))
     return {'instruction_words_bound': len(fired), 'block_instances': instances, 'memory_access_elements_bound': checked, 'dynamic_dma_intervals': intervals}
 
 

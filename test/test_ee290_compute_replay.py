@@ -131,7 +131,10 @@ class PortableTest(unittest.TestCase):
         for word, mnemonic, fields in ((vli, "vli.row", {"rd": 2, "immediate": 0x3f80}), (seld, "seld", {"rd": 3, "rs1": 6, "immediate": 1024}),
                                        (0x48 << 25 | 4 << 13 | 2 << 7 | 0x57, "vrelu.bf16", {"rd": 2, "rs1": 4}),
                                        (0x44 << 25 | 6 << 19 | 3 << 13 | 9 << 7 | 0x57, "vpack.bf16.fp8", {"rd": 9, "rs1": 3, "rs2": 6}),
-                                       (0x18000077 | 1 << 25 | 1 << 19 | 2 << 13 | 1 << 7, "vmatmul.acc.mxu1", {"rd": 1, "rs1": 2, "rs2": 1})):
+                                       (0x18000077 | 1 << 25 | 1 << 19 | 2 << 13 | 1 << 7, "vmatmul.acc.mxu1", {"rd": 1, "rs1": 2, "rs2": 1}),
+                                       (4 << 20 | 10 << 15 | 2 << 12 | 16 << 7 | 0x03, "lw", {"rd": 16, "rs1": 10, "immediate": 4}),
+                                       (127 << 20 | 7 << 12 | 3 << 7 | 0x03, "seli", {"rd": 3, "immediate": 127}),
+                                       (17 << 20 | 12 << 15 | 2 << 12 | 20 << 7 | 0x23, "sw", {"rs1": 12, "rs2": 17, "immediate": 20})):
             with self.subTest(mnemonic=mnemonic):
                 decoded, operands = BIND.decoded_operands(word)
                 self.assertEqual((decoded, {k: operands[k] for k in fields}), (mnemonic, fields))
@@ -182,7 +185,8 @@ class VerilatorReplayTest(unittest.TestCase):
              "dma_loop_schedule", "diamond_taken_delay", "diamond_fall_schedule", "overlap_vls", "overlap_vpu",
              "mxu0_tile_delay", "mxu1_tile_schedule", "vpu_relu_delay", "vpu_binary_schedule", "vpu_unary_delay", "vpu_reduce_schedule",
              "vpu_vli_delay", "vpu_pack_schedule", "mxu0_acc_bf16_delay", "mxu1_acc_bf16_schedule", "mxu0_acc_fp8_delay",
-             "mxu1_acc_fp8_schedule", "dma_pair_in_flight", "virtual_relu_delay", "virtual_relu_schedule")
+             "mxu1_acc_fp8_schedule", "dma_pair_in_flight", "virtual_relu_delay", "virtual_relu_schedule",
+             "virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule")
     # Selected mnemonic -> facts block (vpu.<op>, mxu<u>.<op>).
     FACTS = {"vadd.bf16": "add", "vsub.bf16": "sub", "vmul.bf16": "mul", "vmaximum.bf16": "pairmax", "vminimum.bf16": "pairmin", "vmov": "mov",
              "vexp.bf16": "exp", "vexp2.bf16": "exp2", "vsquare.bf16": "square", "vcube.bf16": "cube", "vrelu.bf16": "relu",
@@ -274,6 +278,28 @@ class VerilatorReplayTest(unittest.TestCase):
         # A DMA wait inside the loop opens a new epoch in every iteration.
         instances = self.bind("dma_loop_schedule")["block_instances"]
         self.assertEqual([len(i["epoch_origins"]) for i in instances if i["block"] == 1], [2, 2, 2])
+
+    def test_fp8_mlp_relayout_binds_each_iteration_to_its_entry_context(self):
+        # The pack relayout loop moves its LW/SW addresses every iteration; each instance binds the context its registers hold.
+        for name in ("virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule"):
+            with self.subTest(name=name):
+                events, export = self.cases[name][2:4]
+                loop = next(b for b in export["blocks"] if "entry_contexts" in b)
+                instances = [i for i in self.bind(name)["block_instances"] if i["block"] == loop["index"]]
+                self.assertEqual((len(instances), len(loop["entry_contexts"])), (32, 32))
+                self.assertTrue(all(i["entry_context_groups"] == 1 for i in instances))
+                self.assertEqual(sorted({a["address"] >> 5 for a in events["scalar_memory"] if a["kind"] == "sw"}), list(range(4128, 4160)))
+                swapped = copy.deepcopy(export); contexts = next(b for b in swapped["blocks"] if "entry_contexts" in b)["entry_contexts"]
+                contexts[0]["footprints"], contexts[1]["footprints"] = contexts[1]["footprints"], contexts[0]["footprints"]
+                self.rejects(name, export=swapped)
+                missing = copy.deepcopy(export); next(b for b in missing["blocks"] if "entry_contexts" in b)["entry_contexts"].pop(7)
+                self.rejects(name, export=missing)
+                late = copy.deepcopy(events); late["scalar_memory"][0]["write_age"] += 1
+                self.rejects(name, events=late)
+        # A store to another word, or with other data, than its decoded SW is rejected by the validator.
+        self.mutate("virtual_fp8_mlp_delay", lambda v, e: v["scmd"] and v["scmd_store"], lambda v: v.update(scmd_addr=v["scmd_addr"] + 4))
+        self.mutate("virtual_fp8_mlp_delay", lambda v, e: v["scmd"] and v["scmd_store"], lambda v: v.update(scmd_wdata=v["scmd_wdata"] ^ 1))
+        self.mutate("virtual_fp8_mlp_delay", lambda v, e: v["xw_en"] and v["xw_addr"] == 16, lambda v: v.update(xw_data=v["xw_data"] ^ 1))
 
     def test_diamond_executes_only_the_selected_arm(self):
         for name, arm in (("diamond_taken_delay", 2), ("diamond_fall_schedule", 1)):
