@@ -53,7 +53,7 @@ class StreamSchedulingTest(unittest.TestCase):
                     (ROOT / f"test/examples/handoff_{name}_tile.mlir").read_text())
                 result = run(OPT, source, "--schedule-atlas-stream")
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stderr.count("warning:"), 1, result.stderr)
+                self.assertEqual(result.stderr.count("warning:"), 0, result.stderr)
                 in_order = stream(run(OPT, source, "--insert-atlas-delays").stdout)
                 scheduled = stream(result.stdout)
 
@@ -73,7 +73,11 @@ class StreamSchedulingTest(unittest.TestCase):
                 pop = next(i for i, (op, f, _) in enumerate(scheduled)
                            if op == "mxu_pop" and "unit = 0" in f)
                 self.assertGreaterEqual(issue[pop] - issue[matmul], 64)
+                # The back edge lands on the loop's first op, not on the
+                # drain its fall-through entry needs.
                 self.assertEqual(scheduled[branch_target(scheduled)][0], "scalar_load")
+                verified = run(OPT, result.stdout, "--verify-atlas-timing")
+                self.assertEqual(verified.returncode, 0, verified.stderr)
 
                 checked = run(OPT, result.stdout, "--verify-atlas-machine-stream")
                 self.assertEqual(checked.returncode, 0, checked.stderr)

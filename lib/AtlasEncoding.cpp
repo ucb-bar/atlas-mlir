@@ -1,10 +1,15 @@
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Verifier.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
+#include <atomic>
 #include <optional>
 
 using namespace mlir;
@@ -241,12 +246,13 @@ static FailureOr<uint32_t> proveJalrTarget(
   return static_cast<uint32_t>(target);
 }
 
-LogicalResult mlir::atlas::collectAtlasWords(
-    ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words, bool llvmBlock) {
-  if (failed(verify(module))) return failure();
-  if (module->hasAttr("atlas.generated_from_virtual") &&
-      failed(verifyAtlasGeneratedSchedule(module)))
-    return failure();
+static std::atomic<unsigned> encodeCount{0};
+
+unsigned mlir::atlas::atlasWordEncodeCount() { return encodeCount; }
+
+LogicalResult mlir::atlas::encodeAtlasWords(
+    ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words) {
+  ++encodeCount;
   llvm::SmallVector<uint32_t> collected;
   llvm::SmallVector<Operation *> encodedOps;
   Value previous;
@@ -290,33 +296,56 @@ LogicalResult mlir::atlas::collectAtlasWords(
     module.emitError("branch or jump lacks its required delay-slot instruction");
     return failure();
   }
-  if (llvmBlock) {
-    for (auto [index, op] : llvm::enumerate(encodedOps)) {
-      if (auto jump = dyn_cast<JumpOp>(op)) {
-        if (jump.getKind() == "jalr") {
-          if (failed(proveJalrTarget(encodedOps, index, jump)))
-            return failure();
-          continue;
-        }
-      }
-      int64_t offsetBytes = 0;
-      // The generated I32 accessors expose raw unsigned bits. Interpret the
-      // encoded displacement as signed before validating backward targets.
-      if (auto branch = dyn_cast<BranchOp>(op))
-        offsetBytes = branch.getOffsetBytesAttr().getValue().getSExtValue();
-      else if (auto jump = dyn_cast<JumpOp>(op))
-        offsetBytes = jump.getOffsetAttr().getValue().getSExtValue();
-      else
+  words.append(collected.begin(), collected.end());
+  return success();
+}
+
+static LogicalResult checkLLVMBlockTargets(llvm::ArrayRef<Operation *> encodedOps) {
+  for (auto [index, op] : llvm::enumerate(encodedOps)) {
+    if (auto jump = dyn_cast<JumpOp>(op)) {
+      if (jump.getKind() == "jalr") {
+        if (failed(proveJalrTarget(encodedOps, index, jump)))
+          return failure();
         continue;
-      // ScalarCore.scala:269-270 applies the encoded byte displacement >> 1
-      // to its instruction-index PC. All targets must stay in this asm block.
-      int64_t target = static_cast<int64_t>(index) + offsetBytes / 2;
-      if (target < 0 || target >= static_cast<int64_t>(collected.size())) {
-        op->emitError("PC-relative target escapes the LLVM inline assembly block");
-        return failure();
       }
     }
+    int64_t offsetBytes = 0;
+    // The generated I32 accessors expose raw unsigned bits. Interpret the
+    // encoded displacement as signed before validating backward targets.
+    if (auto branch = dyn_cast<BranchOp>(op))
+      offsetBytes = branch.getOffsetBytesAttr().getValue().getSExtValue();
+    else if (auto jump = dyn_cast<JumpOp>(op))
+      offsetBytes = jump.getOffsetAttr().getValue().getSExtValue();
+    else
+      continue;
+    // ScalarCore.scala:269-270 applies the encoded byte displacement >> 1
+    // to its instruction-index PC. All targets must stay in this asm block.
+    int64_t target = static_cast<int64_t>(index) + offsetBytes / 2;
+    if (target < 0 || target >= static_cast<int64_t>(encodedOps.size())) {
+      op->emitError("PC-relative target escapes the LLVM inline assembly block");
+      return failure();
+    }
   }
-  words.append(collected.begin(), collected.end());
+  return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasArtifact(
+    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
+  if (failed(verify(module)) || failed(verifyAtlasTimingState(module))) return failure();
+  auto kind = classifyAtlasGeneratedArtifact(module);
+  if (failed(kind))
+    return failure();
+  bool generated = *kind == AtlasArtifactKind::Generated;
+  auto ctx = buildAtlasVerificationContext(module, generated);
+  if (failed(ctx))
+    return failure();
+  if (generated ? failed(verifyAtlasGeneratedSchedule(*ctx))
+                : ctx->timed && failed(verifyAtlasTiming(*ctx)))
+    return failure();
+  if (!ctx->stream && failed(encodeAtlasWords(module, ctx->words)))
+    return failure();
+  if (llvmBlock && failed(checkLLVMBlockTargets(ctx->ops)))
+    return failure();
+  words.append(ctx->words.begin(), ctx->words.end());
   return success();
 }

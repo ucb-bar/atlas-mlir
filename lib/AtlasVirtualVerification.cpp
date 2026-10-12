@@ -5,48 +5,134 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <iterator>
+#include <optional>
+#include <utility>
 
 using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+// The DRAM bytes [first, last) a virtual DMA launch moves, and whether it
+// writes them. The launch's op verifier proves its address and size.
+struct DRAMEffect {
+  std::optional<std::pair<uint64_t, uint64_t>> span;
+  bool write;
+};
+
+DRAMEffect dramEffect(Operation *launch) {
+  auto effect = [](Value address, Value size, bool write) {
+    std::optional<uint32_t> first = provenI32(address), bytes = provenI32(size);
+    DRAMEffect e{std::nullopt, write};
+    if (first && bytes)
+      e.span = {{*first, static_cast<uint64_t>(*first) + *bytes}};
+    return e;
+  };
+  return llvm::TypeSwitch<Operation *, DRAMEffect>(launch)
+      .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>([&](auto op) {
+        return effect(op.getDramByte(), op.getSizeBytes(), false);
+      })
+      .Case<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([&](auto op) {
+        return effect(op.getDramByte(), op.getSizeBytes(), true);
+      })
+      .Default([](Operation *) -> DRAMEffect {
+        llvm_unreachable("not a virtual DMA launch");
+      });
+}
+
+// The explicit transfers in flight within a block, completing in any order:
+// each handle and its launch.
 struct VirtualDMATransfers {
-  Value pending;
+  SmallVector<std::pair<Value, Operation *>, kMaxPendingVirtualDMA> pending;
 
   LogicalResult verify(Operation &op) {
     if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-      if (pending)
-        return op.emitOpError("must complete the pending DMA before another launch");
-      pending = op.getResult(1);
+      if (pending.size() == kMaxPendingVirtualDMA)
+        return op.emitOpError("must complete a pending DMA before another launch; at most ")
+               << kMaxPendingVirtualDMA << " may be pending";
+      for (auto [handle, launch] : pending)
+        if (virtualDMAConflict(&op, launch)) {
+          InFlightDiagnostic diagnostic = op.emitOpError(
+              "must not touch the DRAM bytes of a pending DMA transfer while either writes them");
+          diagnostic.attachNote(launch->getLoc()) << "pending transfer launched here";
+          return diagnostic;
+        }
+      pending.push_back({op.getResult(1), &op});
       return success();
     }
-    if (!pending || op.getOperand(1) != pending)
-      return op.emitOpError("must consume the current pending DMA transfer");
-    pending = Value{};
+    auto found = llvm::find_if(pending, [&](const auto &transfer) {
+      return transfer.first == op.getOperand(1);
+    });
+    if (found == pending.end())
+      return op.emitOpError("must consume a pending DMA transfer");
+    pending.erase(found);
     return success();
   }
 
   LogicalResult verifyClosed(Operation *where) {
-    if (pending)
+    if (!pending.empty())
       return where->emitOpError("must complete pending DMA before block exit");
     return success();
   }
 };
 
-// Track one current weight and accumulator per unit within a block.
+// Track the weights resident on each unit and the current version of each
+// live accumulator, at most one per hardware slot, within a block. A weight
+// stays resident while it has uses left, so every use finds it.
 struct VirtualMXUResources {
-  Value weights[2];
-  Value accumulators[2];
+  SmallVector<Value, kVirtualMXUSlots> weights[2];
+  SmallVector<Value, kVirtualMXUSlots> accumulators[2];
+  llvm::DenseMap<Value, unsigned> remainingUses;
+
+  // The resident weights of `unit` that something still uses.
+  SmallVector<Value, kVirtualMXUSlots> &liveWeights(unsigned unit) {
+    llvm::erase_if(weights[unit],
+                   [&](Value weight) { return remainingUses[weight] == 0; });
+    return weights[unit];
+  }
+
+  LogicalResult startAccumulator(Operation &op, unsigned unit, Value acc,
+                                 StringRef verb) {
+    if (accumulators[unit].size() == kVirtualMXUSlots)
+      return op.emitOpError("cannot ")
+             << verb << " a unit with " << kVirtualMXUSlots
+             << " live accumulators";
+    accumulators[unit].push_back(acc);
+    return success();
+  }
+
+  // Replace the live accumulator version `acc` with `next`, or retire it.
+  LogicalResult consumeAccumulator(Operation &op, unsigned unit, Value acc,
+                                   Value next) {
+    auto found = llvm::find(accumulators[unit], acc);
+    if (found == accumulators[unit].end())
+      return op.emitOpError("must consume the current accumulator version; "
+                            "stale accumulator handle");
+    if (next)
+      *found = next;
+    else
+      accumulators[unit].erase(found);
+    return success();
+  }
 
   LogicalResult verify(Operation &op) {
     if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
-      unsigned unit =
-          cast<VirtualMXUWeightType>(load.getWeight().getType()).getUnit();
+      Value weight = load.getWeight();
+      unsigned unit = cast<VirtualMXUWeightType>(weight.getType()).getUnit();
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
-      weights[unit] = load.getWeight();
+      if (liveWeights(unit).size() == kVirtualMXUSlots)
+        return op.emitOpError("cannot load a weight on a unit with ")
+               << kVirtualMXUSlots << " live weights";
+      weights[unit].push_back(weight);
+      remainingUses[weight] =
+          std::distance(weight.use_begin(), weight.use_end());
       return success();
     }
     if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
@@ -54,51 +140,34 @@ struct VirtualMXUResources {
       unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
-      if (accumulators[unit])
-        return op.emitOpError("cannot load a unit with a live accumulator");
-      accumulators[unit] = acc;
-      return success();
+      return startAccumulator(op, unit, acc, "load");
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
       unsigned unit = cast<VirtualMXUAccType>(reset.getAcc().getType()).getUnit();
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
-      if (weights[unit] != reset.getWeight())
-        return op.emitOpError(
-            "must use the current weight handle; stale weight handle");
-      if (accumulators[unit])
-        return op.emitOpError("cannot reset a unit with a live accumulator");
-      accumulators[unit] = reset.getAcc();
-      return success();
+      --remainingUses[reset.getWeight()];
+      return startAccumulator(op, unit, reset.getAcc(), "reset");
     }
     if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
       unsigned unit =
           cast<VirtualMXUAccType>(accumulate.getAcc().getType()).getUnit();
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
-      if (weights[unit] != accumulate.getWeight())
-        return op.emitOpError(
-            "must use the current weight handle; stale weight handle");
-      if (accumulators[unit] != accumulate.getAcc())
-        return op.emitOpError("must consume the current accumulator version; "
-                              "stale accumulator handle");
-      accumulators[unit] = accumulate.getNextAcc();
-      return success();
+      --remainingUses[accumulate.getWeight()];
+      return consumeAccumulator(op, unit, accumulate.getAcc(),
+                                accumulate.getNextAcc());
     }
     Value acc = op.getOperand(1);
     unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
     if (unit > 1)
       return op.emitOpError("MXU unit must be in [0, 1]");
-    if (accumulators[unit] != acc)
-      return op.emitOpError("must consume the current accumulator version; "
-                            "stale accumulator handle");
-    accumulators[unit] = Value{};
-    return success();
+    return consumeAccumulator(op, unit, acc, Value{});
   }
 
   LogicalResult verifyClosed(Operation *where) {
     for (unsigned unit = 0; unit < 2; ++unit)
-      if (accumulators[unit])
+      if (!accumulators[unit].empty())
         return where->emitOpError(
                    "must read out the live MXU accumulator before block exit; unit ")
                << unit;
@@ -166,7 +235,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
         return operation.emitOpError(
             "pending DMA handles cannot cross CFG blocks");
     }
-    if (dma.pending &&
+    if (!dma.pending.empty() &&
         isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
             VirtualPackFP8Op>(operation))
       return operation.emitOpError(
@@ -236,11 +305,13 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       unsigned unit = matmul.getUnit();
       if (unit > 1)
         return matmul.emitOpError("unit must be in [0, 1]");
-      if (mxu.accumulators[unit])
+      if (!mxu.accumulators[unit].empty())
         return matmul.emitOpError(
             "legacy virtual_mxu_matmul cannot overwrite a live accumulator");
-      // Legacy matmul overwrites weights and completes readout internally.
-      mxu.weights[unit] = Value{};
+      // Legacy matmul overwrites a weight slot and completes readout internally.
+      if (!mxu.liveWeights(unit).empty())
+        return matmul.emitOpError(
+            "legacy virtual_mxu_matmul cannot overwrite a live weight");
       continue;
     }
     if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualPackFP8Op,
@@ -406,4 +477,13 @@ LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
 
 void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
+}
+
+bool mlir::atlas::virtualDMAConflict(Operation *a, Operation *b) {
+  DRAMEffect x = dramEffect(a), y = dramEffect(b);
+  if (!x.write && !y.write)
+    return false;
+  // A span that cannot be proven may touch anything.
+  return !x.span || !y.span ||
+         (x.span->first < y.span->second && y.span->first < x.span->second);
 }

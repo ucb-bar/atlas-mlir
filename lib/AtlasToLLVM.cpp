@@ -1,7 +1,8 @@
 #include "Atlas/AtlasToLLVM.h"
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
-#include "Atlas/AtlasRTLVerification.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -62,8 +63,8 @@ struct ConvertAtlasToLLVMPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::verifySelectedAtlasRTLTiming(module)) ||
-        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
+        failed(mlir::atlas::verifyAtlasArtifact(module, true, words))) {
       signalPassFailure();
       return;
     }
@@ -89,8 +90,8 @@ struct ConvertAtlasToLLVMCallsPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     llvm::SmallVector<uint32_t> words;
-    if (failed(mlir::atlas::verifySelectedAtlasRTLTiming(module)) ||
-        failed(mlir::atlas::collectAtlasWords(module, words, true))) {
+    if (failed(mlir::atlas::verifyAtlasTimingState(module, true)) ||
+        failed(mlir::atlas::verifyAtlasArtifact(module, true, words))) {
       signalPassFailure();
       return;
     }
@@ -181,11 +182,9 @@ struct FinalizeAtlasLLVMCallsPass
 
     OpBuilder builder(module.getContext());
     ModuleOp reconstructed = ModuleOp::create(module.getLoc());
-    if (Attribute evidence = module->getAttr("atlas.rtl_evidence"))
-      reconstructed->setAttr("atlas.rtl_evidence", evidence);
-    if (module->hasAttr("atlas.generated_from_virtual"))
-      reconstructed->setAttr("atlas.generated_from_virtual",
-                             builder.getUnitAttr());
+    for (StringRef name : mlir::atlas::atlasPreservedModuleAttrs())
+      if (Attribute value = module->getAttr(name))
+        reconstructed->setAttr(name, value);
     builder.setInsertionPointToStart(reconstructed.getBody());
     OperationState startState(module.getLoc(), "atlas.start");
     auto stateType = mlir::atlas::StateType::get(module.getContext());
@@ -232,8 +231,8 @@ struct FinalizeAtlasLLVMCallsPass
     }
     llvm::SmallVector<uint32_t> checked;
     if (stagedWords.empty() ||
-        failed(mlir::atlas::verifySelectedAtlasRTLTiming(reconstructed)) ||
-        failed(mlir::atlas::collectAtlasWords(reconstructed, checked, true)) ||
+        failed(mlir::atlas::verifyAtlasTimingState(reconstructed, true)) ||
+        failed(mlir::atlas::verifyAtlasArtifact(reconstructed, true, checked)) ||
         !llvm::equal(stagedWords, checked)) {
       module.emitError("structured Atlas LLVM calls disagree with checked encodings");
       signalPassFailure();

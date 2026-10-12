@@ -109,26 +109,14 @@ struct Footprint {
   bool writeDuringRead = false;
   int vpuLive = 0;
   int doneAge = 0;
-  bool dmaAsync = false; // completes only at a matching channel wait
-  // Selected DMA: VMEM is exclusive from launch until the matching wait.
-  bool exclusiveVmemUntilWait = false;
-  bool serializeWithDMA = false; // drains before, and waits after, a DMA
   int dmaCycles = 0;
   std::string error;
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
+// Supplied timing rules; the built-in footprintOf provider is the unqualified
+// npu-model rtl-match model, not an independently qualified RTL contract.
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
-
-// A selected target supplies every footprint and drops the model's MXU
-// sequencing, MXU capacity and VPU sharing rules.
-struct TargetTiming {
-  FootprintResolver resolver;
-  Footprint resolve(const Instr &in, const RegValues &regs) const {
-    return resolver ? resolver(in, regs) : footprintOf(in, regs);
-  }
-  explicit operator bool() const { return bool(resolver); }
-};
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
 const char *edgeKindName(EdgeKind k);
@@ -141,7 +129,7 @@ struct Dependence {
 
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
-                      const Footprint &fb, const TargetTiming &target = {});
+                      const Footprint &fb);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
@@ -164,23 +152,19 @@ struct DepGraph {
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, 8>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    uint32_t dmaRegs = 0xFFFFFFFE,
-                    const IncomingDma *incomingDma = nullptr,
-                    const TargetTiming &target = {});
-uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
+                    const IncomingDma *incomingDma = nullptr);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
 
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
-int unitCapacity(Unit u, int index, const TargetTiming &target = {});
+int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
 int dmaTransferCycles(long long bytes);
 
 class ReservationTable {
 public:
-  ReservationTable(const TargetTiming &target = {}) : target_(target) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);
@@ -188,7 +172,6 @@ public:
   void extendForWait(int cycle);
 
 private:
-  TargetTiming target_;
   struct PortUse {
     int reg = -1, row = -1;
     bool shareable = false;
