@@ -1,9 +1,9 @@
 """Compiler issue gaps never undercut the RTL pair sweeps (rtl_extract.op_pairs.v1).
 
 For each pair record, a program issues the pair's two operations with the pair file's operand
-overlays (tools/rtl_extract/targets/atlas/pairs), separated by DELAY, and --verify-atlas-rtl-timing
+overlays (tools/rtl_extract/targets/atlas/pairs), separated by DELAY, and --verify-atlas-timing
 finds the smallest accepted issue gap; it must be at least the record's stable_gap. Pairs the
-selected resolver rejects are reported as unsupported. An informational legacy run lists pairs
+selected provider rejects are reported as unsupported. An informational legacy run lists pairs
 whose built-in rules (insert-atlas-delays without a selection) fall below stable_gap.
 
 ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated); the default is every pairs-*.json next to
@@ -19,7 +19,7 @@ import sys
 import unittest
 
 from test_delay_insertion import EMIT, OPT, ROOT, addi, nop, program, run, stream
-from test_rtl_timing import FACTS, HALT, RESOLVER, VERIFY, delay, selection, vls, word_base
+from test_rtl_timing import FACTS, HALT, PROVIDER, VERIFY, delay, selection, vls, word_base
 from test_rtl_vmul_timing import pack, reduce, unary, vli, vmul
 from test_rtl_xlu_timing import transpose
 
@@ -171,7 +171,7 @@ def issue_gap(printed, first, second):
 
 
 def selected_gap(setup, first, second, limit):
-    """Smallest gap accepted by --verify-atlas-rtl-timing, None if none up to `limit`, or the rejection."""
+    """Smallest gap accepted by --verify-atlas-timing under the selected provider, None if none up to `limit`, or the rejection."""
     option = selection()
     widest = run(OPT, gapped(setup, first, second, limit), option, VERIFY)
     if widest.returncode:
@@ -234,15 +234,15 @@ class RTLGapCoverageTest(unittest.TestCase):
             print(f"  {record['name']:34} stable {record['stable_gap']:4} legacy {str(gap):>4} {'<' if low else ''}")
         print(f"  below stable_gap: {below or 'none'}")
 
-    def test_unsupported_pairs_are_resolver_rejections(self):
-        # A rejection at the widest gap must come from the selected resolver, not from a malformed program.
+    def test_unsupported_pairs_are_provider_rejections(self):
+        # A rejection at the widest gap must come from the selected provider, not from a malformed program.
         for _, record in self.records:
             built = pair_program(record)
             if built:
                 result = run(OPT, gapped(*built, LIMIT), selection(), VERIFY)
                 if result.returncode:
                     with self.subTest(pair=record["name"]):
-                        self.assertIn(RESOLVER, result.stderr)
+                        self.assertIn(PROVIDER, result.stderr)
 
 
 if __name__ == "__main__":

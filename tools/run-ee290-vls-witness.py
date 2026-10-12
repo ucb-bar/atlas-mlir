@@ -22,7 +22,7 @@ def commands(args, out, digest):
     pass_name = "--insert-atlas-delays" if args.schedule == "delay" else "--schedule-atlas-stream"
     host = out / "host.riscv"
     return [
-        [str(args.atlas_opt), str(args.program), select, pass_name, "--verify-atlas-rtl-timing", "-o", str(out / "final.mlir")],
+        [str(args.atlas_opt), str(args.program), select, pass_name, "--verify-atlas-timing", "-o", str(out / "final.mlir")],
         [str(args.atlas_emit), str(out / "final.mlir")],
         [str(args.host_cc), "-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror", "-fno-common", "-fno-builtin-printf", "-march=rv64imafd", "-mabi=lp64d",
          "-mcmodel=medany", "-specs=htif_nano.specs", "-static", "-T", "htif.ld", f"-I{out}", str(HOST), "-o", str(host)],

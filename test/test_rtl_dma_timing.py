@@ -4,7 +4,7 @@ import re
 import unittest
 
 from test_delay_insertion import OPT, EMIT, addi, run
-from test_rtl_timing import CONSUMERS, FACTS, HALT, MARKER, RESOLVER, VERIFY, delay, selected, vls, word_base
+from test_rtl_timing import CONSUMERS, FACTS, HALT, MARKER, PROVIDER, VERIFY, delay, selected, vls, word_base
 
 
 def config(reg=5, channel=0):
@@ -48,7 +48,7 @@ class SelectedDMATimingTest(unittest.TestCase):
             self.assertEqual(exported.returncode, 0, exported.stderr)
             data = json.loads(exported.stdout)
             self.assertEqual(data["schema"], "atlas.resolved_rtl_timing.v1")
-            self.assertEqual(data["resolver"], {"id": RESOLVER, "version": 1, "dma_policy": "wait"})
+            self.assertEqual(data["provider"], {"id": PROVIDER, "version": 1, "dma_policy": "wait"})
             self.assertIn("dma.load.ch0..7", data["applicability"]["supported_operations"])
             self.assertIsNone(data["applicability"]["dma_domain"]["completion_latency"])
             launch = next(i for i in data["instructions"] if i["mnemonic"] == "dma.load.ch0")
@@ -136,7 +136,7 @@ class SelectedDMATimingTest(unittest.TestCase):
         plain = selected([HALT], VERIFY)
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertNotIn("dma =", plain.stdout)
-        self.assertEqual(json.loads(run(EMIT, plain.stdout, "--rtl-timing-json").stdout)["resolver"]["dma_policy"],
+        self.assertEqual(json.loads(run(EMIT, plain.stdout, "--rtl-timing-json").stdout)["provider"]["dma_policy"],
                          "none")
 
 

@@ -186,7 +186,7 @@ class SelectedMXUTimingTest(unittest.TestCase):
                     self.assertNotEqual(run(OPT, without_delays(result.stdout), entrypoint).returncode, 0)
         # The marker publishes only after the last accumulator write and both stores.
         self.check([mxu("matmul", 0), addi(1, 0, 1), MARKER, delay(100), nop(), HALT], False, VERIFY,
-                   diagnostic="requires all prior asynchronous writes to be complete")
+                   diagnostic="atlas.complete waits for prior fixed-latency work")
 
     def test_facts_drive_the_mxu_boundaries(self):
         matmul = mxu("matmul", 1)

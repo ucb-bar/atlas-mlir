@@ -293,7 +293,7 @@ class VerilatorReplayTest(unittest.TestCase):
                                            lambda e: hold(e, "VMEM bank", load).__setitem__("unit", "MXU port"),
                                            lambda e: e["instructions"][index].__setitem__("epoch_offset", e["instructions"][index]["epoch_offset"] + 1),
                                            lambda e: e["evidence"].__setitem__("op_timing_sha256", "0" * 64),
-                                           lambda e: e["resolver"].__setitem__("id", "other")]):
+                                           lambda e: e["provider"].__setitem__("id", "other")]):
             changed = copy.deepcopy(export); mutate(changed)
             with self.subTest(position=position): self.rejects(name, export=changed)
         # A policy hold or lifetime may outlast the engine's own activity.

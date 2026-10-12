@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Bind `atlas-emit --rtl-timing-json` footprints to decoded Verilator observations.
 
-No timing rules live here. Static streams come from the compiler's resolver; every dynamic block
+No timing rules live here. Static streams come from the compiler's provider; every dynamic block
 instance binds to its block's offsets, and DMA completion is anchored to the actual matching WAIT.
 """
 
-RESOLVER = 'atlas.op_timing.serialized.v1'
+PROVIDER = 'rtl-op-timing-v1'
 SCHEMA = 'atlas.resolved_rtl_timing.v1'
 BRANCHES = {0: 'beq', 1: 'bne', 4: 'blt', 5: 'bge', 6: 'bltu', 7: 'bgeu'}
 # Observed engine -> (selected mnemonic, the engine's own hold unit).
@@ -80,7 +80,7 @@ def decoded_operands(word):
         mnemonic = 'dma.' + ('wait' if word >> 25 else 'config') + '.ch' + str((word >> 12) & 7)
         if not word >> 25: result.update(rs1=rs1)
     elif opcode == 0x73 and (word >> 12) & 7 == 1:
-        mnemonic = 'csrrw'; result.update(rd=rd, rs1=rs1, immediate=immediate)
+        mnemonic = 'csrrw'; result.update(rd=rd, rs1=rs1, immediate=immediate, release=immediate == 0xC10)
     elif word == 0x73:
         mnemonic = 'ecall'
     else: raise BindingError('unsupported word in finite export binding')
@@ -88,8 +88,8 @@ def decoded_operands(word):
 
 
 def check_header(export, facts_sha256):
-    require(export.get('schema') == SCHEMA and export.get('resolver', {}).get('id') == RESOLVER, 'export schema/resolver mismatch')
-    require(export['resolver'].get('dma_policy') == 'wait', 'DMA wait policy required')
+    require(export.get('schema') == SCHEMA and export.get('provider', {}).get('id') == PROVIDER, 'export schema/provider mismatch')
+    require(export['provider'].get('dma_policy') == 'wait', 'DMA wait policy required')
     require(export.get('evidence', {}).get('op_timing_sha256') == facts_sha256, 'export was not resolved from the selected facts')
     for item in export['instructions']:
         require((item['mnemonic'], item['operands']) == decoded_operands(item['word_u32']), 'exported instruction metadata differs from selected word')
@@ -149,7 +149,7 @@ def bind_command(item, command, waits):
     for stream in footprint['accesses']:
         if stream['resource'] in ('mreg', 'vmem') or stream['resource'] in ('acc', 'weight') and stream['step']: exported += finite_stream(stream, issue)
         else: require(stream['resource'] in ('xreg', 'ereg') or mxu and stream['resource'] == 'weight', 'unbound access resource ' + str(stream['resource']))
-    require(sorted(exported) == sorted(points), 'observed access resource/address/age differs from resolver footprint')
+    require(sorted(exported) == sorted(points), 'observed access resource/address/age differs from provider footprint')
     reads = {(e.get('port', 0), e['id'], e['row']): e for e in command['reads'] if e.get('resource', 'mreg') in ('mreg', 'vmem')}
     require(len(reads) == len(command['responses']) == len({(e.get('port', 0), e.get('resource'), e['id'], e['row']) for e in command['reads'] if e.get('resource', 'mreg') in ('mreg', 'vmem')}), 'incomplete or duplicate source stream')
     seen = set()

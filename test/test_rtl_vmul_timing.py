@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from test_delay_insertion import OPT, EMIT, addi, nop, run, without_delays
-from test_rtl_timing import (CONSUMERS, FACTS, HALT, MARKER, RESOLVER, VERIFY, block, delay, export,
+from test_rtl_timing import (CONSUMERS, FACTS, HALT, MARKER, PROVIDER, VERIFY, block, delay, export,
                              facts, facts_variant, selected, vls)
 
 
@@ -96,11 +96,11 @@ class SelectedVmulTimingTest(unittest.TestCase):
             for consumer in CONSUMERS:
                 with self.subTest(pair=pair, consumer=consumer):
                     self.check([vmul(*pair), HALT], accepted, consumer)
-        # Physical bank aliases (register mod 32) pass the dialect verifier and fail in the resolver.
+        # Physical bank aliases (register mod 32) pass the dialect verifier and fail in the provider.
         for op in (unary("mov", 0, 32), reduce("row_sum", 32, 0), reduce("col_sum", 0, 0),
                    pack("bf16_to_fp8", 0, 1), pack("fp8_to_bf16", 4, 4), unary("square", 2, 34)):
             with self.subTest(op=op):
-                self.assertIn(RESOLVER, self.check([op, HALT], False, CONSUMERS[0]).stderr)
+                self.assertIn(PROVIDER, self.check([op, HALT], False, CONSUMERS[0]).stderr)
 
     def test_facts_drive_the_serialized_boundary(self):
         # The next VPU command may issue at next_issue_age and the XLU at first_free_age; a VSTORE waits only
@@ -108,8 +108,8 @@ class SelectedVmulTimingTest(unittest.TestCase):
         from test_rtl_xlu_timing import transpose
         record = block(facts(), "vpu.mul")
         written = max(record["next_issue_age"], record["events"]["write0"]["last_age"]) + 1
-        for next_op, boundary, reason in ((vmul(6, 8, 10), record["next_issue_age"], "serialized engine admission"),
-                                          (transpose(8, 12), record["first_free_age"], "serialized engine admission"),
+        for next_op, boundary, reason in ((vmul(6, 8, 10), record["next_issue_age"], "timing resource conflict"),
+                                          (transpose(8, 12), record["first_free_age"], "timing resource conflict"),
                                           (vls("vstore", 4), written, "m4 reserved for writing"),
                                           (vls("vstore", 12), 1, None)):
             for gap in (boundary - 1, boundary) if boundary > 1 else (boundary,):

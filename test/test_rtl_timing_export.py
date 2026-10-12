@@ -8,7 +8,7 @@ import struct
 import unittest
 
 from test_delay_insertion import OPT, EMIT, ROOT, run, without_delays
-from test_rtl_timing import CONSUMERS, FACTS, RESOLVER, VERIFY, VLS_COPY, VLS_LOOP, block, facts, selected, selection, sha256
+from test_rtl_timing import CONSUMERS, FACTS, PROVIDER, VERIFY, VLS_COPY, VLS_LOOP, block, facts, selected, selection, sha256
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -66,7 +66,7 @@ class RTLTimingExportTest(unittest.TestCase):
         self.assertEqual(value["target_config"], "EE290SimConfig")
         self.assertEqual(value["qualification"], "conditional")
         self.assertIs(value["scheduling_qualified"], False)
-        self.assertEqual(value["resolver"], {"id": RESOLVER, "version": 1, "dma_policy": "none"})
+        self.assertEqual(value["provider"], {"id": PROVIDER, "version": 1, "dma_policy": "none"})
         self.assertEqual(value["evidence"], {"op_timing_schema": "merlin.op_timing.v1",
                                              "op_timing_sha256": sha256(FACTS),
                                              "hardware_ir_sha256": document["hw_ir"]["sha256"]})
@@ -116,7 +116,7 @@ class RTLTimingExportTest(unittest.TestCase):
         changed = re.sub(r'op_timing_sha256 = "[0-9a-f]{64}"', 'op_timing_sha256 = "' + "0" * 64 + '"', source)
         self.assertNotEqual(changed, source)
         for source, diagnostic in ((VLS_COPY.read_text(), "requires selected evidence"),
-                                   (without_delays(source), "serialized engine admission"),
+                                   (without_delays(source), "insufficient issue spacing"),
                                    (changed, "mismatch")):
             result = self.export(source)
             self.assertNotEqual(result.returncode, 0)

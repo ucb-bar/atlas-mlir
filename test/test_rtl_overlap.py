@@ -11,7 +11,7 @@ import unittest
 
 from test_delay_insertion import OPT, EMIT, nop, program, run, stream
 from test_rtl_gap_coverage import gapped, issue_cycles, issue_gap
-from test_rtl_timing import (CONSUMERS, FACTS, HALT, RESOLVER, VERIFY, block, export, facts, facts_variant,
+from test_rtl_timing import (CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, export, facts, facts_variant,
                              selection, vls, word_base)
 from test_rtl_vmul_timing import reduce, unary, vmul
 from test_rtl_xlu_timing import transpose
@@ -128,9 +128,7 @@ class SelectedOverlapTest(unittest.TestCase):
                 if gap > 1:
                     rejected = self.verify(gapped(setup, a, b, gap - 1))
                     self.assertNotEqual(rejected.returncode, 0)
-                    # MXU commands are admitted by the same holds through the reservation check.
-                    self.assertRegex(rejected.stderr, "serialized engine admission: .* busy; issue cycle .*, first "
-                                                      "permitted cycle|selected RTL reservation: .* busy")
+                    self.assertRegex(rejected.stderr, "timing resource conflict: .* busy; issue cycle .*, first permitted cycle")
 
     def test_both_consumers_issue_at_the_boundary(self):
         document = facts()
@@ -155,7 +153,7 @@ class SelectedOverlapTest(unittest.TestCase):
                     with self.subTest(next_issue_age=value, consumer=consumer):
                         result = run(OPT, program([add, HALT]), selection(path), consumer)
                         self.assertNotEqual(result.returncode, 0)
-                        self.assertIn(f"{RESOLVER}: vpu.add: facts block lacks a next_issue_age", result.stderr)
+                        self.assertIn(f"{PROVIDER}: vpu.add: facts block lacks a next_issue_age", result.stderr)
             # A later next_issue_age moves only the VPU->VPU boundary.
             path = facts_variant(directory, lambda d: block(d, "vpu.add").update(next_issue_age=60))
             for b, boundary in ((relu, 60), (SECOND["xlu"][2], 66)):

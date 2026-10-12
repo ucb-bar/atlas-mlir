@@ -581,7 +581,7 @@ def run(args):
             label = name if consumer == 'final' else f'{name}_{consumer}'; out = work / label; out.mkdir(exist_ok=True)
             (out / 'program.mlir').write_text(case.mlir())
             if consumer == 'final': shutil.copyfile(out / 'program.mlir', out / 'final.mlir')
-            else: sh([opt, out / 'program.mlir', select, flags[consumer], '--verify-atlas-rtl-timing', '-o', out / 'final.mlir'], args.timeout)
+            else: sh([opt, out / 'program.mlir', select, flags[consumer], '--verify-atlas-timing', '-o', out / 'final.mlir'], args.timeout)
             text = sh([emit, out / 'final.mlir'], args.timeout)
             if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+', text): raise ReplayError('invalid emitted words')
             (out / 'program.hex').write_text(text); words = [int(w, 16) for w in text.split()]
@@ -594,7 +594,7 @@ def run(args):
             if consumer == 'final':
                 # The compiler serializes these engines: bind footprints of a delay-inserted reference, not issue offsets.
                 (out / 'reference.mlir').write_text(case.mlir([op for op in case.ops if op[0] != 'delay']))
-                sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-rtl-timing', '-o', out / 'reference-final.mlir'], args.timeout)
+                sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-timing', '-o', out / 'reference-final.mlir'], args.timeout)
                 export = json.loads(sh([emit, '--rtl-timing-json', out / 'reference-final.mlir'], args.timeout))
                 binding = BIND.bind_footprints(export, events, digest)
             else:

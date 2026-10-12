@@ -27,7 +27,7 @@ class WitnessTest(unittest.TestCase):
         schedule, emit, build, simulate = WITNESS.commands(args, Path("/out"), "abc")
         self.assertEqual(schedule[:3], ["opt", "p.mlir", "--select-atlas-rtl-evidence=op-timing=/f.json op-timing-sha256=abc dma=wait"])
         self.assertIn("--schedule-atlas-stream", schedule)
-        self.assertIn("--verify-atlas-rtl-timing", schedule)
+        self.assertIn("--verify-atlas-timing", schedule)
         self.assertEqual(emit, ["emit", "/out/final.mlir"])
         self.assertEqual(build[-3:], [str(WITNESS.HOST), "-o", "/out/host.riscv"])
         self.assertEqual(simulate[0], "simv")
