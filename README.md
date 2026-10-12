@@ -75,7 +75,10 @@ CTest runs the portable tests without hardware. Tests that require the selected
 RTL, assembler, or standalone core need their corresponding `ATLAS_RTL_ROOT`,
 `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
 `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN` paths. A skip is
-not execution evidence. For a direct Python test run with another build tree,
+not execution evidence. Selected-core runs go through
+`test/selected_core_runtime.py`, which names the core's `scalar/halt_now` halt
+state to the ModeLIR runner (the pinned runner validates `halt_signal` against
+the manifest, so aliasing `io_halted` in `peek` is not enough). For a direct Python test run with another build tree,
 set `ATLAS_OOT_BIN_DIR` to its `bin` directory. The source-bound inventory
 check and its required source pins are documented in the
 [mode census](docs/selected-variant-census.md).
