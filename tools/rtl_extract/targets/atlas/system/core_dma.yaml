@@ -1,0 +1,197 @@
+# AtlasCore as in core.yaml, with the DMA engine live: its VMEM requests reach the VMEM arbiter and its TileLink
+# port is served by a declared responder (external memory answers every beat `latency` ages after it is accepted,
+# in order; request acceptance follows `accept`). DMA operands come from the register-file cuts at launch; the
+# transfer's VMEM accesses are recorded only when the arbiter grants them. Channel busy (the level DMA.WAIT polls,
+# engine busy or the launch register) is part of `busy`, so a run drains only when every launched transfer has retired.
+engine: core_dma
+module: AtlasCore
+description: >
+  One instruction per command age through the RTL decoder into AtlasCore with a live DMA engine; the external
+  memory is a declared responder. DMA words follow lib/AtlasEncoding.cpp (load rd=x6 rs1=x1 rs2=x2, store rd=x3
+  rs1=x8 rs2=x2, channel in [14:12]); VLS words as in core.yaml.
+limit: 450
+unreset:                      # core.yaml's list plus the DMA command slots and per-source metadata, written at
+                              # enqueue/A-fire and read only under slotActive or a response for that source
+  - {path: lsu, name: vloadVmemBase}
+  - {path: lsu, name: vstoreMregId}
+  - {path: lsu, name: vstoreVmemBase}
+  - {path: mxu0/seq, name: inflight_0_accSel}
+  - {path: mxu0/seq, name: inflight_0_rowsWritten}
+  - {path: mxu0/seq, name: inflight_1_accSel}
+  - {path: mxu0/seq, name: inflight_1_rowsWritten}
+  - {path: mxu0/seq, name: inflight_2_accSel}
+  - {path: mxu0/seq, name: inflight_2_rowsWritten}
+  - {path: mxu0/seq, name: p0Cmd_mregId}
+  - {path: mxu0/seq, name: p0Cmd_op}
+  - {path: mxu0/seq, name: p0Row}
+  - {path: mxu0/seq, name: p1Cmd_mregId}
+  - {path: mxu0/seq, name: p1Cmd_op}
+  - {path: mxu0/seq, name: p1Row}
+  - {path: mxu1/seq, name: inflight_0_accSel}
+  - {path: mxu1/seq, name: inflight_0_rowsWritten}
+  - {path: mxu1/seq, name: inflight_1_accSel}
+  - {path: mxu1/seq, name: inflight_1_rowsWritten}
+  - {path: mxu1/seq, name: p0Cmd_accSel}
+  - {path: mxu1/seq, name: p0Cmd_mregId}
+  - {path: mxu1/seq, name: p0Cmd_op}
+  - {path: mxu1/seq, name: p0Cmd_weightSlot}
+  - {path: mxu1/seq, name: p0Row}
+  - {path: mxu1/seq, name: p1Cmd_accSel}
+  - {path: mxu1/seq, name: p1Cmd_mregId}
+  - {path: mxu1/seq, name: p1Cmd_op}
+  - {path: mxu1/seq, name: p1Cmd_weightSlot}
+  - {path: mxu1/seq, name: p1Row}
+  - {path: xlu, name: activeCmd_srcMregId}
+  - {path: dma, match: 'commandQueue_[0-7]_(opType|channelId|vmemLineAddr|transferSize)'}
+  - {path: dma, match: 'sourceMeta_[0-9]+_(isLoad|slotIdx|lineAddr)'}
+inputs:
+  instruction: 0x00000013     # addi x0, x0, 0
+  fire: 0
+  address: 0
+  host_start: 0
+  dma_size: 0
+  dma_vmem_addr: 0
+  dma_dram_addr: 0
+  io_imemTL_a_valid: 0
+  io_imemTL_a_bits_opcode: 0
+  io_imemTL_a_bits_param: 0
+  io_imemTL_a_bits_size: 0
+  io_imemTL_a_bits_source: 0
+  io_imemTL_a_bits_address: 0
+  io_imemTL_a_bits_mask: 0
+  io_imemTL_a_bits_data: 0
+  io_imemTL_a_bits_corrupt: 0
+  io_imemTL_d_ready: 0
+  io_csrTL_a_valid: 0
+  io_csrTL_a_bits_opcode: 0
+  io_csrTL_a_bits_param: 0
+  io_csrTL_a_bits_size: 0
+  io_csrTL_a_bits_source: 0
+  io_csrTL_a_bits_address: 0
+  io_csrTL_a_bits_mask: 0
+  io_csrTL_a_bits_data: 0
+  io_csrTL_a_bits_corrupt: 0
+  io_csrTL_d_ready: 0
+  io_dmaTL_a_ready: 0
+  io_dmaTL_d_valid: 0
+  io_dmaTL_d_bits_opcode: 0
+  io_dmaTL_d_bits_param: 0
+  io_dmaTL_d_bits_size: 0
+  io_dmaTL_d_bits_source: 0
+  io_dmaTL_d_bits_sink: 0
+  io_dmaTL_d_bits_denied: 0
+  io_dmaTL_d_bits_data: 0
+  io_dmaTL_d_bits_corrupt: 0
+  io_vmemTL_a_valid: 0
+  io_vmemTL_a_bits_opcode: 0
+  io_vmemTL_a_bits_param: 0
+  io_vmemTL_a_bits_size: 0
+  io_vmemTL_a_bits_source: 0
+  io_vmemTL_a_bits_address: 0
+  io_vmemTL_a_bits_mask: 0
+  io_vmemTL_a_bits_data: 0
+  io_vmemTL_a_bits_corrupt: 0
+  io_vmemTL_d_ready: 0
+cuts:
+  instruction: {path: scalar, value: s1_instr}
+  fire: {path: scalar, value: s1_fire}
+  address: {instance: scalar/alu, result: io_out}
+  host_start: {path: scalar, value: hostStart}
+  dma_size: {instance: scalar, result: io_dmaCmd_bits_size}         # DMA operands come from the register file
+  dma_vmem_addr: {instance: scalar, result: io_dmaCmd_bits_vmemAddr}
+  dma_dram_addr: {instance: scalar, result: io_dmaCmd_bits_addr}
+responders:
+  dram:                       # external memory answering after the testbench's 43 cycles; requests always accepted,
+                              # so a transfer's timing does not depend on the age it launches at (pair sweeps shift
+                              # the second operation); the testbench's request stalls are covered on Verilator
+    request: {valid: io_dmaTL_a_valid, ready: io_dmaTL_a_ready, tag: io_dmaTL_a_bits_source,
+              fields: {address: io_dmaTL_a_bits_address, opcode: io_dmaTL_a_bits_opcode}}
+    response: {valid: io_dmaTL_d_valid, ready: io_dmaTL_d_ready, tag: io_dmaTL_d_bits_source}
+    latency: 43
+    accept: [1]
+probes:
+  lsu_busy: {instance: lsu, result: io_vecBusy}
+  vpu_busy: {instance: vpu, result: io_busy}
+  xlu_busy: {instance: xlu, result: io_busy}
+  dma_channel0: {instance: dma, result: io_channelBusy_0}
+  dma_channel1: {instance: dma, result: io_channelBusy_1}
+  dma_launched0: {path: "", value: dmaLaunched_0}                   # with channel busy: what DMA.WAIT polls
+  dma_launched1: {path: "", value: dmaLaunched_1}
+  dma_vmem_write_grant: {instance: vmem, result: io_dmaWriteGrant}  # DMA access performed this cycle
+  dma_vmem_write_bank: {instance: dma, result: io_vmemWrite_bits_bankIdx}
+  dma_vmem_write_line: {instance: dma, result: io_vmemWrite_bits_bankAddr}
+  dma_vmem_read_grant: {instance: vmem, result: io_dmaReadGrant}
+  dma_vmem_read_bank: {instance: dma, result: io_vmemRead_bits_bankIdx}
+  dma_vmem_read_line: {instance: dma, result: io_vmemRead_bits_bankAddr}
+  lsu_vmem_read: {instance: lsu, result: io_vmemVecRead_valid}
+  lsu_vmem_read_bank: {instance: lsu, result: io_vmemVecRead_bits_bankIdx}
+  lsu_vmem_read_row: {instance: lsu, result: io_vmemVecRead_bits_bankAddr}
+  lsu_vmem_write: {instance: lsu, result: io_vmemVecWrite_valid}
+  lsu_vmem_write_bank: {instance: lsu, result: io_vmemVecWrite_bits_bankIdx}
+  lsu_vmem_write_row: {instance: lsu, result: io_vmemVecWrite_bits_bankAddr}
+  lsu_mreg_read: {instance: lsu, result: io_mregReadReq_valid}
+  lsu_mreg_read_id: {instance: lsu, result: io_mregReadReq_bits_mregId}
+  lsu_mreg_read_row: {instance: lsu, result: io_mregReadReq_bits_row}
+  lsu_mreg_write: {instance: lsu, result: io_mregWriteReq_valid}
+  lsu_mreg_write_id: {instance: lsu, result: io_mregWriteReq_bits_mregId}
+  lsu_mreg_write_row: {instance: lsu, result: io_mregWriteReq_bits_row}
+  vpu_read0: {instance: vpu, result: io_mregReadReq0_valid}
+  vpu_read0_id: {instance: vpu, result: io_mregReadReq0_bits_mregId}
+  vpu_read0_row: {instance: vpu, result: io_mregReadReq0_bits_row}
+  vpu_read1: {instance: vpu, result: io_mregReadReq1_valid}
+  vpu_read1_id: {instance: vpu, result: io_mregReadReq1_bits_mregId}
+  vpu_read1_row: {instance: vpu, result: io_mregReadReq1_bits_row}
+  vpu_write0: {instance: vpu, result: io_mregWriteReq0_valid}
+  vpu_write0_id: {instance: vpu, result: io_mregWriteReq0_bits_mregId}
+  vpu_write0_row: {instance: vpu, result: io_mregWriteReq0_bits_row}
+  vpu_write1: {instance: vpu, result: io_mregWriteReq1_valid}
+  vpu_write1_id: {instance: vpu, result: io_mregWriteReq1_bits_mregId}
+  vpu_write1_row: {instance: vpu, result: io_mregWriteReq1_bits_row}
+  xlu_read: {instance: xlu, result: io_mregReadReq_valid}
+  xlu_read_id: {instance: xlu, result: io_mregReadReq_bits_mregId}
+  xlu_read_row: {instance: xlu, result: io_mregReadReq_bits_row}
+  xlu_write: {instance: xlu, result: io_mregWriteReq_valid}
+  xlu_write_id: {instance: xlu, result: io_mregWriteReq_bits_mregId}
+  xlu_write_row: {instance: xlu, result: io_mregWriteReq_bits_row}
+busy: [lsu_busy, vpu_busy, xlu_busy, dma_channel0, dma_launched0, dma_channel1, dma_launched1]
+events:
+  vmem_read: {valid: lsu_vmem_read, fields: {bankIdx: lsu_vmem_read_bank, bankAddr: lsu_vmem_read_row}, row: bankAddr}
+  vmem_write: {valid: lsu_vmem_write, fields: {bankIdx: lsu_vmem_write_bank, bankAddr: lsu_vmem_write_row}, row: bankAddr}
+  mreg_read: {valid: lsu_mreg_read, fields: {mregId: lsu_mreg_read_id, row: lsu_mreg_read_row}, row: row}
+  mreg_write: {valid: lsu_mreg_write, fields: {mregId: lsu_mreg_write_id, row: lsu_mreg_write_row}, row: row}
+  vpu_read0: {valid: vpu_read0, fields: {mregId: vpu_read0_id, row: vpu_read0_row}, row: row, split_by: mregId}
+  vpu_read1: {valid: vpu_read1, fields: {mregId: vpu_read1_id, row: vpu_read1_row}, row: row, split_by: mregId}
+  vpu_write0: {valid: vpu_write0, fields: {mregId: vpu_write0_id, row: vpu_write0_row}, row: row, split_by: mregId}
+  vpu_write1: {valid: vpu_write1, fields: {mregId: vpu_write1_id, row: vpu_write1_row}, row: row, split_by: mregId}
+  xlu_read: {valid: xlu_read, fields: {mregId: xlu_read_id, row: xlu_read_row}, row: row}
+  xlu_write: {valid: xlu_write, fields: {mregId: xlu_write_id, row: xlu_write_row}, row: row}
+  dma_vmem_write: {valid: dma_vmem_write_grant, fields: {bankIdx: dma_vmem_write_bank, bankAddr: dma_vmem_write_line}}
+  dma_vmem_read: {valid: dma_vmem_read_grant, fields: {bankIdx: dma_vmem_read_bank, bankAddr: dma_vmem_read_line}}
+operations:                   # VLS/DMA VMEM address = VMEM line << 3; banks hold 8192 lines; a tile is 32 lines
+  dma_load0:                  # ch0: DRAM 0x90000000 -> bank 3, lines 0..31
+    commands: {0: {fire: 1, instruction: 0x0020837b, dma_vmem_addr: 196608, dma_dram_addr: 0x90000000, dma_size: 1024}}
+  dma_load1:                  # ch1: DRAM 0x90001000 -> bank 4, lines 0..31
+    commands: {0: {fire: 1, instruction: 0x0020937b, dma_vmem_addr: 262144, dma_dram_addr: 0x90001000, dma_size: 1024}}
+  dma_load1_bank3:            # ch1: DRAM 0x90001000 -> bank 3, lines 64..95
+    commands: {0: {fire: 1, instruction: 0x0020937b, dma_vmem_addr: 197120, dma_dram_addr: 0x90001000, dma_size: 1024}}
+  dma_store0:                 # ch0: bank 3, lines 0..31 -> DRAM 0x90002000
+    commands: {0: {fire: 1, instruction: 0x022401fb, dma_vmem_addr: 196608, dma_dram_addr: 0x90002000, dma_size: 1024}}
+  dma_store1:                 # ch1: bank 4, lines 0..31 -> DRAM 0x90003000
+    commands: {0: {fire: 1, instruction: 0x022411fb, dma_vmem_addr: 262144, dma_dram_addr: 0x90003000, dma_size: 1024}}
+  dma_store1_bank3:           # ch1: bank 3, lines 64..95 -> DRAM 0x90003000
+    commands: {0: {fire: 1, instruction: 0x022411fb, dma_vmem_addr: 197120, dma_dram_addr: 0x90003000, dma_size: 1024}}
+  vload:                      # m5 <- bank 1, line 0
+    commands: {0: {fire: 1, instruction: 0x00000287, address: 65536}}
+  vload_bank3:                # m42 <- bank 3, line 1024
+    commands: {0: {fire: 1, instruction: 0x00001507, address: 204800}}
+  vstore:                     # m9 -> bank 2, line 0
+    commands: {0: {fire: 1, instruction: 0x00002487, address: 131072}}
+  vstore_bank3:               # m17 -> bank 3, line 32 (adjacent to the DMA tile)
+    commands: {0: {fire: 1, instruction: 0x00002887, address: 196864}}
+  vstore_bank3_tile:          # m17 -> bank 3, line 0 (the DMA tile itself)
+    commands: {0: {fire: 1, instruction: 0x00002887, address: 196608}}
+  transpose:                  # m3 -> m7
+    commands: {0: {fire: 1, instruction: 0x000063eb}}
+  add:                        # m10:11 <- m2:3 + m6:7
+    commands: {0: {fire: 1, instruction: 0x00304557}}
+invariants: {}                # every assertion in AtlasCore

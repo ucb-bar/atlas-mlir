@@ -38,7 +38,7 @@ import yaml
 
 from . import derive
 from .control import require
-from .runner import RECIPES, failure, failures, observed, schedule
+from .runner import RECIPES, failure, failures, group_valid, observed, schedule
 from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
 
 FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared"})
@@ -46,17 +46,31 @@ PAIR_KEYS = ({"first", "second", "gaps"}, {"description", "first_inputs", "secon
 SCHEMA = "rtl_extract.op_pairs.v1"
 
 
-def validate(raw, spec, where):
-    keys(raw, *FILE_KEYS, where)
-    require(raw["engine"] == spec["engine"], f"{where}: engine {raw['engine']!r} does not match its spec")
-    require(isinstance(raw["pairs"], dict) and raw["pairs"], f"{where}: no pairs")
+def groups(raw, spec, where):
+    """Validates the ``equivalent`` and ``ignore`` groups shared by pair and sequence files."""
     equivalent = raw.setdefault("equivalent", {})
-    members = [g for groups in equivalent.values() for g in groups]
+    members = [g for names in equivalent.values() for g in names]
     require(set(members) <= set(spec["events"]) and len(members) == len(set(members)),
             f"{where}: equivalent must name each event group at most once")
     raw.setdefault("ignore", [])
     require(isinstance(raw["ignore"], list) and set(raw["ignore"]) <= set(spec["events"]) and not set(raw["ignore"]) & set(members),
             f"{where}: ignore must name event groups outside equivalent")
+
+
+def overlay_inputs(spec, overlay, where):
+    """Validates an operand overlay: integer values on declared (or command-prefixed) inputs."""
+    prefix = f"{spec['command']}_" if spec.get("command") else None
+    require(isinstance(overlay, dict) and all(isinstance(v, int) for v in overlay.values()),
+            f"{where}: must map inputs to integers")
+    undeclared = {i for i in overlay if i not in spec["inputs"] and not (prefix and i.startswith(prefix))}
+    require(not undeclared, f"{where}: drives undeclared inputs {sorted(undeclared)}")
+
+
+def validate(raw, spec, where):
+    keys(raw, *FILE_KEYS, where)
+    require(raw["engine"] == spec["engine"], f"{where}: engine {raw['engine']!r} does not match its spec")
+    require(isinstance(raw["pairs"], dict) and raw["pairs"], f"{where}: no pairs")
+    groups(raw, spec, where)
     if "invariants" in raw:
         invariants(raw["invariants"], f"{where}: invariants")
     raw.setdefault("shared", [])
@@ -64,7 +78,6 @@ def validate(raw, spec, where):
     for entry in raw["shared"]:
         keys(entry, {"reason"}, {"input", "path"}, f"{where}: shared")
         require(("input" in entry) != ("path" in entry), f"{where}: shared entries name one input or one path")
-    prefix = f"{spec['command']}_" if spec.get("command") else None
     signals = set(observed(spec))
     for name, pair in raw["pairs"].items():
         at = f"{where}: pairs.{name}"
@@ -72,11 +85,7 @@ def validate(raw, spec, where):
         keys(pair, *PAIR_KEYS, at)
         for side in ("first", "second"):
             require(pair[side] in spec["operations"], f"{at}: unknown operation {pair[side]!r}")
-            overlay = pair.get(f"{side}_inputs", {})
-            require(isinstance(overlay, dict) and all(isinstance(v, int) for v in overlay.values()),
-                    f"{at}: {side}_inputs must map inputs to integers")
-            undeclared = {i for i in overlay if i not in spec["inputs"] and not (prefix and i.startswith(prefix))}
-            require(not undeclared, f"{at}: {side}_inputs drives undeclared inputs {sorted(undeclared)}")
+            overlay_inputs(spec, pair.get(f"{side}_inputs", {}), f"{at}: {side}_inputs")
         require(ages(pair["gaps"])[0] >= 1, f"{at}: gaps start at 1")
         for guard in guards(spec, pair):
             keys(guard, {"signal"}, {"bit"}, f"{at}: guards")
@@ -153,25 +162,51 @@ def clear(value, bit):
     return value is not None and not (value >> bit & 1 if bit is not None else value)
 
 
+def merge(schedules):
+    """One timeline from per-operation schedules, or ``None`` when two commands share an age."""
+    merged = {}
+    for schedule in schedules:
+        if set(merged) & set(schedule):
+            return None
+        merged.update(schedule)
+    return merged
+
+
+def judge(circuit, spec, raw, timeline, issues, expected, explain=difference):
+    """Outcome of one run, shared by pairs and chains: ``{guards, invariants, events, error, accepted}`` (failed parts
+    first). ``issues`` lists ``(age, guards, suffix)``: each guard must be clear at that issue age (``suffix`` ends its
+    message); ``expected`` is the sorted event multiset; ``explain(expected, actual)`` words an event mismatch."""
+    if timeline is None:
+        return {"accepted": False, "error": "command ages collide"}
+    try:
+        trace, problem = run(circuit, spec, timeline)
+    except ValueError as error:
+        return {"accepted": False, "error": str(error)}
+    blocked = [f"guard {g['signal']}" + (f"[{g['bit']}]" if "bit" in g else "") + f" set{suffix}"
+               for age, gs, suffix in issues for g in gs if not clear(trace[age]["signals"][g["signal"]], g.get("bit"))]
+    actual = events(trace, raw["equivalent"], ignore=raw["ignore"])
+    outcome = {"guards": blocked, "invariants": failures(circuit, trace),
+               "events": None if actual == expected else explain(expected, actual), "error": problem}
+    outcome = {k: v for k, v in outcome.items() if v}
+    return {**outcome, "accepted": not outcome}
+
+
+def isolate(circuit, spec, raw, label, op, overlay):
+    """``(events, groups)`` of ``op`` issued alone; a drain failure or a firing invariant is an error."""
+    trace, problem = run(circuit, spec, commands(spec, op, overlay))
+    require(problem is None, f"{label}{op} alone: {problem}")
+    fired = failures(circuit, trace)
+    if fired:
+        raise ValueError(f"{label}{op} alone: {failure(fired[0])}")
+    return events(trace, raw["equivalent"], ignore=raw["ignore"]), {g for e in trace for g in e["events"]} - set(raw["ignore"])
+
+
 def check(circuit, spec, raw, pair, alone, gap):
     """Per-gap outcome: ``{gap, accepted, guards, invariants, events, error}`` (failed parts only)."""
     first = commands(spec, pair["first"], pair.get("first_inputs", {}))
     second = commands(spec, pair["second"], pair.get("second_inputs", {}), gap)
-    if set(first) & set(second):
-        return {"gap": gap, "accepted": False, "error": "command ages collide"}
-    try:
-        trace, problem = run(circuit, spec, {**first, **second})
-    except ValueError as error:
-        return {"gap": gap, "accepted": False, "error": str(error)}
-    issue = min(second)
-    blocked = [f"guard {g['signal']}" + (f"[{g['bit']}]" if "bit" in g else "") + " set"
-               for g in guards(spec, pair) if not clear(trace[issue]["signals"][g["signal"]], g.get("bit"))]
     expected = sorted(alone[0] + [(g, a + gap, f) for g, a, f in alone[1]])
-    actual = events(trace, raw["equivalent"], ignore=raw["ignore"])
-    outcome = {"gap": gap, "guards": blocked, "invariants": failures(circuit, trace),
-               "events": None if actual == expected else difference(expected, actual), "error": problem}
-    outcome = {k: v for k, v in outcome.items() if v}
-    return {**outcome, "accepted": len(outcome) == 1}
+    return {"gap": gap, **judge(circuit, spec, raw, merge([first, second]), [(min(second), guards(spec, pair), "")], expected)}
 
 
 def describe(outcome):
@@ -180,7 +215,7 @@ def describe(outcome):
         return None
     parts = outcome.get("guards", []) + [failure(f) for f in outcome.get("invariants", [])]
     parts += [outcome[k] for k in ("error", "events") if outcome.get(k)]
-    if outcome.get("guards") and len(outcome) == 3:
+    if outcome.get("guards") and not set(outcome) - {"gap", "accepted", "guards"}:
         parts.append("events unchanged")
     return "; ".join(parts)
 
@@ -188,6 +223,16 @@ def describe(outcome):
 def trial(circuit, spec, raw, pair, alone, gap):
     """``None`` if the second may issue at ``gap``, otherwise the reason it may not."""
     return describe(check(circuit, spec, raw, pair, alone, gap))
+
+
+def limits(results):
+    """``(min_gap, stable_gap)`` of ``[(gap, reason)]``: the smallest accepted gap and the smallest from which all pass."""
+    stable = None
+    for gap, reason in reversed(results):
+        if reason is not None:
+            break
+        stable = gap
+    return min((g for g, r in results if r is None), default=None), stable
 
 
 def runs(results):
@@ -208,7 +253,7 @@ def shared_control(circuit, spec, raw, groups):
     require(hasattr(circuit, "reach"), "shared-control check needs a single circuit")
     stop = ["".join("/" + n for n in e["path"].split("/") if n) for e in raw["shared"] if "path" in e]
     declared = {e["input"] for e in raw["shared"] if "input" in e} | {spec["clock"], spec["reset"]}
-    cones = [circuit.reach(sorted({spec["events"][g]["valid"] for g in side}), stop) for side in groups]
+    cones = [circuit.reach(sorted({group_valid(spec, g) for g in side}), stop) for side in groups]
 
     def label(key):
         attrs = circuit.nodes[key][2]
@@ -246,25 +291,15 @@ def extract(document, raw, spec, jobs=1):
         for side in ("first", "second"):
             key = (pair[side], tuple(sorted(pair.get(f"{side}_inputs", {}).items())))
             if key not in isolated:
-                trace, problem = run(circuit, concrete, commands(concrete, pair[side], dict(key[1])))
-                require(problem is None, f"{name}: {pair[side]} alone: {problem}")
-                fired = failures(circuit, trace)
-                if fired:
-                    raise ValueError(f"{name}: {pair[side]} alone: {failure(fired[0])}")
-                isolated[key] = (events(trace, raw["equivalent"], ignore=raw["ignore"]),
-                                 {g for e in trace for g in e["events"]} - set(raw["ignore"]))
+                isolated[key] = isolate(circuit, concrete, raw, f"{name}: ", pair[side], dict(key[1]))
             alone.append(isolated[key][0])
             groups.append(isolated[key][1])
         outcomes = sweep(circuit, concrete, raw, pair, alone, ages(pair["gaps"]), jobs)
         results = [(o["gap"], describe(o)) for o in outcomes]
-        stable = None
-        for gap, reason in reversed(results):
-            if reason is not None:
-                break
-            stable = gap
+        low, high = limits(results)
         records.append({"name": f"{spec['engine']}.{name}", "engine": spec["engine"], "module": spec["module"],
                         "first": pair["first"], "second": pair["second"], "gaps": [results[0][0], results[-1][0]],
-                        "min_gap": min((g for g, r in results if r is None), default=None), "stable_gap": stable,
+                        "min_gap": low, "stable_gap": high,
                         "guards": guards(concrete, pair), "results": runs(results),
                         "rejected": [o for o in outcomes if not o["accepted"]],
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} gaps, "

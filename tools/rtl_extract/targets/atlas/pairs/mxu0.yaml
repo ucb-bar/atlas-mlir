@@ -1,8 +1,10 @@
-# MXU0 (systolic array) pairs; second command on mreg 22. No frontend guard exists for MXU commands, so the event
-# comparison alone decides. Busy flags are levels, not per-command events, and are left out.
+# MXU0 (systolic array) pairs; second command on mreg 22. No frontend guard exists for MXU commands, so the sequencer's
+# issue assertions (invariants) and the event comparison decide.
+# Busy flags are levels, not per-command events, and are left out.
 engine: mxu0
 description: Second MXU0 command issued while the first is in flight, same or other accumulator / weight slot (slot is the first's unless named other_slot).
 ignore: [data_busy, compute_busy]
+invariants: {}           # every SystolicArrayTop assertion
 pairs:
   matmul_matmul_same_acc:
     first: matmul

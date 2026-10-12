@@ -1,8 +1,10 @@
 # MXU1 (inner-product trees) chains at uniform spacing; operation i is issued i * gap ages after the first. No frontend guard
-# exists for MXU commands, so the event comparison alone decides. Busy flags are levels, not per-command events.
+# exists for MXU commands, so the sequencer's issue assertions (invariants) and the event comparison decide. Busy flags
+# are levels, not per-command events.
 engine: mxu1
 description: Chains of 2-6 MXU commands; accumulator and weight-slot relations between neighbors.
 ignore: [data_busy, compute_busy]
+invariants: {}           # every InnerProductTreesTop assertion
 sequences:
   matmul_same_acc_same_slot:
     description: back-to-back matmuls, same acc and same slot between neighbors
@@ -93,7 +95,7 @@ expect:
   matmul_acc_same_acc: {2: 32, 3: 32, 4: 32, 5: 32}
   matmul_acc_other_acc: {2: 32, 3: 32, 4: 32, 5: 32}
   matmul_then_matmul_acc_same_acc: {2: 32, 3: 32, 4: 32, 5: 32}
-  push_acc_matmul_acc_same_acc: {2: 33, 3: 33, 4: 33, 5: 33}
+  push_acc_matmul_acc_same_acc: {2: 33, 3: 34, 4: 34, 5: 34}
   push_acc_matmul_acc_other_acc: {2: 33, 3: 33, 4: 33, 5: 33}
   matmul_pop_same_acc: {2: 4, 3: 16, 4: 16, 5: 16}
   matmul_pop_other_acc: {2: 1, 3: 16, 4: 16, 5: 16}

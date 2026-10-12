@@ -53,6 +53,59 @@ def sweep(module, sequence, spec=QUEUE_SPEC, extra=None):
     return {r["length"]: r for r in sequences.extract({"modules": [module]}, raw, spec_)}
 
 
+def chains(module, sequence, invariants=None, spec=synthetic.TWO):
+    """``{length: record}`` for one sequence of the two-counter engine, whose one assertion fires when B is issued while A is busy."""
+    spec_ = synthetic.load(spec)
+    raw = {"engine": "two", "sequences": {"s": sequence}, **({} if invariants is None else {"invariants": invariants})}
+    return {r["length"]: r for r in sequences.extract({"modules": [module]}, sequences.validate(raw, spec_, "two.yaml"), spec_)}
+
+
+class InvariantSequenceTests(unittest.TestCase):
+    ABA = {"ops": [{"op": "a"}, {"op": "b"}], "lengths": "2..3", "gaps": "1..6"}
+
+    def test_firing_invariant_rejects_chain_spacings(self):
+        records = chains(synthetic.engines(), self.ABA, {})
+        self.assertEqual({n: (r["min_gap"], r["stable_gap"]) for n, r in records.items()}, {2: (4, 4), 3: (4, 4)})
+        self.assertEqual(records[2]["results"][0], {"from": 1, "to": 3, "result": "invariant B issued while A busy (/) fired"})
+        self.assertEqual(records[3]["invariants"], {"checked": 1, "excluded": []})
+        self.assertNotIn("invariants", chains(synthetic.engines(), self.ABA)[2])
+        self.assertEqual(chains(synthetic.engines(), self.ABA)[2]["stable_gap"], 1)
+
+    def test_excluded_invariant_is_accepted_with_its_reason(self):
+        record = chains(synthetic.engines(), self.ABA, {"exclude": [{"message": "B issued", "reason": "independent counters"}]})[2]
+        self.assertEqual(record["stable_gap"], 1)
+        self.assertEqual(record["invariants"]["excluded"], [{"path": "", "message": "B issued while A busy", "reason": "independent counters"}])
+
+    def test_chain_and_pair_agree_on_the_outcome(self):
+        """One acceptance implementation: a two-operation chain and the pair of the same operations give the same reasons."""
+        record = chains(synthetic.engines(), self.ABA, {})[2]
+        pair = synthetic.two_pairs(synthetic.engines(), {})
+        self.assertEqual((record["results"], record["min_gap"], record["stable_gap"]), (pair["results"], pair["min_gap"], pair["stable_gap"]))
+
+    def test_unknown_invariant_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, r"a alone: invariant B issued while A busy \(/\) unknown"):
+            chains(synthetic.engines(unknown=True), self.ABA, {})
+
+    def test_invariants_fail_closed(self):
+        spec = synthetic.load(synthetic.TWO)
+        for label, raw, message in (
+                ("missing reason", {"exclude": [{"message": "x"}]}, "missing keys"),
+                ("unknown key", {"only": []}, "unknown keys")):
+            with self.subTest(label), self.assertRaisesRegex(ValueError, message):
+                sequences.validate({"engine": "two", "invariants": raw, "sequences": {"s": self.ABA}}, spec, "two.yaml")
+        with self.assertRaisesRegex(ValueError, "match no assertion"):
+            chains(synthetic.engines(), self.ABA, {"exclude": [{"message": "nothing", "reason": "r"}]})
+        with self.assertRaisesRegex(ValueError, "exported without assertions"):
+            chains({k: v for k, v in synthetic.engines().items() if k != "assertions"}, self.ABA, {})
+
+    def test_prepared_spec_replaces_the_spec_invariants(self):
+        spec = synthetic.load({**synthetic.TWO, "invariants": {}})
+        raw = sequences.validate({"engine": "two", "invariants": {"exclude": [{"message": "B issued", "reason": "r"}]}, "sequences": {"s": self.ABA}}, spec, "two.yaml")
+        self.assertTrue(pairs.needs_assertions(raw, spec))
+        records = sequences.extract({"modules": [synthetic.engines()]}, raw, spec)
+        self.assertEqual(records[0]["stable_gap"], 1)
+
+
 class SyntheticSequenceTests(unittest.TestCase):
     def test_two_deep_queue_rejects_the_third_command(self):
         records = sweep(queue(), {"ops": [{"op": "go"}], "lengths": "2..4", "gaps": "1..5"})
@@ -136,28 +189,37 @@ class HardwareSequenceTests(unittest.TestCase):
 
     def check(self, name):
         raw, spec = sequences.load("atlas", [name])[name]
-        document = load_document(HW_IR, modules(spec), EXPORTER)
+        document = load_document(HW_IR, modules(spec), EXPORTER, pairs.needs_assertions(raw, spec))
         self.assertTrue(raw["expect"])
-        window = copy.deepcopy(raw)
         for sequence, lengths in raw["expect"].items():
-            stables = list(lengths.values())
-            window["sequences"][sequence]["lengths"] = f"{min(lengths)}..{max(lengths)}"
-            window["sequences"][sequence]["gaps"] = f"{max(1, min(stables) - 1)}..{max(stables) + 1}"
-        window["sequences"] = {s: window["sequences"][s] for s in raw["expect"]}
-        for record in sequences.extract(document, window, spec, self.JOBS):
-            expected = raw["expect"][record["sequence"]].get(record["length"])
-            if expected is None:
-                continue
-            with self.subTest(record["name"]):
-                self.assertEqual(record["stable_gap"], expected, record["results"])
-                if expected > record["gaps"][0]:
-                    self.assertEqual(record["min_gap"], expected, record["results"])
+            for length, expected in lengths.items():
+                window = copy.deepcopy(raw)
+                window["sequences"] = {sequence: {**raw["sequences"][sequence], "lengths": length, "gaps": f"{max(1, expected - 1)}..{expected + 1}"}}
+                record = sequences.extract(document, window, spec, self.JOBS)[0]
+                with self.subTest(record["name"]):
+                    self.assertEqual(record["stable_gap"], expected, record["results"])
+                    if expected > record["gaps"][0]:
+                        self.assertEqual(record["min_gap"], expected, record["results"])
 
     def test_mxu0(self):
         self.check("mxu0")
 
     def test_mxu1(self):
         self.check("mxu1")
+
+    def test_mxu_assertions_bind_chains(self):
+        """Without invariants the event comparison alone accepts MXU0's push_acc, matmul_acc, push_acc chain from gap 64;
+        the AccumulationBuffers check (the load targets the buffer the compute is still writing) moves it to 94."""
+        raw, spec = sequences.load("atlas", ["mxu0"])["mxu0"]
+        document = load_document(HW_IR, modules(spec), EXPORTER, True)
+        window = copy.deepcopy(raw)
+        window["sequences"] = {"s": {**raw["sequences"]["push_acc_matmul_acc_same_acc"], "lengths": 3, "gaps": "63..64"}}
+        bare = {k: v for k, v in window.items() if k != "invariants"}
+        self.assertEqual(sequences.extract(document, bare, spec, self.JOBS)[0]["stable_gap"], 64)
+        record = sequences.extract(document, window, spec, self.JOBS)[0]
+        self.assertIsNone(record["stable_gap"])
+        self.assertRegex(record["results"][-1]["result"], "invariant AccumulationBuffers: compute write and load target the same buffer")
+        self.assertEqual(record["invariants"]["excluded"], [])
 
     def test_mxu1_boundary_block_is_the_chain_at_gap_32(self):
         """The facts block ``matmul_acc_at_32`` (a push_acc_fp8 then a matmul_acc at age 32, accepted but writing no
