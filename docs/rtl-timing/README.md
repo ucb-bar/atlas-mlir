@@ -1,6 +1,6 @@
 # RTL timing for Atlas
 
-Per-operation engine timing is computed from the Atlas RTL rather than typed into the compiler. A C++ exporter turns CIRCT HW IR into JSON, a Python simulator executes each engine's control logic cycle by cycle, and the resulting facts (`merlin.op_timing.v1`) drive scheduling, delay insertion and final verification in the compiler. The compiler supplies instruction structure; the facts supply the numbers.
+Per-operation engine timing is computed from the Atlas RTL rather than typed into the compiler. A C++ exporter turns CIRCT HW IR into JSON, a Python simulator executes each engine's control logic cycle by cycle, and the resulting facts (`merlin.op_timing.v1`) become the `rtl-op-timing-v1` timing provider that drives scheduling, delay insertion and final verification in the compiler. The compiler supplies instruction structure; the facts supply the numbers.
 
 ![Chisel and SystemVerilog converge in CIRCT core dialects](figures/chisel_and_sv_circt_convergence.svg)
 
@@ -8,10 +8,10 @@ Per-operation engine timing is computed from the Atlas RTL rather than typed int
 
 1. **Retain.** Lower the selected FIRRTL to HW IR with `firtool`.
 2. **Extract.** `tools/extract-rtl-timing.py` exports the engine modules and evaluates the per-engine specs in `tools/rtl_extract/targets/atlas/`. Ports come from bundle naming, memory response latency is measured on the memory module, and command codes come from ISA words through the RTL decoder. See the [extractor reference](../../tools/rtl_extract/README.md).
-3. **Select.** `--select-atlas-rtl-evidence` loads the facts file by SHA-256 and records the selection on the module. The `atlas.op_timing.serialized.v1` resolver then answers footprint queries for scheduling, delay insertion, `--verify-atlas-rtl-timing`, `atlas-emit` and the LLVM handoff.
+3. **Select.** `--select-atlas-rtl-evidence` loads the facts file by SHA-256 and records the selection as `atlas.rtl_evidence` on the module. The selection makes `rtl-op-timing-v1` the module's timing provider: scheduling, delay insertion, `--verify-atlas-timing`, `atlas-emit` and the LLVM handoff take footprints, dependences, DMA rules and reservations from it (see [the provider](#the-provider)).
 4. **Check.** The extractor tests, a compiler cross-check and end-to-end simulations validate the facts; see [verification](verification.md).
 
-Without a selection the compiler's built-in rules apply and behavior is unchanged.
+Without a selection the compiler's built-in rules (`npu-model-rtl-match-v1`) apply and behavior is unchanged.
 
 ## Reproduce
 
@@ -29,11 +29,15 @@ Select the facts in the compiler, then schedule and verify:
 ```sh
 atlas-opt prog.mlir \
   --select-atlas-rtl-evidence="op-timing=facts.json op-timing-sha256=$(sha256sum facts.json | cut -d' ' -f1) dma=wait" \
-  --schedule-atlas-stream --verify-atlas-rtl-timing -o final.mlir
+  --schedule-atlas-stream --verify-atlas-timing -o final.mlir
 atlas-emit --rtl-timing-json final.mlir > resolved.json
 ```
 
-`--insert-atlas-delays` replaces `--schedule-atlas-stream` for delay insertion only. `dma=wait` is optional and enables DMA (see below). `atlas-emit --rtl-timing-json` fails without output if the stream is unsafe, uses an unsupported operation, or lacks a valid selection; it reports the resolved footprints of the final instruction stream.
+`--insert-atlas-delays` replaces `--schedule-atlas-stream` for delay insertion only. `dma=wait` is optional and enables DMA (see below). `atlas-emit --rtl-timing-json` is a mode of its own: it fails without output if the stream is untimed or unsafe, uses an unsupported operation, or lacks a valid selection; it reports the resolved footprints of the final instruction stream. A virtual program is verified, scheduled and lowered untimed first (`--verify-atlas-virtual-stream --schedule-atlas-virtual --lower-atlas-virtual-to-machine`), then selected and timed the same way; selecting before lowering also works, since the lowering carries the selection.
+
+## The provider
+
+`rtl-op-timing-v1` (`lib/AtlasRTLSelection.cpp`) is a complete [timing provider](../dialect-reference.md#generated-artifact-checks) registered in the compiler library beside the model. The timing passes choose a provider by `provider=<id>`, else the retained `atlas.timing_provider`, else `rtl-op-timing-v1` when the module carries `atlas.rtl_evidence`, else the model; the model is refused on a module with selected evidence. The provider resolves every footprint from the facts (`lib/AtlasRTLEvidence.cpp`), orders work by the data dependences the footprints imply, drains VMEM work before a DMA launch, excludes VMEM and every engine while a transfer is pending, reserves every unit exclusively, and bounds the program at 32,768 words and 1,000,000 issue cycles. Its scope admits one pending transfer waited on its own channel, blocks that start idle and reach ECALL, and `ADDI`/`LUI` delay slots; a DELAY immediately before a branch, jump or halt is rejected, so the timing passes end such stalls on a NOP. The common verifier (`--verify-atlas-timing`, also run by `atlas-emit` and the LLVM passes) checks the final stream under it; a stream that carries a selection but no timing metadata is checked at those boundaries too, while `atlas-emit --allow-untimed` inspects an untimed lowering without a timing claim. `--schedule-atlas-virtual` costs virtual operations from the same footprints and reservations on canonical operands when a selection is present or `provider=rtl-op-timing-v1` is given; DMA transfers keep the model's transfer estimate, since completion is not a fact.
 
 ## Scope and assumptions
 
@@ -46,10 +50,11 @@ atlas-emit --rtl-timing-json final.mlir > resolved.json
 - The compiler supports VLS, XLU, all VPU operations, MXU commands on both units (weight and accumulator push, matmul with or without accumulation, FP8/BF16 pop), scalar `lw`/`seld`/`sw`, `addi`/`lui`/`delay`/`ecall`/marker, and DMA under `dma=wait`.
 - Each MXU command holds both MXUs and the VPU, XLU and VLS paths through its last event, so MXU work is not overlapped. A matmul keeps its weight slot until its last accumulator write, since weight reads are not extracted.
 - Branches, loops and joins are accepted when every engine is idle and no DMA is pending at each block boundary; each block is verified from an idle state with register values merged over all paths. Branches read their registers at issue and a taken branch executes only its delay slot (ADDI or LUI). Addresses that change between loop iterations are unknown at the loop header and rejected. `--rtl-timing-json` gives each instruction's block and block-relative issue cycle, and each block's successors and earliest successor issue.
+- Scalar ALU operations (including the `xor`, `slt`, `sltu`, `xori` and `sltiu` the virtual lowering emits), `seli`, `lw`/`seld`/`sw` with known addresses, `csrrw x0, 0xC10` and `ecall` are structural: they read and write at issue with no facts numbers. A VPU operation's register operands must lie in distinct physical banks (register mod 32); the allocator may place two BF16 pairs sixteen colors apart in one bank, which the provider rejects by name rather than repairing.
 
 ### DMA
 
-A DMA launch captures its scalar operands and the global DRAM base, so scalar registers and the base (set synchronously by `dma_config`) may be reused immediately. The transfer's VMEM and DRAM effects stay in flight until a `dma.wait` on the same channel. Under `dma=wait` the compiler allows one pending transfer; all VMEM accesses are excluded while it is pending, and a new launch, completion marker or halt requires every transfer to have been waited. Empty, wrong-channel and stale waits are rejected, and a delay cannot replace a wait. Issue coordinates across a wait are lower bounds; the resolved export reports wait-relative issue epochs and marks completion ages unknown.
+A DMA launch captures its scalar operands and the global DRAM base, so scalar registers and the base (set synchronously by `dma_config`) may be reused immediately. The transfer's VMEM and DRAM effects stay in flight until a `dma.wait` on the same channel. Under `dma=wait` the provider allows one pending transfer; all VMEM accesses and engine commands are excluded while it is pending, and a new launch, completion marker or halt requires every transfer to have been waited. Empty, wrong-channel and stale waits are rejected, and a delay cannot replace a wait. Virtual programs whose schedule keeps several transfers in flight stay on the model provider (`test/test_rtl_virtual_timing.py`). Issue coordinates across a wait are lower bounds; the resolved export reports wait-relative issue epochs and marks completion ages unknown.
 
 ## Results
 
@@ -73,7 +78,8 @@ The extractor also reports MXU push/pop streams and busy windows, response-laten
 
 - Same-MXU pipelining. The RTL allows, for example, MXU1 matmul→matmul 32 cycles apart, but some gaps (such as MXU0 matmul→weight push at 63) are not single-operation facts. Overlapping MXU commands needs pair results as a selected input and holds that may overlap within one MXU.
 - Loop-varying addresses (per-state register enumeration is the next step) and engine work crossing block boundaries.
-- VPU two-slot overlap (exp→relu is safe at gap 1, but a second VPU command still waits for `next_issue_age`), cross-engine overlap with the MXU, and DMA overlap with other engines or more than one pending transfer.
+- VPU two-slot overlap (exp→relu is safe at gap 1, but a second VPU command still waits for `next_issue_age`), cross-engine overlap with the MXU, and DMA overlap with other engines or more than one pending transfer; the model's several-channel DMA policy is not adopted as RTL evidence.
+- The virtual scheduler's unit model stays its own: the provider supplies each operation's latency and same-unit interval, not cross-engine exclusion or DMA completion.
 - `next_issue_age` admission is swept for nine VPU-first pairs, not the full 29×29 table; it rests on each operation's own issue-busy bit being the last to clear (`VectorFSM.canIssueOp`).
 - A VLOAD writing an MREG bank another engine is still reading is not asserted by the RTL; the compiler's release rules order it.
 - Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.
