@@ -7,6 +7,7 @@ following the PC through branches, and bound to `atlas-emit --rtl-timing-json`.
 """
 import argparse
 import collections
+import concurrent.futures
 import hashlib
 import importlib.util
 import json
@@ -22,6 +23,7 @@ spec = importlib.util.spec_from_file_location('check_ee290_compute_export', HERE
 BIND = importlib.util.module_from_spec(spec); spec.loader.exec_module(BIND)
 sys.path.insert(0, str(HERE))
 import ee290_replay_cases as CASES  # noqa: E402
+from ee290_replay_cases import mxu as MXU, vpu_ops as VPU  # noqa: E402
 
 
 class ReplayError(Exception):
@@ -48,6 +50,11 @@ SIGNALS = {
     'xw': ('xlu.io_mregWriteReq_valid', 1), 'xwid': ('xlu.io_mregWriteReq_bits_mregId', 6), 'xwrow': ('xlu.io_mregWriteReq_bits_row', 5), 'xwdata': ('xlu.io_mregWriteReq_bits_data', 256),
     'xar': ('xlu.io_activeMregRead_valid', 1), 'xarid': ('xlu.io_activeMregRead_bits', 6), 'xaw': ('xlu.io_activeMregWrite_valid', 1), 'xawid': ('xlu.io_activeMregWrite_bits', 6),
     'pcmd': ('vpu.io_cmd_valid', 1), 'pop': ('vpu.io_cmd_bits_op', 5), 'pdst': ('vpu.io_cmd_bits_vd', 6), 'psrc0': ('vpu.io_cmd_bits_vs1', 6), 'psrc1': ('vpu.io_cmd_bits_vs2', 6),
+    'pimm': ('vpu.io_cmd_bits_imm', 16), 'pscale': ('vpu.io_cmd_bits_scaleE8M0', 8),
+    # Scalar LSU (SELD) and the scale register write it ends in.
+    'scmd': ('lsu.io_scalarCmd_valid', 1), 'scmd_store': ('lsu.io_scalarCmd_bits_isStore', 1), 'scmd_addr': ('lsu.io_scalarCmd_bits_byteAddr', 21),
+    'sresp': ('lsu.io_scalarResp_valid', 1), 'sresp_data': ('lsu.io_scalarResp_bits', 32),
+    'sew': ('scalar.scaleRF.io_writeEn', 1), 'sew_idx': ('scalar.scaleRF.io_writeIdx', 5), 'sew_data': ('scalar.scaleRF.io_writeData', 8),
 }
 for n in range(2):
     for key, path, width in [('r', 'ReadReq%d_valid', 1), ('rid', 'ReadReq%d_bits_mregId', 6), ('rrow', 'ReadReq%d_bits_row', 5), ('resp', 'ReadResp%d_valid', 1), ('data', 'ReadResp%d_bits', 256),
@@ -70,7 +77,7 @@ for key, path, width in [
         ('vwd', 'dma.io_vmemWrite_bits_data', 256), ('vresp', 'dma.io_vmemReadData_valid', 1), ('vdata', 'dma.io_vmemReadData_bits', 256)]:
     SIGNALS['dma_' + key] = (path, width)
 CONTROLS = ['fire', 'launch', 'cmd', 'load_busy', 'store_busy', 'vr', 'vresp', 'vw', 'mr', 'mresp', 'mw', 'csr', 'halt', 'ecall', 'illegal', 'ebreak',
-            'valid', 'xcmd', 'xr', 'xresp', 'xw', 'xar', 'xaw', 'pcmd'] + [f'{p}{n}' for n in range(2) for p in ('pr', 'presp', 'pw')] + [f'{p}{n}' for n in range(4) for p in ('par', 'paw')]
+            'valid', 'xcmd', 'xr', 'xresp', 'xw', 'xar', 'xaw', 'pcmd', 'scmd', 'sresp', 'sew'] + [f'{p}{n}' for n in range(2) for p in ('pr', 'presp', 'pw')] + [f'{p}{n}' for n in range(4) for p in ('par', 'paw')]
 CONTROLS += ['dma_' + k for k in ['launch', 'stall', 'av', 'ar', 'dv', 'dr', 'vr', 'vrg', 'vw', 'vwg', 'vresp']] + [f'dma_{p}{n}' for n in range(8) for p in ('busy', 'engine')]
 
 SIGNALS.update({'vpu_busy': ('vpu.io_issueBusy', 31), 'mreg_read_busy': ('scalar.io_mregReadBusy', 64), 'mreg_write_busy': ('scalar.io_mregWriteBusy', 64)})
@@ -81,7 +88,9 @@ MXU_INFLIGHT = (3, 2)  # in-flight matmul tracker depth (SystolicArraySequencer 
 for u in range(2):
     m, s = f'mxu{u}.', f'mxu{u}.seq.'
     group = {'cmd': (m + 'io_cmd_valid', 1), 'op': (m + 'io_cmd_bits_op', 3), 'mreg': (m + 'io_cmd_bits_mregId', 6),
-             'acc': (m + 'io_cmd_bits_accSel', 1), 'slot': (m + 'io_cmd_bits_weightSlot', 1),
+             'acc': (m + 'io_cmd_bits_accSel', 1), 'slot': (m + 'io_cmd_bits_weightSlot', 1), 'scale': (m + 'io_cmd_bits_scaleE8M0', 8),
+             'al_acc': (s + 'io_accLoadReq_bits_accSel', 1), 'al_row': (s + 'io_accLoadReq_bits_rowIdx', 5),
+             'ar_acc': (s + 'io_accComputeReadAddr_accSel', 1), 'ar_row': (s + 'io_accComputeReadAddr_rowIdx', 5),
              'ww': (s + 'io_weightWriteReq_valid', 1), 'ww_slot': (s + 'io_weightWriteReq_bits_weightSlot', 1), 'ww_lane': (s + 'io_weightWriteReq_bits_laneIdx', 5),
              'cv': (s + 'io_compute_valid', 1), 'cacc': (s + 'io_compute_bits_accumulate', 1), 'cslot': (s + 'io_compute_bits_weightBufSel', 1),
              'aw': (s + 'io_accComputeWrite_valid', 1), 'aw_acc': (s + 'io_accComputeWrite_bits_accSel', 1), 'aw_row': (s + 'io_accComputeWrite_bits_rowIdx', 5),
@@ -96,7 +105,8 @@ for u in range(2):
                       f'actw{p}': (m + f'io_activeWrites_{p}_valid', 1), f'actwid{p}': (m + f'io_activeWrites_{p}_bits', 6)})
     for k in range(32):
         group.update({f'wwd{k}': (s + f'io_weightWriteReq_bits_data_{k}', 8), f'act{k}': (s + f'io_compute_bits_act_{k}', 8),
-                      f'awd{k}': (s + f'io_accComputeWrite_bits_data_{k}', 16)})
+                      f'awd{k}': (s + f'io_accComputeWrite_bits_data_{k}', 16), f'ald{k}': (s + f'io_accLoadReq_bits_data_{k}', 16),
+                      f'psum{k}': (s + f'io_compute_bits_psum_{k}', 16)})
     group.update({f'inf{i}': (s + f'inflightValid_{i}', 1) for i in range(MXU_INFLIGHT[u])})
     SIGNALS.update({f'm{u}_{k}': value for k, value in group.items()})
     CONTROLS += [f'm{u}_{k}' for k in ('cmd', 'ww', 'cv', 'aw', 'ar', 'al', 'as', 'p0v', 'p1v', 'w0v', 'w1v', 'r0', 'r1', 'w0', 'w1', 'actr0', 'actr1', 'actw0', 'actw1')]
@@ -170,14 +180,27 @@ BUSY = {'vload': lambda v: v('load_busy'), 'vstore': lambda v: v('store_busy'), 
 for u in range(2):
     BUSY[f'mxu{u}'] = lambda v, u=u: int(any(v(f'm{u}_{k}') for k in ('p0v', 'p1v', 'w0v', 'w1v', *(f'inf{i}' for i in range(MXU_INFLIGHT[u])))))
 STAGES = ('reads', 'responses', 'writes')
-EVENTS = {'vload': (32, 32, 32), 'vstore': (32, 32, 32), 'xlu': (32, 32, 32), 'vpu': (128, 128, 64)}
-# Replayed MXU operations: MxuOp code -> (mnemonic stem, (reads, responses, writes, compute beats)).
-MXU_OPS = {0: ('vmatpush.weight', (32, 32, 32, 0)), 4: ('vmatpop.bf16.acc', (32, 0, 64, 0)), 5: ('vmatmul', (32, 32, 32, 32))}
+EVENTS = {'vload': (32, 32, 32), 'vstore': (32, 32, 32), 'xlu': (32, 32, 32)}
+# Replayed MXU operations: MxuOp code -> (mnemonic stem, (reads, responses, writes, compute beats)); a matmul.acc also reads its accumulator.
+MXU_OPS = {0: ('vmatpush.weight', (32, 32, 32, 0)), 1: ('vmatpush.acc.fp8', (32, 32, 32, 0)), 2: ('vmatpush.acc.bf16', (64, 64, 32, 0)),
+           3: ('vmatpop.fp8.acc', (32, 0, 32, 0)), 4: ('vmatpop.bf16.acc', (32, 0, 64, 0)), 5: ('vmatmul', (32, 32, 32, 32)), 6: ('vmatmul.acc', (64, 32, 32, 32))}
 UNCHECKED = object()  # a write whose value the validator cannot predict (matmul results; checked through pop and final memory)
+# VPU funct7 -> (ScalarISA VPU_* code on vpu.io_cmd_bits_op, selected mnemonic, layout); VLI is keyed by its mode.
+VPU_OPS = {0: (1, 'vadd.bf16', 'binary'), 2: (2, 'vsub.bf16', 'binary'), 3: (3, 'vmul.bf16', 'binary'), 4: (25, 'vminimum.bf16', 'binary'),
+           6: (24, 'vmaximum.bf16', 'binary'), 0x40: (26, 'vmov', 'unary'), 0x41: (4, 'vrecip.bf16', 'unary'), 0x42: (10, 'vexp.bf16', 'unary'),
+           0x43: (11, 'vexp2.bf16', 'unary'), 0x46: (12, 'vsquare.bf16', 'unary'), 0x47: (13, 'vcube.bf16', 'unary'), 0x48: (19, 'vrelu.bf16', 'unary'),
+           0x49: (6, 'vsin.bf16', 'unary'), 0x4a: (7, 'vcos.bf16', 'unary'), 0x4b: (8, 'vtanh.bf16', 'unary'), 0x4c: (9, 'vlog2.bf16', 'unary'),
+           0x4d: (5, 'vsqrt.bf16', 'unary'), 0x21: (14, 'vredsum.row.bf16', 'row'), 0x24: (21, 'vredmin.row.bf16', 'row'),
+           0x26: (20, 'vredmax.row.bf16', 'row'), 1: (15, 'vredsum.bf16', 'col'), 5: (23, 'vredmin.bf16', 'col'), 7: (22, 'vredmax.bf16', 'col'),
+           0x44: (17, 'vpack.bf16.fp8', 'pack'), 0x45: (18, 'vunpack.fp8.bf16', 'unpack')}
+VLI_MODES = {0: (30, 'vli.all', 'vli_pair'), 1: (29, 'vli.row', 'vli_pair'), 2: (28, 'vli.col', 'vli_single'), 3: (27, 'vli.one', 'vli_single')}
+# Layout -> per-port (reads, writes) counts as VectorFSM sequences them; responses equal reads.
+VPU_PORTS = {'binary': ((64, 64), (64, 0)), 'unary': ((64, 0), (64, 0)), 'row': ((32, 32), (32, 32)), 'col': ((128, 0), (64, 0)),
+             'pack': ((64, 0), (32, 0)), 'unpack': ((32, 0), (64, 0)), 'vli_pair': ((0, 0), (64, 0)), 'vli_single': ((0, 0), (32, 0))}
 
 
 def event_counts(command):
-    return command['counts'] if command['engine'].startswith('mxu') else EVENTS[command['engine']] + (0,)
+    return command['counts'] if 'counts' in command else EVENTS[command['engine']] + (0,)
 # valid signal -> (engine, stage, port, address signals, data signal); VMEM addresses are (bank, row).
 PORT_EVENTS = {'vr': ('vload', 'reads', 0, ('vr_bank', 'vr_addr'), None), 'vresp': ('vload', 'responses', 0, None, 'vresp_data'),
                'mw': ('vload', 'writes', 0, ('mw_id', 'mw_row'), 'mw_data'), 'mr': ('vstore', 'reads', 0, ('mr_id', 'mr_row'), None),
@@ -187,7 +210,8 @@ for n in range(2):
     PORT_EVENTS.update({f'pr{n}': ('vpu', 'reads', n, (f'prid{n}', f'prrow{n}'), None), f'presp{n}': ('vpu', 'responses', n, None, f'pdata{n}'),
                         f'pw{n}': ('vpu', 'writes', n, (f'pwid{n}', f'pwrow{n}'), f'pwdata{n}')})
 # MXU events also name their resource; acc/weight ids are slots. MREG responses (m<u>_resp<p>) are derived:
-# MregFile answers a read on the next edge. Vector data are (signal prefix, lanes, bytes per lane).
+# MregFile answers a read on the next edge. Vector data are (signal prefix, lanes, bytes per lane). Ports 2 and 3
+# are the accumulator compute read (matmul.acc psum) and accumulator load (acc push).
 RESOURCE = {}
 for u in range(2):
     m, kind = f'm{u}_', f'mxu{u}'
@@ -197,36 +221,63 @@ for u in range(2):
         RESOURCE.update({m + f'r{n}': 'mreg', m + f'w{n}': 'mreg'})
     PORT_EVENTS.update({m + 'ww': (kind, 'writes', 0, (m + 'ww_slot', m + 'ww_lane'), (m + 'wwd', 32, 1)),
                         m + 'aw': (kind, 'writes', 0, (m + 'aw_acc', m + 'aw_row'), (m + 'awd', 32, 2)),
-                        m + 'as': (kind, 'reads', 0, (m + 'as_acc', m + 'as_row'), None)})
-    RESOURCE.update({m + 'ww': 'weight', m + 'aw': 'acc', m + 'as': 'acc'})
+                        m + 'as': (kind, 'reads', 0, (m + 'as_acc', m + 'as_row'), None),
+                        m + 'ar': (kind, 'reads', 2, (m + 'ar_acc', m + 'ar_row'), None),
+                        m + 'al': (kind, 'writes', 3, (m + 'al_acc', m + 'al_row'), (m + 'ald', 32, 2))})
+    RESOURCE.update({m + 'ww': 'weight', m + 'aw': 'acc', m + 'as': 'acc', m + 'ar': 'acc', m + 'al': 'acc'})
 
 
 def element(command, stage, port, n):
     """(resource, id, row) of the n-th event of a stage on a port; VMEM ids are lines, acc/weight ids slots."""
     engine = command['engine']
     if engine.startswith('mxu'):
-        op = command['op']
-        if op == 0: return ('mreg', command['mreg'], n) if stage == 'reads' and port == 1 else ('weight', command['slot'], n) if port == 0 else None
-        if op == 5: return (('mreg', command['mreg'], n) if stage == 'reads' else ('acc', command['acc'], n)) if port == 0 else None
-        return ('acc', command['acc'], n) if stage == 'reads' and port == 0 else ('mreg', command['mreg'] + port, n) if stage == 'writes' else None
+        op, reads = command['op'], stage == 'reads'
+        if op == 0: return ('mreg', command['mreg'], n) if reads and port == 1 else ('weight', command['slot'], n) if not reads and port == 0 else None
+        if op in (1, 2):  # an FP8 acc push reads on port 1 (preferred when free), a BF16 push reads the pair on both ports
+            return ('mreg', command['mreg'] + port * (op == 2), n) if reads and port in ((1,) if op == 1 else (0, 1)) else ('acc', command['acc'], n) if not reads and port == 3 else None
+        if op in (5, 6): return ('mreg', command['mreg'], n) if reads and port == 0 else ('acc', command['acc'], n) if port == (2 if reads else 0) and (op == 6 or not reads) else None
+        return ('acc', command['acc'], n) if reads and port == 0 else ('mreg', command['mreg'] + port, n) if not reads and port < (2 if op == 4 else 1) else None
     if engine in ('vload', 'vstore'):
         return ('vmem', command['line'] + n, n) if (stage == 'writes') == (engine == 'vstore') else ('mreg', command['mreg'], n)
     if engine == 'xlu': return 'mreg', command['dst' if stage == 'writes' else 'src'], n
-    if stage == 'writes' and port: return None
-    base = command['dst'] if stage == 'writes' else (command['lhs'], command['rhs'])[port]
-    return 'mreg', base + n // 32, n % 32
+    layout, (reads, writes) = command['layout'], VPU_PORTS[command['layout']]
+    if n >= (writes if stage == 'writes' else reads)[port]: return None
+    if stage == 'writes':
+        if layout == 'row': return 'mreg', command['dst'] + port, n
+        return ('mreg', command['dst'], n) if layout in ('pack', 'vli_single') else ('mreg', command['dst'] + n // 32, n % 32)
+    if layout == 'binary': return 'mreg', (command['lhs'], command['rhs'])[port] + n // 32, n % 32
+    if layout == 'row': return 'mreg', command['src'] + port, n
+    if layout == 'unpack': return 'mreg', command['src'], n
+    return 'mreg', command['src'] + (n // 32) % 2, n % 32
 
 
 def produced(command, n, port=0):
     """Data the n-th write must carry, from the command's own observed responses; None if not yet available."""
     data = command['_data']
     if command['engine'].startswith('mxu'):
-        if command['op'] == 5: return UNCHECKED
-        source = data[1] if command['op'] == 0 else [row[32 * port:32 * port + 32] for row in data[0]]
-        return source[n] if n < len(source) else None
+        op = command['op']
+        try:
+            if op in (5, 6): return UNCHECKED
+            if op == 0: return data[1][n] if n < len(data[1]) else None
+            if op == 1: return MXU.dequantize(data[1][n]) if n < len(data[1]) else None
+            if op == 2: return data[0][n] + data[1][n] if n < min(len(data[0]), len(data[1])) else None
+            if op == 3: return MXU.quantize(data[0][n], command['scale']) if n < len(data[0]) else None
+            return data[0][n][32 * port:32 * port + 32] if n < len(data[0]) else None
+        except ValueError as error: raise ReplayError(f'{command["mnemonic"]} data outside its exact reference: {error}')
     if command['engine'] in ('vload', 'vstore'): return data[0][n] if n < len(data[0]) else None
     if command['engine'] == 'xlu': return bytes(data[0][c][n] for c in range(32)) if len(data[0]) == 32 else None
-    return bf16_power_product(data[0][n], data[1][n]) if n < min(map(len, data)) else None
+    layout, name = command['layout'], command['mnemonic']
+    try:
+        if layout == 'binary':
+            if n >= min(len(data[0]), len(data[1])): return None
+            return bf16_power_product(data[0][n], data[1][n]) if name == 'vmul.bf16' else VPU.elementwise(name, data[0][n], data[1][n])
+        if layout == 'unary': return VPU.elementwise(name, data[0][n]) if n < len(data[0]) else None
+        if layout == 'row': return VPU.row_reduce(name, data[0][n], data[1][n]) if n < min(len(data[0]), len(data[1])) else None
+        if layout == 'col': return VPU.column_reduce(name, data[0][:64]) if len(data[0]) >= 64 else None
+        if layout == 'pack': return VPU.fp8_pack(data[0][2 * n], data[0][2 * n + 1], command['scale']) if 2 * n + 1 < len(data[0]) else None
+        if layout == 'unpack': return VPU.fp8_unpack(data[0][n // 2], n % 2, command['scale']) if n // 2 < len(data[0]) else None
+        return VPU.vli(name[4:], command['imm'], n)
+    except ValueError as error: raise ReplayError(f'{name} data outside its exact reference: {error}')
 
 
 def leaders(words):
@@ -281,10 +332,11 @@ def quiescent_state(v,d,busy,engine):
 
 def validate_compute_edges(samples,words,case):
     vm,dram,expected_vm,expected_dram=memories(case);mreg={};mxu={};prior_reads={};starts=leaders(words)
-    commands=[];instructions=[];endpoints=[];busy_events=[];entries=[]
-    regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0;slot=False;redirect=None
-    live={};pending=None;outstanding={};read_queue=[];a_hold=None;d_hold=None
-    began=False;ended=False;marker=None;publication=None;last_edge=0;prev_busy=None
+    commands=[];instructions=[];endpoints=[];busy_events=[];entries=[];scale_loads=[]
+    regs=[None]*32;regs[0]=0;base=0;next_base=None;pc_expected=0;slot=False;redirect=None;scale=[0]*32;scalar_load=None
+    # DMA: pending maps channel -> launched command; the engine requests commands in launch order (fifo).
+    live={};pending={};fifo=[];outstanding={};read_queue=[];a_hold=None;d_hold=None
+    began=False;ended=False;marker=None;publication=None;last_edge=0;prev_busy=None;delayed=False
     def reject(message): raise ReplayError(message)
     def row_bytes(identity,row):
         if (identity,row) not in mreg: reject('read from uninitialized logical MREG row')
@@ -308,7 +360,7 @@ def validate_compute_edges(samples,words,case):
         def record(collection,**fields): collection.append({'edge':edge,**fields})
         def entry(pc):
             state=quiescent_state(v,d,busy,engine)
-            if live or pending or outstanding or read_queue or any(state.values()): reject('block entry is not quiescent')
+            if live or pending or outstanding or read_queue or scalar_load or any(state.values()): reject('block entry is not quiescent')
             record(entries,word_index=pc,engine_state=state)
         if v('reset'):
             if began: reject('reset interrupted compute envelope')
@@ -326,12 +378,12 @@ def validate_compute_edges(samples,words,case):
             base=next_base;next_base=None
         if began and not ended and d('base')!=base: reject('unexpected global DMA base change')
         if engine&~busy: reject('engine busy omitted from scalar bridge')
-        if pending is None and busy: reject('busy without observed pending DMA')
-        if pending and (busy&~(1<<pending['channel']) or (edge>pending['edge'] and len(pending['responses'])<pending['beats'] and busy!=(1<<pending['channel']))): reject('pending DMA lost busy protection')
+        if busy&~sum(1<<c for c in pending): reject('busy without observed pending DMA')
+        if any(edge>c['edge'] and len(c['responses'])<c['beats'] and not busy>>ch&1 for ch,c in pending.items()): reject('pending DMA lost busy protection')
         # A VPU command drains its last writes after the next VPU command issued (next_issue_age); it releases
         # once those are done and no write marker names its destination.
         drain=live.get('vpu_drain')
-        if drain and len(drain['writes'])==EVENTS['vpu'][2] and not any(v('paw'+str(n)) and v('pawid'+str(n)) in (drain['dst'],drain['dst']+1) for n in range(4)):
+        if drain and len(drain['writes'])==drain['counts'][2] and not any(v('paw'+str(n)) and v('pawid'+str(n)) in drain['dests'] for n in range(4)):
             drain['release_edge']=edge;del live['vpu_drain']
         for kind in [k for k in live if k!='vpu_drain']:
             command=live[kind]
@@ -348,7 +400,7 @@ def validate_compute_edges(samples,words,case):
                 if pc in starts: entry(pc)
                 record(instructions,word_index=pc,word_u32=word)
                 in_slot,target=slot,redirect;slot,redirect=False,None
-                opcode=word&127;rd=(word>>7)&31;rs1=(word>>15)&31;rs2=(word>>20)&31;funct3=(word>>12)&7
+                opcode=word&127;delayed=opcode==0x67 and (word>>12)&7==1;rd=(word>>7)&31;rs1=(word>>15)&31;rs2=(word>>20)&31;funct3=(word>>12)&7
                 common={'edge':edge,'word_index':pc,'word_u32':word,'reads':[],'responses':[],'writes':[]}
                 created=None
                 if opcode==0x13 and funct3==0:
@@ -368,6 +420,12 @@ def validate_compute_edges(samples,words,case):
                         if funct3 in (4,5): a,b=a-(a>>31<<32),b-(b>>31<<32)
                         taken={0:a==b,1:a!=b,4:a<b,5:a>=b,6:a<b,7:a>=b}[funct3]
                     slot=True;redirect=BIND.branch_target(pc,word) if taken else None
+                elif opcode==0x03 and funct3==6:
+                    # SELD: scalar LSU reads the aligned VMEM word; its low byte becomes scale register rd.
+                    immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
+                    if scalar_load or regs[rs1] is None: reject('overlapping/unknown SELD')
+                    scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd}
+                    vm_line(scalar_load['address']>>5)
                 elif opcode==0x07:
                     store=bool(word&(1<<13));identity=(word>>7)&63
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
@@ -380,56 +438,81 @@ def validate_compute_edges(samples,words,case):
                     src=(word>>13)&63;dst=(word>>7)&63
                     if (v('xsrc'),v('xdst'))!=(src,dst): reject('XLU command differs from selected operands')
                     created={**common,'engine':'xlu','src':src,'dst':dst};expected_cmd['xcmd']=True
-                elif opcode==0x57:
-                    op=word>>25;lhs=(word>>13)&63;rhs=(word>>19)&63;dst=(word>>7)&63
-                    if op!=3 or (v('pop'),v('psrc0'),v('psrc1'),v('pdst'))!=(op,lhs,rhs,dst) or any(i%2 for i in (lhs,rhs,dst)): reject('unsupported/mismatched paired VMUL command')
-                    created={**common,'engine':'vpu','op':'mul.bf16','lhs':lhs,'rhs':rhs,'dst':dst};expected_cmd['pcmd']=True
+                elif opcode in (0x57,0x5f):
+                    vd=(word>>7)&63;vs1=(word>>13)&63;vs2=(word>>19)&63
+                    spec=VPU_OPS.get(word>>25) if opcode==0x57 else VLI_MODES.get((word>>13)&7)
+                    if spec is None: reject('unsupported VPU operation in the replay')
+                    code,mnemonic,layout=spec
+                    if (v('pop'),v('psrc0'),v('psrc1'),v('pdst'),v('pimm'),v('pscale'))!=(code,vs1,vs2,vd,word>>16,scale[vs1&31]): reject('VPU command differs from the decoded instruction operands')
+                    src=vs2 if layout in ('pack','unpack') else vs1;lhs,rhs=(0,0) if opcode==0x5f else (vs1,vs2)
+                    if any(r%2 for r in {'binary':(vs1,vs2,vd),'pack':(src,),'unpack':(vd,),'vli_pair':(vd,),'vli_single':()}.get(layout,(src,vd))): reject('VPU pair operand is not even')
+                    (reads,writes),pair=VPU_PORTS[layout],lambda r:{r,r+1}
+                    created={**common,'engine':'vpu','mnemonic':mnemonic,'op':code,'layout':layout,'dst':vd,'lhs':lhs,'rhs':rhs,'src':src,
+                             'scale':scale[vs1&31],'imm':word>>16,'counts':(sum(reads),sum(reads),sum(writes),0),
+                             'sources':{'binary':pair(vs1)|pair(vs2),'unpack':{src},'vli_pair':set(),'vli_single':set()}.get(layout,pair(src)),
+                             'dests':{vd} if layout in ('pack','vli_single') else pair(vd)};expected_cmd['pcmd']=True
                 elif opcode==0x77:
                     op,unit=(word>>25)>>1,(word>>25)&1;vd=(word>>7)&63;vs1=(word>>13)&63;vs2=(word>>19)&63;u=f'm{unit}_'
                     if op not in MXU_OPS: reject('unsupported MXU operation in the replay')
-                    fields={'mreg':vd if op==4 else vs1,'acc':vs2&1 if op==4 else vd&1,'slot':vd&1 if op==0 else vs2&1}
+                    pop=op in (3,4)
+                    fields={'mreg':vd if pop else vs1,'acc':vs2&1 if pop else vd&1,'slot':vd&1 if op==0 else vs2&1,'scale':scale[vs1&31] if op==3 else 0}
                     if op==4 and (vd%2 or vs1): reject('unsupported BF16 pop operands')
-                    checked=('mreg','slot') if op==0 else ('mreg','acc') if op==4 else ('mreg','acc','slot')
-                    if v(u+'op')!=op or any(v(u+k)!=fields[k] for k in checked): reject('MXU command differs from the decoded instruction operands')
+                    checked=('mreg','slot') if op==0 else ('mreg','acc','slot') if op in (5,6) else ('mreg','acc')
+                    if v(u+'op')!=op or any(v(u+k)!=fields[k] for k in checked+('scale',)): reject('MXU command differs from the decoded instruction operands')
                     stem,counts=MXU_OPS[op]
                     created={**common,'engine':f'mxu{unit}','mnemonic':f'{stem}.mxu{unit}','op':op,**fields,'counts':counts,'compute':[],
-                             'sources':{fields['mreg']} if op!=4 else set(),'dests':{vd,vd+1} if op==4 else set()};expected_cmd[u+'cmd']=True
+                             'sources':set() if pop else {vs1,vs1+1} if op==2 else {vs1},'dests':{vd,vd+1} if op==4 else {vd} if op==3 else set(),
+                             **({'scale_reg':vs1} if op==3 else {})};expected_cmd[u+'cmd']=True
                 elif opcode==0x7b:
                     store=bool(word>>25);channel=(word>>12)&7
                     vmreg=rs1 if store else rd;addressreg=rd if store else rs1
-                    if pending or any(regs[r] is None for r in (vmreg,addressreg,rs2)): reject('overlapping/unknown DMA launch')
+                    if channel in pending or any(regs[r] is None for r in (vmreg,addressreg,rs2)): reject('overlapping/unknown DMA launch')
                     address=(base<<32)|regs[addressreg];vmword=regs[vmreg];size=regs[rs2];beats=size//32
                     if (d('address'),d('vmem'),d('size'),d('launch_channel'),d('op'))!=(address,vmword,size,channel,2 if store else 1): reject('DMA launch differs from captured scalar operands')
                     if size%32 or not 0<beats<=64 or vmword%8 or any(vmword//8+r not in vm for r in range(beats)) or any(address+i not in dram for i in range(size)): reject('DMA launch outside the case-initialized memory')
-                    pending={**common,'engine':'dma','op':'store' if store else 'load','channel':channel,'vmem_word':vmword,'dram_address':address,'size':size,'beats':beats,'requests':[],'memory':[],'memory_responses':[],'wait_stall_edges':[]}
-                    commands.append(pending);expected_cmd['dma_launch']=True
+                    pending[channel]={**common,'engine':'dma','op':'store' if store else 'load','channel':channel,'vmem_word':vmword,'dram_address':address,'size':size,'beats':beats,'requests':[],'memory':[],'memory_responses':[],'wait_stall_edges':[]}
+                    fifo.append(pending[channel]);commands.append(pending[channel]);expected_cmd['dma_launch']=True
                 elif opcode==0x7f:
                     channel=(word>>12)&7
                     if word>>25:
-                        if pending is None or channel!=pending['channel'] or busy or outstanding or read_queue or any(len(pending[k])!=pending['beats'] for k in ('requests','responses','memory')) or (pending['op']=='store' and len(pending['memory_responses'])!=pending['beats']) or not pending['wait_stall_edges']: reject('WAIT precedes matching DMA/data drain')
-                        pending['release_edge']=edge;record(endpoints,kind='wait',channel=channel,word_index=pc,word_u32=word);pending=None
+                        command=pending.get(channel)
+                        if command is None or busy>>channel&1 or any(o['command'] is command for o in outstanding.values()) or any(q[1] is command for q in read_queue) or any(len(command[k])!=command['beats'] for k in ('requests','responses','memory')) or (command['op']=='store' and len(command['memory_responses'])!=command['beats']): reject('WAIT precedes matching DMA/data drain')
+                        command['release_edge']=edge;record(endpoints,kind='wait',channel=channel,word_index=pc,word_u32=word);del pending[channel]
                     else:
                         if regs[rs1] is None or regs[rs1]>31 or d('rs1')!=regs[rs1]: reject('unknown/mismatched DMA configuration')
                         next_base=regs[rs1];record(endpoints,kind='config',base=next_base,word_index=pc,word_u32=word)
                 elif not (opcode==0x73 and funct3==1): reject('unsupported scalar instruction in finite compute trace')
                 if created:
                     previous=live.get(created['engine'])
-                    if created['engine']=='vpu' and previous and 'vpu_drain' not in live and not v('vpu_busy')>>op&1 and all(len(previous[s])==n for s,n in zip(STAGES[:2],EVENTS['vpu'])):
+                    if created['engine']=='vpu' and previous and 'vpu_drain' not in live and not v('vpu_busy')>>created['op']&1 and all(len(previous[s])==n for s,n in zip(STAGES[:2],previous['counts'])):
                         live['vpu_drain']=live.pop('vpu')
                     elif previous: reject('command issued while its engine is live')
-                    created.update(_queue=([],[]),_data=([],[]));live[created['engine']]=created;commands.append(created)
+                    created.update(_queue=([],[]),_data=([],[],[]));live[created['engine']]=created;commands.append(created)
                 pc_expected=target if in_slot and target is not None else pc+1
             elif (v('word')&127)==0x7f and v('word')>>25 and pending:
+                # A WAIT is held by its busy channel, or behind a preceding DELAY once its transfer has already drained.
                 channel=(v('word')>>12)&7
-                if channel!=pending['channel'] or not busy or not d('stall'): reject('invalid dynamically held matching WAIT')
-                pending['wait_stall_edges'].append(edge)
+                if channel not in pending or not d('stall') or not busy>>channel&1 and not delayed: reject('invalid dynamically held matching WAIT')
+                if busy>>channel&1: pending[channel]['wait_stall_edges'].append(edge)
         for key,expected in expected_cmd.items():
             if bool(v(key))!=expected: reject('unbound or missing decoded command '+key)
         if v('launch')!=v('cmd'): reject('scalar/LSU launch mismatch')
+        # SELD: command (byte address), response (aligned word), then the scale register write; reads at issue see the old value.
+        if v('scmd'):
+            if not scalar_load or 'word' in scalar_load or v('scmd_store') or v('scmd_addr')!=scalar_load['address']&(1<<21)-1: reject('unbound or mismatched scalar memory command')
+            offset=scalar_load['address']&28;scalar_load.update(word=int.from_bytes(vm_line(scalar_load['address']>>5)[offset:offset+4],'little'),command_edge=edge)
+        if v('sresp'):
+            if not scalar_load or 'word' not in scalar_load or 'response_edge' in scalar_load or v('sresp_data')!=scalar_load['word']: reject('unbound or mismatched scalar memory response')
+            scalar_load['response_edge']=edge
+        if v('sew'):
+            if not scalar_load or 'response_edge' not in scalar_load or (v('sew_idx'),v('sew_data'))!=(scalar_load['rd'],scalar_load['word']&255): reject('unbound or mismatched scale register write')
+            scale[scalar_load['rd']]=scalar_load['word']&255;scale_loads.append({**scalar_load,'write_edge':edge});scalar_load=None
         for stage in STAGES:
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
-                command=live.get('vpu_drain') if kind=='vpu' and stage=='writes' and 'vpu_drain' in live else live.get(kind)
+                command=live.get(kind)
+                drain=live.get('vpu_drain') if kind=='vpu' and stage=='writes' else None
+                if drain and sum(e['port']==port for e in drain['writes'])<VPU_PORTS[drain['layout']][1][port]: command=drain
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
                 n=sum(e.get('port',0)==port for e in command[stage])
                 if len(command[stage])>=event_counts(command)[STAGES.index(stage)]: reject(f'excess {kind} {stage} event')
@@ -459,11 +542,11 @@ def validate_compute_edges(samples,words,case):
                        **({'resource':RESOURCE.get(key,'mreg')} if kind.startswith('mxu') else {}))
         for u in range(2):
             kind,m=f'mxu{u}',f'm{u}_';command=live.get(kind)
-            if v(m+'ar') or v(m+'al'): reject('unsupported MXU accumulator read/load event')
             if v(m+'cv'):
-                if not command or command['op']!=5 or len(command['compute'])>=32: reject('unattributed or excess MXU compute beat')
+                if not command or command['op'] not in (5,6) or len(command['compute'])>=32: reject('unattributed or excess MXU compute beat')
                 n=len(command['compute']);act=data((m+'act',32,1))
-                if n>=len(command['_data'][0]) or act!=command['_data'][0][n] or v(m+'cslot')!=command['slot'] or v(m+'cacc'): reject('MXU compute beat differs from its activation row, slot or mode')
+                if n>=len(command['_data'][0]) or act!=command['_data'][0][n] or v(m+'cslot')!=command['slot'] or v(m+'cacc')!=(command['op']==6): reject('MXU compute beat differs from its activation row, slot or mode')
+                if command['op']==6 and (n>=len(command['_data'][2]) or data((m+'psum',32,2))!=command['_data'][2][n]): reject('MXU accumulate beat differs from its accumulator row')
                 if any((kind,'weight',command['slot'],lane) not in mxu for lane in range(32)): reject('matmul reads an unwritten weight slot')
                 record(command['compute'],row=n)
             for p in range(2):
@@ -476,66 +559,67 @@ def validate_compute_edges(samples,words,case):
             for direction in ('par','paw'):
                 if v(direction+str(port)):
                     actives=[c for c in (live.get('vpu'),live.get('vpu_drain')) if c] or reject('unbound VPU live resource marker')
-                    allowed=[r for c in actives for r in ([c['lhs'],c['lhs']+1,c['rhs'],c['rhs']+1] if direction=='par' else [c['dst'],c['dst']+1])]
-                    if v(direction+'id'+str(port)) not in allowed: reject('VPU live resource operand mismatch')
+                    if v(direction+'id'+str(port)) not in {r for c in actives for r in c['sources' if direction=='par' else 'dests']}: reject('VPU live resource operand mismatch')
+        # DMA: A requests follow launch order; responses carry their source's command; a load response is written to VMEM in the
+        # edge it is accepted (D ready is the VMEM write grant), and a store reads VMEM for the command being requested.
+        head=next((c for c in fifo if len(c['requests'])<c['beats']),None);accepted=None
         if d('av'):
             request=(d('ao'),d('aa'),d('as'),d('ad'))
             if a_hold is not None and request!=a_hold: reject('DMA A changed under backpressure')
             if not d('ar'): a_hold=request
             else:
                 a_hold=None
-                if pending is None: reject('unbound DMA A request')
-                op,address,source,datum=request;n=len(pending['requests']);payload=datum.to_bytes(32,'little')
-                if n>=pending['beats'] or op!=(0 if pending['op']=='store' else 4) or address!=pending['dram_address']+32*n or source in outstanding: reject('DMA beat/address/source mismatch')
+                if head is None: reject('unbound DMA A request')
+                op,address,source,datum=request;n=len(head['requests']);payload=datum.to_bytes(32,'little')
+                if op!=(0 if head['op']=='store' else 4) or address!=head['dram_address']+32*n or source in outstanding: reject('DMA beat/address/source mismatch')
                 if op==0:
-                    if n>=len(pending['memory_responses']) or payload.hex()!=pending['memory_responses'][n]['data_hex']: reject('DMA store data differs from its VMEM source')
+                    if n>=len(head['memory_responses']) or payload.hex()!=head['memory_responses'][n]['data_hex']: reject('DMA store data differs from its VMEM source')
                     for i in range(32): dram[address+i]=payload[i]
-                outstanding[source]={'edge':edge,'row':n,'data':None if op==0 else bytes(dram[address+i] for i in range(32))}
-                record(pending['requests'],source=source,address=address,op=op,data_hex=payload.hex())
+                outstanding[source]={'command':head,'edge':edge,'row':n,'data':None if op==0 else bytes(dram[address+i] for i in range(32))}
+                record(head['requests'],source=source,address=address,op=op,data_hex=payload.hex())
         elif a_hold is not None: reject('DMA A valid dropped under backpressure')
         if d('dv'):
             response=(d('ds'),d('dd'))
             if d_hold is not None and response!=d_hold: reject('DMA D changed under backpressure')
+            source,datum=response
+            if source not in outstanding: reject('unbound DMA response')
+            request=outstanding[source];owner=request['command']
             if not d('dr'): d_hold=response
             else:
-                d_hold=None
-                source,datum=response
-                if pending is None or source not in outstanding: reject('unbound DMA response')
-                request=outstanding.pop(source);observed=datum.to_bytes(32,'little')
-                if edge-request['edge']<43 or pending['op']=='load' and observed!=request['data']: reject('DMA delayed load response mismatch')
-                record(pending['responses'],source=source,row=request['row'],data_hex=observed.hex())
+                d_hold=None;del outstanding[source];observed=datum.to_bytes(32,'little');accepted=request
+                if edge-request['edge']<43 or owner['op']=='load' and observed!=request['data']: reject('DMA delayed load response mismatch')
+                record(owner['responses'],source=source,row=request['row'],data_hex=observed.hex())
         elif d_hold is not None: reject('DMA D valid dropped under backpressure')
-        for port in ('vr','vw'):
-            if d(port):
-                if pending is None or (port=='vw')!=(pending['op']=='load'): reject('unbound DMA VMEM direction')
-                row=len(pending['memory']);line=pending['vmem_word']//8+row
-                if row>=pending['beats'] or (d(port+'b'),d(port+'a'))!=(line>>13,line&8191): reject('DMA VMEM request address mismatch')
-                if port=='vw':
-                    source=[r['data_hex'] for r in pending['responses'] if r['row']==row]
-                    if not source or d('vwd').to_bytes(32,'little').hex()!=source[0]: reject('DMA VMEM write data mismatch')
-                if d(port+'g'):
-                    observed=d('vwd').to_bytes(32,'little') if port=='vw' else vm_line(line)
-                    if port=='vw': vm_line(line);vm[line]=observed
-                    else: read_queue.append((edge+1,row,observed))
-                    record(pending['memory'],kind=port,line=line,row=row,data_hex=observed.hex())
+        if d('vw'):
+            meta=accepted or (outstanding.get(d('ds')) if d('dv') else None)
+            if meta is None or meta['command']['op']!='load' or bool(d('vwg'))!=(accepted is not None): reject('unbound DMA VMEM write')
+            owner,row=meta['command'],meta['row'];line=owner['vmem_word']//8+row
+            if (d('vwb'),d('vwa'))!=(line>>13,line&8191) or d('vwd')!=d('dd'): reject('DMA VMEM write address/data mismatch')
+            if accepted: vm_line(line);vm[line]=d('vwd').to_bytes(32,'little');record(owner['memory'],kind='vw',line=line,row=row,data_hex=vm[line].hex())
+        elif accepted and accepted['command']['op']=='load': reject('DMA load response without its VMEM write')
+        if d('vr'):
+            if head is None or head['op']!='store' or len(head['memory'])>=head['beats']: reject('unbound DMA VMEM read')
+            row=len(head['memory']);line=head['vmem_word']//8+row
+            if (d('vrb'),d('vra'))!=(line>>13,line&8191): reject('DMA VMEM request address mismatch')
+            if d('vrg'): read_queue.append((edge+1,head,row,vm_line(line)));record(head['memory'],kind='vr',line=line,row=row,data_hex=vm[line].hex())
         expected_response=bool(read_queue and read_queue[0][0]==edge)
         if bool(d('vresp'))!=expected_response: reject('DMA VMEM read response timing mismatch')
         if expected_response:
-            _,row,expected=read_queue.pop(0);observed=d('vdata').to_bytes(32,'little')
+            _,owner,row,expected=read_queue.pop(0);observed=d('vdata').to_bytes(32,'little')
             if observed!=expected: reject('DMA VMEM source response mismatch')
-            record(pending['memory_responses'],row=row,data_hex=observed.hex())
+            record(owner['memory_responses'],row=row,data_hex=observed.hex())
         if publication is not None:
             if edge!=publication or v('marker')!=1: reject('marker publication did not follow write')
             record(endpoints,kind='marker_publication');publication=None
         if v('csr'):
-            if live or pending or outstanding or marker is not None or (v('csr_addr'),v('csr_op'),v('csr_data'))!=(0xc10,1,1): reject('marker precedes observed engine drain')
+            if live or pending or outstanding or scalar_load or marker is not None or (v('csr_addr'),v('csr_op'),v('csr_data'))!=(0xc10,1,1): reject('marker precedes observed engine drain')
             marker=edge;publication=edge+1;record(endpoints,kind='marker',word_index=v('pc'),word_u32=v('word'),engine_state=quiescent_state(v,d,busy,engine))
         if v('ecall'):
-            if not began or ended or live or pending or outstanding or read_queue or slot or marker is None or v('marker')!=1 or not v('halt') or v('fire') or v('pc')!=pc_expected or pc_expected>=len(words) or v('word')!=words[pc_expected] or words[pc_expected]!=0x73: reject('terminal precedes complete selected-word/engine drain')
+            if not began or ended or live or pending or outstanding or read_queue or scalar_load or slot or marker is None or v('marker')!=1 or not v('halt') or v('fire') or v('pc')!=pc_expected or pc_expected>=len(words) or v('word')!=words[pc_expected] or words[pc_expected]!=0x73: reject('terminal precedes complete selected-word/engine drain')
             if pc_expected in starts: entry(pc_expected)
             ended=True;record(endpoints,kind='halt',word_index=v('pc'),word_u32=v('word'),engine_state=quiescent_state(v,d,busy,engine))
         elif began and not ended and v('halt'): reject('unexpected halt in compute envelope')
-    if not ended or live or pending or outstanding or read_queue or publication is not None: reject('incomplete compute/terminal drain trace')
+    if not ended or live or pending or outstanding or read_queue or scalar_load or publication is not None: reject('incomplete compute/terminal drain trace')
     if last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')<2: reject('trace lacks bounded post-halt drain samples')
     if collections.Counter(c['engine'] for c in commands)!=collections.Counter({k:n for k,n in case.commands.items() if n}): reject('wrong dynamic compute command coverage')
     if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
@@ -545,9 +629,11 @@ def validate_compute_edges(samples,words,case):
             for event in command.get(field,()): event['age']=event['edge']-command['edge']
         for key in ('sources','dests'):
             if key in command: command[key]=sorted(command[key])
+    for load in scale_loads: load.update({f'{k}_age':load[f'{k}_edge']-load['edge'] for k in ('command','response','write')})
     concurrent=[[i,j] for i,a in enumerate(commands) for j,b in enumerate(commands[i+1:],i+1) if b['edge']<a['release_edge'] and a['edge']<b['release_edge']]
     return {'instructions':instructions,'block_entries':entries,'commands':commands,'concurrent_commands':concurrent,'endpoints':endpoints,'busy_transitions':busy_events,
-            'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
+            'scale_loads':scale_loads,'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
+
 
 
 def sh(argv, timeout, env=None):
@@ -566,45 +652,65 @@ def build_model(args, work):
     return objdir / 'VAtlasCore'
 
 
+def serialized(ops):
+    """Delay-free reference of a final stream; each DMA wait moves up to follow its own launch, so one transfer is pending at a time."""
+    channel = lambda op: re.search(r'channel = (\d+)', op[1])[1]
+    ops = [op for op in ops if op[0] != 'delay']; result = []
+    while ops:
+        op = ops.pop(0); result.append(op)
+        if op[0] == 'dma':
+            wait = next((i for i, o in enumerate(ops) if o[0] == 'dma_wait' and channel(o) == channel(op)), None)
+            if wait is not None: result.append(ops.pop(wait))
+    return result
+
+
+def replay(args, case, label, consumer, select, digest, model):
+    """Schedule or take one case stream, run it on the model, decode and bind it; returns (result, PASS line)."""
+    opt, emit, out = args.bin / 'atlas-opt', args.bin / 'atlas-emit', args.work.resolve() / label
+    flags = {'delay': '--insert-atlas-delays', 'schedule': '--schedule-atlas-stream'}
+    out.mkdir(exist_ok=True); (out / 'program.mlir').write_text(case.mlir())
+    if consumer == 'final': shutil.copyfile(out / 'program.mlir', out / 'final.mlir')
+    else: sh([opt, out / 'program.mlir', select, flags[consumer], '--verify-atlas-rtl-timing', '-o', out / 'final.mlir'], args.timeout)
+    text = sh([emit, out / 'final.mlir'], args.timeout)
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+', text): raise ReplayError('invalid emitted words')
+    (out / 'program.hex').write_text(text); words = [int(w, 16) for w in text.split()]
+    (out / 'image.txt').write_text(image(case))
+    log = sh([model, out / 'program.hex', out / 'trace.vcd', '100000', out / 'image.txt'], args.timeout)
+    match = re.search(r'EE290_COMPUTE_PASSED checked_vmem_bytes=(\d+) checked_dram_bytes=(\d+) reads=(\d+) writes=(\d+) .* status=5 marker=1 illegal_pc=0 cycles=(\d+)', log)
+    if not match or (int(match[3]), int(match[4])) != tuple(case.dma): raise ReplayError(label + ': numerical check failed')
+    with (out / 'trace.vcd').open() as stream: events = validate_compute_edges(vcd_edges(stream), words, case)
+    (out / 'events.json').write_text(json.dumps(events, indent=1))
+    if consumer == 'final':
+        # The compiler serializes these engines: bind footprints of a delay-inserted reference, not issue offsets.
+        (out / 'reference.mlir').write_text(case.mlir(serialized(case.ops)))
+        sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-rtl-timing', '-o', out / 'reference-final.mlir'], args.timeout)
+        export = json.loads(sh([emit, '--rtl-timing-json', out / 'reference-final.mlir'], args.timeout))
+        binding = BIND.bind_footprints(export, events, digest)
+    else:
+        export = json.loads(sh([emit, '--rtl-timing-json', out / 'final.mlir'], args.timeout))
+        binding = BIND.bind_export(export, events, digest, words)
+    (out / 'timing.json').write_text(json.dumps(export, indent=1))
+    if case.check and not case.check(events): raise ReplayError(label + ': case check failed')
+    return ({'case': label, 'cycles': int(match[5]), **binding},
+            f'PASS {label} words={len(words)} blocks_entered={len(events["block_entries"])} accesses_bound={binding["memory_access_elements_bound"]} '
+            f'concurrent={len(events["concurrent_commands"])} dma_intervals={len(binding["dynamic_dma_intervals"])}')
+
+
 def run(args):
     work = args.work.resolve(); work.mkdir(parents=True, exist_ok=True)
     facts = args.facts.resolve(); digest = hashlib.sha256(facts.read_bytes()).hexdigest()
     if args.facts_sha256 and args.facts_sha256 != digest: raise ReplayError('facts hash mismatch')
     model = args.model.resolve() if args.model else build_model(args, work)
     select = f'--select-atlas-rtl-evidence=op-timing={facts} op-timing-sha256={digest} dma=wait'
-    opt, emit = args.bin / 'atlas-opt', args.bin / 'atlas-emit'
-    flags = {'delay': '--insert-atlas-delays', 'schedule': '--schedule-atlas-stream'}
     available = CASES.load(); results = []
-    for name in (available if args.cases == 'all' else args.cases.split(',')):
-        case = available[name]
-        for consumer in (c for c in case.consumers if args.consumer in ('both', c) or c == 'final'):
-            label = name if consumer == 'final' else f'{name}_{consumer}'; out = work / label; out.mkdir(exist_ok=True)
-            (out / 'program.mlir').write_text(case.mlir())
-            if consumer == 'final': shutil.copyfile(out / 'program.mlir', out / 'final.mlir')
-            else: sh([opt, out / 'program.mlir', select, flags[consumer], '--verify-atlas-rtl-timing', '-o', out / 'final.mlir'], args.timeout)
-            text = sh([emit, out / 'final.mlir'], args.timeout)
-            if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+', text): raise ReplayError('invalid emitted words')
-            (out / 'program.hex').write_text(text); words = [int(w, 16) for w in text.split()]
-            (out / 'image.txt').write_text(image(case))
-            log = sh([model, out / 'program.hex', out / 'trace.vcd', '100000', out / 'image.txt'], args.timeout)
-            match = re.search(r'EE290_COMPUTE_PASSED checked_vmem_bytes=(\d+) checked_dram_bytes=(\d+) reads=(\d+) writes=(\d+) .* status=5 marker=1 illegal_pc=0 cycles=(\d+)', log)
-            if not match or (int(match[3]), int(match[4])) != tuple(case.dma): raise ReplayError(label + ': numerical check failed')
-            with (out / 'trace.vcd').open() as stream: events = validate_compute_edges(vcd_edges(stream), words, case)
-            (out / 'events.json').write_text(json.dumps(events, indent=1))
-            if consumer == 'final':
-                # The compiler serializes these engines: bind footprints of a delay-inserted reference, not issue offsets.
-                (out / 'reference.mlir').write_text(case.mlir([op for op in case.ops if op[0] != 'delay']))
-                sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-rtl-timing', '-o', out / 'reference-final.mlir'], args.timeout)
-                export = json.loads(sh([emit, '--rtl-timing-json', out / 'reference-final.mlir'], args.timeout))
-                binding = BIND.bind_footprints(export, events, digest)
-            else:
-                export = json.loads(sh([emit, '--rtl-timing-json', out / 'final.mlir'], args.timeout))
-                binding = BIND.bind_export(export, events, digest, words)
-            (out / 'timing.json').write_text(json.dumps(export, indent=1))
-            if case.check and not case.check(events): raise ReplayError(label + ': case check failed')
-            results.append({'case': label, 'cycles': int(match[5]), **binding})
-            print(f'PASS {label} words={len(words)} blocks_entered={len(events["block_entries"])} accesses_bound={binding["memory_access_elements_bound"]} '
-                  f'concurrent={len(events["concurrent_commands"])} dma_intervals={len(binding["dynamic_dma_intervals"])}', flush=True)
+    runs = [(available[name], name if consumer == 'final' else f'{name}_{consumer}', consumer)
+            for name in (available if args.cases == 'all' else args.cases.split(','))
+            for consumer in available[name].consumers if args.consumer in ('both', consumer) or consumer == 'final']
+    with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
+        for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, select, digest, model) for case, label, consumer in runs]):
+            try: result, line = future.result()
+            except (ReplayError, BIND.BindingError) as error: raise type(error)(f'{label}: {error}') from error
+            results.append(result); print(line, flush=True)
     return results
 
 
@@ -620,7 +726,7 @@ if __name__ == '__main__':
     p.add_argument('--verilator-root', type=Path, help='VERILATOR_ROOT override (directory holding include/verilated.h)')
     p.add_argument('--consumer', choices=('delay', 'schedule', 'both'), default='both', help='compiler consumer; final-stream cases always run')
     p.add_argument('--cases', default='all', help='comma list of case names from tools/ee290_replay_cases, or all')
-    p.add_argument('--jobs', type=int, default=4)
+    p.add_argument('--jobs', type=int, default=8, help='parallel case replays and Verilator build jobs')
     p.add_argument('--timeout', type=int, default=1800)
     a = p.parse_args()
     if not a.model and not a.rtl: p.error('--model or --rtl required')
