@@ -16,7 +16,8 @@ MODEL = "npu-model-rtl-match-v1"
 LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine")
 SCHEDULED = ("--verify-atlas-virtual-stream", "--schedule-atlas-virtual", "--lower-atlas-virtual-to-machine")
 SERIAL = ("virtual_bf16_vpu_program", "virtual_bf16_shared_relu", "virtual_bf16_branch_program", "virtual_bf16_loop_program",
-          "virtual_bf16_swap_loop_program", "virtual_bf16_dynamic_branch_program", "virtual_fp8_matmul_program")
+          "virtual_bf16_swap_loop_program", "virtual_bf16_dynamic_branch_program", "virtual_fp8_matmul_program",
+          "virtual_mxu_seeded_fp8", "virtual_dma_tiles")  # seli sets the FP8 scale register
 MXU_BESIDE_DMA = "'atlas.mxu_push' op order conflict with atlas.dma"
 WAIT = ("dma_wait", "channel = 0 : i32")
 # Two transfers in flight on channels 0 and 1, then both waited (test_untimed_pipeline's manual multichannel stream).
