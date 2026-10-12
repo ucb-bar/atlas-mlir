@@ -74,8 +74,9 @@ class ControlCircuit:
     extra outputs and ``cuts`` replace them with named inputs; selectors are ``{"instance": "a/b",
     "result": name}`` or ``{"value": name, "path": "a/b"}`` (matched on ``name``, then ``sv.namehint``).
     ``unreset`` lists registers allowed to stay unknown after reset/flush as ``{"path": "a/b", "name": reg}``
-    (path ``""`` is the top); each must name exactly one register. ``invariants`` (see ``select``) are assertions in
-    the hierarchy whose firing conditions become extra outputs named in ``self.invariants``.
+    (path ``""`` is the top), each naming exactly one register, or ``{"path", "match": regex}`` naming every
+    register under ``path`` whose name matches the whole expression (at least one). ``invariants`` (see ``select``)
+    are assertions in the hierarchy whose firing conditions become extra outputs named in ``self.invariants``.
     """
     allowed = {"hw.constant", "hw.wire", "seq.firreg", "comb.mux", "comb.and",
                "comb.or", "comb.xor", "comb.add", "comb.sub", "comb.icmp",
@@ -105,15 +106,21 @@ class ControlCircuit:
             selected, self.excluded, self.matched = select(self.modules, top, invariants)
             for path, item in selected:
                 self.watch(path, item)
-        self.unreset = {self.register(selector) for selector in unreset}
+        self.unreset = {key for selector in unreset for key in self.register(selector)}
         self.state = {node: None for node in self.registers}
 
     def register(self, selector):
-        require(isinstance(selector, dict) and set(selector) == {"path", "name"}, f"Unsupported register selector: {selector}")
+        """Registers a selector names: one for ``name``, every whole-name regex match (at least one) for ``match``."""
+        require(isinstance(selector, dict) and set(selector) in ({"path", "name"}, {"path", "match"}),
+                f"Unsupported register selector: {selector}")
         path = "".join("/" + n for n in selector["path"].split("/") if n)
-        found = [k for k in self.registers if k[0] == path and selector["name"] in (self.nodes[k][2].get("name"), self.nodes[k][2].get("sv.namehint"))]
-        require(len(found) == 1, f"Register selector {selector} matches {len(found)} registers")
-        return found[0]
+        if "name" in selector:
+            accept = lambda name: name == selector["name"]
+        else:
+            accept = lambda name: name is not None and re.fullmatch(selector["match"], name) is not None
+        found = [k for k in self.registers if k[0] == path and any(accept(self.nodes[k][2].get(a)) for a in ("name", "sv.namehint"))]
+        require(len(found) == 1 if "name" in selector else found, f"Register selector {selector} matches {len(found)} registers")
+        return found
 
     def context(self, path, name, bindings):
         require(name in self.modules, f"Missing module: {name}")

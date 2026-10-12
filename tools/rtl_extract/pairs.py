@@ -38,7 +38,7 @@ import yaml
 
 from . import derive
 from .control import require
-from .runner import RECIPES, failure, failures, observed, schedule
+from .runner import RECIPES, failure, failures, group_valid, observed, schedule
 from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
 
 FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared"})
@@ -208,7 +208,7 @@ def shared_control(circuit, spec, raw, groups):
     require(hasattr(circuit, "reach"), "shared-control check needs a single circuit")
     stop = ["".join("/" + n for n in e["path"].split("/") if n) for e in raw["shared"] if "path" in e]
     declared = {e["input"] for e in raw["shared"] if "input" in e} | {spec["clock"], spec["reset"]}
-    cones = [circuit.reach(sorted({spec["events"][g]["valid"] for g in side}), stop) for side in groups]
+    cones = [circuit.reach(sorted({group_valid(spec, g) for g in side}), stop) for side in groups]
 
     def label(key):
         attrs = circuit.nodes[key][2]

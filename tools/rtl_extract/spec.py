@@ -10,10 +10,12 @@ TARGETS = Path(__file__).resolve().parent / "targets"
 REQUIRED = {"engine", "module", "events"}
 OPTIONAL = {"description", "recipe", "clock", "reset", "reset_cycles", "flush_cycles", "limit", "tail", "inputs",
             "busy", "probes", "cuts", "operations", "operation_table", "variants", "checks", "expect", "unreset",
-            "system", "command", "decode", "invariants"}
+            "system", "command", "decode", "invariants", "responders"}
 DEFAULTS = {"recipe": "single", "clock": "clock", "reset": "reset", "reset_cycles": 16, "flush_cycles": 16,
             "limit": 320, "tail": 2, "busy": None, "probes": {}, "cuts": {}, "operations": {}, "inputs": {},
-            "variants": {}, "checks": [], "expect": {}, "unreset": []}
+            "variants": {}, "checks": [], "expect": {}, "unreset": [], "responders": {}}
+RESPONDER_KEYS = ({"request", "response", "latency"}, {"accept", "description"})
+HANDSHAKE_KEYS = ({"valid", "ready"}, {"tag", "fields"})
 RECIPE_KEYS = {"single": set(), "coupled": {"partner", "links"}}
 EVENT_KEYS = (set(), {"valid", "bundle", "fields", "row", "split_by", "response"})
 OPERATION_KEYS = ({"commands"}, {"description", "next_issue"})
@@ -76,7 +78,26 @@ def validate(spec, where):
     prefix = f"{spec['command']}_" if spec.get("command") else None
     require(isinstance(spec["unreset"], list), f"{where}: unreset must be a list of {{path, name}} selectors")
     for selector in spec["unreset"]:
-        keys(selector, {"path", "name"}, set(), f"{where}: unreset")
+        keys(selector, {"path"}, {"name", "match"}, f"{where}: unreset")
+        require(("name" in selector) != ("match" in selector), f"{where}: unreset selectors take one of name and match")
+    require(isinstance(spec["responders"], dict), f"{where}: responders must be a mapping")
+    for name, responder in spec["responders"].items():
+        at = f"{where}: responders.{name}"
+        require("/" not in name and "." not in name and name not in spec["events"], f"{at}: invalid responder name")
+        keys(responder, *RESPONDER_KEYS, at)
+        for side in ("request", "response"):
+            keys(responder[side], *HANDSHAKE_KEYS, f"{at}.{side}")
+        require("fields" not in responder["response"], f"{at}.response: fields are recorded on requests only")
+        fields = responder["request"].setdefault("fields", {})
+        require(isinstance(fields, dict) and "tag" not in fields and all(isinstance(v, str) for v in fields.values()),
+                f"{at}.request: fields must map names other than tag to signals")
+        require(isinstance(responder["latency"], int) and responder["latency"] >= 1, f"{at}: latency must be a positive integer")
+        accept = responder.setdefault("accept", [1])
+        require(isinstance(accept, list) and accept and all(v in (0, 1) for v in accept), f"{at}: accept must be a list of 0/1 levels")
+        # The responder drives the request ready and the response valid and tag; they idle at 0.
+        for driven in (responder["request"]["ready"], responder["response"]["valid"], responder["response"].get("tag")):
+            if driven is not None:
+                spec["inputs"].setdefault(driven, 0)
     for name, event in spec["events"].items():
         keys(event, *EVENT_KEYS, f"{where}: events.{name}")
         require(("valid" in event) != ("bundle" in event), f"{where}: events.{name} needs exactly one of valid and bundle")

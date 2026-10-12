@@ -24,12 +24,56 @@ def control_signals(spec):
     signals = busy_signals(spec)
     signals += [e["valid"] for e in spec["events"].values()]
     signals += [op["next_issue"]["signal"] for op in spec["operations"].values() if "next_issue" in op]
+    signals += [r["request"]["valid"] for r in spec["responders"].values()]
     return list(dict.fromkeys(signals))
 
 
 def observed(spec):
     signals = control_signals(spec) + [s for e in spec["events"].values() for s in e.get("fields", {}).values()]
+    for responder in spec["responders"].values():
+        signals += [responder["response"]["ready"], *responder["request"].get("fields", {}).values()]
+        signals += [responder["request"]["tag"]] if "tag" in responder["request"] else []
     return list(dict.fromkeys(signals))
+
+
+def group_valid(spec, group):
+    """The circuit signal that decides ``group``: an event's valid, or the circuit's side of a responder handshake
+    (request valid, response ready)."""
+    if group in spec["events"]:
+        return spec["events"][group]["valid"]
+    name, _, side = group.rpartition(".")
+    require(name in spec["responders"] and side in ("request", "response"), f"Unknown event group {group!r}")
+    return spec["responders"][name][side]["valid" if side == "request" else "ready"]
+
+
+def respond(spec, queues, age, values):
+    """Drive each responder's inputs for ``age``: request ready from its ``accept`` pattern, and the oldest due
+    response (valid, tag) held until it fires. Responses are in order."""
+    for name, responder in spec["responders"].items():
+        accept = responder["accept"]
+        values[responder["request"]["ready"]] = accept[age % len(accept)]
+        head = queues[name][0] if queues[name] and queues[name][0][0] <= age else None
+        values[responder["response"]["valid"]] = int(head is not None)
+        if "tag" in responder["response"]:
+            values[responder["response"]["tag"]] = head[1] if head is not None else 0
+
+
+def handshakes(spec, queues, age, values, out, events):
+    """Record ``<responder>.request`` and ``<responder>.response`` fires at ``age`` and update the queues. The
+    response ready must be known while a response is offered; a request's tag and fields must be known when it fires."""
+    for name, responder in spec["responders"].items():
+        request, response = responder["request"], responder["response"]
+        if values[response["valid"]]:
+            require(out[response["ready"]] is not None, f"{name} response ready unknown at age {age}")
+            if out[response["ready"]]:
+                events[f"{name}.response"] = {"tag": queues[name].pop(0)[1]}
+        if out[request["valid"]] and values[request["ready"]]:
+            fields = {k: out[s] for k, s in request.get("fields", {}).items()}
+            if "tag" in request:
+                fields["tag"] = out[request["tag"]]
+            require(None not in fields.values(), f"{name} request fields unknown at age {age}")
+            queues[name].append((age + responder["latency"], fields.get("tag")))
+            events[f"{name}.request"] = fields
 
 
 def build_single(document, spec):
@@ -70,12 +114,13 @@ def run_single(circuit, spec, name):
     """Drive one operation's commands by age, feed responses back and record per-age events."""
     commands, control = schedule(spec["operations"][name]), control_signals(spec)
     reset_and_flush(circuit, spec, control)
-    pending, trace, free = set(), [], None
+    pending, queues, trace, free = set(), {name: [] for name in spec["responders"]}, [], None
     for age in range(spec["limit"]):
         values = {**spec["inputs"], spec["clock"]: 0, spec["reset"]: 0, **commands.get(age, {})}
         for group, event in spec["events"].items():
             if "response" in event:
                 values[event["response"]["input"]] = int((age, group) in pending)
+        respond(spec, queues, age, values)
         out = circuit.cycle(values)
         require(all(out[s] is not None for s in control), f"Control output unknown at age {age}")
         violations = [(n, "unknown" if out[n] is None else "fired") for n in circuit.invariants if out[n] != 0]
@@ -87,9 +132,11 @@ def run_single(circuit, spec, name):
                 events[group] = fields
                 if "response" in event:
                     pending.add((age + event["response"]["latency"], group))
+        handshakes(spec, queues, age, values, out, events)
         busy = int(any(out[s] for s in busy_signals(spec))) if spec["busy"] else None
         trace.append({"age": age, "busy": busy, "signals": out, "events": events, "violations": violations})
-        if spec["busy"] and free is None and age > max(commands) and not busy and all(a <= age for a, _ in pending):
+        if (spec["busy"] and free is None and age > max(commands) and not busy and all(a <= age for a, _ in pending)
+                and not any(queues.values())):
             free = age
         if free is not None and age >= free + spec["tail"]:
             break
