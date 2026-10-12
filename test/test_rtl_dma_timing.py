@@ -1,4 +1,7 @@
-"""Selected dma=wait policy beside RTL-computed facts (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING)."""
+"""Selected dma=wait policy beside RTL-computed facts (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING).
+
+Transfers queue one per channel into eight command slots; windows stay disjoint and complete only at their wait.
+"""
 import json
 import re
 import unittest
@@ -25,6 +28,11 @@ def setup(vmem=0, offset=0x90000000, size=128, base=0):
 
 
 WAITED = [*setup(), transfer(), wait(), HALT]
+# A second transfer window (VMEM words 1024..1055, DRAM offset 0x90001000) and a VLS tile in bank 1.
+SECOND = [*word_base(7, 1024), *word_base(3, 0x90001000), *word_base(9, 65536)]
+CHANNEL_REUSE = "the RTL does not protect channel reuse"
+EIGHT_SLOTS = "the DMA engine has eight command slots"
+IN_FLIGHT = "which may still be in flight"
 
 
 @unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
@@ -84,6 +92,43 @@ class SelectedDMATimingTest(unittest.TestCase):
                     [wait(), HALT], [*prefix, wait(), wait(), HALT]):
             with self.subTest(ops=ops):
                 self.check_consumers(ops, False)
+
+    def test_queued_transfers_follow_the_evidence_rules(self):
+        base = [*setup(), *SECOND]
+        xlu = ("xlu_transpose", "dst = 4 : i32, src = 2 : i32")
+        vmul = ("vpu_binary", 'kind = "mul", dst = 4 : i32, lhs = 0 : i32, rhs = 2 : i32')
+        matmul = ("mxu_matmul", "unit = 1 : i32, src = 2 : i32, weight_slot = 0 : i32, acc_slot = 0 : i32, accumulate = false")
+        accepted = {
+            "two channels on disjoint windows": [*base, transfer(), transfer(channel=1, reg=7, dram=3), wait(), wait(1), HALT],
+            "two loads of one DRAM span": [*base, transfer(), transfer(channel=1, reg=7), wait(), wait(1), HALT],
+            "VLS off the pending window": [*base, transfer(), vls("vload", 4, 9), wait(), HALT],
+            "VPU beside a pending transfer": [*base, transfer(), vmul, wait(), HALT],
+            "XLU beside a pending transfer": [*base, transfer(), xlu, wait(), HALT],
+            "wait right after launch": [*base, transfer(), wait(), HALT],
+        }
+        rejected = {
+            "same channel before its wait": ([*base, transfer(), transfer(reg=7, dram=3), wait(), wait(), HALT], CHANNEL_REUSE),
+            "overlapping windows": ([*base, transfer(), transfer(channel=1, dram=3), wait(), wait(1), HALT], IN_FLIGHT),
+            "load and store of one DRAM span": ([*base, transfer(), transfer("store", 1, 7), wait(), wait(1), HALT], IN_FLIGHT),
+            "VLS on the pending window": ([*base, transfer(), vls("vload"), wait(), HALT], IN_FLIGHT),
+            "MXU beside a pending transfer": ([*base, transfer(), matmul, wait(), HALT], IN_FLIGHT),
+        }
+        windows = [op for c in range(9) for op in word_base(10 + c, 64 * c)]
+        launches = [transfer(channel=c % 8, reg=10 + c) for c in range(8)]
+        eight = [*base, *windows, *launches, *(wait(c) for c in range(8)), HALT]
+        ninth_early = [*base, *windows, *launches, wait(1), transfer(channel=1, reg=18), *(wait(c) for c in range(8) if c != 1), wait(1), HALT]
+        ninth_late = [*base, *windows, *launches, wait(0), transfer(channel=0, reg=18), *(wait(c) for c in range(1, 8)), wait(0), HALT]
+        accepted["eight transfers pending"] = eight
+        accepted["ninth launch after launch 0 waited"] = ninth_late
+        rejected["ninth launch before launch 0 waited"] = (ninth_early, EIGHT_SLOTS)
+        for name, ops in accepted.items():
+            with self.subTest(case=name):
+                checked = self.check_consumers(ops, True)
+                exported = json.loads(run(EMIT, checked.stdout, "--rtl-timing-json").stdout)
+                self.assertEqual(exported["applicability"]["dma_domain"]["pending_limit"], 8)
+        for name, (ops, diagnostic) in rejected.items():
+            with self.subTest(case=name):
+                self.assertIn(diagnostic, self.check_consumers(ops, False).stderr)
 
     def test_operand_domain_boundaries_and_unknowns(self):
         for vmem, offset, size, base in ((0, 0, 32, 0), (392192, 0xffffffe0, 32, 31), (392192, 0x90000000, 4096, 31)):

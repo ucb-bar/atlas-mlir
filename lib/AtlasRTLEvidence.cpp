@@ -375,7 +375,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"marker_and_terminal_require_prior_writes_complete", true},
           {"delay_immediately_before_terminal_supported", false},
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
-      {"unsupported", Array{dma ? "multiple_pending_dma_transfers" : "dma_and_dynamic_completion",
+      {"unsupported", Array{dma ? "mxu_commands_beside_a_pending_dma_transfer" : "dma_and_dynamic_completion",
           "mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
           "addresses_that_vary_across_loop_iterations",
           "concurrent_engine_or_host_memory_traffic",
@@ -383,7 +383,8 @@ llvm::json::Object RTLEvidence::applicability() const {
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};
   if (dma) {
     result["dma_domain"] = Object{
-        {"global_pending_limit", 1}, {"channels", 8},
+        {"pending_limit", 8}, {"pending_rule", "launch n of a block requires launch n-8 waited; eight command slots indexed by launch count"},
+        {"per_channel_pending_limit", 1}, {"channels", 8},
         {"vmem_pointer_unit", "32_bit_word"}, {"vmem_word_alignment", 8},
         {"size_unit", "byte"}, {"size_min", 32}, {"size_max", 4096},
         {"size_alignment", 32}, {"single_vmem_bank_required", true},
@@ -393,7 +394,9 @@ llvm::json::Object RTLEvidence::applicability() const {
         {"scalar_and_base_reads", "captured_at_launch"},
         {"memory_lifetime", "launch_through_matching_wait"},
         {"completion_latency", nullptr},
-        {"vmem_competition_while_pending", false},
+        {"pending_vmem_windows", "disjoint from each other and from VLS tiles; scalar reads may share a store's window"},
+        {"pending_dram_spans", "disjoint unless both transfers read"},
+        {"engines_beside_pending_transfers", "VLS, VPU and XLU keep their isolated timing; MXU waits"},
         {"publication_requires_matching_wait", true}};
     result.getArray("environment_assumptions")->push_back(
         "fresh_host_START_resets_global_dma_base_to_zero; DMA_queues_already_quiescent");
@@ -481,8 +484,10 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     x(in.rd, false); x(in.rs1, false); x(in.rs2, false);
     f.accesses.push_back({Res::DmaBase, false, 0, 1, 0, 1});
     f.accesses.push_back({Res::Vmem, load, int(words / 8), int(bytes / 32), 0, 0, false, true});
-    // The external address space is retained whole; this is not an alias proof.
-    f.accesses.push_back({Res::Dram, !load, 0, 1, 0, 0, true, true});
+    // The DRAM span in 32-byte units of the captured offset; the configured
+    // upper base is not distinguished, so equal offsets under different bases
+    // are treated as one span.
+    f.accesses.push_back({Res::Dram, !load, int(offset / 32), int(bytes / 32), 0, 0, false, true});
     return f;
   }
 

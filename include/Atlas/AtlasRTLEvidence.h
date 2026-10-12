@@ -33,8 +33,8 @@ public:
   static constexpr unsigned maximumProgramWords() { return 32768; }
   const std::string &factsSha256() const { return sha256; }
   const std::string &hardwareIRSha256() const { return hardwareIR; }
-  // dma=wait: operands captured at launch, synchronous config, one pending
-  // transfer, VMEM exclusive until its wait, no completion latency.
+  // dma=wait: operands captured at launch, synchronous config, queued
+  // transfers completed only at their matching wait, no completion latency.
   bool dmaWait() const { return dma; }
 
   // VLOAD and VSTORE hold their own path; the VPU and XLU exclude each other;

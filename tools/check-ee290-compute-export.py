@@ -121,7 +121,9 @@ def bind_command(item, command, waits):
         require(len(vmem) == len(dram) == 1, 'explicit DMA VMEM and conservative DRAM effects required')
         stream = vmem[0]
         require(stream.get('at_completion') is True and stream.get('anywhere') is False and stream.get('age') is None and stream.get('step') is None and stream.get('lifetime') == 'launch_through_matching_wait', 'DMA VMEM effect lacks dynamic completion lifetime')
-        require(dram[0].get('at_completion') is True and dram[0].get('anywhere') is True and dram[0].get('age') is None and dram[0].get('step') is None, 'DMA DRAM effect must remain dynamically conservative')
+        # The DRAM span is the captured 32-bit offset in 32-byte units; its completion stays dynamic.
+        require(dram[0].get('at_completion') is True and dram[0].get('anywhere') is False and dram[0].get('age') is None and dram[0].get('step') is None and
+                (dram[0]['first'], dram[0]['count']) == ((command['dram_address'] & 0xffffffff) // 32, command['size'] // 32), 'DMA DRAM span differs from the captured transfer or lost its dynamic completion')
         require(stream['write'] == (direction == 'load') and dram[0]['write'] == (direction == 'store'), 'DMA effect direction mismatch')
         require(stream['first'] == command['vmem_word'] // 8 and stream['count'] == command['size'] // 32, 'resolved DMA captured VMEM range mismatch')
         memory = command['memory']

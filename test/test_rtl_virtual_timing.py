@@ -1,13 +1,15 @@
 """Virtual programs lowered untimed and timed by the rtl-op-timing-v1 provider (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING).
 
-The supported scope is a serial-DMA program: one pending transfer, waited on its own channel, with VPU, XLU and
-MXU work between transfers. Programs whose virtual schedule overlaps transfers stay on the model provider.
+Transfers queue one per channel into eight command slots with disjoint VMEM windows, waited within their block;
+VLS, VPU and XLU run beside them and MXU commands wait for them. A virtual schedule that puts MXU work beside a
+pending transfer stays on the model provider.
 """
 import tempfile
 import unittest
 
 from test_delay_insertion import EMIT, OPT, addi, program, run, without_delays
 from test_rtl_timing import CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, facts_variant, selection
+from test_virtual_dma import copy
 from test_virtual_lowering import EXAMPLES, virtual_chain, virtual_pressure
 
 MODEL = "npu-model-rtl-match-v1"
@@ -15,7 +17,7 @@ LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine")
 SCHEDULED = ("--verify-atlas-virtual-stream", "--schedule-atlas-virtual", "--lower-atlas-virtual-to-machine")
 SERIAL = ("virtual_bf16_vpu_program", "virtual_bf16_shared_relu", "virtual_bf16_branch_program", "virtual_bf16_loop_program",
           "virtual_bf16_swap_loop_program", "virtual_bf16_dynamic_branch_program", "virtual_fp8_matmul_program")
-ONE_PENDING = "selected RTL timing supports one pending transfer"
+MXU_BESIDE_DMA = "'atlas.mxu_push' op order conflict with atlas.dma"
 WAIT = ("dma_wait", "channel = 0 : i32")
 # Two transfers in flight on channels 0 and 1, then both waited (test_untimed_pipeline's manual multichannel stream).
 TWO_CHANNELS = [addi(6, 0, 0), addi(7, 0, 1024), addi(1, 0, 0), addi(2, 0, 32),
@@ -63,7 +65,7 @@ class VirtualRTLTimingTest(unittest.TestCase):
                         self.assertEqual(checked(self, structured, "--finalize-atlas-llvm-calls"), checked(self, timed, "--convert-atlas-to-llvm"))
                         # Dropping the delays breaks the timing, or first a contract the delays' CFG ownership established.
                         rejected(self, without_delays(timed), VERIFY,
-                                 diagnostic="insufficient issue spacing|timing resource conflict|contract predecessor is not established")
+                                 diagnostic="insufficient issue spacing|timing resource conflict|contract predecessor is not established|cannot prove DMA memory disjointness")
 
     def test_selection_survives_lowering_and_reordering(self):
         source = (EXAMPLES / "virtual_bf16_vpu_program.mlir").read_text()
@@ -85,15 +87,22 @@ class VirtualRTLTimingTest(unittest.TestCase):
             self.assertTrue(checked(self, timed, tool=EMIT))
         rejected(self, ordered, "--insert-atlas-delays=provider=" + MODEL, diagnostic="selected RTL evidence excludes")
 
-    def test_overlapping_transfers_stay_on_the_model(self):
-        overlap = checked(self, (EXAMPLES / "virtual_sched_overlap.mlir").read_text(), *SCHEDULED)
+    def test_queued_transfers_compile_where_the_evidence_rules_hold(self):
+        source = (EXAMPLES / "virtual_sched_overlap.mlir").read_text()
+        for name, untimed in (("two-launch FP8 copy", checked(self, copy("fp8"), *LOWER)), ("two-launch BF16 copy", checked(self, copy("bf16"), *LOWER)),
+                              ("source-order overlap program", checked(self, source, *LOWER)),
+                              ("manual two channels", program(TWO_CHANNELS)), ("manual serialized channels", program(SERIALIZED))):
+            for consumer in CONSUMERS:
+                with self.subTest(program=name, consumer=consumer):
+                    timed = checked(self, untimed, selection(dma="wait"), consumer, VERIFY)
+                    timed_by(self, timed, PROVIDER)
+                    self.assertTrue(checked(self, timed, tool=EMIT))
+        # The virtual schedule of the overlap program puts a weight push beside a pending transfer; the MXU waits.
+        scheduled = checked(self, source, *SCHEDULED)
         for consumer in CONSUMERS:
-            with self.subTest(consumer=consumer):
-                rejected(self, overlap, selection(dma="wait"), consumer, diagnostic=ONE_PENDING)
-                timed_by(self, checked(self, overlap, consumer, VERIFY), MODEL)
-        rejected(self, program(TWO_CHANNELS), selection(dma="wait"), VERIFY, diagnostic=ONE_PENDING)
-        timed_by(self, checked(self, program(TWO_CHANNELS), "--insert-atlas-delays", VERIFY), MODEL)
-        timed_by(self, checked(self, program(SERIALIZED), selection(dma="wait"), "--insert-atlas-delays", VERIFY), PROVIDER)
+            with self.subTest(program="scheduled overlap program", consumer=consumer):
+                rejected(self, scheduled, selection(dma="wait"), consumer, diagnostic=MXU_BESIDE_DMA)
+                timed_by(self, checked(self, scheduled, consumer, VERIFY), MODEL)
 
     def test_bf16_pairs_sharing_a_physical_bank_are_rejected(self):
         # Seventeen live pairs put colors 0 and 16 in m0/m1 and m32/m33, one VPU bank apart.

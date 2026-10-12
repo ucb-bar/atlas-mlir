@@ -4,6 +4,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
+#include <array>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -19,17 +20,39 @@ llvm::Error selectionError(const std::string &message) {
 constexpr int kMaximumIssueCycle = 1000000;
 constexpr int kMaximumPermittedSearch = 4096;
 
+// The DMA engine queues launches into eight command slots indexed by launch
+// count; the RTL protects neither slot reuse nor channel reuse.
+constexpr size_t kDMASlots = 8;
+
 bool isLaunch(const Instr &in) {
   return in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
 }
 
-// Work a pending transfer excludes: any VMEM access, and every engine command
-// (its holds name a unit other than the scalar write port).
-bool touchesVmemOrEngine(const Footprint &f) {
-  return std::any_of(f.accesses.begin(), f.accesses.end(),
-                     [](const Access &a) { return a.res == Res::Vmem; }) ||
-         std::any_of(f.holds.begin(), f.holds.end(),
-                     [](const Hold &h) { return h.unit != Unit::ScalarWriteback; });
+// MXU commands were not swept beside a pending transfer and stay serialized
+// with DMA; VLS, VPU and XLU kept their isolated events in every swept run.
+bool holdsMxu(const Footprint &f) {
+  return std::any_of(f.holds.begin(), f.holds.end(), [](const Hold &h) {
+    return h.unit == Unit::MxuCompute || h.unit == Unit::MxuPort || h.unit == Unit::MxuAccRead ||
+           h.unit == Unit::MxuAccWrite || h.unit == Unit::MxuWeightStream || h.unit == Unit::MxuAccStream;
+  });
+}
+
+bool isVls(const Footprint &f) {
+  return std::any_of(f.holds.begin(), f.holds.end(), [](const Hold &h) {
+    return h.unit == Unit::VloadPath || h.unit == Unit::VstorePath;
+  });
+}
+
+// A VLS tile may not touch a pending transfer's VMEM window at all; the queued
+// transfer reads or writes it whenever it reaches the head of the queue.
+bool vlsOverlapsWindow(const Footprint &dma, const Footprint &f) {
+  for (const Access &window : dma.accesses) {
+    if (window.res != Res::Vmem || !window.atCompletion) continue;
+    for (const Access &tile : f.accesses)
+      if (tile.res == Res::Vmem && tile.first < window.first + window.count && window.first < tile.first + tile.count)
+        return true;
+  }
+  return false;
 }
 
 class RTLReservations final : public TimingReservations {
@@ -64,7 +87,8 @@ private:
 
 // Every block is verified from an idle state, so every path must reach ECALL
 // through blocks ending in a halt, a delay-slotted redirect to an instruction,
-// or a fall-through; one transfer may be pending, waited on its own channel.
+// or a fall-through. Transfers pend one per channel and at most eight, each
+// waited on its own channel within its block.
 std::string validateScope(const AtlasStream &s) {
   if (s.ops.size() > RTLEvidence::maximumProgramWords())
     return "program exceeds the 32768-word instruction memory";
@@ -100,28 +124,36 @@ std::string validateScope(const AtlasStream &s) {
     } else if (!s.endsInHalt(b) && end == s.ops.size()) {
       return at(end - 1, "ends the stream without ECALL; selected RTL timing requires a terminal instruction");
     }
-    int pending = -1;
-    size_t launch = begin;
+    struct Launch { size_t index; int channel; bool waited; };
+    std::vector<Launch> launches;
+    std::array<int, 8> pendingOn;
+    pendingOn.fill(-1);
     for (size_t i = begin; i < end; ++i) {
       const Instr &in = s.instrs[i];
+      int channel = in.op->channel;
       if (isLaunch(in)) {
-        if (pending >= 0)
-          return at(i, "launches while the transfer on channel " + std::to_string(pending) +
-                           " is pending; selected RTL timing supports one pending transfer, so add atlas.dma_wait first");
-        pending = in.op->channel;
-        launch = i;
+        if (pendingOn[channel] >= 0)
+          return at(i, "launches on channel " + std::to_string(channel) + " while its transfer at word " +
+                           std::to_string(launches[pendingOn[channel]].index) +
+                           " has not been waited; the RTL does not protect channel reuse, so add atlas.dma_wait first");
+        if (launches.size() >= kDMASlots && !launches[launches.size() - kDMASlots].waited)
+          return at(i, "is launch " + std::to_string(launches.size()) + " of its block while launch " +
+                           std::to_string(launches.size() - kDMASlots) + " (word " +
+                           std::to_string(launches[launches.size() - kDMASlots].index) +
+                           ") has not been waited; the DMA engine has eight command slots");
+        pendingOn[channel] = static_cast<int>(launches.size());
+        launches.push_back({i, channel, false});
       } else if (in.op->opClass == OpClass::DmaWait) {
-        if (pending < 0)
-          return at(i, "has no pending transfer to wait for");
-        if (pending != in.op->channel)
-          return at(i, "waits on channel " + std::to_string(in.op->channel) +
-                           " while the pending transfer is on channel " + std::to_string(pending));
-        pending = -1;
+        if (pendingOn[channel] < 0)
+          return at(i, "has no pending transfer to wait for on channel " + std::to_string(channel));
+        launches[pendingOn[channel]].waited = true;
+        pendingOn[channel] = -1;
       }
     }
-    if (pending >= 0)
-      return at(launch, "launches a DMA transfer that is still pending when its block ends; selected RTL timing requires atlas.dma_wait on channel " +
-                            std::to_string(pending) + " within the block");
+    for (const Launch &launch : launches)
+      if (!launch.waited)
+        return at(launch.index, "launches a DMA transfer that is still pending when its block ends; selected RTL timing requires atlas.dma_wait on channel " +
+                                    std::to_string(launch.channel) + " within the block");
   }
   return {};
 }
@@ -138,14 +170,16 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
   };
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     Dependence d = dataDependence(a, fa, b, fb);
-    if (isLaunch(b) && !isLaunch(a) && touchesVmemOrEngine(fa) && fa.doneAge + 1 > d.distance)
-      d = {fa.doneAge + 1, EdgeKind::Order, "selected DMA launch waits for prior VMEM work to drain"};
+    if (isLaunch(b) && holdsMxu(fa) && fa.doneAge + 1 > d.distance)
+      d = {fa.doneAge + 1, EdgeKind::Order, "selected DMA launch waits for MXU work to drain"};
     return TimingRuleResult<Dependence>{d, {}};
   };
+  // Pending windows stay disjoint from each other and from VLS tiles; DRAM
+  // spans may be shared only by reads; MXU commands wait for every transfer.
   p.dmaConflict = [](const Footprint &dma, const Footprint &f) {
     DMACompletionConflict result;
     result.conflict = conflictsAtCompletion(dma, f, result.kind);
-    if (!result.conflict && touchesVmemOrEngine(f))
+    if (!result.conflict && (holdsMxu(f) || (isVls(f) && vlsOverlapsWindow(dma, f))))
       result = {true, EdgeKind::Order};
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };

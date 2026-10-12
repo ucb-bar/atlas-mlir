@@ -16,10 +16,12 @@ loadSelectedRTLEvidence(ModuleOp module);
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
 // The complete kAtlasRTLTimingProviderId policy over selected facts: facts
-// footprints, data dependences with a VMEM drain before each DMA launch,
-// exclusive VMEM while a transfer is pending, one pending transfer with
-// matching waits, drained basic blocks, exclusive engine reservations, the
-// instruction-memory and issue-cycle bounds, and NOP guards before redirects.
+// footprints, data dependences, queued transfers (one per channel, eight
+// command slots, disjoint VMEM windows, DRAM spans shared only by reads, VLS
+// off pending windows, MXU serialized with DMA) completed only at their
+// matching wait within the block, drained basic blocks, exclusive engine
+// reservations, the instruction-memory and issue-cycle bounds, and NOP guards
+// before redirects.
 timing::TimingProvider
 rtlTimingProvider(std::shared_ptr<const timing::RTLEvidence> evidence);
 // Registered factory: fails without valid selected evidence on the module.

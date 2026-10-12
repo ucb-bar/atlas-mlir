@@ -157,14 +157,14 @@ class SelectedVmulTimingTest(unittest.TestCase):
         self.assertEqual(finalized.returncode, 0, finalized.stderr)
         self.assertIn("op_timing_sha256", finalized.stdout)
 
-    def test_dma_wait_and_xlu_share_serialized_compute_policy(self):
+    def test_vpu_runs_beside_a_pending_transfer(self):
         from test_rtl_dma_timing import setup, transfer, wait
         from test_rtl_xlu_timing import transpose
-        self.check([*setup(), transfer(), vmul(), wait(), HALT], False, CONSUMERS[0], dma="wait")
-        for consumer in CONSUMERS:
-            result = self.check([*setup(), transfer(), wait(), transpose(0, 2), vmul(2, 4, 6), HALT],
-                                True, consumer, VERIFY, dma="wait")
-            self.assertEqual(run(EMIT, result.stdout).returncode, 0)
+        for ops in ([*setup(), transfer(), vmul(), wait(), HALT],
+                    [*setup(), transfer(), wait(), transpose(0, 2), vmul(2, 4, 6), HALT]):
+            for consumer in CONSUMERS:
+                result = self.check(ops, True, consumer, VERIFY, dma="wait")
+                self.assertEqual(run(EMIT, result.stdout).returncode, 0)
 
 
 if __name__ == "__main__":

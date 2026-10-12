@@ -1,7 +1,7 @@
 """Smoke case for several DMA transfers in flight: a load on channel 0 and a store on channel 1, launched back to back.
 
-The compiler allows one pending transfer, so the stream is final; footprints bind to a reference in which each
-wait follows its own launch.
+The hand-scheduled stream binds footprints to a reference in which each wait follows its own launch; the compiled
+variants keep both transfers in flight under the provider's queued-transfer rules.
 """
 from . import END, Case, add, dma, dma_config, filler, put, upper, wait
 
@@ -25,4 +25,6 @@ def both_in_flight(events):
 CASES = {
     'dma_pair_in_flight': Case(PAIR + END, {0: filler(8192)}, moved, {'dma': 2}, dram={A: LOADED, O - 32: b'\xa5' * 192}, dma=(4, 4),
                                final=True, consumers=('final',), check=both_in_flight),
+    'dma_pair_compiled': Case(PAIR + END, {0: filler(8192)}, moved, {'dma': 2}, dram={A: LOADED, O - 32: b'\xa5' * 192}, dma=(4, 4),
+                              check=both_in_flight),
 }

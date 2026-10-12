@@ -71,11 +71,11 @@ class SelectedXLUTimingTest(unittest.TestCase):
         for src, dst in ((-1, 7), (64, 7), (3, -1), (3, 64)):
             self.check([transpose(src, dst), HALT], False, CONSUMERS[0])
 
-    def test_pending_dma_requires_wait_before_xlu(self):
+    def test_xlu_runs_beside_a_pending_transfer(self):
         from test_rtl_dma_timing import setup, transfer, wait
-        self.check([*setup(), transfer(), transpose(), wait(), HALT], False, CONSUMERS[0], dma="wait")
-        for consumer in CONSUMERS:
-            self.check([*setup(), transfer(), wait(), transpose(), HALT], True, consumer, VERIFY, dma="wait")
+        for ops in ([*setup(), transfer(), transpose(), wait(), HALT], [*setup(), transfer(), wait(), transpose(), HALT]):
+            for consumer in CONSUMERS:
+                self.check(ops, True, consumer, VERIFY, dma="wait")
 
 
 if __name__ == "__main__":
