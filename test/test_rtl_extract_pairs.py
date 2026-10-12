@@ -20,6 +20,7 @@ import test_rtl_extract_synthetic as synthetic
 from rtl_extract import pairs
 from rtl_extract.ir import load_document
 from rtl_extract.runner import modules
+from rtl_extract.spec import TARGETS
 
 HW_IR = os.environ.get("ATLAS_HW_IR")
 EXPORTER = os.environ.get("ATLAS_HW_EXPORTER")
@@ -103,6 +104,59 @@ class SyntheticPairTests(unittest.TestCase):
             self.assertEqual(set(raw.get("expect", {})), set(raw["pairs"]), name)
 
 
+class CoreVpuPairFileTests(unittest.TestCase):
+    """The all-pairs VPU file: 29x29 ordered pairs with disjoint physical banks, and the compiler's VPU->VPU gap rule."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw, cls.spec = pairs.load("atlas", ["core_vpu"])["core_vpu"]
+        vpu = yaml.safe_load((TARGETS / "atlas" / "vpu.yaml").read_text())
+        cls.words = vpu["decode"]["words"]
+        cls.next_issue = {op: v["next_issue_age"] for op, v in vpu["expect"].items()}
+
+    def split(self, name):
+        first, second = name.split("_")
+        return first, second
+
+    def test_every_ordered_pair_is_declared(self):
+        self.assertEqual(len(self.words), 29)
+        self.assertEqual(set(self.raw["pairs"]), {f"{a}_{b}" for a in self.words for b in self.words})
+
+    def test_instruction_words_encode_the_named_operations(self):
+        for name, pair in self.raw["pairs"].items():
+            for side, op in zip(("first", "second"), self.split(name)):
+                word = pair[f"{side}_inputs"]["instruction"]
+                mask = 0x607F if op.startswith("vli") else 0xFE00007F      # vli: mode and opcode; others: funct7 and opcode
+                with self.subTest(name, side=side):
+                    self.assertEqual(word & mask, self.words[op] & mask)
+
+    def test_operand_banks_are_disjoint_modulo_32(self):
+        def banks(op, word):
+            vd, vs1, vs2 = word >> 7 & 63, word >> 13 & 63, word >> 19 & 63
+            if op.startswith("vli"):
+                return {vd % 32, (vd + 1) % 32}
+            return {r % 32 for r in (vd, vd + 1, vs1, vs1 + 1, vs2, vs2 + 1)}
+        for name, pair in self.raw["pairs"].items():
+            first, second = self.split(name)
+            with self.subTest(name):
+                self.assertFalse(banks(first, pair["first_inputs"]["instruction"]) & banks(second, pair["second_inputs"]["instruction"]))
+
+    def test_gaps_cover_the_first_operations_first_free_age(self):
+        for name, pair in self.raw["pairs"].items():
+            low, high = pair["gaps"].split("..")
+            with self.subTest(name):
+                self.assertEqual(int(low), 1)
+                self.assertGreaterEqual(int(high), self.next_issue[self.split(name)[0]] + 1 + 5)
+
+    def test_stable_gap_never_exceeds_the_first_operations_next_issue_age(self):
+        for name, expected in self.raw["expect"].items():
+            first = self.split(name)[0]
+            with self.subTest(name):
+                self.assertEqual(expected["next_issue_age"], self.next_issue[first])
+                self.assertLessEqual(expected["min_gap"], expected["stable_gap"])
+                self.assertLessEqual(expected["stable_gap"], expected["next_issue_age"])
+
+
 @unittest.skipUnless(HW_IR and EXPORTER, "requires ATLAS_HW_IR and ATLAS_HW_EXPORTER")
 class HardwarePairTests(unittest.TestCase):
     def check(self, name):
@@ -133,6 +187,31 @@ class HardwarePairTests(unittest.TestCase):
 
     def test_core(self):
         self.check("core")
+
+    CORE_VPU_SAMPLE = ("exp_relu relu_exp exp_exp2 exp_add add_relu sin_cos rmax_exp rsum_relu csum_relu csum_csum csum_add "
+                       "cmax_pairmax fp8pack_relu fp8unpack_relu fp8unpack_fp8unpack vliAll_relu vliAll_vliCol vliOne_vliRow "
+                       "relu_vliOne mov_vliAll").split()
+
+    def test_core_vpu_sample(self):
+        """Windows of stable_gap - 1 .. stable_gap + 1 for one pair per timing class; the gap below must fire the VPU
+        issue-busy assertions, and the stable gap never exceeds the first operation's next_issue_age."""
+        raw, spec = pairs.load("atlas", ["core_vpu"])["core_vpu"]
+        document = load_document(HW_IR, modules(spec), EXPORTER, True)
+        window = copy.deepcopy(raw)
+        window["pairs"] = {n: window["pairs"][n] for n in self.CORE_VPU_SAMPLE}
+        for name, pair in window["pairs"].items():
+            stable = raw["expect"][name]["stable_gap"]
+            pair["gaps"] = f"{max(1, stable - 1)}..{stable + 1}"
+        for record in pairs.extract(document, window, spec, jobs=8):
+            name = record["name"].split(".", 1)[1]
+            expected = raw["expect"][name]
+            with self.subTest(name):
+                self.assertEqual(record["invariants"], {"checked": 177, "excluded": []})
+                self.assertEqual(record["stable_gap"], expected["stable_gap"], record["results"])
+                self.assertLessEqual(record["stable_gap"], expected["next_issue_age"])
+                if expected["stable_gap"] > 1:
+                    self.assertEqual(record["min_gap"], expected["stable_gap"], record["results"])
+                    self.assertIn("issue-busy bit is set", record["results"][0]["result"])
 
     def test_mxu0(self):
         self.check("mxu0")

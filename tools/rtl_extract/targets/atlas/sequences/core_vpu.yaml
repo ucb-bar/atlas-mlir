@@ -1,0 +1,102 @@
+# Three- and four-command VPU chains on the VPU engine spec (targets/atlas/vpu.yaml) at uniform spacing; operation i is
+# issued i * gap ages after the first. The guard is each operation's issue-busy bit, the VPU's admission rule. Entries
+# use disjoint operand banks: set 0 is the spec's (2/6/10), then 18/22/26, 34/38/42 and 50/54/58 (vs1/vs2/vd).
+# The system spec is not available to sequences, so AtlasCore assertions do not run here.
+engine: vpu
+description: Slot accounting for a third command arriving while two VPU commands overlap.
+equivalent:              # the overlap path serves the second command on the other port pair
+  read: [read0, read1]
+  write: [write0, write1]
+sequences:
+  exp_relu_exp:
+    description: third shares lane logic with the first (exp) but not the second
+    ops:
+      - {op: exp}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: exp, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  exp_relu_sin_cos:
+    description: third (sin) shares nothing; fourth (cos) shares with the third
+    ops:
+      - {op: exp}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: sin, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: cos, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  sin_relu_cos:
+    description: third shares lane logic with the first (sin) but not the second
+    ops:
+      - {op: sin}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: cos, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  relu_exp_exp2:
+    description: third shares lane logic with the second (exp) but not the first
+    ops:
+      - {op: relu}
+      - {op: exp, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: exp2, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  exp_relu_add:
+    description: third needs both read slots
+    ops:
+      - {op: exp}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: add, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: sin, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  exp_relu_rmax:
+    description: third is a row reduction (double ports)
+    ops:
+      - {op: exp}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: rmax, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: sin, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  csum_relu_exp:
+    description: a column reduction (129 ages) with two single-input commands behind it
+    ops:
+      - {op: csum}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: exp, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: sin, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  vliall_relu_exp:
+    description: an immediate fill (64 ages) with two single-input commands behind it
+    ops:
+      - {op: vliAll}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: exp, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: sin, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+  exp_fp8pack_vlicol:
+    description: pack and fill commands overlapping a transcendental
+    ops:
+      - {op: exp}
+      - {op: fp8pack, inputs: {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}}
+      - {op: vliCol, inputs: {io_cmd_bits_vs1: 34, io_cmd_bits_vs2: 38, io_cmd_bits_vd: 42}}
+      - {op: relu, inputs: {io_cmd_bits_vs1: 50, io_cmd_bits_vs2: 54, io_cmd_bits_vd: 58}}
+    lengths: 3..4
+    gaps: 1..135
+# Regression values used only by tests: stable spacing per chain length. The extractor never reads them.
+expect:
+  exp_relu_exp: {3: 33, 4: 33}
+  exp_relu_sin_cos: {3: 33, 4: 65}
+  sin_relu_cos: {3: 33, 4: 33}
+  relu_exp_exp2: {3: 65, 4: 65}
+  exp_relu_add: {3: 65, 4: 65}
+  exp_relu_rmax: {3: 65, 4: 65}
+  csum_relu_exp: {3: 65, 4: 65}
+  vliall_relu_exp: {3: 32, 4: 33}
+  exp_fp8pack_vlicol: {3: 33, 4: 33}
