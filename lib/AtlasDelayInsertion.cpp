@@ -19,15 +19,24 @@ constexpr int kMaxSearch = 100000;
 constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 
+// In-order placement of one block from `entry`. Each op issues no earlier
+// than its `floor` cycle, when given, and the block drains no earlier than
+// `drainFloor`; `cycles` and `drainedAt` receive the placement. `tail` is the
+// idle time that drains a block without a branch or halt. A nonempty floor
+// marks one of several entry contexts, which diagnostics name.
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
-                        const TimingProvider &p,
+                        const TimingProvider &p, const RegValues &entry,
+                        ArrayRef<int> floor, int drainFloor,
                         std::vector<DelayInsertion> &before,
-                        DelayInsertion &after) {
+                        DelayInsertion &after, std::vector<int> &cycles,
+                        int &drainedAt, int &tail) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
-  RegValues regs = s.entry[block];
+  RegValues regs = entry;
+  cycles.assign(end - begin, 0);
+  tail = 0;
   // The first uncovered provider rule; checked after each placement.
   std::string fault;
   auto note = [&](const std::string &why) {
@@ -86,6 +95,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     const Instr &in = instrs[i];
     reserve(*table, in, f, cycle);
     issued.push_back({i, f, cycle});
+    cycles[i - begin] = cycle;
     applyScalar(in, regs);
     int gap = rule(p.issueGap(in));
     if (gap <= 0)
@@ -110,9 +120,13 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     const Instr &in = instrs[i];
     Footprint f = p.footprint(in, regs);
     if (!f.error.empty())
-      return ops[i]->emitOpError(f.error);
+      return emitAtlasFootprintError(s, ops[i], f.error, floor.empty() ? nullptr : &entry);
     std::string reason;
     int cycle = earliest(in, f, nextFree, reason);
+    if (!floor.empty() && floor[i - begin] > cycle) {
+      cycle = floor[i - begin];
+      reason = "another entry context of this block issues it later";
+    }
 
     if (in.op->opClass == OpClass::Halt) {
       // A halt neither drains in-flight work nor waits for a delay, so its
@@ -147,7 +161,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       applyScalar(in, after);
       Footprint sf = p.footprint(slot, after);
       if (!sf.error.empty())
-        return ops[slotIndex]->emitOpError(sf.error);
+        return emitAtlasFootprintError(s, ops[slotIndex], sf.error, floor.empty() ? nullptr : &entry);
       if (drained() - 2 > cycle) {
         cycle = drained() - 2;
         reason = "this block finishes before the branch's successors start";
@@ -196,8 +210,10 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   // A block that neither branches nor halts drains before the next block, or
   // the stream's end, as its own trailing delays; a next block starting with
   // an instruction that issues during a DELAY gets a NOP guard.
-  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drained() > nextFree) {
-    int idle = drained() - nextFree;
+  drainedAt = drained();
+  int drainCycle = std::max(drainedAt, drainFloor);
+  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drainCycle > nextFree) {
+    int idle = tail = drainCycle - nextFree;
     after = {idleDelays(idle), false,
              s.fallsThrough(block)
                  ? "this block finishes before the next one starts"
@@ -212,6 +228,51 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   return success();
 }
 
+constexpr int kMaxContextRounds = 64;
+
+} // namespace
+
+LogicalResult mlir::atlas::atlasInOrderBlockDelays(
+    const AtlasStream &s, size_t block, const TimingProvider &p,
+    std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail) {
+  std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, p);
+  std::vector<int> cycles;
+  int drained = 0;
+  if (groups.size() == 1)
+    return timeBlock(s, block, p, groups.front().entries.front(), {}, 0, before, after, cycles, drained, tail);
+  // Raise each op's issue cycle to the latest any context needs until one
+  // round leaves every context's placement unchanged, so the delays hold
+  // under all of them.
+  size_t begin = s.starts[block], end = s.blockEnd(block);
+  std::vector<int> floor(end - begin, 0);
+  int drainFloor = 0;
+  for (int round = 0; round < kMaxContextRounds; ++round) {
+    bool stable = true;
+    for (const AtlasContextGroup &group : groups) {
+      for (size_t i = begin; i < end; ++i)
+        before[i] = {};
+      after = {};
+      if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail)))
+        return failure();
+      for (size_t k = 0; k < floor.size(); ++k)
+        if (cycles[k] > floor[k]) {
+          floor[k] = cycles[k];
+          stable = false;
+        }
+      if (drained > drainFloor) {
+        drainFloor = drained;
+        stable = false;
+      }
+    }
+    if (stable)
+      return success();
+  }
+  return s.ops[begin]->emitOpError("delays do not converge over the block's ")
+         << groups.size() << " entry contexts";
+}
+
+namespace {
+
 LogicalResult insertDelays(ModuleOp module, StringRef requested) {
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
   if (failed(provider))
@@ -221,8 +282,9 @@ LogicalResult insertDelays(ModuleOp module, StringRef requested) {
     return failure();
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<DelayInsertion> after(stream->starts.size());
+  int tail;
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(timeBlock(*stream, b, *provider, before, after[b])))
+    if (failed(atlasInOrderBlockDelays(*stream, b, *provider, before, after[b], tail)))
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);

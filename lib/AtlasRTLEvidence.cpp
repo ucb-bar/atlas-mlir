@@ -334,7 +334,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"earliest_successor_issue", "branch_issue_plus_2"},
           {"delay_slots", 1}, {"delay_slot_operations", "scalar ALU"},
           {"delay_immediately_before_redirect_supported", false},
-          {"scalar_values_at_joins", "equal_on_all_paths_or_unknown"},
+          {"scalar_values_at_block_entry", "each_concrete_context_with_branches_evaluated_when_known; equal_on_all_paths_or_unknown_past_4096_contexts"},
           {"linking_and_register_targets_supported", false}}},
       {"timing_source", "merlin.op_timing.v1 facts computed from the RTL; footprint structure from the compiler"},
       {"supported_operations", std::move(operations)},
@@ -377,7 +377,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
       {"unsupported", Array{dma ? "mxu_commands_beside_a_pending_dma_transfer" : "dma_and_dynamic_completion",
           "mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
-          "addresses_that_vary_across_loop_iterations",
+          "addresses_that_vary_beyond_4096_block_entry_contexts",
           "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};

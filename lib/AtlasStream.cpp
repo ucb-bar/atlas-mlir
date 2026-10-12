@@ -6,6 +6,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <atomic>
 #include <deque>
@@ -190,6 +191,22 @@ std::vector<uint32_t> mlir::atlas::idleDelays(int idle) {
   return out;
 }
 
+// Whether a conditional branch is taken, when its operands are known.
+static std::optional<bool> branchTaken(const Instr &in, const RegValues &regs) {
+  if (!regs[in.rs1] || !regs[in.rs2])
+    return std::nullopt;
+  uint32_t a = *regs[in.rs1], b = *regs[in.rs2];
+  int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+  return llvm::StringSwitch<std::optional<bool>>(in.op->name)
+      .Case("beq", a == b)
+      .Case("bne", a != b)
+      .Case("blt", sa < sb)
+      .Case("bge", sa >= sb)
+      .Case("bltu", a < b)
+      .Case("bgeu", a >= b)
+      .Default(std::nullopt);
+}
+
 static bool mergeInto(RegValues &into, const RegValues &from, int first = 1) {
   bool changed = false;
   for (int r = first; r < 32; r++) {
@@ -351,7 +368,106 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
+  // Concrete contexts: a branch with known operands takes one edge, and a
+  // taken branch or JAL executes only its delay slot before the target.
+  std::vector<std::set<RegValues>> seen(blocks);
+  std::deque<std::pair<size_t, RegValues>> pending;
+  size_t total = 0;
+  auto reach = [&](size_t b, const RegValues &regs) {
+    if (seen[b].insert(regs).second) {
+      pending.push_back({b, regs});
+      ++total;
+    }
+  };
+  reach(0, unknownRegs());
+  while (!pending.empty() && total <= kAtlasMaxEntryContexts) {
+    auto [b, regs] = pending.front();
+    pending.pop_front();
+    size_t e = s.blockEnd(b);
+    std::optional<bool> taken;
+    for (size_t i = starts[b]; i < e; ++i) {
+      if (instrs[i].op->opClass == OpClass::Branch)
+        taken = branchTaken(instrs[i], regs);
+      applyScalar(instrs[i], regs);
+    }
+    if (!taken) {
+      for (size_t next : succs[b])
+        reach(next, regs);
+      continue;
+    }
+    size_t next = *taken ? targetIndex(e - 2) : e;
+    if (next < n)
+      reach(blockAt[next], regs);
+  }
+  if (total > kAtlasMaxEntryContexts) {
+    s.contextLimit = "concrete register contexts exceed " + std::to_string(kAtlasMaxEntryContexts) +
+                     " block entries, so values are merged over all paths";
+  } else {
+    s.contexts.resize(blocks);
+    for (size_t b = 0; b < blocks; ++b)
+      s.contexts[b].assign(seen[b].begin(), seen[b].end());
+  }
   return s;
+}
+
+static bool sameAccess(const Access &a, const Access &b) {
+  return std::tie(a.res, a.write, a.first, a.count, a.age, a.step, a.anywhere, a.atCompletion) ==
+         std::tie(b.res, b.write, b.first, b.count, b.age, b.step, b.anywhere, b.atCompletion);
+}
+
+static bool sameHold(const Hold &a, const Hold &b) {
+  return std::tie(a.unit, a.index, a.from, a.to, a.alt) == std::tie(b.unit, b.index, b.from, b.to, b.alt);
+}
+
+static bool sameFootprint(const Footprint &a, const Footprint &b) {
+  return std::equal(a.accesses.begin(), a.accesses.end(), b.accesses.begin(), b.accesses.end(), sameAccess) &&
+         std::equal(a.holds.begin(), a.holds.end(), b.holds.begin(), b.holds.end(), sameHold) &&
+         std::tie(a.mregReads, a.mregWrites, a.readRelease, a.writeRelease, a.writeDuringRead, a.vpuLive, a.doneAge, a.dmaCycles, a.error) ==
+             std::tie(b.mregReads, b.mregWrites, b.readRelease, b.writeRelease, b.writeDuringRead, b.vpuLive, b.doneAge, b.dmaCycles, b.error);
+}
+
+std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
+    const AtlasStream &s, size_t block, const TimingProvider &provider) {
+  if (!provider.concreteEntryContexts || s.contexts.empty() || s.contexts[block].empty())
+    return {{{s.entry[block]}}};
+  // Footprints are pure in the instruction and its register reads, so contexts
+  // with equal footprint sequences time identically.
+  std::vector<AtlasContextGroup> groups;
+  std::vector<std::vector<Footprint>> resolved;
+  for (const RegValues &entry : s.contexts[block]) {
+    std::vector<Footprint> footprints;
+    RegValues regs = entry;
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      footprints.push_back(provider.footprint(s.instrs[i], regs));
+      applyScalar(s.instrs[i], regs);
+    }
+    auto same = [&](const std::vector<Footprint> &other) {
+      return std::equal(footprints.begin(), footprints.end(), other.begin(), other.end(), sameFootprint);
+    };
+    auto it = llvm::find_if(resolved, same);
+    if (it == resolved.end()) {
+      resolved.push_back(std::move(footprints));
+      groups.push_back({{entry}});
+    } else {
+      groups[it - resolved.begin()].entries.push_back(entry);
+    }
+  }
+  return groups;
+}
+
+InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,
+                                                        const RegValues *context) {
+  InFlightDiagnostic diagnostic = op->emitOpError(error);
+  if (!s.contextLimit.empty())
+    diagnostic.attachNote() << s.contextLimit;
+  if (context) {
+    std::string known;
+    for (int r = 1; r < 32; ++r)
+      if ((*context)[r])
+        known += " x" + std::to_string(r) + "=0x" + llvm::utohexstr(*(*context)[r]);
+    diagnostic.attachNote() << "in the block entry context with" << (known.empty() ? " no known registers" : known);
+  }
+  return diagnostic;
 }
 
 // DMA_CONFIG writes one shared ScalarCore register, irrespective of channel.
@@ -416,63 +532,66 @@ LogicalResult mlir::atlas::checkAtlasStream(
     return s.ops[i]->getName().getStringRef().str();
   };
   for (size_t b = 0; b < s.starts.size(); ++b) {
-    RegValues regs = s.entry[b];
-    std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
-    for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
-      const Instr &in = s.instrs[i];
-      const OpInfo &op = *in.op;
-      Footprint f = provider.footprint(in, regs);
-      if (!f.error.empty())
-        return s.ops[i]->emitOpError(f.error);
-      if (f.doneAge < 0)
-        return s.ops[i]->emitOpError("timing provider returned a negative completion age");
-      if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
-          (f.doneAge > 0 || op.opClass == OpClass::Halt))
-        return s.ops[i]->emitOpError(
-            "delay-slot instruction must be single-cycle scalar work");
-      if (in.release)
+    std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, b, provider);
+    for (const AtlasContextGroup &group : groups) {
+      RegValues regs = group.entries.front();
+      std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+      for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
+        const Instr &in = s.instrs[i];
+        const OpInfo &op = *in.op;
+        Footprint f = provider.footprint(in, regs);
+        if (!f.error.empty())
+          return emitAtlasFootprintError(s, s.ops[i], f.error, groups.size() > 1 ? &group.entries.front() : nullptr);
+        if (f.doneAge < 0)
+          return s.ops[i]->emitOpError("timing provider returned a negative completion age");
+        if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
+            (f.doneAge > 0 || op.opClass == OpClass::Halt))
+          return s.ops[i]->emitOpError(
+              "delay-slot instruction must be single-cycle scalar work");
+        if (in.release)
+          for (int ch = 0; ch < 8; ++ch)
+            if (!pending[ch].empty())
+              return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
         for (int ch = 0; ch < 8; ++ch)
-          if (!pending[ch].empty())
-            return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
+          for (const auto &[k, dma] : pending[ch]) {
+            auto conflict = provider.dmaConflict(dma, f);
+            if (!conflict.error.empty())
+              return s.ops[i]->emitOpError(conflict.error);
+            if (conflict.value.conflict)
+              return s.ops[i]->emitOpError()
+                     << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
+                     << " on channel " << ch
+                     << ", which may still be in flight; a delay cannot cover "
+                        "a DMA transfer, so add atlas.dma_wait first";
+          }
+        bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
+        if (command && !pending[op.channel].empty())
+          s.ops[i]->emitWarning()
+              << "reuses DMA channel " << op.channel << " while "
+              << name(pending[op.channel].back().first)
+              << " may still be in flight; the timing model needs an "
+                 "atlas.dma_wait here, which a delay cannot replace";
+        if (op.opClass == OpClass::Halt)
+          for (int ch = 0; ch < 8; ++ch)
+            if (!pending[ch].empty())
+              return s.ops[i]->emitOpError()
+                     << "halts while DMA channel " << ch
+                     << " may still be in flight; add atlas.dma_wait first";
+        if (op.opClass == OpClass::DmaWait)
+          pending[op.channel].clear();
+        if (command)
+          pending[op.channel].push_back({i, f});
+        applyScalar(in, regs);
+      }
+      // Timing is checked one block at a time, so a transfer must complete in
+      // the block that starts it, as verifyAtlasTimedStream requires.
       for (int ch = 0; ch < 8; ++ch)
-        for (const auto &[k, dma] : pending[ch]) {
-          auto conflict = provider.dmaConflict(dma, f);
-          if (!conflict.error.empty())
-            return s.ops[i]->emitOpError(conflict.error);
-          if (conflict.value.conflict)
-            return s.ops[i]->emitOpError()
-                   << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
-                   << " on channel " << ch
-                   << ", which may still be in flight; a delay cannot cover "
-                      "a DMA transfer, so add atlas.dma_wait first";
-        }
-      bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
-      if (command && !pending[op.channel].empty())
-        s.ops[i]->emitWarning()
-            << "reuses DMA channel " << op.channel << " while "
-            << name(pending[op.channel].back().first)
-            << " may still be in flight; the timing model needs an "
-               "atlas.dma_wait here, which a delay cannot replace";
-      if (op.opClass == OpClass::Halt)
-        for (int ch = 0; ch < 8; ++ch)
-          if (!pending[ch].empty())
-            return s.ops[i]->emitOpError()
-                   << "halts while DMA channel " << ch
-                   << " may still be in flight; add atlas.dma_wait first";
-      if (op.opClass == OpClass::DmaWait)
-        pending[op.channel].clear();
-      if (command)
-        pending[op.channel].push_back({i, f});
-      applyScalar(in, regs);
+        if (!pending[ch].empty())
+          return s.ops[pending[ch].back().first]->emitOpError(
+              "may still be in flight when its block ends; timing requires DMA "
+              "completion before a block boundary, so add atlas.dma_wait in "
+              "this block");
     }
-    // Timing is checked one block at a time, so a transfer must complete in
-    // the block that starts it, as verifyAtlasTimedStream requires.
-    for (int ch = 0; ch < 8; ++ch)
-      if (!pending[ch].empty())
-        return s.ops[pending[ch].back().first]->emitOpError(
-            "may still be in flight when its block ends; timing requires DMA "
-            "completion before a block boundary, so add atlas.dma_wait in "
-            "this block");
   }
   return success();
 }
@@ -599,95 +718,107 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
   resolved.footprints.resize(s.ops.size());
   resolved.cycles.assign(s.ops.size(), 0);
   resolved.successorIssue.assign(s.starts.size(), -1);
+  resolved.contexts.resize(s.starts.size());
   struct Issued { size_t index; Footprint footprint; int cycle; };
   for (size_t block = 0; block < s.starts.size(); ++block) {
-    RegValues regs = s.entry[block];
-    auto reservations = provider.createReservations();
-    if (!reservations.error.empty())
-      return s.ops[s.starts[block]]->emitOpError(reservations.error);
-    if (!reservations.value)
-      return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
-    TimingReservations &table = *reservations.value;
-    std::vector<Issued> issued;
-    std::array<Operation *, 8> pendingDMA{};
-    int cycle = 0;
-    int drained = 0;
-    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
-      const Instr &in = s.instrs[i];
-      Footprint f = provider.footprint(in, regs);
-      if (!f.error.empty())
-        return s.ops[i]->emitOpError(f.error);
-      if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
-        return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
-      for (const Issued &prior : issued) {
-        auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
-        if (!rule.error.empty())
-          return s.ops[i]->emitOpError(rule.error);
-        const Dependence &d = rule.value;
-        if (d.distance < 0)
-          return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
-        if (cycle - prior.cycle < d.distance)
-          return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
-                 << "; requires " << d.distance << ", got " << cycle - prior.cycle;
-      }
-      auto conflict = table.conflict(in, f, cycle);
-      if (!conflict.error.empty())
-        return s.ops[i]->emitOpError(conflict.error);
-      if (!conflict.value.empty())
-        return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
-      if (in.release && cycle < drained)
-        return s.ops[i]->emitOpError("completion publication precedes fixed-latency completion");
-      if (in.op->opClass == OpClass::Halt) {
-        if (i > 0 && isa<DelayOp>(s.ops[i - 1]))
-          return s.ops[i]->emitOpError("halt does not wait for a preceding DELAY; require a scalar guard instruction");
-        if (cycle < drained)
-          return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
-      }
-      if (isControlFlow(*in.op)) {
-        if (!provider.redirectWaitsForDelay && i > 0 && isa<DelayOp>(s.ops[i - 1]))
-          return s.ops[i]->emitOpError("redirect does not wait for a preceding DELAY under ") << provider.id << "; require a scalar guard instruction";
-        if (int64_t(cycle) + 2 < drained)
-          return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
-      }
-      std::string reservationError = table.reserve(in, f, cycle);
-      if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
-        reservationError = table.onWait(in, cycle);
-      if (!reservationError.empty())
-        return s.ops[i]->emitOpError(reservationError);
-      if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
-        pendingDMA[in.op->channel] = s.ops[i];
-      else if (in.op->opClass == OpClass::DmaWait)
-        pendingDMA[in.op->channel] = nullptr;
-      issued.push_back({i, f, cycle});
-      resolved.footprints[i] = f;
-      resolved.cycles[i] = cycle;
-      drained = std::max(drained, cycle + f.doneAge + 1);
-      applyScalar(in, regs);
-      auto gap = provider.issueGap(in);
-      if (!gap.error.empty())
-        return s.ops[i]->emitOpError(gap.error);
-      if (gap.value <= 0 || cycle > std::numeric_limits<int>::max() - gap.value)
-        return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
-      cycle += gap.value;
-    }
-    for (Operation *launch : pendingDMA)
-      if (launch)
-        return launch->emitOpError("timing verification requires DMA completion before a block boundary");
-    if (!s.endsInHalt(block))
-      resolved.successorIssue[block] = cycle;
-    if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
-      int idle = 0;
-      if (s.fallsThrough(block))
-        for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i) {
-          auto gap = provider.issueGap(s.instrs[i]);
-          if (!gap.error.empty())
-            return s.ops[i]->emitOpError(gap.error);
-          if (gap.value <= 0 || idle > std::numeric_limits<int>::max() - gap.value)
-            return s.ops[i]->emitOpError("timing provider boundary gap exceeds positive cycle domain");
-          idle += gap.value;
+    // Issue cycles depend only on the words, so every context shares them.
+    std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, provider);
+    if (groups.size() > 1)
+      resolved.contexts[block].resize(groups.size());
+    for (size_t g = 0; g < groups.size(); ++g) {
+      if (groups.size() > 1)
+        resolved.contexts[block][g].entries = groups[g].entries;
+      RegValues regs = groups[g].entries.front();
+      auto reservations = provider.createReservations();
+      if (!reservations.error.empty())
+        return s.ops[s.starts[block]]->emitOpError(reservations.error);
+      if (!reservations.value)
+        return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
+      TimingReservations &table = *reservations.value;
+      std::vector<Issued> issued;
+      std::array<Operation *, 8> pendingDMA{};
+      int cycle = 0;
+      int drained = 0;
+      for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+        const Instr &in = s.instrs[i];
+        Footprint f = provider.footprint(in, regs);
+        if (!f.error.empty())
+          return emitAtlasFootprintError(s, s.ops[i], f.error, groups.size() > 1 ? &groups[g].entries.front() : nullptr);
+        if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
+          return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
+        for (const Issued &prior : issued) {
+          auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
+          if (!rule.error.empty())
+            return s.ops[i]->emitOpError(rule.error);
+          const Dependence &d = rule.value;
+          if (d.distance < 0)
+            return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
+          if (cycle - prior.cycle < d.distance)
+            return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
+                   << "; requires " << d.distance << ", got " << cycle - prior.cycle;
         }
-      if (int64_t(drained) > int64_t(cycle) + idle)
-        return s.ops[s.blockEnd(block) - 1]->emitOpError("fixed-latency work remains live across a block boundary or stream end");
+        auto conflict = table.conflict(in, f, cycle);
+        if (!conflict.error.empty())
+          return s.ops[i]->emitOpError(conflict.error);
+        if (!conflict.value.empty())
+          return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
+        if (in.release && cycle < drained)
+          return s.ops[i]->emitOpError("completion publication precedes fixed-latency completion");
+        if (in.op->opClass == OpClass::Halt) {
+          if (i > 0 && isa<DelayOp>(s.ops[i - 1]))
+            return s.ops[i]->emitOpError("halt does not wait for a preceding DELAY; require a scalar guard instruction");
+          if (cycle < drained)
+            return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
+        }
+        if (isControlFlow(*in.op)) {
+          if (!provider.redirectWaitsForDelay && i > 0 && isa<DelayOp>(s.ops[i - 1]))
+            return s.ops[i]->emitOpError("redirect does not wait for a preceding DELAY under ") << provider.id << "; require a scalar guard instruction";
+          if (int64_t(cycle) + 2 < drained)
+            return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
+        }
+        std::string reservationError = table.reserve(in, f, cycle);
+        if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
+          reservationError = table.onWait(in, cycle);
+        if (!reservationError.empty())
+          return s.ops[i]->emitOpError(reservationError);
+        if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
+          pendingDMA[in.op->channel] = s.ops[i];
+        else if (in.op->opClass == OpClass::DmaWait)
+          pendingDMA[in.op->channel] = nullptr;
+        issued.push_back({i, f, cycle});
+        if (groups.size() > 1)
+          resolved.contexts[block][g].footprints.push_back(f);
+        if (g == 0)
+          resolved.footprints[i] = f;
+        resolved.cycles[i] = cycle;
+        drained = std::max(drained, cycle + f.doneAge + 1);
+        applyScalar(in, regs);
+        auto gap = provider.issueGap(in);
+        if (!gap.error.empty())
+          return s.ops[i]->emitOpError(gap.error);
+        if (gap.value <= 0 || cycle > std::numeric_limits<int>::max() - gap.value)
+          return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
+        cycle += gap.value;
+      }
+      for (Operation *launch : pendingDMA)
+        if (launch)
+          return launch->emitOpError("timing verification requires DMA completion before a block boundary");
+      if (!s.endsInHalt(block))
+        resolved.successorIssue[block] = cycle;
+      if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
+        int idle = 0;
+        if (s.fallsThrough(block))
+          for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i) {
+            auto gap = provider.issueGap(s.instrs[i]);
+            if (!gap.error.empty())
+              return s.ops[i]->emitOpError(gap.error);
+            if (gap.value <= 0 || idle > std::numeric_limits<int>::max() - gap.value)
+              return s.ops[i]->emitOpError("timing provider boundary gap exceeds positive cycle domain");
+            idle += gap.value;
+          }
+        if (int64_t(drained) > int64_t(cycle) + idle)
+          return s.ops[s.blockEnd(block) - 1]->emitOpError("fixed-latency work remains live across a block boundary or stream end");
+      }
     }
   }
   if (trace)

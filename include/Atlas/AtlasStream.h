@@ -20,12 +20,35 @@ struct AtlasStream {
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
   std::vector<timing::RegValues> entry;
+  // Concrete entry states per block, from executing the CFG with each branch
+  // evaluated where its operands are known; empty past kAtlasMaxEntryContexts,
+  // with the reason in contextLimit. A block no evaluated path reaches has none.
+  std::vector<std::vector<timing::RegValues>> contexts;
+  std::string contextLimit;
 
   size_t blockEnd(size_t block) const;
   bool endsInBranch(size_t block) const;
   bool endsInHalt(size_t block) const;
   bool fallsThrough(size_t block) const;
 };
+
+constexpr size_t kAtlasMaxEntryContexts = 4096;
+
+// Entry states of one block under which every instruction resolves to the same
+// footprints; entries.front() represents the group.
+struct AtlasContextGroup {
+  std::vector<timing::RegValues> entries;
+};
+// The entry states a timing consumer checks `block` under: one group per
+// distinct footprint sequence of the concrete contexts when the provider asks
+// for them and they reach the block, else the merged entry alone.
+std::vector<AtlasContextGroup> atlasBlockContexts(
+    const AtlasStream &stream, size_t block, const timing::TimingProvider &provider);
+// Emits a footprint error at `op`, noting why concrete contexts were
+// unavailable and, when given, the entry context it arose under.
+InFlightDiagnostic emitAtlasFootprintError(const AtlasStream &stream,
+                                           Operation *op, llvm::StringRef error,
+                                           const timing::RegValues *context = nullptr);
 
 struct DelayInsertion {
   std::vector<uint32_t> delays;
@@ -40,6 +63,13 @@ struct AtlasTimedTrace {
   std::vector<timing::Footprint> footprints;
   std::vector<int> cycles;
   std::vector<int> successorIssue;
+  // Per block verified under several context groups, each group's entry
+  // states and the footprints of the block's instructions; else empty.
+  struct Context {
+    std::vector<timing::RegValues> entries;
+    std::vector<timing::Footprint> footprints;
+  };
+  std::vector<std::vector<Context>> contexts;
 };
 
 enum class AtlasStreamReadMode { Scheduling, Verification };

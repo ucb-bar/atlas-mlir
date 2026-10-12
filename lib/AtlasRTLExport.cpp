@@ -134,7 +134,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"logical_issue_cycle", cycle},
           {"event_kind", in.op->opClass == OpClass::Halt ?
               "terminal_acceptance" : "instruction_issue"},
-          {"footprint", footprintJSON(in, trace.footprints[i], dynamic)}};
+          {"footprint", trace.contexts[b].empty() ? llvm::json::Value(footprintJSON(in, trace.footprints[i], dynamic)) : nullptr}};
       if (dynamic) {
         entry.erase("logical_issue_cycle");
         entry["minimum_issue_cycle"] = cycle;
@@ -161,6 +161,25 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
         {"entry_state", "idle_engines_no_pending_dma"}};
     if (trace.successorIssue[b] >= 0)
       blockJSON["successor_issue_offset"] = trace.successorIssue[b];
+    // A block whose footprints differ between entry contexts lists each group:
+    // its entry states (known registers) and its instructions' footprints.
+    if (!trace.contexts[b].empty()) {
+      Array contexts;
+      for (const AtlasTimedTrace::Context &context : trace.contexts[b]) {
+        Array entries, footprints;
+        for (const RegValues &regs : context.entries) {
+          Object known;
+          for (int r = 1; r < 32; ++r)
+            if (regs[r])
+              known["x" + std::to_string(r)] = static_cast<int64_t>(*regs[r]);
+          entries.push_back(std::move(known));
+        }
+        for (size_t k = 0; k < context.footprints.size(); ++k)
+          footprints.push_back(footprintJSON(stream->instrs[stream->starts[b] + k], context.footprints[k], dynamic));
+        contexts.push_back(Object{{"entries", std::move(entries)}, {"footprints", std::move(footprints)}});
+      }
+      blockJSON["entry_contexts"] = std::move(contexts);
+    }
     blocks.push_back(std::move(blockJSON));
   }
   Object result{
@@ -183,7 +202,8 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"ages", "relative_to_instruction_issue; holds_have_inclusive_endpoints"},
           {"access_elements", "xreg/ereg:register; mreg:register*32+row; vmem:32_byte_line"},
           {"timeline", "conditional_model_timeline_not_measured_elapsed_cycles"},
-          {"terminal", "acceptance_not_retirement; ECALL_suppresses_scalar_fire"}}},
+          {"terminal", "acceptance_not_retirement; ECALL_suppresses_scalar_fire"},
+          {"entry_contexts", "a block listing entry_contexts has null instruction footprints; an instance takes the footprints of each group with an entry whose registers it holds"}}},
       {"applicability", evidence.applicability()},
       {"blocks", std::move(blocks)},
       {"instructions", std::move(instructions)}};

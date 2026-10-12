@@ -1,4 +1,5 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
@@ -21,7 +22,8 @@ constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 // the selected provider's footprints, dependences and reservations.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
-                            const TimingProvider &p, std::vector<size_t> &order,
+                            const TimingProvider &p, const RegValues &entry,
+                            std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
   size_t begin = s.starts[block];
@@ -46,9 +48,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return std::move(result.value);
   };
 
-  auto built = buildTimingGraph(nodes, s.entry[block], p);
+  auto built = buildTimingGraph(nodes, entry, p);
   if (!built.error.empty())
-    return op(0)->emitOpError(built.error);
+    return emitAtlasFootprintError(s, op(0), built.error);
   DepGraph g = std::move(built.value);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
@@ -311,10 +313,23 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
-  for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
-                             *provider, order, before, tailIdle[b])))
+  for (size_t b = 0; b < stream->starts.size(); ++b) {
+    std::vector<AtlasContextGroup> groups = atlasBlockContexts(*stream, b, *provider);
+    if (groups.size() == 1) {
+      if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
+                               *provider, groups.front().entries.front(), order,
+                               before, tailIdle[b])))
+        return failure();
+      continue;
+    }
+    // Footprints that differ between entry contexts would need one order valid
+    // under each, so such a block keeps its source order.
+    DelayInsertion unused;
+    if (failed(atlasInOrderBlockDelays(*stream, b, *provider, before, unused, tailIdle[b])))
       return failure();
+    for (size_t i = stream->starts[b]; i < stream->blockEnd(b); ++i)
+      order.push_back(i);
+  }
   // A block without a branch or halt drains as its own trailing delays, so a
   // branch into the next block does not run them; a next block starting with
   // an instruction that issues during a DELAY gets a NOP guard.

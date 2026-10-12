@@ -164,6 +164,7 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
   TimingProvider p;
   p.id = kAtlasRTLTimingProviderId.str();
   p.redirectWaitsForDelay = false;
+  p.concreteEntryContexts = true;
   p.validateScope = validateScope;
   p.footprint = [evidence](const Instr &in, const RegValues &regs) {
     return evidence->resolve(in, regs);

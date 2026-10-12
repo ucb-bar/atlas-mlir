@@ -44,6 +44,9 @@ struct TimingProvider {
   // stalls, so the timing passes end such a stall on a NOP and verification
   // rejects a DELAY immediately before a redirect.
   bool redirectWaitsForDelay = true;
+  // True: blocks are checked under each concrete entry context
+  // (atlasBlockContexts) rather than only values merged over all paths.
+  bool concreteEntryContexts = false;
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
