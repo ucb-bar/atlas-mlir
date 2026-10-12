@@ -136,6 +136,23 @@ class SelectedRTLTimingTest(unittest.TestCase):
                 self.assertNotEqual(unsafe.returncode, 0)
                 self.assertIn("insufficient issue spacing", unsafe.stderr)
 
+    def test_executable_boundaries_time_selected_streams_without_timing_metadata(self):
+        # A handwritten stream carrying a selection but no timing state is timed by the provider at emission and
+        # the LLVM handoff; --allow-untimed inspects it without a timing claim.
+        unmarked = self.check(VLS_COPY.read_text(), True).stdout
+        self.assertNotIn("atlas.timing_state", unmarked)
+        for tool, args in ((EMIT, []), (OPT, ["--convert-atlas-to-llvm"]), (OPT, ["--convert-atlas-to-llvm-calls"])):
+            with self.subTest(args=args):
+                unsafe = run(tool, unmarked, *args)
+                self.assertNotEqual(unsafe.returncode, 0)
+                self.assertIn("insufficient issue spacing", unsafe.stderr)
+        self.assertEqual(run(EMIT, unmarked, "--allow-untimed").returncode, 0)
+        timed = self.check(VLS_COPY.read_text(), True, "--insert-atlas-delays").stdout
+        stripped = re.sub(r', atlas\.timing_(state|provider) = "[^"]*"', "", timed)
+        self.assertNotIn("atlas.timing_state", stripped)
+        self.assertEqual(run(EMIT, stripped).stdout, run(EMIT, timed).stdout)
+        self.assertEqual(run(OPT, stripped, "--convert-atlas-to-llvm").returncode, 0)
+
     def test_selection_is_explicit_and_checked(self):
         self.check([HALT], False, VERIFY, digest="0" * 64, diagnostic="mismatch")
         self.check([HALT], False, VERIFY, digest="abc", diagnostic="SHA-256 is required")
