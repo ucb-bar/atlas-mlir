@@ -1,0 +1,369 @@
+# System-level MXU pairs on AtlasCore (targets/atlas/system/core.yaml): the MXU command goes through the RTL decoder
+# and scalar frontend, so every AtlasCore assertion (MXU sequencer issue checks, MREG bank tracker, MregFile per-bank
+# ports) is an invariant and no guards are declared. MXU operands: source m12 (second m14), pop destination m20:21,
+# physical banks disjoint from the VPU, VLS and XLU operands of core.yaml unless the pair name says otherwise.
+engine: core
+description: Second instruction issued g ages after the first through the RTL decoder; MXU commands against each other and against VPU, VLS and XLU commands; all AtlasCore assertions checked.
+equivalent:                   # the VPU overlap path may serve the second command on the other port pair
+  vpu_read: [vpu_read0, vpu_read1]
+  vpu_write: [vpu_write0, vpu_write1]
+shared:                       # control the two operations may share in the cone check
+  - {input: instruction, reason: one instruction per age through the decoder; commands never share an age}
+  - {input: fire, reason: issue strobe of that instruction}
+  - {input: address, reason: VLS address operand of that instruction}
+  - {path: mreg, reason: MREG file; per-bank port conflicts are MregFile invariants}
+  - {path: vmem, reason: VMEM banks; same-bank conflicts are Vmem invariants}
+pairs:
+  mxu0_matmul_matmul_same_acc: 
+    first: mxu0_matmul
+    second: mxu0_matmul_m14
+    gaps: 1..70
+  mxu0_matmul_matmul_same_acc_other_slot: 
+    first: mxu0_matmul
+    second: mxu0_matmul_m14_slot1
+    gaps: 1..70
+  mxu0_matmul_matmul_other_acc: 
+    first: mxu0_matmul
+    second: mxu0_matmul_m14_acc1
+    gaps: 1..70
+  mxu0_matmul_matmul_other_acc_other_slot: 
+    first: mxu0_matmul
+    second: mxu0_matmul_m14_acc1_slot1
+    gaps: 1..70
+  mxu0_push_weight_matmul_same_slot: 
+    first: mxu0_push_weight
+    second: mxu0_matmul_m14
+    gaps: 1..70
+  mxu0_push_weight_matmul_other_slot: 
+    first: mxu0_push_weight
+    second: mxu0_matmul_m14_slot1
+    gaps: 1..70
+  mxu0_matmul_pop_same_acc:    
+    first: mxu0_matmul
+    second: mxu0_pop_acc_bf16
+    gaps: 1..70
+  mxu0_matmul_pop_other_acc:   
+    first: mxu0_matmul
+    second: mxu0_pop_acc_bf16_acc1
+    gaps: 1..70
+  mxu0_push_acc_fp8_matmul_acc_same_acc: 
+    first: mxu0_push_acc_fp8
+    second: mxu0_matmul_acc_m14
+    gaps: 1..70
+  mxu0_push_acc_fp8_matmul_acc_other_acc: 
+    first: mxu0_push_acc_fp8
+    second: mxu0_matmul_acc_m14_acc1
+    gaps: 1..70
+  mxu0_matmul_add:             
+    first: mxu0_matmul
+    second: add
+    gaps: 1..70
+  add_mxu0_matmul:             
+    first: add
+    second: mxu0_matmul
+    gaps: 1..70
+  mxu0_matmul_vload:           
+    first: mxu0_matmul
+    second: vload
+    gaps: 1..70
+  vload_mxu0_matmul:           
+    first: vload
+    second: mxu0_matmul
+    gaps: 1..70
+  mxu0_matmul_vstore:          
+    first: mxu0_matmul
+    second: vstore
+    gaps: 1..70
+  vstore_mxu0_matmul:          
+    first: vstore
+    second: mxu0_matmul
+    gaps: 1..70
+  mxu0_matmul_transpose:       
+    first: mxu0_matmul
+    second: transpose
+    gaps: 1..70
+  transpose_mxu0_matmul:       
+    first: transpose
+    second: mxu0_matmul
+    gaps: 1..70
+  mxu0_push_weight_add:        
+    first: mxu0_push_weight
+    second: add
+    gaps: 1..70
+  add_mxu0_push_weight:        
+    first: add
+    second: mxu0_push_weight
+    gaps: 1..70
+  mxu0_push_weight_vload:      
+    first: mxu0_push_weight
+    second: vload
+    gaps: 1..70
+  vload_mxu0_push_weight:      
+    first: vload
+    second: mxu0_push_weight
+    gaps: 1..70
+  mxu0_push_weight_vstore:     
+    first: mxu0_push_weight
+    second: vstore
+    gaps: 1..70
+  vstore_mxu0_push_weight:     
+    first: vstore
+    second: mxu0_push_weight
+    gaps: 1..70
+  mxu0_push_weight_transpose:  
+    first: mxu0_push_weight
+    second: transpose
+    gaps: 1..70
+  transpose_mxu0_push_weight:  
+    first: transpose
+    second: mxu0_push_weight
+    gaps: 1..70
+  mxu0_pop_acc_bf16_add:       
+    first: mxu0_pop_acc_bf16
+    second: add
+    gaps: 1..70
+  add_mxu0_pop_acc_bf16:       
+    first: add
+    second: mxu0_pop_acc_bf16
+    gaps: 1..70
+  mxu0_pop_acc_bf16_vload:     
+    first: mxu0_pop_acc_bf16
+    second: vload
+    gaps: 1..70
+  vload_mxu0_pop_acc_bf16:     
+    first: vload
+    second: mxu0_pop_acc_bf16
+    gaps: 1..70
+  mxu0_pop_acc_bf16_vstore:    
+    first: mxu0_pop_acc_bf16
+    second: vstore
+    gaps: 1..70
+  vstore_mxu0_pop_acc_bf16:    
+    first: vstore
+    second: mxu0_pop_acc_bf16
+    gaps: 1..70
+  mxu0_pop_acc_bf16_transpose: 
+    first: mxu0_pop_acc_bf16
+    second: transpose
+    gaps: 1..70
+  transpose_mxu0_pop_acc_bf16: 
+    first: transpose
+    second: mxu0_pop_acc_bf16
+    gaps: 1..70
+  mxu1_matmul_matmul_same_acc: 
+    first: mxu1_matmul
+    second: mxu1_matmul_m14
+    gaps: 1..45
+  mxu1_matmul_matmul_same_acc_other_slot: 
+    first: mxu1_matmul
+    second: mxu1_matmul_m14_slot1
+    gaps: 1..45
+  mxu1_matmul_matmul_other_acc: 
+    first: mxu1_matmul
+    second: mxu1_matmul_m14_acc1
+    gaps: 1..45
+  mxu1_matmul_matmul_other_acc_other_slot: 
+    first: mxu1_matmul
+    second: mxu1_matmul_m14_acc1_slot1
+    gaps: 1..45
+  mxu1_push_weight_matmul_same_slot: 
+    first: mxu1_push_weight
+    second: mxu1_matmul_m14
+    gaps: 1..45
+  mxu1_push_weight_matmul_other_slot: 
+    first: mxu1_push_weight
+    second: mxu1_matmul_m14_slot1
+    gaps: 1..45
+  mxu1_matmul_pop_same_acc:    
+    first: mxu1_matmul
+    second: mxu1_pop_acc_bf16
+    gaps: 1..45
+  mxu1_matmul_pop_other_acc:   
+    first: mxu1_matmul
+    second: mxu1_pop_acc_bf16_acc1
+    gaps: 1..45
+  mxu1_push_acc_fp8_matmul_acc_same_acc: 
+    first: mxu1_push_acc_fp8
+    second: mxu1_matmul_acc_m14
+    gaps: 1..45
+  mxu1_push_acc_fp8_matmul_acc_other_acc: 
+    first: mxu1_push_acc_fp8
+    second: mxu1_matmul_acc_m14_acc1
+    gaps: 1..45
+  mxu1_matmul_add:             
+    first: mxu1_matmul
+    second: add
+    gaps: 1..70
+  add_mxu1_matmul:             
+    first: add
+    second: mxu1_matmul
+    gaps: 1..70
+  mxu1_matmul_vload:           
+    first: mxu1_matmul
+    second: vload
+    gaps: 1..70
+  vload_mxu1_matmul:           
+    first: vload
+    second: mxu1_matmul
+    gaps: 1..70
+  mxu1_matmul_vstore:          
+    first: mxu1_matmul
+    second: vstore
+    gaps: 1..70
+  vstore_mxu1_matmul:          
+    first: vstore
+    second: mxu1_matmul
+    gaps: 1..70
+  mxu1_matmul_transpose:       
+    first: mxu1_matmul
+    second: transpose
+    gaps: 1..70
+  transpose_mxu1_matmul:       
+    first: transpose
+    second: mxu1_matmul
+    gaps: 1..70
+  mxu1_push_weight_add:        
+    first: mxu1_push_weight
+    second: add
+    gaps: 1..70
+  add_mxu1_push_weight:        
+    first: add
+    second: mxu1_push_weight
+    gaps: 1..70
+  mxu1_push_weight_vload:      
+    first: mxu1_push_weight
+    second: vload
+    gaps: 1..70
+  vload_mxu1_push_weight:      
+    first: vload
+    second: mxu1_push_weight
+    gaps: 1..70
+  mxu1_push_weight_vstore:     
+    first: mxu1_push_weight
+    second: vstore
+    gaps: 1..70
+  vstore_mxu1_push_weight:     
+    first: vstore
+    second: mxu1_push_weight
+    gaps: 1..70
+  mxu1_push_weight_transpose:  
+    first: mxu1_push_weight
+    second: transpose
+    gaps: 1..70
+  transpose_mxu1_push_weight:  
+    first: transpose
+    second: mxu1_push_weight
+    gaps: 1..70
+  mxu1_pop_acc_bf16_add:       
+    first: mxu1_pop_acc_bf16
+    second: add
+    gaps: 1..70
+  add_mxu1_pop_acc_bf16:       
+    first: add
+    second: mxu1_pop_acc_bf16
+    gaps: 1..70
+  mxu1_pop_acc_bf16_vload:     
+    first: mxu1_pop_acc_bf16
+    second: vload
+    gaps: 1..70
+  vload_mxu1_pop_acc_bf16:     
+    first: vload
+    second: mxu1_pop_acc_bf16
+    gaps: 1..70
+  mxu1_pop_acc_bf16_vstore:    
+    first: mxu1_pop_acc_bf16
+    second: vstore
+    gaps: 1..70
+  vstore_mxu1_pop_acc_bf16:    
+    first: vstore
+    second: mxu1_pop_acc_bf16
+    gaps: 1..70
+  mxu1_pop_acc_bf16_transpose: 
+    first: mxu1_pop_acc_bf16
+    second: transpose
+    gaps: 1..70
+  transpose_mxu1_pop_acc_bf16: 
+    first: transpose
+    second: mxu1_pop_acc_bf16
+    gaps: 1..70
+  mxu0_matmul_mxu1_matmul:     
+    first: mxu0_matmul
+    second: mxu1_matmul_m14
+    gaps: 1..70
+  mxu1_matmul_mxu0_matmul:     
+    first: mxu1_matmul
+    second: mxu0_matmul_m14
+    gaps: 1..70
+# Regression values used only by tests (full sweeps); the extractor never reads them. rejected_by matches the result
+# at stable_gap - 1 (the MXU sequencer's issue assertion that binds); disjoint is the shared-control verdict.
+expect:
+  mxu0_matmul_matmul_same_acc: {min_gap: 64, stable_gap: 64, rejected_by: "SA: compute issued before previous compute.s row\\-0 writeback on same accSel \\(/mxu0/seq\\)"}
+  mxu0_matmul_matmul_same_acc_other_slot: {min_gap: 64, stable_gap: 64, rejected_by: "SA: compute issued before previous compute.s row\\-0 writeback on same accSel \\(/mxu0/seq\\)"}
+  mxu0_matmul_matmul_other_acc: {min_gap: 32, stable_gap: 32, rejected_by: "SA: compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu0/seq\\)"}
+  mxu0_matmul_matmul_other_acc_other_slot: {min_gap: 32, stable_gap: 32, rejected_by: "SA: compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu0/seq\\)"}
+  mxu0_push_weight_matmul_same_slot: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu0_push_weight_matmul_other_slot: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu0_matmul_pop_same_acc: {min_gap: 64, stable_gap: 64, rejected_by: "SA: Pop issued before previous compute.s row\\-0 writeback \\(/mxu0/seq\\)", disjoint: false}
+  mxu0_matmul_pop_other_acc: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu0_push_acc_fp8_matmul_acc_same_acc: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu0_push_acc_fp8_matmul_acc_other_acc: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu0_matmul_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_matmul_same_acc: {min_gap: 32, stable_gap: 32, rejected_by: "IPT: Compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu1/seq\\)"}
+  mxu1_matmul_matmul_same_acc_other_slot: {min_gap: 32, stable_gap: 32, rejected_by: "IPT: Compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu1/seq\\)"}
+  mxu1_matmul_matmul_other_acc: {min_gap: 32, stable_gap: 32, rejected_by: "IPT: Compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu1/seq\\)"}
+  mxu1_matmul_matmul_other_acc_other_slot: {min_gap: 32, stable_gap: 32, rejected_by: "IPT: Compute issued while ReadP0 is busy and not on its last feed cycle \\(/mxu1/seq\\)"}
+  mxu1_push_weight_matmul_same_slot: {min_gap: 32, stable_gap: 32, rejected_by: "IPT: Compute targets wslot currently being written by an active push \\(/mxu1/seq\\)", disjoint: false}
+  mxu1_push_weight_matmul_other_slot: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu1_matmul_pop_same_acc: {min_gap: 4, stable_gap: 4, rejected_by: "IPT: Pop issued before previous compute.s row\\-0 writeback on same accSel \\(/mxu1/seq\\)", disjoint: false}
+  mxu1_matmul_pop_other_acc: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu1_push_acc_fp8_matmul_acc_same_acc: {min_gap: 33, stable_gap: 33, rejected_by: "IPT: Compute targets accSel currently being written by an active push\\-acc \\(/mxu1/seq\\)", disjoint: false}
+  mxu1_push_acc_fp8_matmul_acc_other_acc: {min_gap: 1, stable_gap: 1, disjoint: false}
+  mxu1_matmul_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}

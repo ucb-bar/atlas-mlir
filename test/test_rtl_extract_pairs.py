@@ -219,6 +219,11 @@ class HardwarePairTests(unittest.TestCase):
     def test_mxu1(self):
         self.check("mxu1")
 
+    def test_core_mxu(self):
+        """MXU commands through the RTL decoder on AtlasCore: MXU against MXU (the sequencer's issue assertions bind) and
+        against VPU, VLS and XLU commands on disjoint banks (accepted at gap 1 with disjoint control)."""
+        self.check("core_mxu")
+
 
 if __name__ == "__main__":
     unittest.main()

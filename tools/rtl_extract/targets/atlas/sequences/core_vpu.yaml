@@ -1,8 +1,9 @@
 # Three- and four-command VPU chains on the VPU engine spec (targets/atlas/vpu.yaml) at uniform spacing; operation i is
 # issued i * gap ages after the first. The guard is each operation's issue-busy bit, the VPU's admission rule. Entries
 # use disjoint operand banks: set 0 is the spec's (2/6/10), then 18/22/26, 34/38/42 and 50/54/58 (vs1/vs2/vd).
-# The system spec is not available to sequences, so AtlasCore assertions do not run here.
+# The system spec is not available to sequences; the VPU engine's assertions are checked.
 engine: vpu
+invariants: {}           # every VectorEngineTop assertion
 description: Slot accounting for a third command arriving while two VPU commands overlap.
 equivalent:              # the overlap path serves the second command on the other port pair
   read: [read0, read1]

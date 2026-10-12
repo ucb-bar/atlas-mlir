@@ -5,6 +5,7 @@ A sequence file ``targets/<target>/sequences/<name>.yaml`` names an engine spec 
     engine: <spec stem>
     equivalent: {<name>: [group, ...]} # optional; as in pair files
     ignore: [group, ...]               # optional; as in pair files
+    invariants: {exclude: [...]}       # optional; replaces the spec's invariants, as in pair files
     sequences:
       <sequence>:
         ops:                           # a cycle; a chain of length n takes its first n entries, repeating the cycle
@@ -15,8 +16,9 @@ A sequence file ``targets/<target>/sequences/<name>.yaml`` names an engine spec 
         gaps: "a..b"                   # swept spacings (inclusive, from 1)
     expect: {<sequence>: {<length>: <stable_gap>}}   # regression values read only by tests
 
-A spacing is accepted for a chain when the pair rules hold for all operations at once (see ``pairs.py``): no command
-ages collide, control stays known and busy drains, every guard is clear at each issue age after the first, and the
+A spacing is accepted for a chain when the pair rules hold for all operations at once (``pairs.judge``): no command
+ages collide, control stays known and busy drains, every guard is clear at each issue age after the first, every
+invariant stays 0 at every age (unknown fails), and the
 event multiset equals the union of the isolated runs, each shifted by its issue offset. A rejection names the missing
 or unexpected events and the chain positions that lost events. ``stable_gap`` is, per chain length, the smallest
 spacing from which every swept spacing is accepted. Python stays target-agnostic: names and operands live in YAML.
@@ -30,9 +32,9 @@ import yaml
 from . import derive, pairs
 from .control import require
 from .runner import RECIPES, observed
-from .spec import TARGETS, ages, keys, load_target
+from .spec import TARGETS, ages, invariants, keys, load_target
 
-FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect"})
+FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect", "invariants"})
 SEQUENCE_KEYS = ({"ops", "lengths", "gaps"}, {"description"})
 OP_KEYS = ({"op"}, {"inputs", "guards"})
 SCHEMA = "rtl_extract.op_sequences.v1"
@@ -42,14 +44,9 @@ def validate(raw, spec, where):
     keys(raw, *FILE_KEYS, where)
     require(raw["engine"] == spec["engine"], f"{where}: engine {raw['engine']!r} does not match its spec")
     require(isinstance(raw["sequences"], dict) and raw["sequences"], f"{where}: no sequences")
-    equivalent = raw.setdefault("equivalent", {})
-    members = [g for groups in equivalent.values() for g in groups]
-    require(set(members) <= set(spec["events"]) and len(members) == len(set(members)),
-            f"{where}: equivalent must name each event group at most once")
-    raw.setdefault("ignore", [])
-    require(isinstance(raw["ignore"], list) and set(raw["ignore"]) <= set(spec["events"]) and not set(raw["ignore"]) & set(members),
-            f"{where}: ignore must name event groups outside equivalent")
-    prefix = f"{spec['command']}_" if spec.get("command") else None
+    pairs.groups(raw, spec, where)
+    if "invariants" in raw:
+        invariants(raw["invariants"], f"{where}: invariants")
     signals = set(observed(spec))
     for name, sequence in raw["sequences"].items():
         at = f"{where}: sequences.{name}"
@@ -59,11 +56,7 @@ def validate(raw, spec, where):
         for n, entry in enumerate(sequence["ops"]):
             keys(entry, *OP_KEYS, f"{at}.ops[{n}]")
             require(entry["op"] in spec["operations"], f"{at}.ops[{n}]: unknown operation {entry['op']!r}")
-            overlay = entry.get("inputs", {})
-            require(isinstance(overlay, dict) and all(isinstance(v, int) for v in overlay.values()),
-                    f"{at}.ops[{n}]: inputs must map inputs to integers")
-            undeclared = {i for i in overlay if i not in spec["inputs"] and not (prefix and i.startswith(prefix))}
-            require(not undeclared, f"{at}.ops[{n}]: inputs drives undeclared inputs {sorted(undeclared)}")
+            pairs.overlay_inputs(spec, entry.get("inputs", {}), f"{at}.ops[{n}]: inputs")
             for guard in pairs.guards(spec, step(entry)):
                 keys(guard, {"signal"}, {"bit"}, f"{at}.ops[{n}]: guards")
                 require(guard["signal"] in signals, f"{at}.ops[{n}]: guard {guard['signal']!r} is not an observed control signal")
@@ -109,12 +102,7 @@ def chain(sequence, length):
 def timeline(spec, steps, gap):
     """``(timeline, schedules)`` with operation ``i`` shifted by ``i * gap``; ``timeline`` is ``None`` on a collision."""
     schedules = [pairs.commands(spec, s["op"], s.get("inputs", {}), i * gap) for i, s in enumerate(steps)]
-    merged = {}
-    for schedule in schedules:
-        if set(merged) & set(schedule):
-            return None, schedules
-        merged.update(schedule)
-    return merged, schedules
+    return pairs.merge(schedules), schedules
 
 
 def lost(expected, actual):
@@ -141,30 +129,16 @@ def difference(expected, actual):
 def trial(circuit, spec, raw, steps, alone, gap):
     """``None`` if the chain is accepted at spacing ``gap``, otherwise the reason it is not."""
     merged, schedules = timeline(spec, steps, gap)
-    if merged is None:
-        return "command ages collide"
-    try:
-        trace, problem = pairs.run(circuit, spec, merged)
-    except ValueError as error:
-        return str(error)
-    blocked = [f"guard {g['signal']}" + (f"[{g['bit']}]" if "bit" in g else "") + f" set at op {i}"
-               for i, (s, schedule) in enumerate(zip(steps, schedules)) if i
-               for g in pairs.guards(spec, step(s)) if not pairs.clear(trace[min(schedule)]["signals"][g["signal"]], g.get("bit"))]
     expected = [[(g, a + i * gap, f) for g, a, f in events] for i, events in enumerate(alone)]
-    actual = pairs.events(trace, raw["equivalent"], ignore=raw["ignore"])
     flat = sorted(e for events in expected for e in events)
-    changed = None if actual == flat else f"{difference(flat, actual)} (ops {lost(expected, actual) or 'none'})"
-    reasons = blocked + [r for r in (problem, changed) if r]
-    if blocked and not changed and not problem:
-        reasons.append("events unchanged")
-    return "; ".join(reasons) or None
+    issues = [(min(schedule), pairs.guards(spec, step(s)), f" at op {i}") for i, (s, schedule) in enumerate(zip(steps, schedules)) if i]
+    explain = lambda flat, actual: f"{difference(flat, actual)} (ops {lost(expected, actual) or 'none'})"
+    return pairs.describe(pairs.judge(circuit, spec, raw, merged, issues, flat, explain))
 
 
 def isolated(circuit, spec, raw, entry):
     """The events of one chain entry issued alone."""
-    trace, problem = pairs.run(circuit, spec, pairs.commands(spec, entry["op"], entry.get("inputs", {})))
-    require(problem is None, f"{entry['op']} alone: {problem}")
-    return pairs.events(trace, raw["equivalent"], ignore=raw["ignore"])
+    return pairs.isolate(circuit, spec, raw, "", entry["op"], entry.get("inputs", {}))[0]
 
 
 def key(entry):
@@ -183,7 +157,7 @@ def cell(task):
 
 def extract(document, raw, spec, jobs=1, only=None):
     """One record per (sequence, length): per-spacing results, the minimum accepted spacing and the stable spacing."""
-    concrete, _ = derive.resolve(document, spec, {})
+    concrete, _ = derive.resolve(document, pairs.prepared(raw, spec), {})
     circuit = RECIPES[concrete["recipe"]][0](document, concrete)
     selected = [n for n in raw["sequences"] if only is None or n in only]
     cases, alone = [], {}
@@ -207,19 +181,17 @@ def extract(document, raw, spec, jobs=1, only=None):
     records = []
     for c, (name, steps, _, length) in enumerate(cases):
         results = [(gap, reason) for (case, gap), reason in zip(tasks, reasons) if case == c]
-        stable = None
-        for gap, reason in reversed(results):
-            if reason is not None:
-                break
-            stable = gap
+        low, high = pairs.limits(results)
         records.append({"name": f"{spec['engine']}.{name}/{length}", "engine": spec["engine"], "module": spec["module"],
                         "sequence": name, "length": length,
                         "ops": [{"op": s["op"], **({"inputs": s["inputs"]} if "inputs" in s else {})} for s in steps],
                         "gaps": [results[0][0], results[-1][0]],
-                        "min_gap": min((g for g, r in results if r is None), default=None), "stable_gap": stable,
+                        "min_gap": low, "stable_gap": high,
                         "results": pairs.runs(results),
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} spacings, "
                                     "event multisets compared with isolated runs"})
+        if "invariants" in concrete:
+            records[-1]["invariants"] = {"checked": len(circuit.invariants), "excluded": circuit.excluded}
     return records
 
 
@@ -240,7 +212,8 @@ def main(argv=None):
     loaded = load(args.target, args.sequences)
     unknown = set(args.only or ()) - {n for raw, _ in loaded.values() for n in raw["sequences"]}
     require(not unknown, f"Unknown sequences: {sorted(unknown)}")
-    document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter)
+    document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter,
+                             any(pairs.needs_assertions(r, s) for r, s in loaded.values()))
     records = [r for raw, spec in loaded.values() for r in extract(document, raw, spec, args.jobs, args.only and set(args.only))]
     facts.write(args.output, {"schema": SCHEMA, "hw_ir": {"path": str(args.hw_ir.resolve()), "sha256": facts.sha256(args.hw_ir)},
                               "op_sequences": records})
