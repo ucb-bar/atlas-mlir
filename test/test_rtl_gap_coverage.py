@@ -116,11 +116,15 @@ def encodes(setup, op, word, ignored):
     return emitted.returncode == 0 and (int(emitted.stdout.split()[-2], 16) ^ word) & ~ignored == 0
 
 
-def pair_program(record):
-    """(setup, first, second) for a record, from its pair file's commands and overlays."""
+def pair_program(record, source=""):
+    """(setup, first, second) for a record, from its pair file's commands and overlays.
+
+    The pair file is the one named by the sweep file (pairs-<file>.json), else the record's engine.
+    """
     pairs, files = pair_files()
     engine, key = record["engine"], record["name"].split(".", 1)[-1]
-    raw, spec = files.get(engine, ({"pairs": {}}, None))
+    stem = source.removeprefix("pairs-").removesuffix(".json")
+    raw, spec = files.get(stem if stem in files else engine, ({"pairs": {}}, None))
     pair = raw["pairs"].get(key)
     if not pair or (pair["first"], pair["second"]) != (record["first"], record["second"]):
         return None
@@ -202,7 +206,7 @@ class RTLGapCoverageTest(unittest.TestCase):
     def test_selected_gaps_cover_stable_gaps(self):
         rows, unsupported, unmapped = [], [], []
         for source, record in self.records:
-            built = pair_program(record)
+            built = pair_program(record, source)
             if not built:
                 unmapped.append(record["name"])
                 continue
@@ -226,8 +230,8 @@ class RTLGapCoverageTest(unittest.TestCase):
     def test_legacy_rules_below_stable_gap_are_listed(self):
         print("\nlegacy (unselected) insert-atlas-delays gap vs RTL stable_gap (informational; '<' marks below)")
         below = []
-        for _, record in self.records:
-            built = pair_program(record)
+        for source, record in self.records:
+            built = pair_program(record, source)
             gap = built and consumer_gap(*built)
             low = gap is not None and gap < record["stable_gap"]
             below += [record["name"]] if low else []
@@ -236,8 +240,8 @@ class RTLGapCoverageTest(unittest.TestCase):
 
     def test_unsupported_pairs_are_resolver_rejections(self):
         # A rejection at the widest gap must come from the selected resolver, not from a malformed program.
-        for _, record in self.records:
-            built = pair_program(record)
+        for source, record in self.records:
+            built = pair_program(record, source)
             if built:
                 result = run(OPT, gapped(*built, LIMIT), selection(), VERIFY)
                 if result.returncode:
