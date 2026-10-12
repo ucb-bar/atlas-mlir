@@ -668,9 +668,12 @@ def replay(args, case, label, consumer, select, digest, model):
     """Schedule or take one case stream, run it on the model, decode and bind it; returns (result, PASS line)."""
     opt, emit, out = args.bin / 'atlas-opt', args.bin / 'atlas-emit', args.work.resolve() / label
     flags = {'delay': '--insert-atlas-delays', 'schedule': '--schedule-atlas-stream'}
-    out.mkdir(exist_ok=True); (out / 'program.mlir').write_text(case.mlir())
-    if consumer == 'final': shutil.copyfile(out / 'program.mlir', out / 'final.mlir')
-    else: sh([opt, out / 'program.mlir', select, flags[consumer], '--verify-atlas-timing', '-o', out / 'final.mlir'], args.timeout)
+    out.mkdir(exist_ok=True); (out / 'program.mlir').write_text(case.mlir()); program = out / 'program.mlir'
+    if case.pipeline:
+        # A virtual program: verified, scheduled, allocated and lowered untimed before the facts are selected.
+        sh([opt, program, *case.pipeline, '-o', out / 'lowered.mlir'], args.timeout); program = out / 'lowered.mlir'
+    if consumer == 'final': shutil.copyfile(program, out / 'final.mlir')
+    else: sh([opt, program, select, flags[consumer], '--verify-atlas-timing', '-o', out / 'final.mlir'], args.timeout)
     text = sh([emit, out / 'final.mlir'], args.timeout)
     if not re.fullmatch(r'(?:[0-9a-fA-F]{8}\s+)+', text): raise ReplayError('invalid emitted words')
     (out / 'program.hex').write_text(text); words = [int(w, 16) for w in text.split()]

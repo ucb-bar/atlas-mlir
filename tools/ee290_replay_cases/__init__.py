@@ -18,8 +18,11 @@ class Case:
     final: bool = False   # ops are a final stream: not scheduled; footprints bind to a serialized reference
     check: object = None  # optional check(events) -> bool on the decoded events
     consumers: tuple = ('delay', 'schedule')
+    source: str = ''      # a virtual program instead of `ops`; `pipeline` lowers it before facts selection
+    pipeline: tuple = ()
 
     def mlir(self, ops=None):
+        if self.source and ops is None: return self.source
         lines = ['module {', '  %s0 = "atlas.start"() : () -> !atlas.state']
         for n, (op, attrs) in enumerate(self.ops if ops is None else ops, 1):
             lines.append(f'  %s{n} = "atlas.{op}"(%s{n-1}) {{{attrs}}} : (!atlas.state) -> !atlas.state')

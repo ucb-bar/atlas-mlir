@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,8 +63,13 @@ class PortableTest(unittest.TestCase):
         for name, case in cases.items():
             with self.subTest(name=name):
                 self.assertIn("expect_vmem", REPLAY.image(case))
-                self.assertEqual(case.ops[-1], CASES.END[-1])
                 self.assertEqual(case.final, case.consumers == ("final",))
+                if case.source:
+                    # A virtual program is lowered by its pipeline; the lowering emits the terminal.
+                    self.assertTrue(case.pipeline and not case.ops and not case.final)
+                    self.assertIn("atlas.virtual_output_bf16", case.mlir())
+                    continue
+                self.assertEqual(case.ops[-1], CASES.END[-1])
                 if not case.final: self.assertNotIn("delay", [op for op, _ in case.ops])
         # The VMUL case's closed-form products agree with the validator's dataflow reference.
         vm, _, expected, _ = REPLAY.memories(cases["vmul"])
@@ -174,7 +180,7 @@ class VerilatorReplayTest(unittest.TestCase):
              "dma_loop_schedule", "diamond_taken_delay", "diamond_fall_schedule", "overlap_vls", "overlap_vpu",
              "mxu0_tile_delay", "mxu1_tile_schedule", "vpu_relu_delay", "vpu_binary_schedule", "vpu_unary_delay", "vpu_reduce_schedule",
              "vpu_vli_delay", "vpu_pack_schedule", "mxu0_acc_bf16_delay", "mxu1_acc_bf16_schedule", "mxu0_acc_fp8_delay",
-             "mxu1_acc_fp8_schedule", "dma_pair_in_flight")
+             "mxu1_acc_fp8_schedule", "dma_pair_in_flight", "virtual_relu_delay", "virtual_relu_schedule")
     # Selected mnemonic -> facts block (vpu.<op>, mxu<u>.<op>).
     FACTS = {"vadd.bf16": "add", "vsub.bf16": "sub", "vmul.bf16": "mul", "vmaximum.bf16": "pairmax", "vminimum.bf16": "pairmin", "vmov": "mov",
              "vexp.bf16": "exp", "vexp2.bf16": "exp2", "vsquare.bf16": "square", "vcube.bf16": "cube", "vrelu.bf16": "relu",
@@ -219,6 +225,29 @@ class VerilatorReplayTest(unittest.TestCase):
 
     def rejects(self, name, export=None, events=None):
         with self.assertRaises(BIND.BindingError): self.bind(name, export, events)
+
+    def test_virtual_program_is_lowered_untimed_then_timed_from_the_facts(self):
+        # Verified, scheduled, allocated and lowered untimed; facts selected on the lowering; timed, emitted and run.
+        emit = Path(BIN) / "atlas-emit"
+        for name in ("virtual_relu_delay", "virtual_relu_schedule"):
+            with self.subTest(name=name):
+                directory = self.work / name
+                lowered, final = ((directory / f).read_text() for f in ("lowered.mlir", "final.mlir"))
+                self.assertIn('atlas.generated_from_virtual = "resource-contract-v5"', lowered)
+                self.assertIn('atlas.timing_state = "untimed"', lowered)
+                self.assertNotIn("atlas.rtl_evidence", lowered)
+                self.assertIn('atlas.timing_state = "timed"', final)
+                self.assertIn('atlas.timing_provider = "rtl-op-timing-v1"', final)
+                self.assertIn(f'op_timing_sha256 = "{self.digest}"', final)
+                words = (directory / "program.hex").read_text().split()
+                structured = subprocess.run([Path(BIN) / "atlas-opt", directory / "final.mlir", "--convert-atlas-to-llvm-calls", "--finalize-atlas-llvm-calls"],
+                                            capture_output=True, text=True)
+                self.assertEqual(structured.returncode, 0, structured.stderr)
+                self.assertEqual([w[2:] for w in re.findall(r"\.word (0x[0-9a-f]{8})", structured.stdout)], words)
+                export = self.cases[name][3]
+                self.assertEqual(export["provider"]["id"], "rtl-op-timing-v1")
+                self.assertEqual([i["mnemonic"] for i in export["instructions"] if i["mnemonic"].startswith(("dma.", "vload", "vstore", "vrelu"))].count("vrelu.bf16"), 1)
+                self.assertTrue(self.bind(name)["dynamic_dma_intervals"])
 
     def test_replays_pass_with_full_drain(self):
         self.assertEqual(self.log.count("PASS "), sum(len(c.consumers) for c in CASES.load().values()))
