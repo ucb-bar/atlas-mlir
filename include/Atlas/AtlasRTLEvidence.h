@@ -29,7 +29,6 @@ struct OpTimingBlock {
 // structurally matching block is rejected.
 class RTLEvidence {
 public:
-  static constexpr const char *resolverID() { return "atlas.op_timing.serialized.v1"; }
   // ScalarCore fetches with a 15-bit word index.
   static constexpr unsigned maximumProgramWords() { return 32768; }
   const std::string &factsSha256() const { return sha256; }
@@ -38,10 +37,9 @@ public:
   // transfer, VMEM exclusive until its wait, no completion latency.
   bool dmaWait() const { return dma; }
 
-  // Every engine operation also holds both VLS paths, serializing VLS, XLU
-  // and VPU work.
+  // VLOAD and VSTORE hold their own path; the VPU and XLU exclude each other;
+  // an MXU command holds every engine through its last event.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
-  TargetTiming targetTiming() const;
   llvm::json::Object applicability() const;
 
 private:

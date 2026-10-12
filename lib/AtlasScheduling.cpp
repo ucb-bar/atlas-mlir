@@ -14,11 +14,14 @@ using namespace mlir::atlas::timing;
 namespace {
 
 constexpr int kMaxIdle = 100000;
+constexpr const char *kHaltGuard = "a halt does not wait for a delay";
+constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 
-// scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
+// scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp, with
+// the selected provider's footprints, dependences and reservations.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
-                            std::vector<size_t> &order,
+                            const TimingProvider &p, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
   size_t begin = s.starts[block];
@@ -32,8 +35,21 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int slot = branch ? nb + 1 : -1;
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
+  // The first uncovered provider rule; checked after each placement.
+  std::string fault;
+  auto note = [&](const std::string &why) {
+    if (!why.empty() && fault.empty())
+      fault = why;
+  };
+  auto rule = [&](auto result) {
+    note(result.error);
+    return std::move(result.value);
+  };
 
-  DepGraph g = buildGraph(nodes, s.entry[block]);
+  auto built = buildTimingGraph(nodes, s.entry[block], p);
+  if (!built.error.empty())
+    return op(0)->emitOpError(built.error);
+  DepGraph g = std::move(built.value);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Transfers on several channels may be pending at
@@ -65,11 +81,21 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
     }
   }
+  auto reservations = [&]() -> std::unique_ptr<TimingReservations> {
+    auto table = rule(p.createReservations());
+    if (!table)
+      note("timing provider returned no reservation state");
+    return table;
+  };
+  std::unique_ptr<TimingReservations> alone = reservations();
+  if (!fault.empty())
+    return op(0)->emitOpError(fault);
   for (int i = 0; i < n; i++) {
-    std::string alone =
-        ReservationTable().conflict(nodes[i], g.footprints[i], 0);
-    if (!alone.empty())
-      return op(i)->emitOpError("can never issue: ") << alone;
+    std::string why = rule(alone->conflict(nodes[i], g.footprints[i], 0));
+    if (!fault.empty())
+      return op(i)->emitOpError(fault);
+    if (!why.empty())
+      return op(i)->emitOpError("can never issue: ") << why;
   }
 
   std::vector<int> height = criticalHeights(g);
@@ -87,7 +113,14 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return nodes[i].op->opClass == OpClass::DmaWait;
   };
 
-  ReservationTable table;
+  std::unique_ptr<TimingReservations> table = reservations();
+  auto busy = [&](int i, int c) { return rule(table->conflict(nodes[i], g.footprints[i], c)); };
+  auto gap = [&](int i) {
+    int value = rule(p.issueGap(nodes[i]));
+    if (value <= 0)
+      note("timing provider issue gap exceeds positive cycle domain");
+    return value;
+  };
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -107,7 +140,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
       if (best >= 0 && height[i] <= height[best])
         continue;
-      if (!table.conflict(nodes[i], g.footprints[i], cycle).empty())
+      if (!busy(i, cycle).empty())
         continue;
       best = i;
     }
@@ -135,7 +168,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         if (t >= nb || waitingPreds[t] != 1)
           continue;
         int c = std::max(cycle + 1, earliest[t]);
-        while (!table.conflict(nodes[t], g.footprints[t], c).empty())
+        while (fault.empty() && !busy(t, c).empty())
           c++;
         if (critical < 0 || height[t] > height[critical] ||
             (height[t] == height[critical] && c < firstUse)) {
@@ -146,6 +179,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (firstUse == INT_MAX || firstUse - 1 <= cycle)
         best = bestWait;
     }
+    if (!fault.empty())
+      return op(0)->emitOpError(fault);
     if (best < 0) {
       cycle++;
       if (cycle - lastPlaced > kMaxIdle)
@@ -154,20 +189,19 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     }
 
     if (cycle > nextFree) {
-      std::string busy =
-          table.conflict(nodes[best], g.footprints[best], cycle - 1);
+      std::string held = busy(best, cycle - 1);
       if (earliest[best] == cycle)
         reason[best] = why[best];
-      else if (!busy.empty())
-        reason[best] = busy;
+      else if (!held.empty())
+        reason[best] = held;
       else
         reason[best] = isWait(best) ? "dma.wait issues just before its user"
                                     : "list scheduler priority";
     }
     issue[best] = cycle;
-    table.reserve(nodes[best], g.footprints[best], cycle);
+    note(table->reserve(nodes[best], g.footprints[best], cycle));
     if (isWait(best))
-      table.extendForWait(cycle);
+      note(table->onWait(nodes[best], cycle));
     if (g.footprints[best].dmaCycles > 0) {
       // Transfers run one at a time, in issue order.
       int latency = g.footprints[best].dmaCycles;
@@ -182,7 +216,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
       waitingPreds[ed.to]--;
     }
-    nextFree = cycle + naturalGap(nodes[best]);
+    nextFree = cycle + gap(best);
+    if (!fault.empty())
+      return op(best)->emitOpError(fault);
     lastPlaced = cycle;
     cycle = nextFree;
     placed++;
@@ -209,17 +245,20 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (slot >= 0)
       raise(earliest[slot] - 1, "delay slot: " + why[slot]);
     for (;;) {
-      std::string busy =
-          table.conflict(nodes[term], g.footprints[term], termCycle);
-      if (busy.empty() && slot >= 0) {
-        busy = table.conflict(nodes[slot], g.footprints[slot], termCycle + 1);
-        if (!busy.empty())
-          busy = "delay slot: " + busy;
+      std::string held = busy(term, termCycle);
+      if (held.empty() && slot >= 0) {
+        held = busy(slot, termCycle + 1);
+        if (!held.empty())
+          held = "delay slot: " + held;
       }
-      if (busy.empty())
+      if (!fault.empty())
+        return op(term)->emitOpError(fault);
+      if (held.empty())
         break;
       termCycle++;
-      termReason = busy;
+      termReason = held;
+      if (termCycle - nextFree > kMaxIdle)
+        return op(term)->emitOpError("found no free issue cycle: ") << held;
     }
   }
 
@@ -232,8 +271,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (issue[i] > free)
       before[begin + i] = {idleDelays(issue[i] - free), false, reason[i]};
     order.push_back(begin + i);
-    free = issue[i] + naturalGap(nodes[i]);
+    free = issue[i] + gap(i);
   }
+  if (!fault.empty())
+    return op(0)->emitOpError(fault);
   if (term >= 0) {
     int idle = termCycle - free;
     size_t last = nb > 0 ? order.back() : 0;
@@ -242,6 +283,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       before[last] = {idleDelays(idle), false, termReason};
     else if (idle > 0 && halt)
       before[begin + term] = {idleDelays(idle - 1), true, termReason};
+    else if (idle > 0 && !p.redirectWaitsForDelay)
+      before[begin + term] = {idleDelays(idle - 1), true, termReason, kRedirectGuard};
     else if (idle > 0)
       before[begin + term] = {idleDelays(idle), false, termReason};
     order.push_back(begin + term);
@@ -270,29 +313,32 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
     if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
-                             order, before, tailIdle[b])))
+                             *provider, order, before, tailIdle[b])))
       return failure();
   // A block without a branch or halt drains as its own trailing delays, so a
-  // branch into the next block does not run them.
+  // branch into the next block does not run them; a next block starting with
+  // an instruction that issues during a DELAY gets a NOP guard.
   std::vector<DelayInsertion> after(stream->starts.size());
-  for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (tailIdle[b] > 0)
-      after[b] = {idleDelays(tailIdle[b]), false,
-                  stream->fallsThrough(b)
-                      ? "this block finishes before the next one starts"
-                      : "work finishes before the stream ends"};
+  for (size_t b = 0; b < stream->starts.size(); ++b) {
+    if (tailIdle[b] <= 0)
+      continue;
+    after[b] = {idleDelays(tailIdle[b]), false,
+                stream->fallsThrough(b)
+                    ? "this block finishes before the next one starts"
+                    : "work finishes before the stream ends"};
+    if (!stream->fallsThrough(b))
+      continue;
+    const OpInfo &next = *stream->instrs[order[stream->starts[b + 1]]].op;
+    bool halt = next.opClass == OpClass::Halt;
+    if (halt || (isControlFlow(next) && !provider->redirectWaitsForDelay))
+      after[b] = {idleDelays(tailIdle[b] - 1), true, after[b].reason, halt ? kHaltGuard : kRedirectGuard};
+  }
   if (!insertDelays) {
     before.assign(stream->ops.size(), DelayInsertion{});
     after.clear();
   }
-  if (failed(writeAtlasStream(module, *stream, order, before, after,
-                              insertDelays ? StringRef(provider->id) : StringRef())))
-    return failure();
-  // The list scheduler spaces work with the npu-model graph; a timed result
-  // under any other provider must pass that provider's verification.
-  if (insertDelays && provider->id != kNpuModelTimingProviderId)
-    return verifyAtlasTiming(module, *provider);
-  return success();
+  return writeAtlasStream(module, *stream, order, before, after,
+                          insertDelays ? StringRef(provider->id) : StringRef());
 }
 
 struct ScheduleAtlasStreamPass
@@ -304,13 +350,14 @@ struct ScheduleAtlasStreamPass
                            llvm::cl::desc("Insert timing delays after reordering"),
                            llvm::cl::init(true)};
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else rtl-op-timing-v1 over selected evidence, else npu-model-rtl-match-v1)"),
                                llvm::cl::init("")};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
     return "Reorder each basic block with the list scheduler ported from "
-           "atlas-compiler-experiments and insert the delays it needs";
+           "atlas-compiler-experiments under the selected timing provider and "
+           "insert the delays it needs";
   }
 
   void runOnOperation() override {

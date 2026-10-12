@@ -299,10 +299,13 @@ void testRegistry(MLIRContext &context) {
   check(succeeded(modelStream) && failed(verifyAtlasTimedStream(*modelStream, strictProvider({}).value)) && diagnosed("insufficient issue spacing"),
         "model spacing fails the strict provider's verification", diagnostics);
 
-  // The list scheduler spaces work with the model graph, so its output must pass the selected provider.
-  diagnostics.clear();
-  check(!runPipeline(context, kCopy, "schedule-atlas-stream" + strictOption) && diagnosed("insufficient issue spacing"),
-        "scheduler output is checked under a non-model provider", diagnostics);
+  // The list scheduler spaces work with the selected provider's graph and reservations.
+  auto scheduledByStrict = runPipeline(context, kCopy, "schedule-atlas-stream" + strictOption);
+  check(scheduledByStrict && retainedProvider(*scheduledByStrict) == kStrict && succeeded(verifyAtlasTiming(*scheduledByStrict)),
+        "scheduler output is timed and verified under a non-model provider", diagnostics);
+  auto scheduledByModel = runPipeline(context, kCopy, "schedule-atlas-stream");
+  check(scheduledByModel && scheduledByStrict && delayCycles(*scheduledByStrict) > delayCycles(*scheduledByModel),
+        "stricter selected spacing lengthens the schedule");
   auto reordered = runPipeline(context, kCopy, std::string("schedule-atlas-stream{insert-delays=false provider=") + kStrict +
                                                    "},insert-atlas-delays" + strictOption + ",verify-atlas-timing");
   check(reordered && retainedProvider(*reordered) == kStrict, "reorder then strict delay insertion verifies", diagnostics);

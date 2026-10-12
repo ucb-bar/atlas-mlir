@@ -33,19 +33,3 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
 
-add_llvm_executable(atlas-dma-timing-core-test
-  dma-timing-core.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-dma-timing-core-test)
-target_link_libraries(atlas-dma-timing-core-test PRIVATE MLIRAtlas)
-mlir_check_all_link_libraries(atlas-dma-timing-core-test)
-add_test(NAME atlas-dma-timing-core
-  COMMAND atlas-dma-timing-core-test)
-
-add_llvm_executable(atlas-dma-stream-policy-test
-  dma-stream-policy.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-dma-stream-policy-test)
-target_link_libraries(atlas-dma-stream-policy-test PRIVATE
-  MLIRAtlas MLIRParser MLIRIR)
-mlir_check_all_link_libraries(atlas-dma-stream-policy-test)
-add_test(NAME atlas-dma-stream-policy
-  COMMAND atlas-dma-stream-policy-test)

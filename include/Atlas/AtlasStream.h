@@ -29,8 +29,17 @@ struct AtlasStream {
 
 struct DelayInsertion {
   std::vector<uint32_t> delays;
-  bool guard = false; // end on a NOP: a halt does not wait for a delay
+  bool guard = false; // end on a NOP, for an instruction that issues during a DELAY
   std::string reason;
+  const char *guardReason = "a halt does not wait for a delay";
+};
+
+// The issue cycle and footprint of each stream op under one provider, and
+// each block's earliest successor issue (-1 after a halt), as verified.
+struct AtlasTimedTrace {
+  std::vector<timing::Footprint> footprints;
+  std::vector<int> cycles;
+  std::vector<int> successorIssue;
 };
 
 enum class AtlasStreamReadMode { Scheduling, Verification };
@@ -47,15 +56,19 @@ LogicalResult checkAtlasStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
 // Checks actual issue spacing, reservations and drained CFG boundaries without
 // consulting a scheduler graph or implicitly using any model timing policy.
+// `trace`, when given, receives the resolved timing on success.
 LogicalResult verifyAtlasTimedStream(
-    const AtlasStream &stream, const timing::TimingProvider &provider);
+    const AtlasStream &stream, const timing::TimingProvider &provider,
+    AtlasTimedTrace *trace = nullptr);
 LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
                                 const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
 // The provider a timing pass uses: `requested`, else the retained
-// atlas.timing_provider, else the npu-model provider. A request that differs
-// from the retained one, or an unregistered or incomplete provider, fails.
+// atlas.timing_provider, else the RTL provider when the module carries
+// selected atlas.rtl_evidence, else the npu-model provider. A request that
+// differs from the retained one, the model over selected evidence, or an
+// unregistered or incomplete provider fails.
 FailureOr<timing::TimingProvider>
 selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
 // Dispatches the explicitly retained complete provider. Legacy streams without
@@ -120,9 +133,9 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
 // Rewrites the module as the ops in `order`, each after its insertion, and
 // re-aims branches at the new first op of their target block. `order` keeps
 // every block's ops at that block's positions. `after`, empty or one entry per
-// block, holds the delays that end a block falling through or ending the
-// stream: they drain its work, belong to it, and a branch into the next block
-// does not run them. A nonempty `timedBy` stamps the result timed by that
+// block, holds the delays (and guard) that end a block falling through or
+// ending the stream: they drain its work, belong to it, and a branch into the
+// next block does not run them. A nonempty `timedBy` stamps the result timed by that
 // atlas.timing_provider, else it is untimed. The module is then re-verified,
 // and `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,

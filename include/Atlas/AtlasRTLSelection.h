@@ -2,19 +2,29 @@
 #define ATLAS_RTL_SELECTION_H
 
 #include "Atlas/AtlasRTLEvidence.h"
-#include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTimingProvider.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Support/LogicalResult.h"
 #include <memory>
 
 namespace mlir::atlas {
-// Null when nothing is selected; an invalid selection fails rather than
-// falling back to the model.
+// The facts named by atlas.rtl_evidence, loaded and hash-checked; null when
+// the module carries no selection. An invalid selection is an error rather
+// than a fallback to the model.
+llvm::Expected<std::shared_ptr<timing::RTLEvidence>>
+loadSelectedRTLEvidence(ModuleOp module);
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
-LogicalResult checkSelectedRTLProgramSize(ModuleOp module);
-// Reads and checks the stream for a timing pass under the selected target, if
-// any. A selected stream must satisfy checkSelectedControlFlow.
-FailureOr<AtlasStream> readTimedStream(ModuleOp module,
-                                       timing::TargetTiming &target);
+// The complete kAtlasRTLTimingProviderId policy over selected facts: facts
+// footprints, data dependences with a VMEM drain before each DMA launch,
+// exclusive VMEM while a transfer is pending, one pending transfer with
+// matching waits, drained basic blocks, exclusive engine reservations, the
+// instruction-memory and issue-cycle bounds, and NOP guards before redirects.
+timing::TimingProvider
+rtlTimingProvider(std::shared_ptr<const timing::RTLEvidence> evidence);
+// Registered factory: fails without valid selected evidence on the module.
+timing::TimingRuleResult<timing::TimingProvider>
+rtlTimingProviderFactory(ModuleOp module);
 void registerSelectAtlasRTLEvidencePass();
 } // namespace mlir::atlas
 #endif

@@ -1,5 +1,8 @@
 #include "Atlas/AtlasRTLExport.h"
-#include "Atlas/AtlasRTLVerification.h"
+#include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasRTLSelection.h"
+#include "Atlas/AtlasStream.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/SHA256.h"
 
@@ -31,7 +34,12 @@ Array integers(const std::vector<int> &values) {
   return result;
 }
 
-Object footprintJSON(const Footprint &footprint, bool dynamic) {
+bool isLaunch(const Instr &in) {
+  return in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
+}
+
+Object footprintJSON(const Instr &in, const Footprint &footprint, bool dynamic) {
+  bool launch = isLaunch(in);
   Array accesses, holds;
   for (const Access &access : footprint.accesses) {
     Object fact{{"resource", resourceName(access.res)},
@@ -57,10 +65,8 @@ Object footprintJSON(const Footprint &footprint, bool dynamic) {
       {"vpu_live", footprint.vpuLive}, {"done_age", footprint.doneAge},
       {"dma_cycles", footprint.dmaCycles}};
   if (dynamic) {
-    result["dma_async"] = footprint.dmaAsync;
-    result["exclusive_vmem_until_wait"] = footprint.exclusiveVmemUntilWait;
-    result["serialize_with_dma"] = footprint.serializeWithDMA;
-    if (footprint.dmaAsync) {
+    result["dma_async"] = launch;
+    if (launch) {
       result["done_age"] = nullptr;
       result["read_release"] = nullptr;
       result["write_release"] = nullptr;
@@ -74,63 +80,87 @@ Object footprintJSON(const Footprint &footprint, bool dynamic) {
 
 FailureOr<llvm::json::Object>
 mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
-  ResolvedRTLProgram program;
-  if (failed(verifyAtlasRTLTiming(module, &program)))
+  auto selected = getSelectedRTLEvidence(module);
+  if (failed(selected))
     return failure();
-  Array words, instructions, blocks;
+  if (!*selected)
+    return module.emitError("RTL timing export requires selected evidence");
+  if (auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
+      state && state.getValue() != "timed")
+    return module.emitError("RTL timing export requires a timed stream; schedule or insert delays first");
+  // The executable boundary accepts the stream; the trace then comes from the
+  // same verifier under the selected provider.
+  SmallVector<uint32_t> words;
+  if (failed(verifyAtlasExecutable(module, /*llvmBlock=*/false, words)))
+    return failure();
+  FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module);
+  if (failed(provider))
+    return failure();
+  if (provider->id != kAtlasRTLTimingProviderId)
+    return module.emitError("RTL timing export requires the ") << kAtlasRTLTimingProviderId << " provider, not " << provider->id;
+  FailureOr<AtlasStream> stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  AtlasTimedTrace trace;
+  if (failed(stream) || failed(verifyAtlasTimedStream(*stream, *provider, &trace)))
+    return failure();
+
+  Array exportedWords, instructions, blocks;
   std::vector<uint8_t> encoded;
-  for (uint32_t word : program.words) {
-    words.push_back(static_cast<int64_t>(word));
+  for (uint32_t word : words) {
+    exportedWords.push_back(static_cast<int64_t>(word));
     for (unsigned shift = 0; shift < 32; shift += 8)
       encoded.push_back(static_cast<uint8_t>(word >> shift));
   }
   auto hash = llvm::SHA256::hash(encoded);
-  const auto &evidence = *program.evidence;
+  const RTLEvidence &evidence = **selected;
   const bool dynamic = evidence.dmaWait();
-  for (size_t i = 0; i < program.instructions.size(); ++i) {
-    const auto &entry = program.instructions[i];
-    const Instr &in = entry.instruction;
-    Object entryJSON{
-        {"word_index", static_cast<int64_t>(i)},
-        {"word_u32", static_cast<int64_t>(program.words[i])},
-        {"mnemonic", in.op->name},
-        {"operands", Object{{"rd", in.rd}, {"rs1", in.rs1}, {"rs2", in.rs2},
-            {"immediate", static_cast<int64_t>(in.imm)}, {"release", in.release}}},
-        {"block", entry.block},
-        {"logical_issue_cycle", entry.cycle},
-        {"event_kind", in.op->opClass == OpClass::Halt ?
-            "terminal_acceptance" : "instruction_issue"},
-        {"footprint", footprintJSON(entry.footprint, dynamic)}};
-    if (dynamic) {
-      entryJSON.erase("logical_issue_cycle");
-      entryJSON["minimum_issue_cycle"] = entry.cycle;
-      entryJSON["issue_epoch"] = entry.epoch;
-      entryJSON["epoch_offset"] = entry.epochOffset;
+  for (size_t b = 0; b < stream->starts.size(); ++b) {
+    // Each matching wait starts a new epoch whose offsets are comparable only
+    // within it; every block starts idle at its own cycle origin.
+    int epoch = 0, epochOrigin = 0;
+    for (size_t i = stream->starts[b]; i < stream->blockEnd(b); ++i) {
+      const Instr &in = stream->instrs[i];
+      int cycle = trace.cycles[i];
       if (in.op->opClass == OpClass::DmaWait) {
-        entryJSON["event_kind"] = "matching_wait_acceptance";
-        entryJSON["epoch_origin"] = "matching_wait_acceptance";
-        entryJSON["channel"] = in.op->channel;
+        ++epoch;
+        epochOrigin = cycle;
       }
+      Object entry{
+          {"word_index", static_cast<int64_t>(i)},
+          {"word_u32", static_cast<int64_t>(words[i])},
+          {"mnemonic", in.op->name},
+          {"operands", Object{{"rd", in.rd}, {"rs1", in.rs1}, {"rs2", in.rs2},
+              {"immediate", static_cast<int64_t>(in.imm)}, {"release", in.release}}},
+          {"block", static_cast<int64_t>(b)},
+          {"logical_issue_cycle", cycle},
+          {"event_kind", in.op->opClass == OpClass::Halt ?
+              "terminal_acceptance" : "instruction_issue"},
+          {"footprint", footprintJSON(in, trace.footprints[i], dynamic)}};
+      if (dynamic) {
+        entry.erase("logical_issue_cycle");
+        entry["minimum_issue_cycle"] = cycle;
+        entry["issue_epoch"] = epoch;
+        entry["epoch_offset"] = cycle - epochOrigin;
+        if (in.op->opClass == OpClass::DmaWait) {
+          entry["event_kind"] = "matching_wait_acceptance";
+          entry["epoch_origin"] = "matching_wait_acceptance";
+          entry["channel"] = in.op->channel;
+        }
+      }
+      instructions.push_back(std::move(entry));
     }
-    instructions.push_back(std::move(entryJSON));
-  }
-  // Every block starts idle at its own cycle origin, so each dynamic block
-  // instance binds to the same block-relative offsets.
-  for (size_t b = 0; b < program.blocks.size(); ++b) {
-    const ResolvedRTLBlock &block = program.blocks[b];
     Array successors;
-    for (size_t next : block.successors)
+    for (size_t next : stream->succs[b])
       successors.push_back(static_cast<int64_t>(next));
     Object blockJSON{{"index", static_cast<int64_t>(b)},
-        {"first_word", static_cast<int64_t>(block.first)},
-        {"word_count", static_cast<int64_t>(block.end - block.first)},
-        {"exit", block.successorIssue < 0 ? "halt" :
-                 block.branch ? "branch_with_delay_slot" : "fall_through"},
+        {"first_word", static_cast<int64_t>(stream->starts[b])},
+        {"word_count", static_cast<int64_t>(stream->blockEnd(b) - stream->starts[b])},
+        {"exit", stream->endsInHalt(b) ? "halt" :
+                 stream->endsInBranch(b) ? "branch_with_delay_slot" : "fall_through"},
         {"successors", std::move(successors)},
         {"successor_issue_offset", nullptr},
         {"entry_state", "idle_engines_no_pending_dma"}};
-    if (block.successorIssue >= 0)
-      blockJSON["successor_issue_offset"] = block.successorIssue;
+    if (trace.successorIssue[b] >= 0)
+      blockJSON["successor_issue_offset"] = trace.successorIssue[b];
     blocks.push_back(std::move(blockJSON));
   }
   Object result{
@@ -138,14 +168,14 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       {"target_config", "EE290SimConfig"},
       {"qualification", "conditional"},
       {"scheduling_qualified", false},
-      {"resolver", Object{{"id", RTLEvidence::resolverID()},
+      {"provider", Object{{"id", provider->id},
                           {"version", 1},
                           {"dma_policy", dynamic ? "wait" : "none"}}},
       {"evidence", Object{{"op_timing_schema", "merlin.op_timing.v1"},
           {"op_timing_sha256", evidence.factsSha256()},
           {"hardware_ir_sha256", evidence.hardwareIRSha256()}}},
-      {"program", Object{{"word_count", static_cast<int64_t>(program.words.size())},
-          {"words", std::move(words)},
+      {"program", Object{{"word_count", static_cast<int64_t>(words.size())},
+          {"words", std::move(exportedWords)},
           {"words_sha256", llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true)},
           {"hash_encoding", "little_endian_u32"}}},
       {"conventions", Object{

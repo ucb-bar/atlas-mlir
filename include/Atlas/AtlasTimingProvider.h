@@ -40,6 +40,10 @@ public:
 // names policy, not RTL qualification.
 struct TimingProvider {
   std::string id;
+  // False: a branch or jump, like a halt, issues while a preceding DELAY still
+  // stalls, so the timing passes end such a stall on a NOP and verification
+  // rejects a DELAY immediately before a redirect.
+  bool redirectWaitsForDelay = true;
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
@@ -53,7 +57,15 @@ struct TimingProvider {
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
+// One block's dependence graph under `provider`: pair dependences, DMA
+// completion conflicts resolved at the matching wait, and waits guarding
+// transfers from earlier blocks. A footprint or rule error fails the graph.
+TimingRuleResult<DepGraph> buildTimingGraph(const std::vector<Instr> &instrs,
+                                            const RegValues &entry,
+                                            const TimingProvider &provider);
 constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
+// RTL-computed operation timing facts selected on the module (lib/AtlasRTLEvidence.cpp).
+constexpr llvm::StringLiteral kAtlasRTLTimingProviderId = "rtl-op-timing-v1";
 // Explicit adapter for existing unqualified npu-model rtl-match rules.
 TimingProvider npuModelTimingProvider();
 // Builds the provider for one, possibly null, module whose attributes may carry
@@ -61,7 +73,7 @@ TimingProvider npuModelTimingProvider();
 using TimingProviderFactory =
     std::function<TimingRuleResult<TimingProvider>(mlir::ModuleOp module)>;
 // Adds `id` to the process-wide registry, which is seeded with the npu-model
-// provider. Returns an error for an empty, duplicate or null registration.
+// and RTL providers. Returns an error for an empty, duplicate or null registration.
 std::string registerAtlasTimingProvider(const std::string &id,
                                         TimingProviderFactory factory);
 // Only complete registered policies are returned; unknown and footprint-only

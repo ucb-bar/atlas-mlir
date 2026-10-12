@@ -4,6 +4,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <atomic>
@@ -515,22 +516,20 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       carryCFGOwner(owner, delay);
       append(delay);
     }
+    if (insertion.guard) {
+      builder.setInsertionPointAfter(prev);
+      Operation *nop = createNop(builder, owner->getLoc(), state);
+      nop->setAttr("atlas.reason", builder.getStringAttr(insertion.guardReason));
+      carryCFGOwner(owner, nop);
+      append(nop);
+    }
   };
   size_t block = 0;
   for (size_t position = 0; position < order.size(); ++position) {
     size_t i = order[position];
     current = i;
     Operation *op = s.ops[i];
-    const DelayInsertion &insertion = before[i];
-    emitDelays(insertion, op);
-    if (insertion.guard) {
-      builder.setInsertionPointAfter(prev);
-      Operation *nop = createNop(builder, op->getLoc(), state);
-      nop->setAttr("atlas.reason", builder.getStringAttr(
-                                       "a halt does not wait for a delay"));
-      carryCFGOwner(op, nop);
-      append(nop);
-    }
+    emitDelays(before[i], op);
     append(op);
     // A block's trailing delays follow its last op and belong to it, so a
     // branch to the next block skips them.
@@ -593,9 +592,13 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
 }
 
 LogicalResult mlir::atlas::verifyAtlasTimedStream(
-    const AtlasStream &s, const TimingProvider &provider) {
+    const AtlasStream &s, const TimingProvider &provider, AtlasTimedTrace *trace) {
   if (failed(checkAtlasStream(s, provider)))
     return failure();
+  AtlasTimedTrace resolved;
+  resolved.footprints.resize(s.ops.size());
+  resolved.cycles.assign(s.ops.size(), 0);
+  resolved.successorIssue.assign(s.starts.size(), -1);
   struct Issued { size_t index; Footprint footprint; int cycle; };
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
@@ -640,8 +643,12 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         if (cycle < drained)
           return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
       }
-      if (isControlFlow(*in.op) && int64_t(cycle) + 2 < drained)
-        return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
+      if (isControlFlow(*in.op)) {
+        if (!provider.redirectWaitsForDelay && i > 0 && isa<DelayOp>(s.ops[i - 1]))
+          return s.ops[i]->emitOpError("redirect does not wait for a preceding DELAY under ") << provider.id << "; require a scalar guard instruction";
+        if (int64_t(cycle) + 2 < drained)
+          return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
+      }
       std::string reservationError = table.reserve(in, f, cycle);
       if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
         reservationError = table.onWait(in, cycle);
@@ -652,6 +659,8 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       else if (in.op->opClass == OpClass::DmaWait)
         pendingDMA[in.op->channel] = nullptr;
       issued.push_back({i, f, cycle});
+      resolved.footprints[i] = f;
+      resolved.cycles[i] = cycle;
       drained = std::max(drained, cycle + f.doneAge + 1);
       applyScalar(in, regs);
       auto gap = provider.issueGap(in);
@@ -664,6 +673,8 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     for (Operation *launch : pendingDMA)
       if (launch)
         return launch->emitOpError("timing verification requires DMA completion before a block boundary");
+    if (!s.endsInHalt(block))
+      resolved.successorIssue[block] = cycle;
     if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
       int idle = 0;
       if (s.fallsThrough(block))
@@ -679,6 +690,8 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         return s.ops[s.blockEnd(block) - 1]->emitOpError("fixed-latency work remains live across a block boundary or stream end");
     }
   }
+  if (trace)
+    *trace = std::move(resolved);
   return success();
 }
 
@@ -705,7 +718,16 @@ FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
   auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
   if (!requested.empty() && retained && retained.getValue() != requested)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
-  std::string id = !requested.empty() ? requested.str() : retained ? retained.getValue().str() : kNpuModelTimingProviderId.str();
+  bool evidence = module->hasAttr(kAtlasRTLEvidence);
+  std::string id = !requested.empty() ? requested.str()
+                   : retained         ? retained.getValue().str()
+                   : evidence         ? kAtlasRTLTimingProviderId.str()
+                                      : kNpuModelTimingProviderId.str();
+  // Selected facts state the stream's timing contract; the model would time it
+  // under rules the evidence does not support.
+  if (evidence && id == kNpuModelTimingProviderId)
+    return module.emitOpError("selected RTL evidence excludes the ") << id
+           << " timing provider; drop the selection to time with the model";
   auto provider = lookupTimingProvider(id, module);
   if (!provider.error.empty())
     return module.emitOpError(provider.error);
@@ -729,7 +751,7 @@ struct VerifyAtlasTimingPass
   VerifyAtlasTimingPass() = default;
   VerifyAtlasTimingPass(const VerifyAtlasTimingPass &other) : PassWrapper(other) {}
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else rtl-op-timing-v1 over selected evidence, else npu-model-rtl-match-v1)"),
                                llvm::cl::init("")};
   StringRef getArgument() const final { return "verify-atlas-timing"; }
   StringRef getDescription() const final {

@@ -700,9 +700,9 @@ static bool contains(const std::vector<int> &v, int x) {
   return std::find(v.begin(), v.end(), x) != v.end();
 }
 
-Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
-                                           const Instr &b,
-                                           const Footprint &fb) {
+Dependence mlir::atlas::timing::dataDependence(const Instr &a, const Footprint &fa,
+                                               const Instr &b,
+                                               const Footprint &fb) {
   Dependence best;
   auto consider = [&](int d, EdgeKind kind, const std::string &why) {
     if (d > best.distance)
@@ -763,6 +763,19 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
         consider(fa.readRelease + 1, EdgeKind::WAR,
                  "m" + std::to_string(r) + " reserved for reading until age " +
                      std::to_string(fa.readRelease));
+  return best;
+}
+
+Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
+                                           const Instr &b,
+                                           const Footprint &fb) {
+  Dependence best = dataDependence(a, fa, b, fb);
+  auto consider = [&](int d, EdgeKind kind, const std::string &why) {
+    if (d > best.distance)
+      best = {d, kind, why};
+  };
+  const OpInfo &A = *a.op;
+  const OpInfo &B = *b.op;
 
   // npu_model mxu.py sequencer rules.
   if (A.mxu >= 0 && A.mxu == B.mxu) {
@@ -848,117 +861,6 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
   return false;
 }
 
-namespace {
-// Adds an edge, or raises the distance of an existing edge between the nodes.
-struct EdgeSet {
-  DepGraph &g;
-  std::map<std::pair<int, int>, int> index;
-
-  void add(int from, int to, int distance, EdgeKind kind,
-           const std::string &reason) {
-    auto it = index.find({from, to});
-    if (it == index.end()) {
-      index[{from, to}] = static_cast<int>(g.edges.size());
-      g.edges.push_back({from, to, distance, kind, reason});
-    } else if (distance > g.edges[it->second].distance) {
-      g.edges[it->second] = {from, to, distance, kind, reason};
-    }
-  }
-};
-} // namespace
-
-DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
-                                         const RegValues &entry,
-                                         const IncomingDma *incomingDma) {
-  DepGraph g;
-  g.nodes = instrs;
-  int n = static_cast<int>(instrs.size());
-  RegValues regs = entry;
-  for (const Instr &in : instrs) {
-    g.footprints.push_back(footprintOf(in, regs));
-    applyScalar(in, regs);
-  }
-
-  EdgeSet edges{g, {}};
-  for (int b = 0; b < n; b++)
-    for (int a = 0; a < b; a++) {
-      Dependence d =
-          dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
-      if (d.distance > 0)
-        edges.add(a, b, d.distance, d.kind, d.reason);
-    }
-
-  // A DMA's completion is known only once its dma.wait issues, so later
-  // conflicting accesses wait for that dma.wait.
-  for (int d = 0; d < n; d++) {
-    const OpInfo &op = *g.nodes[d].op;
-    if (op.opClass != OpClass::DmaLoad && op.opClass != OpClass::DmaStore)
-      continue;
-    int wait = -1;
-    for (int k = d + 1; k < n && wait < 0; k++)
-      if (g.nodes[k].op->opClass == OpClass::DmaWait &&
-          g.nodes[k].op->channel == op.channel)
-        wait = k;
-    for (int k = d + 1; k < n; k++) {
-      EdgeKind kind;
-      if (k == wait ||
-          !conflictsAtCompletion(g.footprints[d], g.footprints[k], kind))
-        continue;
-      if (wait >= 0 && wait < k)
-        edges.add(wait, k, 1, kind,
-                  std::string(edgeKindName(kind)) + " with " + op.name +
-                      " (done once the wait issues)");
-      else
-        edges.add(d, k, 1, EdgeKind::Order,
-                  op.name + " may still be in flight (no dma.wait in between)");
-    }
-  }
-
-  // A wait for a transfer from an earlier block guards conflicting accesses
-  // and channel reuse.
-  for (int w = 0; w < n; w++) {
-    const OpInfo &op = *g.nodes[w].op;
-    if (op.opClass != OpClass::DmaWait)
-      continue;
-    bool local = false;
-    for (int d = 0; d < w; d++)
-      if ((g.nodes[d].op->opClass == OpClass::DmaLoad ||
-           g.nodes[d].op->opClass == OpClass::DmaStore) &&
-          g.nodes[d].op->channel == op.channel)
-        local = true;
-    if (local)
-      continue;
-    for (int k = w + 1; k < n; k++) {
-      bool guarded = g.nodes[k].op->opClass == OpClass::DmaLoad ||
-                     g.nodes[k].op->opClass == OpClass::DmaStore;
-      if (incomingDma) {
-        guarded = guarded && g.nodes[k].op->channel == op.channel;
-        for (const Footprint &dma : (*incomingDma)[op.channel]) {
-          EdgeKind kind;
-          guarded |= conflictsAtCompletion(dma, g.footprints[k], kind);
-        }
-      } else {
-        // The transfer latched its registers at launch, so only the VMEM it
-        // moves at completion may conflict.
-        for (const Access &a : g.footprints[k].accesses)
-          if (a.res == Res::Vmem)
-            guarded = true;
-      }
-      if (guarded)
-        edges.add(w, k, 1, EdgeKind::Order,
-                  op.name + " guards a transfer started in an earlier block");
-    }
-  }
-
-  g.in.assign(n, {});
-  g.out.assign(n, {});
-  for (int e = 0; e < static_cast<int>(g.edges.size()); e++) {
-    g.out[g.edges[e].from].push_back(e);
-    g.in[g.edges[e].to].push_back(e);
-  }
-  return g;
-}
-
 std::vector<int> mlir::atlas::timing::criticalHeights(const DepGraph &g) {
   int n = static_cast<int>(g.nodes.size());
   std::vector<int> height(n, 0);
@@ -987,7 +889,7 @@ bool ReservationTable::unitFree(Unit u, int index, int from, int to) const {
   auto it = units_.find(unitKey(u, index));
   if (it == units_.end())
     return true;
-  int cap = unitCapacity(u, index);
+  int cap = policy_ == ReservationPolicy::Exclusive ? 1 : unitCapacity(u, index);
   for (auto c = it->second.lower_bound(from);
        c != it->second.end() && c->first <= to; ++c)
     if (c->second >= cap)
@@ -1013,7 +915,8 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
     for (int i = 0; i < a.count; i++) {
       int element = a.first + i;
       int reg = element / 32, row = element % 32;
-      bool shareable = !a.write && in.op->engine == Engine::Vpu;
+      bool shareable = policy_ == ReservationPolicy::Model && !a.write &&
+                       in.op->engine == Engine::Vpu;
       out.push_back({(reg % 32) * 2 + (a.write ? 1 : 0),
                      cycle + a.age + i * a.step, reg, row, shareable});
     }

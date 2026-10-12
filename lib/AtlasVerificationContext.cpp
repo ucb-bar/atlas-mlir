@@ -87,7 +87,7 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
 
 FailureOr<AtlasVerificationContext>
 mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
-                                           bool requireStream) {
+                                           bool requireStream, bool executable) {
   AtlasVerificationContext ctx;
   ctx.module = module;
   ctx.generated = generated;
@@ -101,7 +101,8 @@ mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
   }
   ctx.hasCFGContract = module->hasAttr(kAtlasCFGContract);
   auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
-  ctx.timed = state && state.getValue() == "timed";
+  ctx.timed = state ? state.getValue() == "timed"
+                    : executable && module->hasAttr(kAtlasRTLEvidence);
   // The structural stage precedes decoding, which rejects every JALR.
   if (generated && failed(verifyGeneratedStructure(module)))
     return failure();

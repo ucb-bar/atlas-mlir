@@ -42,9 +42,12 @@ struct AtlasVerificationContext {
 // After the MLIR verifier and verifyAtlasTimingState, decodes (so encodes) at
 // most once. `generated` first runs the structural stage (DMA pairing,
 // protected intervals, x0-NOP redirect slots); requireStream forces decoding.
+// At an executable boundary a stream without a timing state is timed when it
+// carries selected RTL evidence, which names its provider.
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
-                              bool requireStream = false);
+                              bool requireStream = false,
+                              bool executable = false);
 
 // The exact `addi x0, x0, 0` that generated redirect delay slots require.
 inline bool isExactAtlasNop(Operation *op) {

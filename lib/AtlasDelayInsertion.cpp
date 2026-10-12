@@ -16,6 +16,8 @@ struct Issued {
 };
 
 constexpr int kMaxSearch = 100000;
+constexpr const char *kHaltGuard = "a halt does not wait for a delay";
+constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p,
@@ -172,7 +174,10 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       };
       if (failed(search(i, cycle, reason, fits)))
         return failure();
+      int idle = cycle - nextFree;
       place(i, f, cycle, reason);
+      if (!p.redirectWaitsForDelay && idle > 0)
+        before[i] = {idleDelays(idle - 1), true, reason, kRedirectGuard};
       place(slotIndex, sf, cycle + 1, "");
       if (!fault.empty())
         return ops[i]->emitOpError(fault);
@@ -189,12 +194,21 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   }
 
   // A block that neither branches nor halts drains before the next block, or
-  // the stream's end, as its own trailing delays.
-  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drained() > nextFree)
-    after = {idleDelays(drained() - nextFree), false,
+  // the stream's end, as its own trailing delays; a next block starting with
+  // an instruction that issues during a DELAY gets a NOP guard.
+  if (!s.endsInBranch(block) && !s.endsInHalt(block) && drained() > nextFree) {
+    int idle = drained() - nextFree;
+    after = {idleDelays(idle), false,
              s.fallsThrough(block)
                  ? "this block finishes before the next one starts"
                  : "work finishes before the stream ends"};
+    if (s.fallsThrough(block)) {
+      const OpInfo &next = *instrs[end].op;
+      bool halt = next.opClass == OpClass::Halt;
+      if (halt || (isControlFlow(next) && !p.redirectWaitsForDelay))
+        after = {idleDelays(idle - 1), true, after.reason, halt ? kHaltGuard : kRedirectGuard};
+    }
+  }
   return success();
 }
 
@@ -221,7 +235,7 @@ struct InsertAtlasDelaysPass
   InsertAtlasDelaysPass() = default;
   InsertAtlasDelaysPass(const InsertAtlasDelaysPass &other) : PassWrapper(other) {}
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else rtl-op-timing-v1 over selected evidence, else npu-model-rtl-match-v1)"),
                                llvm::cl::init("")};
 
   StringRef getArgument() const final { return "insert-atlas-delays"; }

@@ -329,14 +329,14 @@ static LogicalResult checkLLVMBlockTargets(llvm::ArrayRef<Operation *> encodedOp
   return success();
 }
 
-LogicalResult mlir::atlas::verifyAtlasArtifact(
-    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
-  if (failed(verify(module)) || failed(verifyAtlasTimingState(module))) return failure();
+static LogicalResult verifyArtifact(ModuleOp module, bool llvmBlock, bool executable,
+                                    llvm::SmallVectorImpl<uint32_t> &words) {
+  if (failed(verify(module)) || failed(verifyAtlasTimingState(module, executable))) return failure();
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
   bool generated = *kind == AtlasArtifactKind::Generated;
-  auto ctx = buildAtlasVerificationContext(module, generated);
+  auto ctx = buildAtlasVerificationContext(module, generated, /*requireStream=*/false, executable);
   if (failed(ctx))
     return failure();
   if (generated ? failed(verifyAtlasGeneratedSchedule(*ctx))
@@ -348,4 +348,14 @@ LogicalResult mlir::atlas::verifyAtlasArtifact(
     return failure();
   words.append(ctx->words.begin(), ctx->words.end());
   return success();
+}
+
+LogicalResult mlir::atlas::verifyAtlasArtifact(
+    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
+  return verifyArtifact(module, llvmBlock, /*executable=*/false, words);
+}
+
+LogicalResult mlir::atlas::verifyAtlasExecutable(
+    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
+  return verifyArtifact(module, llvmBlock, /*executable=*/true, words);
 }

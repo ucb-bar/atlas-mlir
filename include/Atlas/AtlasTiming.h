@@ -130,6 +130,10 @@ struct Dependence {
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
                       const Footprint &fb);
+// The access, MREG release, barrier and DMA order rules of `dependence` without
+// the model's MXU sequencer rules, for providers whose footprints carry them.
+Dependence dataDependence(const Instr &a, const Footprint &fa, const Instr &b,
+                          const Footprint &fb);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
@@ -149,10 +153,6 @@ struct DepGraph {
   std::vector<std::vector<int>> in, out;
 };
 
-// Pending transfers per channel at block entry; null keeps broad barriers.
-using IncomingDma = std::array<std::vector<Footprint>, 8>;
-DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    const IncomingDma *incomingDma = nullptr);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
 
@@ -163,8 +163,13 @@ int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
 int dmaTransferCycles(long long bytes);
 
+// Exclusive: every unit admits one command and VPU reads are never shared.
+enum class ReservationPolicy { Model, Exclusive };
+
 class ReservationTable {
 public:
+  explicit ReservationTable(ReservationPolicy policy = ReservationPolicy::Model)
+      : policy_(policy) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);
@@ -172,6 +177,7 @@ public:
   void extendForWait(int cycle);
 
 private:
+  ReservationPolicy policy_;
   struct PortUse {
     int reg = -1, row = -1;
     bool shareable = false;

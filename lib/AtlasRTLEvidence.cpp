@@ -1,4 +1,5 @@
 #include "Atlas/AtlasRTLEvidence.h"
+#include "Atlas/AtlasTimingProvider.h"
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -13,7 +14,7 @@ using Array = llvm::json::Array;
 
 constexpr int kLinesPerBank = kVmemBankBytes / kLineBytes;
 
-llvm::Error failure(const std::string &message) {
+llvm::Error factsError(const std::string &message) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                  "RTL timing facts: " + message);
 }
@@ -122,17 +123,15 @@ struct Fill {
   // command, and the XLU until first_free_age; the XLU holds both throughout.
   void engine(Unit unit, int busy) {
     hold({unit, Unit::Vpu}, 0, busy);
-    f.serializeWithDMA = true;
   }
   void vpu(int busy) {
     int issued = issueEnd(busy);
     hold({Unit::Vpu}, 0, issued);
     hold({Unit::Xlu}, issued + 1, busy);
-    f.serializeWithDMA = true;
   }
   Footprint done(int busy) {
     if (!error.empty()) {
-      f.error = std::string(RTLEvidence::resolverID()) + ": " + error;
+      f.error = kAtlasRTLTimingProviderId.str() + ": " + error;
       return f;
     }
     f.doneAge = std::max({busy, f.readRelease, f.writeRelease});
@@ -164,7 +163,7 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
   const OpInfo &op = *in.op;
   auto block = mxuBlocks().find(op.opClass);
   if (block == mxuBlocks().end() || op.mxu < 0 || op.mxu > 1) {
-    f.error = std::string(RTLEvidence::resolverID()) + ": unsupported MXU operation";
+    f.error = kAtlasRTLTimingProviderId.str() + ": unsupported MXU operation";
     return f;
   }
   const int m = op.mxu;
@@ -243,36 +242,35 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
   for (int unit = 0; unit < 2; ++unit) f.holds.push_back({Unit::MxuCompute, unit, 0, busy});
   for (Unit unit : {Unit::Vpu, Unit::Xlu, Unit::VloadPath, Unit::VstorePath})
     f.holds.push_back({unit, 0, 0, busy});
-  f.serializeWithDMA = true;
   return fill.done(busy);
 }
 } // namespace
 
 llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
     llvm::StringRef path, llvm::StringRef expectedSha256, bool dmaWait) {
-  if (!hashSyntax(expectedSha256)) return failure("facts SHA-256 is required");
+  if (!hashSyntax(expectedSha256)) return factsError("facts SHA-256 is required");
   auto buffer = llvm::MemoryBuffer::getFile(path);
-  if (!buffer) return failure("cannot read " + path.str());
+  if (!buffer) return factsError("cannot read " + path.str());
   llvm::StringRef bytes = (*buffer)->getBuffer();
   auto hash = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
       reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
   if (llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true) != expectedSha256)
-    return failure("selected facts hash mismatch");
+    return factsError("selected facts hash mismatch");
   auto parsed = llvm::json::parse(bytes);
-  if (!parsed) return failure(llvm::toString(parsed.takeError()));
+  if (!parsed) return factsError(llvm::toString(parsed.takeError()));
   const Object *root = parsed->getAsObject();
   if (!root || root->getString("schema") != "merlin.op_timing.v1")
-    return failure("expected schema merlin.op_timing.v1");
+    return factsError("expected schema merlin.op_timing.v1");
   const Object *hardware = root->getObject("hw_ir");
   auto hardwareSha = hardware ? hardware->getString("sha256") : std::nullopt;
-  if (!hardwareSha || !hashSyntax(*hardwareSha)) return failure("missing hw_ir.sha256");
+  if (!hardwareSha || !hashSyntax(*hardwareSha)) return factsError("missing hw_ir.sha256");
   const Array *timing = root->getArray("op_timing");
-  if (!timing) return failure("missing op_timing");
+  if (!timing) return factsError("missing op_timing");
   RTLEvidence result;
   for (const auto &value : *timing) {
     const Object *entry = value.getAsObject();
     auto name = entry ? entry->getString("name") : std::nullopt;
-    if (!name) return failure("op_timing block without a name");
+    if (!name) return factsError("op_timing block without a name");
     OpTimingBlock block;
     block.readLatency = integer(entry->getObject("assumptions"), "scratchpad_read_latency");
     block.firstFreeAge = integer(entry, "first_free_age");
@@ -282,13 +280,13 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
       for (const auto &[key, group] : *events) {
         const Object *g = group.getAsObject();
         auto count = integer(g, "count");
-        if (!count) return failure(name->str() + "." + key.str() + " has no count");
+        if (!count) return factsError(name->str() + "." + key.str() + " has no count");
         OpTimingGroup out;
         out.count = *count;
         out.step = integer(g, "step");
         if (*count > 0) {
           auto first = integer(g, "first_age"), last = integer(g, "last_age");
-          if (!first || !last) return failure(name->str() + "." + key.str() + " lacks ages");
+          if (!first || !last) return factsError(name->str() + "." + key.str() + " lacks ages");
           out.firstAge = *first;
           out.lastAge = *last;
         }
@@ -296,21 +294,15 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
       }
     } else if (const llvm::json::Value *events = entry->get("events");
                !events || events->kind() != llvm::json::Value::Null) {
-      return failure(name->str() + ": events must be an object or null");
+      return factsError(name->str() + ": events must be an object or null");
     }
     if (!result.blocks.emplace(name->str(), std::move(block)).second)
-      return failure("duplicate op_timing block " + name->str());
+      return factsError("duplicate op_timing block " + name->str());
   }
   result.sha256 = expectedSha256.str();
   result.hardwareIR = hardwareSha->str();
   result.dma = dmaWait;
   return result;
-}
-
-TargetTiming RTLEvidence::targetTiming() const {
-  return {[facts = *this](const Instr &in, const RegValues &regs) {
-    return facts.resolve(in, regs);
-  }};
 }
 
 llvm::json::Object RTLEvidence::applicability() const {
@@ -321,7 +313,7 @@ llvm::json::Object RTLEvidence::applicability() const {
   };
   auto vload = blocks.find("vlsu.vload");
   int latency = vload != blocks.end() ? vload->second.readLatency.value_or(0) : 0;
-  Array operations{"addi", "lui", "lw", "sw", "seld", "vload", "vstore", "vtrpose.xlu",
+  Array operations{"scalar ALU (add..and, addi..srai, lui)", "lw", "sw", "seld", "seli", "vload", "vstore", "vtrpose.xlu",
                    "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu",
                    "bgeu", "jal"};
   for (const auto &[mnemonic, block] : vpuBlocks()) operations.push_back(mnemonic);
@@ -334,13 +326,13 @@ llvm::json::Object RTLEvidence::applicability() const {
                              "dma.config.ch0..7", "dma.wait.ch0..7"})
       operations.push_back(name);
   Object result{
-      {"scope", dma ? "drained_basic_blocks_serialized_engines_and_wait_governed_dma" :
-                      "drained_basic_blocks_serialized_engines_with_scalar_setup_and_completion"},
+      {"scope", dma ? "drained_basic_blocks_exclusive_engine_holds_and_wait_governed_dma" :
+                      "drained_basic_blocks_exclusive_engine_holds_with_scalar_setup_and_completion"},
       {"control_flow", Object{
           {"block_entry_state", "idle_engines_no_pending_dma"},
           {"block_exit", "all_prior_work_complete_by_earliest_successor_issue"},
           {"earliest_successor_issue", "branch_issue_plus_2"},
-          {"delay_slots", 1}, {"delay_slot_operations", Array{"addi", "lui"}},
+          {"delay_slots", 1}, {"delay_slot_operations", "scalar ALU"},
           {"delay_immediately_before_redirect_supported", false},
           {"scalar_values_at_joins", "equal_on_all_paths_or_unknown"},
           {"linking_and_register_targets_supported", false}}},
@@ -414,7 +406,7 @@ llvm::json::Object RTLEvidence::applicability() const {
 Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   Footprint f;
   auto reject = [&](const char *why) {
-    f.error = std::string(resolverID()) + ": " + why; return f;
+    f.error = kAtlasRTLTimingProviderId.str() + ": " + why; return f;
   };
   if (!in.op) return reject("invalid instruction");
   const OpInfo &op = *in.op;
@@ -427,11 +419,19 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   if (in.release && op.opClass != OpClass::Csr)
     return reject("unsupported completion annotation");
 
-  if (name == "addi" || name == "lui") {
-    if (!xreg(in.rd) || !xreg(in.rs1)) return reject("unsupported scalar operands");
-    if (name == "addi") x(in.rs1, false);
+  // Scalar ALU operations read their registers and write back at issue.
+  if (op.opClass == OpClass::Alu && name != "auipc") {
+    if (!xreg(in.rd) || !xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported scalar operands");
+    if (hasOperand(op, "x1")) x(in.rs1, false);
+    if (hasOperand(op, "x2")) x(in.rs2, false);
     x(in.rd, true);
     if (in.rd) f.holds.push_back({Unit::ScalarWriteback, 0, 0, 0});
+    return f;
+  }
+  if (op.opClass == OpClass::ScaleImm) {
+    if (!xreg(in.rd)) return reject("unsupported scale register");
+    f.accesses.push_back({Res::EReg, true, in.rd, 1, 0, 1});
+    f.holds.push_back({Unit::ScalarWriteback, 0, 0, 0});
     return f;
   }
   if (name == "delay" || name == "ecall") return f;
@@ -483,8 +483,6 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     f.accesses.push_back({Res::Vmem, load, int(words / 8), int(bytes / 32), 0, 0, false, true});
     // The external address space is retained whole; this is not an alias proof.
     f.accesses.push_back({Res::Dram, !load, 0, 1, 0, 0, true, true});
-    f.dmaAsync = true;
-    f.exclusiveVmemUntilWait = true;
     return f;
   }
 
@@ -619,11 +617,13 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     default:
       return reject("unsupported VPU operation");
     }
-    std::set<int> banks;
+    std::map<int, int> banks;
     for (const std::vector<int> *group : {&f.mregReads, &f.mregWrites})
       for (int reg : *group)
-        if (!banks.insert(reg & 31).second)
-          fill.fail("VPU register operands must occupy distinct physical banks");
+        if (auto [at, inserted] = banks.emplace(reg & 31, reg); !inserted)
+          fill.fail("VPU register operands must occupy distinct physical banks (register mod 32): m" +
+                    std::to_string(at->second) + " and m" + std::to_string(reg) + " share bank " +
+                    std::to_string(reg & 31));
     for (const char *key : reads) f.readRelease = std::max(f.readRelease, fill.readEnd(key));
     f.writeRelease = fill.nextIssue();
     for (const char *key : writes) f.writeRelease = std::max(f.writeRelease, fill.last(key));

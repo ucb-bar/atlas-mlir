@@ -2,6 +2,7 @@
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasRTLExport.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/MLIRContext.h"
@@ -16,18 +17,21 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 int main(int argc, char **argv) {
-  bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
+  bool mapJson = false, programJson = false, timingJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
   for (int i = 1; i < argc; ++i) {
     StringRef arg(argv[i]);
     if (arg == "--map-json") mapJson = true;
     else if (arg == "--program-json") programJson = true;
+    else if (arg == "--rtl-timing-json") timingJson = true;
     else if (arg == "--allow-untimed") allowUntimed = true;
     else if (arg.starts_with("--") || input) invalid = true;
     else input = argv[i];
   }
-  if (invalid || !input || (mapJson && programJson)) {
-    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n";
+  // The RTL timing export is a timed-only mode of its own.
+  if (invalid || !input || (mapJson && programJson) || (timingJson && (mapJson || programJson || allowUntimed))) {
+    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n"
+                    "       atlas-emit --rtl-timing-json <flat-mlir-module>\n";
     return 2;
   }
   DialectRegistry registry;
@@ -36,9 +40,16 @@ int main(int argc, char **argv) {
   auto module = parseSourceFile<ModuleOp>(input, &context);
   if (!module || failed(verify(*module))) return 1;
 
+  if (timingJson) {
+    auto resolved = exportAtlasRTLTiming(*module);
+    if (failed(resolved)) return 1;
+    llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(*resolved)));
+    return 0;
+  }
   llvm::SmallVector<uint32_t> words;
-  if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
-  if (failed(verifyAtlasArtifact(*module, mapJson || programJson, words))) return 1;
+  if (failed(allowUntimed ? verifyAtlasArtifact(*module, mapJson || programJson, words)
+                          : verifyAtlasExecutable(*module, mapJson || programJson, words)))
+    return 1;
   if (programJson) {
     // This is the physical-stream input boundary for an external functional
     // model. The encoded words remain authoritative; these typed fields and
@@ -116,8 +127,16 @@ int main(int argc, char **argv) {
     };
     if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
-    if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
+    if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider)) {
       root["timing_provider"] = provider.getValue().str();
+      // Issue spacing was verified under the named policy; the words carry its
+      // delays. Only the RTL provider's export resolves per-instruction timing.
+      root["timing_scope"] = provider.getValue() == timing::kAtlasRTLTimingProviderId
+          ? "issue_spacing_verified_by_timing_provider_over_selected_rtl_facts; see atlas-emit --rtl-timing-json"
+          : "issue_spacing_verified_by_timing_provider; policy unqualified against the RTL";
+    }
+    if ((*module)->hasAttr(kAtlasRTLEvidence))
+      root["rtl_evidence"] = true;
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }
