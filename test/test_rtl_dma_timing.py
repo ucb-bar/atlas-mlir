@@ -120,6 +120,9 @@ class SelectedDMATimingTest(unittest.TestCase):
         ninth_late = [*base, *windows, *launches, wait(0), transfer(channel=0, reg=18), *(wait(c) for c in range(1, 8)), wait(0), HALT]
         accepted["eight transfers pending"] = eight
         accepted["ninth launch after launch 0 waited"] = ninth_late
+        # The scheduler keeps waits ahead of later launches, so it cannot move launch 0's wait past the ninth.
+        accepted["ninth launch on another channel after launch 0 waited"] = [
+            *base, *windows, *launches, wait(1), wait(0), transfer(channel=1, reg=18), *(wait(c) for c in range(2, 8)), wait(1), HALT]
         rejected["ninth launch before launch 0 waited"] = (ninth_early, EIGHT_SLOTS)
         for name, ops in accepted.items():
             with self.subTest(case=name):

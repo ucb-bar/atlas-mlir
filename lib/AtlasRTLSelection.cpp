@@ -172,6 +172,10 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     Dependence d = dataDependence(a, fa, b, fb);
     if (isLaunch(b) && holdsMxu(fa) && fa.doneAge + 1 > d.distance)
       d = {fa.doneAge + 1, EdgeKind::Order, "selected DMA launch waits for MXU work to drain"};
+    // Launches keep queue order, so a wait kept ahead of every later launch
+    // keeps each launch's command slot free, as the scope requires.
+    if (isLaunch(b) && a.op->opClass == OpClass::DmaWait && d.distance < 1)
+      d = {1, EdgeKind::Order, "selected DMA launch stays behind an earlier wait (eight command slots)"};
     return TimingRuleResult<Dependence>{d, {}};
   };
   // Pending windows stay disjoint from each other and from VLS tiles; DRAM
