@@ -2,8 +2,9 @@
 
 Transfers queue one per channel into eight command slots with disjoint VMEM windows, waited within their block;
 VLS, VPU and XLU run beside them and MXU commands wait for them. A virtual schedule that puts MXU work beside a
-pending transfer stays on the model provider.
+pending transfer stays on the model provider. Loops whose addresses move are timed under each concrete entry context.
 """
+import json
 import tempfile
 import unittest
 
@@ -17,7 +18,9 @@ LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine")
 SCHEDULED = ("--verify-atlas-virtual-stream", "--schedule-atlas-virtual", "--lower-atlas-virtual-to-machine")
 SERIAL = ("virtual_bf16_vpu_program", "virtual_bf16_shared_relu", "virtual_bf16_branch_program", "virtual_bf16_loop_program",
           "virtual_bf16_swap_loop_program", "virtual_bf16_dynamic_branch_program", "virtual_fp8_matmul_program",
-          "virtual_mxu_seeded_fp8", "virtual_dma_tiles")  # seli sets the FP8 scale register
+          "virtual_mxu_seeded_fp8", "virtual_dma_tiles",  # seli sets the FP8 scale register
+          # The FP8 pack relayout loop moves its lw/sw addresses every iteration: one entry context each.
+          "virtual_fp8_two_layer_mlp", "virtual_fp8_two_layer_mlp_bias")
 MXU_BESIDE_DMA = "'atlas.mxu_push' op order conflict with atlas.dma"
 WAIT = ("dma_wait", "channel = 0 : i32")
 # Two transfers in flight on channels 0 and 1, then both waited (test_untimed_pipeline's manual multichannel stream).
@@ -67,6 +70,20 @@ class VirtualRTLTimingTest(unittest.TestCase):
                         # Dropping the delays breaks the timing, or first a contract the delays' CFG ownership established.
                         rejected(self, without_delays(timed), VERIFY,
                                  diagnostic="insufficient issue spacing|timing resource conflict|contract predecessor is not established|cannot prove DMA memory disjointness")
+
+    def test_fp8_pack_loop_is_timed_under_each_iteration(self):
+        untimed = checked(self, (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text(), *LOWER)
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                timed = checked(self, untimed, selection(dma="wait"), consumer, VERIFY)
+                exported = json.loads(checked(self, timed, "--rtl-timing-json", tool=EMIT))
+                loop = next(b for b in exported["blocks"] if "entry_contexts" in b)
+                contexts = loop["entry_contexts"]
+                self.assertEqual(sorted(e["x13"] for c in contexts for e in c["entries"]), list(range(32)))
+                self.assertEqual(exported["instructions"][loop["first_word"]]["mnemonic"], "lw")
+                # The first lw reads x10 = 0x20000 + 16 * iteration.
+                lines = sorted(c["footprints"][0]["accesses"][1]["first"] for c in contexts for _ in c["entries"])
+                self.assertEqual(lines, [(0x20000 + 16 * k) // 32 for k in range(32)])
 
     def test_selection_survives_lowering_and_reordering(self):
         source = (EXAMPLES / "virtual_bf16_vpu_program.mlir").read_text()

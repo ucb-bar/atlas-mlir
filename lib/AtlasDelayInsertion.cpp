@@ -18,6 +18,7 @@ struct Issued {
 constexpr int kMaxSearch = 100000;
 constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
+constexpr const char *kContextReason = "another entry context of this block issues it later";
 
 // In-order placement of one block from `entry`. Each op issues no earlier
 // than its `floor` cycle, when given, and the block drains no earlier than
@@ -125,7 +126,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     int cycle = earliest(in, f, nextFree, reason);
     if (!floor.empty() && floor[i - begin] > cycle) {
       cycle = floor[i - begin];
-      reason = "another entry context of this block issues it later";
+      reason = kContextReason;
     }
 
     if (in.op->opClass == OpClass::Halt) {
@@ -246,6 +247,7 @@ LogicalResult mlir::atlas::atlasInOrderBlockDelays(
   size_t begin = s.starts[block], end = s.blockEnd(block);
   std::vector<int> floor(end - begin, 0);
   int drainFloor = 0;
+  std::vector<std::pair<int, std::string>> own(end - begin, {0, ""});
   for (int round = 0; round < kMaxContextRounds; ++round) {
     bool stable = true;
     for (const AtlasContextGroup &group : groups) {
@@ -254,6 +256,14 @@ LogicalResult mlir::atlas::atlasInOrderBlockDelays(
       after = {};
       if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail)))
         return failure();
+      // A delay keeps the reason of the context that needs the most idle time there on its own.
+      for (size_t i = begin; round == 0 && i < end; ++i) {
+        int idle = before[i].guard;
+        for (uint32_t n : before[i].delays)
+          idle += n + 1;
+        if (idle > own[i - begin].first)
+          own[i - begin] = {idle, before[i].reason};
+      }
       for (size_t k = 0; k < floor.size(); ++k)
         if (cycles[k] > floor[k]) {
           floor[k] = cycles[k];
@@ -264,8 +274,12 @@ LogicalResult mlir::atlas::atlasInOrderBlockDelays(
         stable = false;
       }
     }
-    if (stable)
+    if (stable) {
+      for (size_t i = begin; i < end; ++i)
+        if (before[i].reason == kContextReason && !own[i - begin].second.empty())
+          before[i].reason = own[i - begin].second;
       return success();
+    }
   }
   return s.ops[begin]->emitOpError("delays do not converge over the block's ")
          << groups.size() << " entry contexts";

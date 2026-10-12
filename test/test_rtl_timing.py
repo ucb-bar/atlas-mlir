@@ -12,7 +12,7 @@ import re
 import tempfile
 import unittest
 
-from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, stream, without_delays
+from test_delay_insertion import OPT, EMIT, ROOT, addi, cycles, nop, program, run, stream, without_delays
 
 
 FACTS = os.environ.get("ATLAS_OP_TIMING")
@@ -412,20 +412,57 @@ class SelectedRTLTimingTest(unittest.TestCase):
                 self.assertEqual([op for op, _, _ in ops[-3:]], ["delay", "alu_imm", "trap"])
                 self.assertEqual(ops[-2][2], "a halt does not wait for a delay")
 
-    def test_join_keeps_only_values_equal_on_every_path(self):
-        # beq skips to the else arm; both arms reach the join's vload.
-        def diamond(then_base, else_base):
-            return [addi(5, 0, 1), branch("beq", 5, 0, 5), nop(), addi(6, 0, then_base), jal(3), nop(),
+    def test_blocks_are_checked_under_each_concrete_entry_context(self):
+        # beq skips to the else arm; both arms reach the join's vload. x5 = 1 decides the
+        # branch; x7 is unknown at entry, so both arms reach the join with their exact bases.
+        def diamond(then_base, else_base, condition=5):
+            return [addi(5, 0, 1), branch("beq", condition, 0, 5), nop(), addi(6, 0, then_base), jal(3), nop(),
                     addi(6, 0, else_base), VLOAD, HALT]
+        misaligned = "VLS effective tile is unaligned, out of range, or crosses a bank"
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
                 self.check(diamond(256, 256), True, consumer, VERIFY)
-                self.check(diamond(256, 1280), False, consumer,
-                           diagnostic="unknown VLS base cannot establish bounded address domain")
-        # An induction variable is unknown at the loop header.
-        stride = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3), VLOAD, addi(6, 6, 256),
-                  addi(13, 13, 1), branch("blt", 13, 14, -3), nop(), HALT]
-        self.check(stride, False, CONSUMERS[0], diagnostic="unknown VLS base")
+                self.check(diamond(256, 264), True, consumer, VERIFY)
+                self.check(diamond(256, 1280, 7), True, consumer, VERIFY)
+                result = self.check(diamond(256, 264, 7), False, consumer, diagnostic=misaligned)
+                self.assertIn("note: in the block entry context with x5=0x1 x6=0x108", result.stderr)
+
+        # An induction variable takes one exact value per iteration; the block keeps its order.
+        def stride(trips, step=None):
+            body = [addi(6, 0, 256), *word_base(15, step or 256), addi(13, 0, 0), addi(14, 0, trips), VLOAD,
+                    ("alu_reg", 'kind = "add", dst = 6 : i32, lhs = 6 : i32, rhs = 15 : i32'), addi(13, 13, 1)]
+            return [*body, branch("blt", 13, 14, 5 - len(body)), nop(), HALT]
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                timed = self.check(stride(3), True, consumer, VERIFY).stdout
+                self.assertEqual([op for op, _, _ in stream(timed)[5:8]], ["vload", "alu_reg", "alu_imm"])
+                exported = export(timed)
+                contexts = exported["blocks"][1]["entry_contexts"]
+                self.assertEqual([c["entries"][0]["x6"] for c in contexts], [256, 512, 768])
+                self.assertEqual([c["footprints"][0]["accesses"][1]["first"] for c in contexts], [32, 64, 96])
+                self.assertIsNone(exported["instructions"][5]["footprint"])
+                # A bank-sized stride leaves VMEM in the seventh iteration.
+                self.check(stride(6, 65536), True, consumer, VERIFY)
+                result = self.check(stride(7, 65536), False, consumer, diagnostic=misaligned)
+                self.assertIn("x6=0x60100", result.stderr)
+        # Contexts differing in a VMEM bank time under the worst one: the vstore shares the vload's
+        # bank only on the else path, which needs the load-to-store bank gap.
+        join = [addi(6, 0, 256), branch("beq", 7, 0, 6), nop(), *word_base(8, 65536 + 256), jal(3), nop(),
+                addi(8, 0, 1280), VLOAD, vls("vstore", 5, 8), HALT]
+        for consumer in CONSUMERS:
+            with self.subTest(consumer=consumer):
+                ops = stream(self.check(join, True, consumer, VERIFY).stdout)
+                at = [op for op, _, _ in ops].index("vload")
+                self.assertEqual(ops[at + 2][0], "vstore")
+                self.assertEqual(cycles(ops[at + 1][1]) + 2, 30)
+        # Past the context bound values merge over all paths: an invariant tile still times, a moving one does not.
+        unbounded = [addi(6, 0, 256), addi(13, 0, 0), VLOAD, vls("vstore", 4, 6, 32), addi(13, 13, 1),
+                     branch("blt", 13, 14, -3), nop(), HALT]
+        self.check(unbounded, True, CONSUMERS[0], VERIFY)
+        moving = [*unbounded[:4], addi(6, 6, 256), *unbounded[4:]]
+        moving[6] = branch("blt", 13, 14, -4)
+        result = self.check(moving, False, CONSUMERS[0], diagnostic="unknown VLS base cannot establish bounded address domain")
+        self.assertIn("note: concrete register contexts exceed 4096 block entries", result.stderr)
 
     def test_control_flow_shape_is_checked(self):
         for ops, diagnostic in (
