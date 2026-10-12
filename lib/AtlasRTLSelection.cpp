@@ -236,6 +236,13 @@ mlir::atlas::loadSelectedRTLEvidence(ModuleOp module) {
     return selectionError("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
   if (loaded->hardwareIRSha256() != hardware.getValue())
     return selectionError("selected facts describe a different hardware IR than recorded");
+  auto pairs = attr.getAs<StringAttr>("op_pairs");
+  auto pairsHash = attr.getAs<StringAttr>("op_pairs_sha256");
+  if ((attr.get("op_pairs") || attr.get("op_pairs_sha256")) && !(pairs && pairsHash))
+    return selectionError("incomplete RTL pair facts selection");
+  if (pairs)
+    if (llvm::Error error = loaded->selectPairFacts(pairs.getValue(), pairsHash.getValue()))
+      return selectionError("RTL evidence selection failed: " + llvm::toString(std::move(error)));
   return std::make_shared<RTLEvidence>(std::move(*loaded));
 }
 
@@ -260,6 +267,10 @@ struct SelectAtlasRTLEvidencePass
       llvm::cl::desc("Expected SHA-256 of the facts file")};
   Option<std::string> dmaPolicy{*this, "dma",
       llvm::cl::desc("Optional DMA policy: wait")};
+  Option<std::string> opPairs{*this, "op-pairs",
+      llvm::cl::desc("Optional pair facts (merlin.op_pairs.v1) derived from the same facts")};
+  Option<std::string> opPairsHash{*this, "op-pairs-sha256",
+      llvm::cl::desc("Expected SHA-256 of the pair facts file")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
   StringRef getDescription() const final {
     return "Select SHA-256-identified RTL-computed timing facts for the RTL timing provider";
@@ -277,6 +288,17 @@ struct SelectAtlasRTLEvidencePass
       signalPassFailure();
       return;
     }
+    if (opPairs.empty() != opPairsHash.empty()) {
+      module.emitError("op-pairs and op-pairs-sha256 are selected together");
+      signalPassFailure();
+      return;
+    }
+    if (!opPairs.empty())
+      if (llvm::Error error = loaded->selectPairFacts(opPairs, opPairsHash)) {
+        module.emitError("RTL evidence selection failed: ") << llvm::toString(std::move(error));
+        signalPassFailure();
+        return;
+      }
     if (auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
         retained && retained.getValue() != kAtlasRTLTimingProviderId) {
       module.emitError("selected RTL evidence contradicts the retained timing provider ")
@@ -291,6 +313,10 @@ struct SelectAtlasRTLEvidencePass
     fields.set("hardware_ir_sha256", builder.getStringAttr(loaded->hardwareIRSha256()));
     if (loaded->dmaWait())
       fields.set("dma", builder.getStringAttr("wait"));
+    if (!opPairs.empty()) {
+      fields.set("op_pairs", builder.getStringAttr(opPairs));
+      fields.set("op_pairs_sha256", builder.getStringAttr(opPairsHash));
+    }
     fields.set("provider", builder.getStringAttr(kAtlasRTLTimingProviderId));
     module->setAttr(kAtlasRTLEvidence, fields.getDictionary(module.getContext()));
   }

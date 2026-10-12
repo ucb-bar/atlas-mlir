@@ -130,6 +130,12 @@ class CoreVpuPairFileTests(unittest.TestCase):
                 with self.subTest(name, side=side):
                     self.assertEqual(word & mask, self.words[op] & mask)
 
+    def test_pairs_name_their_blocks_and_relation(self):
+        self.assertEqual(self.raw["relation"], {"mreg_banks": "disjoint"})
+        for name, pair in self.raw["pairs"].items():
+            first, second = self.split(name)
+            self.assertEqual(pair["as"], {"first": f"vpu.{first}", "second": f"vpu.{second}"}, name)
+
     def test_operand_banks_are_disjoint_modulo_32(self):
         def banks(op, word):
             vd, vs1, vs2 = word >> 7 & 63, word >> 13 & 63, word >> 19 & 63

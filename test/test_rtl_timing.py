@@ -16,6 +16,7 @@ from test_delay_insertion import OPT, EMIT, ROOT, addi, cycles, nop, program, ru
 
 
 FACTS = os.environ.get("ATLAS_OP_TIMING")
+PAIRS = os.environ.get("ATLAS_PAIR_FACTS")  # merlin.op_pairs.v1 derived from FACTS (tools/rtl_extract/pairfacts.py)
 PROVIDER = "rtl-op-timing-v1"
 CONSUMERS = ("--insert-atlas-delays", "--schedule-atlas-stream")
 VERIFY = "--verify-atlas-timing"
@@ -28,9 +29,11 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def selection(path=None, digest=None, dma=None):
+def selection(path=None, digest=None, dma=None, pairs=None):
     path = Path(path or FACTS).resolve()
     options = f"op-timing={path} op-timing-sha256={digest or sha256(path)}"
+    if pairs:
+        options += f" op-pairs={Path(pairs).resolve()} op-pairs-sha256={sha256(pairs)}"
     return "--select-atlas-rtl-evidence=" + options + (f" dma={dma}" if dma else "")
 
 

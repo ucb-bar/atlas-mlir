@@ -207,6 +207,10 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       {"applicability", evidence.applicability()},
       {"blocks", std::move(blocks)},
       {"instructions", std::move(instructions)}};
+  if (const RTLPairFacts *pairs = evidence.pairFacts()) {
+    (*result.getObject("evidence"))["op_pairs_schema"] = "merlin.op_pairs.v1";
+    (*result.getObject("evidence"))["op_pairs_sha256"] = pairs->sha256;
+  }
   if (dynamic) {
     auto *conventions = result.getObject("conventions");
     (*conventions)["cycle_origin"] = "per_block_instance; epoch0:first_instruction_of_block; later_epochs:matching_wait_acceptance";

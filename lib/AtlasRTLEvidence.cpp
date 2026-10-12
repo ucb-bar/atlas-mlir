@@ -244,20 +244,28 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     f.holds.push_back({unit, 0, 0, busy});
   return fill.done(busy);
 }
-} // namespace
 
-llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
-    llvm::StringRef path, llvm::StringRef expectedSha256, bool dmaWait) {
-  if (!hashSyntax(expectedSha256)) return factsError("facts SHA-256 is required");
+// The JSON document at `path`, whose bytes must hash to `expectedSha256`.
+llvm::Expected<llvm::json::Value> readPinned(llvm::StringRef path, llvm::StringRef expectedSha256,
+                                             const std::string &what) {
+  if (!hashSyntax(expectedSha256)) return factsError(what + " SHA-256 is required");
   auto buffer = llvm::MemoryBuffer::getFile(path);
   if (!buffer) return factsError("cannot read " + path.str());
   llvm::StringRef bytes = (*buffer)->getBuffer();
   auto hash = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
       reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
   if (llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true) != expectedSha256)
-    return factsError("selected facts hash mismatch");
+    return factsError("selected " + what + " hash mismatch");
   auto parsed = llvm::json::parse(bytes);
   if (!parsed) return factsError(llvm::toString(parsed.takeError()));
+  return std::move(*parsed);
+}
+} // namespace
+
+llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
+    llvm::StringRef path, llvm::StringRef expectedSha256, bool dmaWait) {
+  auto parsed = readPinned(path, expectedSha256, "facts");
+  if (!parsed) return parsed.takeError();
   const Object *root = parsed->getAsObject();
   if (!root || root->getString("schema") != "merlin.op_timing.v1")
     return factsError("expected schema merlin.op_timing.v1");
@@ -275,6 +283,7 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
     block.readLatency = integer(entry->getObject("assumptions"), "scratchpad_read_latency");
     block.firstFreeAge = integer(entry, "first_free_age");
     block.nextIssueAge = integer(entry, "next_issue_age");
+    block.engine = entry->getString("engine").value_or("").str();
     if (const Object *events = entry->getObject("events")) {
       block.resolved = true;
       for (const auto &[key, group] : *events) {
@@ -303,6 +312,77 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
   result.hardwareIR = hardwareSha->str();
   result.dma = dmaWait;
   return result;
+}
+
+const char *RTLEvidence::vpuBlockName(const std::string &mnemonic) {
+  auto it = vpuBlocks().find(mnemonic);
+  return it == vpuBlocks().end() ? nullptr : it->second;
+}
+
+const OpTimingBlock *RTLEvidence::block(const std::string &name) const {
+  auto it = blocks.find(name);
+  return it == blocks.end() ? nullptr : &it->second;
+}
+
+llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef expectedSha256) {
+  auto parsed = readPinned(path, expectedSha256, "pair facts");
+  if (!parsed) return parsed.takeError();
+  auto fail = [](const std::string &why) { return factsError("pair facts: " + why); };
+  const Object *root = parsed->getAsObject();
+  if (!root || root->getString("schema") != "merlin.op_pairs.v1")
+    return fail("expected schema merlin.op_pairs.v1");
+  const Object *hardware = root->getObject("hw_ir");
+  if (!hardware || hardware->getString("sha256") != llvm::StringRef(hardwareIR))
+    return fail("describe a different hardware IR than the selected facts");
+  const Object *timing = root->getObject("op_timing");
+  if (!timing || timing->getString("sha256") != llvm::StringRef(sha256))
+    return fail("were derived from different op_timing facts than the selected ones");
+  const Array *records = root->getArray("op_pairs");
+  const Array *capacity = root->getArray("capacity");
+  if (!records || !capacity) return fail("missing op_pairs or capacity");
+  auto result = std::make_shared<RTLPairFacts>();
+  for (const auto &value : *records) {
+    const Object *record = value.getAsObject();
+    auto first = record ? record->getString("first") : std::nullopt;
+    auto second = record ? record->getString("second") : std::nullopt;
+    const Array *gaps = record ? record->getArray("gaps") : nullptr;
+    const Object *relation = record ? record->getObject("relation") : nullptr;
+    if (!first || !second || !gaps || gaps->size() != 2 || !relation)
+      return fail("malformed op_pairs record");
+    std::string where = first->str() + " -> " + second->str();
+    for (llvm::StringRef name : {*first, *second}) {
+      const OpTimingBlock *b = block(name.str());
+      if (!b || !b->resolved) return fail(where + " names no resolved facts block " + name.str());
+    }
+    if (integer(record->getObject("assertions"), "checked").value_or(0) <= 0)
+      return fail(where + " was not checked against RTL assertions");
+    auto last = (*gaps)[1].getAsInteger();
+    if (!last) return fail(where + " has malformed gaps");
+    if (record->get("stable_gap") && record->get("stable_gap")->kind() == llvm::json::Value::Null)
+      continue; // never stable over the sweep: the record admits nothing
+    auto stable = integer(record, "stable_gap");
+    if (!stable || *stable < 1 || *stable > *last) return fail(where + " has malformed stable_gap");
+    OpPairFact fact;
+    fact.stableGap = *stable;
+    fact.lastGap = static_cast<int>(*last);
+    for (const auto &[key, entry] : *relation) {
+      auto text = entry.getAsString();
+      if (!text) return fail(where + " has a non-string relation");
+      fact.relation[key.str()] = text->str();
+    }
+    result->pairs[{first->str(), second->str()}].push_back(std::move(fact));
+  }
+  for (const auto &value : *capacity) {
+    const Object *entry = value.getAsObject();
+    auto engine = entry ? entry->getString("engine") : std::nullopt;
+    auto live = integer(entry, "live");
+    if (!engine || !live || *live < 1 || entry->getString("window") != "next_issue_age" ||
+        !result->capacity.emplace(engine->str(), *live).second)
+      return fail("malformed capacity entry");
+  }
+  result->sha256 = expectedSha256.str();
+  pairs = std::move(result);
+  return llvm::Error::success();
 }
 
 llvm::json::Object RTLEvidence::applicability() const {
@@ -381,6 +461,13 @@ llvm::json::Object RTLEvidence::applicability() const {
           "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};
+  if (pairs) {
+    Object capacity;
+    for (const auto &[engine, live] : pairs->capacity) capacity[engine] = live;
+    result["pair_facts"] = Object{{"schema", "merlin.op_pairs.v1"}, {"sha256", pairs->sha256},
+                                  {"operation_pairs", static_cast<int64_t>(pairs->pairs.size())},
+                                  {"live_capacity", std::move(capacity)}};
+  }
   if (dma) {
     result["dma_domain"] = Object{
         {"pending_limit", 8}, {"pending_rule", "launch n of a block requires launch n-8 waited; eight command slots indexed by launch count"},

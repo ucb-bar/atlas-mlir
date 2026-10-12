@@ -7,6 +7,7 @@ A pair file ``targets/<target>/pairs/<name>.yaml`` names an engine spec of the s
     ignore: [group, ...]               # optional; level-type groups (busy flags) left out of the comparison
     invariants: {exclude: [...]}       # optional; replaces the spec's invariants (see spec.invariants)
     shared: [{input|path, reason}]     # optional; control the two operations may share (cone check below)
+    relation: {name: value}            # optional; operand relation every pair's overlays satisfy (for pair facts)
     pairs:
       <pair>:
         first: <operation>             # issued at its own command ages
@@ -15,6 +16,8 @@ A pair file ``targets/<target>/pairs/<name>.yaml`` names an engine spec of the s
         first_inputs: {input: value}   # optional overlay on every command of first (distinct operands)
         second_inputs: {input: value}  # optional overlay on every command of second
         guards: [{signal, bit?}]       # optional; default: second's next_issue. Must be clear at age g.
+        as: {first: name, second: name} # optional; the op_timing blocks the sides stand for (default <engine>.<op>)
+        relation: {name: value}        # optional; merged over the file's relation
     expect: {<pair>: {...}}            # regression values read only by tests
 
 A gap is accepted when (1) no command ages collide, (2) every control output stays known and, with a ``busy``
@@ -41,8 +44,8 @@ from .control import require
 from .runner import RECIPES, failure, failures, group_valid, observed, schedule
 from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
 
-FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared"})
-PAIR_KEYS = ({"first", "second", "gaps"}, {"description", "first_inputs", "second_inputs", "guards"})
+FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared", "relation"})
+PAIR_KEYS = ({"first", "second", "gaps"}, {"description", "first_inputs", "second_inputs", "guards", "as", "relation"})
 SCHEMA = "rtl_extract.op_pairs.v1"
 
 
@@ -66,8 +69,16 @@ def overlay_inputs(spec, overlay, where):
     require(not undeclared, f"{where}: drives undeclared inputs {sorted(undeclared)}")
 
 
+def names(value, allowed, where):
+    """Validates a mapping of names to strings (``as``, ``relation``); ``allowed`` limits the keys when given."""
+    require(isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()),
+            f"{where}: must map names to strings")
+    require(allowed is None or set(value) <= allowed, f"{where}: unknown keys {sorted(set(value) - (allowed or set()))}")
+
+
 def validate(raw, spec, where):
     keys(raw, *FILE_KEYS, where)
+    names(raw.get("relation", {}), None, f"{where}: relation")
     require(raw["engine"] == spec["engine"], f"{where}: engine {raw['engine']!r} does not match its spec")
     require(isinstance(raw["pairs"], dict) and raw["pairs"], f"{where}: no pairs")
     groups(raw, spec, where)
@@ -87,6 +98,8 @@ def validate(raw, spec, where):
             require(pair[side] in spec["operations"], f"{at}: unknown operation {pair[side]!r}")
             overlay_inputs(spec, pair.get(f"{side}_inputs", {}), f"{at}: {side}_inputs")
         require(ages(pair["gaps"])[0] >= 1, f"{at}: gaps start at 1")
+        names(pair.get("as", {}), {"first", "second"}, f"{at}: as")
+        names(pair.get("relation", {}), None, f"{at}: relation")
         for guard in guards(spec, pair):
             keys(guard, {"signal"}, {"bit"}, f"{at}: guards")
             require(guard["signal"] in signals, f"{at}: guard {guard['signal']!r} is not an observed control signal")

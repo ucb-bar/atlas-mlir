@@ -12,6 +12,7 @@ A sequence file ``targets/<target>/sequences/<name>.yaml`` names an engine spec 
           - op: <operation>            # issued at its own command ages + i * gap
             inputs: {input: value}     # optional operand overlay on every command of this entry
             guards: [{signal, bit?}]   # optional; default: the operation's next_issue. Must be clear at its issue age.
+            as: <name>                 # optional; the op_timing block the entry stands for (default <engine>.<op>)
         lengths: "a..b"                # chain lengths (at least 2)
         gaps: "a..b"                   # swept spacings (inclusive, from 1)
     expect: {<sequence>: {<length>: <stable_gap>}}   # regression values read only by tests
@@ -36,7 +37,7 @@ from .spec import TARGETS, ages, invariants, keys, load_target
 
 FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect", "invariants"})
 SEQUENCE_KEYS = ({"ops", "lengths", "gaps"}, {"description"})
-OP_KEYS = ({"op"}, {"inputs", "guards"})
+OP_KEYS = ({"op"}, {"inputs", "guards", "as"})
 SCHEMA = "rtl_extract.op_sequences.v1"
 
 
@@ -57,6 +58,7 @@ def validate(raw, spec, where):
             keys(entry, *OP_KEYS, f"{at}.ops[{n}]")
             require(entry["op"] in spec["operations"], f"{at}.ops[{n}]: unknown operation {entry['op']!r}")
             pairs.overlay_inputs(spec, entry.get("inputs", {}), f"{at}.ops[{n}]: inputs")
+            require(isinstance(entry.get("as", ""), str), f"{at}.ops[{n}]: as must name an op_timing block")
             for guard in pairs.guards(spec, step(entry)):
                 keys(guard, {"signal"}, {"bit"}, f"{at}.ops[{n}]: guards")
                 require(guard["signal"] in signals, f"{at}.ops[{n}]: guard {guard['signal']!r} is not an observed control signal")
