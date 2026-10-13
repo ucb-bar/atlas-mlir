@@ -322,7 +322,6 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b) {
-    std::vector<AtlasContextGroup> groups = atlasBlockContexts(*stream, b, *provider);
     if (improvedRTL && rtlBestOf) {
       auto schedule = [&](const RegValues &entry, RTLSchedulingOrder policy,
                           std::vector<size_t> &candidate,
@@ -335,6 +334,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
         return failure();
       continue;
     }
+    std::vector<AtlasContextGroup> groups = atlasBlockContexts(*stream, b, *provider);
     if (groups.size() == 1) {
       if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
                                *provider, groups.front().entries.front(), order,

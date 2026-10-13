@@ -7,7 +7,6 @@
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
-#include "Atlas/AtlasRTLSelection.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -360,7 +359,7 @@ public:
   explicit CostModel(const timing::TimingProvider &provider) : provider(provider) {}
 
   FailureOr<MachineTiming> timingOf(const std::string &name, Operation *at) const {
-    auto result = machineTimingOf(provider, name, at);
+    auto result = timing::machineTimingOf(provider, name, at);
     if (failed(result))
       return failure();
     return MachineTiming{result->latency, result->interval};

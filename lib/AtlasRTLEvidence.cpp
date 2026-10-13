@@ -95,6 +95,15 @@ struct Fill {
   int last(const char *key) { const OpTimingGroup *g = group(key); return g ? g->lastAge : 0; }
   // A source is retained through its synchronous read response.
   int readEnd(const char *key) { return last(key) + latency; }
+  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1) {
+    access(key, Res::MReg, write, reg * 32, registers * 32, passes);
+    auto &list = write ? f.mregWrites : f.mregReads;
+    for (int i = 0; i < registers; ++i) list.push_back(reg + i);
+    int end = write ? last(key) : readEnd(key);
+    int &release = write ? f.writeRelease : f.readRelease;
+    release = std::max(release, end);
+    return end;
+  }
   // Inclusive hold end: the RTL's first free age is one past it.
   int busyEnd() {
     if (block && !block->firstFreeAge) fail("facts block lacks first_free_age");
@@ -108,7 +117,8 @@ struct Fill {
     if (from <= to)
       for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
-  // VPU admission uses next_issue_age; XLU exclusion lasts through busy.
+  // VectorFSM canIssueOp admits the next VPU command at next_issue_age;
+  // VPU/XLU exclude each other until first_free_age; XLU holds both slots.
   void vpu(int busy) {
     if (block && (!block->nextIssueAge || *block->nextIssueAge < 1 || *block->nextIssueAge > busy + 1))
       fail("facts block lacks a next_issue_age within its busy window");
@@ -139,8 +149,9 @@ const std::map<OpClass, const char *> &mxuBlocks() {
   return table;
 }
 
-// Each MXU holds its own unit unless pair facts replace that hold. Matmul
-// retains its weight slot through the last write because weight reads lack ages.
+// The other MXU, VPU, XLU, VLS and pending DMA meet an MXU only at MREG ports/releases
+// (pairs/core_mxu*.yaml, pairs/core_dma_mxu.yaml). Unextracted weight reads retain
+// a matmul's slot through its last accumulator write; pair facts replace unit holds.
 Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBlock> &blocks) {
   Footprint f;
   const OpInfo &op = *in.op;
@@ -156,12 +167,7 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
   auto track = [&](const char *key, int end) { modeled.insert(key); busy = std::max(busy, end); };
   auto mregRows = [&](const char *key, int reg, bool write) {
     if (reg < 0 || reg > 63) fill.fail("register operand out of range");
-    fill.access(key, Res::MReg, write, reg * 32, 32);
-    (write ? f.mregWrites : f.mregReads).push_back(reg);
-    int end = write ? fill.last(key) : fill.readEnd(key);
-    int &release = write ? f.writeRelease : f.readRelease;
-    release = std::max(release, end);
-    track(key, end);
+    track(key, fill.mreg(key, reg, write));
   };
   auto slotRows = [&](const char *key, Res res, int slot, bool write) {
     if (slot < 0 || slot > 1) fill.fail("accumulator and weight slots are 0 or 1");
@@ -515,8 +521,10 @@ llvm::json::Object RTLEvidence::applicability() const {
 
 Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   Footprint f;
-  auto reject = [&](const char *why) {
-    f.error = kAtlasRTLTimingProviderId.str() + ": " + why; return f;
+  auto reject = [](const char *why) {
+    Footprint rejected;
+    rejected.error = kAtlasRTLTimingProviderId.str() + ": " + why;
+    return rejected;
   };
   if (!in.op) return reject("invalid instruction");
   const OpInfo &op = *in.op;
@@ -545,7 +553,8 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     return f;
   }
   if (name == "delay" || name == "ecall") return f;
-  // Control flow reads operands at issue; the verifier drains successor edges.
+  // The verifier drains every engine before a successor starts, so redirect
+  // latency need only cover the delay slot; operands are read at issue.
   if (op.opClass == OpClass::Branch) {
     if (!xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported branch operands");
     x(in.rs1, false);
@@ -640,6 +649,8 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     fill.access(vmem, Res::Vmem, !load, int(line), 32);
     fill.access(rows, Res::MReg, load, in.rd * 32, 32);
     int busy = fill.busyEnd();
+    // VLOAD/VSTORE hold only their own path: bank holds order them, and MREG
+    // ports/releases order their overlap with VPU and XLU.
     fill.hold({load ? Unit::VloadPath : Unit::VstorePath}, 0, busy);
     fill.bank(int(line), vmem);
     if (load) {
@@ -675,22 +686,14 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
                            op.opClass == OpClass::VpuLoadImmSingle;
     if (!immediate && in.imm != 0) return reject("unsupported VPU encoding");
     Fill fill(f, blockName, blocks);
-    int writeRelease = fill.nextIssue();
-    auto note = [&](bool write, const char *key, std::initializer_list<int> used) {
-      auto &list = write ? f.mregWrites : f.mregReads;
-      list.insert(list.end(), used);
-      int &release = write ? writeRelease : f.readRelease;
-      release = std::max(release, write ? fill.last(key) : fill.readEnd(key));
-    };
+    f.writeRelease = fill.nextIssue();
     auto pair = [&](int reg, bool write, const char *key, int passes = 1) {
       if (!mreg(reg) || (reg & 1)) fill.fail("BF16 operands must name even register pairs");
-      fill.access(key, Res::MReg, write, reg * 32, 64, passes);
-      note(write, key, {reg, reg + 1});
+      fill.mreg(key, reg, write, 2, passes);
     };
     auto single = [&](int reg, bool write, const char *key) {
       if (!mreg(reg)) fill.fail("register operand out of range");
-      fill.access(key, Res::MReg, write, reg * 32, 32);
-      note(write, key, {reg});
+      fill.mreg(key, reg, write);
     };
     switch (op.opClass) {
     case OpClass::VpuElementwise:
@@ -735,7 +738,6 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
           fill.fail("VPU register operands must occupy distinct physical banks (register mod 32): m" +
                     std::to_string(at->second) + " and m" + std::to_string(reg) + " share bank " +
                     std::to_string(reg & 31));
-    f.writeRelease = writeRelease;
     int busy = fill.busyEnd();
     fill.vpu(busy);
     return fill.done(busy);

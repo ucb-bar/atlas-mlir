@@ -20,11 +20,8 @@ constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 constexpr const char *kContextReason = "another entry context of this block issues it later";
 
-// Placement of one block from `entry`, in source order or `order`. Each op issues no earlier
-// than its `floor` cycle, when given, and the block drains no earlier than
-// `drainFloor`; `cycles` and `drainedAt` receive the placement. `tail` is the
-// idle time that drains a block without a branch or halt. A nonempty floor
-// marks one of several entry contexts, which diagnostics name.
+// Place source order or `order` no earlier than `floor`/`drainFloor`.
+// A nonempty floor identifies an entry context in diagnostics.
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p, const RegValues &entry,
                         ArrayRef<int> floor, int drainFloor,

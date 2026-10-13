@@ -14,17 +14,16 @@ llvm::Expected<std::shared_ptr<timing::RTLEvidence>>
 loadSelectedRTLEvidence(ModuleOp module);
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
-// Complete RTL policy: selected footprints and pair reservations, bounded programs,
-// drained blocks, matching DMA waits, and scalar guards before redirects.
+// The complete RTL policy: selected footprints, exclusive engines or pair
+// reservations, drained blocks, bounded programs and NOP guards before
+// redirects. DMA: one pending transfer per channel and at most eight, disjoint
+// VMEM windows, DRAM spans shared only by reads, VLS off pending windows, MXU
+// serialized with DMA, each completed only at its matching wait in the block.
 timing::TimingProvider
 rtlTimingProvider(std::shared_ptr<const timing::RTLEvidence> evidence);
 // Registered factory: fails without valid selected evidence on the module.
 timing::TimingRuleResult<timing::TimingProvider>
 rtlTimingProviderFactory(ModuleOp module);
-// Canonical disjoint operands measure completion latency and same-unit issue interval.
-struct MachineTiming { int latency, interval; };
-FailureOr<MachineTiming> machineTimingOf(const timing::TimingProvider &provider,
-                                       const std::string &name, Operation *at);
 // Scheduler-local heuristics: these never alter provider facts or verification.
 struct RTLSchedulingOrder {
   bool dmaEstimate = false;

@@ -63,6 +63,11 @@ std::string validateTimingProvider(const TimingProvider &provider);
 TimingRuleResult<DepGraph> buildTimingGraph(const std::vector<Instr> &instrs,
                                             const RegValues &entry,
                                             const TimingProvider &provider);
+// Canonical disjoint operands measure completion latency and same-unit issue interval.
+struct MachineOpTiming { int latency, interval; };
+FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
+                                           const std::string &name,
+                                           Operation *at);
 constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
 // RTL-computed operation timing facts selected on the module (lib/AtlasRTLEvidence.cpp).
 constexpr llvm::StringLiteral kAtlasRTLTimingProviderId = "rtl-op-timing-v1";

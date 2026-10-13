@@ -6,6 +6,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <atomic>
 #include <deque>
@@ -407,6 +408,66 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
       s.contexts[b].assign(seen[b].begin(), seen[b].end());
   }
   return s;
+}
+
+static bool sameAccess(const Access &a, const Access &b) {
+  return std::tie(a.res, a.write, a.first, a.count, a.age, a.step, a.anywhere, a.atCompletion) ==
+         std::tie(b.res, b.write, b.first, b.count, b.age, b.step, b.anywhere, b.atCompletion);
+}
+
+static bool sameHold(const Hold &a, const Hold &b) {
+  return std::tie(a.unit, a.index, a.from, a.to, a.alt) == std::tie(b.unit, b.index, b.from, b.to, b.alt);
+}
+
+static bool sameFootprint(const Footprint &a, const Footprint &b) {
+  return std::equal(a.accesses.begin(), a.accesses.end(), b.accesses.begin(), b.accesses.end(), sameAccess) &&
+         std::equal(a.holds.begin(), a.holds.end(), b.holds.begin(), b.holds.end(), sameHold) &&
+         std::tie(a.mregReads, a.mregWrites, a.readRelease, a.writeRelease, a.writeDuringRead, a.vpuLive, a.doneAge, a.dmaCycles, a.error) ==
+             std::tie(b.mregReads, b.mregWrites, b.readRelease, b.writeRelease, b.writeDuringRead, b.vpuLive, b.doneAge, b.dmaCycles, b.error);
+}
+
+std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
+    const AtlasStream &s, size_t block, const TimingProvider &provider) {
+  if (!provider.concreteEntryContexts || s.contexts.empty() || s.contexts[block].empty())
+    return {{{s.entry[block]}}};
+  // Footprints are pure in the instruction and its register reads, so contexts
+  // with equal footprint sequences time identically.
+  std::vector<AtlasContextGroup> groups;
+  std::vector<std::vector<Footprint>> resolved;
+  for (const RegValues &entry : s.contexts[block]) {
+    std::vector<Footprint> footprints;
+    RegValues regs = entry;
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      footprints.push_back(provider.footprint(s.instrs[i], regs));
+      applyScalar(s.instrs[i], regs);
+    }
+    auto same = [&](const std::vector<Footprint> &other) {
+      return std::equal(footprints.begin(), footprints.end(), other.begin(), other.end(), sameFootprint);
+    };
+    auto it = llvm::find_if(resolved, same);
+    if (it == resolved.end()) {
+      resolved.push_back(std::move(footprints));
+      groups.push_back({{entry}});
+    } else {
+      groups[it - resolved.begin()].entries.push_back(entry);
+    }
+  }
+  return groups;
+}
+
+InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,
+                                                        const RegValues *context) {
+  InFlightDiagnostic diagnostic = op->emitOpError(error);
+  if (!s.contextLimit.empty())
+    diagnostic.attachNote() << s.contextLimit;
+  if (context) {
+    std::string known;
+    for (int r = 1; r < 32; ++r)
+      if ((*context)[r])
+        known += " x" + std::to_string(r) + "=0x" + llvm::utohexstr(*(*context)[r]);
+    diagnostic.attachNote() << "in the block entry context with" << (known.empty() ? " no known registers" : known);
+  }
+  return diagnostic;
 }
 
 // DMA_CONFIG writes one shared ScalarCore register, irrespective of channel.
