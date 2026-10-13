@@ -15,14 +15,60 @@ Without a selection the compiler's built-in rules (`npu-model-rtl-match-v1`) app
 
 ## Reproduce
 
-Lower the selected FIRRTL with the options of `tools/retain-ee290-hw-ir.py`, adding `-O=debug --preserve-values=named` and dropping `--repl-seq-mem` and `--repl-seq-mem-file`. The default lowering removes dead ports and wire names and turns on-chip SRAMs into external blackboxes; the extractor would report such records as unresolved. With inline memories, VMEM and MREG appear as `seq.firmem 1, 1, undefined`.
-
-Build the exporter and extract (details in the [extractor reference](../../tools/rtl_extract/README.md#build-and-run)):
+These commands reproduce every artifact from the selected FIRRTL and SV snapshot. Run from the compiler repository root, with a new `X` directory. `R` is the read-only canonical checkout, `I` the built integration checkout, and `P` the CIRCT 1.75.0 installation. Use the npu-model venv Python (`VPY`) from the integration environment. All pair sweeps and sequences go beside the facts so gap-coverage discovery sees them.
 
 ```sh
-python3 tools/extract-rtl-timing.py --hw-ir ee290.debug.hw.mlir \
-  --exporter build/rtl-extract/exporter/hw_ir_export --target atlas --output facts.json
+C=/bwrcq/C/reednicolas/ee194-sp26-chipyard
+R=$C/generators/sp26-atlas-acc/compiler/sessions/circt/atlas-mlir-circt
+I=$C/generators/sp26-atlas-acc/compiler/sessions/circt/wt/integration
+P=$C/.conda-env/riscv-tools
+L=$C/generators/sp26-atlas-acc/compiler/atlas-mlir/build
+X=$PWD/build/manual-rtl-extract
+source "$I/build/env.sh"
+export PYTHONPATH="$PWD/tools:$PYTHONPATH"
+INPUT=$R/build/rtl-timing/ee290-portable-helper-check/inputs
+"$VPY" tools/retain-ee290-hw-ir.py --mode debug \
+  --firrtl "$INPUT/input.fir" --annotations "$INPUT/original.anno.json" \
+  --lowering-options "$INPUT/lowering-options.txt" \
+  --firtool "$P/bin/firtool" --circt-opt "$P/bin/circt-opt" --output "$X/ir-debug"
+H=$X/ir-debug/ee290.debug.hw.mlir
+E=$X/exporter/hw_ir_export
+cmake -S tools/rtl_extract/export -B "$X/exporter" -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE=Release -DCIRCT_DIR="$P/lib/cmake/circt" \
+  -DMLIR_DIR="$P/lib/cmake/mlir" -DLLVM_DIR="$P/lib/cmake/llvm"
+cmake --build "$X/exporter" -j32
+"$VPY" tools/extract-rtl-timing.py --hw-ir "$H" --exporter "$E" \
+  --target atlas --output "$X/out/all.json"
+cp "$X/out/all.json" "$X/out/compiler-facts.json"
+for name in vlsu vpu mxu0 mxu1 core core_vpu core_dma core_dma_mxu core_mxu core_mxu_cross core_mxu_units; do
+  "$VPY" -m rtl_extract.pairs --hw-ir "$H" --exporter "$E" --target atlas \
+    --pairs "$name" --jobs 64 --output "$X/out/pairs-$name.json"
+done
+for name in mxu0 mxu1 core_vpu; do
+  "$VPY" -m rtl_extract.sequences --hw-ir "$H" --exporter "$E" --target atlas \
+    --sequences "$name" --jobs 64 --output "$X/out/sequences-$name.json"
+done
+"$VPY" tools/rtl_extract/targets/atlas/gen_core_vpu.py \
+  "$X/out/all.json" "$X/out/pairs-core_vpu.json" --output "$X/core_vpu.yaml"
+cmp "$X/core_vpu.yaml" tools/rtl_extract/targets/atlas/pairs/core_vpu.yaml
+"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+  --pairs "$X/out/pairs-core_vpu.json" --sequences "$X/out/sequences-core_vpu.json" \
+  --output "$X/out/op-pairs-vpu.json"
+mkdir -p "$X/probe" "$X/model"
+g++ -std=c++17 -O2 -I include -I "$L/llvm-project/llvm/include" -I "$L/llvm-build/include" \
+  test/rtl-timing-facts-probe.cpp lib/AtlasTiming.cpp -o "$X/probe/rtl-timing-facts-probe"
+"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
+  --bin "$I/build/compiler/bin" --work "$X/replay" \
+  --rtl "$R/build/rtl-timing/atlascore-replay-002/inputs" \
+  --verilator "$C/.conda-env/bin/verilator_bin" \
+  --verilator-root "$C/.conda-env/share/verilator" --jobs 32
+cp "$X/replay/obj/VAtlasCore" "$X/model/VAtlasCore"
+"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
+  --pairs "$X/out/op-pairs-vpu.json" --bin "$I/build/compiler/bin" \
+  --model "$X/model/VAtlasCore" --work "$X/replay-pairs" --jobs 32
 ```
+
+Debug lowering uses `-O=debug --preserve-values=named`, `--mlir-timing`, and inline memories (no `--repl-seq-mem` flags). The prepared annotation sidecar redirects hierarchy outputs into `X`; two `firrtl.moduleHierarchyFile` attributes therefore differ from the canonical IR by path alone. All other IR bytes match with firtool 1.75.0. The generator preserves the committed YAML byte for byte when supplied the baseline facts and sweep; its `expect` values are test regressions, never extraction inputs. The current baseline contains 56 facts, 1,426 records in eleven pair files, and 138 records in three sequence files; replay gives 80 PASS, or 85 with pair facts.
 
 Select the facts in the compiler, then schedule and verify:
 
