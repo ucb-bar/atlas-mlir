@@ -34,16 +34,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def stages(source: Path, timing: str,
-           output: Path) -> list[tuple[str, str, Path | str, list[str]]]:
+def stages(source: Path, timing: str) -> list[tuple[str, str, Path | str, list[str]]]:
     """(artifact, tool, input, options) for each command, in order."""
-    report = output / "3-allocation.json"
     return [
         ("1-virtual.mlir", "atlas-opt", source, ["--verify-atlas-virtual-stream"]),
         ("2-scheduled.mlir", "atlas-opt", "1-virtual.mlir",
          ["--schedule-atlas-virtual", "--verify-atlas-virtual-stream"]),
         ("3-allocated.mlir", "atlas-opt", "2-scheduled.mlir",
-         [f"--lower-atlas-virtual-to-machine=allocation-report={report}",
+         ["--lower-atlas-virtual-to-machine=allocation-report=3-allocation.json",
           "--verify-atlas-generated-schedule"]),
         ("4-timed.mlir", "atlas-opt", "3-allocated.mlir",
          [f"--{timing}", "--verify-atlas-timing", "--verify-atlas-generated-schedule"]),
@@ -63,26 +61,35 @@ def main() -> int:
     parser.add_argument("--timing", choices=("insert-atlas-delays", "schedule-atlas-stream"),
                         default="insert-atlas-delays")
     args = parser.parse_args()
-    source = args.source.resolve(strict=True)
-    bin_dir = args.atlas_bin_dir.resolve(strict=True)
-    output = args.output_dir.resolve()
-    if output.exists() and any(output.iterdir()):
-        parser.error("--output-dir must be empty to prevent stale artifacts")
-    output.mkdir(parents=True, exist_ok=True)
+    try:
+        source = args.source.resolve(strict=True)
+        bin_dir = args.atlas_bin_dir.resolve(strict=True)
+        output = args.output_dir.resolve()
+        if output.exists() and (not output.is_dir() or any(output.iterdir())):
+            parser.error("--output-dir must be an empty directory to prevent stale artifacts")
+        output.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        parser.error(str(error))
 
     commands, log = [], []
-    for artifact, tool, given, options in stages(source, args.timing, output):
+    for artifact, tool, given, options in stages(source, args.timing):
         command = [str(bin_dir / tool), *options, str(output / given)]
         if tool == "atlas-opt":
             # A diagnostic names the failing resource; the operation dump would bury it.
             command += ["--mlir-print-op-on-diagnostic=false", "-o", str(output / artifact)]
-        commands.append(shlex.join(command) +
+        # Run in the artifact directory so the pass option has a simple relative
+        # filename. MLIR pass options have their own quoting grammar, distinct
+        # from argv and shell quoting. Record the working directory for replay.
+        commands.append(f"cd {shlex.quote(str(output))} && " + shlex.join(command) +
                         ("" if tool == "atlas-opt" else f" > {shlex.quote(str(output / artifact))}"))
-        result = subprocess.run(command, text=True, capture_output=True)
+        (output / "commands.txt").write_text("\n".join(commands) + "\n")
+        try:
+            result = subprocess.run(command, cwd=output, text=True, capture_output=True)
+        except OSError as error:
+            result = subprocess.CompletedProcess(command, 1, "", f"{error}\n")
         if tool == "atlas-emit" and result.returncode == 0:
             (output / artifact).write_text(result.stdout)
         log.append(f"$ {commands[-1]}\n{result.stderr}exit {result.returncode}\n")
-        (output / "commands.txt").write_text("\n".join(commands) + "\n")
         (output / "log.txt").write_text("\n".join(log))
         if result.returncode:
             print(f"{artifact} failed; see {output / 'log.txt'}\n{result.stderr}",

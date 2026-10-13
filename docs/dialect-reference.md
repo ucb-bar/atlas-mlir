@@ -188,6 +188,12 @@ Lowering marks its output `atlas.generated_from_virtual = "resource-contract-v5"
 
 Contracts derive from live source, checked placements or earlier contracts, never from the lowering's plan.
 
+Generated programs must fit the 2,048-word policy limit, including inserted
+delays. The check applies after timing and at emission as well as during
+untimed lowering. The [virtual program driver](virtual-program-lowering.md)
+retains every stage and its diagnostics; an allocation report's `fits` covers
+untimed lowering, not completion of later timing and encoding stages.
+
 | Contract and checker | Checks | Out of scope |
 | --- | --- | --- |
 | `atlas.virtual_dma_contract` ([DMA](../include/Atlas/AtlasDMAContractVerification.h)) | Launch-time operands and completion identities of explicit transfers | Implicit DMA, tile payloads |

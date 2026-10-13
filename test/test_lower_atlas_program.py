@@ -12,18 +12,72 @@ from pathlib import Path
 
 from test_virtual_scheduling import wide_return_block
 from test_virtual_ssa import BIN, ROOT
+from test_virtual_lowering import virtual_chain
 
 ATTENTION = ROOT / "test/examples/virtual_attention_tile.mlir"
 
 
-def drive(source: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def drive(source: Path, output: Path, *options: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(ROOT / "tools/lower_atlas_program.py"),
                            str(source), "--output-dir", str(output),
-                           "--atlas-bin-dir", str(BIN)],
+                           "--atlas-bin-dir", str(BIN), *options],
                           text=True, capture_output=True)
 
 
 class LowerAtlasProgramTest(unittest.TestCase):
+    def test_paths_with_spaces_and_quotes_can_be_replayed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "input 'attention'.mlir"
+            source.write_text(ATTENTION.read_text())
+            done = Path(temp) / 'output "attention"'
+            result = drive(source, done)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            original = (done / "5-words.hex").read_bytes()
+            # The logged commands include their working directory and work
+            # from an unrelated directory, with no reliance on this driver.
+            replay = subprocess.run(["sh", str(done / "commands.txt")],
+                                    cwd=temp, text=True, capture_output=True)
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual((done / "5-words.hex").read_bytes(), original)
+
+    def test_missing_tool_is_logged_without_a_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            done = Path(temp) / "out"
+            result = drive(ATTENTION, done, "--atlas-bin-dir", temp)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("atlas-opt", (done / "log.txt").read_text())
+            self.assertEqual(len((done / "commands.txt").read_text().splitlines()), 1)
+            self.assertFalse((done / "1-virtual.mlir").exists())
+
+    def test_wait_insertion_cannot_overflow_instruction_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "long.mlir"
+            source.write_text(virtual_chain(1050))
+            for timing in ("insert-atlas-delays", "schedule-atlas-stream"):
+                with self.subTest(timing=timing):
+                    done = Path(temp) / timing
+                    result = drive(source, done, "--timing", timing)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    report = json.loads((done / "3-allocation.json").read_text())
+                    self.assertTrue(report["fits"])
+                    self.assertLess(report["untimed_words"]["words"], 2048)
+                    self.assertIn("2048-word policy limit", result.stderr)
+                    self.assertFalse((done / "4-timed.mlir").exists())
+                    self.assertFalse((done / "5-words.hex").exists())
+
+    def test_legacy_resources_are_included_in_the_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            done = Path(temp) / "mlp"
+            result = drive(ROOT / "test/examples/virtual_fp8_two_layer_mlp.mlir", done)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((done / "3-allocation.json").read_text())
+            self.assertEqual(report["dma"]["synchronous_channels"], [0, 1])
+            self.assertEqual(report["dma"]["peak_in_flight"], 1)
+            self.assertTrue(any(unit["weight_slots_used"] == 1 and
+                                unit["acc_slots_used"] == 1
+                                for unit in report["mxu"]["units"]))
+
     def test_artifacts_or_the_failing_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             done = Path(temp) / "attention"
