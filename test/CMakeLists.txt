@@ -32,3 +32,8 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
+
+# Prints the built-in footprints that test_rtl_extract_hw compares with the extracted RTL facts.
+add_llvm_executable(rtl-timing-facts-probe rtl-timing-facts-probe.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(rtl-timing-facts-probe)
+target_link_libraries(rtl-timing-facts-probe PRIVATE MLIRAtlas)

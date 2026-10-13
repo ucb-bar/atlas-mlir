@@ -482,9 +482,9 @@ def table(rows):
 class CompilerCrossCheck(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        exe = os.environ.get("ATLAS_TIMING_PROBE")
-        if not exe:
-            raise unittest.SkipTest("requires ATLAS_TIMING_PROBE")
+        exe = os.environ.get("ATLAS_TIMING_PROBE") or Path(os.environ.get("ATLAS_OOT_BIN_DIR", "")) / "rtl-timing-facts-probe"
+        if not Path(exe).is_file():
+            raise unittest.SkipTest("requires a built rtl-timing-facts-probe (ATLAS_OOT_BIN_DIR or ATLAS_TIMING_PROBE)")
         cls.facts = load_facts()
         if cls.facts is None:
             raise unittest.SkipTest("requires ATLAS_OP_TIMING, or ATLAS_HW_IR and ATLAS_HW_EXPORTER")

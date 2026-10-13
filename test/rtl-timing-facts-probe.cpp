@@ -1,4 +1,4 @@
-// Print built-in footprints with fixed legal operands for test_rtl_extract_compiler.
+// Print built-in footprints with fixed legal operands for test_rtl_extract_hw.
 #include "Atlas/AtlasTiming.h"
 #include <iostream>
 #include <string>
