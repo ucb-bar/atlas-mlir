@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Generates tools/rtl_extract/targets/atlas/pairs/core_mxu_same.yaml: every ordered pair of commands on one MXU.
+
+Encodings follow lib/AtlasEncoding.cpp (vr: funct7[31:25], vs2[24:19], vs1[18:13], vd[12:7], opcode 0x77).
+
+Usage: gen_core_mxu_same.py FACTS_JSON [OUTPUT_YAML [SWEEP_JSON]] [--output PATH]
+Without an output path the generated YAML goes to stdout. The historical build/
+generator comment is preserved so committed specs reproduce byte for byte.
+"""
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+# kind: (funct7 base, uses accumulator, uses weight slot)
+KINDS = {
+    "push_weight": (0, False, True),
+    "push_acc_fp8": (2, True, False),
+    "push_acc_bf16": (4, True, False),
+    "pop_acc_fp8": (6, True, False),
+    "pop_acc_bf16": (8, True, False),
+    "matmul": (10, True, True),
+    "matmul_acc": (12, True, True),
+}
+# Operand sets: MREG registers of the first and second command lie in disjoint physical banks.
+SRC = (12, 16)       # source register (BF16 pairs 12:13, 16:17)
+DST = (20, 24)       # pop destination (BF16 pairs 20:21, 24:25)
+SCALE = (0, 1)       # FP8 pop scale register
+
+
+def word(kind, unit, side, acc, slot):
+    base = KINDS[kind][0] + unit
+    if kind == "push_weight":
+        vd, vs1, vs2 = slot, SRC[side], 0
+    elif kind.startswith("push_acc"):
+        vd, vs1, vs2 = acc, SRC[side], 0
+    elif kind == "pop_acc_fp8":
+        vd, vs1, vs2 = DST[side], SCALE[side], acc
+    elif kind == "pop_acc_bf16":
+        vd, vs1, vs2 = DST[side], 0, acc
+    else:
+        vd, vs1, vs2 = acc, SRC[side], slot
+    return (base << 25) | (vs2 << 19) | (vs1 << 13) | (vd << 7) | 0x77
+
+
+def short(kind):
+    return {"push_weight": "pw", "push_acc_fp8": "pa8", "push_acc_bf16": "pa16", "pop_acc_fp8": "pop8",
+            "pop_acc_bf16": "pop16", "matmul": "mm", "matmul_acc": "mma"}[kind]
+
+
+def generate(facts, sweep=None):
+    """Render ordered MXU pairs from event ages and optional sweep regressions."""
+    last_ages = {b["name"]: max(g["last_age"] for g in b["events"].values() if g["count"]) for b in facts["op_timing"]
+            if b["engine"] in ("mxu0", "mxu1")}
+
+    expected = {f"mxu{unit}.{kind}" for unit in (0, 1) for kind in KINDS}
+    if not expected <= set(last_ages):
+        raise ValueError("facts must contain all 14 MXU operations")
+
+    lines = []
+    count = 0
+    for unit in (0, 1):
+        for first in KINDS:
+            for second in KINDS:
+                acc_rel = ["same", "other"] if KINDS[first][1] and KINDS[second][1] else [None]
+                slot_rel = ["same", "other"] if KINDS[first][2] and KINDS[second][2] else [None]
+                last = last_ages[f"mxu{unit}.{first}"]
+                for a in acc_rel:
+                    for s in slot_rel:
+                        name = f"mxu{unit}_{short(first)}_{short(second)}" + (f"_acc_{a}" if a else "") + (f"_slot_{s}" if s else "")
+                        relation = {**({"accumulator": a} if a else {}), **({"weight_slot": s} if s else {})}
+                        w1 = word(first, unit, 0, 0, 0)
+                        w2 = word(second, unit, 1, 0 if a in (None, "same") else 1, 0 if s in (None, "same") else 1)
+                        lines.append(f"  {name}:")
+                        lines.append(f"    as: {{first: mxu{unit}.{first}, second: mxu{unit}.{second}}}")
+                        if relation:
+                            lines.append("    relation: {" + ", ".join(f"{k}: {v}" for k, v in relation.items()) + "}")
+                        lines.append(f"    first: mxu{unit}_matmul")
+                        lines.append(f"    first_inputs: {{instruction: 0x{w1:08x}}}")
+                        lines.append(f"    second: mxu{unit}_matmul")
+                        lines.append(f"    second_inputs: {{instruction: 0x{w2:08x}}}")
+                        lines.append(f"    gaps: 1..{last + 6}")
+                        count += 1
+
+    HEADER = f"""# Every ordered pair of commands on one MXU on AtlasCore through the decoder cut (targets/atlas/system/core.yaml):
+# push_weight, push_acc_fp8/bf16, pop_acc_fp8/bf16, matmul and matmul_acc on each unit, for every accumulator and
+# weight-slot relation the two commands can have ({count} pairs). Every AtlasCore assertion is an invariant, so the MXU
+# sequencer's issue checks, the MREG bank tracker and the MregFile port checks decide. The first command uses source
+# m12 (m12:13), pop destination m20 (m20:21) and scale register 0, accumulator 0 and weight slot 0; the second source
+# m16 (m16:17), destination m24 (m24:25) and scale register 1, and accumulator and weight slot 0 (same) or 1 (other):
+# every MREG register of one command lies in physical banks the other does not use. Both sides override the
+# instruction word of the carrier operation mxu<unit>_matmul. Gaps run to the first command's last event age plus 6,
+# past the age at which it stops being live. Generated by build/gen_core_mxu_same.py from the encodings of
+# lib/AtlasEncoding.cpp. `as` names the op_timing blocks each side stands for; `relation` states the operand relation
+# the pair satisfies (accumulator and weight slot same or other where both commands name one, MREG banks disjoint),
+# which pair facts carry to the compiler.
+engine: core
+description: Every ordered same-MXU command pair, second issued g ages after the first; all AtlasCore assertions checked.
+equivalent:
+  vpu_read: [vpu_read0, vpu_read1]
+  vpu_write: [vpu_write0, vpu_write1]
+shared:
+  - {{input: instruction, reason: one instruction per age through the decoder; commands never share an age}}
+  - {{input: fire, reason: issue strobe of that instruction}}
+  - {{input: address, reason: VLS address operand of that instruction}}
+  - {{path: mreg, reason: MREG file; per-bank port conflicts are MregFile invariants}}
+  - {{path: vmem, reason: VMEM banks; same-bank conflicts are Vmem invariants}}
+invariants: {{}}
+relation: {{mreg_banks: disjoint}}
+pairs:
+"""
+    text = HEADER + "\n".join(lines) + "\n"
+
+    if sweep is not None:
+        records = {r["name"].split(".", 1)[1]: r for r in sweep["op_pairs"]}
+        names = [l.strip()[:-1] for l in lines if l.startswith("  ") and not l.startswith("    ")]
+        if set(records) != set(names) or len(records) != len(sweep["op_pairs"]):
+            raise ValueError("sweep must contain exactly every same-MXU pair")
+        out = ["# Regression values used only by tests (full sweeps); the extractor never reads them. rejected_by matches the result",
+               "# at stable_gap - 1 (the first failed part).", "expect:"]
+        for name in [l.strip()[:-1] for l in lines if l.startswith("  ") and not l.startswith("    ")]:
+            r = records[name]
+            entry = f"min_gap: {r['min_gap']}, stable_gap: {r['stable_gap']}"
+            if r["stable_gap"] > 1:
+                below = next(x["result"] for x in r["results"] if x["from"] <= r["stable_gap"] - 1 <= x["to"])
+                first = below.split("; ")[0]
+                entry += ', rejected_by: "' + re.escape(first).replace("\\ ", " ").replace('"', '\\"').replace("\\", "\\\\") + '"'
+            out.append(f"  {name}: {{{entry}}}")
+        text += "\n".join(out) + "\n"
+    return text
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("facts", type=Path)
+    parser.add_argument("output_path", type=Path, nargs="?")
+    parser.add_argument("sweep", type=Path, nargs="?")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    if args.output and args.output_path:
+        parser.error("use either the positional output path or --output")
+    text = generate(json.loads(args.facts.read_text()),
+                    json.loads(args.sweep.read_text()) if args.sweep else None)
+    output = args.output or args.output_path
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
