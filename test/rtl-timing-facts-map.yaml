@@ -1,4 +1,4 @@
-# test_rtl_extract_compiler compares RTL event ages/counts/spacing with probe accesses.
+# test_rtl_extract_hw.CompilerCrossCheck compares RTL event ages/counts/spacing with probe accesses.
 # Selectors: resource r|w [rd|rs1|rs2[+N]]; MReg elements are register*32+row.
 # Scalars: [fact, footprint/hold/events expression [+ N], relation (= by default)].
 # Every storage access and nonempty fact group must be compared or marked not modeled.

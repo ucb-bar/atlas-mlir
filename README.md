@@ -52,9 +52,8 @@ do not establish an RTL-qualified schedule. The
 tool, allocation limit, and pass extension point. The
 [functional-stream format](docs/functional-stream-contract.md) is the separate
 instruction-level input for a functional model. The
-[RTL timing overview](docs/rtl-timing/README.md) describes how engine timing is
-computed from the Atlas RTL and consumed as a timing provider;
-[verification](docs/rtl-timing/verification.md) lists the checks.
+[RTL timing overview](docs/rtl-timing/README.md) covers the selected provider;
+[verification](docs/rtl-timing/verification.md) maps its evidence.
 
 ## Build and test
 
@@ -76,9 +75,8 @@ RTL, assembler, or standalone core need their corresponding `ATLAS_RTL_ROOT`,
 `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
 `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN` paths. A skip is
 not execution evidence. Selected-core runs go through
-`test/selected_core_runtime.py`, which names the core's `scalar/halt_now` halt
-state to the ModeLIR runner (the pinned runner validates `halt_signal` against
-the manifest, so aliasing `io_halted` in `peek` is not enough). For a direct Python test run with another build tree,
+`test/selected_core_runtime.py`, which selects `scalar/halt_now` for the
+ModeLIR runner. For a direct Python test run with another build tree,
 set `ATLAS_OOT_BIN_DIR` to its `bin` directory. The source-bound inventory
 check and its required source pins are documented in the
 [mode census](docs/selected-variant-census.md).

@@ -1,117 +1,84 @@
-# rtl_extract: engine timing from CIRCT HW IR
+# rtl_extract: timing from CIRCT HW IR
 
-Computes per-operation engine timing (event ages, release, next issue) by executing the control logic of CIRCT HW IR cycle by cycle. Python stays target-agnostic; every module, port, opcode and stimulus lives in `targets/<target>/<engine>.yaml`. The output is a `merlin.op_timing.v1` document that drops into Merlin's RTL facts as the `op_timing` section (see Output). The [overview](../../docs/rtl-timing/README.md) covers the pipeline, scope and results; [verification](../../docs/rtl-timing/verification.md) the checks.
-
-## Layout
-
-| Path | Role |
-| --- | --- |
-| `export/` | `hw_ir_export`: C++ CIRCT exporter (HW IR → JSON). Standalone CMake; the compiler build never depends on CIRCT. |
-| `ir.py` | `load_document(hw_ir, modules, exporter)`: exports the modules plus their instance closure. The only code that knows about the exporter. |
-| `control.py` | `ControlCircuit`: register-boundary slicing and exact finite-width execution with unknown (`None`) propagation. Fails closed on unapproved inputs, ops outside the whitelist, enabled/async registers, and foreign clocks/resets. |
-| `spec.py` | `load_spec`, `load_target`, `variant`: YAML loading and validation; unknown or missing keys fail. |
-| `derive.py` | Derives bundle ports, memory response latency and decoded command codes from the IR before a circuit is built. |
-| `runner.py` | `extract(document, spec)`: recipe registry (`RECIPES`), the generic `single` recipe, summaries, spec checks. |
-| `coupled.py` | `coupled` recipe: two circuits clocked together; same-cycle links resolved by fixed-point iteration over unknowns. |
-| `pairs.py` | Pair sweeps (prototype): operation A, then B at gap g; the gaps at which both behave as in isolation. Not part of `op_timing`. |
-| `sequences.py` | Chains of N operations at uniform spacing, with the pair acceptance rules; gives in-flight limits. Not part of `op_timing`. |
-| `pairfacts.py` | Pair facts (`merlin.op_pairs.v1`): pair and chain sweep results joined with their files into the compact document a compiler selects. |
-| `summaries.py` | Stream summaries (first/last age, count, step, row contiguity, split streams), first-free and next-issue ages. |
-| `facts.py` | Record shape, `block` (record to `op_timing` block) and `document` (the output). Unresolved blocks carry `null` values and the reason as `evidence`. |
-
-## Output
-
-`tools/extract-rtl-timing.py` writes `{schema: "merlin.op_timing.v1", hw_ir: {path, sha256}, op_timing: [block, ...]}`. The document names only the IR it read; the target, spec set and exporter are not recorded.
-
-`op_timing` is a named-block list keyed by `name` (`<engine>.<op>` or `<engine>.<op>/<variant>`), the shape Merlin merges per block beside its per-module `timing` section. A block has `name`, `module`, `engine`, `operation`, `variant` (only for variants), `source` (`control_simulation`), `evidence`, `assumptions`, `events`, `first_free_age` and, for engines that declare one, `next_issue_age`. `null` means unknown, never a guess: an unresolved block has `events`, `first_free_age` and `next_issue_age` all `null` and its reason in `evidence`. There is no `status` field; a block is resolved when `events` is not `null`, and the CLI exits 1 otherwise.
+`rtl_extract` executes HW IR control logic cycle by cycle to derive operation events, release ages and issue spacing. Module names, ports, instructions and stimulus belong in target specs. See the [provider overview](../../docs/rtl-timing/README.md) for compiler guarantees, assumptions, limits and artifact reproduction, and the [evidence map](../../docs/rtl-timing/verification.md) for the checks behind them.
 
 ## Build and run
 
+The exporter is a standalone CIRCT build:
+
 ```sh
-P=/path/to/circt-install   # needs lib/cmake/{circt,mlir,llvm}
-cmake -S tools/rtl_extract/export -B build/rtl-extract/exporter -G "Unix Makefiles" \
-  -DCIRCT_DIR=$P/lib/cmake/circt -DMLIR_DIR=$P/lib/cmake/mlir -DLLVM_DIR=$P/lib/cmake/llvm
+P=/path/to/circt-install
+cmake -S tools/rtl_extract/export -B build/rtl-extract/exporter \
+  -DCIRCT_DIR="$P/lib/cmake/circt" -DMLIR_DIR="$P/lib/cmake/mlir" -DLLVM_DIR="$P/lib/cmake/llvm"
 cmake --build build/rtl-extract/exporter -j8
-python3 tools/extract-rtl-timing.py --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
-  --target atlas --engines xlu --output build/rtl-extract/out/xlu.json
-python3 -m unittest discover -s test -p 'test_rtl_extract_*.py'   # hardware tests need ATLAS_HW_IR, ATLAS_HW_EXPORTER
 ```
 
-Run on a debug lowering of the selected FIRRTL (`-O=debug --preserve-values=named`, no `--repl-seq-mem`; see the [overview](../../docs/rtl-timing/README.md#reproduce)). The default lowering removes dead ports and wire names, and memory replacement turns on-chip SRAMs into external blackboxes; the extractor then reports `unresolved` rather than substituting proxies. The CLI exits 1 if any record is unresolved.
+Use debug HW IR with named values and retained on-chip memories; see [Reproduce](../../docs/rtl-timing/README.md#reproduce). From the repository root:
 
-Responses are fed back after `events.<g>.response.latency` ages and reported as `assumptions.scratchpad_read_latency`. This is the on-chip VMEM/MREG read latency, fixed by the RTL: the vector and scalar LSU are always granted ahead of DMA and TileLink. External memory and DMA completion are not modeled; they are variable and governed by `dma.wait`, not by a cycle count.
+```sh
+PYTHONPATH=tools python3 -m rtl_extract --hw-ir ee290.debug.hw.mlir \
+  --exporter build/rtl-extract/exporter/hw_ir_export --target atlas --engines xlu \
+  --output build/rtl-extract/out/xlu.json
+```
 
-## Spec schema (`single` recipe)
+Omit `--engines` to extract every engine. Missing control dependencies or unsupported operations produce unresolved blocks; the CLI exits 1 if any block is unresolved. `python3` needs PyYAML; use the prepared `VPY` interpreter for tests.
 
-- Required: `engine` (file stem), `module` (top), `events`. `inputs` lists approved control inputs that are not derived, and idle-value overrides; derived inputs idle at 0.
-- `command: <prefix>`: approves `<prefix>_valid` and every `<prefix>_bits_*` input port of `module` (idle 0 unless listed in `inputs`).
-- `events.<group>`: `valid` (signal) or `bundle: <prefix>` (valid `<prefix>_valid`, an input `<prefix>_ready` is approved, fields are the `<prefix>_bits_*` outputs named by suffix that depend only on approved inputs through supported operations; payload bits drop out); optional explicit `fields` (`{name: signal}`, overrides the expansion), `row` (field checked for 0..n-1 order), `split_by` (field that splits the group into `streams`), `response: {input, memory?, latency?}` (the input, idle 0, pulses `latency` ages after each valid).
-- `system`: module instantiating the engine, its memories and the instruction decoder; required by `memory` and `decode`, and loaded with the engine.
-- `response.memory: <module>`: derives `latency`. The single `system` instance of that module must be a sibling of the single engine instance, with the event valid wired to exactly one memory input and the response input driven by exactly one memory output. That memory is simulated alone (other inputs idle 0): the ages from a one-cycle request pulse to response valid are the latency. Every `seq.firmem` `readLatency` in it must agree and not exceed the measurement; an extra register makes the measurement win. An explicit `latency` (e.g. in a variant) overrides it. Records report `assumptions.scratchpad_read_derivation.<group>` (memory instance, ports, `measured`, `memory_read_latency`, `used`).
-- `decode: {input, instruction: {instance, port}, words: {name: word}}`: command codes come from the RTL. Each declared ISA word (names and encodings are vocabulary, matching `lib/AtlasEncoding.cpp`) drives the decoder input `instruction` (instance path in `system`; its driver must be a named value or an instance result), and the code is the value reaching `input` (a port of the engine instance or a cut) in the same cycle. Codes must be known, distinct, and differ from the all-zero word's. Commands refer to codes as `"$name"`.
-- `operations.<op>.commands`: `{age | "a..b": {input: value}}` overlaid on the idle inputs for those ages; optional `next_issue: {signal, bit?}`. `operation_table: {codes?: {op: code}, template: {...}}` generates operations, replacing `"$code"`; without `codes` it generates one operation per `decode.words` name.
-- `busy`: signal or list of signals (their OR); gives `first_free_age` (first age after the first command with busy low) and requires a contiguous busy interval.
-- `responders: {<name>: {request: {valid, ready, tag?, fields?}, response: {valid, ready, tag?}, latency, accept}}`: an external memory serving a request/response handshake. A request is accepted when the `accept` pattern (one level per age, repeating) is 1 and answered in order `latency` ages later; handshakes become `<name>.request`/`<name>.response` events. `unreset` entries may name registers by regex (`match`).
-- `invariants: {exclude: [{reason, path?, module?, message?}]}`: every live RTL assertion under the simulated top must not fire at any age, and an unknown firing condition fails. Assertions come from `hw_ir_export --assertions` (each `sv.error`/`sv.fatal`/`sv.assert` with its enclosing region chain); a condition is the AND of the enclosing `sv.if` terms, read as in a simulation build (`ifdef` macros undefined, `ASSERT_VERBOSE_COND_`/`STOP_COND_` = 1), and must be clocked by the top clock. Exclusions need a reason and must match an assertion.
-- `probes: {name: selector}` exposes values inside the hierarchy as observable signals; `cuts: {input: selector}` replaces a value by an input (declare its idle value in `inputs`). Selectors: `{instance: "a/b", result: port}` or `{path: "a/b", value: name}` (matches `name`, then `sv.namehint`).
-- `unreset`: optional list of `{path, name}` register selectors (`path` is the instance path, `""` for the top; a coupled `partner` takes its own `unreset`) that may stay unknown after reset/flush. Every other register in the control cone must be known; an entry that matches no register, lies outside the cone, or is already known after reset/flush fails the run. Control outputs and valid event fields must still be known at every age.
+## Implementation and specs
+
+The [exporter](export/CMakeLists.txt) produces JSON; [ir.py](ir.py) loads requested modules and their instance closure. [control.py](control.py) slices control cones at registers and executes exact finite-width operations with unknown propagation. [derive.py](derive.py) resolves bundle ports, memory latency and command codes; [runner.py](runner.py) executes recipes; [summaries.py](summaries.py) reduces traces; [facts.py](facts.py) writes timing blocks.
+
+[spec.py](spec.py) validates YAML keys and loads specs through `read_spec(path)`. The six engine specs, engine pair specs and MXU engine chains remain YAML files. AtlasCore system specs, core pair enumerations and core chains are generated on load by [gen_core.py](targets/atlas/gen_core.py); their logical YAML names still work with the sweep CLI. To inspect one:
+
+```sh
+python3 tools/rtl_extract/targets/atlas/gen_core.py pairs/core_vpu.yaml \
+  --output build/rtl-extract/specs/pairs/core_vpu.yaml
+```
+
+Generator choices are listed by `--help`. Generated expectations are regression pins, not inputs to extraction.
+
+## Timing output
+
+The document is `{schema: "merlin.op_timing.v1", hw_ir: {path, sha256}, op_timing: [...]}`. Each block names `<engine>.<op>` or `<engine>.<op>/<variant>` and carries module, engine, operation, optional variant, `source: control_simulation`, evidence, assumptions, events and `first_free_age`. `next_issue_age` appears for engines declaring it. The JSON has no status field: unresolved blocks have null timing values and an explanation in `evidence`. The document pins the input IR, not the exporter or specs.
+
+Events summarize first/last ages, count, spacing, row order and optional split streams. Response latencies appear in `assumptions.scratchpad_read_latency`; RTL-derived latencies also carry `scratchpad_read_derivation`. Unknown values are never replaced by estimates.
+
+## Single-circuit schema
+
+See [spec.py](spec.py) for validation and [vlsu.yaml](targets/atlas/vlsu.yaml) for an engine example. A run resets and flushes before age 0. Control-cone registers must then be known except declared `unreset` registers; control signals must be known every age, and fields whenever their event is valid.
+
+- Required: `engine`, `module`, `events`. `inputs` maps approved control inputs to idle integer values. `command: PREFIX` approves `PREFIX_valid` and `PREFIX_bits_*` input ports, defaulting them to zero.
+- `events.GROUP` uses `valid: SIGNAL` or `bundle: PREFIX`. Bundles derive valid, approve an input ready port and include fields supported by the control cone; explicit `fields: {NAME: SIGNAL}` overrides this expansion. `row` reports row contiguity; `split_by` separates streams.
+- `response: {input, memory?, latency?}` pulses the response input after each event. `memory` requires `system`: exactly one engine and memory instance must be siblings with unique request/response wiring. The memory's measured response latency must not precede its consistent `seq.firmem` read latency. Explicit `latency` overrides the measured value and is recorded as `used`.
+- `decode: {input, instruction: {instance, port}, words: {NAME: WORD}}` requires `system`. Each word drives the RTL decoder; the resulting codes must be known, distinct and different from the all-zero word's code. Commands reference them as `$NAME`.
+- `operations.OP.commands` maps an age or inclusive `"A..B"` range to input overlays. Optional `next_issue: {signal, bit?}` identifies an issue guard. `operation_table: {codes?, template}` expands a template's `$code`; without `codes`, it uses `decode.words`.
+- `busy` is a signal or list of signals combined by OR. It must form a contiguous interval and drain; `first_free_age` is the first free age after the command.
+- `probes: {NAME: SELECTOR}` exposes hierarchical values; `cuts: {INPUT: SELECTOR}` substitutes approved inputs. Selectors use `{instance, result}` or `{path, value}`; values match `name`, then `sv.namehint`.
+- `unreset` selects registers by `{path, name}` or `{path, match}` (regex). A selector must match registers in the control cone that remain unknown after reset/flush. A coupled partner declares its own selectors.
+- `responders.NAME` declares request/response handshakes, positive `latency` and an optional repeating `accept` pattern. Requests are answered in order; accepted request and response handshakes become events. Request fields and optional tags are checked for known values.
+- `invariants: {exclude: [...]}` enables RTL assertion checking. Firing or unknown conditions fail. Each exclusion needs a reason and must match an assertion. The exporter supplies assertions with `--assertions`; their clocks must trace to the top clock.
+- `variants.NAME` deep-merges an overlay, optionally selecting `only: [OPS]`; identity, derivation and regression keys cannot be overridden. `checks: [{equal: [PATHS], reason?}]` marks compared records unresolved on a mismatch. `expect` is read by tests, never by extraction.
 - Defaults: `clock: clock`, `reset: reset`, `reset_cycles: 16`, `flush_cycles: 16`, `limit: 320`, `tail: 2`.
-- `variants.<name>`: deep-merged overlay of the spec (not `engine`, `module`, `checks`, `expect`, `operation_table`, `system`, `command`, `decode`); optional `only: [ops]`. Records are named `<engine>.<op>` and `<engine>.<op>/<variant>`.
-- `checks: [{equal: ["op.events.write", "op/variant.events.write"], reason?}]`: a failure marks the named records unresolved.
-- `expect`: regression values per record, read only by `test/test_rtl_extract_hw.py`. Never feed them into extraction.
 
-A run resets, flushes, then requires every register in the cone of the control signals (`busy`, event `valid`s, `next_issue` signals) to be known, except those listed in `unreset`; fields must be known whenever their event is valid. Ages are absolute; age 0 is the first cycle after the flush.
+## Coupled circuits
 
-## `coupled` recipe
+`recipe: coupled` adds `partner: {module, inputs, cuts?, probes?, unreset?}` and `links: {INPUT: OUTPUT}`. Partner inputs name entries in the top-level `inputs`. [coupled.py](coupled.py) starts linked inputs unknown each cycle and evaluates both circuits until links settle before committing state. Unknown links stay unknown; links that do not settle fail. Every observed signal must belong to exactly one circuit. [scalar_lsu.yaml](targets/atlas/scalar_lsu.yaml) is the ScalarCore/LSU example.
 
-`recipe: coupled` simulates `module` (primary, with `cuts`/`probes`) and `partner: {module, inputs: [names], cuts?, probes?}` in lockstep; `partner.inputs` names the top-level `inputs` that belong to the partner. `links: {input: output}` drives an input port of one circuit with the same-cycle output (port or probe) of the other. Each cycle starts the linked inputs unknown and re-evaluates both circuits until the links stop changing, so evaluation order never matters and a combinational loop between the circuits leaves values unknown (unresolved). Every observed signal must be an output of exactly one circuit; the rest of the schema is that of `single`. Example: `targets/atlas/scalar_lsu.yaml`.
+## Pair and chain sweeps
 
-## Pair sweeps (prototype)
+[pairs.py](pairs.py) loads `pairs/NAME.yaml`: `engine`, named `pairs` with `first`, `second`, positive `gaps`, optional operand overlays (`first_inputs`, `second_inputs`), `guards`, compiler aliases (`as`) and operand `relation`. File-level `equivalent` combines event groups; `ignore` omits level events. `invariants` enables assertions; `shared` declares allowed shared control inputs or instance paths.
 
-`targets/<target>/pairs/<engine>.yaml` declares operation pairs on one engine or system spec: `first`, `second`, `gaps` (`a..b`), optional `first_inputs`/`second_inputs` (operand overlays), `guards` (default: the second's `next_issue`), `as` and `relation` (read only by pair facts, below), and file-level `relation`, `equivalent` (event groups compared as one resource) and `ignore` (level-type groups). For each gap the second is issued `g` ages after the first; the gap is accepted when control stays known, busy drains, every guard is clear at the second's issue age, and the event multiset equals both isolated runs with the second shifted by `g`. Records (`rtl_extract.op_pairs.v1`) give per-gap results, `min_gap` and `stable_gap` (smallest gap from which every swept gap passes). Pair files may add `invariants` (as in specs; a gap whose run fires or leaves unknown an assertion is rejected) and `shared` (inputs or instance paths both operations may use). Records add `rejected` (per-gap guard, invariant, event or error reasons), `invariants` (assertions checked, exclusions) and, for pairs with disjoint event groups, `shared_control`: the registers and inputs both operations' control reaches, traversal stopping at declared shared instances. `--jobs N` runs a file's isolated runs, then all its (pair, gap) trials, in N forked processes.
+A trial issues the second operation at the selected gap. Acceptance requires known control, drain, clear issue guards and the exact event multiset of both isolated runs, with the second shifted by the gap. The default guard is the second operation's `next_issue`. Output schema `rtl_extract.op_pairs.v1` retains per-gap results and rejection reasons, `min_gap`, `stable_gap` (the smallest gap whose remaining swept gaps all pass), assertion counts and, for disjoint event groups, shared-control reachability.
 
-System specs in `targets/<target>/system/` are loaded only by pair and sequence sweeps and never enter `op_timing`. `system/core.yaml` drives AtlasCore through a decoder cut (instruction word, fire and VLS address as inputs; host start, DMA and TileLink idle), so the frontend hazard checks, MREG bank tracker, MregFile port counts and VMEM same-bank checks run with every engine: all 177 AtlasCore assertions, none excluded. `pairs/core.yaml` sweeps cross-engine pairs there. `pairs/core_vpu.yaml` sweeps all 841 ordered VPU pairs there (generated, with disjoint operand banks): every stable gap equals 1 or the first operation's `next_issue_age`, and the 439 non-overlapping pairs are bound only by the three VPU issue-busy assertions. Results: vload/vstore on distinct banks 1, same bank 30/34 (VMEM and LSU same-bank assertions), same MREG RAW 35 (tracker), add or transpose against vload or vstore 1 in both orders with disjoint control, a shared MREG physical bank 31 (MregFile read conflict), and every VPU-first pair at the first operation's `next_issue_age`. The VLOAD hazard check covers pending writes only, so a VLOAD writing a bank still being read stays a compiler data rule.
+[sequences.py](sequences.py) loads `sequences/NAME.yaml`: named chains with an `ops` cycle (`op`, optional `inputs`, `guards`, `as`), `lengths` and `gaps`. Position `i` issues at `i * gap`; the same acceptance rules apply to the full chain. `rtl_extract.op_sequences.v1` records include inputs and per-length gaps. `--jobs N` parallelizes isolated runs and trials. Both CLIs take `--hw-ir`, `--exporter`, `--target` and `--output`; use `--pairs` or `--sequences` to select names. Artifact commands and compiler gap-coverage semantics live in the [overview](../../docs/rtl-timing/README.md).
 
-```sh
-PYTHONPATH=tools python3 -m rtl_extract.pairs --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
-  --pairs vlsu vpu --output build/rtl-extract/out/pairs.json
-```
+[pairfacts.py](pairfacts.py) joins assertion-checked sweeps with resolved timing blocks into `merlin.op_pairs.v1`. It pins timing and source documents by SHA-256, checks the hardware IR agrees, validates records against current specs and rejects duplicate `(first, second, relation)` records. Pair aliases and relations come from those specs; the [known limits](../../docs/rtl-timing/README.md#not-covered) explain the binding boundary. Pair facts retain the swept range and stable gap. Capacity is the maximum observed live count with a witness, using `next_issue_age` where declared or the last event inclusive otherwise; all blocks of an engine must use the same window convention. Per-gap detail stays in sweeps.
 
-`targets/<target>/sequences/<engine>.yaml` generalizes a pair to chains: an `ops` cycle (operation, operand overlay, guards, optional `as` for pair facts), `lengths` and `gaps`. Operation i issues at `i * gap`, and a spacing is accepted under the pair rules applied to all operations at once. Records (`rtl_extract.op_sequences.v1`) give per-length `min_gap` and `stable_gap`; rejections name the missing events and the chain positions that lost them. Sequence files take the same `invariants` key and share the pair acceptance code; the MXU and VPU chain files check every assertion under their engine. For matmul chains the pair gaps are also the in-flight limits (MXU0 keeps at most three in flight, alternating accumulators at 32; MXU1's 32-cycle issue gap never allows a third), but assertions tighten the accumulator push, accumulating matmul, accumulator push chain on one accumulator from 64 to 94 (MXU0) and 33 to 34 (MXU1): the next push may not load the buffer the matmul is still writing. `pairs/core_mxu.yaml` reproduces the MXU engine gaps through AtlasCore's decoder and accepts MXU against VPU, VLS and XLU at gap 1 in both orders, with disjoint control. `pairs/core_mxu_cross.yaml` extends this to every MXU command and every VPU timing class (gap 1, disjoint control) and to shared operands: a shared register binds at the MREG bank tracker's RAW and WAR/WAW assertions (at the release ages, except that a VSTORE's source stays reported read until the VSTORE drains, 35), a shared physical bank at MregFile's per-bank read or write port check. `pairs/core_mxu_units.yaml` accepts every ordered pair of commands across MXU0 and MXU1 at gap 1 with disjoint control. `pairs/core_mxu_same.yaml` (generated) sweeps every ordered pair of commands on one MXU for every accumulator and weight-slot relation the two can have (196 pairs, operands in disjoint physical banks, gaps past the first command's last event): one cycle below each stable gap an MXU sequencer issue assertion, the accumulation buffer's read check or a moved MREG port event binds, so an accepted pair keeps both commands on their isolated ports. MXU0 admits matmul→pop on its accumulator at 64 and on the other at 1, matmul→matmul or matmul_acc at 32 (other accumulator) or 64 (same), matmul→push_weight at 63 (same slot) or 1 (other), matmul→accumulator push at 94 (same) or 1 (other; 32 for BF16, which needs both read ports); MXU1 matmul→pop at 4 (same), matmul→matmul at 32, push_weight→matmul at 32 (same slot), push_acc→matmul_acc at 33 (same); on both units pushes are 32 apart (33 between accumulator pushes onto one MXU1 accumulator; a single-port push behind a busy port 1 falls back to port 0, which the event comparison rejects, and a BF16 push needs both ports), pops 32 apart, pop→matmul_acc on one accumulator 32 (both accumulator read ports on one buffer), and a push or pop beside a matmul on other slots and accumulators 1. `pairs/core_mxu_shared.yaml` (generated) adds the 536 same-MXU pairs whose MREG operands share a register or a physical bank, one per way they can overlap (`relation.mreg_banks`: `i=j` for the first command's i-th and the second's j-th register, `i~j` for the same bank under another register) and per accumulator and weight-slot relation: 370 keep the disjoint pair's gap, and the rest bind at the MREG bank tracker's RAW and WAR/WAW checks, MregFile's per-bank read port or the sequencers' checks that a pop not write a register an active push or compute reads (and the converse). `sequences/core_mxu.yaml` (generated) runs 50 same-MXU chains of up to six commands there, every chain position on its own registers; every record's minimum gap equals its stable gap. `pairs/core_dma_mxu.yaml` runs on `system/core_dma.yaml`, which now also observes both MXUs: every MXU command beside a DMA load or store, in both orders, keeps its events and leaves the transfer's beats unmoved at every swept gap; the 23 `pairs/core_dma.yaml` records are unchanged by the added probes.
+## Extend and check
+
+Add an engine spec with approved inputs, events and commands; encode alternatives in variants and equalities in `checks`. New control operations need exact semantics plus a mutation or rejection test in [test_rtl_extract_synthetic.py](../../test/test_rtl_extract_synthetic.py). Add hardware regressions under `EngineCase` in [test_rtl_extract_hw.py](../../test/test_rtl_extract_hw.py). Pair/chain behavior, pair facts and generated-spec pins are checked by [test_rtl_extract_pairs.py](../../test/test_rtl_extract_pairs.py).
+
+`CompilerCrossCheck` in the hardware test compares mapped RTL quantities with compiler footprints through the CMake target `rtl-timing-facts-probe` in the build's `bin`. [rtl-timing-facts-map.yaml](../../test/rtl-timing-facts-map.yaml) declares equality or conservative bounds and unmodeled records/groups; every record and nonempty group needs coverage. `ATLAS_OOT_BIN_DIR` selects the binary directory; `ATLAS_TIMING_PROBE` overrides it. `ATLAS_OP_TIMING` selects facts; otherwise `ATLAS_HW_IR` and `ATLAS_HW_EXPORTER` derive them.
 
 ```sh
-PYTHONPATH=tools python3 -m rtl_extract.sequences --hw-ir ee290.debug.hw.mlir --exporter build/rtl-extract/exporter/hw_ir_export \
-  --sequences mxu0 mxu1 --jobs 16 --output build/rtl-extract/out/sequences.json
-```
-
-## Pair facts
-
-`python3 -m rtl_extract.pairfacts --op-timing facts.json --pairs pairs-<file>.json ... [--sequences sequences-<file>.json ...] --output op-pairs.json` writes `merlin.op_pairs.v1`: `hw_ir`, `op_timing` (path and SHA-256 of the facts the document derives from), `sources` (each sweep file's path, SHA-256 and schema), `op_pairs` and `capacity`, one list element per line. Each sweep record is joined with the pair or sequence file that produced it (`pairs-<file>.json` names the file, else the record's engine). A record gives `first` and `second` (the `op_timing` blocks its sides stand for: the pair's `as`, else `<engine>.<op>`), `engine` (their common engine, `null` across engines), `relation` (the file's `relation` merged with the pair's: the operand relation every swept overlay satisfies, e.g. `{mreg_banks: disjoint}`), `gaps`, `min_gap`, `stable_gap`, `assertions` (`checked`, number `excluded`) and `source` (the sweep record). The second may issue at any gap from `stable_gap` through `gaps[1]` when its operands satisfy `relation`. `capacity` gives, per engine, the most operations observed live at once in any accepted pair gap or chain spacing, with a witness run; it reports what the runs show, never more. `window` names when an operation is live: from issue until its `next_issue_age` where its engine's blocks have one (VPU), otherwise from issue through its last event age (MXU); every block of an engine must take the same window. MXU pair files state `accumulator` and `weight_slot` (`same` or `other`) wherever both commands name one, beside `mreg_banks` (`disjoint` or the exact overlap). Records without assertion checks, sides that are not resolved blocks, sweeps of another hardware IR, records that do not match their file and duplicate (first, second, relation) records fail the run. Per-gap results stay in the sweep files.
-
-```sh
-PYTHONPATH=tools python3 -m rtl_extract.pairfacts --op-timing build/rtl-extract/out/all.json \
-  --pairs build/rtl-extract/out/pairs-core_vpu.json build/rtl-extract/out/system/pairs-core_mxu_same.json \
-  build/rtl-extract/out/system/pairs-core_mxu_shared.json --sequences build/rtl-extract/out/sequences-core_vpu.json \
-  --output build/rtl-extract/out/op-pairs.json
-```
-
-## How to add an engine
-
-1. Write `targets/atlas/<engine>.yaml` with the debug IR open: list the approved inputs, events, responses and commands. Add `expect:` only from values you have checked independently, labelled as regressions.
-2. Run the CLI for the engine. `Timing depends on unapproved input` means a payload reaches control (or an input is missing from `inputs`); `Unsupported timing operation` means the cone hit an op outside the whitelist; extend `ControlCircuit.allowed` only with exact semantics and a synthetic test.
-3. Engine-specific invariants (families sharing a write age, overwrite vs accumulate equality, overlap neutrality) go in `checks:` or in variants that encode the alternative stimulus, not in Python.
-4. If one circuit is not enough, add a generic recipe: register `RECIPES[name] = (build, run)` in `runner.py` and its extra spec keys in `spec.RECIPE_KEYS[name]`; extend `runner.modules(spec)` if it simulates more than `module`. `run` must return the per-age trace shape of `run_single` (`age`, `busy`, `signals`, `events`) so summaries and facts stay shared. Wiring between circuits belongs in YAML.
-5. Add a class deriving `EngineCase` in `test/test_rtl_extract_hw.py`, ideally with one mutation (an extra register or a payload-dependent control path) that must move or reject the result.
-6. If the compiler models the operation, map it in `test/rtl-timing-facts-map.yaml` so the cross-check below covers it; otherwise list it there as not modeled.
-
-## Compiler cross-check
-
-`test/test_rtl_extract_compiler.py` compares the compiler's built-in footprints (`lib/AtlasTiming.cpp`, through `test/rtl-timing-facts-probe.cpp`) with the computed facts and fails on any difference. `test/rtl-timing-facts-map.yaml` maps each record to a compiler mnemonic and states the conventions (inclusive hold ends, so `first_free_age` is the hold end plus one). Every computed record must be compared or listed as not modeled. The compiler's behavior is unchanged; this only detects drift between its constants and the RTL.
-
-```sh
-L=/path/to/llvm   # LLVM source include/ and build include/ directories
-c++ -std=c++17 -O2 -I include -I $L/llvm/include -I $L/build/include \
-  test/rtl-timing-facts-probe.cpp lib/AtlasTiming.cpp -o build/rtl-extract/probe/rtl-timing-facts-probe
-ATLAS_TIMING_PROBE=build/rtl-extract/probe/rtl-timing-facts-probe ATLAS_OP_TIMING=build/rtl-extract/out/all.json \
-  python3 -m unittest discover -s test -p 'test_rtl_extract_compiler.py'
+PYTHONPATH=tools:test "$VPY" -m unittest test_rtl_extract_hw.CompilerCrossCheck
 ```

@@ -1,152 +1,160 @@
 # RTL timing for Atlas
 
-Per-operation engine timing is computed from the Atlas RTL rather than typed into the compiler. A C++ exporter turns CIRCT HW IR into JSON, a Python simulator executes each engine's control logic cycle by cycle, and the resulting facts (`merlin.op_timing.v1`) become the `rtl-op-timing-v1` timing provider that drives scheduling, delay insertion and final verification in the compiler. The compiler supplies instruction structure; the facts supply the numbers.
+The `rtl-op-timing-v1` provider uses timing computed from selected Atlas RTL for scheduling, delay insertion and final verification. A CIRCT HW IR exporter and control simulator produce `merlin.op_timing.v1` facts; the compiler supplies instruction structure and resolves timing on concrete operands. Optional `merlin.op_pairs.v1` facts admit overlap backed by assertion-checked sweeps.
 
 ![Chisel and SystemVerilog converge in CIRCT core dialects](figures/chisel_and_sv_circt_convergence.svg)
 
-## Pipeline
+See the [extractor reference](../../tools/rtl_extract/README.md) for simulation and schemas, and the [verification map](verification.md) for tests and execution evidence.
 
-1. **Retain.** Lower the selected FIRRTL to HW IR with `firtool`.
-2. **Extract.** `tools/extract-rtl-timing.py` exports the engine modules and evaluates the per-engine specs in `tools/rtl_extract/targets/atlas/`. Ports come from bundle naming, memory response latency is measured on the memory module, and command codes come from ISA words through the RTL decoder. See the [extractor reference](../../tools/rtl_extract/README.md).
-3. **Select.** `--select-atlas-rtl-evidence` loads the facts file by SHA-256 and records the selection as `atlas.rtl_evidence` on the module; optional pair facts (`merlin.op_pairs.v1`, from `python3 -m rtl_extract.pairfacts`) are selected beside them the same way. The selection makes `rtl-op-timing-v1` the module's timing provider: scheduling, delay insertion, `--verify-atlas-timing`, `atlas-emit` and the LLVM handoff take footprints, dependences, DMA rules and reservations from it (see [the provider](#the-provider)).
-4. **Check.** The extractor tests, a compiler cross-check and end-to-end simulations validate the facts; see [verification](verification.md).
+## The provider
 
-Without a selection the compiler's built-in rules (`npu-model-rtl-match-v1`) apply and behavior is unchanged.
+Selection pins facts by SHA-256 and retains `atlas.rtl_evidence`. Pair facts must match the hardware IR digest, pin the selected operation facts, name resolved blocks and report checked assertions. Subsequent loads recheck selection; resolved exports include both digests. [AtlasRTLEvidence.cpp](../../lib/AtlasRTLEvidence.cpp) implements these checks; [test_rtl_timing.py](../../test/test_rtl_timing.py) exercises malformed and mismatched evidence.
+
+Timing passes resolve `provider=<id>`, then retained `atlas.timing_provider`, then `rtl-op-timing-v1` over selected evidence, otherwise `npu-model-rtl-match-v1`. The model is refused over selected evidence. Without selection, the default provider emits exactly what it did before RTL selection existed; the one exception is a block falling through into ECALL, whose drain now ends on a NOP (DELAY then NOP), accepting a previously rejected program. [AtlasStream.cpp](../../lib/AtlasStream.cpp) implements the guard; [test_delay_insertion.py](../../test/test_delay_insertion.py) checks halt padding.
+
+The common verifier checks dependencies, reservations and drained boundaries. Emission and LLVM handoff check selected streams even without timing metadata. `atlas-emit --allow-untimed` permits inspection without a timing claim; `atlas-emit --rtl-timing-json` requires a safe timed selection and exports footprints, block-relative issues, successors and wait-relative epochs. [test_rtl_export.py](../../test/test_rtl_export.py) checks these boundaries.
+
+## Guarantees and assumptions
+
+[AtlasRTLSelection.cpp](../../lib/AtlasRTLSelection.cpp) enforces these rules; [verification](verification.md) maps each to evidence.
+
+- Every reachable block starts with idle engines and no pending DMA, and drains before its successor or ECALL. Branch delay slots contain ADDI or LUI; stalls before redirects or halt end on a NOP. Programs are bounded by 32,768 words and 1,000,000 issue cycles.
+- Footprints use exact scalar values at each concrete block entry, following one branch edge when operands are known, otherwise both. Scheduling and verification respect every distinct footprint group. After 4096 block entries, values merge across paths; moving or unknown addresses may be rejected. Operand alignment, range and bank checks apply in every context.
+- VLOAD and VSTORE reserve separate paths and overlap subject to VMEM bank and MREG port/release rules. VPU and XLU exclude each other; VLS and either MXU can overlap them under memory rules. Each MXU reserves its own unit. VSTORE protects its source until it drains against writers other than VLOAD. Matmul retains its weight slot through its last accumulator write.
+- Without pair facts, VPU commands wait for `next_issue_age`, and commands on one MXU wait for its busy end. With them, every overlapping pair must match its ordered operations, covered gap and operand relation: disjoint or shared physical MREG banks and, where applicable, same or other accumulator and weight slot. Other resource rules still apply. Selected facts cap each VPU/MXU at two live commands; missing coverage falls back to exclusive admission.
+- VPU live windows end at `next_issue_age`; MXU windows include their last event and MREG read responses. Hold ends are inclusive: occupation through age 34 permits exclusive issue at 35.
+
+These guarantees assume selected hardware, deasserted reset, quiescent entry, immutable instructions, supplied operand data and no concurrent host access to VMEM or DMA base changes. Competing requesters and alternative memories need review. Selected VMEM/MREG response latency, measured from IR, is one cycle. Extraction assumes data-independent engine control, rejects unknown control outputs and permits only explicitly declared unreset registers. This is timing evidence, not numerical qualification.
+
+### DMA
+
+DMA requires `dma=wait`. Launch captures scalar operands and the global DRAM base; both may then be reused. VMEM/DRAM effects remain live until a matching channel wait. Completion latency is unknown; issue coordinates across waits are lower bounds.
+
+One transfer may be pending per channel. The eight slots use launch count: launch `n` requires launch `n-8` to have been waited. Every transfer needs a wait within its block; markers and halt require completion. Pending VMEM windows must be disjoint from transfers and VLS tiles; scalar reads may share a store window. DRAM spans may overlap only for two reads. Empty, stale and wrong-channel waits fail. These compiler protections cover unguarded RTL channel reuse and address overlap; [test_rtl_engines.py](../../test/test_rtl_engines.py) checks them.
+
+### Gap coverage
+
+Gap coverage uses `stable_gap`, except for a pair with a DMA launch: a rejected gap whose only failure is a moved DMA or DRAM event does not bind. The bound is one past the last other failing gap, or 1 if none; a firing assertion always binds. Two launches bind their order. A VLS compiler bound can therefore be below `stable_gap`. [test_rtl_gap_coverage.py](../../test/test_rtl_gap_coverage.py) compares compiler gaps with this bound, rejects unmapped records and requires unsupported operations to be provider rejections.
+
+## Scheduler
+
+`--schedule-atlas-stream="rtl-best-of=true rtl-dma-estimate=true"` enables ordering estimates under `rtl-op-timing-v1`; both default true and other providers ignore them. The options compare source/list orders and use model DMA estimates in list priorities. They change only the orders tried; the common verifier checks every result and entry context. Estimates do not assign DMA completion latency. [test_rtl_scheduler.py](../../test/test_rtl_scheduler.py) covers these policies.
 
 ## Reproduce
 
-These commands reproduce every artifact from the selected FIRRTL and SV snapshot. Run from the compiler repository root, with a new `X` directory. `R` is the read-only canonical checkout, `I` the built integration checkout, and `P` the CIRCT 1.75.0 installation. Use the npu-model venv Python (`VPY`) from the integration environment. All pair sweeps and sequences go beside the facts so gap-coverage discovery sees them.
+Run from this repository root with the prepared environment and a new output directory. Selected inputs are read-only. Keep sweeps beside facts for gap-test discovery. Loops invoke one command per artifact; extraction, sweeps and model builds can exceed a minute.
 
 ```sh
-C=/bwrcq/C/reednicolas/ee194-sp26-chipyard
-R=$C/generators/sp26-atlas-acc/compiler/sessions/circt/atlas-mlir-circt
-I=$C/generators/sp26-atlas-acc/compiler/sessions/circt/wt/integration
-P=$C/.conda-env/riscv-tools
-L=$C/generators/sp26-atlas-acc/compiler/atlas-mlir/build
-X=$PWD/build/manual-rtl-extract
-source "$I/build/env.sh"
+source build/env.sh
 export PYTHONPATH="$PWD/tools:$PYTHONPATH"
+unset ATLAS_TIMING_PROBE
+X=$PWD/build/manual-rtl-extract
+R=${ATLAS_HW_IR%/build/rtl-extract/ir-debug/*}
+P=${R%/generators/*}/.conda-env/riscv-tools
 INPUT=$R/build/rtl-timing/ee290-portable-helper-check/inputs
+H=$X/ir-debug/ee290.debug.hw.mlir
+E=$X/exporter/hw_ir_export
+```
+
+Retained debug HW IR and manifest, then exporter:
+
+```sh
 "$VPY" tools/retain-ee290-hw-ir.py --mode debug \
   --firrtl "$INPUT/input.fir" --annotations "$INPUT/original.anno.json" \
   --lowering-options "$INPUT/lowering-options.txt" \
   --firtool "$P/bin/firtool" --circt-opt "$P/bin/circt-opt" --output "$X/ir-debug"
-H=$X/ir-debug/ee290.debug.hw.mlir
-E=$X/exporter/hw_ir_export
-cmake -S tools/rtl_extract/export -B "$X/exporter" -G "Unix Makefiles" \
+cmake -S tools/rtl_extract/export -B "$X/exporter" \
   -DCMAKE_BUILD_TYPE=Release -DCIRCT_DIR="$P/lib/cmake/circt" \
   -DMLIR_DIR="$P/lib/cmake/mlir" -DLLVM_DIR="$P/lib/cmake/llvm"
 cmake --build "$X/exporter" -j32
-"$VPY" tools/extract-rtl-timing.py --hw-ir "$H" --exporter "$E" \
-  --target atlas --output "$X/out/all.json"
+```
+
+Debug lowering preserves named values and inline memories. Hierarchy-output paths depend on `X`, so IR digests can differ with output location; downstream artifacts must use the same IR.
+
+Operation facts and compiler selection copy:
+
+```sh
+"$VPY" -m rtl_extract --hw-ir "$H" --exporter "$E" --target atlas --output "$X/out/all.json"
 cp "$X/out/all.json" "$X/out/compiler-facts.json"
-for name in vlsu vpu mxu0 mxu1 core core_vpu core_dma core_dma_mxu core_mxu core_mxu_cross core_mxu_units; do
+```
+
+Pair and sequence sweeps:
+
+```sh
+for name in vlsu vpu mxu0 mxu1 core core_vpu core_dma core_dma_mxu core_mxu core_mxu_cross core_mxu_units core_mxu_same core_mxu_shared; do
   "$VPY" -m rtl_extract.pairs --hw-ir "$H" --exporter "$E" --target atlas \
-    --pairs "$name" --jobs 64 --output "$X/out/pairs-$name.json"
+    --pairs "$name" --jobs 32 --output "$X/out/pairs-$name.json"
 done
-for name in mxu0 mxu1 core_vpu; do
+for name in mxu0 mxu1 core_vpu core_mxu; do
   "$VPY" -m rtl_extract.sequences --hw-ir "$H" --exporter "$E" --target atlas \
-    --sequences "$name" --jobs 64 --output "$X/out/sequences-$name.json"
+    --sequences "$name" --jobs 32 --output "$X/out/sequences-$name.json"
 done
-"$VPY" tools/rtl_extract/targets/atlas/gen_core_vpu.py \
-  "$X/out/all.json" "$X/out/pairs-core_vpu.json" --output "$X/core_vpu.yaml"
-cmp "$X/core_vpu.yaml" tools/rtl_extract/targets/atlas/pairs/core_vpu.yaml
+```
+
+Generated specs load through [spec.py](../../tools/rtl_extract/spec.py). Export them for inspection; expectations are pinned regressions, not extraction inputs.
+
+```sh
+for name in pairs/core pairs/core_dma pairs/core_dma_mxu pairs/core_mxu pairs/core_mxu_cross pairs/core_mxu_units pairs/core_mxu_same pairs/core_mxu_shared pairs/core_vpu sequences/core_vpu sequences/core_mxu system/core system/core_dma; do
+  "$VPY" tools/rtl_extract/targets/atlas/gen_core.py "$name.yaml" --output "$X/specs/$name.yaml"
+done
+```
+
+VPU, MXU and combined pair facts:
+
+```sh
 "$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
   --pairs "$X/out/pairs-core_vpu.json" --sequences "$X/out/sequences-core_vpu.json" \
   --output "$X/out/op-pairs-vpu.json"
-mkdir -p "$X/probe" "$X/model"
-g++ -std=c++17 -O2 -I include -I "$L/llvm-project/llvm/include" -I "$L/llvm-build/include" \
-  test/rtl-timing-facts-probe.cpp lib/AtlasTiming.cpp -o "$X/probe/rtl-timing-facts-probe"
-"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
-  --bin "$I/build/compiler/bin" --work "$X/replay" \
-  --rtl "$R/build/rtl-timing/atlascore-replay-002/inputs" \
-  --verilator "$C/.conda-env/bin/verilator_bin" \
-  --verilator-root "$C/.conda-env/share/verilator" --jobs 32
-cp "$X/replay/obj/VAtlasCore" "$X/model/VAtlasCore"
-"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
-  --pairs "$X/out/op-pairs-vpu.json" --bin "$I/build/compiler/bin" \
-  --model "$X/model/VAtlasCore" --work "$X/replay-pairs" --jobs 32
+"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+  --pairs "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
+  --output "$X/out/op-pairs-mxu.json"
+"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+  --pairs "$X/out/pairs-core_vpu.json" "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
+  --sequences "$X/out/sequences-core_vpu.json" --output "$X/out/op-pairs.json"
 ```
 
-Debug lowering uses `-O=debug --preserve-values=named`, `--mlir-timing`, and inline memories (no `--repl-seq-mem` flags). The prepared annotation sidecar redirects hierarchy outputs into `X`; two `firrtl.moduleHierarchyFile` attributes therefore differ from the canonical IR by path alone. All other IR bytes match with firtool 1.75.0. The generator preserves the committed YAML byte for byte when supplied the baseline facts and sweep; its `expect` values are test regressions, never extraction inputs. The current baseline contains 56 facts, 1,426 records in eleven pair files, and 138 records in three sequence files; replay gives 80 PASS, or 85 with pair facts.
+MXU chains validate uniform spacing; including them in selection raises observed capacity beyond the reviewed two-command rule.
 
-Select the facts in the compiler, then schedule and verify:
+CMake timing probe and replay with the prepared model:
 
 ```sh
-atlas-opt prog.mlir \
-  --select-atlas-rtl-evidence="op-timing=facts.json op-timing-sha256=$(sha256sum facts.json | cut -d' ' -f1) dma=wait" \
-  --schedule-atlas-stream --verify-atlas-timing -o final.mlir
-atlas-emit --rtl-timing-json final.mlir > resolved.json
+cmake --build build/compiler --target rtl-timing-facts-probe -j32
+"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
+  --bin "$ATLAS_OOT_BIN_DIR" --model "$ATLAS_EE290_COMPUTE_MODEL" --work "$X/replay" --jobs 32
+"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
+  --pairs "$X/out/op-pairs.json" --bin "$ATLAS_OOT_BIN_DIR" \
+  --model "$ATLAS_EE290_COMPUTE_MODEL" --work "$X/replay-pairs" --jobs 32
 ```
 
-Pair facts are optional: add `op-pairs=op-pairs.json op-pairs-sha256=<digest>` to the selection. They must hash to the digest, describe the same hardware IR as the facts, record the facts' SHA-256 as the facts they derive from, and contain only assertion-checked records naming resolved blocks; the selection records `op_pairs` and `op_pairs_sha256` in `atlas.rtl_evidence`, every later load rechecks them, and the resolved export reports their digest. With them the provider admits two VPU commands, or two commands on one MXU, at once where a pair fact covers them (see [scope](#scope-and-assumptions)); without them nothing changes. `--insert-atlas-delays` replaces `--schedule-atlas-stream` for delay insertion only. `dma=wait` is optional and enables DMA (see below). `atlas-emit --rtl-timing-json` is a mode of its own: it fails without output if the stream is untimed or unsafe, uses an unsupported operation, or lacks a valid selection; it reports the resolved footprints of the final instruction stream. A virtual program is verified, scheduled and lowered untimed first (`--verify-atlas-virtual-stream --schedule-atlas-virtual --lower-atlas-virtual-to-machine`), then selected and timed the same way; selecting before lowering also works, since the lowering carries the selection.
+To reproduce the model from selected SV:
 
-## The provider
+```sh
+"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
+  --bin "$ATLAS_OOT_BIN_DIR" --rtl "$R/build/rtl-timing/atlascore-replay-002/inputs" \
+  --verilator "${R%/generators/*}/.conda-env/bin/verilator_bin" \
+  --verilator-root "${R%/generators/*}/.conda-env/share/verilator" --work "$X/replay-built" --jobs 32
+```
 
-`rtl-op-timing-v1` (`lib/AtlasRTLSelection.cpp`) is a complete [timing provider](../dialect-reference.md#generated-artifact-checks) registered in the compiler library beside the model. The timing passes choose a provider by `provider=<id>`, else the retained `atlas.timing_provider`, else `rtl-op-timing-v1` when the module carries `atlas.rtl_evidence`, else the model; the model is refused on a module with selected evidence. The provider resolves every footprint from the facts (`lib/AtlasRTLEvidence.cpp`), orders work by the data dependences the footprints imply, queues DMA transfers under the rules below, reserves every unit exclusively, and bounds the program at 32,768 words and 1,000,000 issue cycles. Its scope admits transfers pending one per channel in at most eight command slots, each waited on its own channel within its block, blocks that start idle and reach ECALL, and `ADDI`/`LUI` delay slots; a DELAY immediately before a branch, jump or halt is rejected, so the timing passes end such stalls on a NOP. The common verifier (`--verify-atlas-timing`, also run by `atlas-emit` and the LLVM passes) checks the final stream under it; a stream that carries a selection but no timing metadata is checked at those boundaries too, while `atlas-emit --allow-untimed` inspects an untimed lowering without a timing claim. `--schedule-atlas-virtual` costs virtual operations from the same footprints and reservations on canonical operands when a selection is present or `provider=rtl-op-timing-v1` is given; DMA transfers keep the model's transfer estimate, since completion is not a fact.
+The model is written to that work directory's `obj/VAtlasCore`.
 
-## Scheduler ordering estimates
+Compiler selection and resolved export (substitute an untimed physical program):
 
-`--schedule-atlas-stream="rtl-dma-estimate=true rtl-best-of=true"` controls additional ordering policies only under `rtl-op-timing-v1`; both options default to `true`. `rtl-dma-estimate` uses the compiler model's transfer estimate in list priorities for DMA waits, without adding a completion latency to the selected evidence. `rtl-best-of` compares critical-height and unit-contention list orders, with and without DMA hints when enabled, against source order. It chooses the lowest estimated block cost, including inserted delays, terminal drain and estimated wait stalls; a pending DMA transfer receives a 32-cycle penalty for each VLS command on its VMEM bank. These are ordering heuristics, with no claim that estimated completion matches external memory or measured hardware cycles.
+```sh
+"$ATLAS_OOT_BIN_DIR/atlas-opt" prog.mlir \
+  --select-atlas-rtl-evidence="op-timing=$X/out/compiler-facts.json op-timing-sha256=$(sha256sum "$X/out/compiler-facts.json" | cut -d' ' -f1) dma=wait" \
+  --schedule-atlas-stream --verify-atlas-timing -o "$X/final.mlir"
+"$ATLAS_EMIT" --rtl-timing-json "$X/final.mlir" > "$X/resolved.json"
+```
 
-For blocks with distinct entry footprints, each candidate must respect every context's dependency graph. Delay insertion reconciles its order across the contexts, and selection compares the worst context's estimated cost, keeping source order on a tie. The common timing verifier checks the resulting stream. Best-of scoring remains DMA-aware when list-priority hints are disabled. Waits remain the DMA completion contract, and exports continue to report completion ages as unknown. Setting both options to `false` restores the legacy ordering, including source order for blocks with different entry footprints; other providers ignore these options. `--insert-atlas-delays` keeps its existing behavior.
-
-## Scope and assumptions
-
-- Each record describes one operation issued to an idle engine. Overlap between operations is admitted only where assertion-checked pair sweeps show it (see below); control flow and DMA lifetimes follow the compiler's conservative rules.
-- Engine admission comes from facts-derived unit holds. VLOAD and VSTORE each hold only their own path, so they overlap; same-bank order comes from the VMEM bank windows (load→store 30, store→load 34), and MREG port and release rules are unchanged. A VPU admits the next VPU command at `next_issue_age` and the XLU at `first_free_age`; the VPU and XLU exclude each other but overlap VLS and the MXUs subject to MREG port (`reg % 32`) and release rules. With pair facts selected, a VPU command is live from issue until its `next_issue_age`, and a later one may issue while it is live only where a pair fact for the two (in issue order) covers the gap and both commands' operands satisfy the fact's relation (disjoint physical MREG banks); the rule applies against every live VPU command, at most the facts' live capacity (two, the most seen live in any accepted pair or chain run) run together, and a pair without a fact waits for `next_issue_age`. VectorFSM's two slots behave this way: a single-input command runs on the second port pair beside a single-input command sharing no lane logic, and a third takes the first slot to free up. The provider's reservations keep VPU commands' VPU and XLU holds apart from the other engines', so the XLU still waits for every live VPU command while MXU work overlaps them under the MREG rules (`VpuSlots` in `lib/AtlasRTLSelection.cpp`). The pair sweeps behind each rule run on AtlasCore with all 177 RTL assertions checked (all 841 ordered VPU pairs stay at or below the first operation's `next_issue_age`), and `test/test_rtl_gap_coverage.py` requires every compiler gap to be at least the swept minimum.
-- On-chip VMEM and MREG reads take one cycle: the IR declares them `seq.firmem 1, 1`, and the LSU is always granted ahead of DMA and TileLink. Records report this as `scratchpad_read_latency`.
-- External memory and DMA completion are not modeled; they are variable and governed by `dma.wait`.
-- Registers without a reset value are accepted only when listed in a spec's `unreset`; every control output must still be known at every age.
-- Ages are absolute from the first cycle after reset and flush. Hold ends are inclusive: a last occupied age of 34 means the next VLS issues at age 35.
-- The compiler supports VLS, XLU, all VPU operations, MXU commands on both units (weight and accumulator push, matmul with or without accumulation, FP8/BF16 pop), scalar `lw`/`seld`/`sw`, `addi`/`lui`/`delay`/`ecall`/marker, and DMA under `dma=wait`.
-- Each MXU command holds only its own MXU through its last event, so without pair facts commands on one MXU stay sequenced. The other MXU, the VPU, the XLU, the VLS paths and pending DMA transfers overlap it subject to MREG port (`reg % 32`) and release rules and the accumulator and weight access rules: on AtlasCore with all 177 assertions checked, every MXU command keeps its isolated events at gap 1 against every command on the other MXU (98 ordered pairs, `pairs/core_mxu_units.yaml`), against VPU (every timing class), VLOAD, VSTORE and transpose commands in both orders (`pairs/core_mxu.yaml`, `pairs/core_mxu_cross.yaml`), and beside a DMA load or store (`pairs/core_dma_mxu.yaml`), always with disjoint control. A shared register binds at the MREG bank tracker's RAW and WAR/WAW assertions exactly at the release ages, and a shared physical bank at MregFile's per-bank port checks exactly at the port rule. The tracker reports a VSTORE's source register as read until the VSTORE drains, so a VPU, XLU or MXU pop writing that register waits for the VSTORE's `first_free_age` (35), one cycle beyond its read release; a VLOAD, which checks only pending writes, does not. Compiled streams on Verilator (`tools/ee290_replay_cases/mxu_overlap.py`, `virtual_dma_mxu.py`) observe MXU commands live beside a pending transfer, beside VPU, XLU, VLOAD and VSTORE commands, and on both MXUs at once, with exact results. A matmul keeps its weight slot until its last accumulator write, since weight reads are not extracted.
-- With pair facts that cover a unit (`pairs/core_mxu_same.yaml`, `pairs/core_mxu_shared.yaml`), an MXU command is live from issue through its busy end (its last event, MREG reads through their response) and replaces its own-unit hold: a later command on that MXU may issue while it is live only where a pair fact for the two (in issue order) covers the gap and their operands satisfy its relation, which must state every operand kind both name: how their MREG registers overlap (`disjoint` physical banks, or the exact shared registers `i=j` and banks `i~j`), and the same or the other accumulator and weight slot. At most the facts' live capacity of the unit runs together (two, all the pair runs show); otherwise the next command waits for the busy end, as without pair facts. The accumulator, weight-slot and MREG port and release rules still bind, so a pair issues at the larger of its stable gap and those rules. The sweeps cover all 196 ordered command pairs on one MXU for every accumulator and weight-slot relation with disjoint operands, and 536 more for every way their MREG operands can share a register or bank, on AtlasCore with all 177 assertions checked and past the first command's last event. One cycle below each stable gap a sequencer issue assertion, the accumulation buffer's read check or an MREG event moved to the other port binds (so an admitted pair keeps each command on its isolated port); with shared operands also the MREG bank tracker, MregFile's per-bank ports or the sequencers' register checks (370 shared pairs keep the disjoint gap). MXU0 admits a pop 64 cycles after a matmul on its accumulator (95 before) and 1 after one on the other, a matmul 32 after a matmul on the other accumulator and an accumulating matmul reading the same source 64 after one on its accumulator; MXU1 a pop 4 after its matmul (35 before); both units a weight push into the other slot 1 cycle into a matmul. Chain sweeps (`sequences/core_mxu.yaml`: 50 chains of up to six commands, every position on its own registers) check that the compiler admits no uniform spacing the RTL rejects (`test/test_rtl_mxu_pipeline.py`), and compiled streams on Verilator (`tools/ee290_replay_cases/mxu_pipeline.py`) run pops beside their matmul, two tiles on one unit, a K=2 accumulation and #15's virtual MXU programs with commands on one MXU live together and exact results.
-- Branches, loops and joins are accepted when every engine is idle and no DMA is pending at each block boundary; each block is verified from an idle state under every concrete entry context (see below). Branches read their registers at issue and a taken branch executes only its delay slot (ADDI or LUI). `--rtl-timing-json` gives each instruction's block and block-relative issue cycle, and each block's successors and earliest successor issue.
-- Entry contexts come from executing the CFG from the first block with registers unknown at entry: a branch whose operands are known takes one edge, otherwise both, and each distinct register state reaching a block is one context. Every resolver domain check (alignment, bank, range) runs on the exact values of each context, so an address that moves every loop iteration, such as the FP8 pack relayout loop's LW/SW, is checked at every value it takes; a failure names the context. Contexts that resolve to the same footprints form one group. The RTL scheduler considers orders valid in every group, including source order. Delay insertion raises each delay to the largest any group needs until every group's placement agrees; the verifier checks each group. Past 4096 block entries (an unknown trip count with a moving counter) registers fall back to values merged over all paths, so loop-invariant addresses still time while a moving address is rejected with a note naming the bound. Unknown bases (kernel arguments, loaded values) stay rejected. The export lists a multi-group block's `entry_contexts` (each group's known entry registers and footprints) with null instruction footprints.
-- Scalar ALU operations (including the `xor`, `slt`, `sltu`, `xori` and `sltiu` the virtual lowering emits), `seli`, `lw`/`seld`/`sw` with known addresses, `csrrw x0, 0xC10` and `ecall` are structural: they read and write at issue with no facts numbers. A VPU operation's register operands must lie in distinct physical banks (register mod 32); the allocator may place two BF16 pairs sixteen colors apart in one bank, which the provider rejects by name rather than repairing.
-
-### DMA
-
-A DMA launch captures its scalar operands and the global DRAM base, so scalar registers and the base (set synchronously by `dma_config`) may be reused immediately. The transfer's VMEM and DRAM effects stay in flight until a `dma.wait` on the same channel, and a completion marker, halt or block end requires every transfer to have been waited; empty, wrong-channel and stale waits are rejected, and a delay cannot replace a wait. Under `dma=wait` transfers queue: the DMA engine serves launches in launch order from eight command slots indexed by launch count, so launch *n* of a block requires launch *n*−8 waited, and a channel's busy bit clears when its slot retires, so a channel may not be relaunched before its wait; `--schedule-atlas-stream` keeps every wait ahead of the launches after it, so reordering preserves both rules. A launch needs no engine drain. Pending VMEM windows stay disjoint from each other and from every VLS tile; DRAM spans may be shared only by transfers that both read; a VLS, VPU, XLU or MXU command beside a pending transfer keeps its isolated timing (the LSU has priority and only delays the transfer's VMEM accesses; MXU commands and transfers share no resource and neither moves), and a launch needs no MXU drain. Virtual schedules that put MXU work beside a pending transfer compile under the provider (`test/test_rtl_virtual_timing.py`). Issue coordinates across a wait are lower bounds; the resolved export reports wait-relative issue epochs and marks completion ages unknown.
-
-The evidence is `system/core_dma.yaml` with `pairs/core_dma.yaml` (23 pairs on AtlasCore with the DMA live and external memory served by a declared responder, all 177 assertions checked), `pairs/core_dma_mxu.yaml` (all seven MXU commands on both units against a DMA load and store in both orders: 56 pairs, every swept gap accepted, also under fast, stalled and slow responders) and hand-scheduled Verilator streams (`tools/ee290_replay_cases/dma_concurrency.py`, `dma_pair.py`): a launch on another channel is queued, never dropped, and the engine issues requests in launch order; each channel completes and releases its wait independently; VLS, VPU and XLU work keeps its isolated timing while a transfer is pending, and a VLS on the same bank only delays the transfer's VMEM accesses; compiled streams (`tools/ee290_replay_cases/mxu_overlap.py`) run an MXU tile while a transfer is pending on both MXUs and both consumers. The RTL checks neither DMA/VLS address overlap nor reuse of a busy channel, and its command slots are indexed by launch count, so disjoint windows, the per-channel limit and the eight-slot rule are compiler rules.
-
-## Results
-
-The physical scheduler policies above were compared with the previous scheduler on 153 supported variants per pair selection (examples, replay cases and kernels, including virtual lowering alternatives). Every measured candidate was at least as fast as both the old scheduler and delay insertion on the synthetic Verilator responder: 121 improved over the old scheduler and 185 tied across both pair selections. Totals below include 149 variants with known static counts; Verilator totals include all 153. Static counts omit stalls inside DMA waits.
-
-| Pair facts | Static: delay / old / new | Verilator: delay / old / new |
-| --- | ---: | ---: |
-| Without | 68,094 / 64,328 / 61,469 | 131,909 / 127,290 / 118,698 |
-| Combined VPU and MXU | 65,112 / 62,038 / 58,806 | 129,272 / 124,955 / 116,225 |
-
-With combined pair facts, `slots_chain` improves from 520 to 489 measured cycles, the model-scheduled `virtual_sched_overlap` from 1,630 to 1,184, and the model-scheduled FP8 MLP from 2,632 to 2,132. Both replay consumers pass with exact results (80 runs without pair facts, 111 with them). These results set the default policy on this corpus; they are no guarantee for unknown memory latency.
-
-The following extraction and admission results predate these scheduler ordering policies.
-
-Computed from the debug lowering of the selected FIRRTL; all equal the compiler's built-in rules. With the relaxed admission rules, a pipelined load-load-add-store tile drops from 1120 to 916 cycles with delay insertion (1112 to 704 scheduled), a four-tile copy from 284 to 182 (282 to 178), and load-transpose-store from 480 to 344 (546 to 337). With pair facts, delay insertion runs the replay's exp, exp2, square, cube and mov stream in 661 instead of 789 cycles (548 scheduled either way); the greedy list scheduler can lose cycles when an admitted VPU overlap takes the MREG read port a store needs (`slots_chain`: 519 instead of 488). With the MXU pair facts as well (against the VPU pair facts alone; static issue cycles of the last instruction, Verilator-measured change in parentheses), one FP8 tile (weight push, matmul, pop) finishes 31 cycles sooner on either unit (MXU0 303 to 272, MXU1 243 to 212; -32 measured), two tiles on MXU0 539 to 411 with delay insertion (-133) and a K=2 accumulation 467 to 372 (-101); #15's virtual programs run virtual_dma_mxu in 321 instead of 383 (-64), virtual_dma_mxu_bf16 358 instead of 420, virtual_fp8_matmul_program 284 instead of 315, the FP8 two-layer MLP 571 instead of 633 (-56) and with biases 815 instead of 877 (-68), virtual_sched_overlap 716 instead of 778, virtual_mxu_seeded_fp8 483 instead of 520 and virtual_mxu_accumulation 458 instead of 464. No program is slower in issue cycles; the list scheduler loses 5 measured cycles on one case (`mxu1_beside_vector`, scheduled).
-
-| Operation | Reads | Writes | Next issue / free |
-| --- | --- | --- | --- |
-| `vload` / `vstore` | 1-32 | 3-34 | 35 |
-| `vtrpose.xlu` | 1-32 | 34-65 | 66 |
-| VPU elementwise (incl. `vmul.bf16`) | 0-63 | 2-65 | 65 |
-| VPU row sum / row max, min | 0-31 | 7-38 / 2-33 | 38 / 33 |
-| VPU column reductions | 0-127 | 66-129 | 129 |
-| VPU pack / unpack | 0-63 / 0-31 | 3-65 (step 2) / 3-66 | 65 / 66 |
-| VPU immediate pair / single | - | 1-64 / 1-32 | 64 / 32 |
-| MXU0 / MXU1 matmul | 0-31 | accumulator 63-94 / 3-34 | - |
-| Scalar load | 1 | 3 | 3 |
-
-The extractor also reports MXU push/pop streams and busy windows, response-latency and operand variants, and an MXU1 accumulate boundary case.
+Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pair selection; use `--insert-atlas-delays` for source-order timing. Virtual programs first run `--verify-atlas-virtual-stream --schedule-atlas-virtual --lower-atlas-virtual-to-machine`; selection survives lowering. Virtual scheduling uses provider latencies and same-unit intervals on canonical operands.
 
 ## Not covered
 
-- Three or more live commands on one MXU. The chain sweeps show MXU0 holding three matmuls on alternating accumulators 32 apart, but the pairwise rule would also admit non-uniform triples no chain covers, so the selected document carries pair runs only and caps each MXU at two live commands.
-- Shorter weight-slot windows. Weight reads are not extracted, so a matmul keeps its whole weight slot from issue through its last accumulator write: a weight push into its slot waits 94 cycles on MXU0 and 34 on MXU1, and a matmul waits 33 after a push into its slot, although the sweeps accept 63 and 32 (the sequencers' drain assertions) and 1 (MXU0) and 32 (MXU1). An accumulator push followed by a pop, or an FP8 one by an accumulating matmul, on one accumulator keeps the access rule's 2 where the RTL accepts 1.
-- Addresses that vary over more than 4096 block entry contexts or depend on runtime inputs, and engine work crossing block boundaries.
-- VPU two-slot overlap without pair facts: the default selection still waits for `next_issue_age`.
-- The virtual scheduler's unit model stays its own: the provider supplies each operation's latency and same-unit interval, not cross-engine exclusion or DMA completion.
-- A VLOAD writing an MREG bank another engine is still reading is not asserted by the RTL; the compiler's release rules order it.
-- Merlin consumption: a draft that merges `op_timing` blocks into Merlin's RTL facts is unreviewed, and no Phase 1/2 consumer reads them yet.
+- Runtime-dependent addresses, moving addresses beyond 4096 block-entry contexts, or engine/DMA work crossing blocks.
+- Unbounded same-unit overlap: selection caps each unit at two live commands, although some uniformly spaced MXU chains accept three.
+- Exact weight-read timing: matmul conservatively owns its weight slot through its last accumulator write.
+- DMA completion latency, concurrent host traffic, or memories outside selected assumptions.
+- Pair-sweep records omit operand overlays, `as` names and relations; `rtl_extract.pairfacts` takes them from current YAML by block name, and binding them in records requires a re-sweep.
+- Replay does not bind the VPU own-unit hold end; the pair-sweep guard check and 256 comparisons in the [compiler cross-check](verification.md#extraction-and-compiler-cross-check) cover it.
+- Virtual scheduling models same-unit intervals, not physical cross-engine exclusion; the physical verifier checks the lowered stream.
+- A VLOAD write into an MREG bank still being read is not asserted by RTL; compiler release rules protect it.
