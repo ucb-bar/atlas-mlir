@@ -10,7 +10,7 @@ SCHEMA = 'atlas.resolved_rtl_timing.v1'
 BRANCHES = {0: 'beq', 1: 'bne', 4: 'blt', 5: 'bge', 6: 'bltu', 7: 'bgeu'}
 # Observed engine -> (selected mnemonic, the engine's own hold unit).
 ENGINES = {'vload': ('vload', 'VLOAD path'), 'vstore': ('vstore', 'VSTORE path'), 'xlu': ('vtrpose.xlu', 'XLU'), 'vpu': (None, 'VPU'),
-           'mxu0': (None, 'MXU in-flight matmuls'), 'mxu1': (None, 'MXU in-flight matmuls')}  # an MXU owns both MXU units
+           'mxu0': (None, 'MXU in-flight matmuls'), 'mxu1': (None, 'MXU in-flight matmuls')}  # an MXU owns its own unit index
 ENGINE_UNITS = {'VLOAD path', 'VSTORE path', 'XLU', 'VPU'}
 MXU_STEMS = ('vmatpush.weight', 'vmatpush.acc.fp8', 'vmatpush.acc.bf16', 'vmatpop.fp8.acc', 'vmatpop.bf16.acc', 'vmatmul', 'vmatmul.acc')
 VPU_MNEMONICS = {0: 'vadd.bf16', 2: 'vsub.bf16', 3: 'vmul.bf16', 4: 'vminimum.bf16', 6: 'vmaximum.bf16', 1: 'vredsum.bf16', 5: 'vredmin.bf16',
@@ -183,11 +183,10 @@ def bind_command(item, command, waits):
     age = lambda event: event['edge'] - issue
     release = integer(command['release_edge'] - issue, 'observed release age')
     activity = max(map(age, command['reads'] + command['responses'] + command['writes'] + command.get('compute', [])))
-    own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and (mxu or h['index'] == 0)]
+    own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and h['index'] == (int(kind[3]) if mxu else 0)]
     # A VPU admits its next command at next_issue_age, before it releases: its VPU-unit holds may end there,
     # and policy holds may start there, provided they last through the activity.
-    require(len(own) == (2 if mxu else 1) and sorted(h['index'] for h in own) == list(range(len(own))) and
-            all(h['from'] == 0 and (release == integer(h['to'], 'hold end') + 1 or kind == 'vpu' and h['to'] < release) for h in own),
+    require(len(own) == 1 and all(h['from'] == 0 and (release == integer(h['to'], 'hold end') + 1 or kind == 'vpu' and h['to'] < release) for h in own),
             'observed engine release differs from its own-unit hold end + 1')
     issued = own[0]['to'] + 1 if kind == 'vpu' else 0
     vmem_ages = [age(e) for e in command[vmem_field]] if vmem_field else []

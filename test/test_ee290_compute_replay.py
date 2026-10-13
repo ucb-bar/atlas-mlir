@@ -69,7 +69,7 @@ class PortableTest(unittest.TestCase):
                 if case.source:
                     # A virtual program is lowered by its pipeline; the lowering emits the terminal.
                     self.assertTrue(case.pipeline and not case.ops and not case.final)
-                    self.assertIn("atlas.virtual_output_bf16", case.mlir())
+                    self.assertRegex(case.mlir(), "atlas.virtual_(output_bf16|dma_store_fp8)")
                     continue
                 self.assertEqual(case.ops[-1], CASES.END[-1])
                 if not case.final: self.assertNotIn("delay", [op for op, _ in case.ops])
@@ -186,6 +186,8 @@ class VerilatorReplayTest(unittest.TestCase):
              "mxu0_tile_delay", "mxu1_tile_schedule", "vpu_relu_delay", "vpu_binary_schedule", "vpu_unary_delay", "vpu_reduce_schedule",
              "vpu_vli_delay", "vpu_pack_schedule", "mxu0_acc_bf16_delay", "mxu1_acc_bf16_schedule", "mxu0_acc_fp8_delay",
              "mxu1_acc_fp8_schedule", "dma_pair_in_flight", "virtual_relu_delay", "virtual_relu_schedule",
+             "mxu0_under_dma_load_schedule", "mxu1_under_dma_store_delay", "mxu0_beside_vector_delay", "mxu1_beside_vector_schedule",
+             "virtual_dma_mxu_delay", "mxu_both_units_schedule",
              "virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule",
              *(("slots_exp_relu_delay", "slots_chain_delay", "slots_chain_schedule") if PAIRS else ()))
     # Selected mnemonic -> facts block (vpu.<op>, mxu<u>.<op>).
@@ -439,6 +441,38 @@ class VerilatorReplayTest(unittest.TestCase):
             changed = copy.deepcopy(export); mutate(changed)
             self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)
 
+    def test_mxu_overlaps_dma_and_vector_engines(self):
+        # MXU commands were live together with a pending transfer, with VPU, XLU, VLOAD and VSTORE commands and with the other MXU.
+        for name, unit, others in (("mxu0_under_dma_load_schedule", "mxu0", {"dma"}), ("mxu1_under_dma_store_delay", "mxu1", {"dma"}),
+                                   ("virtual_dma_mxu_delay", "mxu0", {"dma"}), ("mxu0_beside_vector_delay", "mxu0", {"vpu", "xlu", "vload", "vstore"}),
+                                   ("mxu1_beside_vector_schedule", "mxu1", {"vpu", "xlu", "vload", "vstore"}),
+                                   ("mxu_both_units_schedule", "mxu0", {"mxu1"})):
+            commands = self.cases[name][2]["commands"]
+            pairs = {frozenset((commands[i]["engine"], commands[j]["engine"])) for i, j in self.cases[name][2]["concurrent_commands"]}
+            with self.subTest(name=name):
+                self.assertTrue({frozenset((unit, other)) for other in others} <= pairs, pairs)
+
+    def test_seli_writes_its_scale_register_on_issue(self):
+        # #15's virtual FP8 readout sets its scale with SELI; the write must carry the decoded register and immediate.
+        name = "virtual_dma_mxu_delay"
+        for key, value in (("sew_data", lambda x: x ^ 1), ("sew_idx", lambda x: x ^ 1), ("sew", lambda x: 0)):
+            with self.subTest(key=key):
+                self.mutate(name, lambda v, _: v["sew"], lambda v: v.__setitem__(key, value(v[key])))
+
+    def test_mxu_holds_bind_its_own_unit(self):
+        name = "mxu0_beside_vector_delay"; export = self.cases[name][3]
+        index = next(i["word_index"] for i in export["instructions"] if i["mnemonic"] == "vmatmul.mxu0")
+        holds = lambda e: e["instructions"][index]["footprint"]["holds"]
+        self.assertEqual([(h["unit"], h["index"]) for h in holds(export)], [("MXU in-flight matmuls", 0)])
+        for mutate in (lambda e: holds(e)[0].__setitem__("index", 1), lambda e: holds(e).append({**holds(e)[0], "index": 1}),
+                       lambda e: holds(e).pop(), lambda e: holds(e)[0].__setitem__("to", holds(e)[0]["to"] - 1),
+                       lambda e: holds(e).append({**holds(e)[0], "unit": "MXU port"})):
+            changed = copy.deepcopy(export); mutate(changed)
+            with self.subTest(mutation=len(holds(changed))): self.rejects(name, export=changed)
+        # A policy hold on another engine may outlast the MXU's activity, as for the other engines.
+        changed = copy.deepcopy(export); holds(changed).append({**holds(changed)[0], "unit": "VPU", "index": 0})
+        self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)
+
     def test_mxu_events_match_the_facts(self):
         facts = {b["name"]: b for b in json.loads(Path(FACTS).read_text())["op_timing"]}
         for name, unit in (("mxu0_tile_delay", 0), ("mxu1_tile_schedule", 1)):
@@ -476,8 +510,8 @@ class VerilatorReplayTest(unittest.TestCase):
         for position, mutate in enumerate([lambda e: acc(e).__setitem__("age", acc(e)["age"] + 1),            # accumulator write shifted
                                            lambda e: acc(e).__setitem__("first", acc(e)["first"] + 32),         # wrong accumulator slot
                                            lambda e: e["instructions"][index(e, "vmatmul")]["operands"].__setitem__("rs2", 1),
-                                           lambda e: footprint(e, "vmatmul")["holds"][1].__setitem__("to", 95),  # own hold on the other MXU
-                                           lambda e: next(h for h in footprint(e, "vmatpop.bf16.acc")["holds"] if h["unit"] == "VPU").__setitem__("to", 31),
+                                           lambda e: footprint(e, "vmatmul")["holds"].append({**footprint(e, "vmatmul")["holds"][0], "index": 1}),  # the other MXU
+                                           lambda e: footprint(e, "vmatpop.bf16.acc")["holds"][0].__setitem__("to", 31),
                                            lambda e: next(a for a in footprint(e, "vmatmul")["accesses"] if a["resource"] == "weight" and a["age"]).__setitem__("age", 31),
                                            lambda e: footprint(e, "vmatpush.weight")["accesses"][1].__setitem__("resource", "acc")]):
             changed = copy.deepcopy(export); mutate(changed)
