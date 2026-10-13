@@ -1,4 +1,5 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasRTLSelection.h"
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
@@ -25,7 +26,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                             const TimingProvider &p, const RegValues &entry,
                             std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
-                            int &tailIdle) {
+                            int &tailIdle, RTLSchedulingOrder policy = {}) {
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   bool branch = s.endsInBranch(block);
@@ -100,6 +101,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       return op(i)->emitOpError("can never issue: ") << why;
   }
 
+  if (policy.dmaEstimate)
+    estimateRTLGraphDMA(g);
   std::vector<int> height = criticalHeights(g);
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
@@ -126,6 +129,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
+    const std::vector<int> priority = policy.contention
+        ? rtlContentionPriorities(g, issue, nb) : height;
     int best = -1, bestWait = -1;
     bool otherWork = false;
     for (int i = 0; i < nb; i++) {
@@ -140,7 +145,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           bestWait = i;
         continue;
       }
-      if (best >= 0 && height[i] <= height[best])
+      if (best >= 0 && priority[i] <= priority[best])
         continue;
       if (!busy(i, cycle).empty())
         continue;
@@ -300,7 +305,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   return success();
 }
 
-LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef requested) {
+LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef requested, bool rtlBestOf,
+                             bool rtlDMAEstimate) {
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
   if (failed(provider))
     return failure();
@@ -310,15 +316,29 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
+  const bool improvedRTL = provider->id == kAtlasRTLTimingProviderId &&
+                           (rtlBestOf || rtlDMAEstimate);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b) {
     std::vector<AtlasContextGroup> groups = atlasBlockContexts(*stream, b, *provider);
+    if (improvedRTL && rtlBestOf) {
+      auto schedule = [&](const RegValues &entry, RTLSchedulingOrder policy,
+                          std::vector<size_t> &candidate,
+                          std::vector<DelayInsertion> &delays, int &tail) {
+        return scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
+                             *provider, entry, candidate, delays, tail, policy);
+      };
+      if (failed(selectRTLBlockSchedule(*stream, b, *provider, rtlDMAEstimate,
+                                       schedule, order, before, tailIdle[b])))
+        return failure();
+      continue;
+    }
     if (groups.size() == 1) {
       if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
                                *provider, groups.front().entries.front(), order,
-                               before, tailIdle[b])))
+                               before, tailIdle[b], {improvedRTL && rtlDMAEstimate, false})))
         return failure();
       continue;
     }
@@ -352,8 +372,12 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
     before.assign(stream->ops.size(), DelayInsertion{});
     after.clear();
   }
-  return writeAtlasStream(module, *stream, order, before, after,
-                          insertDelays ? StringRef(provider->id) : StringRef());
+  if (failed(writeAtlasStream(module, *stream, order, before, after,
+                              insertDelays ? StringRef(provider->id) : StringRef())))
+    return failure();
+  // The common verifier resolves and checks every entry-context group.
+  return improvedRTL && insertDelays ? verifyAtlasTiming(module, *provider)
+                                    : success();
 }
 
 struct ScheduleAtlasStreamPass
@@ -368,6 +392,13 @@ struct ScheduleAtlasStreamPass
                                llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else the RTL provider over selected evidence, else npu-model-rtl-match-v1)"),
                                llvm::cl::init("")};
 
+  Option<bool> rtlBestOf{*this, "rtl-best-of",
+                        llvm::cl::desc("Select the lowest estimated RTL cost among list orders and source order"),
+                        llvm::cl::init(true)};
+  Option<bool> rtlDMAEstimate{*this, "rtl-dma-estimate",
+                             llvm::cl::desc("Use the model DMA completion estimate in RTL list priorities"),
+                             llvm::cl::init(true)};
+
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
     return "Reorder each basic block with the list scheduler ported from "
@@ -376,7 +407,8 @@ struct ScheduleAtlasStreamPass
   }
 
   void runOnOperation() override {
-    if (failed(scheduleStream(getOperation(), insertDelays, provider.getValue())))
+    if (failed(scheduleStream(getOperation(), insertDelays, provider.getValue(),
+                              rtlBestOf, rtlDMAEstimate)))
       signalPassFailure();
   }
 };

@@ -2,10 +2,13 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <optional>
+#include <set>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -518,4 +521,216 @@ struct SelectAtlasRTLEvidencePass
 
 void mlir::atlas::registerSelectAtlasRTLEvidencePass() {
   PassRegistration<SelectAtlasRTLEvidencePass>();
+}
+
+namespace {
+// This is an ordering estimate, deliberately unrelated to the selected DMA
+// completion facts (which remain unknown). Use the existing compiler model,
+// not a fit to the synthetic replay responder.
+int schedulerDMACycles(const Footprint &f) {
+  for (const Access &a : f.accesses)
+    if (a.res == Res::Vmem && a.atCompletion)
+      return dmaTransferCycles(static_cast<long long>(a.count) * kLineBytes);
+  return dmaTransferCycles(32LL * kLineBytes);
+}
+
+int primaryOccupancy(const Footprint &f, int &unit) {
+  int length = 0;
+  unit = -1;
+  for (const Hold &h : f.holds) {
+    if (h.unit == Unit::ScalarLoad || h.unit == Unit::ScalarWriteback)
+      continue;
+    if (h.to + 1 > length) {
+      length = h.to + 1;
+      unit = static_cast<int>(h.unit) * 64 + h.index;
+    }
+  }
+  return length;
+}
+
+struct RTLOrderCandidate {
+  std::vector<size_t> order;
+  std::vector<DelayInsertion> before;
+  int tail = 0;
+  long long cost = 0;
+};
+
+// Waits stall the frontend in this cost model. The same-bank penalty accounts
+// for the LSU taking priority over pending DMA VMEM accesses. Neither number
+// supplies timing legality: reservations and the common verifier do that.
+TimingRuleResult<long long> rtlOrderCost(
+    const AtlasStream &s, size_t block, const TimingProvider &p,
+    const RegValues &entry, const RTLOrderCandidate &candidate) {
+  long long cycle = 0, last = 0;
+  std::array<long long, 8> completion{}, penalty{};
+  std::array<int, 8> bank;
+  bank.fill(-1);
+  std::array<bool, 8> pending{};
+  RegValues regs = entry;
+  for (size_t i : candidate.order) {
+    const DelayInsertion &d = candidate.before[i];
+    for (uint32_t v : d.delays)
+      cycle += static_cast<long long>(v) + 1;
+    cycle += d.guard;
+    const Instr &in = s.instrs[i];
+    Footprint f = p.footprint(in, regs);
+    if (!f.error.empty())
+      return {0, f.error};
+    if (in.op->opClass == OpClass::DmaWait) {
+      int ch = in.op->channel;
+      cycle = std::max(cycle, completion[ch] + penalty[ch]);
+      pending[ch] = false;
+    }
+    if (isLaunch(in)) {
+      int ch = in.op->channel;
+      completion[ch] = cycle + schedulerDMACycles(f);
+      penalty[ch] = 0;
+      pending[ch] = true;
+      bank[ch] = -1;
+      for (const Access &a : f.accesses)
+        if (a.res == Res::Vmem && a.atCompletion && !a.anywhere)
+          bank[ch] = a.first / (kVmemBankBytes / kLineBytes);
+    }
+    if (isVls(f)) {
+      for (const Access &a : f.accesses) {
+        if (a.res != Res::Vmem || a.anywhere)
+          continue;
+        int vb = a.first / (kVmemBankBytes / kLineBytes);
+        for (int ch = 0; ch < 8; ++ch)
+          if (pending[ch] && bank[ch] == vb)
+            penalty[ch] += 32;
+      }
+    }
+    applyScalar(in, regs);
+    last = cycle;
+    auto gap = p.issueGap(in);
+    if (!gap.error.empty() || gap.value <= 0)
+      return {0, gap.error.empty() ? "nonpositive issue gap" : gap.error};
+    cycle += gap.value;
+  }
+  if (s.endsInHalt(block))
+    return {last, {}};
+  if (s.endsInBranch(block))
+    return {last + 1, {}};
+  return {cycle + candidate.tail, {}};
+}
+} // namespace
+
+void mlir::atlas::estimateRTLGraphDMA(DepGraph &graph) {
+  for (size_t i = 0; i < graph.nodes.size(); ++i)
+    if (isLaunch(graph.nodes[i]))
+      graph.footprints[i].dmaCycles = schedulerDMACycles(graph.footprints[i]);
+}
+
+std::vector<int> mlir::atlas::rtlContentionPriorities(
+    const DepGraph &graph, const std::vector<int> &issued, int bodyCount) {
+  std::vector<int> priority = criticalHeights(graph);
+  std::vector<int> units(bodyCount, -1), occupancy(bodyCount);
+  // Remaining occupancy plus the shortest tail bounds completion on a busy
+  // unit. Scalar operations retain their critical-height priority.
+  std::map<int, std::pair<int, int>> backlog;
+  for (int i = 0; i < bodyCount; ++i) {
+    occupancy[i] = primaryOccupancy(graph.footprints[i], units[i]);
+    if (issued[i] >= 0 || units[i] < 0)
+      continue;
+    auto &entry = backlog.try_emplace(units[i], 0, INT_MAX).first->second;
+    entry.first += occupancy[i];
+    entry.second = std::min(entry.second, std::max(0, priority[i] - occupancy[i]));
+  }
+  for (int i = 0; i < bodyCount; ++i) {
+    auto found = backlog.find(units[i]);
+    if (found != backlog.end())
+      priority[i] = std::max(priority[i], found->second.first + found->second.second);
+  }
+  return priority;
+}
+
+LogicalResult mlir::atlas::selectRTLBlockSchedule(
+    const AtlasStream &s, size_t block, const TimingProvider &p,
+    bool dmaEstimate, const RTLBlockScheduler &schedule,
+    std::vector<size_t> &order, std::vector<DelayInsertion> &before, int &tail) {
+  const auto groups = atlasBlockContexts(s, block, p);
+  size_t begin = s.starts[block], end = s.blockEnd(block);
+  std::vector<DepGraph> graphs;
+  for (const AtlasContextGroup &group : groups) {
+    std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
+    auto built = buildTimingGraph(nodes, group.entries.front(), p);
+    if (!built.error.empty())
+      return emitAtlasFootprintError(s, s.ops[begin], built.error, &group.entries.front());
+    graphs.push_back(std::move(built.value));
+  }
+  auto validOrder = [&](const std::vector<size_t> &candidate) {
+    std::vector<size_t> positions(end - begin);
+    for (size_t k = 0; k < candidate.size(); ++k)
+      positions[candidate[k] - begin] = k;
+    for (const DepGraph &graph : graphs)
+      for (const Edge &e : graph.edges)
+        if (positions[e.from] >= positions[e.to])
+          return false;
+    return true;
+  };
+  std::optional<RTLOrderCandidate> selected;
+  auto consider = [&](RTLOrderCandidate candidate, bool keepTie = false) -> LogicalResult {
+    candidate.cost = 0;
+    for (const AtlasContextGroup &group : groups) {
+      auto cost = rtlOrderCost(s, block, p, group.entries.front(), candidate);
+      if (!cost.error.empty())
+        return emitAtlasFootprintError(s, s.ops[begin], cost.error, &group.entries.front());
+      candidate.cost = std::max(candidate.cost, cost.value);
+    }
+    // Keep the measured list-order policy for single-context blocks. A
+    // multi-context source fallback wins a tie: reordering must offer a gain.
+    if (!selected || candidate.cost < selected->cost ||
+        (keepTie && candidate.cost == selected->cost))
+      selected = std::move(candidate);
+    return success();
+  };
+  // Different contexts often produce the same list order. Its fixpoint and
+  // worst-context cost are identical, so reconcile that order only once.
+  std::set<std::vector<size_t>> reconciled;
+  for (const AtlasContextGroup &group : groups) {
+    for (int variant = 0; variant < (dmaEstimate ? 2 : 1); ++variant) {
+      bool estimate = dmaEstimate && variant == 0;
+      for (bool contention : {false, true}) {
+        RTLOrderCandidate candidate;
+        candidate.before.resize(s.ops.size());
+        {
+          // A speculative order can exceed a bounded search or fail to
+          // converge across contexts. Keep the source/legacy alternatives;
+          // only a failure of their required rules is a pass error.
+          ScopedDiagnosticHandler discard(s.ops[begin]->getContext(),
+                                           [](Diagnostic &) { return success(); });
+          if (failed(schedule(group.entries.front(), {estimate, contention},
+                              candidate.order, candidate.before, candidate.tail)))
+            continue;
+          if (!validOrder(candidate.order))
+            continue;
+          if (groups.size() > 1) {
+            if (!reconciled.insert(candidate.order).second)
+              continue;
+            DelayInsertion after;
+            if (failed(atlasOrderedBlockDelays(s, block, p, candidate.order,
+                                               candidate.before, after, candidate.tail)))
+              continue;
+          }
+        }
+        if (failed(consider(std::move(candidate))))
+          return failure();
+      }
+    }
+  }
+  RTLOrderCandidate source;
+  source.before.resize(s.ops.size());
+  DelayInsertion after;
+  if (failed(atlasInOrderBlockDelays(s, block, p, source.before, after, source.tail)))
+    return failure();
+  for (size_t i = begin; i < end; ++i)
+    source.order.push_back(i);
+  if (failed(consider(std::move(source), groups.size() > 1)))
+    return failure();
+  for (size_t i = begin; i < end; ++i)
+    before[i] = std::move(selected->before[i]);
+  order.insert(order.end(), selected->order.begin(), selected->order.end());
+  tail = selected->tail;
+  return success();
 }
