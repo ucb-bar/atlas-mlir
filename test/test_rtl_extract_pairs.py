@@ -235,6 +235,69 @@ class CoreMxuSamePairFileTests(unittest.TestCase):
                 self.assertLessEqual(self.raw["expect"][name]["stable_gap"], last + 1)
 
 
+def mxu_registers(kind, word):
+    """MREG registers of an MXU command in operand order (a BF16 pair as base, base+1)."""
+    f = mxu_fields(word)
+    base = f["vd"] if kind.startswith("pop") else f["vs1"]
+    return [base, base + 1] if kind.endswith("bf16") else [base]
+
+
+def mxu_overlap(first, second):
+    """The pair files' MREG overlap pattern: "i=j" same register, "i~j" same physical bank, else "disjoint"."""
+    parts = [f"{i}={j}" if a == b else f"{i}~{j}" for i, a in enumerate(first) for j, b in enumerate(second) if a % 32 == b % 32]
+    return ",".join(parts) or "disjoint"
+
+
+class CoreMxuSharedPairFileTests(unittest.TestCase):
+    """Same-MXU pairs whose MREG operands share a register or a bank (pairs/core_mxu_shared.yaml): every overlap the two
+    commands' operands can have, for every accumulator and weight-slot relation, with words that encode it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw, cls.spec = pairs.load("atlas", ["core_mxu_shared"])["core_mxu_shared"]
+
+    def test_every_overlap_and_relation_is_declared(self):
+        expected = set()
+        for unit in (0, 1):
+            for a, (_, acc_a, slot_a) in MXU_KINDS.items():
+                for b, (_, acc_b, slot_b) in MXU_KINDS.items():
+                    shapes = lambda kind: [[r, r + 1] for r in range(0, 64, 2)] if kind.endswith("bf16") else [[r] for r in range(64)]
+                    overlaps = {mxu_overlap(x, y) for x in shapes(a) for y in shapes(b)} - {"disjoint"}
+                    accs = ("same", "other") if acc_a and acc_b else (None,)
+                    slots = ("same", "other") if slot_a and slot_b else (None,)
+                    expected |= {(f"mxu{unit}.{a}", f"mxu{unit}.{b}", o, acc, slot) for o in overlaps for acc in accs for slot in slots}
+        declared = {(p["as"]["first"], p["as"]["second"], p["relation"]["mreg_banks"], p["relation"].get("accumulator"),
+                     p["relation"].get("weight_slot")) for p in self.raw["pairs"].values()}
+        self.assertEqual(len(declared), len(self.raw["pairs"]))
+        self.assertEqual(declared, expected)
+
+    def test_instruction_words_encode_the_overlap_and_relation(self):
+        for name, pair in self.raw["pairs"].items():
+            words = [pair["first_inputs"]["instruction"], pair["second_inputs"]["instruction"]]
+            kinds = [pair["as"][side].split(".")[1] for side in ("first", "second")]
+            unit = int(pair["as"]["first"][3])
+            with self.subTest(name):
+                for word, kind in zip(words, kinds):
+                    self.assertEqual((word & 0x7F, mxu_fields(word)["f7"]), (0x77, MXU_KINDS[kind][0] + unit))
+                self.assertEqual(mxu_overlap(*(mxu_registers(k, w) for k, w in zip(kinds, words))), pair["relation"]["mreg_banks"])
+                fields = [mxu_fields(w) for w in words]
+                for key, index in (("accumulator", 1), ("weight_slot", 2)):
+                    relation, used = pair["relation"].get(key), [MXU_KINDS[k][index] for k in kinds]
+                    self.assertEqual(relation is not None, all(used))
+                    if relation:
+                        self.assertEqual(fields[0][used[0]] == fields[1][used[1]], relation == "same")
+
+    @unittest.skipUnless(os.environ.get("ATLAS_OP_TIMING"), "requires ATLAS_OP_TIMING")
+    def test_gaps_reach_past_the_first_commands_last_event(self):
+        import json
+        blocks = {b["name"]: b for b in json.loads(Path(os.environ["ATLAS_OP_TIMING"]).read_text())["op_timing"]}
+        for name, pair in self.raw["pairs"].items():
+            last = max(g["last_age"] for g in blocks[pair["as"]["first"]]["events"].values() if g["count"])
+            with self.subTest(name):
+                self.assertGreater(int(pair["gaps"].split("..")[1]), last)
+                self.assertLessEqual(self.raw["expect"][name]["stable_gap"], last + 1)
+
+
 @unittest.skipUnless(HW_IR and EXPORTER, "requires ATLAS_HW_IR and ATLAS_HW_EXPORTER")
 class HardwarePairTests(unittest.TestCase):
     def check(self, name, jobs=8):
@@ -310,6 +373,11 @@ class HardwarePairTests(unittest.TestCase):
     def test_core_mxu_units(self):
         """Every ordered pair of commands across MXU0 and MXU1: gap 1 on disjoint operands with disjoint control."""
         self.check("core_mxu_units")
+
+    def test_core_mxu_shared(self):
+        """Same-MXU pairs sharing an MREG register or bank: one cycle below each stable gap the MREG bank tracker, MregFile's
+        ports, an MXU sequencer register check or the issue checks of the disjoint pair bind."""
+        self.check("core_mxu_shared", jobs=min(64, os.cpu_count() or 8))
 
     def test_core_mxu_same(self):
         """Every ordered pair of commands on one MXU, per accumulator and weight-slot relation: the MXU sequencer's issue
