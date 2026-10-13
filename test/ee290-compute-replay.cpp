@@ -59,6 +59,26 @@ class Replay {
       throw std::runtime_error("RTL stopped or asserted");
   }
 
+  void exchange(CData &valid, const CData &ready, const CData &response,
+                const char *port) {
+    auto wait = [&](const CData &signal, const char *phase) {
+      unsigned waits = 0;
+      while (!signal) {
+        if (++waits > 100)
+          throw std::runtime_error(std::string(port) + phase + " handshake timeout");
+        tick();
+      }
+    };
+    valid = 1;
+    dut.clock = 0;
+    evaluate();
+    wait(ready, " A");
+    tick();
+    valid = 0;
+    evaluate();
+    wait(response, " D");
+  }
+
 public:
   Replay(const char *wave, uint64_t cycleLimit) : limit(cycleLimit) {
     context.traceEverOn(true);
@@ -99,23 +119,9 @@ public:
     (csr ? dut.io_csrTL_a_bits_source : dut.io_imemTL_a_bits_source) = 0;
     (csr ? dut.io_csrTL_a_bits_address : dut.io_imemTL_a_bits_address) = address;
     (csr ? dut.io_csrTL_a_bits_data : dut.io_imemTL_a_bits_data) = data;
-    auto &valid = csr ? dut.io_csrTL_a_valid : dut.io_imemTL_a_valid;
-    valid = 1;
-    dut.clock = 0;
-    evaluate();
-    unsigned waits = 0;
-    while (!(csr ? dut.io_csrTL_a_ready : dut.io_imemTL_a_ready)) {
-      if (++waits > 100) throw std::runtime_error("scalar A handshake timeout");
-      tick();
-    }
-    tick();
-    valid = 0;
-    evaluate();
-    waits = 0;
-    while (!(csr ? dut.io_csrTL_d_valid : dut.io_imemTL_d_valid)) {
-      if (++waits > 100) throw std::runtime_error("scalar D handshake timeout");
-      tick();
-    }
+    exchange(csr ? dut.io_csrTL_a_valid : dut.io_imemTL_a_valid,
+             csr ? dut.io_csrTL_a_ready : dut.io_imemTL_a_ready,
+             csr ? dut.io_csrTL_d_valid : dut.io_imemTL_d_valid, "scalar");
     uint32_t result = csr ? dut.io_csrTL_d_bits_data : dut.io_imemTL_d_bits_data;
     auto opcode = csr ? dut.io_csrTL_d_bits_opcode : dut.io_imemTL_d_bits_opcode;
     if (opcode != (write ? 0 : 1)) throw std::runtime_error("scalar response opcode mismatch");
@@ -131,22 +137,8 @@ public:
     dut.io_vmemTL_a_bits_address = 0x20000000U + 32 * line;
     dut.io_vmemTL_a_bits_mask = 0xffffffffU;
     for (unsigned i = 0; i < 8; ++i) dut.io_vmemTL_a_bits_data[i] = data[i];
-    dut.io_vmemTL_a_valid = 1;
-    dut.clock = 0;
-    evaluate();
-    unsigned waits = 0;
-    while (!dut.io_vmemTL_a_ready) {
-      if (++waits > 100) throw std::runtime_error("VMEM A handshake timeout");
-      tick();
-    }
-    tick();
-    dut.io_vmemTL_a_valid = 0;
-    evaluate();
-    waits = 0;
-    while (!dut.io_vmemTL_d_valid) {
-      if (++waits > 100) throw std::runtime_error("VMEM D handshake timeout");
-      tick();
-    }
+    exchange(dut.io_vmemTL_a_valid, dut.io_vmemTL_a_ready,
+             dut.io_vmemTL_d_valid, "VMEM");
     std::array<uint32_t, 8> result;
     for (unsigned i = 0; i < 8; ++i) result[i] = dut.io_vmemTL_d_bits_data[i];
     if (dut.io_vmemTL_d_bits_opcode != (write ? 0 : 1))

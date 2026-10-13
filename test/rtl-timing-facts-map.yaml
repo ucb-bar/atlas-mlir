@@ -10,7 +10,9 @@
 # ">=" permits only an intentionally conservative bound, never a claimed equality.
 # Expressions name footprint fields, hold.<Unit> (inclusive end, 0 if absent),
 # or events.<group>.<field>, optionally followed by "+ N". Busy first-free ages
-# equal hold end+1; the explicit VPU, VLS and MXU mappings below fix their conventions.
+# equal hold end+1. VPU next_issue_age = write_release; first_free_age = vpu_live+1.
+# VLS next_issue_age = path hold end+1; write_release = last MReg write age.
+# MXU busy last ages = stream/compute hold ends (pop: write_release).
 # Nonempty fact groups must be compared or not_modeled; every record must be
 # mapped or not_modeled_records. Selected mode builds footprints from the facts.
 

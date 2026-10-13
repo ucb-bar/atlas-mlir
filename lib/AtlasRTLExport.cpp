@@ -28,9 +28,9 @@ const char *resourceName(Res resource) {
   llvm_unreachable("unhandled timing resource");
 }
 
-Array integers(const std::vector<int> &values) {
+template <typename Range> Array integers(const Range &values) {
   Array result;
-  for (int value : values) result.push_back(value);
+  for (auto value : values) result.push_back(static_cast<int64_t>(value));
   return result;
 }
 
@@ -99,10 +99,9 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   if (failed(stream) || failed(verifyAtlasTimedStream(*stream, *provider, &trace)))
     return failure();
 
-  Array exportedWords, instructions, blocks;
+  Array instructions, blocks;
   std::vector<uint8_t> encoded;
   for (uint32_t word : words) {
-    exportedWords.push_back(static_cast<int64_t>(word));
     for (unsigned shift = 0; shift < 32; shift += 8)
       encoded.push_back(static_cast<uint8_t>(word >> shift));
   }
@@ -144,15 +143,12 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       }
       instructions.push_back(std::move(entry));
     }
-    Array successors;
-    for (size_t next : stream->succs[b])
-      successors.push_back(static_cast<int64_t>(next));
     Object blockJSON{{"index", static_cast<int64_t>(b)},
         {"first_word", static_cast<int64_t>(stream->starts[b])},
         {"word_count", static_cast<int64_t>(stream->blockEnd(b) - stream->starts[b])},
         {"exit", stream->endsInHalt(b) ? "halt" :
                  stream->endsInBranch(b) ? "branch_with_delay_slot" : "fall_through"},
-        {"successors", std::move(successors)},
+        {"successors", integers(stream->succs[b])},
         {"successor_issue_offset", nullptr},
         {"entry_state", "idle_engines_no_pending_dma"}};
     if (trace.successorIssue[b] >= 0)
@@ -190,7 +186,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"op_timing_sha256", evidence.factsSha256()},
           {"hardware_ir_sha256", evidence.hardwareIRSha256()}}},
       {"program", Object{{"word_count", static_cast<int64_t>(words.size())},
-          {"words", std::move(exportedWords)},
+          {"words", integers(words)},
           {"words_sha256", llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true)},
           {"hash_encoding", "little_endian_u32"}}},
       {"conventions", Object{
