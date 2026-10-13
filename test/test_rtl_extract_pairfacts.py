@@ -114,6 +114,79 @@ class PairFactsTests(unittest.TestCase):
             self.assertIn('    {"first": "vpu.exp", "second": "vpu.relu"', path.read_text())
 
 
+def mxu_block(name, last):
+    """An MXU block: no next_issue_age, live through its last event age."""
+    return {"name": name, "engine": name.split(".")[0], "operation": name.split(".")[1],
+            "events": {"compute_busy": {"first_age": 1, "last_age": last, "count": last}, "acc_store": {"count": 0}}}
+
+
+MXU_TIMING = {"schema": "merlin.op_timing.v1", "hw_ir": HW,
+              "op_timing": [block("vpu.exp", 65), block("vpu.relu", 65), block("vpu.sin", 65),
+                            mxu_block("mxu0.matmul", 94), mxu_block("mxu0.pop_acc_bf16", 32), mxu_block("mxu0.push_weight", 32)]}
+
+
+def mxu_pair(name, stable, last=100):
+    return {"name": f"core.{name}", "engine": "core", "module": "AtlasCore", "first": "mxu0_matmul", "second": "mxu0_matmul",
+            "gaps": [1, last], "min_gap": stable, "stable_gap": stable, "results": runs(stable, last), "invariants": CHECKED}
+
+
+def mxu_chain(stable, length=3):
+    return {"name": f"core.mxu0_matmul_other_acc_same_slot/{length}", "engine": "core", "module": "AtlasCore",
+            "sequence": "mxu0_matmul_other_acc_same_slot", "length": length,
+            "ops": [{"op": "mxu0_matmul", "inputs": {"instruction": w}} for w in (0x14000077, 0x140080f7, 0x14010077)][:length],
+            "gaps": [1, 100], "min_gap": stable, "stable_gap": stable, "results": runs(stable, 100), "invariants": CHECKED}
+
+
+class MxuPairFactsTests(unittest.TestCase):
+    """Same-MXU sweeps (pairs/core_mxu_same.yaml, sequences/core_mxu.yaml): relations and the last-event window."""
+
+    def build(self, files, op_timing=MXU_TIMING):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "facts.json").write_text(json.dumps(op_timing))
+            paths = {"pairs": [], "sequences": []}
+            for n, (stem, records) in enumerate(files):
+                kind = "pairs" if stem.startswith("pairs-") else "sequences"
+                schema = "rtl_extract.op_pairs.v1" if kind == "pairs" else "rtl_extract.op_sequences.v1"
+                path = root / str(n) / f"{stem}.json"
+                path.parent.mkdir()
+                path.write_text(json.dumps({"schema": schema, "hw_ir": HW, ("op_pairs" if kind == "pairs" else "op_sequences"): records}))
+                paths[kind].append(path)
+            return pairfacts.build(root / "facts.json", paths["pairs"], paths["sequences"])
+
+    def test_records_carry_accumulator_and_weight_slot_relations(self):
+        document = self.build([("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_other", 1), mxu_pair("mxu0_mm_pop16_acc_same", 64),
+                                                        mxu_pair("mxu0_mm_pw_slot_other", 1)])])
+        relations = {(r["second"], r["source"]): (r["engine"], r["relation"]) for r in document["op_pairs"]}
+        self.assertEqual(relations[("mxu0.pop_acc_bf16", "core.mxu0_mm_pop16_acc_other")],
+                         ("mxu0", {"mreg_banks": "disjoint", "accumulator": "other"}))
+        self.assertEqual(relations[("mxu0.pop_acc_bf16", "core.mxu0_mm_pop16_acc_same")][1]["accumulator"], "same")
+        self.assertEqual(relations[("mxu0.push_weight", "core.mxu0_mm_pw_slot_other")][1],
+                         {"mreg_banks": "disjoint", "weight_slot": "other"})
+
+    def test_mxu_capacity_counts_commands_live_through_their_last_event(self):
+        late = self.build([("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_same", 95)])])["capacity"]
+        self.assertEqual(late, [{"engine": "mxu0", "live": 1, "window": "last_event_age",
+                                 "witness": {"source": "core.mxu0_mm_pop16_acc_same", "gap": 95}}])
+        early = self.build([("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_same", 94)])])["capacity"]
+        self.assertEqual((early[0]["live"], early[0]["witness"]["gap"]), (2, 94))
+        # Three matmuls alternating accumulators at 32 stay live together; at 48 the third issues after the first.
+        pairs = ("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_same", 64)])
+        self.assertEqual(self.build([pairs, ("sequences-core_mxu", [mxu_chain(32)])])["capacity"][0]["live"], 3)
+        self.assertEqual(self.build([pairs, ("sequences-core_mxu", [mxu_chain(48)])])["capacity"][0]["live"], 2)
+
+    def test_duplicate_records_across_files_fail(self):
+        records = [mxu_pair("mxu0_mm_pop16_acc_other", 1)]
+        with self.assertRaisesRegex(ValueError, "a second record"):
+            self.build([("pairs-core_mxu_same", records), ("pairs-core_mxu_same", records)])
+
+    def test_an_engine_takes_one_window(self):
+        mixed = copy.deepcopy(MXU_TIMING)
+        mixed["op_timing"][3]["next_issue_age"] = 95
+        with self.assertRaisesRegex(ValueError, "take different live windows"):
+            self.build([("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_other", 1)])], op_timing=mixed)
+
+
 @unittest.skipUnless(FACTS and (Path(FACTS).parent / "pairs-core_vpu.json").is_file(),
                      "requires ATLAS_OP_TIMING with pairs-core_vpu.json beside it")
 class AtlasPairFactsTests(unittest.TestCase):

@@ -9,13 +9,15 @@ record must check assertions and name resolved ``op_timing`` blocks.
     {schema: "merlin.op_pairs.v1", hw_ir: {path, sha256}, op_timing: {path, sha256},
      sources: [{path, sha256, schema}],
      op_pairs: [{first, second, engine, relation, gaps, min_gap, stable_gap, assertions: {checked, excluded}, source}],
-     capacity: [{engine, live, window: "next_issue_age", witness: {source, gap}}]}
+     capacity: [{engine, live, window, witness: {source, gap}}]}
 
 ``first``/``second`` are ``op_timing`` block names and ``engine`` their common engine (``null`` across engines). A
 record applies when the operands satisfy ``relation``; the second may then issue at any gap from ``stable_gap`` through
 ``gaps[1]``. ``capacity`` is, per engine, the most operations observed live at once in any accepted run of the inputs
-(pairs at an accepted gap, chains at an accepted spacing), an operation being live from its issue until its
-``next_issue_age``; it is what the runs show, never more. Per-gap results stay in the sweep files.
+(pairs at an accepted gap, chains at an accepted spacing); it is what the runs show, never more. ``window`` names when
+an operation is live: from its issue until its ``next_issue_age`` where its engine's blocks have one
+(``next_issue_age``), otherwise from its issue through the last age of any of its events (``last_event_age``). Every
+block of one engine must take the same window. Per-gap results stay in the sweep files.
 """
 import json
 from pathlib import Path
@@ -26,7 +28,13 @@ from .facts import sha256
 from .spec import ages
 
 SCHEMA = "merlin.op_pairs.v1"
-WINDOW = "next_issue_age"
+
+
+def window(block):
+    """``(name, length)``: an operation is live for ``length`` ages from its issue."""
+    if block.get("next_issue_age") is not None:
+        return "next_issue_age", block["next_issue_age"]
+    return "last_event_age", 1 + max(g["last_age"] for g in block["events"].values() if g["count"])
 
 
 def accepted(record):
@@ -50,7 +58,7 @@ class Builder:
         self.blocks = {b["name"]: b for b in op_timing["op_timing"]}
         self.hw_ir = op_timing["hw_ir"]
         self.target = target
-        self.records, self.capacity, self.keys = [], {}, set()
+        self.records, self.capacity, self.keys, self.windows = [], {}, set(), {}
 
     def block(self, name, where):
         found = self.blocks.get(name)
@@ -60,16 +68,25 @@ class Builder:
     def same_ir(self, document, path):
         require(document["hw_ir"]["sha256"] == self.hw_ir["sha256"], f"{path}: describes a different hardware IR than the op_timing facts")
 
+    def window(self, block):
+        """The block's window, which every resolved block of its engine must share."""
+        engine = block["engine"]
+        if engine not in self.windows:
+            kinds = {window(b)[0] for b in self.blocks.values() if b["engine"] == engine and b["events"] is not None}
+            require(len(kinds) == 1, f"blocks of engine {engine!r} take different live windows: {sorted(kinds)}")
+            self.windows[engine] = kinds.pop()
+        return window(block)
+
     def observe(self, issues, source, gap):
         """Counts the live operations of one accepted run: ``issues`` lists ``(block, issue age)``."""
-        windows = {}
+        windows, names = {}, {}
         for block, at in issues:
-            if block.get(WINDOW) is not None:
-                windows.setdefault(block["engine"], []).append((at, at + block[WINDOW]))
+            names[block["engine"]], length = self.window(block)
+            windows.setdefault(block["engine"], []).append((at, at + length))
         for engine, spans in windows.items():
             live = max(sum(start <= at < end for start, end in spans) for at, _ in spans)
             if live > self.capacity.get(engine, {"live": 0})["live"]:
-                self.capacity[engine] = {"engine": engine, "live": live, "window": WINDOW,
+                self.capacity[engine] = {"engine": engine, "live": live, "window": names[engine],
                                          "witness": {"source": source, "gap": gap}}
 
     def pair_sweep(self, path, document):
