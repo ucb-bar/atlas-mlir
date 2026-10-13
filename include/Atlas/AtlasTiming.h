@@ -132,8 +132,7 @@ Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
                       const Footprint &fb);
 // The access, MREG release, barrier and DMA order rules of `dependence` without
 // the model's MXU sequencer rules, for providers whose footprints carry them.
-Dependence dataDependence(const Instr &a, const Footprint &fa, const Instr &b,
-                          const Footprint &fb);
+Dependence dataDependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
@@ -168,8 +167,7 @@ enum class ReservationPolicy { Model, Exclusive };
 
 class ReservationTable {
 public:
-  explicit ReservationTable(ReservationPolicy policy = ReservationPolicy::Model)
-      : policy_(policy) {}
+  explicit ReservationTable(ReservationPolicy policy = ReservationPolicy::Model) : policy_(policy) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);

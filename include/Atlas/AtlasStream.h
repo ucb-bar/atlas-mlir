@@ -45,8 +45,7 @@ std::vector<AtlasContextGroup> atlasBlockContexts(
     const AtlasStream &stream, size_t block, const timing::TimingProvider &provider);
 // Emits a footprint error at `op`, noting why concrete contexts were
 // unavailable and, when given, the entry context it arose under.
-InFlightDiagnostic emitAtlasFootprintError(const AtlasStream &stream,
-                                           Operation *op, llvm::StringRef error,
+InFlightDiagnostic emitAtlasFootprintError(const AtlasStream &stream, Operation *op, llvm::StringRef error,
                                            const timing::RegValues *context = nullptr);
 
 struct DelayInsertion {
@@ -57,8 +56,7 @@ struct DelayInsertion {
 };
 
 // Add a NOP guard to trailing delays if the next instruction ignores DELAY.
-void guardAtlasBlockDrain(DelayInsertion &delay,
-                          const timing::TimingProvider &provider,
+void guardAtlasBlockDrain(DelayInsertion &delay, const timing::TimingProvider &provider,
                           int idle, const timing::OpInfo *next);
 
 // The issue cycle and footprint of each stream op under one provider, and
@@ -89,8 +87,7 @@ LogicalResult checkAtlasStream(
 // consulting a scheduler graph or implicitly using any model timing policy.
 // `trace`, when given, receives the resolved timing on success.
 LogicalResult verifyAtlasTimedStream(
-    const AtlasStream &stream, const timing::TimingProvider &provider,
-    AtlasTimedTrace *trace = nullptr);
+    const AtlasStream &stream, const timing::TimingProvider &provider, AtlasTimedTrace *trace = nullptr);
 LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
                                 const timing::TimingProvider &provider);
 LogicalResult verifyAtlasTiming(

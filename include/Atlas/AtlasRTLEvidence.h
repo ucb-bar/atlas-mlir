@@ -73,13 +73,10 @@ private:
   std::string sha256, hardwareIR;
   bool dma = false;
   std::shared_ptr<const RTLPairFacts> pairs;
-  friend llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef,
-                                                        llvm::StringRef, bool);
+  friend llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef, llvm::StringRef, bool);
 };
 
-llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef path,
-                                               llvm::StringRef expectedSha256,
-                                               bool dmaWait);
+llvm::Expected<RTLEvidence> loadRTLTimingFacts(llvm::StringRef path, llvm::StringRef expectedSha256, bool dmaWait);
 
 } // namespace mlir::atlas::timing
 #endif

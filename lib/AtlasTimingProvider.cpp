@@ -28,8 +28,7 @@ private:
 } // namespace
 
 TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
-    const std::vector<Instr> &instrs, const RegValues &entry,
-    const TimingProvider &p) {
+    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p) {
   TimingRuleResult<DepGraph> result;
   DepGraph &g = result.value;
   g.nodes = instrs;
@@ -37,8 +36,7 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   RegValues regs = entry;
   for (const Instr &in : instrs) {
     Footprint f = p.footprint(in, regs);
-    if (!f.error.empty())
-      return {{}, f.error};
+    if (!f.error.empty()) return {{}, f.error};
     g.footprints.push_back(std::move(f));
     applyScalar(in, regs);
   }
@@ -56,10 +54,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
       auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
-      if (!d.error.empty())
-        return {{}, d.error};
-      if (d.value.distance > 0)
-        add(a, b, d.value.distance, d.value.kind, d.value.reason);
+      if (!d.error.empty()) return {{}, d.error};
+      if (d.value.distance > 0) add(a, b, d.value.distance, d.value.kind, d.value.reason);
     }
   auto isLaunch = [&](int i) {
     OpClass c = g.nodes[i].op->opClass;
@@ -68,26 +64,20 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   // A DMA's completion is known only once its dma.wait issues, so later
   // conflicting accesses wait for that dma.wait.
   for (int d = 0; d < n; d++) {
-    if (!isLaunch(d))
-      continue;
+    if (!isLaunch(d)) continue;
     const OpInfo &op = *g.nodes[d].op;
     int wait = -1;
     for (int k = d + 1; k < n && wait < 0; k++)
-      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel)
-        wait = k;
+      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel) wait = k;
     for (int k = d + 1; k < n; k++) {
-      if (k == wait)
-        continue;
+      if (k == wait) continue;
       auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
-      if (!conflict.error.empty())
-        return {{}, conflict.error};
-      if (!conflict.value.conflict)
-        continue;
+      if (!conflict.error.empty()) return {{}, conflict.error};
+      if (!conflict.value.conflict) continue;
       if (wait >= 0 && wait < k)
         add(wait, k, 1, conflict.value.kind,
             std::string(edgeKindName(conflict.value.kind)) + " with " + op.name + " (done once the wait issues)");
-      else
-        add(d, k, 1, EdgeKind::Order, op.name + " may still be in flight (no dma.wait in between)");
+      else add(d, k, 1, EdgeKind::Order, op.name + " may still be in flight (no dma.wait in between)");
     }
   }
   // A wait for a transfer from an earlier block guards conflicting accesses
@@ -95,21 +85,14 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   // the VMEM it moves at completion may conflict.
   for (int w = 0; w < n; w++) {
     const OpInfo &op = *g.nodes[w].op;
-    if (op.opClass != OpClass::DmaWait)
-      continue;
+    if (op.opClass != OpClass::DmaWait) continue;
     bool local = false;
-    for (int d = 0; d < w; d++)
-      if (isLaunch(d) && g.nodes[d].op->channel == op.channel)
-        local = true;
-    if (local)
-      continue;
+    for (int d = 0; d < w; d++) if (isLaunch(d) && g.nodes[d].op->channel == op.channel) local = true;
+    if (local) continue;
     for (int k = w + 1; k < n; k++) {
       bool guarded = isLaunch(k);
-      for (const Access &a : g.footprints[k].accesses)
-        if (a.res == Res::Vmem)
-          guarded = true;
-      if (guarded)
-        add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
+      for (const Access &a : g.footprints[k].accesses) if (a.res == Res::Vmem) guarded = true;
+      if (guarded) add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
     }
   }
   g.in.assign(n, {});
@@ -150,8 +133,7 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   Footprint firstFootprint = provider.footprint(first, regs);
   Footprint secondFootprint = provider.footprint(second, regs);
   for (const Footprint &f : {firstFootprint, secondFootprint})
-    if (!f.error.empty())
-      return at->emitOpError("virtual cost of ") << name << ": " << f.error;
+    if (!f.error.empty()) return at->emitOpError("virtual cost of ") << name << ": " << f.error;
   auto table = provider.createReservations();
   if (!table.error.empty() || !table.value)
     return at->emitOpError("virtual cost of ") << name << ": "
@@ -161,11 +143,9 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   for (; why.empty(); ++interval) {
     auto conflict = table.value->conflict(second, secondFootprint, interval);
     why = conflict.error;
-    if (why.empty() && conflict.value.empty())
-      break;
+    if (why.empty() && conflict.value.empty()) break;
   }
-  if (!why.empty())
-    return at->emitOpError("virtual cost of ") << name << ": " << why;
+  if (!why.empty()) return at->emitOpError("virtual cost of ") << name << ": " << why;
   return MachineOpTiming{firstFootprint.doneAge + 1, interval};
 }
 

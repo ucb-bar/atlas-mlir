@@ -15,8 +15,7 @@ using Array = llvm::json::Array;
 constexpr int kLinesPerBank = kVmemBankBytes / kLineBytes;
 
 llvm::Error factsError(const std::string &message) {
-  return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                 "RTL timing facts: " + message);
+  return llvm::createStringError(llvm::inconvertibleErrorCode(), "RTL timing facts: " + message);
 }
 
 bool hashSyntax(llvm::StringRef value) {
@@ -44,8 +43,7 @@ const std::map<std::string, const char *> &vpuBlocks() {
       {"vredmin.row.bf16", "vpu.rmin"}, {"vredsum.bf16", "vpu.csum"},
       {"vredmax.bf16", "vpu.cmax"}, {"vredmin.bf16", "vpu.cmin"},
       {"vpack.bf16.fp8", "vpu.fp8pack"}, {"vunpack.fp8.bf16", "vpu.fp8unpack"},
-      {"vli.all", "vpu.vliAll"}, {"vli.row", "vpu.vliRow"},
-      {"vli.col", "vpu.vliCol"}, {"vli.one", "vpu.vliOne"}};
+      {"vli.all", "vpu.vliAll"}, {"vli.row", "vpu.vliRow"}, {"vli.col", "vpu.vliCol"}, {"vli.one", "vpu.vliOne"}};
   return table;
 }
 
@@ -67,10 +65,8 @@ const std::map<OpClass, std::vector<RegisterEvent>> &vpuEvents() {
       {OpClass::VpuUnpack, {{"read0", &Instr::rs2, false},
           {nullptr, &Instr::rs1, false}, {"write0", &Instr::rd, true, 2}}},
       {OpClass::VpuRowReduce, {{"read0", &Instr::rs1, false},
-          {"read1", &Instr::rs1, false, 1, 1, 1}, {"write0", &Instr::rd, true},
-          {"write1", &Instr::rd, true, 1, 1, 1}}},
-      {OpClass::VpuColReduce, {{"read0", &Instr::rs1, false, 2, 2},
-          {"write0", &Instr::rd, true, 2}}},
+          {"read1", &Instr::rs1, false, 1, 1, 1}, {"write0", &Instr::rd, true}, {"write1", &Instr::rd, true, 1, 1, 1}}},
+      {OpClass::VpuColReduce, {{"read0", &Instr::rs1, false, 2, 2}, {"write0", &Instr::rd, true, 2}}},
       {OpClass::VpuLoadImmPair, {{"write0", &Instr::rd, true, 2}}},
       {OpClass::VpuLoadImmSingle, {{"write0", &Instr::rd, true}}}};
   return table;
@@ -83,8 +79,7 @@ struct Fill {
   const OpTimingBlock *block = nullptr;
   int latency = 0;
 
-  Fill(Footprint &footprint, const std::string &blockName,
-       const std::map<std::string, OpTimingBlock> &blocks)
+  Fill(Footprint &footprint, const std::string &blockName, const std::map<std::string, OpTimingBlock> &blocks)
       : f(footprint), name(blockName) {
     auto it = blocks.find(name);
     if (it == blocks.end()) fail("facts block is missing");
@@ -103,27 +98,23 @@ struct Fill {
   }
   // `passes` sweeps over `elements` consecutive elements from `first`, timed by
   // the group: element i of pass p is touched at first_age + (p*elements+i)*step.
-  void access(const char *key, Res res, bool write, int first, int elements,
-              int passes = 1) {
+  void access(const char *key, Res res, bool write, int first, int elements, int passes = 1) {
     const OpTimingGroup *g = group(key);
     if (!g) return;
     int step = g->step.value_or(1);
-    if (g->count != elements * passes || step <= 0 ||
-        g->lastAge != g->firstAge + (g->count - 1) * step) {
+    if (g->count != elements * passes || step <= 0 || g->lastAge != g->firstAge + (g->count - 1) * step) {
       fail(std::string("event group ") + key + " does not sweep " +
            std::to_string(passes) + "x" + std::to_string(elements) + " elements evenly");
       return;
     }
     for (int p = 0; p < passes; ++p)
-      f.accesses.push_back({res, write, first, elements,
-                            g->firstAge + p * elements * step, step});
+      f.accesses.push_back({res, write, first, elements, g->firstAge + p * elements * step, step});
   }
   int first(const char *key) { const OpTimingGroup *g = group(key); return g ? g->firstAge : 0; }
   int last(const char *key) { const OpTimingGroup *g = group(key); return g ? g->lastAge : 0; }
   // A source is retained through its synchronous read response.
   int readEnd(const char *key) { return last(key) + latency; }
-  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1,
-           bool mergeRelease = true) {
+  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1, bool mergeRelease = true) {
     access(key, Res::MReg, write, reg * 32, registers * 32, passes);
     auto &list = write ? f.mregWrites : f.mregReads;
     for (int i = 0; i < registers; ++i) list.push_back(reg + i);
@@ -142,8 +133,7 @@ struct Fill {
     f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
   }
   void hold(std::initializer_list<Unit> units, int from, int to) {
-    if (from <= to)
-      for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
+    if (from <= to) for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
   // VectorFSM canIssueOp admits the next VPU command at next_issue_age;
   // VPU/XLU exclude each other until first_free_age; XLU holds both slots.
@@ -160,8 +150,7 @@ struct Fill {
       return f;
     }
     f.doneAge = std::max({busy, f.readRelease, f.writeRelease});
-    for (const Access &a : f.accesses)
-      if (!a.atCompletion) f.doneAge = std::max(f.doneAge, a.lastAge());
+    for (const Access &a : f.accesses) if (!a.atCompletion) f.doneAge = std::max(f.doneAge, a.lastAge());
     for (const Hold &h : f.holds) f.doneAge = std::max(f.doneAge, h.to);
     return f;
   }
@@ -172,8 +161,7 @@ const std::map<OpClass, const char *> &mxuBlocks() {
   static const std::map<OpClass, const char *> table = {
       {OpClass::WeightPush, "push_weight"}, {OpClass::AccPushFp8, "push_acc_fp8"},
       {OpClass::AccPushBf16, "push_acc_bf16"}, {OpClass::PopFp8, "pop_acc_fp8"},
-      {OpClass::PopBf16, "pop_acc_bf16"}, {OpClass::MatMul, "matmul"},
-      {OpClass::MatMulAcc, "matmul_acc"}};
+      {OpClass::PopBf16, "pop_acc_bf16"}, {OpClass::MatMul, "matmul"}, {OpClass::MatMulAcc, "matmul_acc"}};
   return table;
 }
 
@@ -335,8 +323,7 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
   if (!parsed) return parsed.takeError();
   auto fail = [](const std::string &why) { return factsError("pair facts: " + why); };
   const Object *root = parsed->getAsObject();
-  if (!root || root->getString("schema") != "merlin.op_pairs.v1")
-    return fail("expected schema merlin.op_pairs.v1");
+  if (!root || root->getString("schema") != "merlin.op_pairs.v1") return fail("expected schema merlin.op_pairs.v1");
   const Object *hardware = root->getObject("hw_ir");
   if (!hardware || hardware->getString("sha256") != llvm::StringRef(hardwareIR))
     return fail("describe a different hardware IR than the selected facts");
@@ -353,8 +340,7 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
     auto second = record ? record->getString("second") : std::nullopt;
     const Array *gaps = record ? record->getArray("gaps") : nullptr;
     const Object *relation = record ? record->getObject("relation") : nullptr;
-    if (!first || !second || !gaps || gaps->size() != 2 || !relation)
-      return fail("malformed op_pairs record");
+    if (!first || !second || !gaps || gaps->size() != 2 || !relation) return fail("malformed op_pairs record");
     std::string where = first->str() + " -> " + second->str();
     for (llvm::StringRef name : {*first, *second}) {
       const OpTimingBlock *b = block(name.str());
@@ -411,16 +397,14 @@ llvm::json::Object RTLEvidence::applicability() const {
   const OpTimingBlock *vload = block("vlsu.vload");
   int latency = vload ? vload->readLatency.value_or(0) : 0;
   Array operations{"scalar ALU (add..and, addi..srai, lui)", "lw", "sw", "seld", "seli", "vload", "vstore", "vtrpose.xlu",
-                   "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu",
-                   "bgeu", "jal"};
+                   "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu", "bgeu", "jal"};
   for (const auto &[mnemonic, block] : vpuBlocks()) operations.push_back(mnemonic);
   for (const char *unit : {".mxu0", ".mxu1"})
     for (const char *name : {"vmatpush.weight", "vmatpush.acc.fp8", "vmatpush.acc.bf16",
                              "vmatpop.fp8.acc", "vmatpop.bf16.acc", "vmatmul", "vmatmul.acc"})
       operations.push_back(std::string(name) + unit);
   if (dma)
-    for (const char *name : {"dma.load.ch0..7", "dma.store.ch0..7",
-                             "dma.config.ch0..7", "dma.wait.ch0..7"})
+    for (const char *name : {"dma.load.ch0..7", "dma.store.ch0..7", "dma.config.ch0..7", "dma.wait.ch0..7"})
       operations.push_back(name);
   Object result{
       {"scope", dma ? "drained_basic_blocks_exclusive_engine_holds_and_wait_governed_dma" :
@@ -434,39 +418,29 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"scalar_values_at_block_entry", "each_concrete_context_with_branches_evaluated_when_known; equal_on_all_paths_or_unknown_past_4096_contexts"},
           {"linking_and_register_targets_supported", false}}},
       {"timing_source", "merlin.op_timing.v1 facts computed from the RTL; footprint structure from the compiler"},
-      {"supported_operations", std::move(operations)},
-      {"operand_domain", Object{
+      {"supported_operations", std::move(operations)}, {"operand_domain", Object{
           {"scalar_registers", Object{{"first", 0}, {"count", 32}}},
           {"mreg_registers", Object{{"first", 0}, {"count", 64}}},
           {"vmem_banks", kVmemBanks}, {"vmem_bank_bytes", kVmemBankBytes},
-          {"vmem_line_bytes", kLineBytes}, {"tile_rows", 32},
-          {"vmem_start_line_alignment", 32},
-          {"vmem_last_start_line", kVmemBytes / kLineBytes - 32},
-          {"base_unit", "32_bit_word"},
+          {"vmem_line_bytes", kLineBytes}, {"tile_rows", 32}, {"vmem_start_line_alignment", 32},
+          {"vmem_last_start_line", kVmemBytes / kLineBytes - 32}, {"base_unit", "32_bit_word"},
           {"effective_line", "(((base + 32 * sext12(offset)) mod 2^32) >> 3) & 0xffff"},
           {"known_base_required", true}, {"single_bank_required", true},
           {"scalar_word_access", "known 4-byte aligned address inside VMEM"},
-          {"mlir_offset_min", -2048}, {"mlir_offset_max", 2047},
-          {"csr_constraint", "csrrw x0,0xC10,rs"},
+          {"mlir_offset_min", -2048}, {"mlir_offset_max", 2047}, {"csr_constraint", "csrrw x0,0xC10,rs"},
           {"vpu_operands", "even pair bases; all register operands in distinct physical banks (register mod 32)"},
           {"mxu_operands", "slots 0 or 1; even BF16 pair bases; acc/weight element (unit*2+slot)*32+row"},
-          {"release_annotation_supported", false}}},
-      {"environment_assumptions", Array{
+          {"release_annotation_supported", false}}}, {"environment_assumptions", Array{
           "reset_deasserted", "accelerator_quiescent_at_entry",
           "other_engines_and_competing_memory_requesters_quiescent",
           "sram_read_response_" + std::to_string(latency) + "_cycles_after_request",
-          "instructions_immutable_during_execution",
-          "host_does_not_access_vmem_or_rewrite_dbg0_during_execution",
-          "caller_supplies_required_initial_operand_data",
-          "engine_timing_is_data_independent"}},
-      {"admission", Object{
+          "instructions_immutable_during_execution", "host_does_not_access_vmem_or_rewrite_dbg0_during_execution",
+          "caller_supplies_required_initial_operand_data", "engine_timing_is_data_independent"}}, {"admission", Object{
           {"selected_engines_serialized", false}, {"vls_paths_serialized", false},
           {"minimum_vls_issue_gap", firstFree("vlsu.vload")},
           {"vload_vstore_overlap", "own_path_holds_with_vmem_bank_holds"},
-          {"vls_overlaps_vpu_and_xlu", "mreg_port_and_release_rules_only"},
-          {"vpu_to_vpu_issue_gap", "next_issue_age"},
-          {"vpu_to_xlu_issue_gap", "first_free_age"},
-          {"xlu_first_free_age", firstFree("xlu.transpose")},
+          {"vls_overlaps_vpu_and_xlu", "mreg_port_and_release_rules_only"}, {"vpu_to_vpu_issue_gap", "next_issue_age"},
+          {"vpu_to_xlu_issue_gap", "first_free_age"}, {"xlu_first_free_age", firstFree("xlu.transpose")},
           {"mxu_commands_sequenced_per_unit", true},
           {"mxu_overlaps_other_mxu_vpu_xlu_and_vls", "mreg_port_and_release_rules_only"},
           {"mxu_weight_slot_retained_by_matmul", "issue_through_last_accumulator_write"},
@@ -475,8 +449,7 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
       {"unsupported", Array{dma ? "dma_completion_latency" : "dma_and_dynamic_completion",
           "same_mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
-          "addresses_that_vary_beyond_4096_block_entry_contexts",
-          "concurrent_engine_or_host_memory_traffic",
+          "addresses_that_vary_beyond_4096_block_entry_contexts", "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
       {"domain_qualification", "conditional; computed_timing_is_not_execution_qualification"}};
   if (pairs) {
@@ -488,8 +461,7 @@ llvm::json::Object RTLEvidence::applicability() const {
     // An MXU with pair facts admits commands on itself where a fact covers the
     // gap (lib/AtlasRTLSelection.cpp); the other keeps its busy rule.
     Array pipelined;
-    for (const char *unit : {"mxu0", "mxu1"})
-      if (pairs->capacity.count(unit)) pipelined.push_back(unit);
+    for (const char *unit : {"mxu0", "mxu1"}) if (pairs->capacity.count(unit)) pipelined.push_back(unit);
     if (!pipelined.empty()) {
       (*admission)["mxu_commands_sequenced_per_unit"] = false;
       (*admission)["mxu_to_same_mxu_issue_gap"] =
@@ -511,12 +483,9 @@ llvm::json::Object RTLEvidence::applicability() const {
         {"vmem_pointer_unit", "32_bit_word"}, {"vmem_word_alignment", 8},
         {"size_unit", "byte"}, {"size_min", 32}, {"size_max", 4096},
         {"size_alignment", 32}, {"single_vmem_bank_required", true},
-        {"dram_offset_alignment", 32}, {"dram_base_max", 31},
-        {"dram_offset_wrap_supported", false},
-        {"dram_address", "(configured_base << 32) | captured_offset"},
-        {"scalar_and_base_reads", "captured_at_launch"},
-        {"memory_lifetime", "launch_through_matching_wait"},
-        {"completion_latency", nullptr},
+        {"dram_offset_alignment", 32}, {"dram_base_max", 31}, {"dram_offset_wrap_supported", false},
+        {"dram_address", "(configured_base << 32) | captured_offset"}, {"scalar_and_base_reads", "captured_at_launch"},
+        {"memory_lifetime", "launch_through_matching_wait"}, {"completion_latency", nullptr},
         {"pending_vmem_windows", "disjoint from each other and from VLS tiles; scalar reads may share a store's window"},
         {"pending_dram_spans", "disjoint unless both transfers read"},
         {"engines_beside_pending_transfers", "VLS, VPU, XLU and MXU keep their isolated timing"},
@@ -544,8 +513,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   auto x = [&](int reg, bool write) {
     if (reg) f.accesses.push_back({Res::XReg, write, reg, 1, 0, 1});
   };
-  if (in.release && op.opClass != OpClass::Csr)
-    return reject("unsupported completion annotation");
+  if (in.release && op.opClass != OpClass::Csr) return reject("unsupported completion annotation");
 
   // Scalar ALU operations read their registers and write back at issue.
   if (op.opClass == OpClass::Alu && name != "auipc") {
@@ -592,16 +560,12 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
       f.accesses.push_back({Res::DmaBase, true, 0, 1, 0, 1});
       return f;
     }
-    if (op.opClass != OpClass::DmaLoad && op.opClass != OpClass::DmaStore)
-      return reject("unsupported DMA operation");
-    if (!xreg(in.rd) || !xreg(in.rs1) || !xreg(in.rs2) ||
-        !regs[in.rd] || !regs[in.rs1] || !regs[in.rs2])
+    if (op.opClass != OpClass::DmaLoad && op.opClass != OpClass::DmaStore) return reject("unsupported DMA operation");
+    if (!xreg(in.rd) || !xreg(in.rs1) || !xreg(in.rs2) || !regs[in.rd] || !regs[in.rs1] || !regs[in.rs2])
       return reject("DMA requires known scalar VMEM, DRAM and size operands");
     const bool load = op.opClass == OpClass::DmaLoad;
-    const uint64_t words = *regs[load ? in.rd : in.rs1],
-                   offset = *regs[load ? in.rs1 : in.rd], bytes = *regs[in.rs2];
-    if (bytes < 32 || bytes > 4096 || bytes % 32 || words % 8 ||
-        words + bytes / 4 > uint64_t(kVmemBytes / 4) ||
+    const uint64_t words = *regs[load ? in.rd : in.rs1], offset = *regs[load ? in.rs1 : in.rd], bytes = *regs[in.rs2];
+    if (bytes < 32 || bytes > 4096 || bytes % 32 || words % 8 || words + bytes / 4 > uint64_t(kVmemBytes / 4) ||
         words / (kVmemBankBytes / 4) != (words + bytes / 4 - 1) / (kVmemBankBytes / 4) ||
         offset % 32 || offset + bytes > (uint64_t(1) << 32))
       return reject("DMA transfer is unaligned, out of range, oversized, or crosses a bank/address boundary");
@@ -617,8 +581,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
 
   if (name == "lw" || name == "seld" || name == "sw") {
     const bool store = name == "sw", scale = name == "seld";
-    if (!xreg(in.rs1) || !xreg(in.rs2) || (!scale && !xreg(in.rd)))
-      return reject("unsupported scalar memory operands");
+    if (!xreg(in.rs1) || !xreg(in.rs2) || (!scale && !xreg(in.rd))) return reject("unsupported scalar memory operands");
     if (!regs[in.rs1]) return reject("unknown scalar base cannot establish bounded address domain");
     const uint32_t address = (*regs[in.rs1] + uint32_t(signExtend(in.imm, 12))) & 0x1FFFFF;
     if (address % 4 || address + 4 > uint32_t(kVmemBytes))
@@ -681,8 +644,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   if (op.engine == Engine::Vpu) {
     const char *blockName = vpuBlockName(name);
     if (!blockName) return reject("unsupported VPU operation");
-    const bool immediate = op.opClass == OpClass::VpuLoadImmPair ||
-                           op.opClass == OpClass::VpuLoadImmSingle;
+    const bool immediate = op.opClass == OpClass::VpuLoadImmPair || op.opClass == OpClass::VpuLoadImmSingle;
     if (!immediate && in.imm != 0) return reject("unsupported VPU encoding");
     Fill fill(f, blockName, blocks);
     f.writeRelease = fill.nextIssue();

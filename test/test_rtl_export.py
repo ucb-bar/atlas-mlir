@@ -8,14 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rtl_test_support import (
-    CONSUMERS, EMIT, EXAMPLES, FACTS, OPT, PROVIDER, ROOT, VERIFY, VLS_COPY, VLS_LOOP, block,
+from rtl_test_support import (CONSUMERS, EMIT, EXAMPLES, FACTS, OPT, PROVIDER, ROOT, VERIFY, VLS_COPY, VLS_LOOP, block,
     checked, copy, export, facts, facts_variant, program, run, selection, sha256, stream,
-    virtual_chain, virtual_pressure, without_delays,
-)
+    virtual_chain, virtual_pressure, without_delays,)
 
-@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
-                     "requires explicit RTL timing facts and Atlas tools")
+@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(), "requires explicit RTL timing facts and Atlas tools")
 class RTLTimingExportTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -55,8 +52,7 @@ class RTLTimingExportTest(unittest.TestCase):
         latency = block(document, "vlsu.vload")["assumptions"]["scratchpad_read_latency"]
         self.assertIn(f"sram_read_response_{latency}_cycles_after_request", applicability["environment_assumptions"])
         domain = applicability["operand_domain"]
-        self.assertEqual((domain["vmem_banks"], domain["mlir_offset_min"], domain["mlir_offset_max"]),
-                         (6, -2048, 2047))
+        self.assertEqual((domain["vmem_banks"], domain["mlir_offset_min"], domain["mlir_offset_max"]), (6, -2048, 2047))
         self.assertIn("vmul.bf16", applicability["supported_operations"])
         self.assertNotIn(str(ROOT), json.dumps(value))
         self.assertNotIn(str(Path(FACTS)), json.dumps(value))
@@ -90,8 +86,7 @@ class RTLTimingExportTest(unittest.TestCase):
         changed = re.sub(r'op_timing_sha256 = "[0-9a-f]{64}"', 'op_timing_sha256 = "' + "0" * 64 + '"', source)
         self.assertNotEqual(changed, source)
         for source, diagnostic in ((VLS_COPY.read_text(), "requires selected evidence"),
-                                   (without_delays(source), "insufficient issue spacing"),
-                                   (changed, "mismatch")):
+                                   (without_delays(source), "insufficient issue spacing"), (changed, "mismatch")):
             result = run(EMIT, source, "--rtl-timing-json")
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
@@ -169,8 +164,7 @@ class VirtualRTLTimingTest(unittest.TestCase):
                         self.assertTrue(mxu_beside_transfer(timed), "no MXU command between a launch and its wait")
 
     def test_bf16_pairs_sharing_a_physical_bank_are_rejected(self):
-        source = virtual_pressure(17).replace(
-            '    %io18 = "atlas.virtual_output_bf16"(%io17, %t0)',
+        source = virtual_pressure(17).replace('    %io18 = "atlas.virtual_output_bf16"(%io17, %t0)',
             '    %sum = "atlas.virtual_vpu_binary"(%t0, %t16) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16\n'
             '    %io18 = "atlas.virtual_output_bf16"(%io17, %sum)')
         self.assertIn("%sum", source)

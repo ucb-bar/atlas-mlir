@@ -24,8 +24,7 @@ import unittest
 from rtl_test_support import (
     BINARY, EMIT, FACTS, HALT, IN_FLIGHT, LIMIT, MXU_WORDS, OPT, PAIRS, PROVIDER, REDUCE, ROOT,
     UNARY, VERIFY, VLI, gapped, issue_gap, mxu, pack, program, run, selection, transfer,
-    transpose, vli, vls, vpu, wait, word_base, pair_spec, decode_mxu,
-)
+    transpose, vli, vls, vpu, wait, word_base, pair_spec, decode_mxu,)
 
 
 DMA_FIELDS = (31 << 7) | (31 << 15) | (31 << 20)  # DMA register fields; the operands arrive on the cuts

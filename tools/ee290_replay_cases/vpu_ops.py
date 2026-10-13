@@ -207,8 +207,7 @@ CASES = {
     'vpu_reduce': Case(REDUCE + END, {0: REDUCE_IN, 512: filler(10240)}, reduce, {'vload': 2, 'vpu': 5, 'vstore': 10}),
     'vpu_vli': Case(VLI + END, {512: filler(8192)}, immediates, {'vpu': 4, 'vstore': 6}),
     'vpu_pack': Case(PACK + END, {0: bytes([SCALE]) + filler(1023, 1), 32: PACK_IN, 512: filler(5120)}, packed,
-                     {'vload': 2, 'vpu': 2, 'vstore': 3}),
-}
+                     {'vload': 2, 'vpu': 2, 'vstore': 3}),}
 
 def vpu(kind, dst, src): return ('vpu_unary', f'kind = "{kind}", dst = {dst} : i32, src = {src} : i32')
 

@@ -27,8 +27,7 @@ LogicalResult verifyAtlasArtifact(ModuleOp module, bool llvmBlock,
                                   llvm::SmallVectorImpl<uint32_t> &words);
 // Rejects explicitly untimed streams and checks selected RTL timing even
 // without timing metadata; legacy streams retain their verification scope.
-LogicalResult verifyAtlasExecutable(ModuleOp module, bool llvmBlock,
-                                    llvm::SmallVectorImpl<uint32_t> &words);
+LogicalResult verifyAtlasExecutable(ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words);
 
 } // namespace mlir::atlas
 

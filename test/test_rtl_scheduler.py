@@ -1,10 +1,8 @@
 import re
 import unittest
 
-from rtl_test_support import (
-    DMA_SECOND, EMIT, FACTS, HALT, OPT, PAIRS, VERIFY, VLOAD, addi, branch, dma_setup, export,
-    jal, nop, program, run, selection, stream, transfer, unary, vls, wait, word_base,
-)
+from rtl_test_support import (DMA_SECOND, EMIT, FACTS, HALT, OPT, PAIRS, VERIFY, VLOAD, addi, branch, dma_setup, export,
+    jal, nop, program, run, selection, stream, transfer, unary, vls, wait, word_base,)
 
 LEGACY = "--schedule-atlas-stream=rtl-dma-estimate=false rtl-best-of=false"
 ESTIMATE = "--schedule-atlas-stream=rtl-dma-estimate=true rtl-best-of=false"
@@ -31,8 +29,7 @@ def estimated_dma_cost(document):
                 stall += delay
                 cycle += delay
             else:
-                window = next(a for a in footprint["accesses"]
-                              if a["resource"] == "vmem" and a["at_completion"])
+                window = next(a for a in footprint["accesses"] if a["resource"] == "vmem" and a["at_completion"])
                 byte_count = 32 * window["count"]
                 latency = max(1, 2 * ((byte_count + 11) // 4), (byte_count + 63) // 64)
                 pending[channel] = (cycle + latency, window["first"] // 8192)
@@ -126,21 +123,16 @@ class RTLSchedulerTest(unittest.TestCase):
                 self.assertLess(load, scalar)
                 self.assertLess(scalar, store)
                 join = next(b for b in document["blocks"] if b.get("entry_contexts"))
-                self.assertEqual(sorted(c["entries"][0]["x8"] for c in join["entry_contexts"]),
-                                 [1280, 65536 + 256])
+                self.assertEqual(sorted(c["entries"][0]["x8"] for c in join["entry_contexts"]), [1280, 65536 + 256])
                 instructions = document["instructions"]
-                load_cycle = next(i["logical_issue_cycle"] for i in instructions
-                                  if i["mnemonic"] == "vload")
-                store_cycle = next(i["logical_issue_cycle"] for i in instructions
-                                   if i["mnemonic"] == "vstore")
+                load_cycle = next(i["logical_issue_cycle"] for i in instructions if i["mnemonic"] == "vload")
+                store_cycle = next(i["logical_issue_cycle"] for i in instructions if i["mnemonic"] == "vstore")
                 self.assertGreaterEqual(store_cycle - load_cycle, 30)
-                self.assertLessEqual(issue_cycle(document["instructions"][-1]),
-                                     issue_cycle(legacy["instructions"][-1]))
+                self.assertLessEqual(issue_cycle(document["instructions"][-1]), issue_cycle(legacy["instructions"][-1]))
 
     def test_loop_reordering_keeps_scalar_footprints_and_redirect_slot(self):
         setup = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3)]
-        body = [addi(9, 0, 17), VLOAD, vls("vstore", 4, 6, 32),
-                addi(6, 6, 256), addi(13, 13, 1)]
+        body = [addi(9, 0, 17), VLOAD, vls("vstore", 4, 6, 32), addi(6, 6, 256), addi(13, 13, 1)]
         ops = [*setup, *body, branch("blt", 13, 14, -len(body)), nop(), HALT]
         timed, _, document = self.schedule(ops)
         printed = stream(timed)

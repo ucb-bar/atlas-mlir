@@ -128,8 +128,7 @@ def extract(document, raw, spec, jobs=1, only=None):
         records.append({"name": f"{spec['engine']}.{name}/{length}", "engine": spec["engine"], "module": spec["module"],
                         "sequence": name, "length": length,
                         "ops": [{"op": s["op"], **({"inputs": s["inputs"]} if "inputs" in s else {})} for s in steps],
-                        "gaps": [results[0][0], results[-1][0]],
-                        "min_gap": low, "stable_gap": high,
+                        "gaps": [results[0][0], results[-1][0]], "min_gap": low, "stable_gap": high,
                         "results": pairs.runs(results),
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} spacings, "
                                     "event multisets compared with isolated runs"})

@@ -193,18 +193,11 @@ std::vector<uint32_t> mlir::atlas::idleDelays(int idle) {
 
 // Whether a conditional branch is taken, when its operands are known.
 static std::optional<bool> branchTaken(const Instr &in, const RegValues &regs) {
-  if (!regs[in.rs1] || !regs[in.rs2])
-    return std::nullopt;
+  if (!regs[in.rs1] || !regs[in.rs2]) return std::nullopt;
   uint32_t a = *regs[in.rs1], b = *regs[in.rs2];
   int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
-  return llvm::StringSwitch<std::optional<bool>>(in.op->name)
-      .Case("beq", a == b)
-      .Case("bne", a != b)
-      .Case("blt", sa < sb)
-      .Case("bge", sa >= sb)
-      .Case("bltu", a < b)
-      .Case("bgeu", a >= b)
-      .Default(std::nullopt);
+  return llvm::StringSwitch<std::optional<bool>>(in.op->name).Case("beq", a == b).Case("bne", a != b)
+      .Case("blt", sa < sb).Case("bge", sa >= sb).Case("bltu", a < b).Case("bgeu", a >= b).Default(std::nullopt);
 }
 
 static bool mergeInto(RegValues &into, const RegValues &from, int first = 1) {
@@ -386,26 +379,22 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     size_t e = s.blockEnd(b);
     std::optional<bool> taken;
     for (size_t i = starts[b]; i < e; ++i) {
-      if (instrs[i].op->opClass == OpClass::Branch)
-        taken = branchTaken(instrs[i], regs);
+      if (instrs[i].op->opClass == OpClass::Branch) taken = branchTaken(instrs[i], regs);
       applyScalar(instrs[i], regs);
     }
     if (!taken) {
-      for (size_t next : succs[b])
-        reach(next, regs);
+      for (size_t next : succs[b]) reach(next, regs);
       continue;
     }
     size_t next = *taken ? targetIndex(e - 2) : e;
-    if (next < n)
-      reach(blockAt[next], regs);
+    if (next < n) reach(blockAt[next], regs);
   }
   if (total > kAtlasMaxEntryContexts) {
     s.contextLimit = "concrete register contexts exceed " + std::to_string(kAtlasMaxEntryContexts) +
                      " block entries, so values are merged over all paths";
   } else {
     s.contexts.resize(blocks);
-    for (size_t b = 0; b < blocks; ++b)
-      s.contexts[b].assign(seen[b].begin(), seen[b].end());
+    for (size_t b = 0; b < blocks; ++b) s.contexts[b].assign(seen[b].begin(), seen[b].end());
   }
   return s;
 }
@@ -445,36 +434,30 @@ std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
                         group.footprints.end(), sameFootprint);
     };
     auto it = llvm::find_if(groups, same);
-    if (it == groups.end())
-      groups.push_back({{entry}, std::move(footprints)});
+    if (it == groups.end()) groups.push_back({{entry}, std::move(footprints)});
     else
       it->entries.push_back(entry);
   }
   return groups;
 }
 
-void mlir::atlas::guardAtlasBlockDrain(DelayInsertion &delay,
-                                       const TimingProvider &provider,
+void mlir::atlas::guardAtlasBlockDrain(DelayInsertion &delay, const TimingProvider &provider,
                                        int idle, const OpInfo *next) {
-  if (!next || idle <= 0)
-    return;
+  if (!next || idle <= 0) return;
   bool halt = next->opClass == OpClass::Halt;
   if (halt || (isControlFlow(*next) && !provider.redirectWaitsForDelay))
-    delay = {idleDelays(idle - 1), true, delay.reason,
-             halt ? "a halt does not wait for a delay"
+    delay = {idleDelays(idle - 1), true, delay.reason, halt ? "a halt does not wait for a delay"
                   : "a redirect does not wait for a delay"};
 }
 
 InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,
                                                         const RegValues *context) {
   InFlightDiagnostic diagnostic = op->emitOpError(error);
-  if (!s.contextLimit.empty())
-    diagnostic.attachNote() << s.contextLimit;
+  if (!s.contextLimit.empty()) diagnostic.attachNote() << s.contextLimit;
   if (context) {
     std::string known;
     for (int r = 1; r < 32; ++r)
-      if ((*context)[r])
-        known += " x" + std::to_string(r) + "=0x" + llvm::utohexstr(*(*context)[r]);
+      if ((*context)[r]) known += " x" + std::to_string(r) + "=0x" + llvm::utohexstr(*(*context)[r]);
     diagnostic.attachNote() << "in the block entry context with" << (known.empty() ? " no known registers" : known);
   }
   return diagnostic;
@@ -552,12 +535,9 @@ LogicalResult mlir::atlas::checkAtlasStream(
         Footprint f = provider.footprint(in, regs);
         if (!f.error.empty())
           return emitAtlasFootprintError(s, s.ops[i], f.error, groups.size() > 1 ? &group.entries.front() : nullptr);
-        if (f.doneAge < 0)
-          return s.ops[i]->emitOpError("timing provider returned a negative completion age");
-        if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
-            (f.doneAge > 0 || op.opClass == OpClass::Halt))
-          return s.ops[i]->emitOpError(
-              "delay-slot instruction must be single-cycle scalar work");
+        if (f.doneAge < 0) return s.ops[i]->emitOpError("timing provider returned a negative completion age");
+        if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) && (f.doneAge > 0 || op.opClass == OpClass::Halt))
+          return s.ops[i]->emitOpError("delay-slot instruction must be single-cycle scalar work");
         if (in.release)
           for (int ch = 0; ch < 8; ++ch)
             if (!pending[ch].empty())
@@ -565,32 +545,24 @@ LogicalResult mlir::atlas::checkAtlasStream(
         for (int ch = 0; ch < 8; ++ch)
           for (const auto &[k, dma] : pending[ch]) {
             auto conflict = provider.dmaConflict(dma, f);
-            if (!conflict.error.empty())
-              return s.ops[i]->emitOpError(conflict.error);
+            if (!conflict.error.empty()) return s.ops[i]->emitOpError(conflict.error);
             if (conflict.value.conflict)
-              return s.ops[i]->emitOpError()
-                     << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
-                     << " on channel " << ch
-                     << ", which may still be in flight; a delay cannot cover "
+              return s.ops[i]->emitOpError() << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
+                     << " on channel " << ch << ", which may still be in flight; a delay cannot cover "
                         "a DMA transfer, so add atlas.dma_wait first";
           }
         bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
         if (command && !pending[op.channel].empty())
-          s.ops[i]->emitWarning()
-              << "reuses DMA channel " << op.channel << " while "
-              << name(pending[op.channel].back().first)
-              << " may still be in flight; the timing model needs an "
+          s.ops[i]->emitWarning() << "reuses DMA channel " << op.channel << " while "
+              << name(pending[op.channel].back().first) << " may still be in flight; the timing model needs an "
                  "atlas.dma_wait here, which a delay cannot replace";
         if (op.opClass == OpClass::Halt)
           for (int ch = 0; ch < 8; ++ch)
             if (!pending[ch].empty())
-              return s.ops[i]->emitOpError()
-                     << "halts while DMA channel " << ch
+              return s.ops[i]->emitOpError() << "halts while DMA channel " << ch
                      << " may still be in flight; add atlas.dma_wait first";
-        if (op.opClass == OpClass::DmaWait)
-          pending[op.channel].clear();
-        if (command)
-          pending[op.channel].push_back({i, f});
+        if (op.opClass == OpClass::DmaWait) pending[op.channel].clear();
+        if (command) pending[op.channel].push_back({i, f});
         applyScalar(in, regs);
       }
       // Timing is checked one block at a time, so a transfer must complete in
@@ -599,8 +571,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
         if (!pending[ch].empty())
           return s.ops[pending[ch].back().first]->emitOpError(
               "may still be in flight when its block ends; timing requires DMA "
-              "completion before a block boundary, so add atlas.dma_wait in "
-              "this block");
+              "completion before a block boundary, so add atlas.dma_wait in " "this block");
     }
   }
   return success();
@@ -733,15 +704,12 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
   for (size_t block = 0; block < s.starts.size(); ++block) {
     // Issue cycles depend only on the words, so every context shares them.
     std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, provider);
-    if (groups.size() > 1)
-      resolved.contexts[block].resize(groups.size());
+    if (groups.size() > 1) resolved.contexts[block].resize(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
-      if (groups.size() > 1)
-        resolved.contexts[block][g].entries = groups[g].entries;
+      if (groups.size() > 1) resolved.contexts[block][g].entries = groups[g].entries;
       RegValues regs = groups[g].entries.front();
       auto reservations = provider.createReservations();
-      if (!reservations.error.empty())
-        return s.ops[s.starts[block]]->emitOpError(reservations.error);
+      if (!reservations.error.empty()) return s.ops[s.starts[block]]->emitOpError(reservations.error);
       if (!reservations.value)
         return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
       TimingReservations &table = *reservations.value;
@@ -758,27 +726,22 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
           return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
         for (const Issued &prior : issued) {
           auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
-          if (!rule.error.empty())
-            return s.ops[i]->emitOpError(rule.error);
+          if (!rule.error.empty()) return s.ops[i]->emitOpError(rule.error);
           const Dependence &d = rule.value;
-          if (d.distance < 0)
-            return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
+          if (d.distance < 0) return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
           if (cycle - prior.cycle < d.distance)
             return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
                    << "; requires " << d.distance << ", got " << cycle - prior.cycle;
         }
         auto conflict = table.conflict(in, f, cycle);
-        if (!conflict.error.empty())
-          return s.ops[i]->emitOpError(conflict.error);
-        if (!conflict.value.empty())
-          return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
+        if (!conflict.error.empty()) return s.ops[i]->emitOpError(conflict.error);
+        if (!conflict.value.empty()) return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
         if (in.release && cycle < drained)
           return s.ops[i]->emitOpError("completion publication precedes fixed-latency completion");
         if (in.op->opClass == OpClass::Halt) {
           if (i > 0 && isa<DelayOp>(s.ops[i - 1]))
             return s.ops[i]->emitOpError("halt does not wait for a preceding DELAY; require a scalar guard instruction");
-          if (cycle < drained)
-            return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
+          if (cycle < drained) return s.ops[i]->emitOpError("halt precedes completion of in-flight fixed-latency work");
         }
         if (isControlFlow(*in.op)) {
           if (!provider.redirectWaitsForDelay && i > 0 && isa<DelayOp>(s.ops[i - 1]))
@@ -787,41 +750,32 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
             return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
         }
         std::string reservationError = table.reserve(in, f, cycle);
-        if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
-          reservationError = table.onWait(in, cycle);
-        if (!reservationError.empty())
-          return s.ops[i]->emitOpError(reservationError);
+        if (reservationError.empty() && in.op->opClass == OpClass::DmaWait) reservationError = table.onWait(in, cycle);
+        if (!reservationError.empty()) return s.ops[i]->emitOpError(reservationError);
         if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
           pendingDMA[in.op->channel] = s.ops[i];
-        else if (in.op->opClass == OpClass::DmaWait)
-          pendingDMA[in.op->channel] = nullptr;
+        else if (in.op->opClass == OpClass::DmaWait) pendingDMA[in.op->channel] = nullptr;
         issued.push_back({i, f, cycle});
-        if (groups.size() > 1)
-          resolved.contexts[block][g].footprints.push_back(f);
-        if (g == 0)
-          resolved.footprints[i] = f;
+        if (groups.size() > 1) resolved.contexts[block][g].footprints.push_back(f);
+        if (g == 0) resolved.footprints[i] = f;
         resolved.cycles[i] = cycle;
         drained = std::max(drained, cycle + f.doneAge + 1);
         applyScalar(in, regs);
         auto gap = provider.issueGap(in);
-        if (!gap.error.empty())
-          return s.ops[i]->emitOpError(gap.error);
+        if (!gap.error.empty()) return s.ops[i]->emitOpError(gap.error);
         if (gap.value <= 0 || cycle > std::numeric_limits<int>::max() - gap.value)
           return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
         cycle += gap.value;
       }
       for (Operation *launch : pendingDMA)
-        if (launch)
-          return launch->emitOpError("timing verification requires DMA completion before a block boundary");
-      if (!s.endsInHalt(block))
-        resolved.successorIssue[block] = cycle;
+        if (launch) return launch->emitOpError("timing verification requires DMA completion before a block boundary");
+      if (!s.endsInHalt(block)) resolved.successorIssue[block] = cycle;
       if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
         int idle = 0;
         if (s.fallsThrough(block))
           for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i) {
             auto gap = provider.issueGap(s.instrs[i]);
-            if (!gap.error.empty())
-              return s.ops[i]->emitOpError(gap.error);
+            if (!gap.error.empty()) return s.ops[i]->emitOpError(gap.error);
             if (gap.value <= 0 || idle > std::numeric_limits<int>::max() - gap.value)
               return s.ops[i]->emitOpError("timing provider boundary gap exceeds positive cycle domain");
             idle += gap.value;
@@ -831,8 +785,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       }
     }
   }
-  if (trace)
-    *trace = std::move(resolved);
+  if (trace) *trace = std::move(resolved);
   return success();
 }
 
@@ -860,10 +813,8 @@ FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
   if (!requested.empty() && retained && retained.getValue() != requested)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   bool evidence = module->hasAttr(kAtlasRTLEvidence);
-  std::string id = !requested.empty() ? requested.str()
-                   : retained         ? retained.getValue().str()
-                   : evidence         ? kAtlasRTLTimingProviderId.str()
-                                      : kNpuModelTimingProviderId.str();
+  std::string id = !requested.empty() ? requested.str() : retained         ? retained.getValue().str()
+                   : evidence         ? kAtlasRTLTimingProviderId.str() : kNpuModelTimingProviderId.str();
   // Selected facts state the stream's timing contract; the model would time it
   // under rules the evidence does not support.
   if (evidence && id == kNpuModelTimingProviderId)

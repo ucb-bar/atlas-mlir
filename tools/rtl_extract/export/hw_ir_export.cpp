@@ -32,8 +32,7 @@ template <typename T> static std::string print(T value) {
 
 static const std::set<std::string> assertionKinds = {
     "sv.error", "sv.fatal", "sv.assert", "sv.assume", "sv.assert.concurrent",
-    "sv.assume.concurrent", "verif.assert", "verif.assume", "verif.clocked_assert",
-    "verif.clocked_assume"};
+    "sv.assume.concurrent", "verif.assert", "verif.assume", "verif.clocked_assert", "verif.clocked_assume"};
 
 static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
   llvm::DenseMap<Operation *, std::string> opIds;
@@ -42,8 +41,7 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
   unsigned nextOp = 0, nextBlock = 0;
   mod->walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (op != mod.getOperation()) opIds[op] = "op" + std::to_string(nextOp++);
-    for (auto result : op->getResults())
-      valueIds[result] = opIds[op] + ".r" + std::to_string(result.getResultNumber());
+    for (auto result : op->getResults()) valueIds[result] = opIds[op] + ".r" + std::to_string(result.getResultNumber());
     for (auto &region : op->getRegions()) {
       for (auto &block : region) {
         unsigned blockNumber = nextBlock++;
@@ -61,13 +59,10 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
   auto &body = mod->getRegion(0).front();
   auto output = cast<hw::OutputOp>(body.getTerminator());
   for (const auto &port : mod.getPortList()) {
-    Value value = port.isOutput() ? output.getOperand(port.argNum)
-                                 : body.getArgument(port.argNum);
+    Value value = port.isOutput() ? output.getOperand(port.argNum) : body.getArgument(port.argNum);
     ports.push_back(llvm::json::Object{
-        {"name", port.name.getValue()},
-        {"direction", port.isOutput() ? "output" : port.isInput() ? "input" : "inout"},
-        {"index", static_cast<int64_t>(port.argNum)}, {"type", print(port.type)},
-        {"value", valueIds.lookup(value)}});
+        {"name", port.name.getValue()}, {"direction", port.isOutput() ? "output" : port.isInput() ? "input" : "inout"},
+        {"index", static_cast<int64_t>(port.argNum)}, {"type", print(port.type)}, {"value", valueIds.lookup(value)}});
   }
   llvm::json::Array operations;
   mod->walk<WalkOrder::PreOrder>([&](Operation *op) {
@@ -86,10 +81,8 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
     llvm::json::Object item{
         {"id", opIds.lookup(op)}, {"kind", op->getName().getStringRef()},
         {"location", print(op->getLoc())}, {"attributes", std::move(attrs)},
-        {"operands", std::move(operands)}, {"results", std::move(results)},
-        {"result_types", std::move(resultTypes)},
-        {"combinational", hw::isCombinational(op)},
-        {"identity_wire", isa<hw::WireOp>(op)},
+        {"operands", std::move(operands)}, {"results", std::move(results)}, {"result_types", std::move(resultTypes)},
+        {"combinational", hw::isCombinational(op)}, {"identity_wire", isa<hw::WireOp>(op)},
         {"has_regions", op->getNumRegions() != 0}};
     if (auto inst = dyn_cast<hw::InstanceOp>(op)) {
       llvm::json::Array inputs, outputs;
@@ -102,8 +95,7 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
     operations.push_back(std::move(item));
   });
   llvm::json::Object result{{"name", mod.getName()}, {"location", print(mod.getLoc())},
-          {"ports", std::move(ports)}, {"arguments", std::move(arguments)},
-          {"operations", std::move(operations)}};
+          {"ports", std::move(ports)}, {"arguments", std::move(arguments)}, {"operations", std::move(operations)}};
   if (!assertions) return result;
   // Each assertion op with its enclosing region ops, outermost first (the module itself excluded).
   llvm::json::Array found;
@@ -114,8 +106,7 @@ static llvm::json::Object exportModule(hw::HWModuleOp mod, bool assertions) {
       chain.push_back(llvm::json::Object{{"op", opIds.lookup(child->getParentOp())},
                                          {"region", child->getParentRegion()->getRegionNumber()}});
     std::reverse(chain.begin(), chain.end());
-    found.push_back(llvm::json::Object{{"op", opIds.lookup(op)},
-                                       {"parents", llvm::json::Array(chain)}});
+    found.push_back(llvm::json::Object{{"op", opIds.lookup(op)}, {"parents", llvm::json::Array(chain)}});
   });
   result["assertions"] = std::move(found);
   return result;
@@ -125,10 +116,8 @@ template <typename Module> static llvm::json::Object exportDeclaration(Module mo
   llvm::json::Array ports;
   for (const auto &port : mod.getPortList())
     ports.push_back(llvm::json::Object{
-        {"name", port.name.getValue()},
-        {"direction", port.isOutput() ? "output" : port.isInput() ? "input" : "inout"},
-        {"index", static_cast<int64_t>(port.argNum)}, {"type", print(port.type)},
-        {"location", print(port.loc)}});
+        {"name", port.name.getValue()}, {"direction", port.isOutput() ? "output" : port.isInput() ? "input" : "inout"},
+        {"index", static_cast<int64_t>(port.argNum)}, {"type", print(port.type)}, {"location", print(port.loc)}});
   return llvm::json::Object{{"name", mod.getName()},
       {"kind", mod->getName().getStringRef()}, {"location", print(mod.getLoc())},
       {"verilog_name", mod.getVerilogModuleName()}, {"ports", std::move(ports)}};
@@ -143,8 +132,7 @@ int main(int argc, char **argv) {
   }
   DialectRegistry registry;
   registry.insert<hw::HWDialect, comb::CombDialect, seq::SeqDialect, sv::SVDialect,
-                  verif::VerifDialect, ltl::LTLDialect, emit::EmitDialect,
-                  om::OMDialect, sim::SimDialect>();
+                  verif::VerifDialect, ltl::LTLDialect, emit::EmitDialect, om::OMDialect, sim::SimDialect>();
   MLIRContext context(registry);
   context.disableMultithreading();
   auto input = parseSourceFile<ModuleOp>(argv[1], &context);
@@ -156,16 +144,13 @@ int main(int argc, char **argv) {
   input->walk([&](Operation *op) {
     ++operationCounts[op->getName().getStringRef().str()];
     ++dialectCounts[op->getName().getDialectNamespace().str()];
-    if (auto mod = dyn_cast<hw::HWModuleExternOp>(op))
-      declarations.push_back(exportDeclaration(mod));
-    if (auto mod = dyn_cast<hw::HWModuleGeneratedOp>(op))
-      declarations.push_back(exportDeclaration(mod));
+    if (auto mod = dyn_cast<hw::HWModuleExternOp>(op)) declarations.push_back(exportDeclaration(mod));
+    if (auto mod = dyn_cast<hw::HWModuleGeneratedOp>(op)) declarations.push_back(exportDeclaration(mod));
     if (auto inst = dyn_cast<hw::InstanceOp>(op)) {
       auto parent = op->getParentOfType<hw::HWModuleOp>();
       instances.push_back(llvm::json::Object{
           {"parent_module", parent ? parent.getName() : StringRef()},
-          {"name", inst.getInstanceName()}, {"module", inst.getModuleName()},
-          {"location", print(inst.getLoc())}});
+          {"name", inst.getInstanceName()}, {"module", inst.getModuleName()}, {"location", print(inst.getLoc())}});
     }
   });
   input->walk([&](hw::HWModuleOp mod) {
@@ -179,10 +164,8 @@ int main(int argc, char **argv) {
   for (const auto &item : dialectCounts) dialects[item.first] = item.second;
   llvm::json::Object output{{"schema_version", 1}, {"producer", "CIRCT typed SSA traversal"},
       {"modules", std::move(modules)}, {"available_modules", std::move(inventory)},
-      {"missing_modules", std::move(missing)},
-      {"census", llvm::json::Object{{"operation_counts", std::move(opCounts)},
-          {"dialect_counts", std::move(dialects)},
-          {"external_or_generated_modules", std::move(declarations)},
+      {"missing_modules", std::move(missing)}, {"census", llvm::json::Object{{"operation_counts", std::move(opCounts)},
+          {"dialect_counts", std::move(dialects)}, {"external_or_generated_modules", std::move(declarations)},
           {"instance_sites", std::move(instances)}}}};
   llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(output)));
   return 0;

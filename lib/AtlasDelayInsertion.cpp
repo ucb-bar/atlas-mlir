@@ -22,11 +22,9 @@ constexpr const char *kContextReason = "another entry context of this block issu
 // Place source order or `order` no earlier than `floor`/`drainFloor`.
 // A nonempty floor identifies an entry context in diagnostics.
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
-                        const TimingProvider &p, const RegValues &entry,
-                        ArrayRef<int> floor, int drainFloor,
+                        const TimingProvider &p, const RegValues &entry, ArrayRef<int> floor, int drainFloor,
                         std::vector<DelayInsertion> &before,
-                        DelayInsertion &after, std::vector<int> &cycles,
-                        int &drainedAt, int &tail,
+                        DelayInsertion &after, std::vector<int> &cycles, int &drainedAt, int &tail,
                         ArrayRef<size_t> order = {}) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
@@ -193,8 +191,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         return failure();
       int idle = cycle - nextFree;
       place(i, f, cycle, reason);
-      if (!p.redirectWaitsForDelay && idle > 0)
-        before[i] = {idleDelays(idle - 1), true, reason, kRedirectGuard};
+      if (!p.redirectWaitsForDelay && idle > 0) before[i] = {idleDelays(idle - 1), true, reason, kRedirectGuard};
       place(slotIndex, sf, cycle + 1, "");
       if (!fault.empty())
         return ops[i]->emitOpError(fault);
@@ -221,8 +218,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
              s.fallsThrough(block)
                  ? "this block finishes before the next one starts"
                  : "work finishes before the stream ends"};
-    guardAtlasBlockDrain(after, p, idle,
-                         s.fallsThrough(block) ? instrs[end].op : nullptr);
+    guardAtlasBlockDrain(after, p, idle, s.fallsThrough(block) ? instrs[end].op : nullptr);
   }
   return success();
 }
@@ -231,8 +227,7 @@ constexpr int kMaxContextRounds = 64;
 
 } // namespace
 
-LogicalResult mlir::atlas::atlasBlockDelays(
-    const AtlasStream &s, size_t block, const TimingProvider &p,
+LogicalResult mlir::atlas::atlasBlockDelays(const AtlasStream &s, size_t block, const TimingProvider &p,
     std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail,
     std::optional<ArrayRef<size_t>> requestedOrder) {
   size_t begin = s.starts[block], end = s.blockEnd(block);
@@ -246,12 +241,10 @@ LogicalResult mlir::atlas::atlasBlockDelays(
         return s.ops[begin]->emitOpError("delay planning order must be a permutation of this block");
       seen[i - begin] = true;
     }
-    if ((s.endsInHalt(block) && order.back() != end - 1) ||
-        (s.endsInBranch(block) &&
+    if ((s.endsInHalt(block) && order.back() != end - 1) || (s.endsInBranch(block) &&
          (order[order.size() - 2] != end - 2 || order.back() != end - 1)))
       return s.ops[begin]->emitOpError("delay planning order must preserve the terminator and delay slot");
-    for (size_t i = begin; i < end; ++i)
-      before[i] = {};
+    for (size_t i = begin; i < end; ++i) before[i] = {};
     after = {};
   }
   std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, p);
@@ -268,18 +261,15 @@ LogicalResult mlir::atlas::atlasBlockDelays(
   for (int round = 0; round < kMaxContextRounds; ++round) {
     bool stable = true;
     for (const AtlasContextGroup &group : groups) {
-      for (size_t i = begin; i < end; ++i)
-        before[i] = {};
+      for (size_t i = begin; i < end; ++i) before[i] = {};
       after = {};
       if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail, order)))
         return failure();
       // A delay keeps the reason of the context that needs the most idle time there on its own.
       for (size_t i = begin; round == 0 && i < end; ++i) {
         int idle = before[i].guard;
-        for (uint32_t n : before[i].delays)
-          idle += n + 1;
-        if (idle > own[i - begin].first)
-          own[i - begin] = {idle, before[i].reason};
+        for (uint32_t n : before[i].delays) idle += n + 1;
+        if (idle > own[i - begin].first) own[i - begin] = {idle, before[i].reason};
       }
       for (size_t k = 0; k < floor.size(); ++k)
         if (cycles[k] > floor[k]) {
@@ -298,8 +288,7 @@ LogicalResult mlir::atlas::atlasBlockDelays(
       return success();
     }
   }
-  return s.ops[begin]->emitOpError("delays do not converge over the block's ")
-         << groups.size() << " entry contexts";
+  return s.ops[begin]->emitOpError("delays do not converge over the block's ") << groups.size() << " entry contexts";
 }
 
 namespace {

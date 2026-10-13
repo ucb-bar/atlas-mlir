@@ -51,8 +51,7 @@ def scalar_load_trace(first="lw", second="lw", same_destination=False, consecuti
     load = lambda rd, offset, kind: offset << 20 | 6 << 15 | (6 if kind == "seld" else 2) << 12 | rd << 7 | 0x03
     store_rd = second_rd if second == "lw" else first_rd
     stored = 0x55667788 if second == "lw" else 0x11223344
-    words = [6 << 7 | 0x13, load(first_rd, 0, first), 0x13, 0x13,
-             load(second_rd, 4, second), 0x13, 0x13, 0x13,
+    words = [6 << 7 | 0x13, load(first_rd, 0, first), 0x13, 0x13, load(second_rd, 4, second), 0x13, 0x13, 0x13,
              store_rd << 20 | 6 << 15 | 2 << 12 | 8 << 7 | 0x23,
              0x13, 1 << 20 | 1 << 7 | 0x13, 0xc10 << 20 | 1 << 15 | 1 << 12 | 0x73, 0x73]
     if consecutive_stores:
@@ -114,19 +113,10 @@ class PortableTest(unittest.TestCase):
                                  [(1, 2, 3), (1, 2, 3)])
 
     def test_scalar_load_shared_edge_keeps_event_attribution_strict(self):
-        mutations = (
-            (3, dict(scmd_addr=4)),
-            (4, dict(sresp_data=0x55667788)),
-            (4, dict(sresp=0)),
-            (5, dict(xw_addr=17)),
-            (5, dict(xw_data=0x11223345)),
-            (5, dict(xw_en=0)),
-            (6, dict(scmd_addr=0)),
-            (6, dict(xw_en=1, xw_addr=31, xw_data=9)),
-            (7, dict(sresp_data=0x11223344)),
-            (8, dict(xw_addr=16)),
-            (8, dict(xw_data=0x55667789)),
-        )
+        mutations = ((3, dict(scmd_addr=4)), (4, dict(sresp_data=0x55667788)), (4, dict(sresp=0)),
+            (5, dict(xw_addr=17)), (5, dict(xw_data=0x11223345)), (5, dict(xw_en=0)), (6, dict(scmd_addr=0)),
+            (6, dict(xw_en=1, xw_addr=31, xw_data=9)), (7, dict(sresp_data=0x11223344)), (8, dict(xw_addr=16)),
+            (8, dict(xw_data=0x55667789)),)
         for edge, mutation in mutations:
             with self.subTest(edge=edge, mutation=mutation):
                 samples, words, case = scalar_load_trace()
@@ -538,8 +528,7 @@ class VerilatorReplayTest(unittest.TestCase):
             ("dma_pair_in_flight", lambda v: v["dma_av"] and v["dma_ar"] and v["dma_ao"] == 0, "dma_ad", flip()),
             ("dma_pair_in_flight", lambda v: v["dma_dv"] and v["dma_dr"], "dma_ds", flip()),
             ("dma_pair_in_flight", lambda v: v["dma_busy0"] and v["dma_busy1"], "dma_busy1", 0),
-            ("dma_pair_in_flight", lambda v: v["dma_vw"] and v["dma_vwg"], "dma_vwa", flip())],
-        ]
+            ("dma_pair_in_flight", lambda v: v["dma_vw"] and v["dma_vwg"], "dma_vwa", flip())],]
         for name, predicate, key, value in mutations:
             with self.subTest(name=name, key=key):
                 self.mutate(name, lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))

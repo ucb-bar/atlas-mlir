@@ -5,11 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rtl_test_support import (
-    CONSUMERS, FACTS, HALT, OPT, PAIRS, ROOT, VERIFY, addi, block, busy,
+from rtl_test_support import (CONSUMERS, FACTS, HALT, OPT, PAIRS, ROOT, VERIFY, addi, block, busy,
     decode_mxu, export, facts, gapped, issue_cycles, issue_gap, mxu, pair_spec,
-    pairs_variant, program, run, selection, separated, spaced, stream, transpose, vls, vpu,
-)
+    pairs_variant, program, run, selection, separated, spaced, stream, transpose, vls, vpu,)
 
 SETS = [(0, 2, 4), (8, 10, 12), (16, 18, 20), (24, 26, 28)]
 
@@ -60,14 +58,10 @@ class PairAdmissionTest(unittest.TestCase):
 
     def test_mxu_admission_and_data_boundaries(self):
         for unit in (0, 1):
-            cases = [("matmul", "pop_acc_bf16", 0, 0, 64 if unit == 0 else 4),
-                     ("matmul", "pop_acc_bf16", 1, 0, 1),
-                     ("matmul", "matmul", 1, 0, 32),
-                     ("matmul", "matmul_acc", 0, 1, 64 if unit == 0 else 32),
-                     ("matmul", "push_weight", 0, 0, 94 if unit == 0 else 34),
-                     ("matmul", "push_weight", 0, 1, 1),
-                     ("push_weight", "matmul", 0, 0, 33),
-                     ("push_weight", "matmul", 0, 1, 1),
+            cases = [("matmul", "pop_acc_bf16", 0, 0, 64 if unit == 0 else 4), ("matmul", "pop_acc_bf16", 1, 0, 1),
+                     ("matmul", "matmul", 1, 0, 32), ("matmul", "matmul_acc", 0, 1, 64 if unit == 0 else 32),
+                     ("matmul", "push_weight", 0, 0, 94 if unit == 0 else 34), ("matmul", "push_weight", 0, 1, 1),
+                     ("push_weight", "matmul", 0, 0, 33), ("push_weight", "matmul", 0, 1, 1),
                      ("push_acc_fp8", "matmul_acc", 0, 0, 2 if unit == 0 else 33),
                      ("push_acc_fp8", "matmul_acc", 1, 0, 1)]
             for first, second, acc, slot, gap in cases:
@@ -199,8 +193,7 @@ class PairAdmissionTest(unittest.TestCase):
             path = pairs_variant(directory, lambda d: d.update(
                 op_pairs=[r for r in d["op_pairs"] if r["engine"] not in ("mxu0", "mxu1")],
                 capacity=[c for c in d["capacity"] if c["engine"] not in ("mxu0", "mxu1")]))
-            source = program([addi(6, 0, 256), vls("vload", 0), vpu("add", SETS[0]),
-                              vls("vstore", 4, offset=32), HALT])
+            source = program([addi(6, 0, 256), vls("vload", 0), vpu("add", SETS[0]), vls("vstore", 4, offset=32), HALT])
             cases = [("vls_add", source, self.with_pairs)]
             cases += [(f"tile{u}", program([mxu("push_weight", u), mxu("matmul", u),
                                           mxu("pop_acc_bf16", u), HALT]), selection(pairs=path)) for u in (0, 1)]

@@ -12,17 +12,14 @@ import sys
 import time
 from pathlib import Path
 
-HIERARCHY = {
-    "sifive.enterprise.firrtl.TestHarnessHierarchyAnnotation": "model_module_hierarchy.json",
-    "sifive.enterprise.firrtl.ModuleHierarchyAnnotation": "top_module_hierarchy.json",
-}
+HIERARCHY = {"sifive.enterprise.firrtl.TestHarnessHierarchyAnnotation": "model_module_hierarchy.json",
+    "sifive.enterprise.firrtl.ModuleHierarchyAnnotation": "top_module_hierarchy.json",}
 
 
 def lowering_command(firtool, firrtl, prepared, options, out, mode):
     hw = out / ("ee290.debug.hw.mlir" if mode == "debug" else "ee290.hw.mlir")
     command = [firtool, "--format=fir", "--export-module-hierarchy", "--verify-each=true",
-               "--warn-on-unprocessed-annotations", "--disable-annotation-classless",
-               "--disable-annotation-unknown"]
+               "--warn-on-unprocessed-annotations", "--disable-annotation-classless", "--disable-annotation-unknown"]
     if mode == "debug":
         command.append("--mlir-timing")
     command += ["--mlir-print-debuginfo", "--lowering-options=" + options.strip()]

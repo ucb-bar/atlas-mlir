@@ -606,8 +606,7 @@ class RetainedHWIRTests(unittest.TestCase):
 
     def test_debug_matches_recorded_timing_lowering_policy(self):
         command = retain.lowering_command("firtool", Path("input.fir"), Path("debug.anno.json"), "noAlwaysComb\n", Path("out"), "debug")
-        self.assertEqual(command, [
-            "firtool", "--format=fir", "--export-module-hierarchy", "--verify-each=true",
+        self.assertEqual(command, ["firtool", "--format=fir", "--export-module-hierarchy", "--verify-each=true",
             "--warn-on-unprocessed-annotations", "--disable-annotation-classless",
             "--disable-annotation-unknown", "--mlir-timing", "--mlir-print-debuginfo",
             "--lowering-options=noAlwaysComb", "-O=debug", "--preserve-values=named",

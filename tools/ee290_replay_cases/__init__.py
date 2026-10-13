@@ -86,13 +86,11 @@ MUL = tuple(op for bank, words in enumerate([0, 256, 512, 768]) for op in (add(6
 MIXED = (add(5, 0), dma_config(0, 5), add(6, 0), upper(1, 589824), add(2, 128), dma('load', 0, 6, 1), wait(0)) + TRANSPOSE + \
         (upper(3, 589824), add(3, 1024, 3), dma('store', 1, 8, 3), wait(1))
 
-STRAIGHT = {
-    'xlu': Case(TRANSPOSE + END, {0: raw_tiles()}, transposed, {'vload': 1, 'xlu': 1, 'vstore': 1}),
+STRAIGHT = {'xlu': Case(TRANSPOSE + END, {0: raw_tiles()}, transposed, {'vload': 1, 'xlu': 1, 'vstore': 1}),
     'vmul': Case(MUL + END, {0: bf16_pairs()}, products, {'vload': 4, 'vpu': 1, 'vstore': 2}),
     'dma_xlu': Case(MIXED + END, {0: raw_tiles()}, composed, {'dma': 2, 'vload': 1, 'xlu': 1, 'vstore': 1},
                     dram={A: bytes(source(i) for i in range(128)), B: bytes((53 * i + 79) & 255 for i in range(128)),
-                          A + (1 << 32): b'\xe7' * 128, O - 32: b'\xa5' * 192}, dma=(4, 4)),
-}
+                          A + (1 << 32): b'\xe7' * 128, O - 32: b'\xa5' * 192}, dma=(4, 4)),}
 
 def copy_tile(first, to):
     return lambda vm, dram: put(vm, to, tile(vm, first))
@@ -111,13 +109,11 @@ def diamond(condition):
     return (add(6, 0), add(7, 256), add(8, 512), add(5, condition), branch('beq', 5, 0, 5), nop(),
             vload(0, 6), jal(3), nop(), vload(0, 7), vstore(0, 8))
 
-CONTROL = {
-    'loop': Case(LOOP + END, {0: raw_tiles()}, copy_tile(0, 32), {'vload': 3, 'vstore': 3}),
+CONTROL = {'loop': Case(LOOP + END, {0: raw_tiles()}, copy_tile(0, 32), {'vload': 3, 'vstore': 3}),
     'dma_loop': Case(DMA_LOOP + END, {0: raw_tiles()}, loaded_copy, {'dma': 3, 'vload': 3, 'vstore': 3},
                      dram={A: bytes(source(i) for i in range(128))}, dma=(12, 0)),
     'diamond_taken': Case(diamond(0) + END, {0: raw_tiles()}, copy_tile(32, 64), {'vload': 1, 'vstore': 1}),
-    'diamond_fall': Case(diamond(1) + END, {0: raw_tiles()}, copy_tile(0, 64), {'vload': 1, 'vstore': 1}),
-}
+    'diamond_fall': Case(diamond(1) + END, {0: raw_tiles()}, copy_tile(0, 64), {'vload': 1, 'vstore': 1}),}
 
 BANK1 = 8192  # first line of VMEM bank 1; x7 = 16 << 12 words addresses it
 SECOND = bytes((29 * i + 5) & 255 for i in range(1024))
@@ -133,12 +129,10 @@ FINAL_VPU_LOAD = tuple(op for bank, words in enumerate([0, 256, 512, 768]) for o
 def load_store(vm, dram): put(vm, 32, tile(vm, 0)); put(vm, 64, tile(vm, BANK1))
 def vpu_load(vm, dram): products(vm, dram); put(vm, 192, tile(vm, BANK1))
 
-FINAL = {
-    'overlap_vls': Case(LOAD_STORE + END, {0: raw_tiles(), BANK1: SECOND}, load_store, {'vload': 2, 'vstore': 2},
+FINAL = {'overlap_vls': Case(LOAD_STORE + END, {0: raw_tiles(), BANK1: SECOND}, load_store, {'vload': 2, 'vstore': 2},
                         final=True, consumers=('final',), check=lambda events: overlapping(events, 'vload', 'vstore')),
     'overlap_vpu': Case(FINAL_VPU_LOAD + END, {0: bf16_pairs(), BANK1: SECOND}, vpu_load, {'vload': 5, 'vpu': 1, 'vstore': 3},
-                        final=True, consumers=('final',), check=lambda events: overlapping(events, 'vpu', 'vload')),
-}
+                        final=True, consumers=('final',), check=lambda events: overlapping(events, 'vpu', 'vload')),}
 
 # Two VMULs on the same sources: the second issues at the first's next_issue_age, one edge before the first
 # releases.
@@ -165,8 +159,7 @@ XLU_PIPE = (add(6, 0), upper(7, 16), vload(0, 6, 0), vload(1, 6, 8), xlu(16, 0),
 def pipeline_transposed(vm, dram):
     for t in range(3): put(vm, BANK1 + 32 * t, transpose(tile(vm, 32 * t)))
 
-OVERLAP = {
-    'relax_vpu_under_vload': Case(VPU_LOAD + END, {0: bf16_pairs(), BANK1: SECOND}, vpu_load,
+OVERLAP = {'relax_vpu_under_vload': Case(VPU_LOAD + END, {0: bf16_pairs(), BANK1: SECOND}, vpu_load,
                                   {'vload': 5, 'vpu': 1, 'vstore': 3}, check=lambda events: overlapping(events, 'vpu', 'vload')),
     'relax_xlu_pipeline': Case(XLU_PIPE + END, {0: raw_tiles(), BANK1: filler(3072)}, pipeline_transposed,
                                {'vload': 3, 'xlu': 3, 'vstore': 3},
@@ -176,8 +169,7 @@ OVERLAP = {
     'relax_copy_same_bank': Case(copy_stream(add(7, 1024)) + END, {0: raw_tiles()}, copied_tiles(128), {'vload': 4, 'vstore': 4},
                                  check=lambda events: overlapping(events, 'vload', 'vstore')),
     'relax_vpu_next_issue': Case(VPU_PAIR + END, {0: bf16_pairs()}, vpu_pair, {'vload': 4, 'vpu': 2, 'vstore': 4},
-                                 check=lambda events: bool(issue_gaps(events, 'vpu'))),
-}
+                                 check=lambda events: bool(issue_gaps(events, 'vpu'))),}
 
 BANK1, BANK3, BANK4 = 8192, 3 * 8192, 4 * 8192          # first VMEM line of each bank
 A, B, O1, O2 = 0x90000000, 0x90001000, 0x90002000, 0x90003000
@@ -249,8 +241,7 @@ CONCURRENT = {
                                dma=(32, 0), final=True, consumers=('final',), check=under_dma('vload')),
     'dma_store_under_vls': Case(STORE_UNDER_VLS + END, {BANK3: SOURCE, BANK3 + 1024: TILE_B, BANK3 + 2048: filler(SIZE)},
                                 store_under_vls, {'dma': 1, 'vload': 1, 'vstore': 1}, dram=guarded(O1, filler(SIZE, 3072)),
-                                dma=(0, 32), final=True, consumers=('final',), check=under_dma('vload')),
-}
+                                dma=(0, 32), final=True, consumers=('final',), check=under_dma('vload')),}
 
 O = 0x90000400
 PAIR_STREAM = (add(5, 0), dma_config(0, 5), upper(1, 589824), upper(3, 589824), add(3, 1024, 3), add(2, 128), add(6, 0), add(7, 256),
@@ -266,14 +257,12 @@ PAIR_CASES = {
     'dma_pair_in_flight': Case(PAIR_STREAM + END, {0: filler(8192)}, moved, {'dma': 2}, dram={A: LOADED, O - 32: b'\xa5' * 192}, dma=(4, 4),
                                final=True, consumers=('final',), check=concurrent_dma),
     'dma_pair_compiled': Case(PAIR_STREAM + END, {0: filler(8192)}, moved, {'dma': 2}, dram={A: LOADED, O - 32: b'\xa5' * 192}, dma=(4, 4),
-                              check=concurrent_dma),
-}
+                              check=concurrent_dma),}
 
 def load():
     from . import mxu, vpu_ops
     groups = (STRAIGHT, CONTROL, CONCURRENT, PAIR_CASES, mxu.MLP, mxu.CASES,
-              mxu.OVERLAP, mxu.pipelined(), FINAL, OVERLAP, mxu.RELU, mxu.DMA,
-              vpu_ops.CASES, vpu_ops.SLOTS)
+              mxu.OVERLAP, mxu.pipelined(), FINAL, OVERLAP, mxu.RELU, mxu.DMA, vpu_ops.CASES, vpu_ops.SLOTS)
     cases = {}
     for group in groups:
         for name, case in group.items():

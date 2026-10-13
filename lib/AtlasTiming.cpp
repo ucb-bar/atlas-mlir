@@ -700,8 +700,7 @@ static bool contains(const std::vector<int> &v, int x) {
   return std::find(v.begin(), v.end(), x) != v.end();
 }
 
-Dependence mlir::atlas::timing::dataDependence(const Instr &a, const Footprint &fa,
-                                               const Instr &b,
+Dependence mlir::atlas::timing::dataDependence(const Instr &a, const Footprint &fa, const Instr &b,
                                                const Footprint &fb) {
   Dependence best;
   auto consider = [&](int d, EdgeKind kind, const std::string &why) {
@@ -766,13 +765,10 @@ Dependence mlir::atlas::timing::dataDependence(const Instr &a, const Footprint &
   return best;
 }
 
-Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
-                                           const Instr &b,
-                                           const Footprint &fb) {
+Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
   Dependence best = dataDependence(a, fa, b, fb);
   auto consider = [&](int d, EdgeKind kind, const std::string &why) {
-    if (d > best.distance)
-      best = {d, kind, why};
+    if (d > best.distance) best = {d, kind, why};
   };
   const OpInfo &A = *a.op;
   const OpInfo &B = *b.op;
@@ -914,8 +910,7 @@ ReservationTable::portRequests(const Instr &in, const Footprint &f,
     for (int i = 0; i < a.count; i++) {
       int element = a.first + i;
       int reg = element / 32, row = element % 32;
-      bool shareable = policy_ == ReservationPolicy::Model && !a.write &&
-                       in.op->engine == Engine::Vpu;
+      bool shareable = policy_ == ReservationPolicy::Model && !a.write && in.op->engine == Engine::Vpu;
       out.push_back({(reg % 32) * 2 + (a.write ? 1 : 0),
                      cycle + a.age + i * a.step, reg, row, shareable});
     }

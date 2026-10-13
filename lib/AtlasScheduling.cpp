@@ -40,8 +40,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   // The first uncovered provider rule; checked after each placement.
   std::string fault;
   auto note = [&](const std::string &why) {
-    if (!why.empty() && fault.empty())
-      fault = why;
+    if (!why.empty() && fault.empty()) fault = why;
   };
   auto rule = [&](auto result) {
     note(result.error);
@@ -49,8 +48,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   };
 
   auto built = buildTimingGraph(nodes, entry, p);
-  if (!built.error.empty())
-    return emitAtlasFootprintError(s, op(0), built.error);
+  if (!built.error.empty()) return emitAtlasFootprintError(s, op(0), built.error);
   DepGraph g = std::move(built.value);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
@@ -85,23 +83,18 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   }
   auto reservations = [&]() -> std::unique_ptr<TimingReservations> {
     auto table = rule(p.createReservations());
-    if (!table)
-      note("timing provider returned no reservation state");
+    if (!table) note("timing provider returned no reservation state");
     return table;
   };
   std::unique_ptr<TimingReservations> alone = reservations();
-  if (!fault.empty())
-    return op(0)->emitOpError(fault);
+  if (!fault.empty()) return op(0)->emitOpError(fault);
   for (int i = 0; i < n; i++) {
     std::string why = rule(alone->conflict(nodes[i], g.footprints[i], 0));
-    if (!fault.empty())
-      return op(i)->emitOpError(fault);
-    if (!why.empty())
-      return op(i)->emitOpError("can never issue: ") << why;
+    if (!fault.empty()) return op(i)->emitOpError(fault);
+    if (!why.empty()) return op(i)->emitOpError("can never issue: ") << why;
   }
 
-  if (policy.dmaEstimate)
-    estimateRTLGraphDMA(g);
+  if (policy.dmaEstimate) estimateRTLGraphDMA(g);
   std::vector<int> height = criticalHeights(g);
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
@@ -121,15 +114,13 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto busy = [&](int i, int c) { return rule(table->conflict(nodes[i], g.footprints[i], c)); };
   auto gap = [&](int i) {
     int value = rule(p.issueGap(nodes[i]));
-    if (value <= 0)
-      note("timing provider issue gap exceeds positive cycle domain");
+    if (value <= 0) note("timing provider issue gap exceeds positive cycle domain");
     return value;
   };
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
-    const std::vector<int> priority = policy.contention
-        ? rtlContentionPriorities(g, issue, nb) : height;
+    const std::vector<int> priority = policy.contention ? rtlContentionPriorities(g, issue, nb) : height;
     int best = -1, bestWait = -1;
     bool otherWork = false;
     for (int i = 0; i < nb; i++) {
@@ -185,8 +176,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (firstUse == INT_MAX || firstUse - 1 <= cycle)
         best = bestWait;
     }
-    if (!fault.empty())
-      return op(0)->emitOpError(fault);
+    if (!fault.empty()) return op(0)->emitOpError(fault);
     if (best < 0) {
       cycle++;
       if (cycle - lastPlaced > kMaxIdle)
@@ -198,8 +188,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       std::string held = busy(best, cycle - 1);
       if (earliest[best] == cycle)
         reason[best] = why[best];
-      else if (!held.empty())
-        reason[best] = held;
+      else if (!held.empty()) reason[best] = held;
       else
         reason[best] = isWait(best) ? "dma.wait issues just before its user"
                                     : "list scheduler priority";
@@ -223,8 +212,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       waitingPreds[ed.to]--;
     }
     nextFree = cycle + gap(best);
-    if (!fault.empty())
-      return op(best)->emitOpError(fault);
+    if (!fault.empty()) return op(best)->emitOpError(fault);
     lastPlaced = cycle;
     cycle = nextFree;
     placed++;
@@ -254,17 +242,14 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       std::string held = busy(term, termCycle);
       if (held.empty() && slot >= 0) {
         held = busy(slot, termCycle + 1);
-        if (!held.empty())
-          held = "delay slot: " + held;
+        if (!held.empty()) held = "delay slot: " + held;
       }
-      if (!fault.empty())
-        return op(term)->emitOpError(fault);
+      if (!fault.empty()) return op(term)->emitOpError(fault);
       if (held.empty())
         break;
       termCycle++;
       termReason = held;
-      if (termCycle - nextFree > kMaxIdle)
-        return op(term)->emitOpError("found no free issue cycle: ") << held;
+      if (termCycle - nextFree > kMaxIdle) return op(term)->emitOpError("found no free issue cycle: ") << held;
     }
   }
 
@@ -279,8 +264,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     order.push_back(begin + i);
     free = issue[i] + gap(i);
   }
-  if (!fault.empty())
-    return op(0)->emitOpError(fault);
+  if (!fault.empty()) return op(0)->emitOpError(fault);
   if (term >= 0) {
     int idle = termCycle - free;
     size_t last = nb > 0 ? order.back() : 0;
@@ -315,21 +299,18 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
-  const bool improvedRTL = provider->id == kAtlasRTLTimingProviderId &&
-                           (rtlBestOf || rtlDMAEstimate);
+  const bool improvedRTL = provider->id == kAtlasRTLTimingProviderId && (rtlBestOf || rtlDMAEstimate);
   std::vector<size_t> order;
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b) {
     if (improvedRTL && rtlBestOf) {
-      auto schedule = [&](const RegValues &entry, RTLSchedulingOrder policy,
-                          std::vector<size_t> &candidate,
+      auto schedule = [&](const RegValues &entry, RTLSchedulingOrder policy, std::vector<size_t> &candidate,
                           std::vector<DelayInsertion> &delays, int &tail) {
         return scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
                              *provider, entry, candidate, delays, tail, policy);
       };
-      if (failed(selectRTLBlockSchedule(*stream, b, *provider, rtlDMAEstimate,
-                                       schedule, order, before, tailIdle[b])))
+      if (failed(selectRTLBlockSchedule(*stream, b, *provider, rtlDMAEstimate, schedule, order, before, tailIdle[b])))
         return failure();
       continue;
     }
@@ -346,24 +327,18 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
     DelayInsertion unused;
     if (failed(atlasBlockDelays(*stream, b, *provider, before, unused, tailIdle[b])))
       return failure();
-    for (size_t i = stream->starts[b]; i < stream->blockEnd(b); ++i)
-      order.push_back(i);
+    for (size_t i = stream->starts[b]; i < stream->blockEnd(b); ++i) order.push_back(i);
   }
   // A block without a branch or halt drains as its own trailing delays, so a
   // branch into the next block does not run them; a next block starting with
   // an instruction that issues during a DELAY gets a NOP guard.
   std::vector<DelayInsertion> after(stream->starts.size());
   for (size_t b = 0; b < stream->starts.size(); ++b) {
-    if (tailIdle[b] <= 0)
-      continue;
-    after[b] = {idleDelays(tailIdle[b]), false,
-                stream->fallsThrough(b)
-                    ? "this block finishes before the next one starts"
-                    : "work finishes before the stream ends"};
-    guardAtlasBlockDrain(
-        after[b], *provider, tailIdle[b],
-        stream->fallsThrough(b) ? stream->instrs[order[stream->starts[b + 1]]].op
-                                : nullptr);
+    if (tailIdle[b] <= 0) continue;
+    after[b] = {idleDelays(tailIdle[b]), false, stream->fallsThrough(b)
+                    ? "this block finishes before the next one starts" : "work finishes before the stream ends"};
+    guardAtlasBlockDrain(after[b], *provider, tailIdle[b],
+        stream->fallsThrough(b) ? stream->instrs[order[stream->starts[b + 1]]].op : nullptr);
   }
   if (!insertDelays) {
     before.assign(stream->ops.size(), DelayInsertion{});
@@ -373,8 +348,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
                               insertDelays ? StringRef(provider->id) : StringRef())))
     return failure();
   // The common verifier resolves and checks every entry-context group.
-  return improvedRTL && insertDelays ? verifyAtlasTiming(module, *provider)
-                                    : success();
+  return improvedRTL && insertDelays ? verifyAtlasTiming(module, *provider) : success();
 }
 
 struct ScheduleAtlasStreamPass
@@ -399,13 +373,11 @@ struct ScheduleAtlasStreamPass
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
     return "Reorder each basic block with the list scheduler ported from "
-           "atlas-compiler-experiments under the selected timing provider and "
-           "insert the delays it needs";
+           "atlas-compiler-experiments under the selected timing provider and " "insert the delays it needs";
   }
 
   void runOnOperation() override {
-    if (failed(scheduleStream(getOperation(), insertDelays, provider.getValue(),
-                              rtlBestOf, rtlDMAEstimate)))
+    if (failed(scheduleStream(getOperation(), insertDelays, provider.getValue(), rtlBestOf, rtlDMAEstimate)))
       signalPassFailure();
   }
 };

@@ -35,8 +35,7 @@ bool isLaunch(const Instr &in) {
 
 int holdEnd(const Footprint &f, Unit unit) {
   int end = -1;
-  for (const Hold &h : f.holds)
-    if (h.unit == unit) end = std::max(end, h.to);
+  for (const Hold &h : f.holds) if (h.unit == unit) end = std::max(end, h.to);
   return end;
 }
 
@@ -118,8 +117,7 @@ public:
     const OpTimingBlock *b = name.empty() ? nullptr : evidence.block(name);
     auto window = facts.window.find(b ? b->engine : "");
     int busy = holdEnd(f, Unit::MxuCompute);
-    if (!b || window == facts.window.end() || window->second != "last_event_age" || busy < 0)
-      return std::nullopt;
+    if (!b || window == facts.window.end() || window->second != "last_event_age" || busy < 0) return std::nullopt;
     Command command{in.op, name, b->engine, "MXU in-flight matmuls " + std::to_string(in.op->mxu),
                     mregOperands(f), std::nullopt, std::nullopt, cycle, busy + 1};
     switch (in.op->opClass) {
@@ -145,15 +143,13 @@ public:
       if (!admits(first, second, gap))
         return live.holder + " held by " + live.op->name + " issued at cycle " + std::to_string(live.issue) +
                " until cycle " + std::to_string(live.issue + live.window) + "; no pair fact admits " +
-               second.op->name + " " + std::to_string(gap) + " cycles after " + first.op->name +
-               " with these operands";
+               second.op->name + " " + std::to_string(gap) + " cycles after " + first.op->name + " with these operands";
     }
     auto limit = facts.capacity.find(next.engine);
     int capacity = limit == facts.capacity.end() ? 1 : limit->second;
     for (int start = next.issue; start < next.issue + next.window; ++start) {
       int live = 1;
-      for (const Command *other : overlapping)
-        live += other->issue <= start && start < other->issue + other->window;
+      for (const Command *other : overlapping) live += other->issue <= start && start < other->issue + other->window;
       if (live > capacity)
         return "all " + std::to_string(capacity) + " " + (next.op->engine == Engine::Vpu ? "VPU" : next.engine) +
                " slots busy at cycle " + std::to_string(start) + " (live capacity from the pair facts)";
@@ -170,8 +166,7 @@ private:
     auto found = facts.pairs.find({first.block, second.block});
     if (found == facts.pairs.end() || gap < 1) return false;
     for (const OpPairFact &fact : found->second)
-      if (fact.stableGap <= gap && fact.lastGap + 1 >= first.window && satisfied(fact, first, second))
-        return true;
+      if (fact.stableGap <= gap && fact.lastGap + 1 >= first.window && satisfied(fact, first, second)) return true;
     return false;
   }
   // Require known relations for MREG banks and every shared accumulator or slot.
@@ -205,18 +200,13 @@ public:
   explicit RTLReservations(std::shared_ptr<const RTLEvidence> evidence) : evidence(std::move(evidence)) {
     if (this->evidence && this->evidence->pairFacts()) slots.emplace(*this->evidence);
   }
-  TimingRuleResult<std::string>
-  conflict(const Instr &in, const Footprint &f, int cycle) const override {
-    if (cycle > kMaximumIssueCycle)
-      return {{}, "exceeds the bounded RTL timing cycle limit"};
+  TimingRuleResult<std::string> conflict(const Instr &in, const Footprint &f, int cycle) const override {
+    if (cycle > kMaximumIssueCycle) return {{}, "exceeds the bounded RTL timing cycle limit"};
     std::string busy = busyAt(in, f, cycle);
-    if (busy.empty())
-      return {};
+    if (busy.empty()) return {};
     int permitted = cycle + 1;
-    while (permitted - cycle < kMaximumPermittedSearch && !busyAt(in, f, permitted).empty())
-      ++permitted;
-    return {busy + "; issue cycle " + std::to_string(cycle) +
-                ", first permitted cycle " + std::to_string(permitted),
+    while (permitted - cycle < kMaximumPermittedSearch && !busyAt(in, f, permitted).empty()) ++permitted;
+    return {busy + "; issue cycle " + std::to_string(cycle) + ", first permitted cycle " + std::to_string(permitted),
             {}};
   }
   std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
@@ -245,10 +235,8 @@ private:
   // stall only widens the gaps the facts admit.
   std::string busyAt(const Instr &in, const Footprint &f, int cycle) const {
     std::string busy = table.conflict(in, f, cycle);
-    if (!busy.empty() || !slots)
-      return busy;
-    if (auto command = slots->command(in, f, cycle))
-      return slots->conflict(*command);
+    if (!busy.empty() || !slots) return busy;
+    if (auto command = slots->command(in, f, cycle)) return slots->conflict(*command);
     return engines.conflict(in, reservedFootprint(f, ReservedHolds::Engine), cycle);
   }
 
@@ -261,11 +249,9 @@ private:
 // Every reachable block starts idle and drains before its successor or ECALL.
 // DMA launches need distinct channels and free slots until their matching waits.
 std::string validateScope(const AtlasStream &s) {
-  if (s.ops.size() > RTLEvidence::maximumProgramWords())
-    return "program exceeds the 32768-word instruction memory";
+  if (s.ops.size() > RTLEvidence::maximumProgramWords()) return "program exceeds the 32768-word instruction memory";
   size_t blocks = s.starts.size();
-  if (blocks == 0)
-    return "selected RTL timing requires a terminal instruction";
+  if (blocks == 0) return "selected RTL timing requires a terminal instruction";
   std::vector<bool> reached(blocks, false);
   std::vector<size_t> work = {0};
   reached[0] = true;
@@ -284,8 +270,7 @@ std::string validateScope(const AtlasStream &s) {
   for (size_t b = 0; b < blocks; ++b) {
     size_t begin = s.starts[b], end = s.blockEnd(b);
     if (!reached[b])
-      return at(begin, b > 0 && s.endsInHalt(b - 1) && !s.endsInBranch(b - 1)
-                           ? "follows the terminal instruction"
+      return at(begin, b > 0 && s.endsInHalt(b - 1) && !s.endsInBranch(b - 1) ? "follows the terminal instruction"
                            : "is unreachable; selected RTL timing verifies only reachable blocks");
     if (s.endsInBranch(b)) {
       if (!s.targetOf.lookup(s.ops[end - 2]))
@@ -348,10 +333,8 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     if (a.op->opClass == OpClass::VStore && b.op->opClass != OpClass::VLoad) {
       int end = holdEnd(fa, Unit::VstorePath);
       for (int r : fa.mregReads)
-        if (std::find(fb.mregWrites.begin(), fb.mregWrites.end(), r) != fb.mregWrites.end() &&
-            end + 1 > d.distance)
-          d = {end + 1, EdgeKind::WAR,
-               "m" + std::to_string(r) + " reported read until the VSTORE drains at age " +
+        if (std::find(fb.mregWrites.begin(), fb.mregWrites.end(), r) != fb.mregWrites.end() && end + 1 > d.distance)
+          d = {end + 1, EdgeKind::WAR, "m" + std::to_string(r) + " reported read until the VSTORE drains at age " +
                    std::to_string(end)};
     }
     // Launches keep queue order, so a wait kept ahead of every later launch
@@ -366,8 +349,7 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
   p.dmaConflict = [](const Footprint &dma, const Footprint &f) {
     DMACompletionConflict result;
     result.conflict = conflictsAtCompletion(dma, f, result.kind);
-    if (!result.conflict && isVls(f) && vlsOverlapsWindow(dma, f))
-      result = {true, EdgeKind::Order};
+    if (!result.conflict && isVls(f) && vlsOverlapsWindow(dma, f)) result = {true, EdgeKind::Order};
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };
   p.issueGap = [](const Instr &in) { return TimingRuleResult<int>{naturalGap(in), {}}; };
@@ -380,42 +362,33 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
 }
 
 TimingRuleResult<TimingProvider> mlir::atlas::rtlTimingProviderFactory(ModuleOp module) {
-  if (!module)
-    return {{}, "the RTL timing provider requires a module carrying selected atlas.rtl_evidence"};
+  if (!module) return {{}, "the RTL timing provider requires a module carrying selected atlas.rtl_evidence"};
   auto evidence = loadSelectedRTLEvidence(module);
-  if (!evidence)
-    return {{}, llvm::toString(evidence.takeError())};
-  if (!*evidence)
-    return {{}, "the RTL timing provider requires selected evidence (--select-atlas-rtl-evidence)"};
+  if (!evidence) return {{}, llvm::toString(evidence.takeError())};
+  if (!*evidence) return {{}, "the RTL timing provider requires selected evidence (--select-atlas-rtl-evidence)"};
   return {rtlTimingProvider(std::move(*evidence)), {}};
 }
 
-llvm::Expected<std::shared_ptr<RTLEvidence>>
-mlir::atlas::loadSelectedRTLEvidence(ModuleOp module) {
+llvm::Expected<std::shared_ptr<RTLEvidence>> mlir::atlas::loadSelectedRTLEvidence(ModuleOp module) {
   Attribute raw = module->getAttr(kAtlasRTLEvidence);
-  if (!raw)
-    return std::shared_ptr<RTLEvidence>();
+  if (!raw) return std::shared_ptr<RTLEvidence>();
   auto attr = dyn_cast<DictionaryAttr>(raw);
-  if (!attr)
-    return selectionError("atlas.rtl_evidence must be a selection dictionary");
+  if (!attr) return selectionError("atlas.rtl_evidence must be a selection dictionary");
   auto path = attr.getAs<StringAttr>("op_timing");
   auto hash = attr.getAs<StringAttr>("op_timing_sha256");
   auto hardware = attr.getAs<StringAttr>("hardware_ir_sha256");
   auto provider = attr.getAs<StringAttr>("provider");
-  if (!path || !hash || !hardware || !provider)
-    return selectionError("incomplete RTL evidence selection");
+  if (!path || !hash || !hardware || !provider) return selectionError("incomplete RTL evidence selection");
   bool dma = false;
   if (Attribute policy = attr.get("dma")) {
     auto text = dyn_cast<StringAttr>(policy);
-    if (!text || text.getValue() != "wait")
-      return selectionError("unsupported DMA policy; only dma=wait is defined");
+    if (!text || text.getValue() != "wait") return selectionError("unsupported DMA policy; only dma=wait is defined");
     dma = true;
   }
   if (provider.getValue() != kAtlasRTLTimingProviderId)
     return selectionError("unsupported RTL evidence provider: " + provider.getValue().str());
   auto loaded = loadRTLTimingFacts(path.getValue(), hash.getValue(), dma);
-  if (!loaded)
-    return selectionError("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
+  if (!loaded) return selectionError("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
   if (loaded->hardwareIRSha256() != hardware.getValue())
     return selectionError("selected facts describe a different hardware IR than recorded");
   auto pairs = attr.getAs<StringAttr>("op_pairs");
@@ -428,31 +401,24 @@ mlir::atlas::loadSelectedRTLEvidence(ModuleOp module) {
   return std::make_shared<RTLEvidence>(std::move(*loaded));
 }
 
-FailureOr<std::shared_ptr<RTLEvidence>>
-mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
+FailureOr<std::shared_ptr<RTLEvidence>> mlir::atlas::getSelectedRTLEvidence(ModuleOp module) {
   auto evidence = loadSelectedRTLEvidence(module);
-  if (!evidence)
-    return module.emitError(llvm::toString(evidence.takeError()));
+  if (!evidence) return module.emitError(llvm::toString(evidence.takeError()));
   return std::move(*evidence);
 }
 
 namespace {
-struct SelectAtlasRTLEvidencePass
-    : PassWrapper<SelectAtlasRTLEvidencePass, OperationPass<ModuleOp>> {
+struct SelectAtlasRTLEvidencePass : PassWrapper<SelectAtlasRTLEvidencePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectAtlasRTLEvidencePass)
   SelectAtlasRTLEvidencePass() = default;
-  SelectAtlasRTLEvidencePass(const SelectAtlasRTLEvidencePass &other)
-      : PassWrapper(other) {}
+  SelectAtlasRTLEvidencePass(const SelectAtlasRTLEvidencePass &other) : PassWrapper(other) {}
   Option<std::string> opTiming{*this, "op-timing",
       llvm::cl::desc("RTL-computed operation timing facts (merlin.op_timing.v1)")};
-  Option<std::string> opTimingHash{*this, "op-timing-sha256",
-      llvm::cl::desc("Expected SHA-256 of the facts file")};
-  Option<std::string> dmaPolicy{*this, "dma",
-      llvm::cl::desc("Optional DMA policy: wait")};
+  Option<std::string> opTimingHash{*this, "op-timing-sha256", llvm::cl::desc("Expected SHA-256 of the facts file")};
+  Option<std::string> dmaPolicy{*this, "dma", llvm::cl::desc("Optional DMA policy: wait")};
   Option<std::string> opPairs{*this, "op-pairs",
       llvm::cl::desc("Optional pair facts (merlin.op_pairs.v1) derived from the same facts")};
-  Option<std::string> opPairsHash{*this, "op-pairs-sha256",
-      llvm::cl::desc("Expected SHA-256 of the pair facts file")};
+  Option<std::string> opPairsHash{*this, "op-pairs-sha256", llvm::cl::desc("Expected SHA-256 of the pair facts file")};
   StringRef getArgument() const final { return "select-atlas-rtl-evidence"; }
   StringRef getDescription() const final {
     return "Select SHA-256-identified RTL-computed timing facts for the RTL timing provider";
@@ -463,28 +429,23 @@ struct SelectAtlasRTLEvidencePass
       module.emitError(message);
       signalPassFailure();
     };
-    if (!dmaPolicy.empty() && dmaPolicy != "wait")
-      return fail("unsupported DMA policy; only dma=wait is defined");
+    if (!dmaPolicy.empty() && dmaPolicy != "wait") return fail("unsupported DMA policy; only dma=wait is defined");
     auto loaded = loadRTLTimingFacts(opTiming, opTimingHash, dmaPolicy == "wait");
-    if (!loaded)
-      return fail("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
-    if (opPairs.empty() != opPairsHash.empty())
-      return fail("op-pairs and op-pairs-sha256 are selected together");
+    if (!loaded) return fail("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
+    if (opPairs.empty() != opPairsHash.empty()) return fail("op-pairs and op-pairs-sha256 are selected together");
     if (!opPairs.empty())
       if (llvm::Error error = loaded->selectPairFacts(opPairs, opPairsHash))
         return fail("RTL evidence selection failed: " + llvm::toString(std::move(error)));
     if (auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
         retained && retained.getValue() != kAtlasRTLTimingProviderId)
-      return fail("selected RTL evidence contradicts the retained timing provider " +
-                  retained.getValue().str() +
+      return fail("selected RTL evidence contradicts the retained timing provider " + retained.getValue().str() +
                   "; time the stream again after selection or drop the selection");
     Builder builder(module.getContext());
     NamedAttrList fields;
     fields.set("op_timing", builder.getStringAttr(opTiming));
     fields.set("op_timing_sha256", builder.getStringAttr(opTimingHash));
     fields.set("hardware_ir_sha256", builder.getStringAttr(loaded->hardwareIRSha256()));
-    if (loaded->dmaWait())
-      fields.set("dma", builder.getStringAttr("wait"));
+    if (loaded->dmaWait()) fields.set("dma", builder.getStringAttr("wait"));
     if (!opPairs.empty()) {
       fields.set("op_pairs", builder.getStringAttr(opPairs));
       fields.set("op_pairs_sha256", builder.getStringAttr(opPairsHash));
@@ -503,8 +464,7 @@ namespace {
 // Ordering uses the compiler's DMA estimate; selected completion remains unknown.
 int schedulerDMACycles(const Footprint &f) {
   for (const Access &a : f.accesses)
-    if (a.res == Res::Vmem && a.atCompletion)
-      return dmaTransferCycles(static_cast<long long>(a.count) * kLineBytes);
+    if (a.res == Res::Vmem && a.atCompletion) return dmaTransferCycles(static_cast<long long>(a.count) * kLineBytes);
   return dmaTransferCycles(32LL * kLineBytes);
 }
 
@@ -512,8 +472,7 @@ int primaryOccupancy(const Footprint &f, int &unit) {
   int length = 0;
   unit = -1;
   for (const Hold &h : f.holds) {
-    if (h.unit == Unit::ScalarLoad || h.unit == Unit::ScalarWriteback)
-      continue;
+    if (h.unit == Unit::ScalarLoad || h.unit == Unit::ScalarWriteback) continue;
     if (h.to + 1 > length) {
       length = h.to + 1;
       unit = static_cast<int>(h.unit) * 64 + h.index;
@@ -532,8 +491,7 @@ struct RTLOrderCandidate {
 // Waits stall the frontend in this cost model. The same-bank penalty accounts
 // for the LSU taking priority over pending DMA VMEM accesses. Neither number
 // supplies timing legality: reservations and the common verifier do that.
-TimingRuleResult<long long> rtlOrderCost(
-    const AtlasStream &s, size_t block, const TimingProvider &p,
+TimingRuleResult<long long> rtlOrderCost(const AtlasStream &s, size_t block, const TimingProvider &p,
     const RegValues &entry, const RTLOrderCandidate &candidate) {
   long long cycle = 0, last = 0;
   std::array<long long, 8> completion{}, penalty{};
@@ -543,13 +501,11 @@ TimingRuleResult<long long> rtlOrderCost(
   RegValues regs = entry;
   for (size_t i : candidate.order) {
     const DelayInsertion &d = candidate.before[i];
-    for (uint32_t v : d.delays)
-      cycle += static_cast<long long>(v) + 1;
+    for (uint32_t v : d.delays) cycle += static_cast<long long>(v) + 1;
     cycle += d.guard;
     const Instr &in = s.instrs[i];
     Footprint f = p.footprint(in, regs);
-    if (!f.error.empty())
-      return {0, f.error};
+    if (!f.error.empty()) return {0, f.error};
     if (in.op->opClass == OpClass::DmaWait) {
       int ch = in.op->channel;
       cycle = std::max(cycle, completion[ch] + penalty[ch]);
@@ -562,38 +518,30 @@ TimingRuleResult<long long> rtlOrderCost(
       pending[ch] = true;
       bank[ch] = -1;
       for (const Access &a : f.accesses)
-        if (a.res == Res::Vmem && a.atCompletion && !a.anywhere)
-          bank[ch] = a.first / (kVmemBankBytes / kLineBytes);
+        if (a.res == Res::Vmem && a.atCompletion && !a.anywhere) bank[ch] = a.first / (kVmemBankBytes / kLineBytes);
     }
     if (isVls(f)) {
       for (const Access &a : f.accesses) {
-        if (a.res != Res::Vmem || a.anywhere)
-          continue;
+        if (a.res != Res::Vmem || a.anywhere) continue;
         int vb = a.first / (kVmemBankBytes / kLineBytes);
-        for (int ch = 0; ch < 8; ++ch)
-          if (pending[ch] && bank[ch] == vb)
-            penalty[ch] += 32;
+        for (int ch = 0; ch < 8; ++ch) if (pending[ch] && bank[ch] == vb) penalty[ch] += 32;
       }
     }
     applyScalar(in, regs);
     last = cycle;
     auto gap = p.issueGap(in);
-    if (!gap.error.empty() || gap.value <= 0)
-      return {0, gap.error.empty() ? "nonpositive issue gap" : gap.error};
+    if (!gap.error.empty() || gap.value <= 0) return {0, gap.error.empty() ? "nonpositive issue gap" : gap.error};
     cycle += gap.value;
   }
-  if (s.endsInHalt(block))
-    return {last, {}};
-  if (s.endsInBranch(block))
-    return {last + 1, {}};
+  if (s.endsInHalt(block)) return {last, {}};
+  if (s.endsInBranch(block)) return {last + 1, {}};
   return {cycle + candidate.tail, {}};
 }
 } // namespace
 
 void mlir::atlas::estimateRTLGraphDMA(DepGraph &graph) {
   for (size_t i = 0; i < graph.nodes.size(); ++i)
-    if (isLaunch(graph.nodes[i]))
-      graph.footprints[i].dmaCycles = schedulerDMACycles(graph.footprints[i]);
+    if (isLaunch(graph.nodes[i])) graph.footprints[i].dmaCycles = schedulerDMACycles(graph.footprints[i]);
 }
 
 std::vector<int> mlir::atlas::rtlContentionPriorities(
@@ -605,22 +553,19 @@ std::vector<int> mlir::atlas::rtlContentionPriorities(
   std::map<int, std::pair<int, int>> backlog;
   for (int i = 0; i < bodyCount; ++i) {
     int occupancy = primaryOccupancy(graph.footprints[i], units[i]);
-    if (issued[i] >= 0 || units[i] < 0)
-      continue;
+    if (issued[i] >= 0 || units[i] < 0) continue;
     auto &entry = backlog.try_emplace(units[i], 0, INT_MAX).first->second;
     entry.first += occupancy;
     entry.second = std::min(entry.second, std::max(0, priority[i] - occupancy));
   }
   for (int i = 0; i < bodyCount; ++i) {
     auto found = backlog.find(units[i]);
-    if (found != backlog.end())
-      priority[i] = std::max(priority[i], found->second.first + found->second.second);
+    if (found != backlog.end()) priority[i] = std::max(priority[i], found->second.first + found->second.second);
   }
   return priority;
 }
 
-LogicalResult mlir::atlas::selectRTLBlockSchedule(
-    const AtlasStream &s, size_t block, const TimingProvider &p,
+LogicalResult mlir::atlas::selectRTLBlockSchedule(const AtlasStream &s, size_t block, const TimingProvider &p,
     bool dmaEstimate, const RTLBlockScheduler &schedule,
     std::vector<size_t> &order, std::vector<DelayInsertion> &before, int &tail) {
   const auto groups = atlasBlockContexts(s, block, p);
@@ -629,18 +574,14 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
   std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
   for (const AtlasContextGroup &group : groups) {
     auto built = buildTimingGraph(nodes, group.entries.front(), p);
-    if (!built.error.empty())
-      return emitAtlasFootprintError(s, s.ops[begin], built.error, &group.entries.front());
+    if (!built.error.empty()) return emitAtlasFootprintError(s, s.ops[begin], built.error, &group.entries.front());
     graphs.push_back(std::move(built.value));
   }
   auto validOrder = [&](const std::vector<size_t> &candidate) {
     std::vector<size_t> positions(end - begin);
-    for (size_t k = 0; k < candidate.size(); ++k)
-      positions[candidate[k] - begin] = k;
+    for (size_t k = 0; k < candidate.size(); ++k) positions[candidate[k] - begin] = k;
     for (const DepGraph &graph : graphs)
-      for (const Edge &e : graph.edges)
-        if (positions[e.from] >= positions[e.to])
-          return false;
+      for (const Edge &e : graph.edges) if (positions[e.from] >= positions[e.to]) return false;
     return true;
   };
   std::optional<RTLOrderCandidate> selected;
@@ -648,14 +589,12 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
     candidate.cost = 0;
     for (const AtlasContextGroup &group : groups) {
       auto cost = rtlOrderCost(s, block, p, group.entries.front(), candidate);
-      if (!cost.error.empty())
-        return emitAtlasFootprintError(s, s.ops[begin], cost.error, &group.entries.front());
+      if (!cost.error.empty()) return emitAtlasFootprintError(s, s.ops[begin], cost.error, &group.entries.front());
       candidate.cost = std::max(candidate.cost, cost.value);
     }
     // Keep the measured list-order policy for single-context blocks. A
     // multi-context source fallback wins a tie: reordering must offer a gain.
-    if (!selected || candidate.cost < selected->cost ||
-        (keepTie && candidate.cost == selected->cost))
+    if (!selected || candidate.cost < selected->cost || (keepTie && candidate.cost == selected->cost))
       selected = std::move(candidate);
     return success();
   };
@@ -672,38 +611,30 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
           // A speculative order can exceed a bounded search or fail to
           // converge across contexts. Keep the source/legacy alternatives;
           // only a failure of their required rules is a pass error.
-          ScopedDiagnosticHandler discard(s.ops[begin]->getContext(),
-                                           [](Diagnostic &) { return success(); });
+          ScopedDiagnosticHandler discard(s.ops[begin]->getContext(), [](Diagnostic &) { return success(); });
           if (failed(schedule(group.entries.front(), {estimate, contention},
                               candidate.order, candidate.before, candidate.tail)))
             continue;
-          if (!validOrder(candidate.order))
-            continue;
+          if (!validOrder(candidate.order)) continue;
           if (groups.size() > 1) {
-            if (!reconciled.insert(candidate.order).second)
-              continue;
+            if (!reconciled.insert(candidate.order).second) continue;
             DelayInsertion after;
             if (failed(atlasBlockDelays(s, block, p, candidate.before, after,
                                         candidate.tail, ArrayRef<size_t>(candidate.order))))
               continue;
           }
         }
-        if (failed(consider(std::move(candidate))))
-          return failure();
+        if (failed(consider(std::move(candidate)))) return failure();
       }
     }
   }
   RTLOrderCandidate source;
   source.before.resize(s.ops.size());
   DelayInsertion after;
-  if (failed(atlasBlockDelays(s, block, p, source.before, after, source.tail)))
-    return failure();
-  for (size_t i = begin; i < end; ++i)
-    source.order.push_back(i);
-  if (failed(consider(std::move(source), groups.size() > 1)))
-    return failure();
-  for (size_t i = begin; i < end; ++i)
-    before[i] = std::move(selected->before[i]);
+  if (failed(atlasBlockDelays(s, block, p, source.before, after, source.tail))) return failure();
+  for (size_t i = begin; i < end; ++i) source.order.push_back(i);
+  if (failed(consider(std::move(source), groups.size() > 1))) return failure();
+  for (size_t i = begin; i < end; ++i) before[i] = std::move(selected->before[i]);
   order.insert(order.end(), selected->order.begin(), selected->order.end());
   tail = selected->tail;
   return success();

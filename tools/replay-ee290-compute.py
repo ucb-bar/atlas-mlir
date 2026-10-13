@@ -503,8 +503,7 @@ VPU_OPS = {funct7: (code, VPU_MNEMONICS[funct7], layout) for layout, codes in {
     'binary': {0: 1, 2: 2, 3: 3, 4: 25, 6: 24},
     'unary': {0x40: 26, 0x41: 4, 0x42: 10, 0x43: 11, 0x46: 12, 0x47: 13, 0x48: 19,
               0x49: 6, 0x4a: 7, 0x4b: 8, 0x4c: 9, 0x4d: 5},
-    'row': {0x21: 14, 0x24: 21, 0x26: 20}, 'col': {1: 15, 5: 23, 7: 22},
-    'pack': {0x44: 17}, 'unpack': {0x45: 18},
+    'row': {0x21: 14, 0x24: 21, 0x26: 20}, 'col': {1: 15, 5: 23, 7: 22}, 'pack': {0x44: 17}, 'unpack': {0x45: 18},
 }.items() for funct7, code in codes.items()}
 VLI_MODES = {mode: (code, VLI_MNEMONICS[mode], 'vli_pair' if mode < 2 else 'vli_single')
              for mode, code in enumerate((30, 29, 28, 27))}
@@ -627,15 +626,13 @@ def image(case):
 
 def quiescent_state(v,d,busy,engine):
     return {'vls_load_busy':v('load_busy'),'vls_store_busy':v('store_busy'),
-            'xlu_read_active':v('xar'),'xlu_write_active':v('xaw'),
-            'vpu_issue_busy':v('vpu_busy'),
+            'xlu_read_active':v('xar'),'xlu_write_active':v('xaw'), 'vpu_issue_busy':v('vpu_busy'),
             'vpu_read_mask':sum(v('par'+str(n))<<n for n in range(4)),
             'vpu_write_mask':sum(v('paw'+str(n))<<n for n in range(4)),
             'mreg_read_busy':v('mreg_read_busy'),'mreg_write_busy':v('mreg_write_busy'),
             **{f'mxu{u}_busy':BUSY[f'mxu{u}'](v) for u in range(2)},
             **{f'mxu{u}_active_mask':sum(v(f'm{u}_act{d}{p}')<<(2*(d=='w')+p) for d in 'rw' for p in range(2)) for u in range(2)},
-            'dma_scalar_mask':busy,'dma_engine_mask':engine,
-            'dma_a_valid':d('av'),'dma_d_valid':d('dv')}
+            'dma_scalar_mask':busy,'dma_engine_mask':engine, 'dma_a_valid':d('av'),'dma_d_valid':d('dv')}
 
 def validate_compute_edges(samples,words,case):
     vm,dram,expected_vm,expected_dram=memories(case);mreg={};mxu={};prior_reads={};starts=leaders(words)

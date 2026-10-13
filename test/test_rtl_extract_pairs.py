@@ -28,13 +28,11 @@ op = synthetic.operation
 def counter(accept_while_busy=False):
     """A busy counter ignores go, or restarts when accept_while_busy is set."""
     return synthetic.module("Toy", ["go"], [("out", "busy"), ("busy", "busy")], [
-        op("zero", "hw.constant", [], "i2", value="0 : i2"),
-        op("one", "hw.constant", [], "i2", value="1 : i2"),
+        op("zero", "hw.constant", [], "i2", value="0 : i2"), op("one", "hw.constant", [], "i2", value="1 : i2"),
         op("three", "hw.constant", [], "i2", value="3 : i2"),
         op("cnt", "seq.firreg", ["next", "clock", "reset", "zero"], "i2", name="cnt"),
         op("idle", "comb.icmp", ["cnt", "zero"], predicate="0 : i64"),
-        op("busy", "comb.icmp", ["cnt", "zero"], predicate="1 : i64"),
-        op("dec", "comb.sub", ["cnt", "one"], "i2"),
+        op("busy", "comb.icmp", ["cnt", "zero"], predicate="1 : i64"), op("dec", "comb.sub", ["cnt", "one"], "i2"),
         op("start", "comb.and", ["go", "idle"]) if not accept_while_busy else op("start", "hw.wire", ["go"]),
         op("hold", "comb.mux", ["busy", "dec", "zero"], "i2"),
         op("next", "comb.mux", ["start", "three", "hold"], "i2")])
@@ -438,12 +436,9 @@ class PairFactsTests(unittest.TestCase):
 
     def test_inputs_fail_closed(self):
         unchecked = pair("exp_relu", 1, invariants=None)
-        cases = {
-            "assertion-checked": [unchecked],
-            "does not match": [{**pair("exp_relu", 1), "first": "sub"}],
+        cases = {"assertion-checked": [unchecked], "does not match": [{**pair("exp_relu", 1), "first": "sub"}],
             "a second record": [pair("exp_relu", 1), pair("exp_relu", 1)],
-            "not a resolved op_timing block": [pair("exp_cos", 1)],
-        }
+            "not a resolved op_timing block": [pair("exp_cos", 1)],}
         for message, records in cases.items():
             with self.subTest(message), self.assertRaisesRegex(ValueError, message):
                 self.build(records)
@@ -544,8 +539,7 @@ TARGET = TARGETS / "atlas"
 MODULE = importlib.util.spec_from_file_location("atlas_gen_core", TARGET / "gen_core.py")
 GENERATOR = importlib.util.module_from_spec(MODULE)
 MODULE.loader.exec_module(GENERATOR)
-SPEC_DIGESTS = {
-    'pairs/core.yaml': 'caece41795d3b6ce93d0c37c6abdb7f16495b8229a356bb212f7b7de1c6fabea',
+SPEC_DIGESTS = {'pairs/core.yaml': 'caece41795d3b6ce93d0c37c6abdb7f16495b8229a356bb212f7b7de1c6fabea',
     'pairs/core_dma.yaml': 'f0f75d54938e13113eb891a8e53a4a7ff2c0a7a10d0ea8de916358d5dc7a28ce',
     'pairs/core_dma_mxu.yaml': '39e3ee2cebdb7907ed233bc935e334f2d16aa4fa32eea9f5fb4774ab8b94b1fe',
     'pairs/core_mxu.yaml': '18bbd1a353bdb88b22a97b60c66f06dad3f803fd51be7febfb1b5a4631db0875',
@@ -557,12 +551,10 @@ SPEC_DIGESTS = {
     'sequences/core_mxu.yaml': 'c7c388bb53eb9dd2a8ba7632f51cf27e13fd40a05370fe64e7d00f21bb7ca177',
     'sequences/core_vpu.yaml': '98004014df10489a0ffc9ae0eb448605f5ce52424e079338c11eb890ab2c3f44',
     'system/core.yaml': '044782994f4c40324d4f2ed6f6d97b60e63bcd27601b60bb67eee29aa29da0e8',
-    'system/core_dma.yaml': '9704652d1f09331021e91168bf205a3ded003098a75c3c094a7f459f31a07386',
-}
+    'system/core_dma.yaml': '9704652d1f09331021e91168bf205a3ded003098a75c3c094a7f459f31a07386',}
 
 
-SPEC_ORDER_DIGESTS = {
-    'pairs/core.yaml': '35ea71f0e7cb75783f6ff82bdd11ff14f1e3fc158de2e4737890000f47e0483f',
+SPEC_ORDER_DIGESTS = {'pairs/core.yaml': '35ea71f0e7cb75783f6ff82bdd11ff14f1e3fc158de2e4737890000f47e0483f',
     'pairs/core_dma.yaml': '3b042e2655ffa655c06aca1fdb9d17cd3389152fcf7139a0e3e061b6eb23dd00',
     'pairs/core_dma_mxu.yaml': '313051a3d85516de3cb4baeff9ae5be229f7c97c1017d6df1b2c334fc393d9c6',
     'pairs/core_mxu.yaml': 'd6d6b8d99fac5a79ee3393b9108c4bfd34c4c7520f83fc3fa12a170271667a98',
@@ -574,8 +566,7 @@ SPEC_ORDER_DIGESTS = {
     'sequences/core_mxu.yaml': '9ac8b0a6c1462c5640faccd884b18d8bd0a771ea9fc75cf79e74fe72366b6445',
     'sequences/core_vpu.yaml': '8fd8535380559a2f3293e0527856fff0d4b409be8646068039173a6f00bc0674',
     'system/core.yaml': 'fd94a0d853783561813b9397cd8b4e7722b81826e93e51e51a2bebc6a31b7cb8',
-    'system/core_dma.yaml': 'd16cf75075c8a0e4948b160685dc2e05500dc0b638a3ceef5f2ccf7e31689617',
-}
+    'system/core_dma.yaml': 'd16cf75075c8a0e4948b160685dc2e05500dc0b638a3ceef5f2ccf7e31689617',}
 
 class GeneratorTests(unittest.TestCase):
     @classmethod

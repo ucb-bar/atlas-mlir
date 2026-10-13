@@ -101,8 +101,7 @@ mlir::atlas::buildAtlasVerificationContext(ModuleOp module, bool generated,
   }
   ctx.hasCFGContract = module->hasAttr(kAtlasCFGContract);
   auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
-  ctx.timed = state ? state.getValue() == "timed"
-                    : executable && module->hasAttr(kAtlasRTLEvidence);
+  ctx.timed = state ? state.getValue() == "timed" : executable && module->hasAttr(kAtlasRTLEvidence);
   // The structural stage precedes decoding, which rejects every JALR.
   if (generated && failed(verifyGeneratedStructure(module)))
     return failure();

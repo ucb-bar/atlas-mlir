@@ -62,8 +62,7 @@ def lui(dst, immediate):
 
 def vls(kind, mreg=4, base=6, offset=0):
     register = "dst" if kind == "vload" else "src"
-    return (kind, f'{register} = {mreg} : i32, base = {base} : i32, '
-                  f'offset = {offset} : i32, format = "raw"')
+    return (kind, f'{register} = {mreg} : i32, base = {base} : i32, ' f'offset = {offset} : i32, format = "raw"')
 
 def scalar_load(kind="lw", dst=5, base=6, offset=0):
     return ("scalar_load", f'kind = "{kind}", dst = {dst} : i32, base = {base} : i32, offset = {offset} : i32')

@@ -46,8 +46,7 @@ struct AtlasVerificationContext {
 // carries selected RTL evidence, which names its provider.
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
-                              bool requireStream = false,
-                              bool executable = false);
+                              bool requireStream = false, bool executable = false);
 
 // The exact `addi x0, x0, 0` that generated redirect delay slots require.
 inline bool isExactAtlasNop(Operation *op) {

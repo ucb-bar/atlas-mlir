@@ -166,11 +166,9 @@ class ControlTests(unittest.TestCase):
 def engine():
     """Command starts busy and a request; the response retires the request one cycle later."""
     return {"modules": [module("Engine", ["cmd", "resp", ("payload", "i8")], [("req", "req"), ("done", "done"), ("busy", "busy")], [
-        zero(), one(),
-        operation("req", "seq.firreg", ["cmd", "clock", "reset", "zero"]),
+        zero(), one(), operation("req", "seq.firreg", ["cmd", "clock", "reset", "zero"]),
         operation("done", "seq.firreg", ["resp", "clock", "reset", "zero"]),
-        operation("hold", "comb.mux", ["done", "zero", "busy"]),
-        operation("next", "comb.mux", ["cmd", "one", "hold"]),
+        operation("hold", "comb.mux", ["done", "zero", "busy"]), operation("next", "comb.mux", ["cmd", "one", "hold"]),
         operation("busy", "seq.firreg", ["next", "clock", "reset", "zero"])])]}
 TOY = {"engine": "toy", "module": "Engine", "limit": 40, "busy": "busy", "inputs": {"cmd": 0, "resp": 0},
        "events": {"request": {"valid": "req", "response": {"input": "resp", "latency": 1}}, "done": {"valid": "done"}},
@@ -185,8 +183,7 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(variant(spec, "slow")["events"]["request"]["response"]["latency"], 3)
 
     def test_fail_closed(self):
-        cases = {"missing module": lambda s: s.pop("module"),
-                 "unknown top-level key": lambda s: s.update(stimulus={}),
+        cases = {"missing module": lambda s: s.pop("module"), "unknown top-level key": lambda s: s.update(stimulus={}),
                  "unknown event key": lambda s: s["events"]["done"].update(ready="x"),
                  "undeclared command input": lambda s: s["operations"]["pulse"]["commands"][0].update(payload=1),
                  "response without latency or memory": lambda s: s["events"]["request"]["response"].pop("latency"),
@@ -273,8 +270,7 @@ def system(stages=1, firmem=(1,)):
                     [zero(), *chain, *[operation(f"bank{i}", "seq.firmem", [], "!seq.firmem<8 x 8>", readLatency=f"{n} : i32")
                                        for i, n in enumerate(firmem)]])
     decoder = module("Dec", [("io_instr", "i32")], [("io_op", "op", "i2")], [operation("op", "comb.extract", ["io_instr"], "i2", lowBit="25 : i32")], clocked=False)
-    top = module("Sys", [("instr", "i32")], [], [
-        zero(), operation("three", "hw.constant", [], "i3", value="3 : i3"),
+    top = module("Sys", [("instr", "i32")], [], [zero(), operation("three", "hw.constant", [], "i3", value="3 : i3"),
         operation("s1_instr", "hw.wire", ["instr"], "i32", name="s1_instr"),
         instance("dec", "Dec", {"io_instr": "s1_instr"}, [("io_op", "i2")]),
         instance("eng", "Eng", {"clock": "clock", "reset": "reset", "io_cmd_valid": "zero", "io_cmd_bits_op": "dec.io_op",
@@ -496,8 +492,7 @@ class UnresetTests(unittest.TestCase):
     def coupled(self, unreset=(), partner_unreset=()):
         doc = pair()
         doc["modules"].append(self.masked("P", "in"))
-        return self.extracted(doc, {
-            "module": "A", "recipe": "coupled", "inputs": {"cmd": 0}, "unreset": list(unreset),
+        return self.extracted(doc, {"module": "A", "recipe": "coupled", "inputs": {"cmd": 0}, "unreset": list(unreset),
             "partner": {"module": "P", "inputs": [], "unreset": list(partner_unreset)}, "links": {"in": "req", "ack": "flag"},
             "events": {"seen": {"valid": "seen"}}})
 
@@ -690,22 +685,19 @@ def client():
         operation("want", "seq.firreg", ["want_next", "clock", "reset", "zero"], name="want"),
         operation("waiting", "seq.firreg", ["wait_next", "clock", "reset", "zero"], name="waiting"),
         operation("rdy", "seq.firreg", ["rdy_next", "clock", "reset", "zero"], name="rdy"),
-        operation("rdy_next", "comb.xor", ["rdy", "one"]),
-        operation("fire", "comb.and", ["want", "req_ready"]),
+        operation("rdy_next", "comb.xor", ["rdy", "one"]), operation("fire", "comb.and", ["want", "req_ready"]),
         operation("resp_fire", "comb.and", ["resp_valid", "rdy"]),
         operation("hold", "comb.mux", ["fire", "zero", "want"]),
         operation("want_next", "comb.mux", ["go", "one", "hold"]),
         operation("wait_hold", "comb.mux", ["resp_fire", "zero", "waiting"]),
         operation("wait_next", "comb.mux", ["fire", "one", "wait_hold"]),
         operation("tagged", "comb.icmp", ["resp_tag", "five"], predicate="0 : i64"),
-        operation("done", "comb.and", ["resp_fire", "tagged"]),
-        operation("busy", "comb.or", ["want", "waiting"])])
+        operation("done", "comb.and", ["resp_fire", "tagged"]), operation("busy", "comb.or", ["want", "waiting"])])
 RESPONDER_SPEC = {"engine": "client", "module": "Client", "inputs": {"go": 0}, "busy": "busy", "limit": 24,
         "events": {"done": {"valid": "done"}},
         "responders": {"mem": {"request": {"valid": "req_valid", "ready": "req_ready", "tag": "req_tag"},
                                "response": {"valid": "resp_valid", "ready": "resp_ready", "tag": "resp_tag"},
-                               "latency": 3, "accept": [0, 1]}},
-        "operations": {"go": {"commands": {0: {"go": 1}}}}}
+                               "latency": 3, "accept": [0, 1]}}, "operations": {"go": {"commands": {0: {"go": 1}}}}}
 
 def events_of(trace):
     return sorted((e["age"], group, fields) for e in trace for group, fields in e["events"].items())
@@ -747,10 +739,8 @@ class ResponderTests(unittest.TestCase):
 
     def test_invalid_responders_are_rejected(self):
         mem = RESPONDER_SPEC["responders"]["mem"]
-        bad = {"latency zero": {**mem, "latency": 0},
-               "accept level": {**mem, "accept": [2]},
-               "accept empty": {**mem, "accept": []},
-               "unknown key": {**mem, "order": "any"},
+        bad = {"latency zero": {**mem, "latency": 0}, "accept level": {**mem, "accept": [2]},
+               "accept empty": {**mem, "accept": []}, "unknown key": {**mem, "order": "any"},
                "response fields": {**mem, "response": {**mem["response"], "fields": {"x": "req_tag"}}},
                "field named tag": {**mem, "request": {**mem["request"], "fields": {"tag": "req_tag"}}},
                "missing ready": {**mem, "request": {"valid": "req_valid"}}}

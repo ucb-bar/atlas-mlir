@@ -263,8 +263,7 @@ def relu_output(vm, dram):
 RELU = {
     'virtual_relu': Case((), {RELU_IN_LINE: filler(8192, 7), RELU_OUT_LINE: filler(8192, 9)}, relu_output, {'dma': 4, 'vload': 2, 'vpu': 1, 'vstore': 2},
                          dram={RELU_INPUT: RELU_IN, RELU_OUTPUT - 32: b'\xa5' * 32 + b'\x5a' * 2048 + b'\xa5' * 32}, dma=(64, 64),
-                         source=RELU_PROGRAM, pipeline=PIPELINE),
-}
+                         source=RELU_PROGRAM, pipeline=PIPELINE),}
 
 DMA_PROGRAM = (Path(__file__).resolve().parents[2] / 'test/examples/virtual_dma_mxu.mlir').read_text()
 VIRTUAL_X, WEIGHT, OUT = 0x90000000, 0x90000400, 0x90001000
@@ -290,8 +289,7 @@ COMMON = dict(vmem={STAGE: filler(8192, 7)}, expect=readout, commands={'dma': 3,
               source=DMA_PROGRAM, pipeline=PIPELINE)
 DMA = {
     'virtual_dma_mxu': Case((), consumers=('delay',), check=lambda events: overlapping(events, 'dma', 'mxu0'), **COMMON),
-    'virtual_dma_mxu_stream': Case((), consumers=('schedule',), **COMMON),
-}
+    'virtual_dma_mxu_stream': Case((), consumers=('schedule',), **COMMON),}
 
 EXAMPLES = Path(__file__).resolve().parents[2] / 'test/examples'
 INPUT = 0x90000000

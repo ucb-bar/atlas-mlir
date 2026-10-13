@@ -133,8 +133,7 @@ int main(int argc, char **argv) {
       if (provider.getValue() == timing::kAtlasRTLTimingProviderId)
         root["timing_scope"] = "issue_spacing_verified_by_timing_provider_over_selected_rtl_facts; see atlas-emit --rtl-timing-json";
     }
-    if ((*module)->hasAttr(kAtlasRTLEvidence))
-      root["rtl_evidence"] = true;
+    if ((*module)->hasAttr(kAtlasRTLEvidence)) root["rtl_evidence"] = true;
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }

@@ -52,13 +52,10 @@ Object footprintJSON(const Instr &in, const Footprint &footprint, bool dynamic) 
     holds.push_back(Object{{"unit", unitName(hold.unit)}, {"index", hold.index},
         {"from", hold.from}, {"to", hold.to}, {"alt", hold.alt}});
   Object result{{"accesses", std::move(accesses)}, {"holds", std::move(holds)},
-      {"mreg_reads", integers(footprint.mregReads)},
-      {"mreg_writes", integers(footprint.mregWrites)},
-      {"read_release", footprint.readRelease},
-      {"write_release", footprint.writeRelease},
+      {"mreg_reads", integers(footprint.mregReads)}, {"mreg_writes", integers(footprint.mregWrites)},
+      {"read_release", footprint.readRelease}, {"write_release", footprint.writeRelease},
       {"write_during_read", footprint.writeDuringRead},
-      {"vpu_live", footprint.vpuLive}, {"done_age", footprint.doneAge},
-      {"dma_cycles", footprint.dmaCycles}};
+      {"vpu_live", footprint.vpuLive}, {"done_age", footprint.doneAge}, {"dma_cycles", footprint.dmaCycles}};
   if (dynamic) {
     bool launch = in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
     result["dma_async"] = launch;
@@ -74,36 +71,29 @@ Object footprintJSON(const Instr &in, const Footprint &footprint, bool dynamic) 
 }
 } // namespace
 
-FailureOr<llvm::json::Object>
-mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
+FailureOr<llvm::json::Object> mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   auto selected = getSelectedRTLEvidence(module);
-  if (failed(selected))
-    return failure();
-  if (!*selected)
-    return module.emitError("RTL timing export requires selected evidence");
+  if (failed(selected)) return failure();
+  if (!*selected) return module.emitError("RTL timing export requires selected evidence");
   if (auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
       state && state.getValue() != "timed")
     return module.emitError("RTL timing export requires a timed stream; schedule or insert delays first");
   // The executable boundary accepts the stream; the trace then comes from the
   // same verifier under the selected provider.
   SmallVector<uint32_t> words;
-  if (failed(verifyAtlasExecutable(module, /*llvmBlock=*/false, words)))
-    return failure();
+  if (failed(verifyAtlasExecutable(module, /*llvmBlock=*/false, words))) return failure();
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module);
-  if (failed(provider))
-    return failure();
+  if (failed(provider)) return failure();
   if (provider->id != kAtlasRTLTimingProviderId)
     return module.emitError("RTL timing export requires the ") << kAtlasRTLTimingProviderId << " provider, not " << provider->id;
   FailureOr<AtlasStream> stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
   AtlasTimedTrace trace;
-  if (failed(stream) || failed(verifyAtlasTimedStream(*stream, *provider, &trace)))
-    return failure();
+  if (failed(stream) || failed(verifyAtlasTimedStream(*stream, *provider, &trace))) return failure();
 
   Array instructions, blocks;
   std::vector<uint8_t> encoded;
   for (uint32_t word : words) {
-    for (unsigned shift = 0; shift < 32; shift += 8)
-      encoded.push_back(static_cast<uint8_t>(word >> shift));
+    for (unsigned shift = 0; shift < 32; shift += 8) encoded.push_back(static_cast<uint8_t>(word >> shift));
   }
   auto hash = llvm::SHA256::hash(encoded);
   const RTLEvidence &evidence = **selected;
@@ -120,15 +110,11 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
         epochOrigin = cycle;
       }
       Object entry{
-          {"word_index", static_cast<int64_t>(i)},
-          {"word_u32", static_cast<int64_t>(words[i])},
-          {"mnemonic", in.op->name},
-          {"operands", Object{{"rd", in.rd}, {"rs1", in.rs1}, {"rs2", in.rs2},
+          {"word_index", static_cast<int64_t>(i)}, {"word_u32", static_cast<int64_t>(words[i])},
+          {"mnemonic", in.op->name}, {"operands", Object{{"rd", in.rd}, {"rs1", in.rs1}, {"rs2", in.rs2},
               {"immediate", static_cast<int64_t>(in.imm)}, {"release", in.release}}},
-          {"block", static_cast<int64_t>(b)},
-          {"logical_issue_cycle", cycle},
-          {"event_kind", in.op->opClass == OpClass::Halt ?
-              "terminal_acceptance" : "instruction_issue"},
+          {"block", static_cast<int64_t>(b)}, {"logical_issue_cycle", cycle},
+          {"event_kind", in.op->opClass == OpClass::Halt ? "terminal_acceptance" : "instruction_issue"},
           {"footprint", trace.contexts[b].empty() ? llvm::json::Value(footprintJSON(in, trace.footprints[i], dynamic)) : nullptr}};
       if (dynamic) {
         entry.erase("logical_issue_cycle");
@@ -143,16 +129,12 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       }
       instructions.push_back(std::move(entry));
     }
-    Object blockJSON{{"index", static_cast<int64_t>(b)},
-        {"first_word", static_cast<int64_t>(stream->starts[b])},
+    Object blockJSON{{"index", static_cast<int64_t>(b)}, {"first_word", static_cast<int64_t>(stream->starts[b])},
         {"word_count", static_cast<int64_t>(stream->blockEnd(b) - stream->starts[b])},
-        {"exit", stream->endsInHalt(b) ? "halt" :
-                 stream->endsInBranch(b) ? "branch_with_delay_slot" : "fall_through"},
-        {"successors", integers(stream->succs[b])},
-        {"successor_issue_offset", nullptr},
+        {"exit", stream->endsInHalt(b) ? "halt" : stream->endsInBranch(b) ? "branch_with_delay_slot" : "fall_through"},
+        {"successors", integers(stream->succs[b])}, {"successor_issue_offset", nullptr},
         {"entry_state", "idle_engines_no_pending_dma"}};
-    if (trace.successorIssue[b] >= 0)
-      blockJSON["successor_issue_offset"] = trace.successorIssue[b];
+    if (trace.successorIssue[b] >= 0) blockJSON["successor_issue_offset"] = trace.successorIssue[b];
     // A block whose footprints differ between entry contexts lists each group:
     // its entry states (known registers) and its instructions' footprints.
     if (!trace.contexts[b].empty()) {
@@ -161,9 +143,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
         Array entries, footprints;
         for (const RegValues &regs : context.entries) {
           Object known;
-          for (int r = 1; r < 32; ++r)
-            if (regs[r])
-              known["x" + std::to_string(r)] = static_cast<int64_t>(*regs[r]);
+          for (int r = 1; r < 32; ++r) if (regs[r]) known["x" + std::to_string(r)] = static_cast<int64_t>(*regs[r]);
           entries.push_back(std::move(known));
         }
         for (size_t k = 0; k < context.footprints.size(); ++k)
@@ -176,19 +156,12 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
   }
   Object result{
       {"schema", dynamic ? "atlas.resolved_rtl_timing.v1" : "atlas.resolved_rtl_timing.v0"},
-      {"target_config", "EE290SimConfig"},
-      {"qualification", "conditional"},
-      {"scheduling_qualified", false},
-      {"provider", Object{{"id", provider->id},
-                          {"version", 1},
-                          {"dma_policy", dynamic ? "wait" : "none"}}},
-      {"evidence", Object{{"op_timing_schema", "merlin.op_timing.v1"},
-          {"op_timing_sha256", evidence.factsSha256()},
+      {"target_config", "EE290SimConfig"}, {"qualification", "conditional"}, {"scheduling_qualified", false},
+      {"provider", Object{{"id", provider->id}, {"version", 1}, {"dma_policy", dynamic ? "wait" : "none"}}},
+      {"evidence", Object{{"op_timing_schema", "merlin.op_timing.v1"}, {"op_timing_sha256", evidence.factsSha256()},
           {"hardware_ir_sha256", evidence.hardwareIRSha256()}}},
-      {"program", Object{{"word_count", static_cast<int64_t>(words.size())},
-          {"words", integers(words)},
-          {"words_sha256", llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true)},
-          {"hash_encoding", "little_endian_u32"}}},
+      {"program", Object{{"word_count", static_cast<int64_t>(words.size())}, {"words", integers(words)},
+          {"words_sha256", llvm::toHex(llvm::ArrayRef<uint8_t>(hash), true)}, {"hash_encoding", "little_endian_u32"}}},
       {"conventions", Object{
           {"cycle_origin", "per_block_instance:first_instruction_logical_issue"},
           {"ages", "relative_to_instruction_issue; holds_have_inclusive_endpoints"},
@@ -196,8 +169,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
           {"timeline", "conditional_model_timeline_not_measured_elapsed_cycles"},
           {"terminal", "acceptance_not_retirement; ECALL_suppresses_scalar_fire"},
           {"entry_contexts", "a block listing entry_contexts has null instruction footprints; an instance takes the footprints of each group with an entry whose registers it holds"}}},
-      {"applicability", evidence.applicability()},
-      {"blocks", std::move(blocks)},
+      {"applicability", evidence.applicability()}, {"blocks", std::move(blocks)},
       {"instructions", std::move(instructions)}};
   if (const RTLPairFacts *pairs = evidence.pairFacts()) {
     auto *selectedFacts = result.getObject("evidence");

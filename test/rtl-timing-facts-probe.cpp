@@ -6,18 +6,15 @@
 using namespace mlir::atlas::timing;
 
 static const char *resourceName(Res r) {
-  static const char *names[] = {
-      "XReg", "EReg", "MReg", "Acc", "Weight", "Vmem", "DmaBase", "Dram"};
+  static const char *names[] = {"XReg", "EReg", "MReg", "Acc", "Weight", "Vmem", "DmaBase", "Dram"};
   unsigned index = static_cast<unsigned>(r);
   return index < sizeof(names) / sizeof(*names) ? names[index] : "invalid";
 }
 
 // Unit enumerator names, in declaration order.
 static const char *unitId(Unit u) {
-  static const char *names[] = {
-      "ScalarLoad", "ScalarWriteback", "VloadPath", "VstorePath", "VmemBank",
-      "Xlu", "MxuPort", "MxuCompute", "MxuAccRead", "MxuAccWrite",
-      "MxuWeightStream", "MxuAccStream", "Vpu"};
+  static const char *names[] = {"ScalarLoad", "ScalarWriteback", "VloadPath", "VstorePath", "VmemBank",
+      "Xlu", "MxuPort", "MxuCompute", "MxuAccRead", "MxuAccWrite", "MxuWeightStream", "MxuAccStream", "Vpu"};
   return names[static_cast<int>(u)];
 }
 
@@ -65,8 +62,7 @@ static void footprint(const Footprint &f) {
               << "\",\"index\":" << h.index << ",\"from\":" << h.from
               << ",\"to\":" << h.to << ",\"alt\":" << h.alt << '}';
   }
-  std::cout << "],\"read_release\":" << f.readRelease
-            << ",\"write_release\":" << f.writeRelease
+  std::cout << "],\"read_release\":" << f.readRelease << ",\"write_release\":" << f.writeRelease
             << ",\"vpu_live\":" << f.vpuLive << ",\"done_age\":" << f.doneAge << '}';
 }
 
@@ -81,8 +77,7 @@ int main(int argc, char **argv) {
     Instr in = instruction(op);
     RegValues regs = unknownRegs();
     regs[8] = 0;
-    std::cout << (i > 1 ? "," : "") << "{\"operation\":\"" << op->name
-              << "\",\"rd\":" << in.rd << ",\"rs1\":" << in.rs1
+    std::cout << (i > 1 ? "," : "") << "{\"operation\":\"" << op->name << "\",\"rd\":" << in.rd << ",\"rs1\":" << in.rs1
               << ",\"rs2\":" << in.rs2 << ",\"footprint\":";
     footprint(footprintOf(in, regs));
     std::cout << '}';

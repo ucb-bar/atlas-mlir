@@ -55,17 +55,14 @@ class Replay {
   void evaluate() {
     dut.eval();
     trace.dump(time++);
-    if (context.gotFinish())
-      throw std::runtime_error("RTL stopped or asserted");
+    if (context.gotFinish()) throw std::runtime_error("RTL stopped or asserted");
   }
 
-  void exchange(CData &valid, const CData &ready, const CData &response,
-                const char *port) {
+  void exchange(CData &valid, const CData &ready, const CData &response, const char *port) {
     auto wait = [&](const CData &signal, const char *phase) {
       unsigned waits = 0;
       while (!signal) {
-        if (++waits > 100)
-          throw std::runtime_error(std::string(port) + phase + " handshake timeout");
+        if (++waits > 100) throw std::runtime_error(std::string(port) + phase + " handshake timeout");
         tick();
       }
     };
@@ -119,8 +116,7 @@ public:
     (csr ? dut.io_csrTL_a_bits_source : dut.io_imemTL_a_bits_source) = 0;
     (csr ? dut.io_csrTL_a_bits_address : dut.io_imemTL_a_bits_address) = address;
     (csr ? dut.io_csrTL_a_bits_data : dut.io_imemTL_a_bits_data) = data;
-    exchange(csr ? dut.io_csrTL_a_valid : dut.io_imemTL_a_valid,
-             csr ? dut.io_csrTL_a_ready : dut.io_imemTL_a_ready,
+    exchange(csr ? dut.io_csrTL_a_valid : dut.io_imemTL_a_valid, csr ? dut.io_csrTL_a_ready : dut.io_imemTL_a_ready,
              csr ? dut.io_csrTL_d_valid : dut.io_imemTL_d_valid, "scalar");
     uint32_t result = csr ? dut.io_csrTL_d_bits_data : dut.io_imemTL_d_bits_data;
     auto opcode = csr ? dut.io_csrTL_d_bits_opcode : dut.io_imemTL_d_bits_opcode;
@@ -129,20 +125,17 @@ public:
     return result;
   }
 
-  std::array<uint32_t, 8> memory(bool write, unsigned line,
-                               const std::array<uint32_t, 8> &data = {}) {
+  std::array<uint32_t, 8> memory(bool write, unsigned line, const std::array<uint32_t, 8> &data = {}) {
     dut.io_vmemTL_a_bits_opcode = write ? 0 : 4;
     dut.io_vmemTL_a_bits_size = 5; // 32 bytes: one full physical line
     dut.io_vmemTL_a_bits_source = 0;
     dut.io_vmemTL_a_bits_address = 0x20000000U + 32 * line;
     dut.io_vmemTL_a_bits_mask = 0xffffffffU;
     for (unsigned i = 0; i < 8; ++i) dut.io_vmemTL_a_bits_data[i] = data[i];
-    exchange(dut.io_vmemTL_a_valid, dut.io_vmemTL_a_ready,
-             dut.io_vmemTL_d_valid, "VMEM");
+    exchange(dut.io_vmemTL_a_valid, dut.io_vmemTL_a_ready, dut.io_vmemTL_d_valid, "VMEM");
     std::array<uint32_t, 8> result;
     for (unsigned i = 0; i < 8; ++i) result[i] = dut.io_vmemTL_d_bits_data[i];
-    if (dut.io_vmemTL_d_bits_opcode != (write ? 0 : 1))
-      throw std::runtime_error("VMEM response opcode mismatch");
+    if (dut.io_vmemTL_d_bits_opcode != (write ? 0 : 1)) throw std::runtime_error("VMEM response opcode mismatch");
     tick();
     return result;
   }

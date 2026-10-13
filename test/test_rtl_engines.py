@@ -3,17 +3,14 @@ import re
 import tempfile
 import unittest
 
-from rtl_test_support import (
-    BANK_WORDS, CHANNEL_REUSE, CONSUMERS, DMA_SECOND, EIGHT_SLOTS, EMIT, FACTS,
+from rtl_test_support import (BANK_WORDS, CHANNEL_REUSE, CONSUMERS, DMA_SECOND, EIGHT_SLOTS, EMIT, FACTS,
     HALT, IN_FLIGHT, MARKER, OPT, PROVIDER, RTLTestSupport, VERIFY, WAITED,
     addi, binary, block, busy, config, delay, export, facts, facts_variant,
     gapped, issue_gap, mxu, pack, program, reduce, run, stream, transfer,
-    transpose, unary, vli, vls, wait, word_base, dma_setup,
-)
+    transpose, unary, vli, vls, wait, word_base, dma_setup,)
 
 
-@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
-                     "requires explicit RTL timing facts and built tools")
+@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(), "requires explicit RTL timing facts and built tools")
 class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
     def test_engine_admission_boundaries(self):
         document = facts()
@@ -24,8 +21,7 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
             (binary(), binary(6, 8, 10), mul["next_issue_age"], "timing resource conflict"),
             (binary(), transpose(8, 12), mul["first_free_age"], "timing resource conflict"),
             (binary(), vls("vstore", 4), max(mul["next_issue_age"], mul["events"]["write0"]["last_age"]) + 1,
-             "m4 reserved for writing"),
-        ]
+             "m4 reserved for writing"),]
         for unit in (0, 1):
             matmul = f"mxu{unit}.matmul"
             pop = f"mxu{unit}.pop_acc_bf16"
@@ -51,8 +47,7 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
         released = store["events"]["mreg_read"]["last_age"] + store["assumptions"]["scratchpad_read_latency"] + 1
         setup = [*word_base(8, 2 * BANK_WORDS), *word_base(7, 3 * BANK_WORDS)]
         writers = [(transpose(30, 9), drained), (vli("all", 8), drained),
-                   *( (mxu("pop_acc_bf16", unit, reg=8), drained) for unit in (0, 1)),
-                   (vls("vload", 9, 7), released)]
+                   *( (mxu("pop_acc_bf16", unit, reg=8), drained) for unit in (0, 1)), (vls("vload", 9, 7), released)]
         for writer, bound in writers:
             for gap in (bound - 1, bound):
                 with self.subTest(writer=writer, gap=gap):
@@ -61,8 +56,7 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
                                diagnostic=reason if gap < bound else None)
 
     def test_admission_uses_selected_facts(self):
-        cases = [
-            ("mxu1.matmul", lambda b: b["events"]["compute_busy"].update(last_age=40, count=40),
+        cases = [("mxu1.matmul", lambda b: b["events"]["compute_busy"].update(last_age=40, count=40),
              mxu("matmul", 1), mxu("matmul", 1, reg=22), 41, "MXU in-flight matmuls"),
             ("xlu.transpose", lambda b: b.update(first_free_age=70),
              transpose(), transpose(22, 24), 70, "timing resource conflict"),
@@ -71,8 +65,7 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
             ("vpu.mul", lambda b: b.update(first_free_age=70, next_issue_age=69),
              binary(), transpose(8, 12), 70, "timing resource conflict"),
             ("vpu.add", lambda b: b.update(next_issue_age=60),
-             binary(16, 20, 24, "add"), unary("relu", 0, 6), 60, "timing resource conflict"),
-        ]
+             binary(16, 20, 24, "add"), unary("relu", 0, 6), 60, "timing resource conflict"),]
         with tempfile.TemporaryDirectory() as directory:
             for name, mutate, first, second, bound, diagnostic in cases:
                 path = facts_variant(directory, lambda d: mutate(block(d, name)))
@@ -82,15 +75,13 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
                                    diagnostic=diagnostic if gap < bound else None)
 
     def test_engine_facts_fail_closed(self):
-        cases = [
-            ("mxu1.matmul", lambda b: b["events"]["acc_load"].update(first_age=1, last_age=32, count=32, step=1),
+        cases = [("mxu1.matmul", lambda b: b["events"]["acc_load"].update(first_age=1, last_age=32, count=32, step=1),
              mxu("matmul", 1), "event group acc_load is not modeled"),
             ("mxu1.matmul", lambda b: b["events"].pop("compute_busy"), mxu("matmul", 1), "event group compute_busy is missing"),
             ("mxu1.matmul", lambda b: b["events"]["acc_write"].update(last_age=40), mxu("matmul", 1), "does not sweep"),
             ("vpu.mul", lambda b: b["events"]["write0"].update(count=32), binary(), "does not sweep 1x64"),
             *(("vpu.add", lambda b, value=value: b.update(next_issue_age=value),
-               binary(kind="add"), "facts block lacks a next_issue_age") for value in (None, 0, 67)),
-        ]
+               binary(kind="add"), "facts block lacks a next_issue_age") for value in (None, 0, 67)),]
         with tempfile.TemporaryDirectory() as directory:
             for name, mutate, operation, diagnostic in cases:
                 path = facts_variant(directory, lambda d: mutate(block(d, name)))
@@ -137,8 +128,7 @@ class SelectedEngineTimingTest(RTLTestSupport, unittest.TestCase):
                 self.assertNotIn("atlas.rtl_evidence", result.stdout)
 
 
-@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(),
-                     "requires explicit RTL timing facts and built tools")
+@unittest.skipUnless(FACTS and OPT.is_file() and EMIT.is_file(), "requires explicit RTL timing facts and built tools")
 class SelectedDMATimingTest(RTLTestSupport, unittest.TestCase):
     def check_consumers(self, ops, accepted, diagnostic=None):
         for consumer in CONSUMERS:
@@ -184,15 +174,13 @@ class SelectedDMATimingTest(RTLTestSupport, unittest.TestCase):
 
     def test_pending_transfers_require_their_wait(self):
         prefix = [*dma_setup(), transfer()]
-        cases = [
-            ([*prefix, wait(1), HALT], "has no pending transfer to wait for"),
+        cases = [([*prefix, wait(1), HALT], "has no pending transfer to wait for"),
             ([*prefix, transfer(channel=1), wait(1), HALT], "still pending when its block ends"),
             ([*prefix, addi(5, 0, 1), config(), vls("vload"), wait(), HALT], IN_FLIGHT),
             ([*prefix, MARKER, wait(), HALT], "completion publication requires DMA.WAIT"),
             ([*prefix, HALT], "still pending when its block ends"),
             ([wait(), HALT], "has no pending transfer to wait for"),
-            ([*prefix, wait(), wait(), HALT], "has no pending transfer to wait for"),
-        ]
+            ([*prefix, wait(), wait(), HALT], "has no pending transfer to wait for"),]
         for ops, diagnostic in cases:
             with self.subTest(ops=ops):
                 self.check_consumers(ops, False, diagnostic)
@@ -201,21 +189,18 @@ class SelectedDMATimingTest(RTLTestSupport, unittest.TestCase):
 
     def test_queued_transfer_rules(self):
         base = [*dma_setup(), *DMA_SECOND]
-        cases = [
-            ([*base, transfer(), transfer(channel=1, reg=7, dram=3), wait(), wait(1), HALT], True, None),
+        cases = [([*base, transfer(), transfer(channel=1, reg=7, dram=3), wait(), wait(1), HALT], True, None),
             ([*base, transfer(), transfer(channel=1, reg=7), wait(), wait(1), HALT], True, None),
             ([*base, transfer(), vls("vload", 4, 9), wait(), HALT], True, None),
             ([*base, transfer(), wait(), HALT], True, None),
             ([*base, transfer(), transfer(reg=7, dram=3), wait(), wait(), HALT], False, CHANNEL_REUSE),
             ([*base, transfer(), transfer(channel=1, dram=3), wait(), wait(1), HALT], False, IN_FLIGHT),
             ([*base, transfer(), transfer("store", 1, 7), wait(), wait(1), HALT], False, IN_FLIGHT),
-            ([*base, transfer(), vls("vload"), wait(), HALT], False, IN_FLIGHT),
-        ]
+            ([*base, transfer(), vls("vload"), wait(), HALT], False, IN_FLIGHT),]
         windows = [op for c in range(9) for op in word_base(10 + c, 64 * c)]
         launches = [transfer(channel=c, reg=10 + c) for c in range(8)]
         prefix = [*base, *windows, *launches]
-        cases += [
-            ([*prefix, *(wait(c) for c in range(8)), HALT], True, None),
+        cases += [([*prefix, *(wait(c) for c in range(8)), HALT], True, None),
             ([*prefix, wait(0), transfer(channel=0, reg=18), *(wait(c) for c in range(1, 8)), wait(0), HALT], True, None),
             ([*prefix, wait(1), wait(0), transfer(channel=1, reg=18), *(wait(c) for c in range(2, 8)), wait(1), HALT], True, None),
             ([*prefix, wait(1), transfer(channel=1, reg=18), *(wait(c) for c in range(8) if c != 1), wait(1), HALT], False, EIGHT_SLOTS),

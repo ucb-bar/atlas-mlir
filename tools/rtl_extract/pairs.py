@@ -236,8 +236,7 @@ def extract(document, raw, spec, jobs=1):
         low, high = limits(results)
         records.append({"name": f"{spec['engine']}.{name}", "engine": spec["engine"], "module": spec["module"],
                         "first": pair["first"], "second": pair["second"], "gaps": [results[0][0], results[-1][0]],
-                        "min_gap": low, "stable_gap": high,
-                        "guards": guards(concrete, pair), "results": runs(results),
+                        "min_gap": low, "stable_gap": high, "guards": guards(concrete, pair), "results": runs(results),
                         "rejected": [o for o in mine if not o["accepted"]],
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} gaps, "
                                     "event multisets compared with isolated runs"})

@@ -49,8 +49,7 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
         self.assertIn("selected RTL evidence excludes", model.stderr)
         good = self.check([HALT], True, VERIFY).stdout
         self.assertIn(f'atlas.timing_provider = "{PROVIDER}"', good)
-        for source, diagnostic in (
-                (good.replace(facts()["hw_ir"]["sha256"], "1" * 64), "different hardware IR"),
+        for source, diagnostic in ((good.replace(facts()["hw_ir"]["sha256"], "1" * 64), "different hardware IR"),
                 (good.replace(f', provider = "{PROVIDER}"}}', f', provider = "{PROVIDER[:-1]}9"}}'), "unsupported RTL evidence provider"),
                 (good.replace(f', provider = "{PROVIDER}"}}', f', dma = "latency", provider = "{PROVIDER}"}}'),
                  "unsupported DMA policy")):
@@ -61,8 +60,7 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
 
     def test_missing_unresolved_and_disagreeing_blocks_fail_closed(self):
         load = lambda d: block(d, "vlsu.vload")
-        mutations = (
-            (lambda d: d["op_timing"].remove(load(d)), "facts block is missing"),
+        mutations = ((lambda d: d["op_timing"].remove(load(d)), "facts block is missing"),
             (lambda d: load(d).update(events=None), "facts block is unresolved"),
             (lambda d: load(d)["events"]["mreg_write"].update(count=31), "does not sweep"),
             (lambda d: load(d)["events"]["mreg_write"].update(step=None, last_age=40), "does not sweep"),
@@ -79,12 +77,10 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
                         self.assertIn(f"{PROVIDER}: vlsu.vload: ", result.stderr)
             for mutate in (lambda d: d.update(schema="merlin.op_timing.v0"), lambda d: d.pop("hw_ir"),
                            lambda d: d["op_timing"].append(load(d))):
-                self.check([HALT], False, VERIFY, path=facts_variant(directory, mutate),
-                           diagnostic="RTL timing facts")
+                self.check([HALT], False, VERIFY, path=facts_variant(directory, mutate), diagnostic="RTL timing facts")
 
     def test_exact_memory_admission_boundaries(self):
-        for first, second, mreg, words, boundary, conflict in (
-                ("vload", "vload", 63, 65792, 35, "VLOAD path 0 busy"),
+        for first, second, mreg, words, boundary, conflict in (("vload", "vload", 63, 65792, 35, "VLOAD path 0 busy"),
                 ("vstore", "vstore", 63, 65792, 35, "VSTORE path 0 busy"),
                 *((a, b, r, w, gap, conflict) for a, b, release, bank in (
                     ("vload", "vstore", 35, 30), ("vstore", "vload", 34, 34))
@@ -128,13 +124,11 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
                  ([], VLOAD, False, None), ([addi(6, 0, 8)], VLOAD, False, None)]
         rows += [(setup, instruction, accepted, None) for setup, instruction, accepted in (
                 ([addi(6, 0, 256), addi(2, 0, 7)], scalar_store("sw", 2, 6, 8), True),
-                ([addi(6, 0, 256)], scalar_load("seld", 3, 6, 0), True),
-                ([], scalar_load("lw", 5, 6, 0), False),
+                ([addi(6, 0, 256)], scalar_load("seld", 3, 6, 0), True), ([], scalar_load("lw", 5, 6, 0), False),
                 ([addi(6, 0, 2)], scalar_load("lw", 5, 6, 0), False),
                 ([lui(6, 0x180)], scalar_load("lw", 5, 6, 0), False),
                 ([addi(6, 0, 256)], scalar_load("lb", 5, 6, 0), False),
-                ([addi(6, 0, 256)], scalar_store("sh", 2, 6, 0), False),
-                ([], ("fence", ""), False),
+                ([addi(6, 0, 256)], scalar_store("sh", 2, 6, 0), False), ([], ("fence", ""), False),
                 ([], ("csr", 'kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3089 : i32'), False))]
         rows += [([], ("alu_reg", f'kind = "{kind}", dst = 6 : i32, lhs = 0 : i32, rhs = 0 : i32'), True, None)
                  for kind in ("xor", "slt", "sltu")]
@@ -229,30 +223,25 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
         self.assertIn("note: concrete register contexts exceed 4096 block entries", result.stderr)
 
     def test_control_flow_shape_is_checked(self):
-        for ops, diagnostic in (
-                ([addi(13, 0, 0), branch("beq", 0, 0, 2), VLOAD, HALT], "admits only ADDI or LUI"),
+        for ops, diagnostic in (([addi(13, 0, 0), branch("beq", 0, 0, 2), VLOAD, HALT], "admits only ADDI or LUI"),
                 ([addi(13, 0, 0), branch("beq", 0, 0, 2), nop()], "targets the stream end"),
                 ([jal(3), nop(), addi(1, 0, 1), HALT], "is unreachable"),
                 ([addi(13, 0, 0), branch("blt", 13, 0, 3), nop(), HALT, nop()], "requires a terminal"),
-                ([("jump", 'kind = "jal", dst = 1 : i32, base = 0 : i32, offset = 4 : i32'), nop(), HALT],
-                 "link")):
+                ([("jump", 'kind = "jal", dst = 1 : i32, base = 0 : i32, offset = 4 : i32'), nop(), HALT], "link")):
             for consumer in (*CONSUMERS, VERIFY):
                 with self.subTest(ops=ops, consumer=consumer):
                     self.check(ops, False, consumer, diagnostic=diagnostic)
 
     def test_dma_must_be_waited_within_its_block(self):
         counter = [addi(13, 0, 0), addi(14, 0, 2)]
-        across = [*dma_setup(), *counter, DMA_LOAD, addi(13, 13, 1), branch("blt", 13, 14, -2), nop(),
-                  DMA_WAIT, HALT]
-        inside = [*dma_setup(), *counter, DMA_LOAD, DMA_WAIT, addi(13, 13, 1),
-                  branch("blt", 13, 14, -3), nop(), HALT]
+        across = [*dma_setup(), *counter, DMA_LOAD, addi(13, 13, 1), branch("blt", 13, 14, -2), nop(), DMA_WAIT, HALT]
+        inside = [*dma_setup(), *counter, DMA_LOAD, DMA_WAIT, addi(13, 13, 1), branch("blt", 13, 14, -3), nop(), HALT]
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
                 self.check(across, False, consumer, dma="wait",
                            diagnostic="still pending when its block ends; selected RTL timing requires atlas.dma_wait on channel 0")
                 self.check(inside, True, consumer, VERIFY, dma="wait")
-        self.check(across, False, VERIFY, dma="wait",
-                   diagnostic="still pending when its block ends")
+        self.check(across, False, VERIFY, dma="wait", diagnostic="still pending when its block ends")
 
     def test_program_size_limits(self):
         for words in (32768, 32769):
@@ -303,8 +292,7 @@ class PairFactsSelectionTest(unittest.TestCase):
                 if value is not None:
                     entry["window"] = value
             return mutate
-        mutations = [
-            ("different hardware IR", lambda d: d["hw_ir"].update(sha256="0" * 64)),
+        mutations = [("different hardware IR", lambda d: d["hw_ir"].update(sha256="0" * 64)),
             ("different op_timing facts", lambda d: d["op_timing"].update(sha256="0" * 64)),
             ("not checked against RTL assertions", lambda d: d["op_pairs"][0].update(assertions={"checked": 0, "excluded": 0})),
             ("names no resolved facts block", lambda d: d["op_pairs"][0].update(second="vpu.unknown")),
