@@ -17,8 +17,8 @@ using namespace mlir::atlas;
 bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
   if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
-          VPUReduceOp, VLIOp, VLoadOp, VStoreOp, ALURegOp, ALUImmOp,
-          UpperOp>(op))
+          VPUReduceOp, VLIOp, XLUTransposeOp, VLoadOp, VStoreOp, ALURegOp,
+          ALUImmOp, UpperOp>(op))
     return true;
   if (auto load = dyn_cast<ScalarLoadOp>(op))
     return load.getKind() == "seli";

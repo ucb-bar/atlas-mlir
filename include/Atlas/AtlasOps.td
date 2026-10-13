@@ -218,6 +218,12 @@ def Atlas_VirtualVPUSplatOp : Atlas_Op<"virtual_vpu_splat", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualXLUTransposeOp : Atlas_Op<"virtual_xlu_transpose", [Pure]> {
+  let summary = "FP8 tile transposed on the XLU: element (j, i) is source (i, j)";
+  let arguments = (ins Atlas_VirtualFP8Type:$src);
+  let results = (outs Atlas_VirtualFP8Type:$dst);
+}
+
 def Atlas_VirtualOutputBF16Op :
     Atlas_Op<"virtual_output_bf16",
              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {

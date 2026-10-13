@@ -7,8 +7,11 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/JSON.h"
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <string>
 
 namespace mlir::atlas {
 
@@ -62,9 +65,24 @@ struct FixedResourcePlacement {
 enum class RegisterKind { BF16, FP8, Scalar };
 using RegisterCapacities = std::array<unsigned, 3>;
 
+// One RegisterKind's demand in the last allocate(), against its capacity.
+struct RegisterPressure {
+  unsigned capacity = 0;
+  // The most values of the kind live at once, a lower bound on the registers
+  // any allocation needs, and an operation where that many are live.
+  unsigned peak = 0;
+  Operation *peakAt = nullptr;
+  // The registers the coloring used; empty when it did not fit.
+  std::optional<unsigned> used;
+};
+
 // How many values of each RegisterKind allocate can keep in registers at once
 // in `function`: BF16 pairs, FP8 registers and scalars.
 RegisterCapacities registerCapacities(func::FuncOp function);
+
+// `loc` as file:line:col, without the file's directory, where it has one,
+// else as MLIR prints it.
+std::string locationText(Location loc);
 
 class VirtualAllocationPlan {
 public:
@@ -82,6 +100,10 @@ public:
   const DMATransferPlacement &dma(Value value) const;
   llvm::ArrayRef<int32_t> scalarArguments() const;
   const FixedResourcePlacement &fixed() const;
+  // After allocate(), whether or not it succeeded: register pressure per kind,
+  // each value's placement, MXU slots, DMA channels and the VMEM windows the
+  // lowering uses. Values are named as the function prints.
+  llvm::json::Object report() const;
 
 private:
   LogicalResult colorValues(RegisterKind kind);
@@ -93,6 +115,7 @@ private:
   llvm::DenseMap<Value, MXUPlacement> mxuResources;
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
   llvm::SmallVector<int32_t> scalarArgumentRegs;
+  std::array<RegisterPressure, 3> pressure;
   bool mixedFp8 = false;
   bool hasPack = false;
   const FixedResourcePlacement fixedResources;
