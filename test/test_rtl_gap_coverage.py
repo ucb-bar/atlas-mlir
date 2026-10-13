@@ -1,22 +1,18 @@
-"""Compiler issue gaps never undercut the RTL pair sweeps (rtl_extract.op_pairs.v1).
+"""Compiler issue gaps never undercut the RTL pair sweeps.
 
-For each pair record, a program issues the pair's two operations with the pair file's operand
-overlays (tools/rtl_extract/targets/atlas/pairs), separated by DELAY, and --verify-atlas-timing
-finds the smallest accepted issue gap; it must be at least the record's stable_gap. Pairs the
-selected provider rejects are reported as unsupported. An informational legacy run lists pairs
-whose built-in rules (insert-atlas-delays without a selection) fall below stable_gap.
+For each record, a program issues the pair's two operations with the pair file's operand overlays,
+separated by DELAY; the smallest gap --verify-atlas-timing accepts under the selected provider must be
+at least the record's bound. System pairs (engines `core` and `core_dma`) are decoded from AtlasCore
+instruction words and must re-encode to them. Unsupported pairs must be provider rejections, and an
+informational run lists pairs whose legacy rules fall below the bound.
 
-ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated); the default is every pairs-*.json next to
-ATLAS_OP_TIMING. Missing files are skipped. With ATLAS_PAIR_FACTS the pair facts are selected too. System pairs
-(engines `core` and `core_dma`) feed instruction words to AtlasCore's decoder; they are decoded into compiler
-operations that must encode to the same words, with register fields fed by cuts (VLS base, DMA operands) set up
-from the cut values.
+The bound is stable_gap, except for a pair with a DMA launch: a transfer's beats are not compiler facts,
+so a swept gap whose only failure is a moved DMA or DRAM event does not bind. Its bound is one past the
+last other failing gap (a firing assertion always binds), or 1 when there is none, so a VLS command
+beside a pending transfer may be bound below its stable_gap. Two launches bind only their order.
 
-A DMA transfer's beats are not compiler facts: its effects are unknown from launch to the matching wait. For a
-pair with a DMA launch, a swept gap whose only failure is a moved DMA event (the transfer queued behind another
-launch, or its VMEM accesses waiting for the LSU's grant) keeps every other event isolated, so the bound the
-compiler must meet is the gap after the last other failure. Two launches never keep isolated timing (the second
-is queued), so they bind launch order only. Any firing assertion binds as stable_gap does.
+ATLAS_PAIR_SWEEPS lists sweep files (os.pathsep-separated; default every pairs-*.json beside
+ATLAS_OP_TIMING); with ATLAS_PAIR_FACTS the pair facts are selected too.
 """
 from concurrent.futures import ThreadPoolExecutor
 import functools
@@ -26,23 +22,15 @@ from pathlib import Path
 import sys
 import unittest
 
-from test_delay_insertion import EMIT, OPT, ROOT, addi, nop, program, run, stream
-from test_rtl_timing import FACTS, HALT, PAIRS, PROVIDER, VERIFY, delay, selection, vls, word_base
-from test_rtl_vmul_timing import pack, reduce, unary, vli, vmul
-from test_rtl_xlu_timing import transpose
-from test_rtl_dma_timing import IN_FLIGHT, transfer, wait
+from rtl_test_support import (
+    BINARY, EMIT, FACTS, HALT, IN_FLIGHT, LIMIT, MXU_WORDS, OPT, PAIRS, PROVIDER, REDUCE, ROOT,
+    UNARY, VERIFY, VLI, gapped, issue_gap, mxu, pack, program, run, selection, transfer,
+    transpose, vli, vls, vpu, wait, word_base,
+)
 
 sys.path.insert(0, str(ROOT / "tools"))
 
-LIMIT = 400  # widest gap probed; every pair here drains well before it
-BINARY = {"add": "add", "sub": "sub", "mul": "mul", "pairmax": "max", "pairmin": "min"}
-UNARY = {"mov": "mov", "rcp": "recip", "log": "log2",
-         **{k: k for k in ("exp", "exp2", "relu", "sin", "cos", "tanh", "sqrt", "square", "cube")}}
-REDUCE = {"rsum": "row_sum", "rmax": "row_max", "rmin": "row_min",
-          "csum": "col_sum", "cmax": "col_max", "cmin": "col_min"}
-VLI = {"vliAll": "all", "vliRow": "row", "vliCol": "col", "vliOne": "one"}
-MXU = {0: "push_weight", 2: "push_acc_fp8", 4: "push_acc_bf16", 6: "pop_acc_fp8", 8: "pop_acc_bf16",
-       10: "matmul", 12: "matmul_acc"}  # funct7 - unit (lib/AtlasEncoding.cpp)
+
 DMA_FIELDS = (31 << 7) | (31 << 15) | (31 << 20)  # DMA register fields; the operands arrive on the cuts
 
 
@@ -79,27 +67,12 @@ def operation(engine, name, fields, base):
         return word_base(base, fields["io_cmd_bits_vmemLineAddr"] * 8), vls(name, fields["io_cmd_bits_mregBank"], base)
     if engine == "vpu":
         vs1, vs2, vd = (fields[f"io_cmd_bits_{k}"] for k in ("vs1", "vs2", "vd"))
-        if name in BINARY:
-            return [], vmul(vs1, vs2, vd, BINARY[name])
-        if name in UNARY:
-            return [], unary(UNARY[name], vs1, vd)
-        if name in REDUCE:
-            return [], reduce(REDUCE[name], vs1, vd)
-        if name in VLI:
-            return [], vli(VLI[name], vd)
-    if engine in ("mxu0", "mxu1"):
-        unit, src = engine[-1], fields["io_cmd_bits_mregId"]
-        acc, slot = fields.get("io_cmd_bits_accSel", 0), fields.get("io_cmd_bits_weightSlot", 0)
-        if name in ("matmul", "matmul_acc"):
-            return [], ("mxu_matmul", f"unit = {unit} : i32, src = {src} : i32, weight_slot = {slot} : i32, "
-                                      f"acc_slot = {acc} : i32, accumulate = {str(name == 'matmul_acc').lower()}")
-        if name in ("push_weight", "push_acc_fp8", "push_acc_bf16"):
-            kind, at = ("weight_fp8", slot) if name == "push_weight" else (name[5:], acc)
-            return [], ("mxu_push", f'kind = "{kind}", unit = {unit} : i32, src = {src} : i32, slot = {at} : i32')
-        if name in ("pop_acc_bf16", "pop_acc_fp8"):
-            scale = fields.get("scale", 0) if name == "pop_acc_fp8" else 0
-            return [], ("mxu_pop", f'format = "{name[8:]}", unit = {unit} : i32, dst = {src} : i32, '
-                                   f'slot = {acc} : i32, scale_reg = {scale} : i32')
+        if name in BINARY or name in UNARY or name in REDUCE or name in VLI:
+            return [], vpu(name, (vs1, vs2, vd))
+    if engine in ("mxu0", "mxu1") and name in MXU_WORDS.values():
+        return [], mxu(name, int(engine[-1]), reg=fields["io_cmd_bits_mregId"],
+                       acc=fields.get("io_cmd_bits_accSel", 0), slot=fields.get("io_cmd_bits_weightSlot", 0),
+                       scale=fields.get("scale", 0))
     return None
 
 
@@ -115,8 +88,8 @@ def core_operation(fields, base):
         return word_base(base, fields["address"]), vls(kind, vd, base)
     if opcode == 0x6b:
         return [], transpose(vs1, vd)
-    if opcode == 0x77 and (word >> 25) & ~1 in MXU:
-        name, unit = MXU[(word >> 25) & ~1], (word >> 25) & 1
+    if opcode == 0x77 and (word >> 25) & ~1 in MXU_WORDS:
+        name, unit = MXU_WORDS[(word >> 25) & ~1], (word >> 25) & 1
         pop = name.startswith("pop")
         return operation(f"mxu{unit}", name, {"io_cmd_bits_mregId": vd if pop else vs1,
                                               "io_cmd_bits_accSel": vs2 if pop else vd,
@@ -207,32 +180,6 @@ def bound(record):
     if max(binding) >= record["gaps"][1] or record["stable_gap"] is None:
         raise AssertionError(f"{record['name']}: no swept gap clears every non-DMA failure")
     return max(binding) + 1, "dma"
-
-
-def separated(gap):
-    return [] if gap == 1 else [nop()] if gap == 2 else [delay(gap - 2)]
-
-
-def gapped(setup, first, second, gap, tail=()):
-    return program([*setup, first, *separated(gap), second, *tail, delay(LIMIT), nop(), HALT])
-
-
-def issue_cycles(printed):
-    """(op, sorted fields, issue cycle) for each printed stream op."""
-    out, cycle = [], 0
-    for op, fields, _ in stream(printed):
-        out.append((op, sorted(fields.split(", ")), cycle))
-        cycle += int(fields.split("cycles = ")[1].split(" ")[0]) + 1 if op == "delay" else 1
-    return out
-
-
-def issue_gap(printed, first, second):
-    """Issue cycle of `second` minus that of `first` (negative if reordered)."""
-    ops = issue_cycles(printed)
-    find = lambda op, skip=-1: next(i for i, (name, fields, _) in enumerate(ops)
-                                    if i != skip and (name, fields) == (op[0], sorted(op[1].split(", "))))
-    a = find(first)
-    return ops[find(second, a)][2] - ops[a][2]
 
 
 def selected_gap(setup, first, second, tail, limit):

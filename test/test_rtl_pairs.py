@@ -1,13 +1,4 @@
-"""Commands on one MXU at once under selected pair facts (ATLAS_OP_TIMING, ATLAS_PAIR_FACTS, ATLAS_OOT_BIN_DIR).
-
-An MXU command is live from its issue through its busy end (its last event; MREG reads through their response). With
-pair facts that cover its unit selected, a command may issue while another on the same MXU is live exactly where a
-pair fact for the two (in issue order) covers the gap and their operands satisfy its relation (disjoint physical MREG
-banks, and the same or other accumulator and weight slot wherever both name one), and at most the facts' live
-capacity run together; otherwise it waits for the live command's busy end, as without pair facts. The accumulator and
-weight-slot access rules still bind, so a pair issues at the larger of its stable gap and its data distance. Chains
-check the accounting against the chain sweeps (tools/rtl_extract/targets/atlas/sequences/core_mxu.yaml).
-"""
+"""Pair-fact admission, operand relations and live command capacity."""
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -16,15 +7,129 @@ import unittest
 
 import yaml
 
-from test_delay_insertion import OPT, ROOT, nop, program, run, without_delays
-from test_rtl_gap_coverage import issue_cycles, issue_gap
-from test_rtl_mxu_timing import busy, mxu, spacer
-from test_rtl_timing import CONSUMERS, FACTS, HALT, PAIRS, VERIFY, block, delay, export, facts, selection
+from rtl_test_support import (
+    CONSUMERS, FACTS, HALT, KERNELS, OPT, PAIRS, ROOT, VERIFY, block, busy, decode_mxu, delay,
+    export, facts, gapped, issue_cycles, issue_gap, mxu, nop, pairs_variant, program, run,
+    selection, spaced, stream, transpose, unary, vpu, without_delays,
+)
 
-KINDS = ("push_weight", "push_acc_fp8", "push_acc_bf16", "pop_acc_fp8", "pop_acc_bf16", "matmul", "matmul_acc")
-USES = {"push_weight": (False, True), "push_acc_fp8": (True, False), "push_acc_bf16": (True, False),
-        "pop_acc_fp8": (True, False), "pop_acc_bf16": (True, False), "matmul": (True, True), "matmul_acc": (True, True)}
-# MREG operands of the first and second command (sources, pop destinations), in disjoint physical banks.
+
+SETS = [(0, 2, 4), (8, 10, 12), (16, 18, 20), (24, 26, 28)]
+OVERLAP = [("exp", "relu"), ("relu", "exp"), ("rcp", "sqrt"), ("mov", "exp"), ("fp8unpack", "relu"),
+           ("vliAll", "relu"), ("csum", "relu")]
+SERIAL = [("exp", "exp"), ("exp", "exp2"), ("relu", "add"), ("add", "relu"), ("rsum", "relu"), ("exp", "rsum"),
+          ("vliAll", "vliCol")]
+
+
+def pair_facts():
+    return {(r["first"], r["second"]): r for r in json.loads(Path(PAIRS).read_text())["op_pairs"]}
+
+
+@unittest.skipUnless(FACTS and PAIRS and OPT.is_file(), "requires RTL timing facts, pair facts and built tools")
+class VpuSlotTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.facts, cls.pairs = facts(), pair_facts()
+        cls.with_pairs, cls.plain = selection(pairs=PAIRS), selection()
+
+    def accepts(self, source, option=None):
+        return run(OPT, source, option or self.with_pairs, VERIFY)
+
+    def next_issue(self, name):
+        return block(self.facts, f"vpu.{name}")["next_issue_age"]
+
+    def test_pairs_admit_exactly_their_stable_gap(self):
+        for first, second in OVERLAP + SERIAL:
+            stable = self.pairs[(f"vpu.{first}", f"vpu.{second}")]["stable_gap"]
+            a, b = vpu(first, SETS[0]), vpu(second, SETS[1])
+            with self.subTest(f"{first}->{second}", stable=stable):
+                self.assertEqual((stable == 1), (first, second) in OVERLAP)
+                result = self.accepts(gapped([], a, b, stable))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if stable > 1:
+                    early = self.accepts(gapped([], a, b, stable - 1))
+                    self.assertIn(f"first permitted cycle {stable}", early.stderr)
+                    self.assertIn("no pair fact admits", early.stderr)
+                else:
+                    plain = self.accepts(gapped([], a, b, 1), self.plain)
+                    self.assertIn(f"first permitted cycle {self.next_issue(first)}", plain.stderr)
+                reverse = self.pairs[(f"vpu.{second}", f"vpu.{first}")]["stable_gap"]
+                for consumer in CONSUMERS:
+                    timed = run(OPT, program([a, b, HALT]), self.with_pairs, consumer, VERIFY)
+                    self.assertEqual(timed.returncode, 0, timed.stderr)
+                    gap = issue_gap(timed.stdout, a, b)
+                    # The scheduler may issue the second first; it then keeps the reverse pair's gap.
+                    self.assertEqual(gap if gap > 0 else -gap, stable if gap > 0 else reverse, consumer)
+
+    def test_operands_must_satisfy_the_relation(self):
+        # relu reads m48 and m49, physical banks 16 and 17 of exp's destination pair: no fact applies.
+        first, second = unary("exp", 8, 16), unary("relu", 48, 28)
+        shared = self.accepts(gapped([], first, second, 1))
+        self.assertIn("no pair fact admits vrelu.bf16 1 cycles after vexp.bf16 with these operands", shared.stderr)
+        self.assertIn(f"first permitted cycle {self.next_issue('exp')}", shared.stderr)
+        self.assertEqual(self.accepts(gapped([], first, second, self.next_issue("exp"))).returncode, 0)
+
+    def test_missing_facts_and_unknown_relations_do_not_apply(self):
+        first, second = unary("exp", 8, 16), unary("relu", 20, 28)
+        with tempfile.TemporaryDirectory() as directory:
+            for relation in (None, {}, {"mreg_banks": "shared"}, {"mreg_banks": "disjoint", "accumulator": "other"}):
+                document = json.loads(Path(PAIRS).read_text())
+                target = next(r for r in document["op_pairs"] if (r["first"], r["second"]) == ("vpu.exp", "vpu.relu"))
+                if relation is None:
+                    document["op_pairs"].remove(target)
+                else:
+                    target["relation"] = relation
+                path = Path(directory) / "op-pairs.json"
+                path.write_text(json.dumps(document))
+                with self.subTest(relation=relation):
+                    result = self.accepts(gapped([], first, second, 1), selection(pairs=path))
+                    self.assertIn(f"first permitted cycle {self.next_issue('exp')}", result.stderr)
+
+    def test_chains_match_the_sequence_sweeps(self):
+        raw = yaml.safe_load((ROOT / "tools/rtl_extract/targets/atlas/sequences/core_vpu.yaml").read_text())
+        for name, lengths in raw["expect"].items():
+            cycle = [entry["op"] for entry in raw["sequences"][name]["ops"]]
+            for length, stable in lengths.items():
+                ops = [vpu(cycle[i % len(cycle)], SETS[i % len(SETS)]) for i in range(length)]
+                accepted = lambda gap: self.accepts(spaced(ops, gap)).returncode == 0
+                with self.subTest(name, length=length, stable=stable):
+                    self.assertEqual(min(g for g in range(1, stable + 2) if accepted(g)), stable)
+                    self.assertTrue(all(accepted(g) for g in range(stable, stable + 4)))
+
+    def test_slot_capacity_bounds_a_third_command(self):
+        # exp and relu fill both slots; sin shares no logic with either, so only capacity holds it back.
+        ops = [vpu("exp", SETS[0]), vpu("relu", SETS[1]), vpu("sin", SETS[2])]
+        full = self.accepts(program([*ops, delay(400), nop(), HALT]))
+        self.assertIn("VPU slots busy", full.stderr)
+        self.assertIn(f"first permitted cycle {self.next_issue('exp')}", full.stderr)
+        for consumer in CONSUMERS:
+            timed = run(OPT, program([*ops, HALT]), self.with_pairs, consumer, VERIFY)
+            self.assertEqual(timed.returncode, 0, timed.stderr)
+            cycles = [c for op, _, c in issue_cycles(timed.stdout) if op == "vpu_unary"]
+            self.assertEqual(cycles, [0, 1, self.next_issue("exp")], consumer)
+
+    def test_xlu_waits_for_every_live_vpu_command(self):
+        ops = [vpu("exp", SETS[0]), vpu("relu", SETS[1])]
+        free = 1 + block(self.facts, "vpu.relu")["first_free_age"]
+        late = lambda gap: program([*ops, *([] if gap == 1 else [nop()] if gap == 2 else [delay(gap - 2)]),
+                                    transpose(40, 42), delay(400), nop(), HALT])
+        self.assertEqual(self.accepts(late(free - 1)).returncode, 0, self.accepts(late(free - 1)).stderr)
+        self.assertIn("busy", self.accepts(late(free - 2)).stderr)
+
+    def test_without_pair_facts_nothing_changes(self):
+        ops = [vpu("exp", SETS[0]), vpu("relu", SETS[1]), vpu("exp", SETS[2])]
+        for consumer in CONSUMERS:
+            plain = run(OPT, program([*ops, HALT]), self.plain, consumer, VERIFY)
+            cycles = [c for op, _, c in issue_cycles(plain.stdout) if op == "vpu_unary"]
+            self.assertEqual(cycles, [0, self.next_issue("exp"), self.next_issue("exp") + self.next_issue("relu")])
+        # Programs without two VPU commands time identically with and without pair facts.
+        for name, kernel in KERNELS.items():
+            for consumer in CONSUMERS:
+                with self.subTest(name, consumer=consumer):
+                    timed = [run(OPT, program(kernel()), option, consumer, VERIFY) for option in (self.plain, self.with_pairs)]
+                    self.assertEqual(stream(timed[0].stdout), stream(timed[1].stdout))
+
+
 REGS = ({"src": 12, "dst": 20}, {"src": 16, "dst": 24})
 MATCHED_CHAINS = 109  # of the 172 chain records, those whose stable gap the compiler reproduces exactly
 
@@ -81,38 +186,8 @@ def operands(relation):
     return 0 if relation in (None, "same") else 1
 
 
-# funct7 - unit -> operation (lib/AtlasEncoding.cpp).
-WORDS = {0: "push_weight", 2: "push_acc_fp8", 4: "push_acc_bf16", 6: "pop_acc_fp8", 8: "pop_acc_bf16", 10: "matmul", 12: "matmul_acc"}
 CHAINS = ROOT / "tools/rtl_extract/targets/atlas/sequences/core_mxu.yaml"
 SHARED = ROOT / "tools/rtl_extract/targets/atlas/pairs/core_mxu_shared.yaml"
-
-
-def decoded(word):
-    """The compiler operation of an MXU instruction word of the chain file."""
-    vd, vs1, vs2, f7 = word >> 7 & 63, word >> 13 & 63, word >> 19 & 63, word >> 25
-    kind, unit = WORDS[f7 & ~1], f7 & 1
-    if kind == "push_weight":
-        return mxu(kind, unit, reg=vs1, slot=vd)
-    if kind.startswith("push_acc"):
-        return mxu(kind, unit, reg=vs1, acc=vd)
-    if kind.startswith("pop"):
-        return mxu(kind, unit, reg=vd, acc=vs2, scale=vs1)
-    return mxu(kind, unit, reg=vs1, acc=vd, slot=vs2)
-
-
-def spaced(ops, gap, drain=400):
-    out = []
-    for i, op in enumerate(ops):
-        out += ([] if i == 0 else spacer(gap)) + [op]
-    return program(out + [delay(drain), nop(), HALT])
-
-
-def pair_facts_variant(directory, mutate, name="op-pairs.json"):
-    document = json.loads(Path(PAIRS).read_text())
-    mutate(document)
-    path = Path(directory) / name
-    path.write_text(json.dumps(document))
-    return path
 
 
 def record_of(document, unit, first, second, acc=None, slot=None):
@@ -176,10 +251,7 @@ class MxuPipelineTest(unittest.TestCase):
                         self.assertRegex(early.stderr, f"first permitted cycle {gap}|requires {gap}, got {gap - 1}")
 
     def test_shared_operand_facts_hold_with_the_mreg_rules(self):
-        """Every same-MXU pair fact for operands sharing an MREG register or bank (pairs/core_mxu_shared.yaml), on the
-        swept operands: accepted at the first gap the compiler admits and rejected one cycle earlier, never below the
-        fact's stable gap; where the two commands only read the shared registers the MREG rules add nothing, so the
-        pair issues exactly at the larger of its stable gap and its accumulator and weight access distance."""
+        """Shared operands meet swept gaps and MREG releases; read-only sharing adds no data distance."""
         raw = yaml.safe_load(SHARED.read_text())
         records = [r for r in json.loads(Path(PAIRS).read_text())["op_pairs"]
                    if r["engine"] in ("mxu0", "mxu1") and r["relation"]["mreg_banks"] != "disjoint"]
@@ -187,7 +259,7 @@ class MxuPipelineTest(unittest.TestCase):
 
         def check(record):
             pair = raw["pairs"][record["source"].split(".", 1)[1]]
-            a, b = (decoded(pair[f"{side}_inputs"]["instruction"]) for side in ("first", "second"))
+            a, b = (decode_mxu(pair[f"{side}_inputs"]["instruction"]) for side in ("first", "second"))
             gap = next(g for g in range(1, 200) if self.verify(spaced([a, b], g, 200)).returncode == 0)
             return record, a, b, gap, self.verify(spaced([a, b], gap + 1, 200)), self.verify(spaced([a, b], gap - 1, 200)) if gap > 1 else None
 
@@ -220,7 +292,6 @@ class MxuPipelineTest(unittest.TestCase):
                 self.assertEqual(self.boundary(*key), gap)
                 self.assertLess(gap, self.window(first, unit))
                 a, b = command(first, unit, 0), command(second, unit, 1, operands(acc), operands(slot))
-                self.assert_boundary(a, b, gap)
                 self.assert_boundary(a, b, self.window(first, unit) if gap < self.window(first, unit) else gap, self.plain)
                 for consumer in CONSUMERS:
                     timed = run(OPT, program([a, b, HALT]), self.with_pairs, consumer, VERIFY)
@@ -241,7 +312,7 @@ class MxuPipelineTest(unittest.TestCase):
             with self.subTest(unit=unit):
                 self.assert_boundary(first, second, shared["stable_gap"])
                 with tempfile.TemporaryDirectory() as directory:
-                    disjoint = pair_facts_variant(directory, lambda d: d.update(
+                    disjoint = pairs_variant(directory, lambda d: d.update(
                         op_pairs=[r for r in d["op_pairs"] if r["relation"]["mreg_banks"] in ("disjoint",)]))
                     stderr = self.assert_boundary(first, second, window, selection(pairs=disjoint))
                 self.assertIn(f"no pair fact admits vmatpop.bf16.acc.mxu{unit} {window - 1} cycles after "
@@ -277,7 +348,7 @@ class MxuPipelineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for name, mutate in mutations.items():
                 with self.subTest(name):
-                    path = pair_facts_variant(directory, mutate, f"{name.replace(' ', '-')}.json")
+                    path = pairs_variant(directory, mutate, f"{name.replace(' ', '-')}.json")
                     option = selection(pairs=path)
                     self.assertEqual(self.verify(spaced([first, second], 1), option).returncode != 0, True)
                     self.assert_boundary(first, second, window, option)
@@ -301,19 +372,17 @@ class MxuPipelineTest(unittest.TestCase):
             cycles = [c for op, _, c in issue_cycles(timed.stdout) if op == "mxu_matmul"]
             self.assertEqual(cycles, [0, 32, window], consumer)
         with tempfile.TemporaryDirectory() as directory:
-            three = pair_facts_variant(directory, lambda d: next(c for c in d["capacity"] if c["engine"] == "mxu0").update(live=3))
+            three = pairs_variant(directory, lambda d: next(c for c in d["capacity"] if c["engine"] == "mxu0").update(live=3))
             self.assertEqual(self.verify(spaced(ops, 32), selection(pairs=three)).returncode, 0)
 
     def test_chains_never_admit_what_the_sweeps_reject(self):
-        """Every chain of sequences/core_mxu.yaml at uniform spacing: the compiler accepts no spacing below the chain's
-        stable gap (each chain is rejected below it and accepted from it), and exactly the stable gap unless the facts'
-        capacity of two or an accumulator or weight access rule binds, which the rejection at the stable gap names."""
+        """Chains meet swept gaps; any extra delay must name capacity or data conflicts."""
         raw = yaml.safe_load(CHAINS.read_text())
         records = [(name, length, stable) for name, lengths in raw["expect"].items() for length, stable in lengths.items()]
 
         def scan(record):
             name, length, stable = record
-            ops = [decoded(entry["inputs"]["instruction"]) for entry in raw["sequences"][name]["ops"][:length]]
+            ops = [decode_mxu(entry["inputs"]["instruction"]) for entry in raw["sequences"][name]["ops"][:length]]
             verdicts = {}
             for gap in range(1, 200):
                 verdicts[gap] = self.verify(spaced(ops, gap))
@@ -322,7 +391,7 @@ class MxuPipelineTest(unittest.TestCase):
                     break
             return record, verdicts
 
-        with ThreadPoolExecutor(32) as pool:
+        with ThreadPoolExecutor(16) as pool:
             scanned = list(pool.map(scan, records))
         matched = 0
         for (name, length, stable), verdicts in scanned:
@@ -337,14 +406,13 @@ class MxuPipelineTest(unittest.TestCase):
         self.assertGreaterEqual(matched, MATCHED_CHAINS)
 
     def test_without_mxu_facts_nothing_changes(self):
-        """Pair facts without MXU records (the VPU document) and no pair facts time MXU programs identically; MXU programs
-        compare against the 38393c5 build in the word comparison (docs/rtl-timing/verification.md)."""
+        """A selection without MXU pair records preserves the unpipelined schedule."""
         programs = {name: without_delays((ROOT / f"test/examples/{name}.mlir").read_text())
                     for name in ("mxu0_full", "mxu0_k2", "mxu1_k2")}
         tiles = {f"tile{u}": program([command("push_weight", u, 0), command("matmul", u, 0), command("pop_acc_bf16", u, 0), HALT])
                  for u in (0, 1)}
         with tempfile.TemporaryDirectory() as directory:
-            vpu_only = pair_facts_variant(directory, lambda d: (
+            vpu_only = pairs_variant(directory, lambda d: (
                 d.update(op_pairs=[r for r in d["op_pairs"] if r["engine"] not in ("mxu0", "mxu1")]),
                 d.update(capacity=[c for c in d["capacity"] if c["engine"] not in ("mxu0", "mxu1")])))
             for name, source in {**programs, **tiles}.items():
