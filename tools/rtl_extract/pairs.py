@@ -280,41 +280,59 @@ def shared_control(circuit, spec, raw, groups):
 TASK = None
 
 
-def check_gap(gap):
-    return check(*TASK, gap)
+def parallel(function, tasks, jobs):
+    """``function`` over ``tasks`` in order, in ``jobs`` forked processes when more than one; ``TASK`` is inherited."""
+    if jobs <= 1 or len(tasks) < 2:
+        return [function(t) for t in tasks]
+    with multiprocessing.get_context("fork").Pool(min(jobs, len(tasks))) as pool:
+        return pool.map(function, tasks, chunksize=1)
 
 
-def sweep(circuit, spec, raw, pair, alone, gaps, jobs=1):
-    """``check`` for every gap, in ``jobs`` forked processes when more than one."""
-    global TASK
-    if jobs <= 1 or len(gaps) < 2:
-        return [check(circuit, spec, raw, pair, alone, gap) for gap in gaps]
-    TASK = (circuit, spec, raw, pair, alone)
-    with multiprocessing.get_context("fork").Pool(min(jobs, len(gaps))) as pool:
-        return pool.map(check_gap, gaps, chunksize=1)
+def isolate_task(task):
+    circuit, spec, raw = TASK[:3]
+    return isolate(circuit, spec, raw, *task)
+
+
+def check_task(task):
+    circuit, spec, raw, alone = TASK
+    name, gap = task
+    return check(circuit, spec, raw, raw["pairs"][name], alone[name], gap)
+
+
+def side_key(pair, side):
+    return pair[side], tuple(sorted(pair.get(f"{side}_inputs", {}).items()))
 
 
 def extract(document, raw, spec, jobs=1):
-    """One record per pair of one pair file: per-gap results, the minimum accepted gap and the stable gap."""
+    """One record per pair of one pair file: per-gap results, the minimum accepted gap and the stable gap. With
+    ``jobs`` above one, the isolated runs and then every (pair, gap) trial of the file run in that many processes."""
+    global TASK
     concrete, _ = derive.resolve(document, prepared(raw, spec), {})
     circuit = RECIPES[concrete["recipe"]][0](document, concrete)
-    records, isolated = [], {}
+    labels = {}
     for name, pair in raw["pairs"].items():
-        alone, groups = [], []
         for side in ("first", "second"):
-            key = (pair[side], tuple(sorted(pair.get(f"{side}_inputs", {}).items())))
-            if key not in isolated:
-                isolated[key] = isolate(circuit, concrete, raw, f"{name}: ", pair[side], dict(key[1]))
-            alone.append(isolated[key][0])
-            groups.append(isolated[key][1])
-        outcomes = sweep(circuit, concrete, raw, pair, alone, ages(pair["gaps"]), jobs)
-        results = [(o["gap"], describe(o)) for o in outcomes]
+            labels.setdefault(side_key(pair, side), f"{name}: ")
+    try:
+        TASK = (circuit, concrete, raw)
+        isolated = dict(zip(labels, parallel(isolate_task, [(label, op, dict(overlay)) for (op, overlay), label in labels.items()], jobs)))
+        alone = {name: [isolated[side_key(pair, side)][0] for side in ("first", "second")] for name, pair in raw["pairs"].items()}
+        tasks = [(name, gap) for name, pair in raw["pairs"].items() for gap in ages(pair["gaps"])]
+        TASK = (circuit, concrete, raw, alone)
+        outcomes = parallel(check_task, tasks, jobs)
+    finally:
+        TASK = None
+    records = []
+    for name, pair in raw["pairs"].items():
+        mine = [o for (owner, _), o in zip(tasks, outcomes) if owner == name]
+        groups = [isolated[side_key(pair, side)][1] for side in ("first", "second")]
+        results = [(o["gap"], describe(o)) for o in mine]
         low, high = limits(results)
         records.append({"name": f"{spec['engine']}.{name}", "engine": spec["engine"], "module": spec["module"],
                         "first": pair["first"], "second": pair["second"], "gaps": [results[0][0], results[-1][0]],
                         "min_gap": low, "stable_gap": high,
                         "guards": guards(concrete, pair), "results": runs(results),
-                        "rejected": [o for o in outcomes if not o["accepted"]],
+                        "rejected": [o for o in mine if not o["accepted"]],
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} gaps, "
                                     "event multisets compared with isolated runs"})
         if "invariants" in concrete:
@@ -336,7 +354,7 @@ def main(argv=None):
     parser.add_argument("--target", default="atlas")
     parser.add_argument("--pairs", nargs="+", help="pair files (default: every file under targets/<target>/pairs/)")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--jobs", type=int, default=1, help="processes per gap sweep")
+    parser.add_argument("--jobs", type=int, default=1, help="worker processes for the isolated runs and the (pair, gap) trials")
     args = parser.parse_args(argv)
     loaded = load(args.target, args.pairs)
     document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter,

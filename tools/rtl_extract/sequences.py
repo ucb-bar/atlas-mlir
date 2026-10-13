@@ -2,7 +2,7 @@
 
 A sequence file ``targets/<target>/sequences/<name>.yaml`` names an engine spec of the same target and declares chains:
 
-    engine: <spec stem>
+    engine: <spec stem>                # targets/<target>/<stem>.yaml or targets/<target>/system/<stem>.yaml
     equivalent: {<name>: [group, ...]} # optional; as in pair files
     ignore: [group, ...]               # optional; as in pair files
     invariants: {exclude: [...]}       # optional; replaces the spec's invariants, as in pair files
@@ -33,7 +33,7 @@ import yaml
 from . import derive, pairs
 from .control import require
 from .runner import RECIPES, observed
-from .spec import TARGETS, ages, invariants, keys, load_target
+from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
 
 FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect", "invariants"})
 SEQUENCE_KEYS = ({"ops", "lengths", "gaps"}, {"description"})
@@ -93,7 +93,9 @@ def load(target, names=None, specs=None):
     raws = {n: yaml.safe_load((TARGETS / target / "sequences" / f"{n}.yaml").read_text()) for n in selected}
     specs = dict(specs or {})
     missing = sorted({r["engine"] for r in raws.values()} - set(specs))
-    specs.update(load_target(target, missing) if missing else {})
+    engines = [m for m in missing if m in available_engines(target)]
+    specs.update(load_target(target, engines) if engines else {})
+    specs.update({m: load_system(target, m) for m in missing if m not in engines})
     return {n: (validate(r, specs[r["engine"]], f"sequences/{n}.yaml"), specs[r["engine"]]) for n, r in raws.items()}
 
 
@@ -162,24 +164,22 @@ def extract(document, raw, spec, jobs=1, only=None):
     concrete, _ = derive.resolve(document, pairs.prepared(raw, spec), {})
     circuit = RECIPES[concrete["recipe"]][0](document, concrete)
     selected = [n for n in raw["sequences"] if only is None or n in only]
-    cases, alone = [], {}
-    for name in selected:
-        sequence = raw["sequences"][name]
-        for length in ages(sequence["lengths"]):
-            steps = chain(sequence, length)
-            for s in steps:
-                if key(s) not in alone:
-                    alone[key(s)] = isolated(circuit, concrete, raw, s)
-            cases.append((name, steps, [alone[key(s)] for s in steps], length))
+    chains = [(name, chain(raw["sequences"][name], length), length)
+              for name in selected for length in ages(raw["sequences"][name]["lengths"])]
+    entries = {key(s): s for _, steps, _ in chains for s in steps}
+    pairs.TASK = (circuit, concrete, raw)
+    try:
+        alone = dict(zip(entries, (events for events, _ in pairs.parallel(
+            pairs.isolate_task, [("", s["op"], s.get("inputs", {})) for s in entries.values()], jobs))))
+    finally:
+        pairs.TASK = None
+    cases = [(name, steps, [alone[key(s)] for s in steps], length) for name, steps, length in chains]
     tasks = [(c, gap) for c, case in enumerate(cases) for gap in ages(raw["sequences"][case[0]]["gaps"])]
     CONTEXT["context"] = {"circuit": circuit, "spec": concrete, "raw": raw, "cases": cases}
-    if jobs > 1:
-        import multiprocessing
-        with multiprocessing.get_context("fork").Pool(jobs) as pool:
-            reasons = pool.map(cell, tasks, chunksize=1)
-    else:
-        reasons = [cell(t) for t in tasks]
-    CONTEXT.clear()
+    try:
+        reasons = pairs.parallel(cell, tasks, jobs)
+    finally:
+        CONTEXT.clear()
     records = []
     for c, (name, steps, _, length) in enumerate(cases):
         results = [(gap, reason) for (case, gap), reason in zip(tasks, reasons) if case == c]
