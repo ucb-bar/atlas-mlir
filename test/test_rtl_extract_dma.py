@@ -1,11 +1,11 @@
-"""DMA concurrency evidence (tools/rtl_extract/targets/atlas/system/core_dma.yaml, pairs/core_dma.yaml).
+"""DMA concurrency evidence (tools/rtl_extract/targets/atlas/system/core_dma.yaml, pairs/core_dma.yaml, pairs/core_dma_mxu.yaml).
 
 Synthetic tests cover the responder runner (a declared external memory serving a circuit's request/response
 handshakes) and ``unreset`` regex selectors. Hardware tests (ATLAS_HW_IR, ATLAS_HW_EXPORTER) check a window around
 each expected pair result and the DMA-specific claims: a launch on a second channel is queued, never dropped or
 merged; VLS on other lines keeps its isolated events while the transfer's accesses are only delayed; channel
-completion is independent; same-channel reuse is not protected by the RTL; and the disjoint-bank results hold under
-other response patterns.
+completion is independent; same-channel reuse is not protected by the RTL; every MXU command keeps its isolated events
+beside a transfer, which is not delayed; and the disjoint-bank results hold under other response patterns.
 """
 from collections import Counter
 import copy
@@ -277,6 +277,45 @@ class HardwareDMATests(unittest.TestCase):
                 self.assertEqual(results["core_dma.load0_add"]["stable_gap"], 1, results["core_dma.load0_add"]["results"])
                 self.assertTrue(results["core_dma.load0_vload"]["shared_control"]["disjoint"])
                 self.assertIn("missing dram.request events", results["core_dma.load0_load1"]["results"][0]["result"])
+
+
+@unittest.skipUnless(HW_IR and EXPORTER, "requires ATLAS_HW_IR and ATLAS_HW_EXPORTER")
+class HardwareMXUBesideDMATests(unittest.TestCase):
+    """pairs/core_dma_mxu.yaml: every MXU command on both units against a DMA load or store, in both orders."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw, cls.spec = pairs.load("atlas", ["core_dma_mxu"])["core_dma_mxu"]
+        cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER, True)
+
+    def test_pair_windows(self):
+        # The full sweep accepts every gap; gaps 1 and 2 for every pair, where the commands are closest.
+        window = copy.deepcopy(self.raw)
+        for pair in window["pairs"].values():
+            pair["gaps"] = "1..2"
+        records = pairs.extract(self.document, window, self.spec, jobs=8)
+        self.assertEqual({r["name"].split(".", 1)[1] for r in records}, set(self.raw["expect"]))
+        for record in records:
+            expected = self.raw["expect"][record["name"].split(".", 1)[1]]
+            with self.subTest(record["name"]):
+                self.assertEqual(record["invariants"], {"checked": 177, "excluded": []})
+                self.assertEqual((record["min_gap"], record["stable_gap"]), (expected["min_gap"], expected["stable_gap"]), record["results"])
+                self.assertEqual(record["shared_control"]["disjoint"], expected["disjoint"], record["shared_control"])
+
+    def test_mxu_keeps_its_events_under_other_response_patterns(self):
+        for label, overlay, limit in (("fast", {"accept": [1], "latency": 1}, 450),
+                                      ("stalled", {"accept": [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], "latency": 43}, 450),
+                                      ("slow", {"accept": [1] + [0] * 9, "latency": 61}, 900)):
+            spec = copy.deepcopy(self.spec)
+            spec["responders"]["dram"].update(overlay)
+            spec["limit"] = limit
+            window = copy.deepcopy(self.raw)
+            # The transfer first: the accept pattern repeats by absolute age, so a shifted launch would see another phase.
+            window["pairs"] = {n: {**self.raw["pairs"][n], "gaps": "1..2"} for n in
+                               ("load0_mxu0_matmul", "store0_mxu1_pop_acc_bf16", "store0_mxu0_push_acc_bf16", "load0_mxu1_matmul_acc")}
+            for record in pairs.extract(self.document, window, spec, jobs=8):
+                with self.subTest(label=label, pair=record["name"]):
+                    self.assertEqual(record["stable_gap"], 1, record["results"])
 
 
 if __name__ == "__main__":

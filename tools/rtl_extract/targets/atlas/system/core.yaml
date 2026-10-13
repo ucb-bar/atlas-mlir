@@ -313,4 +313,92 @@ operations:                   # VLS address = VMEM line << 3; banks hold 8192 li
     commands: {0: {fire: 1, instruction: 0x12000a77}}
   mxu1_pop_acc_bf16_acc1:     # acc 1 -> m20:21
     commands: {0: {fire: 1, instruction: 0x12080a77}}
+  mxu0_push_acc_bf16:        # m12:13 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x08018077}}
+  mxu0_pop_acc_fp8:          # acc 0 -> m20, scale register 0
+    commands: {0: {fire: 1, instruction: 0x0c000a77}}
+  mxu0_matmul_m5:            # m5 (vload's destination)
+    commands: {0: {fire: 1, instruction: 0x1400a077}}
+  mxu0_push_weight_m7:       # m7 (transpose's destination) -> slot 0
+    commands: {0: {fire: 1, instruction: 0x0000e077}}
+  mxu0_push_acc_bf16_m10:    # m10:11 (add's destination) -> acc 0
+    commands: {0: {fire: 1, instruction: 0x08014077}}
+  mxu0_pop_acc_bf16_m8:      # acc 0 -> m8:9 (vstore reads m9)
+    commands: {0: {fire: 1, instruction: 0x10000477}}
+  mxu0_pop_acc_bf16_m2:      # acc 0 -> m2:3 (add's source)
+    commands: {0: {fire: 1, instruction: 0x10000177}}
+  mxu0_pop_acc_fp8_m3:       # acc 0 -> m3 (transpose's source)
+    commands: {0: {fire: 1, instruction: 0x0c0001f7}}
+  mxu0_pop_acc_bf16_m4:      # acc 0 -> m4:5 (vload's destination m5)
+    commands: {0: {fire: 1, instruction: 0x10000277}}
+  mxu0_matmul_m20:           # m20 (the other unit's pop destination)
+    commands: {0: {fire: 1, instruction: 0x14028077}}
+  mxu0_pop_acc_bf16_m12:     # acc 0 -> m12:13 (the other unit's matmul source)
+    commands: {0: {fire: 1, instruction: 0x10000677}}
+  mxu0_matmul_m44:           # m44 (physical MREG bank 12, as m12)
+    commands: {0: {fire: 1, instruction: 0x14058077}}
+  mxu1_push_acc_bf16:        # m12:13 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x0a018077}}
+  mxu1_pop_acc_fp8:          # acc 0 -> m20, scale register 0
+    commands: {0: {fire: 1, instruction: 0x0e000a77}}
+  mxu1_matmul_m5:            # m5 (vload's destination)
+    commands: {0: {fire: 1, instruction: 0x1600a077}}
+  mxu1_push_weight_m7:       # m7 (transpose's destination) -> slot 0
+    commands: {0: {fire: 1, instruction: 0x0200e077}}
+  mxu1_push_acc_bf16_m10:    # m10:11 (add's destination) -> acc 0
+    commands: {0: {fire: 1, instruction: 0x0a014077}}
+  mxu1_pop_acc_bf16_m8:      # acc 0 -> m8:9 (vstore reads m9)
+    commands: {0: {fire: 1, instruction: 0x12000477}}
+  mxu1_pop_acc_bf16_m2:      # acc 0 -> m2:3 (add's source)
+    commands: {0: {fire: 1, instruction: 0x12000177}}
+  mxu1_pop_acc_fp8_m3:       # acc 0 -> m3 (transpose's source)
+    commands: {0: {fire: 1, instruction: 0x0e0001f7}}
+  mxu1_pop_acc_bf16_m4:      # acc 0 -> m4:5 (vload's destination m5)
+    commands: {0: {fire: 1, instruction: 0x12000277}}
+  mxu1_matmul_m20:           # m20 (the other unit's pop destination)
+    commands: {0: {fire: 1, instruction: 0x16028077}}
+  mxu1_pop_acc_bf16_m12:     # acc 0 -> m12:13 (the other unit's matmul source)
+    commands: {0: {fire: 1, instruction: 0x12000677}}
+  mxu1_matmul_m44:           # m44 (physical MREG bank 12, as m12)
+    commands: {0: {fire: 1, instruction: 0x16058077}}
+  mxu1_push_weight_m14:      # m14 -> slot 0
+    commands: {0: {fire: 1, instruction: 0x0201c077}}
+  mxu1_push_acc_fp8_m14:     # m14 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x0601c077}}
+  mxu1_push_acc_bf16_m14:    # m14:15 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x0a01c077}}
+  mxu1_pop_acc_fp8_m22:      # acc 0 -> m22, scale register 0
+    commands: {0: {fire: 1, instruction: 0x0e000b77}}
+  mxu1_pop_acc_bf16_m22:     # acc 0 -> m22:23
+    commands: {0: {fire: 1, instruction: 0x12000b77}}
+  vstore_m20:                # m20 -> bank 2, line 0
+    commands: {0: {fire: 1, instruction: 0x00002a07, address: 131072}}
+  vstore_m44:                # m44 (physical MREG bank 12) -> bank 2, line 0
+    commands: {0: {fire: 1, instruction: 0x00003607, address: 131072}}
+  vload_m12:                 # m12 <- bank 1, line 0
+    commands: {0: {fire: 1, instruction: 0x00000607, address: 65536}}
+  vload_m20:                 # m20 <- bank 1, line 0
+    commands: {0: {fire: 1, instruction: 0x00000a07, address: 65536}}
+  vload_m52:                 # m52 (physical MREG bank 20) <- bank 1, line 0
+    commands: {0: {fire: 1, instruction: 0x00001a07, address: 65536}}
+  vload_m44:                 # m44 (physical MREG bank 12) <- bank 1, line 0
+    commands: {0: {fire: 1, instruction: 0x00001607, address: 65536}}
+  vstore_m52:                # m52 (physical MREG bank 20) -> bank 2, line 0
+    commands: {0: {fire: 1, instruction: 0x00003a07, address: 131072}}
+  exp_m20:                   # m24:25 <- exp m20:21
+    commands: {0: {fire: 1, instruction: 0x84328c57}}
+  exp_m44:                   # m46:47 <- exp m44:45 (physical MREG banks 12, 13)
+    commands: {0: {fire: 1, instruction: 0x84359757}}
+  vli_all_m12:               # m12:13 <- immediate
+    commands: {0: {fire: 1, instruction: 0x0000065f}}
+  transpose_m20:             # m20 -> m24
+    commands: {0: {fire: 1, instruction: 0x00028c6b}}
+  transpose_to_m12:          # m3 -> m12
+    commands: {0: {fire: 1, instruction: 0x0000666b}}
+  mxu0_matmul_acc_m12:       # m12, acc 0, slot 0
+    commands: {0: {fire: 1, instruction: 0x18018077}}
+  transpose_to_m9:            # m3 -> m9 (vstore's source)
+    commands: {0: {fire: 1, instruction: 0x000064eb}}
+  vli_all_m8:                 # m8:9 <- immediate (vstore reads m9)
+    commands: {0: {fire: 1, instruction: 0x0000045f}}
 invariants: {}                # every assertion in AtlasCore

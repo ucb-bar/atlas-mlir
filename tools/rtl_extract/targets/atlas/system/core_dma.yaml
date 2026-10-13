@@ -3,12 +3,13 @@
 # in order; request acceptance follows `accept`). DMA operands come from the register-file cuts at launch; the
 # transfer's VMEM accesses are recorded only when the arbiter grants them. Channel busy (the level DMA.WAIT polls,
 # engine busy or the launch register) is part of `busy`, so a run drains only when every launched transfer has retired.
+# Both MXUs are observed as in core.yaml (pairs/core_dma_mxu.yaml); with them idle, pairs/core_dma.yaml is unchanged.
 engine: core_dma
 module: AtlasCore
 description: >
   One instruction per command age through the RTL decoder into AtlasCore with a live DMA engine; the external
   memory is a declared responder. DMA words follow lib/AtlasEncoding.cpp (load rd=x6 rs1=x1 rs2=x2, store rd=x3
-  rs1=x8 rs2=x2, channel in [14:12]); VLS words as in core.yaml.
+  rs1=x8 rs2=x2, channel in [14:12]); VLS and MXU words as in core.yaml.
 limit: 450
 unreset:                      # core.yaml's list plus the DMA command slots and per-source metadata, written at
                               # enqueue/A-fire and read only under slotActive or a response for that source
@@ -27,6 +28,9 @@ unreset:                      # core.yaml's list plus the DMA command slots and 
   - {path: mxu0/seq, name: p1Cmd_mregId}
   - {path: mxu0/seq, name: p1Cmd_op}
   - {path: mxu0/seq, name: p1Row}
+  - {path: mxu0/seq, name: w0Cmd_op}
+  - {path: mxu0/seq, name: w0Row}
+  - {path: mxu0/seq, name: w1Row}
   - {path: mxu1/seq, name: inflight_0_accSel}
   - {path: mxu1/seq, name: inflight_0_rowsWritten}
   - {path: mxu1/seq, name: inflight_1_accSel}
@@ -41,6 +45,9 @@ unreset:                      # core.yaml's list plus the DMA command slots and 
   - {path: mxu1/seq, name: p1Cmd_op}
   - {path: mxu1/seq, name: p1Cmd_weightSlot}
   - {path: mxu1/seq, name: p1Row}
+  - {path: mxu1/seq, name: w0Cmd_op}
+  - {path: mxu1/seq, name: w0Row}
+  - {path: mxu1/seq, name: w1Row}
   - {path: xlu, name: activeCmd_srcMregId}
   - {path: dma, match: 'commandQueue_[0-7]_(opType|channelId|vmemLineAddr|transferSize)'}
   - {path: dma, match: 'sourceMeta_[0-9]+_(isLoad|slotIdx|lineAddr)'}
@@ -153,7 +160,55 @@ probes:
   xlu_write: {instance: xlu, result: io_mregWriteReq_valid}
   xlu_write_id: {instance: xlu, result: io_mregWriteReq_bits_mregId}
   xlu_write_row: {instance: xlu, result: io_mregWriteReq_bits_row}
-busy: [lsu_busy, vpu_busy, xlu_busy, dma_channel0, dma_launched0, dma_channel1, dma_launched1]
+  mxu0_read0: {instance: mxu0, result: io_mregReadReq0_valid}
+  mxu0_read0_id: {instance: mxu0, result: io_mregReadReq0_bits_mregId}
+  mxu0_read0_row: {instance: mxu0, result: io_mregReadReq0_bits_row}
+  mxu0_read1: {instance: mxu0, result: io_mregReadReq1_valid}
+  mxu0_read1_id: {instance: mxu0, result: io_mregReadReq1_bits_mregId}
+  mxu0_read1_row: {instance: mxu0, result: io_mregReadReq1_bits_row}
+  mxu0_write0: {instance: mxu0, result: io_mregWriteReq0_valid}
+  mxu0_write0_id: {instance: mxu0, result: io_mregWriteReq0_bits_mregId}
+  mxu0_write0_row: {instance: mxu0, result: io_mregWriteReq0_bits_row}
+  mxu0_write1: {instance: mxu0, result: io_mregWriteReq1_valid}
+  mxu0_write1_id: {instance: mxu0, result: io_mregWriteReq1_bits_mregId}
+  mxu0_write1_row: {instance: mxu0, result: io_mregWriteReq1_bits_row}
+  mxu0_compute: {instance: mxu0/seq, result: io_compute_valid}
+  mxu0_weight_write: {instance: mxu0/seq, result: io_weightWriteReq_valid}
+  mxu0_acc_write: {instance: mxu0/seq, result: io_accComputeWrite_valid}
+  mxu0_acc_write_row: {instance: mxu0/seq, result: io_accComputeWrite_bits_rowIdx}
+  mxu0_acc_read: {instance: mxu0/seq, result: io_accComputeReadEn}
+  mxu0_acc_read_row: {instance: mxu0/seq, result: io_accComputeReadAddr_rowIdx}
+  mxu0_acc_load: {instance: mxu0/seq, result: io_accLoadReq_valid}
+  mxu0_acc_load_row: {instance: mxu0/seq, result: io_accLoadReq_bits_rowIdx}
+  mxu0_acc_store: {instance: mxu0/seq, result: io_accStoreReadEn}
+  mxu0_acc_store_row: {instance: mxu0/seq, result: io_accStoreAddr_rowIdx}
+  mxu0_data_busy: {instance: mxu0, result: io_dataBusy}
+  mxu0_compute_busy: {instance: mxu0, result: io_computeBusy}
+  mxu1_read0: {instance: mxu1, result: io_mregReadReq0_valid}
+  mxu1_read0_id: {instance: mxu1, result: io_mregReadReq0_bits_mregId}
+  mxu1_read0_row: {instance: mxu1, result: io_mregReadReq0_bits_row}
+  mxu1_read1: {instance: mxu1, result: io_mregReadReq1_valid}
+  mxu1_read1_id: {instance: mxu1, result: io_mregReadReq1_bits_mregId}
+  mxu1_read1_row: {instance: mxu1, result: io_mregReadReq1_bits_row}
+  mxu1_write0: {instance: mxu1, result: io_mregWriteReq0_valid}
+  mxu1_write0_id: {instance: mxu1, result: io_mregWriteReq0_bits_mregId}
+  mxu1_write0_row: {instance: mxu1, result: io_mregWriteReq0_bits_row}
+  mxu1_write1: {instance: mxu1, result: io_mregWriteReq1_valid}
+  mxu1_write1_id: {instance: mxu1, result: io_mregWriteReq1_bits_mregId}
+  mxu1_write1_row: {instance: mxu1, result: io_mregWriteReq1_bits_row}
+  mxu1_compute: {instance: mxu1/seq, result: io_compute_valid}
+  mxu1_weight_write: {instance: mxu1/seq, result: io_weightWriteReq_valid}
+  mxu1_acc_write: {instance: mxu1/seq, result: io_accComputeWrite_valid}
+  mxu1_acc_write_row: {instance: mxu1/seq, result: io_accComputeWrite_bits_rowIdx}
+  mxu1_acc_read: {instance: mxu1/seq, result: io_accComputeReadEn}
+  mxu1_acc_read_row: {instance: mxu1/seq, result: io_accComputeReadAddr_rowIdx}
+  mxu1_acc_load: {instance: mxu1/seq, result: io_accLoadReq_valid}
+  mxu1_acc_load_row: {instance: mxu1/seq, result: io_accLoadReq_bits_rowIdx}
+  mxu1_acc_store: {instance: mxu1/seq, result: io_accStoreReadEn}
+  mxu1_acc_store_row: {instance: mxu1/seq, result: io_accStoreAddr_rowIdx}
+  mxu1_data_busy: {instance: mxu1, result: io_dataBusy}
+  mxu1_compute_busy: {instance: mxu1, result: io_computeBusy}
+busy: [lsu_busy, vpu_busy, xlu_busy, mxu0_data_busy, mxu0_compute_busy, mxu1_data_busy, mxu1_compute_busy, dma_channel0, dma_launched0, dma_channel1, dma_launched1]
 events:
   vmem_read: {valid: lsu_vmem_read, fields: {bankIdx: lsu_vmem_read_bank, bankAddr: lsu_vmem_read_row}, row: bankAddr}
   vmem_write: {valid: lsu_vmem_write, fields: {bankIdx: lsu_vmem_write_bank, bankAddr: lsu_vmem_write_row}, row: bankAddr}
@@ -167,6 +222,26 @@ events:
   xlu_write: {valid: xlu_write, fields: {mregId: xlu_write_id, row: xlu_write_row}, row: row}
   dma_vmem_write: {valid: dma_vmem_write_grant, fields: {bankIdx: dma_vmem_write_bank, bankAddr: dma_vmem_write_line}}
   dma_vmem_read: {valid: dma_vmem_read_grant, fields: {bankIdx: dma_vmem_read_bank, bankAddr: dma_vmem_read_line}}
+  mxu0_read0: {valid: mxu0_read0, fields: {mregId: mxu0_read0_id, row: mxu0_read0_row}, row: row}
+  mxu0_read1: {valid: mxu0_read1, fields: {mregId: mxu0_read1_id, row: mxu0_read1_row}, row: row}
+  mxu0_write0: {valid: mxu0_write0, fields: {mregId: mxu0_write0_id, row: mxu0_write0_row}, row: row}
+  mxu0_write1: {valid: mxu0_write1, fields: {mregId: mxu0_write1_id, row: mxu0_write1_row}, row: row}
+  mxu0_compute: {valid: mxu0_compute}
+  mxu0_weight_write: {valid: mxu0_weight_write}
+  mxu0_acc_write: {valid: mxu0_acc_write, fields: {row: mxu0_acc_write_row}, row: row}
+  mxu0_acc_read: {valid: mxu0_acc_read, fields: {row: mxu0_acc_read_row}, row: row}
+  mxu0_acc_load: {valid: mxu0_acc_load, fields: {row: mxu0_acc_load_row}, row: row}
+  mxu0_acc_store: {valid: mxu0_acc_store, fields: {row: mxu0_acc_store_row}, row: row}
+  mxu1_read0: {valid: mxu1_read0, fields: {mregId: mxu1_read0_id, row: mxu1_read0_row}, row: row}
+  mxu1_read1: {valid: mxu1_read1, fields: {mregId: mxu1_read1_id, row: mxu1_read1_row}, row: row}
+  mxu1_write0: {valid: mxu1_write0, fields: {mregId: mxu1_write0_id, row: mxu1_write0_row}, row: row}
+  mxu1_write1: {valid: mxu1_write1, fields: {mregId: mxu1_write1_id, row: mxu1_write1_row}, row: row}
+  mxu1_compute: {valid: mxu1_compute}
+  mxu1_weight_write: {valid: mxu1_weight_write}
+  mxu1_acc_write: {valid: mxu1_acc_write, fields: {row: mxu1_acc_write_row}, row: row}
+  mxu1_acc_read: {valid: mxu1_acc_read, fields: {row: mxu1_acc_read_row}, row: row}
+  mxu1_acc_load: {valid: mxu1_acc_load, fields: {row: mxu1_acc_load_row}, row: row}
+  mxu1_acc_store: {valid: mxu1_acc_store, fields: {row: mxu1_acc_store_row}, row: row}
 operations:                   # VLS/DMA VMEM address = VMEM line << 3; banks hold 8192 lines; a tile is 32 lines
   dma_load0:                  # ch0: DRAM 0x90000000 -> bank 3, lines 0..31
     commands: {0: {fire: 1, instruction: 0x0020837b, dma_vmem_addr: 196608, dma_dram_addr: 0x90000000, dma_size: 1024}}
@@ -194,4 +269,32 @@ operations:                   # VLS/DMA VMEM address = VMEM line << 3; banks hol
     commands: {0: {fire: 1, instruction: 0x000063eb}}
   add:                        # m10:11 <- m2:3 + m6:7
     commands: {0: {fire: 1, instruction: 0x00304557}}
+  mxu0_matmul:                # m12, acc 0, slot 0 (MXU words as in core.yaml)
+    commands: {0: {fire: 1, instruction: 0x14018077}}
+  mxu0_matmul_acc:            # m12, acc 0, slot 0
+    commands: {0: {fire: 1, instruction: 0x18018077}}
+  mxu0_push_weight:           # m12 -> slot 0
+    commands: {0: {fire: 1, instruction: 0x00018077}}
+  mxu0_push_acc_fp8:          # m12 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x04018077}}
+  mxu0_push_acc_bf16:         # m12:13 -> acc 0
+    commands: {0: {fire: 1, instruction: 0x08018077}}
+  mxu0_pop_acc_fp8:           # acc 0 -> m20, scale register 0
+    commands: {0: {fire: 1, instruction: 0x0c000a77}}
+  mxu0_pop_acc_bf16:          # acc 0 -> m20:21
+    commands: {0: {fire: 1, instruction: 0x10000a77}}
+  mxu1_matmul:
+    commands: {0: {fire: 1, instruction: 0x16018077}}
+  mxu1_matmul_acc:
+    commands: {0: {fire: 1, instruction: 0x1a018077}}
+  mxu1_push_weight:
+    commands: {0: {fire: 1, instruction: 0x02018077}}
+  mxu1_push_acc_fp8:
+    commands: {0: {fire: 1, instruction: 0x06018077}}
+  mxu1_push_acc_bf16:
+    commands: {0: {fire: 1, instruction: 0x0a018077}}
+  mxu1_pop_acc_fp8:
+    commands: {0: {fire: 1, instruction: 0x0e000a77}}
+  mxu1_pop_acc_bf16:
+    commands: {0: {fire: 1, instruction: 0x12000a77}}
 invariants: {}                # every assertion in AtlasCore

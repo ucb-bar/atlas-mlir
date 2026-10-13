@@ -230,6 +230,15 @@ class HardwarePairTests(unittest.TestCase):
         against VPU, VLS and XLU commands on disjoint banks (accepted at gap 1 with disjoint control)."""
         self.check("core_mxu")
 
+    def test_core_mxu_cross(self):
+        """Every MXU command against VPU, VLS and XLU commands: gap 1 on disjoint operands with disjoint control; a shared
+        register binds at the MREG bank tracker's RAW/WAR assertions and a shared physical bank at MregFile's port checks."""
+        self.check("core_mxu_cross")
+
+    def test_core_mxu_units(self):
+        """Every ordered pair of commands across MXU0 and MXU1: gap 1 on disjoint operands with disjoint control."""
+        self.check("core_mxu_units")
+
 
 if __name__ == "__main__":
     unittest.main()

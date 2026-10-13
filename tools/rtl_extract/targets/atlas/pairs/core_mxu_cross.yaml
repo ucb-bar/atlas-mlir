@@ -1,0 +1,789 @@
+# MXU commands against VPU, VLS and XLU commands on AtlasCore (targets/atlas/system/core.yaml), extending
+# core_mxu.yaml to every MXU command, every VPU timing class and to operands that share a register (RAW, WAR and WAW
+# through the MREG bank tracker) or a physical MREG bank (register mod 32: MregFile per-bank ports). Unless the pair
+# name says otherwise, operands are disjoint as in core_mxu.yaml. Every AtlasCore assertion is an invariant.
+engine: core
+description: MXU command and a VPU, VLS or XLU command g ages apart through the RTL decoder; all AtlasCore assertions checked.
+equivalent:                   # the VPU overlap path may serve the second command on the other port pair
+  vpu_read: [vpu_read0, vpu_read1]
+  vpu_write: [vpu_write0, vpu_write1]
+shared:                       # control the two operations may share in the cone check
+  - {input: instruction, reason: one instruction per age through the decoder; commands never share an age}
+  - {input: fire, reason: issue strobe of that instruction}
+  - {input: address, reason: VLS address operand of that instruction}
+  - {path: mreg, reason: MREG file; per-bank port conflicts are MregFile invariants}
+  - {path: vmem, reason: VMEM banks; same-bank conflicts are Vmem invariants}
+pairs:
+  mxu0_push_acc_fp8_add:
+    first: mxu0_push_acc_fp8
+    second: add
+    gaps: 1..110
+  add_mxu0_push_acc_fp8:
+    first: add
+    second: mxu0_push_acc_fp8
+    gaps: 1..80
+  mxu0_push_acc_fp8_vload:
+    first: mxu0_push_acc_fp8
+    second: vload
+    gaps: 1..110
+  vload_mxu0_push_acc_fp8:
+    first: vload
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_fp8_vstore:
+    first: mxu0_push_acc_fp8
+    second: vstore
+    gaps: 1..110
+  vstore_mxu0_push_acc_fp8:
+    first: vstore
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_fp8_transpose:
+    first: mxu0_push_acc_fp8
+    second: transpose
+    gaps: 1..110
+  transpose_mxu0_push_acc_fp8:
+    first: transpose
+    second: mxu0_push_acc_fp8
+    gaps: 1..80
+  mxu0_push_acc_bf16_add:
+    first: mxu0_push_acc_bf16
+    second: add
+    gaps: 1..110
+  add_mxu0_push_acc_bf16:
+    first: add
+    second: mxu0_push_acc_bf16
+    gaps: 1..80
+  mxu0_push_acc_bf16_vload:
+    first: mxu0_push_acc_bf16
+    second: vload
+    gaps: 1..110
+  vload_mxu0_push_acc_bf16:
+    first: vload
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_bf16_vstore:
+    first: mxu0_push_acc_bf16
+    second: vstore
+    gaps: 1..110
+  vstore_mxu0_push_acc_bf16:
+    first: vstore
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_bf16_transpose:
+    first: mxu0_push_acc_bf16
+    second: transpose
+    gaps: 1..110
+  transpose_mxu0_push_acc_bf16:
+    first: transpose
+    second: mxu0_push_acc_bf16
+    gaps: 1..80
+  mxu0_pop_acc_fp8_add:
+    first: mxu0_pop_acc_fp8
+    second: add
+    gaps: 1..110
+  add_mxu0_pop_acc_fp8:
+    first: add
+    second: mxu0_pop_acc_fp8
+    gaps: 1..80
+  mxu0_pop_acc_fp8_vload:
+    first: mxu0_pop_acc_fp8
+    second: vload
+    gaps: 1..110
+  vload_mxu0_pop_acc_fp8:
+    first: vload
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_fp8_vstore:
+    first: mxu0_pop_acc_fp8
+    second: vstore
+    gaps: 1..110
+  vstore_mxu0_pop_acc_fp8:
+    first: vstore
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_fp8_transpose:
+    first: mxu0_pop_acc_fp8
+    second: transpose
+    gaps: 1..110
+  transpose_mxu0_pop_acc_fp8:
+    first: transpose
+    second: mxu0_pop_acc_fp8
+    gaps: 1..80
+  mxu0_matmul_acc_m14_add:
+    first: mxu0_matmul_acc_m14
+    second: add
+    gaps: 1..110
+  add_mxu0_matmul_acc_m14:
+    first: add
+    second: mxu0_matmul_acc_m14
+    gaps: 1..80
+  mxu0_matmul_acc_m14_vload:
+    first: mxu0_matmul_acc_m14
+    second: vload
+    gaps: 1..110
+  vload_mxu0_matmul_acc_m14:
+    first: vload
+    second: mxu0_matmul_acc_m14
+    gaps: 1..50
+  mxu0_matmul_acc_m14_vstore:
+    first: mxu0_matmul_acc_m14
+    second: vstore
+    gaps: 1..110
+  vstore_mxu0_matmul_acc_m14:
+    first: vstore
+    second: mxu0_matmul_acc_m14
+    gaps: 1..50
+  mxu0_matmul_acc_m14_transpose:
+    first: mxu0_matmul_acc_m14
+    second: transpose
+    gaps: 1..110
+  transpose_mxu0_matmul_acc_m14:
+    first: transpose
+    second: mxu0_matmul_acc_m14
+    gaps: 1..80
+  mxu0_matmul_exp:
+    first: mxu0_matmul
+    second: exp
+    gaps: 1..110
+  exp_mxu0_matmul:
+    first: exp
+    second: mxu0_matmul
+    gaps: 1..80
+  mxu0_matmul_rmax:
+    first: mxu0_matmul
+    second: rmax
+    gaps: 1..110
+  rmax_mxu0_matmul:
+    first: rmax
+    second: mxu0_matmul
+    gaps: 1..60
+  mxu0_matmul_csum:
+    first: mxu0_matmul
+    second: csum
+    gaps: 1..110
+  csum_mxu0_matmul:
+    first: csum
+    second: mxu0_matmul
+    gaps: 1..140
+  mxu0_matmul_fp8unpack:
+    first: mxu0_matmul
+    second: fp8unpack
+    gaps: 1..110
+  fp8unpack_mxu0_matmul:
+    first: fp8unpack
+    second: mxu0_matmul
+    gaps: 1..80
+  mxu0_matmul_vli_all:
+    first: mxu0_matmul
+    second: vli_all
+    gaps: 1..110
+  vli_all_mxu0_matmul:
+    first: vli_all
+    second: mxu0_matmul
+    gaps: 1..80
+  mxu0_pop_acc_bf16_exp:
+    first: mxu0_pop_acc_bf16
+    second: exp
+    gaps: 1..110
+  exp_mxu0_pop_acc_bf16:
+    first: exp
+    second: mxu0_pop_acc_bf16
+    gaps: 1..80
+  mxu0_pop_acc_bf16_rmax:
+    first: mxu0_pop_acc_bf16
+    second: rmax
+    gaps: 1..110
+  rmax_mxu0_pop_acc_bf16:
+    first: rmax
+    second: mxu0_pop_acc_bf16
+    gaps: 1..60
+  mxu0_pop_acc_bf16_csum:
+    first: mxu0_pop_acc_bf16
+    second: csum
+    gaps: 1..110
+  csum_mxu0_pop_acc_bf16:
+    first: csum
+    second: mxu0_pop_acc_bf16
+    gaps: 1..140
+  mxu0_pop_acc_bf16_fp8unpack:
+    first: mxu0_pop_acc_bf16
+    second: fp8unpack
+    gaps: 1..110
+  fp8unpack_mxu0_pop_acc_bf16:
+    first: fp8unpack
+    second: mxu0_pop_acc_bf16
+    gaps: 1..80
+  mxu0_pop_acc_bf16_vli_all:
+    first: mxu0_pop_acc_bf16
+    second: vli_all
+    gaps: 1..110
+  vli_all_mxu0_pop_acc_bf16:
+    first: vli_all
+    second: mxu0_pop_acc_bf16
+    gaps: 1..80
+  vload_mxu0_matmul_m5:
+    first: vload
+    second: mxu0_matmul_m5
+    gaps: 1..50
+  transpose_mxu0_push_weight_m7:
+    first: transpose
+    second: mxu0_push_weight_m7
+    gaps: 1..80
+  add_mxu0_push_acc_bf16_m10:
+    first: add
+    second: mxu0_push_acc_bf16_m10
+    gaps: 1..80
+  mxu0_pop_acc_bf16_vstore_m20:
+    first: mxu0_pop_acc_bf16
+    second: vstore_m20
+    gaps: 1..110
+  mxu0_pop_acc_bf16_exp_m20:
+    first: mxu0_pop_acc_bf16
+    second: exp_m20
+    gaps: 1..110
+  mxu0_pop_acc_bf16_transpose_m20:
+    first: mxu0_pop_acc_bf16
+    second: transpose_m20
+    gaps: 1..110
+  mxu0_matmul_vload_m12:
+    first: mxu0_matmul
+    second: vload_m12
+    gaps: 1..110
+  mxu0_matmul_vli_all_m12:
+    first: mxu0_matmul
+    second: vli_all_m12
+    gaps: 1..110
+  mxu0_matmul_transpose_to_m12:
+    first: mxu0_matmul
+    second: transpose_to_m12
+    gaps: 1..110
+  vstore_mxu0_pop_acc_bf16_m8:
+    first: vstore
+    second: mxu0_pop_acc_bf16_m8
+    gaps: 1..50
+  add_mxu0_pop_acc_bf16_m2:
+    first: add
+    second: mxu0_pop_acc_bf16_m2
+    gaps: 1..80
+  transpose_mxu0_pop_acc_fp8_m3:
+    first: transpose
+    second: mxu0_pop_acc_fp8_m3
+    gaps: 1..80
+  mxu0_pop_acc_bf16_vload_m20:
+    first: mxu0_pop_acc_bf16
+    second: vload_m20
+    gaps: 1..110
+  vload_mxu0_pop_acc_bf16_m4:
+    first: vload
+    second: mxu0_pop_acc_bf16_m4
+    gaps: 1..50
+  mxu0_matmul_vstore_m44:
+    first: mxu0_matmul
+    second: vstore_m44
+    gaps: 1..110
+  vstore_m44_mxu0_matmul:
+    first: vstore_m44
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_pop_acc_bf16_vload_m52:
+    first: mxu0_pop_acc_bf16
+    second: vload_m52
+    gaps: 1..110
+  vload_m52_mxu0_pop_acc_bf16:
+    first: vload_m52
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_matmul_exp_m44:
+    first: mxu0_matmul
+    second: exp_m44
+    gaps: 1..110
+  exp_m44_mxu0_matmul:
+    first: exp_m44
+    second: mxu0_matmul
+    gaps: 1..80
+  mxu0_matmul_vload_m44:
+    first: mxu0_matmul
+    second: vload_m44
+    gaps: 1..110
+  vload_m44_mxu0_matmul:
+    first: vload_m44
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_pop_acc_bf16_vstore_m52:
+    first: mxu0_pop_acc_bf16
+    second: vstore_m52
+    gaps: 1..110
+  vstore_m52_mxu0_pop_acc_bf16:
+    first: vstore_m52
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu1_push_acc_fp8_add:
+    first: mxu1_push_acc_fp8
+    second: add
+    gaps: 1..50
+  add_mxu1_push_acc_fp8:
+    first: add
+    second: mxu1_push_acc_fp8
+    gaps: 1..80
+  mxu1_push_acc_fp8_vload:
+    first: mxu1_push_acc_fp8
+    second: vload
+    gaps: 1..50
+  vload_mxu1_push_acc_fp8:
+    first: vload
+    second: mxu1_push_acc_fp8
+    gaps: 1..50
+  mxu1_push_acc_fp8_vstore:
+    first: mxu1_push_acc_fp8
+    second: vstore
+    gaps: 1..50
+  vstore_mxu1_push_acc_fp8:
+    first: vstore
+    second: mxu1_push_acc_fp8
+    gaps: 1..50
+  mxu1_push_acc_fp8_transpose:
+    first: mxu1_push_acc_fp8
+    second: transpose
+    gaps: 1..50
+  transpose_mxu1_push_acc_fp8:
+    first: transpose
+    second: mxu1_push_acc_fp8
+    gaps: 1..80
+  mxu1_push_acc_bf16_add:
+    first: mxu1_push_acc_bf16
+    second: add
+    gaps: 1..50
+  add_mxu1_push_acc_bf16:
+    first: add
+    second: mxu1_push_acc_bf16
+    gaps: 1..80
+  mxu1_push_acc_bf16_vload:
+    first: mxu1_push_acc_bf16
+    second: vload
+    gaps: 1..50
+  vload_mxu1_push_acc_bf16:
+    first: vload
+    second: mxu1_push_acc_bf16
+    gaps: 1..50
+  mxu1_push_acc_bf16_vstore:
+    first: mxu1_push_acc_bf16
+    second: vstore
+    gaps: 1..50
+  vstore_mxu1_push_acc_bf16:
+    first: vstore
+    second: mxu1_push_acc_bf16
+    gaps: 1..50
+  mxu1_push_acc_bf16_transpose:
+    first: mxu1_push_acc_bf16
+    second: transpose
+    gaps: 1..50
+  transpose_mxu1_push_acc_bf16:
+    first: transpose
+    second: mxu1_push_acc_bf16
+    gaps: 1..80
+  mxu1_pop_acc_fp8_add:
+    first: mxu1_pop_acc_fp8
+    second: add
+    gaps: 1..50
+  add_mxu1_pop_acc_fp8:
+    first: add
+    second: mxu1_pop_acc_fp8
+    gaps: 1..80
+  mxu1_pop_acc_fp8_vload:
+    first: mxu1_pop_acc_fp8
+    second: vload
+    gaps: 1..50
+  vload_mxu1_pop_acc_fp8:
+    first: vload
+    second: mxu1_pop_acc_fp8
+    gaps: 1..50
+  mxu1_pop_acc_fp8_vstore:
+    first: mxu1_pop_acc_fp8
+    second: vstore
+    gaps: 1..50
+  vstore_mxu1_pop_acc_fp8:
+    first: vstore
+    second: mxu1_pop_acc_fp8
+    gaps: 1..50
+  mxu1_pop_acc_fp8_transpose:
+    first: mxu1_pop_acc_fp8
+    second: transpose
+    gaps: 1..50
+  transpose_mxu1_pop_acc_fp8:
+    first: transpose
+    second: mxu1_pop_acc_fp8
+    gaps: 1..80
+  mxu1_matmul_acc_m14_add:
+    first: mxu1_matmul_acc_m14
+    second: add
+    gaps: 1..50
+  add_mxu1_matmul_acc_m14:
+    first: add
+    second: mxu1_matmul_acc_m14
+    gaps: 1..80
+  mxu1_matmul_acc_m14_vload:
+    first: mxu1_matmul_acc_m14
+    second: vload
+    gaps: 1..50
+  vload_mxu1_matmul_acc_m14:
+    first: vload
+    second: mxu1_matmul_acc_m14
+    gaps: 1..50
+  mxu1_matmul_acc_m14_vstore:
+    first: mxu1_matmul_acc_m14
+    second: vstore
+    gaps: 1..50
+  vstore_mxu1_matmul_acc_m14:
+    first: vstore
+    second: mxu1_matmul_acc_m14
+    gaps: 1..50
+  mxu1_matmul_acc_m14_transpose:
+    first: mxu1_matmul_acc_m14
+    second: transpose
+    gaps: 1..50
+  transpose_mxu1_matmul_acc_m14:
+    first: transpose
+    second: mxu1_matmul_acc_m14
+    gaps: 1..80
+  mxu1_matmul_exp:
+    first: mxu1_matmul
+    second: exp
+    gaps: 1..50
+  exp_mxu1_matmul:
+    first: exp
+    second: mxu1_matmul
+    gaps: 1..80
+  mxu1_matmul_rmax:
+    first: mxu1_matmul
+    second: rmax
+    gaps: 1..50
+  rmax_mxu1_matmul:
+    first: rmax
+    second: mxu1_matmul
+    gaps: 1..60
+  mxu1_matmul_csum:
+    first: mxu1_matmul
+    second: csum
+    gaps: 1..50
+  csum_mxu1_matmul:
+    first: csum
+    second: mxu1_matmul
+    gaps: 1..140
+  mxu1_matmul_fp8unpack:
+    first: mxu1_matmul
+    second: fp8unpack
+    gaps: 1..50
+  fp8unpack_mxu1_matmul:
+    first: fp8unpack
+    second: mxu1_matmul
+    gaps: 1..80
+  mxu1_matmul_vli_all:
+    first: mxu1_matmul
+    second: vli_all
+    gaps: 1..50
+  vli_all_mxu1_matmul:
+    first: vli_all
+    second: mxu1_matmul
+    gaps: 1..80
+  mxu1_pop_acc_bf16_exp:
+    first: mxu1_pop_acc_bf16
+    second: exp
+    gaps: 1..50
+  exp_mxu1_pop_acc_bf16:
+    first: exp
+    second: mxu1_pop_acc_bf16
+    gaps: 1..80
+  mxu1_pop_acc_bf16_rmax:
+    first: mxu1_pop_acc_bf16
+    second: rmax
+    gaps: 1..50
+  rmax_mxu1_pop_acc_bf16:
+    first: rmax
+    second: mxu1_pop_acc_bf16
+    gaps: 1..60
+  mxu1_pop_acc_bf16_csum:
+    first: mxu1_pop_acc_bf16
+    second: csum
+    gaps: 1..50
+  csum_mxu1_pop_acc_bf16:
+    first: csum
+    second: mxu1_pop_acc_bf16
+    gaps: 1..140
+  mxu1_pop_acc_bf16_fp8unpack:
+    first: mxu1_pop_acc_bf16
+    second: fp8unpack
+    gaps: 1..50
+  fp8unpack_mxu1_pop_acc_bf16:
+    first: fp8unpack
+    second: mxu1_pop_acc_bf16
+    gaps: 1..80
+  mxu1_pop_acc_bf16_vli_all:
+    first: mxu1_pop_acc_bf16
+    second: vli_all
+    gaps: 1..50
+  vli_all_mxu1_pop_acc_bf16:
+    first: vli_all
+    second: mxu1_pop_acc_bf16
+    gaps: 1..80
+  vload_mxu1_matmul_m5:
+    first: vload
+    second: mxu1_matmul_m5
+    gaps: 1..50
+  transpose_mxu1_push_weight_m7:
+    first: transpose
+    second: mxu1_push_weight_m7
+    gaps: 1..80
+  add_mxu1_push_acc_bf16_m10:
+    first: add
+    second: mxu1_push_acc_bf16_m10
+    gaps: 1..80
+  mxu1_pop_acc_bf16_vstore_m20:
+    first: mxu1_pop_acc_bf16
+    second: vstore_m20
+    gaps: 1..50
+  mxu1_pop_acc_bf16_exp_m20:
+    first: mxu1_pop_acc_bf16
+    second: exp_m20
+    gaps: 1..50
+  mxu1_pop_acc_bf16_transpose_m20:
+    first: mxu1_pop_acc_bf16
+    second: transpose_m20
+    gaps: 1..50
+  mxu1_matmul_vload_m12:
+    first: mxu1_matmul
+    second: vload_m12
+    gaps: 1..50
+  mxu1_matmul_vli_all_m12:
+    first: mxu1_matmul
+    second: vli_all_m12
+    gaps: 1..50
+  mxu1_matmul_transpose_to_m12:
+    first: mxu1_matmul
+    second: transpose_to_m12
+    gaps: 1..50
+  vstore_mxu1_pop_acc_bf16_m8:
+    first: vstore
+    second: mxu1_pop_acc_bf16_m8
+    gaps: 1..50
+  add_mxu1_pop_acc_bf16_m2:
+    first: add
+    second: mxu1_pop_acc_bf16_m2
+    gaps: 1..80
+  transpose_mxu1_pop_acc_fp8_m3:
+    first: transpose
+    second: mxu1_pop_acc_fp8_m3
+    gaps: 1..80
+  mxu1_pop_acc_bf16_vload_m20:
+    first: mxu1_pop_acc_bf16
+    second: vload_m20
+    gaps: 1..50
+  vload_mxu1_pop_acc_bf16_m4:
+    first: vload
+    second: mxu1_pop_acc_bf16_m4
+    gaps: 1..50
+  mxu1_matmul_vstore_m44:
+    first: mxu1_matmul
+    second: vstore_m44
+    gaps: 1..50
+  vstore_m44_mxu1_matmul:
+    first: vstore_m44
+    second: mxu1_matmul
+    gaps: 1..50
+  mxu1_pop_acc_bf16_vload_m52:
+    first: mxu1_pop_acc_bf16
+    second: vload_m52
+    gaps: 1..50
+  vload_m52_mxu1_pop_acc_bf16:
+    first: vload_m52
+    second: mxu1_pop_acc_bf16
+    gaps: 1..50
+  mxu1_matmul_exp_m44:
+    first: mxu1_matmul
+    second: exp_m44
+    gaps: 1..50
+  exp_m44_mxu1_matmul:
+    first: exp_m44
+    second: mxu1_matmul
+    gaps: 1..80
+  mxu1_matmul_vload_m44:
+    first: mxu1_matmul
+    second: vload_m44
+    gaps: 1..50
+  vload_m44_mxu1_matmul:
+    first: vload_m44
+    second: mxu1_matmul
+    gaps: 1..50
+  mxu1_pop_acc_bf16_vstore_m52:
+    first: mxu1_pop_acc_bf16
+    second: vstore_m52
+    gaps: 1..50
+  vstore_m52_mxu1_pop_acc_bf16:
+    first: vstore_m52
+    second: mxu1_pop_acc_bf16
+    gaps: 1..50
+  vstore_transpose_to_m9:     # the VSTORE release the WAR pairs above rely on, for the XLU and VPU writers as well
+    first: vstore
+    second: transpose_to_m9
+    gaps: 1..50
+  vstore_vli_all_m8:
+    first: vstore
+    second: vli_all_m8
+    gaps: 1..50
+# Regression values used only by tests (full sweeps); the extractor never reads them. rejected_by matches the result
+# at stable_gap - 1 (the AtlasCore assertion that binds); disjoint is the shared-control verdict.
+expect:
+  mxu0_push_acc_fp8_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_m14_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu0_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_m14_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_m14_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu0_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_m14_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu0_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_exp: {min_gap: 1, stable_gap: 1, disjoint: true}
+  exp_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_rmax: {min_gap: 1, stable_gap: 1, disjoint: true}
+  rmax_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_csum: {min_gap: 1, stable_gap: 1, disjoint: true}
+  csum_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_fp8unpack: {min_gap: 1, stable_gap: 1, disjoint: true}
+  fp8unpack_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_vli_all: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vli_all_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_exp: {min_gap: 1, stable_gap: 1, disjoint: true}
+  exp_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_rmax: {min_gap: 1, stable_gap: 1, disjoint: true}
+  rmax_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_csum: {min_gap: 1, stable_gap: 1, disjoint: true}
+  csum_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_fp8unpack: {min_gap: 1, stable_gap: 1, disjoint: true}
+  fp8unpack_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_vli_all: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vli_all_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu0_matmul_m5: {min_gap: 35, stable_gap: 35, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  transpose_mxu0_push_weight_m7: {min_gap: 66, stable_gap: 66, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  add_mxu0_push_acc_bf16_m10: {min_gap: 66, stable_gap: 66, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu0_pop_acc_bf16_vstore_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu0_pop_acc_bf16_exp_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu0_pop_acc_bf16_transpose_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu0_matmul_vload_m12: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_vli_all_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu0_matmul_transpose_to_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  vstore_mxu0_pop_acc_bf16_m8: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  add_mxu0_pop_acc_bf16_m2: {min_gap: 64, stable_gap: 64, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  transpose_mxu0_pop_acc_fp8_m3: {min_gap: 34, stable_gap: 34, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu0_pop_acc_bf16_vload_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  vload_mxu0_pop_acc_bf16_m4: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu0_matmul_vstore_m44: {min_gap: 31, stable_gap: 31, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  vstore_m44_mxu0_matmul: {min_gap: 33, stable_gap: 33, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  mxu0_pop_acc_bf16_vload_m52: {min_gap: 30, stable_gap: 30, rejected_by: "multiple write ports targeting physical bank 20 \\(m20 or m52\\)", disjoint: true}
+  vload_m52_mxu0_pop_acc_bf16: {min_gap: 34, stable_gap: 34, rejected_by: "multiple write ports targeting physical bank 20 \\(m20 or m52\\)", disjoint: true}
+  mxu0_matmul_exp_m44: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  exp_m44_mxu0_matmul: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  mxu0_matmul_vload_m44: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_m44_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_vstore_m52: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_m52_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_m14_add: {min_gap: 1, stable_gap: 1, disjoint: true}
+  add_mxu1_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_m14_vload: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_m14_vstore: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_mxu1_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_m14_transpose: {min_gap: 1, stable_gap: 1, disjoint: true}
+  transpose_mxu1_matmul_acc_m14: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_exp: {min_gap: 1, stable_gap: 1, disjoint: true}
+  exp_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_rmax: {min_gap: 1, stable_gap: 1, disjoint: true}
+  rmax_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_csum: {min_gap: 1, stable_gap: 1, disjoint: true}
+  csum_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_fp8unpack: {min_gap: 1, stable_gap: 1, disjoint: true}
+  fp8unpack_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_vli_all: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vli_all_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_exp: {min_gap: 1, stable_gap: 1, disjoint: true}
+  exp_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_rmax: {min_gap: 1, stable_gap: 1, disjoint: true}
+  rmax_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_csum: {min_gap: 1, stable_gap: 1, disjoint: true}
+  csum_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_fp8unpack: {min_gap: 1, stable_gap: 1, disjoint: true}
+  fp8unpack_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_vli_all: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vli_all_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_mxu1_matmul_m5: {min_gap: 35, stable_gap: 35, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  transpose_mxu1_push_weight_m7: {min_gap: 66, stable_gap: 66, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  add_mxu1_push_acc_bf16_m10: {min_gap: 66, stable_gap: 66, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu1_pop_acc_bf16_vstore_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu1_pop_acc_bf16_exp_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu1_pop_acc_bf16_transpose_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu1_matmul_vload_m12: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_vli_all_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu1_matmul_transpose_to_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  vstore_mxu1_pop_acc_bf16_m8: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  add_mxu1_pop_acc_bf16_m2: {min_gap: 64, stable_gap: 64, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  transpose_mxu1_pop_acc_fp8_m3: {min_gap: 34, stable_gap: 34, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu1_pop_acc_bf16_vload_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  vload_mxu1_pop_acc_bf16_m4: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu1_matmul_vstore_m44: {min_gap: 31, stable_gap: 31, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  vstore_m44_mxu1_matmul: {min_gap: 33, stable_gap: 33, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  mxu1_pop_acc_bf16_vload_m52: {min_gap: 30, stable_gap: 30, rejected_by: "multiple write ports targeting physical bank 20 \\(m20 or m52\\)", disjoint: true}
+  vload_m52_mxu1_pop_acc_bf16: {min_gap: 34, stable_gap: 34, rejected_by: "multiple write ports targeting physical bank 20 \\(m20 or m52\\)", disjoint: true}
+  mxu1_matmul_exp_m44: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  exp_m44_mxu1_matmul: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  mxu1_matmul_vload_m44: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vload_m44_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_vstore_m52: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_m52_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  vstore_transpose_to_m9: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  vstore_vli_all_m8: {min_gap: 35, stable_gap: 35, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}

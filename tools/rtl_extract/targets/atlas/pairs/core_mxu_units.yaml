@@ -1,0 +1,539 @@
+# MXU0 against MXU1 on AtlasCore (targets/atlas/system/core.yaml): every ordered pair of commands across the two units
+# (MXU0 operands m12/m12:13 and m20/m20:21, MXU1 operands m14/m14:15 and m22/m22:23; accumulator and weight slot 0
+# on each unit), plus a pop feeding the other unit's matmul (RAW), a pop onto the other unit's matmul source (WAR)
+# and two matmuls reading one physical MREG bank. Every AtlasCore assertion is an invariant.
+engine: core
+description: Command on one MXU and a command on the other g ages later through the RTL decoder; all AtlasCore assertions checked.
+equivalent:                   # the VPU overlap path may serve the second command on the other port pair
+  vpu_read: [vpu_read0, vpu_read1]
+  vpu_write: [vpu_write0, vpu_write1]
+shared:                       # control the two operations may share in the cone check
+  - {input: instruction, reason: one instruction per age through the decoder; commands never share an age}
+  - {input: fire, reason: issue strobe of that instruction}
+  - {input: address, reason: VLS address operand of that instruction}
+  - {path: mreg, reason: MREG file; per-bank port conflicts are MregFile invariants}
+  - {path: vmem, reason: VMEM banks; same-bank conflicts are Vmem invariants}
+pairs:
+  mxu0_push_weight_mxu1_push_weight:
+    first: mxu0_push_weight
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_push_weight_mxu0_push_weight:
+    first: mxu1_push_weight_m14
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_push_weight_mxu1_push_acc_fp8:
+    first: mxu0_push_weight
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_push_weight_mxu0_push_acc_fp8:
+    first: mxu1_push_weight_m14
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_push_weight_mxu1_push_acc_bf16:
+    first: mxu0_push_weight
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_push_weight_mxu0_push_acc_bf16:
+    first: mxu1_push_weight_m14
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_push_weight_mxu1_pop_acc_fp8:
+    first: mxu0_push_weight
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_push_weight_mxu0_pop_acc_fp8:
+    first: mxu1_push_weight_m14
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_push_weight_mxu1_pop_acc_bf16:
+    first: mxu0_push_weight
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_push_weight_mxu0_pop_acc_bf16:
+    first: mxu1_push_weight_m14
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_push_weight_mxu1_matmul:
+    first: mxu0_push_weight
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_push_weight_mxu0_matmul:
+    first: mxu1_push_weight_m14
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_push_weight_mxu1_matmul_acc:
+    first: mxu0_push_weight
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_push_weight_mxu0_matmul_acc:
+    first: mxu1_push_weight_m14
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_push_weight:
+    first: mxu0_push_acc_fp8
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_push_weight:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_push_acc_fp8:
+    first: mxu0_push_acc_fp8
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_push_acc_fp8:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_push_acc_bf16:
+    first: mxu0_push_acc_fp8
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_push_acc_bf16:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_pop_acc_fp8:
+    first: mxu0_push_acc_fp8
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_pop_acc_fp8:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_pop_acc_bf16:
+    first: mxu0_push_acc_fp8
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_pop_acc_bf16:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_matmul:
+    first: mxu0_push_acc_fp8
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_matmul:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_push_acc_fp8_mxu1_matmul_acc:
+    first: mxu0_push_acc_fp8
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_push_acc_fp8_mxu0_matmul_acc:
+    first: mxu1_push_acc_fp8_m14
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_push_weight:
+    first: mxu0_push_acc_bf16
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_push_weight:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_push_acc_fp8:
+    first: mxu0_push_acc_bf16
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_push_acc_fp8:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_push_acc_bf16:
+    first: mxu0_push_acc_bf16
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_push_acc_bf16:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_pop_acc_fp8:
+    first: mxu0_push_acc_bf16
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_pop_acc_fp8:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_pop_acc_bf16:
+    first: mxu0_push_acc_bf16
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_pop_acc_bf16:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_matmul:
+    first: mxu0_push_acc_bf16
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_matmul:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_push_acc_bf16_mxu1_matmul_acc:
+    first: mxu0_push_acc_bf16
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_push_acc_bf16_mxu0_matmul_acc:
+    first: mxu1_push_acc_bf16_m14
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_push_weight:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_push_weight:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_push_acc_fp8:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_push_acc_fp8:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_push_acc_bf16:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_push_acc_bf16:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_pop_acc_fp8:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_pop_acc_fp8:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_pop_acc_bf16:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_pop_acc_bf16:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_matmul:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_matmul:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_pop_acc_fp8_mxu1_matmul_acc:
+    first: mxu0_pop_acc_fp8
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_pop_acc_fp8_mxu0_matmul_acc:
+    first: mxu1_pop_acc_fp8_m22
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_push_weight:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_push_weight:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_push_acc_fp8:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_push_acc_fp8:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_push_acc_bf16:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_push_acc_bf16:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_pop_acc_fp8:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_pop_acc_fp8:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_pop_acc_bf16:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_pop_acc_bf16:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_matmul:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_matmul:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_matmul_acc:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_matmul_acc:
+    first: mxu1_pop_acc_bf16_m22
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_matmul_mxu1_push_weight:
+    first: mxu0_matmul
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_matmul_mxu0_push_weight:
+    first: mxu1_matmul_m14
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_matmul_mxu1_push_acc_fp8:
+    first: mxu0_matmul
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_matmul_mxu0_push_acc_fp8:
+    first: mxu1_matmul_m14
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_matmul_mxu1_push_acc_bf16:
+    first: mxu0_matmul
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_matmul_mxu0_push_acc_bf16:
+    first: mxu1_matmul_m14
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_matmul_mxu1_pop_acc_fp8:
+    first: mxu0_matmul
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_matmul_mxu0_pop_acc_fp8:
+    first: mxu1_matmul_m14
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_matmul_mxu1_pop_acc_bf16:
+    first: mxu0_matmul
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_matmul_mxu0_pop_acc_bf16:
+    first: mxu1_matmul_m14
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_matmul_mxu1_matmul:
+    first: mxu0_matmul
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_matmul_mxu0_matmul:
+    first: mxu1_matmul_m14
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_matmul_mxu1_matmul_acc:
+    first: mxu0_matmul
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_matmul_mxu0_matmul_acc:
+    first: mxu1_matmul_m14
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_push_weight:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_push_weight_m14
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_push_weight:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_push_weight
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_push_acc_fp8:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_push_acc_fp8_m14
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_push_acc_fp8:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_push_acc_fp8
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_push_acc_bf16:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_push_acc_bf16_m14
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_push_acc_bf16:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_push_acc_bf16
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_pop_acc_fp8:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_pop_acc_fp8_m22
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_pop_acc_fp8:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_pop_acc_fp8
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_pop_acc_bf16:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_pop_acc_bf16_m22
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_pop_acc_bf16:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_pop_acc_bf16
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_matmul:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_matmul_m14
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_matmul:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_matmul
+    gaps: 1..50
+  mxu0_matmul_acc_mxu1_matmul_acc:
+    first: mxu0_matmul_acc_m12
+    second: mxu1_matmul_acc_m14
+    gaps: 1..110
+  mxu1_matmul_acc_mxu0_matmul_acc:
+    first: mxu1_matmul_acc_m14
+    second: mxu0_matmul_acc_m12
+    gaps: 1..50
+  mxu0_pop_acc_bf16_mxu1_matmul_m20:
+    first: mxu0_pop_acc_bf16
+    second: mxu1_matmul_m20
+    gaps: 1..110
+  mxu1_pop_acc_bf16_mxu0_matmul_m20:
+    first: mxu1_pop_acc_bf16
+    second: mxu0_matmul_m20
+    gaps: 1..50
+  mxu0_matmul_mxu1_pop_acc_bf16_m12:
+    first: mxu0_matmul
+    second: mxu1_pop_acc_bf16_m12
+    gaps: 1..110
+  mxu1_matmul_mxu0_pop_acc_bf16_m12:
+    first: mxu1_matmul
+    second: mxu0_pop_acc_bf16_m12
+    gaps: 1..50
+  mxu0_matmul_mxu1_matmul_m44:
+    first: mxu0_matmul
+    second: mxu1_matmul_m44
+    gaps: 1..110
+  mxu1_matmul_mxu0_matmul_m44:
+    first: mxu1_matmul
+    second: mxu0_matmul_m44
+    gaps: 1..50
+# Regression values used only by tests (full sweeps); the extractor never reads them. rejected_by matches the result
+# at stable_gap - 1 (the AtlasCore assertion that binds); disjoint is the shared-control verdict.
+expect:
+  mxu0_push_weight_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_weight_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_weight_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_fp8_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_fp8_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_push_acc_bf16_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_push_acc_bf16_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_fp8_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_fp8_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_push_weight: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_push_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_push_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_pop_acc_fp8: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_pop_acc_bf16: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_matmul: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_matmul_acc_mxu1_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu1_matmul_acc_mxu0_matmul_acc: {min_gap: 1, stable_gap: 1, disjoint: true}
+  mxu0_pop_acc_bf16_mxu1_matmul_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu1_pop_acc_bf16_mxu0_matmul_m20: {min_gap: 33, stable_gap: 33, rejected_by: "MREG RAW hazard: instruction reads bank with pending write", disjoint: true}
+  mxu0_matmul_mxu1_pop_acc_bf16_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu1_matmul_mxu0_pop_acc_bf16_m12: {min_gap: 33, stable_gap: 33, rejected_by: "MREG WAR/WAW hazard: instruction writes bank with pending re", disjoint: true}
+  mxu0_matmul_mxu1_matmul_m44: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
+  mxu1_matmul_mxu0_matmul_m44: {min_gap: 32, stable_gap: 32, rejected_by: "multiple read ports targeting physical bank 12 \\(m12 or m44\\)", disjoint: true}
