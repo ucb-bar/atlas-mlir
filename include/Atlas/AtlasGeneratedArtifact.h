@@ -8,6 +8,9 @@
 
 namespace mlir::atlas {
 
+// Bounded virtual-to-machine policy, including instructions added by timing.
+constexpr unsigned kAtlasGeneratedWordLimit = 2048;
+
 // Module attributes stamped by virtual-to-machine lowering.
 constexpr llvm::StringLiteral kAtlasGeneratedMarker = "atlas.generated_from_virtual";
 constexpr llvm::StringLiteral kAtlasGeneratedVersion = "resource-contract-v5";

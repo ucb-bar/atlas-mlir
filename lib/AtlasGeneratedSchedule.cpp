@@ -29,6 +29,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     const AtlasVerificationContext &ctx) {
   assert(ctx.generated && "generated checks require the structural stage");
   ModuleOp module = ctx.module;
+  if (ctx.words.size() > kAtlasGeneratedWordLimit)
+    return module.emitOpError("generated program exceeds the ")
+           << kAtlasGeneratedWordLimit << "-word policy limit ("
+           << ctx.words.size() << " words, including inserted delays)";
   if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)) ||
       failed(verifyAtlasGeneratedDMAMemory(ctx)) || failed(verifyAtlasGeneratedDMAContract(ctx)) ||
       failed(verifyAtlasGeneratedMXUContract(ctx)) || failed(verifyAtlasGeneratedTileContract(ctx)) ||

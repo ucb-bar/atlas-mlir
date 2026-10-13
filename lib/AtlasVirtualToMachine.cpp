@@ -35,7 +35,6 @@ using namespace mlir::atlas;
 namespace {
 constexpr uint64_t kTileBytes = 2048;
 constexpr uint64_t kHalfBytes = 1024;
-constexpr size_t kWordLimit = 2048;
 
 struct PlannedOp {
   std::string name;
@@ -53,8 +52,7 @@ public:
     if (failed(readABI()))
       return failure();
     allocated = true;
-    allocationFits = succeeded(allocation.allocate(function));
-    if (!allocationFits || failed(allocation.verify()))
+    if (failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
     int32_t nextValue = 0, nextBlock = 0, nextOperation = 0;
     for (Block &block : function.getBody()) {
@@ -105,7 +103,7 @@ public:
       }
     }
     loweredWords = planned.size();
-    if (planned.size() > kWordLimit)
+    if (planned.size() > kAtlasGeneratedWordLimit)
       return function.emitOpError("lowered program exceeds the 2048-word policy limit");
     return resolveTargets();
   }
@@ -185,8 +183,8 @@ public:
   }
 
   // The allocation plan, once allocation has run, and the untimed program
-  // size once every operation has lowered; it fits when both are within
-  // capacity. Call before materialize(), which replaces the function.
+  // size once every operation has lowered. Call before materialize(), which
+  // replaces the function; the pass adds the final lowering status afterward.
   llvm::json::Object report() {
     llvm::json::Object report;
     if (allocated)
@@ -194,8 +192,8 @@ public:
     report["function"] = function.getSymName();
     if (loweredWords)
       report["untimed_words"] =
-          llvm::json::Object{{"words", *loweredWords}, {"limit", kWordLimit}};
-    report["fits"] = allocationFits && loweredWords && *loweredWords <= kWordLimit;
+          llvm::json::Object{{"words", *loweredWords},
+                             {"limit", kAtlasGeneratedWordLimit}};
     return report;
   }
 
@@ -901,7 +899,7 @@ private:
   unsigned nextTileCommand = 0;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
-  bool allocated = false, allocationFits = false;
+  bool allocated = false;
   std::optional<size_t> loweredWords;
 };
 
@@ -947,7 +945,7 @@ struct LowerAtlasVirtualToMachinePass
     }
     llvm::json::Array failures;
     LogicalResult lowered = failure();
-    std::optional<llvm::json::Object> report;
+    llvm::json::Object report;
     {
       // Errors still reach the usual handler.
       ScopedDiagnosticHandler capture(&getContext(), [&](Diagnostic &d) {
@@ -960,7 +958,10 @@ struct LowerAtlasVirtualToMachinePass
       if (succeeded(lowered))
         lowered = planner.materialize();
     }
-    (*report)["failures"] = std::move(failures);
+    // Planning can fit but materialization can still reject its contracts.
+    // Never publish a successful report for a failed lowering.
+    report["fits"] = succeeded(lowered);
+    report["failures"] = std::move(failures);
     std::string error;
     std::unique_ptr<llvm::ToolOutputFile> file =
         openOutputFile(allocationReport, &error);
@@ -968,8 +969,15 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError(error);
       return signalPassFailure();
     }
-    file->os() << llvm::formatv("{0:2}", llvm::json::Value(std::move(*report)))
+    file->os() << llvm::formatv("{0:2}", llvm::json::Value(std::move(report)))
                << "\n";
+    file->os().flush();
+    if (file->os().has_error()) {
+      module.emitError("failed to write allocation report: ")
+          << file->os().error().message();
+      file->os().clear_error();
+      return signalPassFailure();
+    }
     file->keep();
     if (failed(lowered))
       signalPassFailure();

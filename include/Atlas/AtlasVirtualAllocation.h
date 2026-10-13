@@ -68,8 +68,8 @@ using RegisterCapacities = std::array<unsigned, 3>;
 // One RegisterKind's demand in the last allocate(), against its capacity.
 struct RegisterPressure {
   unsigned capacity = 0;
-  // The most values of the kind live at once, a lower bound on the registers
-  // any allocation needs, and an operation where that many are live.
+  // Peak simultaneous demand under the no-operand-overwrite policy, and an
+  // operation where that many values need registers.
   unsigned peak = 0;
   Operation *peakAt = nullptr;
   // The registers the coloring used; empty when it did not fit.

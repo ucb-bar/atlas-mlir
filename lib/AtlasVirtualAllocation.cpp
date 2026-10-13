@@ -11,6 +11,7 @@
 #include "llvm/Support/Path.h"
 #include <algorithm>
 #include <iterator>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -601,6 +602,29 @@ llvm::json::Object VirtualAllocationPlan::report() const {
         place(result);
   }
 
+  // Legacy matmul and synchronous I/O have no SSA resource handles, but
+  // still occupy fixed MXU slots and DMA channels during their expansion.
+  std::array<bool, kDMAChannels> synchronousChannels{};
+  if (function.getNumArguments())
+    synchronousChannels[fixedResources.loadChannel] = true;
+  function.walk([&](Operation *op) {
+    if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
+      auto &used = slotsUsed[matmul.getUnit()];
+      used[0] = std::max(used[0], fixedResources.mxuWeightSlot + 1);
+      used[1] = std::max(used[1], fixedResources.mxuAccSlot + 1);
+    }
+    if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
+      synchronousChannels[fixedResources.loadChannel] = true;
+    if (isa<VirtualOutputBF16Op>(op))
+      synchronousChannels[fixedResources.storeChannel] = true;
+  });
+  Array implicitChannels;
+  for (unsigned channel = 0; channel < kDMAChannels; ++channel)
+    if (synchronousChannels[channel])
+      implicitChannels.push_back(channel);
+  unsigned peakInFlight =
+      std::max(windowsUsed, implicitChannels.empty() ? 0u : 1u);
+
   Array units;
   for (const auto &used : slotsUsed)
     units.push_back(
@@ -641,7 +665,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
                      {"units", std::move(units)}}},
       {"dma", Object{{"channels", kDMAChannels},
                      {"staging_windows", kDMAChannels},
-                     {"peak_in_flight", windowsUsed}}},
+                     {"synchronous_channels", std::move(implicitChannels)},
+                     {"peak_in_flight", peakInFlight}}},
       {"vmem", std::move(vmem)},
       {"values", std::move(values)}};
 }
