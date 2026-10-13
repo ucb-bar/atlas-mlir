@@ -63,11 +63,12 @@ def data_gap(document, first, second):
     return gap
 
 
-def same_mxu_facts():
-    """(unit, first, second, accumulator relation, weight-slot relation) -> pair fact record."""
+def same_mxu_facts(overlap="disjoint"):
+    """(unit, first, second, accumulator relation, weight-slot relation) -> the pair fact record whose MREG operands
+    overlap as `overlap` states (pairs/core_mxu_shared.yaml)."""
     out = {}
     for record in json.loads(Path(PAIRS).read_text())["op_pairs"]:
-        if record["engine"] in ("mxu0", "mxu1"):
+        if record["engine"] in ("mxu0", "mxu1") and record["relation"]["mreg_banks"] == overlap:
             relation = record["relation"]
             key = (int(record["engine"][3]), record["first"].split(".")[1], record["second"].split(".")[1],
                    relation.get("accumulator"), relation.get("weight_slot"))
@@ -83,6 +84,7 @@ def operands(relation):
 # funct7 - unit -> operation (lib/AtlasEncoding.cpp).
 WORDS = {0: "push_weight", 2: "push_acc_fp8", 4: "push_acc_bf16", 6: "pop_acc_fp8", 8: "pop_acc_bf16", 10: "matmul", 12: "matmul_acc"}
 CHAINS = ROOT / "tools/rtl_extract/targets/atlas/sequences/core_mxu.yaml"
+SHARED = ROOT / "tools/rtl_extract/targets/atlas/pairs/core_mxu_shared.yaml"
 
 
 def decoded(word):
@@ -116,7 +118,8 @@ def pair_facts_variant(directory, mutate, name="op-pairs.json"):
 def record_of(document, unit, first, second, acc=None, slot=None):
     return next(r for r in document["op_pairs"]
                 if (r["first"], r["second"]) == (f"mxu{unit}.{first}", f"mxu{unit}.{second}")
-                and r["relation"].get("accumulator") == acc and r["relation"].get("weight_slot") == slot)
+                and r["relation"].get("accumulator") == acc and r["relation"].get("weight_slot") == slot
+                and r["relation"]["mreg_banks"] == "disjoint")
 
 
 @unittest.skipUnless(FACTS and PAIRS and OPT.is_file(), "requires RTL timing facts, pair facts and built tools")
@@ -172,6 +175,37 @@ class MxuPipelineTest(unittest.TestCase):
                         self.assertNotEqual(early.returncode, 0)
                         self.assertRegex(early.stderr, f"first permitted cycle {gap}|requires {gap}, got {gap - 1}")
 
+    def test_shared_operand_facts_hold_with_the_mreg_rules(self):
+        """Every same-MXU pair fact for operands sharing an MREG register or bank (pairs/core_mxu_shared.yaml), on the
+        swept operands: accepted at the first gap the compiler admits and rejected one cycle earlier, never below the
+        fact's stable gap; where the two commands only read the shared registers the MREG rules add nothing, so the
+        pair issues exactly at the larger of its stable gap and its accumulator and weight access distance."""
+        raw = yaml.safe_load(SHARED.read_text())
+        records = [r for r in json.loads(Path(PAIRS).read_text())["op_pairs"]
+                   if r["engine"] in ("mxu0", "mxu1") and r["relation"]["mreg_banks"] != "disjoint"]
+        self.assertEqual(len(records), len(raw["pairs"]))
+
+        def check(record):
+            pair = raw["pairs"][record["source"].split(".", 1)[1]]
+            a, b = (decoded(pair[f"{side}_inputs"]["instruction"]) for side in ("first", "second"))
+            gap = next(g for g in range(1, 200) if self.verify(spaced([a, b], g, 200)).returncode == 0)
+            return record, a, b, gap, self.verify(spaced([a, b], gap + 1, 200)), self.verify(spaced([a, b], gap - 1, 200)) if gap > 1 else None
+
+        with ThreadPoolExecutor(16) as pool:
+            for record, a, b, gap, later, early in pool.map(check, records):
+                first, second = record["first"].split(".")[1], record["second"].split(".")[1]
+                unit, relation = int(record["engine"][3]), record["relation"]
+                with self.subTest(record["source"], gap=gap):
+                    self.assertGreaterEqual(gap, record["stable_gap"])
+                    self.assertEqual(later.returncode, 0, later.stderr)
+                    if early is not None:
+                        self.assertNotEqual(early.returncode, 0)
+                    reads = not first.startswith("pop") and not second.startswith("pop")
+                    if reads and "~" not in relation["mreg_banks"]:
+                        data = data_gap(self.facts, (first, unit, 0, 0), (second, unit, operands(relation.get("accumulator")),
+                                                                          operands(relation.get("weight_slot"))))
+                        self.assertEqual(gap, max(record["stable_gap"], data))
+
     def test_overlap_beats_the_busy_rule(self):
         """Representative pairs issue well inside the first command's busy window, as the sweeps show."""
         cases = [(0, "matmul", "pop_acc_bf16", "same", None, 64), (0, "matmul", "pop_acc_bf16", "other", None, 1),
@@ -196,13 +230,20 @@ class MxuPipelineTest(unittest.TestCase):
                     self.assertEqual(abs(placed), expected, consumer)
 
     def test_operands_must_satisfy_the_relation(self):
-        # The pop writes m44:45, physical banks 12 and 13 of the matmul's source m12: no fact applies.
+        """The pop writes m44:45, physical banks 12 and 13 of the matmul's source m12 ("0~0"): the shared-bank record for
+        that overlap applies (pairs/core_mxu_shared.yaml); without it, or under the disjoint record alone, the pop waits
+        for the matmul's busy end."""
         for unit in (0, 1):
             first = command("matmul", unit, 0)
             second = command("pop_acc_bf16", unit, 1, acc=1, regs={"dst": 44})
             window = self.window("matmul", unit)
+            shared = same_mxu_facts("0~0")[(unit, "matmul", "pop_acc_bf16", "other", None)]
             with self.subTest(unit=unit):
-                stderr = self.assert_boundary(first, second, window)
+                self.assert_boundary(first, second, shared["stable_gap"])
+                with tempfile.TemporaryDirectory() as directory:
+                    disjoint = pair_facts_variant(directory, lambda d: d.update(
+                        op_pairs=[r for r in d["op_pairs"] if r["relation"]["mreg_banks"] in ("disjoint",)]))
+                    stderr = self.assert_boundary(first, second, window, selection(pairs=disjoint))
                 self.assertIn(f"no pair fact admits vmatpop.bf16.acc.mxu{unit} {window - 1} cycles after "
                               f"vmatmul.mxu{unit} with these operands", stderr)
                 self.assertIn(f"MXU in-flight matmuls {unit} held by vmatmul.mxu{unit}", stderr)

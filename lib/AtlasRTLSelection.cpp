@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <optional>
-#include <set>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -65,12 +64,24 @@ Footprint holdsWhere(const Footprint &f, bool engine) {
   return out;
 }
 
-// Physical MREG banks (register mod 32) a command names.
-std::set<int> mregBanks(const Footprint &f) {
-  std::set<int> banks;
-  for (const std::vector<int> *regs : {&f.mregReads, &f.mregWrites})
-    for (int reg : *regs) banks.insert(reg & 31);
-  return banks;
+// MREG registers a command names, reads then writes in operand order.
+std::vector<int> mregOperands(const Footprint &f) {
+  std::vector<int> regs = f.mregReads;
+  regs.insert(regs.end(), f.mregWrites.begin(), f.mregWrites.end());
+  return regs;
+}
+
+// How two commands' MREG operands overlap, as pair files state it
+// (pairs/core_mxu_shared.yaml): "i=j" where the first's i-th register is the
+// second's j-th, "i~j" where they share a physical bank (register mod 32)
+// under different registers, comma-joined; "disjoint" when no bank is shared.
+std::string mregOverlap(const std::vector<int> &first, const std::vector<int> &second) {
+  std::string out;
+  for (size_t i = 0; i < first.size(); ++i)
+    for (size_t j = 0; j < second.size(); ++j)
+      if ((first[i] & 31) == (second[j] & 31))
+        out += (out.empty() ? "" : ",") + std::to_string(i) + (first[i] == second[j] ? "=" : "~") + std::to_string(j);
+  return out.empty() ? "disjoint" : out;
 }
 
 Footprint withoutHold(const Footprint &f, Unit unit) {
@@ -97,7 +108,7 @@ public:
   struct Command {
     const OpInfo *op = nullptr;
     std::string block, engine, holder;
-    std::set<int> banks;
+    std::vector<int> regs;
     std::optional<int> acc, slot;
     int issue = 0, window = 0;
   };
@@ -108,7 +119,7 @@ public:
       const char *name = RTLEvidence::vpuBlockName(in.op->name);
       const OpTimingBlock *b = name ? evidence.block(name) : nullptr;
       if (!b || !b->nextIssueAge) return std::nullopt;
-      return Command{in.op, name, b->engine, "VPU slot", mregBanks(f), std::nullopt, std::nullopt, cycle,
+      return Command{in.op, name, b->engine, "VPU slot", mregOperands(f), std::nullopt, std::nullopt, cycle,
                      *b->nextIssueAge};
     }
     std::string name = RTLEvidence::mxuBlockName(*in.op);
@@ -118,7 +129,7 @@ public:
     if (!b || window == facts.window.end() || window->second != "last_event_age" || busy < 0)
       return std::nullopt;
     Command command{in.op, name, b->engine, "MXU in-flight matmuls " + std::to_string(in.op->mxu),
-                    mregBanks(f), std::nullopt, std::nullopt, cycle, busy + 1};
+                    mregOperands(f), std::nullopt, std::nullopt, cycle, busy + 1};
     switch (in.op->opClass) {
     case OpClass::WeightPush: command.slot = in.rd; break;
     case OpClass::AccPushFp8:
@@ -172,17 +183,17 @@ private:
     return false;
   }
   // Every relation must be stated in a known vocabulary and hold, and it must
-  // constrain every operand kind both commands name: physical MREG banks
-  // always, the accumulator and the weight slot where both use one.
+  // constrain every operand kind both commands name: how their MREG operands
+  // overlap (disjoint banks, or the exact shared registers and banks) always,
+  // the accumulator and the weight slot where both use one.
   static bool satisfied(const OpPairFact &fact, const Command &first, const Command &second) {
     bool banks = false, acc = false, slot = false;
     auto same = [](const std::optional<int> &a, const std::optional<int> &b, const std::string &value) {
       return a && b && (value == "same" || value == "other") && ((*a == *b) == (value == "same"));
     };
     for (const auto &[name, value] : fact.relation) {
-      if (name == "mreg_banks" && value == "disjoint") {
-        for (int bank : first.banks)
-          if (second.banks.count(bank)) return false;
+      if (name == "mreg_banks") {
+        if (value != mregOverlap(first.regs, second.regs)) return false;
         banks = true;
       } else if (name == "accumulator" && same(first.acc, second.acc, value)) {
         acc = true;
