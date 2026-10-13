@@ -872,7 +872,6 @@ std::vector<int> mlir::atlas::timing::criticalHeights(const DepGraph &g) {
       // A dma.wait holds the frontend until the transfer completes.
       const Instr &to = g.nodes[ed.to];
       if (to.op->opClass == OpClass::DmaWait &&
-          g.footprints[i].dmaCycles > 0 &&
           to.op->channel == g.nodes[i].op->channel)
         d = std::max(d, g.footprints[i].dmaCycles + 2);
       height[i] = std::max(height[i], d + height[ed.to]);

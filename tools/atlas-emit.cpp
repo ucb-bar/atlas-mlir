@@ -129,11 +129,9 @@ int main(int argc, char **argv) {
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider)) {
       root["timing_provider"] = provider.getValue().str();
-      // Issue spacing was verified under the named policy; the words carry its
-      // delays. Only the RTL provider's export resolves per-instruction timing.
-      root["timing_scope"] = provider.getValue() == timing::kAtlasRTLTimingProviderId
-          ? "issue_spacing_verified_by_timing_provider_over_selected_rtl_facts; see atlas-emit --rtl-timing-json"
-          : "issue_spacing_verified_by_timing_provider; policy unqualified against the RTL";
+      // Only the RTL provider's export resolves per-instruction timing.
+      if (provider.getValue() == timing::kAtlasRTLTimingProviderId)
+        root["timing_scope"] = "issue_spacing_verified_by_timing_provider_over_selected_rtl_facts; see atlas-emit --rtl-timing-json";
     }
     if ((*module)->hasAttr(kAtlasRTLEvidence))
       root["rtl_evidence"] = true;
