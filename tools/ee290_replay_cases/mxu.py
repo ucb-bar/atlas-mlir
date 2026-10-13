@@ -1,16 +1,11 @@
-"""One FP8 tile through each MXU: vload A and W, push W, overwrite matmul, BF16 pop, store both halves.
-
-Expected results come from an exact fixed-point reference independent of the RTL (the archived
-ee290-mxu-reference.h fixture, phase 0): one nonzero weight per output column, so every output is a
-single exact product, and any result that would need BF16 rounding is rejected. The accumulate cases
-push a BF16 or FP8 accumulator first; the reference adds it exactly, refuses any term set wider than
-the inner-product tree's exact anchor window, and the FP8 pop quantizes only exactly representable values.
-"""
+"""MXU and virtual cases with an independent exact fixed-point reference."""
+from dataclasses import replace
 from fractions import Fraction
+from pathlib import Path
 
-from . import END, Case, add, filler, put, vload, vstore
-from .vpu_ops import bf16_from_fp8, exact, fp8_from_bf16, lanes, scale_exponent, value
-
+from . import END, Case, add, dma, dma_config, filler, issue_gaps, overlapping, put, tile, transpose, upper, vload, vstore, wait, xlu
+from . import raw_tiles
+from .vpu_ops import bf16_from_fp8, exact, fp8_from_bf16, lanes, scale_exponent, value, fp8_unpack, RELU_IN, elementwise, fp8_pack
 
 def fp8(integer, scale, negative=False):
     """E4M3 encoding of integer (1..8) * 2^scale, finite normal only."""
@@ -18,7 +13,6 @@ def fp8(integer, scale, negative=False):
     exponent = bit + scale + 7
     if not 1 <= integer <= 8 or not 1 <= exponent <= 14: raise ValueError('outside the fixture FP8 domain')
     return (0x80 if negative else 0) | exponent << 3 | ((integer << (3 - bit)) - 8)
-
 
 def decode(bits):
     """E4M3 as (signed numerator, exponent); zero is (0, 0)."""
@@ -29,19 +23,8 @@ def decode(bits):
     if exponent == 15: raise ValueError('extended exponent outside the fixture reference')
     return (-(8 + fraction) if bits & 0x80 else 8 + fraction), exponent - 10
 
-
 def exact_bf16(fixed):
-    """BF16 of a fixed-point value with 16 fractional bits; rounding is refused."""
-    if not fixed: return 0
-    magnitude = abs(fixed); bit = magnitude.bit_length() - 1
-    exponent = bit - 16 + 127
-    if not 1 <= exponent <= 254: raise ValueError('result outside normal BF16')
-    if bit > 7:
-        if magnitude & ((1 << (bit - 7)) - 1): raise ValueError('result requires BF16 rounding')
-        significand = magnitude >> (bit - 7)
-    else: significand = magnitude << (7 - bit)
-    return (0x8000 if fixed < 0 else 0) | exponent << 7 | (significand - 128)
-
+    return exact(Fraction(fixed, 1 << 16)) if fixed else 0
 
 def fixture(phase=0):
     activation = bytes(fp8(1 + (3 * r + 5 * k + phase % 8) % 8, r // 8 - 1) for r in range(32) for k in range(32))
@@ -49,7 +32,6 @@ def fixture(phase=0):
     for column in range(32):
         weights[32 * column + (5 * column + phase % 32) % 32] = fp8(1, column // 8 - 2, (column + phase) % 2 != 0)
     return activation, bytes(weights)
-
 
 def reference(activation, weights, accumulator=None):
     """C[r,j] = acc[r,j] + sum_k A[r,k] W[j,k] as two 32x16 BF16 panels (columns 0..15, then 16..31).
@@ -78,25 +60,26 @@ def reference(activation, weights, accumulator=None):
             result[offset:offset + 2] = exact_bf16(sum(terms)).to_bytes(2, 'little')
     return bytes(result)
 
-
 def accumulator_codes(panels):
     """Accumulator rows of a BF16 pair in panel layout (lanes 0..15 from the first register, 16..31 from the second)."""
     return [code for row in range(32) for half in (0, 1) for code in lanes(panels[1024 * half + 32 * row:1024 * half + 32 * row + 32])]
-
 
 def dequantize(row):
     """Accumulator row loaded by an FP8 acc push: E4M3 lanes to BF16 (e4m3ToBf16)."""
     return b''.join(bf16_from_fp8(b, 0).to_bytes(2, 'little') for b in row)
 
-
 def quantize(row, scale):
     """FP8 pop of one accumulator row: BF16ScaleToE4M3 multiplies by 2^(scale - 127); rounding, saturation and underflow are refused."""
     return bytes(fp8_from_bf16(c, scale_exponent(scale)) for c in lanes(row))
 
-
 ACTIVATION, WEIGHTS = fixture()
 IMAGE = ACTIVATION + filler(1024, 1024) + WEIGHTS + filler(5120, 3072)
 
+def push(unit, src=2, slot=0): return ('mxu_push', f'kind = "weight_fp8", unit = {unit} : i32, src = {src} : i32, slot = {slot} : i32')
+def matmul(unit, src=0, slot=0, acc=0, accumulate=False):
+    return ('mxu_matmul', f'unit = {unit} : i32, src = {src} : i32, weight_slot = {slot} : i32, acc_slot = {acc} : i32, '
+                          f'accumulate = {str(accumulate).lower()}')
+def pop(unit, dst=4, acc=0): return ('mxu_pop', f'format = "bf16", unit = {unit} : i32, dst = {dst} : i32, slot = {acc} : i32, scale_reg = 0 : i32')
 
 def tile_ops(unit, slot):
     return (add(6, 0), vload(0, 6), add(6, 512), vload(2, 6),
@@ -105,30 +88,23 @@ def tile_ops(unit, slot):
             ('mxu_pop', f'format = "bf16", unit = {unit} : i32, dst = 4 : i32, slot = {slot} : i32, scale_reg = 0 : i32'),
             add(8, 1024), vstore(4, 8), add(8, 1280), vstore(5, 8))
 
-
 def result(vm, dram): put(vm, 128, reference(ACTIVATION, WEIGHTS))
-
 
 # Accumulate: the pushed accumulator is a multiple of each column's single product, so every total is exact
 # (BF16 pop: C0 (1 + f) has at most 8 significant bits; FP8 pop: 1 + f is a power of two and C0 has 4 bits).
-OVERWRITE = [int.from_bytes(reference(ACTIVATION, WEIGHTS)[o:o + 2], 'little') for o in range(0, 2048, 2)]
-PRODUCTS = accumulator_codes(bytes(b for c in OVERWRITE for b in c.to_bytes(2, 'little')))
+PRODUCTS = accumulator_codes(reference(ACTIVATION, WEIGHTS))
 BF16_FACTORS = (3, -3, Fraction(1, 2), Fraction(-3, 4), 5, -2, 1, Fraction(7, 4))
 FP8_FACTORS = (1, -2, Fraction(-1, 2))
 SCALE = 126  # FP8 pop halves
 
-
 def scaled_bf16(i, factors): return exact(value(PRODUCTS[i]) * factors[(i // 32 + i % 32) % len(factors)])
-
 
 def panels(codes):  # accumulator rows -> BF16 pair in panel layout
     return b''.join(codes[32 * r + 16 * half + j].to_bytes(2, 'little') for half in (0, 1) for r in range(32) for j in range(16))
 
-
 ACC_BF16 = [scaled_bf16(i, BF16_FACTORS) for i in range(1024)]
 ACC_FP8 = bytes(fp8_from_bf16(scaled_bf16(i, FP8_FACTORS), 0) for i in range(1024))
 ACC_IMAGE = ACTIVATION + bytes([SCALE]) + filler(1023, 1025) + WEIGHTS + filler(1024, 3072)
-
 
 def accumulate_ops(unit, slot, fp8):
     load = ('mxu_push', f'kind = "acc_{"fp8" if fp8 else "bf16"}", unit = {unit} : i32, src = 4 : i32, slot = {slot} : i32')
@@ -139,14 +115,11 @@ def accumulate_ops(unit, slot, fp8):
             ('mxu_matmul', f'unit = {unit} : i32, src = 0 : i32, weight_slot = {slot} : i32, acc_slot = {slot} : i32, accumulate = true'),
             pop, vstore(6, 6, 64), *(() if fp8 else (vstore(7, 6, 72),)))
 
-
 def accumulated_bf16(vm, dram): put(vm, 256, reference(ACTIVATION, WEIGHTS, ACC_BF16))
-
 
 def accumulated_fp8(vm, dram):
     total = accumulator_codes(reference(ACTIVATION, WEIGHTS, [int.from_bytes(dequantize(bytes([b])), 'little') for b in ACC_FP8]))
     put(vm, 256, b''.join(quantize(b''.join(c.to_bytes(2, 'little') for c in total[32 * r:32 * r + 32]), SCALE) for r in range(32)))
-
 
 CASES = {f'mxu{unit}_tile': Case(tile_ops(unit, unit) + END, {0: IMAGE}, result, {'vload': 2, f'mxu{unit}': 3, 'vstore': 2})
          for unit in (0, 1)}
@@ -154,3 +127,222 @@ CASES.update({f'mxu{unit}_acc_bf16': Case(accumulate_ops(unit, 1 - unit, False) 
                                           accumulated_bf16, {'vload': 4, f'mxu{unit}': 4, 'vstore': 2}) for unit in (0, 1)})
 CASES.update({f'mxu{unit}_acc_fp8': Case(accumulate_ops(unit, 1 - unit, True) + END, {0: ACC_IMAGE + ACC_FP8 + filler(5120, 8192)},
                                          accumulated_fp8, {'vload': 3, f'mxu{unit}': 4, 'vstore': 1}) for unit in (0, 1)})
+
+BANK2, BANK3 = 2 * 8192, 3 * 8192  # first VMEM line of each bank
+A, O = 0x90000000, 0x90002000
+SIZE = 1024
+TILE = bytes((37 * i + 11 + 3 * (i // 32)) & 255 for i in range(SIZE))
+GUARD = b'\xa5' * 32
+
+# x2 size, x5 DMA base 0, x9/x10 word addresses of bank 3 / bank 2 line 0, x1 DRAM tile / x3 DRAM output.
+SETUP = (add(5, 0), dma_config(0, 5), add(2, SIZE), upper(9, BANK3 * 8 >> 12), upper(10, BANK2 * 8 >> 12),
+         add(6, 0), vload(0, 6), add(6, 512), vload(2, 6))
+
+def under_transfer(unit, direction):
+    """The MXU tile with a transfer launched while its matmul runs: a load into bank 3 once m8 has read the old
+    bank 3 tile, or a store of bank 3 once m8 (from bank 2) has been stored there."""
+    if direction == 'load':
+        body = (upper(1, A >> 12), vload(8, 9), push(unit), matmul(unit), dma('load', 0, 9, 1), pop(unit), wait(0), vstore(8, 10))
+    else:
+        body = (upper(3, O >> 12), vload(8, 10), push(unit), matmul(unit), vstore(8, 9), dma('store', 0, 9, 3), pop(unit), wait(0))
+    return (*SETUP, *body, add(8, 1024), vstore(4, 8), add(8, 1280), vstore(5, 8))
+
+OLD = filler(SIZE, 4096)
+
+def loaded(vm, dram): result(vm, dram); put(vm, BANK2, OLD); put(vm, BANK3, TILE)
+
+def stored(vm, dram):
+    result(vm, dram)
+    put(vm, BANK3, TILE)
+    for i in range(SIZE): dram[O + i] = TILE[i]
+
+# Vector work issued while the MXU tile runs, on tiles it has already loaded: m12:13 <- FP8 unpack of the activation
+# tile m0 (scale register 3 from byte 1024) -> bank 2 lines 128..191; m17 <- transpose of the weight tile m2 -> bank 2
+# line 32; an unrelated m18 <- bank 2 line 64.
+def beside_vector(unit):
+    return (add(6, 0), ('scalar_load', 'kind = "seld", dst = 3 : i32, base = 6 : i32, offset = 1024 : i32'), vload(0, 6),
+            add(6, 512), vload(2, 6), upper(10, BANK2 * 8 >> 12), push(unit), matmul(unit),
+            ('vpu_pack', 'direction = "fp8_to_bf16", dst = 12 : i32, src = 0 : i32, scale_reg = 3 : i32'), xlu(17, 2),
+            vload(18, 10, 16), pop(unit), vstore(12, 10, 32), vstore(13, 10, 40), vstore(17, 10, 8),
+            add(8, 1024), vstore(4, 8), add(8, 1280), vstore(5, 8))
+
+def vector_result(vm, dram):
+    result(vm, dram)
+    rows = [vm[r] for r in range(32)]
+    put(vm, BANK2 + 128, b''.join(fp8_unpack(rows[n // 2], n % 2, IMAGE[1024]) for n in range(64)))
+    put(vm, BANK2 + 32, transpose(tile(vm, 64)))
+
+# The tile on both MXUs at once: MXU1 reads its own copies (m8, m10) and pops to m12:13, stored at lines 192..255.
+BOTH = (add(6, 0), vload(0, 6), vload(8, 6), add(6, 512), vload(2, 6), vload(10, 6), push(0), push(1, 10), matmul(0), matmul(1, 8),
+        pop(0), pop(1, 12), add(8, 1024), vstore(4, 8), vstore(5, 8, 8), vstore(12, 8, 16), vstore(13, 8, 24))
+
+def both_results(vm, dram): result(vm, dram); put(vm, 192, reference(ACTIVATION, WEIGHTS))
+
+TILE_COUNTS = {'vload': 3, 'dma': 1}
+OVERLAP = {}
+for unit in (0, 1):
+    engine = f'mxu{unit}'
+    OVERLAP[f'{engine}_under_dma_load'] = Case(under_transfer(unit, 'load') + END, {0: IMAGE, BANK2: filler(SIZE), BANK3: OLD},
+                                              loaded, {**TILE_COUNTS, engine: 3, 'vstore': 3}, dram={A: TILE}, dma=(32, 0),
+                                              check=lambda events, e=engine: overlapping(events, 'dma', e))
+    OVERLAP[f'{engine}_under_dma_store'] = Case(under_transfer(unit, 'store') + END, {0: IMAGE, BANK2: TILE, BANK3: filler(SIZE)},
+                                               stored, {**TILE_COUNTS, engine: 3, 'vstore': 3},
+                                               dram={O - 32: GUARD, O: filler(SIZE, 2048), O + SIZE: GUARD}, dma=(0, 32),
+                                               check=lambda events, e=engine: overlapping(events, 'dma', e))
+    OVERLAP[f'{engine}_beside_vector'] = Case(beside_vector(unit) + END, {0: IMAGE, BANK2: raw_tiles()},
+                                            vector_result, {'vload': 3, engine: 3, 'vpu': 1, 'xlu': 1, 'vstore': 5},
+                                            check=lambda events, e=engine: all(overlapping(events, e, x) for x in ('vpu', 'xlu', 'vload', 'vstore')))
+OVERLAP['mxu_both_units'] = Case(BOTH + END, {0: IMAGE}, both_results, {'vload': 4, 'mxu0': 3, 'mxu1': 3, 'vstore': 4},
+                               check=lambda events: overlapping(events, 'mxu0', 'mxu1'))
+
+# Lines 0..31 activation 1, 32..63 activation 2, 64..95 weights 1, 96..127 weights 2; results from line 128.
+A1, W1 = fixture(0)
+A2, W2 = fixture(3)
+PIPELINE_IMAGE = A1 + A2 + W1 + W2 + filler(4096)
+PIPELINE_LOADS = (add(6, 0), vload(0, 6), vload(4, 6, 8), vload(8, 6, 16), vload(12, 6, 24))
+
+def stores(*pairs):
+    """Store each popped BF16 pair (two registers) to consecutive 64-line panels from line 128."""
+    out = []
+    for k, dst in enumerate(pairs):
+        out += [vstore(dst, 6, 32 + 16 * k), vstore(dst + 1, 6, 40 + 16 * k)]
+    return tuple(out)
+
+def two_tiles(unit):
+    return (*PIPELINE_LOADS, push(unit, 8, 0), push(unit, 12, 1), matmul(unit, 0, 0, 0), matmul(unit, 4, 1, 1),
+            pop(unit, 16, 0), pop(unit, 20, 1), *stores(16, 20))
+
+def two_results(vm, dram):
+    put(vm, 128, reference(A1, W1))
+    put(vm, 192, reference(A2, W2))
+
+def k2(unit):
+    return (*PIPELINE_LOADS, push(unit, 8, 0), matmul(unit, 0, 0, 0), push(unit, 12, 1), matmul(unit, 4, 1, 0, True),
+            pop(unit, 16, 0), *stores(16))
+
+def k2_result(vm, dram): put(vm, 128, reference(A2, W2, accumulator_codes(reference(A1, W1))))
+
+def pipelined():
+    cases = {}
+    for unit in (0, 1):
+        engine = f'mxu{unit}'
+        overlap = lambda events, e=engine: bool(issue_gaps(events, e))
+        for name in ('tile', 'acc_bf16', 'acc_fp8'):
+            cases[f'{engine}_{name}_pipelined'] = replace(CASES[f'{engine}_{name}'], check=overlap, pairs=True)
+        cases[f'{engine}_two_tiles'] = Case(two_tiles(unit) + END, {0: PIPELINE_IMAGE}, two_results, {'vload': 4, engine: 6, 'vstore': 4},
+                                            check=overlap, pairs=True)
+        cases[f'{engine}_k2'] = Case(k2(unit) + END, {0: PIPELINE_IMAGE}, k2_result, {'vload': 4, engine: 5, 'vstore': 2},
+                                     check=overlap, pairs=True)
+    cases['virtual_dma_mxu_pipelined'] = replace(DMA['virtual_dma_mxu'], consumers=('delay', 'schedule'), pairs=True,
+                                                 check=lambda events: bool(issue_gaps(events, 'mxu0')))
+    for name in ('virtual_fp8_mlp', 'virtual_fp8_mlp_bias'):
+        base = MLP[name]
+        cases[f'{name}_pipelined'] = replace(base, pairs=True, check=lambda events, c=base.check: c(events) and any(issue_gaps(events, f'mxu{u}') for u in (0, 1)))
+    return cases
+
+RELU_INPUT, RELU_OUTPUT = 0x90000000, 0x90001000
+RELU_IN_LINE, RELU_OUT_LINE = 0, 8192
+RELU_PROGRAM = """module {
+  func.func @relu() -> !atlas.virtual_state attributes {atlas.input_dram_base = 2415919104 : i64, atlas.output_dram_base = 2415923200 : i64} {
+    %io0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %io1, %x = "atlas.virtual_input_bf16"(%io0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %y = "atlas.virtual_vpu_unary"(%x) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %io2 = "atlas.virtual_output_bf16"(%io1, %y) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    return %io2 : !atlas.virtual_state
+  }
+}
+"""
+PIPELINE = ('--verify-atlas-virtual-stream', '--schedule-atlas-virtual', '--lower-atlas-virtual-to-machine')
+RELU_RESULT = b''.join(elementwise('vrelu.bf16', RELU_IN[32 * r:32 * r + 32]) for r in range(64))
+
+def relu_output(vm, dram):
+    put(vm, RELU_IN_LINE, RELU_IN)
+    put(vm, RELU_OUT_LINE, RELU_RESULT)
+    for i, byte in enumerate(RELU_RESULT): dram[RELU_OUTPUT + i] = byte
+
+RELU = {
+    'virtual_relu': Case((), {RELU_IN_LINE: filler(8192, 7), RELU_OUT_LINE: filler(8192, 9)}, relu_output, {'dma': 4, 'vload': 2, 'vpu': 1, 'vstore': 2},
+                         dram={RELU_INPUT: RELU_IN, RELU_OUTPUT - 32: b'\xa5' * 32 + b'\x5a' * 2048 + b'\xa5' * 32}, dma=(64, 64),
+                         source=RELU_PROGRAM, pipeline=PIPELINE),
+}
+
+DMA_PROGRAM = (Path(__file__).resolve().parents[2] / 'test/examples/virtual_dma_mxu.mlir').read_text()
+VIRTUAL_X, WEIGHT, OUT = 0x90000000, 0x90000400, 0x90001000
+STAGE = 16384  # first VMEM line of bank 2
+DMA_SCALE = 129
+
+DMA_ACTIVATION = bytes(fp8(1 + (3 * r + 5 * k) % 8, r // 8 - 2) for r in range(32) for k in range(32))
+DMA_WEIGHTS = bytearray(1024)
+for column in range(32):
+    DMA_WEIGHTS[32 * column + (5 * column) % 32] = fp8(1, column // 8 - 3, column % 2 != 0)
+DMA_WEIGHTS = bytes(DMA_WEIGHTS)
+PRODUCT = reference(DMA_ACTIVATION, DMA_WEIGHTS)
+TOTAL = accumulator_codes(reference(DMA_ACTIVATION, DMA_WEIGHTS, accumulator_codes(PRODUCT)))
+DMA_RESULT = b''.join(quantize(b''.join(c.to_bytes(2, 'little') for c in TOTAL[32 * r:32 * r + 32]), DMA_SCALE) for r in range(32))
+
+def readout(vm, dram):
+    put(vm, STAGE, DMA_RESULT)
+    put(vm, STAGE + 64, DMA_ACTIVATION)
+    for i, byte in enumerate(DMA_RESULT): dram[OUT + i] = byte
+
+COMMON = dict(vmem={STAGE: filler(8192, 7)}, expect=readout, commands={'dma': 3, 'vload': 2, 'mxu0': 4, 'vstore': 1},
+              dram={VIRTUAL_X: DMA_ACTIVATION, WEIGHT: DMA_WEIGHTS, OUT - 32: b'\xa5' * 32 + b'\x5a' * 1024 + b'\xa5' * 32}, dma=(64, 32),
+              source=DMA_PROGRAM, pipeline=PIPELINE)
+DMA = {
+    'virtual_dma_mxu': Case((), consumers=('delay',), check=lambda events: overlapping(events, 'dma', 'mxu0'), **COMMON),
+    'virtual_dma_mxu_stream': Case((), consumers=('schedule',), **COMMON),
+}
+
+EXAMPLES = Path(__file__).resolve().parents[2] / 'test/examples'
+INPUT = 0x90000000
+X_LINE, W0_LINE, W1_LINE, B0_LINE, B1_LINE, PACKED, ROWS, OUT_LINE = 0, 64, 128, 192, 256, 4096, 4128, 8192
+MLP_SCALE = 127
+
+VIRTUAL_X, MLP_W0 = fixture()
+MLP_W1 = bytearray(1024)
+for column in range(32):
+    MLP_W1[32 * column + 2 * ((5 * column + 1) % 16)] = fp8(1, column // 8 - 2, column % 2 != 0)
+MLP_W1 = bytes(MLP_W1)
+
+def rows(data): return [data[32 * r:32 * r + 32] for r in range(len(data) // 32)]
+def add_tiles(lhs, rhs): return b''.join(elementwise('vadd.bf16', a, b) for a, b in zip(rows(lhs), rows(rhs)))
+
+def layers(bias):
+    """Every intermediate tile; with bias, B0 = H0 and B1 = the second product, so each add doubles exactly."""
+    h0 = reference(VIRTUAL_X, MLP_W0)                               # BF16 panels: columns 0..15, then 16..31
+    b0 = h0 if bias else None
+    h1 = [elementwise('vrelu.bf16', row) for row in rows(add_tiles(h0, b0) if bias else h0)]
+    packed = b''.join(fp8_pack(h1[2 * n], h1[2 * n + 1], MLP_SCALE) for n in range(32))
+    # Row r joins the FP8 columns 0..15 (packed bytes 16r..) and 16..31 (bytes 512 + 16r..) of matrix row r.
+    h = b''.join(packed[16 * r:16 * r + 16] + packed[512 + 16 * r:528 + 16 * r] for r in range(32))
+    y = reference(h, MLP_W1)
+    return b0, (y if bias else None), packed, h, add_tiles(y, y) if bias else y
+
+def relayout_moves(events):
+    """The loop body ran 32 times, each instance entering with its own x10, and moved 256 words each way."""
+    loop = [e for e in events['block_entries'] if e['registers'].get('x14') == 32 and e['registers'].get('x13', 32) < 32]
+    return sorted(e['registers']['x10'] for e in loop) == [0x20000 + 16 * k for k in range(32)] and \
+        sum(a['kind'] == 'lw' for a in events['scalar_memory']) == 256 and sum(a['kind'] == 'sw' for a in events['scalar_memory']) == 256
+
+def mlp(bias, pipeline):
+    b0, b1, packed, h, y = layers(bias)
+    output = 0x90003000 if bias else 0x90002000
+    vmem = {X_LINE: filler(1024, 1), W0_LINE: filler(1024, 2), W1_LINE: filler(1024, 3), PACKED: filler(1024, 4), ROWS: filler(1024, 5),
+            OUT_LINE: filler(3072, 6)}  # 32 guard lines follow the output pair
+    inputs = VIRTUAL_X + filler(1024, 7) + MLP_W0 + filler(1024, 8) + MLP_W1
+    if bias:
+        vmem.update({B0_LINE: filler(2048, 9), B1_LINE: filler(2048, 10)})
+        inputs += filler(1024, 11) + b0 + b1
+
+    def expect(vm, dram):
+        put(vm, X_LINE, VIRTUAL_X); put(vm, W0_LINE, MLP_W0); put(vm, W1_LINE, MLP_W1)
+        if bias: put(vm, B0_LINE, b0); put(vm, B1_LINE, b1)
+        put(vm, PACKED, packed); put(vm, ROWS, h); put(vm, OUT_LINE, y)
+        for i, byte in enumerate(y): dram[output + i] = byte
+    commands = {'dma': 9 if bias else 5, 'vload': 8 if bias else 4, 'mxu0': 3, 'vpu': 4 if bias else 2, 'vstore': 3, 'mxu1': 3}
+    source = (EXAMPLES / ('virtual_fp8_two_layer_mlp_bias.mlir' if bias else 'virtual_fp8_two_layer_mlp.mlir')).read_text()
+    return Case((), vmem, expect, commands, dram={INPUT: inputs, output - 32: b'\xa5' * 32 + b'\x5a' * 2048 + b'\xa5' * 32},
+                dma=(224 if bias else 96, 64), source=source, pipeline=pipeline, check=relayout_moves)
+
+LOWER = ('--verify-atlas-virtual-stream', '--lower-atlas-virtual-to-machine')
+MLP = {'virtual_fp8_mlp': mlp(False, LOWER), 'virtual_fp8_mlp_scheduled': mlp(False, PIPELINE), 'virtual_fp8_mlp_bias': mlp(True, LOWER)}

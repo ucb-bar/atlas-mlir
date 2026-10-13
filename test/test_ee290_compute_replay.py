@@ -1,9 +1,4 @@
-"""Compute replay checks: synthetic VCD/checker tests always run; the Verilator run is env-gated.
-
-The real run needs ATLAS_EE290_COMPUTE_MODEL (a VAtlasCore built with test/ee290-compute-replay.cpp),
-ATLAS_OOT_BIN_DIR (atlas-opt, atlas-emit) and ATLAS_OP_TIMING (merlin.op_timing.v1 facts); with ATLAS_PAIR_FACTS
-(pair facts) the cases that need them run too. It replays every case in tools/ee290_replay_cases, then mutates the captured traces, events and exports to confirm each check bites.
-"""
+"""Portable decoder/reference checks and env-gated exact Verilator replay mutations."""
 import copy
 import dataclasses
 import hashlib
@@ -18,14 +13,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_rtl_timing import PROVIDER
-
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("replay", ROOT / "tools/replay-ee290-compute.py")
 REPLAY = importlib.util.module_from_spec(spec); spec.loader.exec_module(REPLAY)
-BIND, CASES = REPLAY.BIND, REPLAY.CASES
+BIND, CASES = REPLAY, REPLAY.CASES
+PROVIDER = BIND.PROVIDER
 MODEL, BIN, FACTS, PAIRS = (os.environ.get(k) for k in ("ATLAS_EE290_COMPUTE_MODEL", "ATLAS_OOT_BIN_DIR", "ATLAS_OP_TIMING", "ATLAS_PAIR_FACTS"))
-
 
 def vcd(cycles, drop=None):
     """VCD with every selected signal under TOP.AtlasCore; the clock rises at 10 + 20n and cycles[n] holds over [20n, 20n+20)."""
@@ -43,11 +36,9 @@ def vcd(cycles, drop=None):
                 lines.append(f"b{value:b} {ids[key]}" if REPLAY.SIGNALS[key][1] > 1 else f"{value}{ids[key]}")
     return io.StringIO("\n".join(lines) + "\n")
 
-
 def btype(offset_bytes, rs1=13, rs2=14, funct3=4):
     imm = offset_bytes & 0x1fff
     return (imm >> 12) << 31 | ((imm >> 5) & 63) << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | ((imm >> 1) & 15) << 8 | ((imm >> 11) & 1) << 7 | 0x63
-
 
 def scalar_load_trace(first="lw", second="lw", same_destination=False, consecutive_stores=False):
     """Two scalar loads, the next launch sharing the old writeback edge.
@@ -91,7 +82,6 @@ def scalar_load_trace(first="lw", second="lw", same_destination=False, consecuti
         if consecutive_stores: vm[0] = vm[0][:12] + (0x11223344).to_bytes(4, "little") + vm[0][16:]
     case = CASES.Case(ops=(), vmem={0: memory}, expect=expect, commands={})
     return samples, words, case
-
 
 class PortableTest(unittest.TestCase):
     def test_scalar_store_launch_can_share_previous_command_edge(self):
@@ -293,7 +283,6 @@ class PortableTest(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises((BIND.BindingError, TypeError)):
                 BIND.finite_stream({**stream, field: value}, 100)
 
-
 @unittest.skipUnless(MODEL and BIN and FACTS, "requires a Verilated AtlasCore, compiler binaries and facts")
 class VerilatorReplayTest(unittest.TestCase):
     NAMES = ("vmul_delay", "vmul_schedule", "dma_xlu_delay", "dma_xlu_schedule", "loop_delay", "loop_schedule",
@@ -317,7 +306,7 @@ class VerilatorReplayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(); cls.work = Path(cls.temporary.name)
-        run = subprocess.run([sys.executable, str(ROOT / "tools/replay-ee290-compute.py"), "--facts", FACTS, "--bin", BIN, "--model", MODEL, "--work", str(cls.work),
+        run = subprocess.run([sys.executable, str(ROOT / "tools/replay-ee290-compute.py"), "--facts", FACTS, "--bin", BIN, "--model", MODEL, "--work", str(cls.work), "--jobs", "4",
                               *(("--pairs", PAIRS) if PAIRS else ())], capture_output=True, text=True)
         if run.returncode: raise AssertionError(run.stdout + run.stderr)
         cls.log = run.stdout
@@ -353,6 +342,12 @@ class VerilatorReplayTest(unittest.TestCase):
     def rejects(self, name, export=None, events=None):
         with self.assertRaises(BIND.BindingError): self.bind(name, export, events)
 
+    def reject_mutations(self, name, original, mutations, field):
+        for position, mutate in enumerate(mutations):
+            changed = copy.deepcopy(original); mutate(changed)
+            with self.subTest(name=name, field=field, position=position):
+                self.rejects(name, **{field: changed})
+
     def test_virtual_program_is_lowered_untimed_then_timed_from_the_facts(self):
         # Verified, scheduled, allocated and lowered untimed; facts selected on the lowering; timed, emitted and run.
         emit = Path(BIN) / "atlas-emit"
@@ -378,12 +373,13 @@ class VerilatorReplayTest(unittest.TestCase):
 
     def test_replays_pass_with_full_drain(self):
         self.assertEqual(self.log.count("PASS "), sum(len(c.consumers) for c in CASES.load().values() if PAIRS or not c.pairs))
-        for name in self.cases:
+        bound = {name: int(count) for name, count in re.findall(r"^PASS (\S+) .* accesses_bound=(\d+)\b", self.log, re.MULTILINE)}
+        for name, (_, _, events, _, _) in self.cases.items():
             with self.subTest(name=name):
-                result = self.validate(name)
-                self.assertGreaterEqual(result["full_memory_checked_bytes"], 8192)
-                self.assertGreaterEqual(result["terminal_drain_edges"], 2)
-                self.assertGreater(self.bind(name)["memory_access_elements_bound"], 0)
+                self.assertGreaterEqual(events["full_memory_checked_bytes"], 8192)
+                self.assertGreaterEqual(events["terminal_drain_edges"], 2)
+                self.assertIn(name, bound)
+                self.assertGreater(bound[name], 0)
 
     def test_loop_binds_every_iteration_to_one_drained_block(self):
         events, export = self.cases["loop_delay"][2:4]
@@ -481,25 +477,72 @@ class VerilatorReplayTest(unittest.TestCase):
         self.mutate(name, during("m0_w0"), lambda v: v.__setitem__("m0_wrow0", v["m0_wrow0"] ^ 1))
         events = self.cases[name][2]
         index = lambda command: next(n for n, c in enumerate(events["commands"]) if c["edge"] == command["edge"])
-        for position, mutate in enumerate([lambda m, p: p["writes"][0].__setitem__("edge", p["writes"][0]["edge"] + 1),
-                                           lambda m, p: m["writes"][-1].__setitem__("edge", m["writes"][-1]["edge"] - 1),
-                                           lambda m, p: m.__setitem__("release_edge", p["release_edge"])]):
-            changed = copy.deepcopy(events); mutate(changed["commands"][index(matmul)], changed["commands"][index(pop)])
-            with self.subTest(position=position): self.rejects(name, events=changed)
+        pair = (index(matmul), index(pop))
+        mutations = (lambda m, p: p["writes"][0].__setitem__("edge", p["writes"][0]["edge"] + 1),
+                     lambda m, p: m["writes"][-1].__setitem__("edge", m["writes"][-1]["edge"] - 1),
+                     lambda m, p: m.__setitem__("release_edge", p["release_edge"]))
+        self.reject_mutations(name, events,
+                              [lambda changed, mutate=mutate: mutate(*(changed["commands"][i] for i in pair)) for mutate in mutations],
+                              "events")
 
-    def test_vmul_trace_mutations_are_rejected(self):
-        for key, predicate, value in [("prid0", lambda v: v["pr0"] and v["prid0"] == 1, 0), ("prrow0", lambda v: v["pr0"], lambda x: x ^ 1),
+    def test_trace_mutations_are_rejected(self):
+        flip = lambda bit=0: lambda x: x ^ 1 << bit
+        mutations = [
+            *(("vmul_delay", predicate, key, value) for key, predicate, value in [("prid0", lambda v: v["pr0"] and v["prid0"] == 1, 0), ("prrow0", lambda v: v["pr0"], lambda x: x ^ 1),
                                       ("pdata1", lambda v: v["presp1"], lambda x: x ^ 1), ("pwid0", lambda v: v["pw0"] and v["pwid0"] == 5, 4),
-                                      ("pwdata0", lambda v: v["pw0"], lambda x: x ^ 1), ("pw0", lambda v: v["pw0"], None), ("presp1", lambda v: v["presp1"], None)]:
-            with self.subTest(key=key):
-                self.mutate("vmul_delay", lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
-
-    def test_dma_trace_mutations_are_rejected(self):
-        for key, predicate, value in [("dma_aa", lambda v: v["dma_av"] and v["dma_ar"], 0x90001000), ("dma_dd", lambda v: v["dma_dv"] and v["dma_dr"], lambda x: x ^ 1),
+                                      ("pwdata0", lambda v: v["pw0"], lambda x: x ^ 1), ("pw0", lambda v: v["pw0"], None), ("presp1", lambda v: v["presp1"], None)]),
+            *(("dma_xlu_delay", predicate, key, value) for key, predicate, value in [("dma_aa", lambda v: v["dma_av"] and v["dma_ar"], 0x90001000), ("dma_dd", lambda v: v["dma_dv"] and v["dma_dr"], lambda x: x ^ 1),
                                       ("dma_ds", lambda v: v["dma_dv"] and v["dma_dr"], 63), ("dma_vwd", lambda v: v["dma_vw"], lambda x: x ^ 1),
-                                      ("dma_vdata", lambda v: v["dma_vresp"], lambda x: x ^ 1), ("dma_busy0", lambda v: v["dma_busy0"], 0)]:
-            with self.subTest(key=key):
-                self.mutate("dma_xlu_delay", lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
+                                      ("dma_vdata", lambda v: v["dma_vresp"], lambda x: x ^ 1), ("dma_busy0", lambda v: v["dma_busy0"], 0)]),
+            *[  # shifted accumulator write row, wrong slots, missing compute beat, corrupted accumulator data, early pop data
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 3, "m0_aw_row", 4),
+            ("mxu1_tile_schedule", lambda v: v["m1_ww"] and v["m1_ww_lane"] == 7, "m1_ww_slot", 0),
+            ("mxu1_tile_schedule", lambda v: v["m1_cv"], "m1_cslot", 0),
+            ("mxu1_tile_schedule", lambda v: v["m1_as"] and v["m1_as_row"] == 9, "m1_as_acc", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_cv"], "m0_cv", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 11, "m0_awd3", lambda x: x ^ 1),
+            ("mxu0_tile_delay", lambda v: v["m0_w1"] and v["m0_wrow1"] == 2, "m0_wdata1", lambda x: x ^ 1 << 40),
+            ("mxu1_tile_schedule", lambda v: v["m1_cmd"] and v["m1_op"] == 5, "m1_slot", 0),
+            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 31, "m0_aw", 0)],
+            *[  # (case, predicate, signal, value): shifted, wrong register/slot/channel and corrupted data
+            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwrow0"] == 5, "pwdata0", flip(15)),
+            ("vpu_relu_delay", lambda v: v["presp0"], "pdata0", flip(15)),
+            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwrow0"] == 7, "pwrow0", 8),
+            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwid0"] == 3, "pwid0", 2),
+            ("vpu_binary_schedule", lambda v: v["pcmd"] and v["pop"] == 2, "pop", 1),
+            ("vpu_binary_schedule", lambda v: v["pr1"] and v["prid1"] == 3, "prid1", 1),
+            ("vpu_unary_delay", lambda v: v["pcmd"] and v["pop"] == 10, "pimm", flip()),
+            ("vpu_unary_delay", lambda v: v["pw0"] and v["pwid0"] == 6 and v["pwrow0"] == 3, "pwdata0", flip()),
+            ("vpu_reduce_schedule", lambda v: v["pw1"] and v["pwrow1"] == 4, "pwid1", flip()),
+            ("vpu_reduce_schedule", lambda v: v["pw1"] and v["pwrow1"] == 9, "pwdata1", flip(8)),
+            ("vpu_reduce_schedule", lambda v: v["pr0"] and v["prid0"] == 1 and v["prrow0"] == 31, "pr0", 0),
+            ("vpu_vli_delay", lambda v: v["pw0"] and v["pwid0"] == 2 and v["pwrow0"] == 0, "pwdata0", 0),
+            ("vpu_vli_delay", lambda v: v["pcmd"] and v["pop"] == 28, "pdst", 5),
+            ("vpu_pack_schedule", lambda v: v["pcmd"] and v["pop"] == 17, "pscale", 127),
+            ("vpu_pack_schedule", lambda v: v["pw0"] and v["pwid0"] == 4, "pwdata0", flip()),
+            ("vpu_pack_schedule", lambda v: v["scmd"], "scmd_addr", 4),
+            ("vpu_pack_schedule", lambda v: v["sresp"], "sresp_data", flip()),
+            ("vpu_pack_schedule", lambda v: v["sew"], "sew_idx", 4),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"] and v["m0_al_row"] == 3, "m0_ald5", flip()),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"] and v["m0_al_row"] == 3, "m0_al_row", 4),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"], "m0_al_acc", flip()),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_cv"] and v["m0_cacc"], "m0_psum7", flip()),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_ar"] and v["m0_ar_row"] == 6, "m0_ar_row", 7),
+            ("mxu0_acc_bf16_delay", lambda v: v["m0_cv"], "m0_cacc", 0),
+            ("mxu1_acc_fp8_schedule", lambda v: v["m1_cmd"] and v["m1_op"] == 3, "m1_scale", 127),
+            ("mxu1_acc_fp8_schedule", lambda v: v["m1_w0"] and v["m1_wrow0"] == 2, "m1_wdata0", flip()),
+            ("mxu1_acc_fp8_schedule", lambda v: v["m1_as"], "m1_as_acc", flip()),
+            ("mxu1_acc_fp8_schedule", lambda v: v["m1_r1"] and v["m1_rrow1"] == 5, "m1_rid1", flip()),
+            ("mxu1_acc_fp8_schedule", lambda v: v["m1_al"] and v["m1_al_row"] == 0, "m1_ald0", flip(3)),
+            ("dma_pair_in_flight", lambda v: v["dma_launch"] and v["dma_launch_channel"] == 1, "dma_launch_channel", 0),
+            ("dma_pair_in_flight", lambda v: v["dma_av"] and v["dma_ar"] and v["dma_ao"] == 0, "dma_ad", flip()),
+            ("dma_pair_in_flight", lambda v: v["dma_dv"] and v["dma_dr"], "dma_ds", flip()),
+            ("dma_pair_in_flight", lambda v: v["dma_busy0"] and v["dma_busy1"], "dma_busy1", 0),
+            ("dma_pair_in_flight", lambda v: v["dma_vw"] and v["dma_vwg"], "dma_vwa", flip())],
+        ]
+        for name, predicate, key, value in mutations:
+            with self.subTest(name=name, key=key):
+                self.mutate(name, lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
 
     def test_missing_idle_at_block_entry_is_rejected(self):
         events = self.cases["loop_delay"][2]
@@ -512,18 +555,14 @@ class VerilatorReplayTest(unittest.TestCase):
     def test_wrong_block_binding_is_rejected(self):
         export, events = self.cases["loop_delay"][3], self.cases["loop_delay"][2]
         store = next(i["word_index"] for i in export["instructions"] if i["mnemonic"] == "vstore")
-        for position, mutate in enumerate([lambda e: e["blocks"][1].__setitem__("successors", [2]),
+        self.reject_mutations("loop_delay", export, [lambda e: e["blocks"][1].__setitem__("successors", [2]),
                                            lambda e: e["blocks"][1].__setitem__("successor_issue_offset", e["blocks"][1]["successor_issue_offset"] + 1),
                                            lambda e: e["instructions"][store].__setitem__("block", 0),
                                            lambda e: e["instructions"][store].__setitem__("epoch_offset", e["instructions"][store]["epoch_offset"] + 1),
-                                           lambda e: e["blocks"][0].__setitem__("word_count", e["blocks"][0]["word_count"] + 1)]):
-            changed = copy.deepcopy(export); mutate(changed)
-            with self.subTest(export=position): self.rejects("loop_delay", export=changed)
-        for position, mutate in enumerate([lambda o: o["block_entries"].pop(2),
+                                           lambda e: e["blocks"][0].__setitem__("word_count", e["blocks"][0]["word_count"] + 1)], 'export')
+        self.reject_mutations("loop_delay", events, [lambda o: o["block_entries"].pop(2),
                                            lambda o: o["block_entries"][3].__setitem__("edge", o["block_entries"][2]["edge"]),
-                                           lambda o: o["instructions"].pop(next(n for n, i in enumerate(o["instructions"]) if i["word_index"] == store))]):
-            changed = copy.deepcopy(events); mutate(changed)
-            with self.subTest(events=position): self.rejects("loop_delay", events=changed)
+                                           lambda o: o["instructions"].pop(next(n for n, i in enumerate(o["instructions"]) if i["word_index"] == store))], 'events')
 
     def test_event_attributed_to_wrong_engine_is_rejected(self):
         # While both LSU paths are live, a VSTORE read moved to the XLU port and a VLOAD write moved to the VPU port.
@@ -537,12 +576,13 @@ class VerilatorReplayTest(unittest.TestCase):
         self.mutate("overlap_vls", concurrent("mw"), move("mw", "pw0", [("mw_id", "pwid0"), ("mw_row", "pwrow0"), ("mw_data", "pwdata0")]))
         events = self.cases["overlap_vls"][2]
         pair = events["concurrent_commands"][0]
-        for position, mutate in enumerate([lambda load, store: store.__setitem__("engine", "vload"),
-                                           lambda load, store: load["writes"].append(store["writes"].pop()),
-                                           lambda load, store: store["reads"][5].__setitem__("edge", store["reads"][5]["edge"] + 1),
-                                           lambda load, store: load.__setitem__("release_edge", store["release_edge"])]):
-            changed = copy.deepcopy(events); mutate(*(changed["commands"][n] for n in pair))
-            with self.subTest(position=position): self.rejects("overlap_vls", events=changed)
+        mutations = (lambda load, store: store.__setitem__("engine", "vload"),
+                     lambda load, store: load["writes"].append(store["writes"].pop()),
+                     lambda load, store: store["reads"][5].__setitem__("edge", store["reads"][5]["edge"] + 1),
+                     lambda load, store: load.__setitem__("release_edge", store["release_edge"]))
+        self.reject_mutations("overlap_vls", events,
+                              [lambda changed, mutate=mutate: mutate(*(changed["commands"][i] for i in pair)) for mutate in mutations],
+                              "events")
 
     def test_shifted_event_is_rejected(self):
         events = self.cases["loop_schedule"][2]
@@ -567,7 +607,7 @@ class VerilatorReplayTest(unittest.TestCase):
         hold = lambda e, unit, n=index: next(h for h in footprint(e, n)["holds"] if h["unit"] == unit)
         # The VMUL's holds on other engines (they may start at next_issue_age, when the VPU admits a command).
         policy = lambda e: [h for h in footprint(e)["holds"] if h["unit"] in ("VLOAD path", "VSTORE path", "XLU")]
-        for position, mutate in enumerate([lambda e: e["instructions"][index]["operands"].__setitem__("rd", 6),
+        self.reject_mutations(name, export, [lambda e: e["instructions"][index]["operands"].__setitem__("rd", 6),
                                            lambda e: footprint(e)["accesses"][0].__setitem__("first", 32),
                                            lambda e: footprint(e)["accesses"][0].__setitem__("age", 1),
                                            lambda e: footprint(e).__setitem__("done_age", 64),
@@ -582,9 +622,7 @@ class VerilatorReplayTest(unittest.TestCase):
                                            lambda e: e["instructions"][index].__setitem__("epoch_offset", e["instructions"][index]["epoch_offset"] + 1),
                                            lambda e: e["evidence"].__setitem__("op_timing_sha256", "0" * 64),
                                            lambda e: e["evidence"].__setitem__("op_pairs_sha256", "0" * 64),
-                                           lambda e: e["provider"].__setitem__("id", "other")]):
-            changed = copy.deepcopy(export); mutate(changed)
-            with self.subTest(position=position): self.rejects(name, export=changed)
+                                           lambda e: e["provider"].__setitem__("id", "other")], 'export')
         # A policy hold or lifetime may outlast the engine's own activity.
         for mutate in (lambda e: policy(e)[-1].__setitem__("to", 100), lambda e: [h.__setitem__("to", 90) for h in footprint(e, load)["holds"] if h["unit"] in ("VPU", "VSTORE path")],
                        lambda e: footprint(e).__setitem__("done_age", 80)):
@@ -623,56 +661,24 @@ class VerilatorReplayTest(unittest.TestCase):
         changed = copy.deepcopy(export); holds(changed).append({**holds(changed)[0], "unit": "VPU", "index": 0})
         self.assertGreater(self.bind(name, export=changed)["memory_access_elements_bound"], 0)
 
-    def test_mxu_events_match_the_facts(self):
-        facts = {b["name"]: b for b in json.loads(Path(FACTS).read_text())["op_timing"]}
-        for name, unit in (("mxu0_tile_delay", 0), ("mxu1_tile_schedule", 1)):
-            commands = [c for c in self.cases[name][2]["commands"] if c["engine"] == f"mxu{unit}"]
-            self.assertEqual([c["mnemonic"] for c in commands], [f"vmatpush.weight.mxu{unit}", f"vmatmul.mxu{unit}", f"vmatpop.bf16.acc.mxu{unit}"])
-            for command, operation, group, field, resource in ((commands[0], "push_weight", "weight_write", "writes", "weight"),
-                                                               (commands[1], "matmul", "acc_write", "writes", "acc"),
-                                                               (commands[1], "matmul", "compute", "compute", None),
-                                                               (commands[2], "pop_acc_bf16", "acc_store", "reads", "acc")):
-                with self.subTest(name=name, group=group):
-                    event = facts[f"mxu{unit}.{operation}"]["events"][group]
-                    ages = [e["age"] for e in command[field] if resource in (None, e.get("resource"))]
-                    self.assertEqual((min(ages), max(ages), len(ages)), (event["first_age"], event["last_age"], event["count"]))
-
-    def test_mxu_trace_mutations_are_rejected(self):
-        mutations = [  # shifted accumulator write row, wrong slots, missing compute beat, corrupted accumulator data, early pop data
-            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 3, "m0_aw_row", 4),
-            ("mxu1_tile_schedule", lambda v: v["m1_ww"] and v["m1_ww_lane"] == 7, "m1_ww_slot", 0),
-            ("mxu1_tile_schedule", lambda v: v["m1_cv"], "m1_cslot", 0),
-            ("mxu1_tile_schedule", lambda v: v["m1_as"] and v["m1_as_row"] == 9, "m1_as_acc", 0),
-            ("mxu0_tile_delay", lambda v: v["m0_cv"], "m0_cv", 0),
-            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 11, "m0_awd3", lambda x: x ^ 1),
-            ("mxu0_tile_delay", lambda v: v["m0_w1"] and v["m0_wrow1"] == 2, "m0_wdata1", lambda x: x ^ 1 << 40),
-            ("mxu1_tile_schedule", lambda v: v["m1_cmd"] and v["m1_op"] == 5, "m1_slot", 0),
-            ("mxu0_tile_delay", lambda v: v["m0_aw"] and v["m0_aw_row"] == 31, "m0_aw", 0)]
-        for name, predicate, key, value in mutations:
-            with self.subTest(name=name, key=key):
-                self.mutate(name, lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
 
     def test_mxu_binding_mutations_are_rejected(self):
         name = "mxu0_tile_delay"; export, events = self.cases[name][3], self.cases[name][2]
         index = lambda e, stem: next(i["word_index"] for i in e["instructions"] if i["mnemonic"] == stem + ".mxu0")
         footprint = lambda e, stem: e["instructions"][index(e, stem)]["footprint"]
         acc = lambda e: next(a for a in footprint(e, "vmatmul")["accesses"] if a["resource"] == "acc")
-        for position, mutate in enumerate([lambda e: acc(e).__setitem__("age", acc(e)["age"] + 1),            # accumulator write shifted
+        self.reject_mutations(name, export, [lambda e: acc(e).__setitem__("age", acc(e)["age"] + 1),            # accumulator write shifted
                                            lambda e: acc(e).__setitem__("first", acc(e)["first"] + 32),         # wrong accumulator slot
                                            lambda e: e["instructions"][index(e, "vmatmul")]["operands"].__setitem__("rs2", 1),
                                            lambda e: footprint(e, "vmatmul")["holds"].append({**footprint(e, "vmatmul")["holds"][0], "index": 1}),  # the other MXU
                                            lambda e: footprint(e, "vmatpop.bf16.acc")["holds"][0].__setitem__("to", 31),
                                            lambda e: next(a for a in footprint(e, "vmatmul")["accesses"] if a["resource"] == "weight" and a["age"]).__setitem__("age", 31),
-                                           lambda e: footprint(e, "vmatpush.weight")["accesses"][1].__setitem__("resource", "acc")]):
-            changed = copy.deepcopy(export); mutate(changed)
-            with self.subTest(export=position): self.rejects(name, export=changed)
+                                           lambda e: footprint(e, "vmatpush.weight")["accesses"][1].__setitem__("resource", "acc")], 'export')
         matmul = lambda o: next(c for c in o["commands"] if c["engine"] == "mxu0" and c["op"] == 5)
-        for position, mutate in enumerate([lambda o: matmul(o)["writes"][0].__setitem__("edge", matmul(o)["writes"][0]["edge"] + 1),
+        self.reject_mutations(name, events, [lambda o: matmul(o)["writes"][0].__setitem__("edge", matmul(o)["writes"][0]["edge"] + 1),
                                            lambda o: matmul(o)["writes"][4].__setitem__("id", 1),
                                            lambda o: matmul(o).__setitem__("release_edge", matmul(o)["release_edge"] + 1),
-                                           lambda o: matmul(o)["compute"].append({"edge": matmul(o)["release_edge"] + 1, "row": 32})]):
-            changed = copy.deepcopy(events); mutate(changed)
-            with self.subTest(events=position): self.rejects(name, events=changed)
+                                           lambda o: matmul(o)["compute"].append({"edge": matmul(o)["release_edge"] + 1, "row": 32})], 'events')
 
     def test_dma_completion_stays_dynamic(self):
         name = "dma_xlu_schedule"; export, events = self.cases[name][3], self.cases[name][2]
@@ -687,6 +693,9 @@ class VerilatorReplayTest(unittest.TestCase):
         self.rejects(name, events=changed)
 
     def test_new_op_events_match_the_facts(self):
+        for name, unit in (("mxu0_tile_delay", 0), ("mxu1_tile_schedule", 1)):
+            commands = [c for c in self.cases[name][2]["commands"] if c["engine"] == f"mxu{unit}"]
+            self.assertEqual([c["mnemonic"] for c in commands], [f"vmatpush.weight.mxu{unit}", f"vmatmul.mxu{unit}", f"vmatpop.bf16.acc.mxu{unit}"])
         facts, seen = {b["name"]: b["events"] for b in json.loads(Path(FACTS).read_text())["op_timing"]}, set()
         group = lambda e, field: (f"{'write' if field == 'writes' else 'read'}{e['port']}" if "resource" not in e else "compute" if field == "compute" else
                                   {("reads", "mreg"): f"mreg_read{e['port']}", ("writes", "mreg"): f"mreg_write{e['port']}", ("writes", "weight"): "weight_write",
@@ -704,59 +713,14 @@ class VerilatorReplayTest(unittest.TestCase):
                 seen.add(command["mnemonic"])
         self.assertLessEqual({"vrelu.bf16", "vredsum.bf16", "vli.one", "vpack.bf16.fp8", "vmatmul.acc.mxu0", "vmatpop.fp8.acc.mxu1", "vmatpush.acc.fp8.mxu1"}, seen)
 
-    def test_new_decoder_trace_mutations_are_rejected(self):
-        flip = lambda bit=0: lambda x: x ^ 1 << bit
-        mutations = [  # (case, predicate, signal, value): shifted, wrong register/slot/channel and corrupted data
-            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwrow0"] == 5, "pwdata0", flip(15)),
-            ("vpu_relu_delay", lambda v: v["presp0"], "pdata0", flip(15)),
-            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwrow0"] == 7, "pwrow0", 8),
-            ("vpu_relu_delay", lambda v: v["pw0"] and v["pwid0"] == 3, "pwid0", 2),
-            ("vpu_binary_schedule", lambda v: v["pcmd"] and v["pop"] == 2, "pop", 1),
-            ("vpu_binary_schedule", lambda v: v["pr1"] and v["prid1"] == 3, "prid1", 1),
-            ("vpu_unary_delay", lambda v: v["pcmd"] and v["pop"] == 10, "pimm", flip()),
-            ("vpu_unary_delay", lambda v: v["pw0"] and v["pwid0"] == 6 and v["pwrow0"] == 3, "pwdata0", flip()),
-            ("vpu_reduce_schedule", lambda v: v["pw1"] and v["pwrow1"] == 4, "pwid1", flip()),
-            ("vpu_reduce_schedule", lambda v: v["pw1"] and v["pwrow1"] == 9, "pwdata1", flip(8)),
-            ("vpu_reduce_schedule", lambda v: v["pr0"] and v["prid0"] == 1 and v["prrow0"] == 31, "pr0", 0),
-            ("vpu_vli_delay", lambda v: v["pw0"] and v["pwid0"] == 2 and v["pwrow0"] == 0, "pwdata0", 0),
-            ("vpu_vli_delay", lambda v: v["pcmd"] and v["pop"] == 28, "pdst", 5),
-            ("vpu_pack_schedule", lambda v: v["pcmd"] and v["pop"] == 17, "pscale", 127),
-            ("vpu_pack_schedule", lambda v: v["pw0"] and v["pwid0"] == 4, "pwdata0", flip()),
-            ("vpu_pack_schedule", lambda v: v["scmd"], "scmd_addr", 4),
-            ("vpu_pack_schedule", lambda v: v["sresp"], "sresp_data", flip()),
-            ("vpu_pack_schedule", lambda v: v["sew"], "sew_idx", 4),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"] and v["m0_al_row"] == 3, "m0_ald5", flip()),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"] and v["m0_al_row"] == 3, "m0_al_row", 4),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_al"], "m0_al_acc", flip()),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_cv"] and v["m0_cacc"], "m0_psum7", flip()),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_ar"] and v["m0_ar_row"] == 6, "m0_ar_row", 7),
-            ("mxu0_acc_bf16_delay", lambda v: v["m0_cv"], "m0_cacc", 0),
-            ("mxu1_acc_fp8_schedule", lambda v: v["m1_cmd"] and v["m1_op"] == 3, "m1_scale", 127),
-            ("mxu1_acc_fp8_schedule", lambda v: v["m1_w0"] and v["m1_wrow0"] == 2, "m1_wdata0", flip()),
-            ("mxu1_acc_fp8_schedule", lambda v: v["m1_as"], "m1_as_acc", flip()),
-            ("mxu1_acc_fp8_schedule", lambda v: v["m1_r1"] and v["m1_rrow1"] == 5, "m1_rid1", flip()),
-            ("mxu1_acc_fp8_schedule", lambda v: v["m1_al"] and v["m1_al_row"] == 0, "m1_ald0", flip(3)),
-            ("dma_pair_in_flight", lambda v: v["dma_launch"] and v["dma_launch_channel"] == 1, "dma_launch_channel", 0),
-            ("dma_pair_in_flight", lambda v: v["dma_av"] and v["dma_ar"] and v["dma_ao"] == 0, "dma_ad", flip()),
-            ("dma_pair_in_flight", lambda v: v["dma_dv"] and v["dma_dr"], "dma_ds", flip()),
-            ("dma_pair_in_flight", lambda v: v["dma_busy0"] and v["dma_busy1"], "dma_busy1", 0),
-            ("dma_pair_in_flight", lambda v: v["dma_vw"] and v["dma_vwg"], "dma_vwa", flip())]
-        for name, predicate, key, value in mutations:
-            with self.subTest(name=name, key=key):
-                self.mutate(name, lambda v, _: predicate(v), lambda v: v.__setitem__(key, value(v[key]) if callable(value) else value))
-
     def test_new_decoder_binding_mutations_are_rejected(self):
         export, events = self.cases["vpu_relu_delay"][3], self.cases["vpu_relu_delay"][2]
         relu = next(i for i in export["instructions"] if i["mnemonic"] == "vrelu.bf16")["word_index"]
         write = lambda e: next(a for a in e["instructions"][relu]["footprint"]["accesses"] if a["write"])
-        for position, mutate in enumerate([lambda e: write(e).__setitem__("age", write(e)["age"] + 1), lambda e: write(e).__setitem__("first", write(e)["first"] + 32)]):
-            changed = copy.deepcopy(export); mutate(changed)
-            with self.subTest(export=position): self.rejects("vpu_relu_delay", export=changed)
+        self.reject_mutations("vpu_relu_delay", export, [lambda e: write(e).__setitem__("age", write(e)["age"] + 1), lambda e: write(e).__setitem__("first", write(e)["first"] + 32)], 'export')
         command = lambda o: next(c for c in o["commands"] if c["engine"] == "vpu")
-        for position, mutate in enumerate([lambda o: command(o)["writes"][9].__setitem__("port", 1), lambda o: command(o)["reads"][3].__setitem__("id", 2),
-                                           lambda o: command(o)["responses"][4].__setitem__("edge", command(o)["responses"][4]["edge"] + 1)]):
-            changed = copy.deepcopy(events); mutate(changed)
-            with self.subTest(events=position): self.rejects("vpu_relu_delay", events=changed)
+        self.reject_mutations("vpu_relu_delay", events, [lambda o: command(o)["writes"][9].__setitem__("port", 1), lambda o: command(o)["reads"][3].__setitem__("id", 2),
+                                           lambda o: command(o)["responses"][4].__setitem__("edge", command(o)["responses"][4]["edge"] + 1)], 'events')
         # A SELD binds to its exported VMEM read and scale write ages.
         for key in ("command_age", "write_age"):
             changed = copy.deepcopy(self.cases["vpu_pack_schedule"][2]); changed["scale_loads"][0][key] += 1
@@ -767,13 +731,9 @@ class VerilatorReplayTest(unittest.TestCase):
         events = self.cases["dma_pair_in_flight"][2]
         dmas = lambda o: [c for c in o["commands"] if c["engine"] == "dma"]
         self.assertTrue(any(events["commands"][i]["engine"] == events["commands"][j]["engine"] == "dma" for i, j in events["concurrent_commands"]))
-        for position, mutate in enumerate([lambda o: dmas(o)[1].__setitem__("release_edge", dmas(o)[0]["release_edge"]),
+        self.reject_mutations("dma_pair_in_flight", events, [lambda o: dmas(o)[1].__setitem__("release_edge", dmas(o)[0]["release_edge"]),
                                            lambda o: [c.__setitem__("channel", 1 - c["channel"]) for c in dmas(o)],
-                                           lambda o: dmas(o)[0]["memory"][-1].__setitem__("edge", dmas(o)[0]["release_edge"])]):
-            changed = copy.deepcopy(events); mutate(changed)
-            with self.subTest(dma=position): self.rejects("dma_pair_in_flight", events=changed)
-
-
+                                           lambda o: dmas(o)[0]["memory"][-1].__setitem__("edge", dmas(o)[0]["release_edge"])], 'events')
 
 if __name__ == "__main__":
     unittest.main()

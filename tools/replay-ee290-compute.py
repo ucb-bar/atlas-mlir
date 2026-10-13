@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Verilator replay of AtlasCore programs against `merlin.op_timing.v1` facts.
-
-Each case in tools/ee290_replay_cases is scheduled by atlas-opt (facts selection, dma=wait, and for cases that
-need them the `--pairs` pair facts) or taken as a final stream, emitted by atlas-emit and run on the Verilated AtlasCore. The VCD is decoded per engine,
-following the PC through branches, and bound to `atlas-emit --rtl-timing-json`.
-"""
+"""Schedule AtlasCore cases, replay them on Verilator and bind decoded events to RTL timing exports."""
 import argparse
 import collections
 import concurrent.futures
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -19,16 +13,331 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('check_ee290_compute_export', HERE / 'check-ee290-compute-export.py')
-BIND = importlib.util.module_from_spec(spec); spec.loader.exec_module(BIND)
 sys.path.insert(0, str(HERE))
 import ee290_replay_cases as CASES  # noqa: E402
 from ee290_replay_cases import mxu as MXU, vpu_ops as VPU  # noqa: E402
 
+PROVIDER = 'rtl-op-timing-v1'
+SCHEMA = 'atlas.resolved_rtl_timing.v1'
+BRANCHES = {0: 'beq', 1: 'bne', 4: 'blt', 5: 'bge', 6: 'bltu', 7: 'bgeu'}
+# Observed engine -> (selected mnemonic, the engine's own hold unit).
+ENGINES = {'vload': ('vload', 'VLOAD path'), 'vstore': ('vstore', 'VSTORE path'), 'xlu': ('vtrpose.xlu', 'XLU'), 'vpu': (None, 'VPU'),
+           'mxu0': (None, 'MXU in-flight matmuls'), 'mxu1': (None, 'MXU in-flight matmuls')}  # an MXU owns its own unit index
+ENGINE_UNITS = {'VLOAD path', 'VSTORE path', 'XLU', 'VPU'}
+MXU_STEMS = ('vmatpush.weight', 'vmatpush.acc.fp8', 'vmatpush.acc.bf16', 'vmatpop.fp8.acc', 'vmatpop.bf16.acc', 'vmatmul', 'vmatmul.acc')
+VPU_MNEMONICS = {0: 'vadd.bf16', 2: 'vsub.bf16', 3: 'vmul.bf16', 4: 'vminimum.bf16', 6: 'vmaximum.bf16', 1: 'vredsum.bf16', 5: 'vredmin.bf16',
+                 7: 'vredmax.bf16', 0x21: 'vredsum.row.bf16', 0x24: 'vredmin.row.bf16', 0x26: 'vredmax.row.bf16', 0x40: 'vmov',
+                 0x41: 'vrecip.bf16', 0x42: 'vexp.bf16', 0x43: 'vexp2.bf16', 0x44: 'vpack.bf16.fp8', 0x45: 'vunpack.fp8.bf16', 0x46: 'vsquare.bf16',
+                 0x47: 'vcube.bf16', 0x48: 'vrelu.bf16', 0x49: 'vsin.bf16', 0x4a: 'vcos.bf16', 0x4b: 'vtanh.bf16', 0x4c: 'vlog2.bf16', 0x4d: 'vsqrt.bf16'}
+VLI_MNEMONICS = ('vli.all', 'vli.row', 'vli.col', 'vli.one')
+# VPU layout -> per-port register bases of (reads/responses, writes) with the allowed pair offsets.
+VPU_BASES = {'binary': (('lhs', 'rhs'), ('dst',), (0, 1)), 'unary': (('src',), ('dst',), (0, 1)), 'col': (('src',), ('dst',), (0, 1)),
+             'row': (('src', 'src1'), ('dst', 'dst1'), (0,)), 'pack': (('src',), ('dst',), (0, 1)), 'unpack': (('src',), ('dst',), (0, 1)),
+             'vli_pair': ((), ('dst',), (0, 1)), 'vli_single': ((), ('dst',), (0,))}
+
+class BindingError(ValueError):
+    pass
+
+def require(condition, message):
+    if not condition: raise BindingError(message)
+
+def integer(value, label):
+    require(type(value) is int and value >= 0, 'invalid ' + label)
+    return value
+
+def finite_stream(stream, issue):
+    require(stream.get('anywhere') is False and stream.get('at_completion') is False, 'concrete issue-relative access stream required')
+    first, count, age, step = (integer(stream[k], k) for k in ('first', 'count', 'age', 'step'))
+    require(0 < count <= 256 and step > 0 and type(stream['write']) is bool, 'unsupported finite access count/step')
+    return [(stream['resource'], stream['write'], first + n, issue + age + n * step) for n in range(count)]
+
+def branch_target(index, word):
+    """Word index reached by a branch or JAL; the PC counts words and the encoded displacement is halved."""
+    if word & 127 == 0x63:
+        immediate = (word >> 31) << 12 | ((word >> 7) & 1) << 11 | ((word >> 25) & 63) << 5 | ((word >> 8) & 15) << 1; bits = 13
+    else:
+        immediate = (word >> 31) << 20 | ((word >> 12) & 255) << 12 | ((word >> 20) & 1) << 11 | ((word >> 21) & 1023) << 1; bits = 21
+    return index + ((immediate - (1 << bits) if immediate >> (bits - 1) else immediate) >> 1)
+
+def is_command(mnemonic):
+    return mnemonic in {m for m, _ in ENGINES.values()} or mnemonic in VPU_MNEMONICS.values() or mnemonic in VLI_MNEMONICS or \
+        mnemonic.startswith(('dma.load.ch', 'dma.store.ch')) or '.mxu' in mnemonic
+
+def decoded_operands(word):
+    opcode = word & 127; rd = (word >> 7) & 31; rs1 = (word >> 15) & 31; rs2 = (word >> 20) & 31
+    result = {'rd': 0, 'rs1': 0, 'rs2': 0, 'immediate': 0, 'release': False}
+    immediate = word >> 20; signed = immediate - 4096 if immediate & 2048 else immediate
+    if opcode == 0x13 and (word >> 12) & 7 == 0:
+        mnemonic = 'addi'; result.update(rd=rd, rs1=rs1, immediate=signed)
+    elif opcode == 0x37:
+        mnemonic = 'lui'; result.update(rd=rd, immediate=word >> 12)
+    elif opcode == 0x67 and (word >> 12) & 7 == 1:
+        mnemonic = 'delay'; result.update(immediate=immediate)
+    elif opcode == 0x63 and (word >> 12) & 7 in BRANCHES:
+        # A branch's target is exported only through its block's successors.
+        mnemonic = BRANCHES[(word >> 12) & 7]; result.update(rs1=rs1, rs2=rs2)
+    elif opcode == 0x6f and rd == 0:
+        mnemonic = 'jal'; result.update(immediate=2 * (branch_target(0, word)))
+    elif opcode == 0x07:
+        mnemonic = 'vstore' if word & (1 << 13) else 'vload'
+        result.update(rd=(word >> 7) & 63, rs1=rs1, immediate=signed)
+    elif opcode == 0x6b:
+        mnemonic = 'vtrpose.xlu'; result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63)
+    elif opcode == 0x57 and word >> 25 in VPU_MNEMONICS:
+        mnemonic = VPU_MNEMONICS[word >> 25]; result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
+    elif opcode == 0x5f and (word >> 13) & 7 < 4:
+        mnemonic = VLI_MNEMONICS[(word >> 13) & 7]; result.update(rd=(word >> 7) & 63, immediate=word >> 16)
+    elif opcode == 0x03 and (word >> 12) & 7 in (2, 6, 7):
+        mnemonic = {2: 'lw', 6: 'seld', 7: 'seli'}[(word >> 12) & 7]; result.update(rd=rd, rs1=rs1, immediate=signed)
+    elif opcode == 0x23 and (word >> 12) & 7 == 2:
+        stored = (word >> 25) << 5 | (word >> 7) & 31
+        mnemonic = 'sw'; result.update(rs1=rs1, rs2=rs2, immediate=stored - 4096 if stored & 2048 else stored)
+    elif opcode == 0x77 and word >> 26 < len(MXU_STEMS):
+        mnemonic = f'{MXU_STEMS[word >> 26]}.mxu{(word >> 25) & 1}'
+        result.update(rd=(word >> 7) & 63, rs1=(word >> 13) & 63, rs2=(word >> 19) & 63)
+    elif opcode == 0x7b and word >> 25 in (0, 1):
+        mnemonic = 'dma.' + ('store' if word >> 25 else 'load') + '.ch' + str((word >> 12) & 7)
+        result.update(rd=rd, rs1=rs1, rs2=rs2)
+    elif opcode == 0x7f and word >> 25 in (0, 1):
+        mnemonic = 'dma.' + ('wait' if word >> 25 else 'config') + '.ch' + str((word >> 12) & 7)
+        if not word >> 25: result.update(rs1=rs1)
+    elif opcode == 0x73 and (word >> 12) & 7 == 1:
+        mnemonic = 'csrrw'; result.update(rd=rd, rs1=rs1, immediate=immediate, release=immediate == 0xC10)
+    elif word == 0x73:
+        mnemonic = 'ecall'
+    else: raise BindingError('unsupported word in finite export binding')
+    return mnemonic, result
+
+def check_header(export, facts_sha256, pairs_sha256):
+    require(export.get('schema') == SCHEMA and export.get('provider', {}).get('id') == PROVIDER, 'export schema/provider mismatch')
+    require(export['provider'].get('dma_policy') == 'wait', 'DMA wait policy required')
+    require(export.get('evidence', {}).get('op_timing_sha256') == facts_sha256, 'export was not resolved from the selected facts')
+    require(export['evidence'].get('op_pairs_sha256') == pairs_sha256, 'export was not resolved from the selected pair facts')
+    for item in export['instructions']:
+        require((item['mnemonic'], item['operands']) == decoded_operands(item['word_u32']), 'exported instruction metadata differs from selected word')
+
+def bind_command(item, command, waits):
+    """Bind one observed command to its exported footprint, independently of other commands."""
+    mnemonic, operands, footprint, issue, kind = item['mnemonic'], item['operands'], item['footprint'], command['edge'], command['engine']
+    require(command['word_u32'] == item['word_u32'], 'command differs from its exported instruction word')
+    if kind == 'dma':
+        channel = integer(command['channel'], 'DMA channel'); direction = command['op']
+        require(mnemonic == f'dma.{direction}.ch{channel}', 'resolved DMA operation/channel mismatch')
+        require(footprint.get('dma_async') is True and footprint.get('completion') == 'matching_dma_wait' and all(footprint.get(k) is None for k in ('done_age', 'dma_cycles', 'read_release', 'write_release')), 'DMA completion was assigned a fixed latency')
+        vmem = [a for a in footprint['accesses'] if a['resource'] == 'vmem']; dram = [a for a in footprint['accesses'] if a['resource'] == 'dram']
+        require(len(vmem) == len(dram) == 1, 'explicit DMA VMEM and conservative DRAM effects required')
+        stream = vmem[0]
+        require(stream.get('at_completion') is True and stream.get('anywhere') is False and stream.get('age') is None and stream.get('step') is None and stream.get('lifetime') == 'launch_through_matching_wait', 'DMA VMEM effect lacks dynamic completion lifetime')
+        # The DRAM span is the captured 32-bit offset in 32-byte units; its completion stays dynamic.
+        require(dram[0].get('at_completion') is True and dram[0].get('anywhere') is False and dram[0].get('age') is None and dram[0].get('step') is None and
+                (dram[0]['first'], dram[0]['count']) == ((command['dram_address'] & 0xffffffff) // 32, command['size'] // 32), 'DMA DRAM span differs from the captured transfer or lost its dynamic completion')
+        require(stream['write'] == (direction == 'load') and dram[0]['write'] == (direction == 'store'), 'DMA effect direction mismatch')
+        require(stream['first'] == command['vmem_word'] // 8 and stream['count'] == command['size'] // 32, 'resolved DMA captured VMEM range mismatch')
+        memory = command['memory']
+        require([e['line'] for e in memory] == list(range(stream['first'], stream['first'] + stream['count'])), 'observed DMA VMEM lines differ from exported range')
+        match = [e for e in waits if e['channel'] == channel and e['edge'] == command['release_edge']]
+        require(len(match) == 1 and match[0]['word_index'] > command['word_index'] and match[0]['edge'] > issue, 'no matching WAIT after selected launch')
+        require(all(issue <= e['edge'] < match[0]['edge'] for e in memory + command['requests'] + command['responses']), 'DMA effects do not drain before actual matching WAIT')
+        return len(memory), {'word_index': command['word_index'], 'channel': channel, 'launch_edge': issue, 'matching_wait_edge': match[0]['edge'], 'observed_elapsed_edges': match[0]['edge'] - issue}
+    require(kind in ENGINES and mnemonic == (ENGINES[kind][0] or command.get('mnemonic')), 'resolved operation differs from the observed engine')
+    mreg = lambda field, write: [('mreg', write, 32 * e['id'] + e['row'], e['edge']) for e in command[field] if e.get('resource', 'mreg') == 'mreg']
+    vmem_field = None; mxu = kind.startswith('mxu')
+    if mxu:
+        unit = int(kind[3:])
+        push, matmul = (command.get('acc'), command.get('mreg'), 0), (command.get('acc'), command.get('mreg'), command.get('slot'))
+        expected = {0: (command.get('slot'), command.get('mreg'), 0), 1: push, 2: push, 3: (command.get('mreg'), command.get('scale_reg'), command.get('acc')),
+                    4: (command.get('mreg'), 0, command.get('acc')), 5: matmul, 6: matmul}.get(command.get('op'))
+        require(expected is not None and (operands['rd'], operands['rs1'], operands['rs2']) == expected, 'resolved MXU operands mismatch')
+        slots = lambda field, write: [(e['resource'], write, (2 * unit + e['id']) * 32 + e['row'], e['edge']) for e in command[field] if e['resource'] in ('acc', 'weight')]
+        points = mreg('reads', False) + mreg('writes', True) + slots('reads', False) + slots('writes', True)
+        # A matmul's slot-wide weight ownership (step 0) must cover its observed compute beats.
+        owned = [a for a in footprint['accesses'] if a['resource'] == 'weight' and a['step'] == 0]
+        beats = [e['edge'] - issue for e in command['compute']]
+        require(len(owned) == (2 if beats else 0) and all(not a['write'] and a['count'] == 32 and a['first'] == (2 * unit + command['slot']) * 32 for a in owned) and
+                (not beats or min(a['age'] for a in owned) <= min(beats) and max(a['age'] for a in owned) >= max(beats)), 'weight-slot ownership does not cover the observed compute beats')
+    elif kind in ('vload', 'vstore'):
+        require(operands['rd'] == command['mreg'], 'resolved VLS register mismatch')
+        vmem_field = 'reads' if kind == 'vload' else 'writes'
+        points = [('vmem', kind == 'vstore', e['id'], e['edge']) for e in command[vmem_field]] + mreg('writes' if kind == 'vload' else 'reads', kind == 'vload')
+    elif kind == 'xlu':
+        require(operands['rd'] == command['dst'] and operands['rs1'] == command['src'], 'resolved XLU operands mismatch')
+        points = mreg('reads', False) + mreg('writes', True)
+    else:
+        require((operands['rd'], operands['rs1'], operands['rs2']) == (command['dst'], command['lhs'], command['rhs']) and
+                (operands['immediate'] == command['imm'] or not mnemonic.startswith('vli')), 'resolved VPU operands mismatch')
+        sources, dests, offsets = VPU_BASES[command['layout']]
+        registers = {**command, 'src1': command['src'] + 1, 'dst1': command['dst'] + 1}
+        for field in ('reads', 'responses', 'writes'):
+            bases = [registers[b] for b in (dests if field == 'writes' else sources)]
+            for e in command[field]:
+                require(type(e.get('port')) is int and 0 <= e['port'] < len(bases) and e['id'] - bases[e['port']] in offsets, 'VPU event lacks its explicit register port')
+        points = mreg('reads', False) + mreg('writes', True)
+    exported = []
+    for stream in footprint['accesses']:
+        if stream['resource'] in ('mreg', 'vmem') or stream['resource'] in ('acc', 'weight') and stream['step']: exported += finite_stream(stream, issue)
+        else: require(stream['resource'] in ('xreg', 'ereg') or mxu and stream['resource'] == 'weight', 'unbound access resource ' + str(stream['resource']))
+    require(sorted(exported) == sorted(points), 'observed access resource/address/age differs from provider footprint')
+    # Each port's responses answer its reads in order, one edge later (a column reduction reads its rows twice).
+    sources = [e for e in command['reads'] if e.get('resource', 'mreg') in ('mreg', 'vmem')]
+    require(len(sources) == len(command['responses']), 'incomplete source stream')
+    for port in {e.get('port', 0) for e in sources + command['responses']}:
+        reads, responses = ([e for e in field if e.get('port', 0) == port] for field in (sources, command['responses']))
+        require(len(reads) == len(responses) and all((r['id'], r['row'], r['edge'] + 1, r['data_hex']) == (s['id'], s['row'], s['edge'], s['data_hex'])
+                                                     for r, s in zip(reads, responses)), 'read response differs from observed one-cycle source stream')
+    age = lambda event: event['edge'] - issue
+    release = integer(command['release_edge'] - issue, 'observed release age')
+    activity = max(map(age, command['reads'] + command['responses'] + command['writes'] + command.get('compute', [])))
+    own = [h for h in footprint['holds'] if h['unit'] == ENGINES[kind][1] and h['index'] == (int(kind[3]) if mxu else 0)]
+    # A VPU admits its next command at next_issue_age, before it releases: its VPU-unit holds may end there,
+    # and policy holds may start there, provided they last through the activity.
+    require(len(own) == 1 and all(h['from'] == 0 and (release == integer(h['to'], 'hold end') + 1 or kind == 'vpu' and h['to'] < release) for h in own),
+            'observed engine release differs from its own-unit hold end + 1')
+    issued = own[0]['to'] + 1 if kind == 'vpu' else 0
+    vmem_ages = [age(e) for e in command[vmem_field]] if vmem_field else []
+    for hold in footprint['holds']:
+        if any(hold is h for h in own): continue
+        if hold['unit'] in ENGINE_UNITS:
+            head = hold['unit'] == 'VPU' and hold['from'] == 0 and hold['to'] + 1 == issued
+            require(head or hold['from'] in (0, issued) and integer(hold['to'], 'hold end') >= release - 1, 'policy ' + hold['unit'] + ' hold ends before the engine activity')
+        elif hold['unit'] == 'VMEM bank': require(vmem_ages and hold['from'] <= min(vmem_ages) and hold['to'] >= max(vmem_ages), 'VMEM bank hold does not cover the observed bank accesses')
+        else: raise BindingError('unbound hold unit ' + str(hold['unit']))
+    sources = [e for e in command['reads'] + command['responses'] if e.get('resource', 'mreg') == 'mreg'] if kind != 'vload' else []
+    dests = [e for e in command['writes'] if e.get('resource', 'mreg') == 'mreg'] if kind != 'vstore' else []
+    require(sorted(footprint['mreg_reads']) == sorted({e['id'] for e in sources}) and sorted(footprint['mreg_writes']) == sorted({e['id'] for e in dests}), 'exported MREG lifetime registers differ from observed streams')
+    require(footprint['read_release'] >= max(map(age, sources), default=0) and footprint['write_release'] >= max(map(age, dests), default=0) and integer(footprint['done_age'], 'done age') >= max(activity, release - 1), 'exported lifetime ends before an observed access')
+    return len(points), None
+
+def bind_scale_load(item, load):
+    """A SELD's exported VMEM read and scale-register write must land at its observed LSU command and write ages."""
+    require(item['mnemonic'] == 'seld' and item['word_u32'] == load['word_u32'] and item['operands']['rd'] == load['rd'], 'scale load differs from its exported SELD')
+    effects = sorted((a['resource'], a['write'], a['first'], a['count'], a['age']) for a in item['footprint']['accesses'] if a['resource'] != 'xreg')
+    require(effects == sorted([('vmem', False, load['address'] >> 5, 1, load['command_age']), ('ereg', True, load['rd'], 1, load['write_age'])]),
+            'observed SELD VMEM read or scale write differs from its exported footprint')
+    return 2
+
+def bind_scalar_memory(item, access):
+    """An LW's VMEM read and register write, or an SW's VMEM write, must land at its observed LSU command and write ages."""
+    require(item['mnemonic'] == access['kind'] and item['word_u32'] == access['word_u32'], 'scalar memory access differs from its exported instruction')
+    effects = sorted((a['resource'], a['write'], a['first'], a['count'], a['age']) for a in item['footprint']['accesses'] if a['resource'] != 'xreg' or a['write'])
+    expected = [('vmem', access['kind'] == 'sw', access['address'] >> 5, 1, access['command_age'])]
+    if access['kind'] == 'lw' and access['rd']: expected.append(('xreg', True, access['rd'], 1, access['write_age']))
+    require(effects == sorted(expected), 'observed scalar VMEM access or register write differs from its exported footprint')
+    return len(expected)
+
+def context_items(export, block, registers):
+    """The block's instructions with the footprints of each entry-context group the observed entry registers hold."""
+    first = block['first_word']; items = export['instructions'][first:first + block['word_count']]
+    if 'entry_contexts' not in block:
+        require(all(item['footprint'] is not None for item in items), 'instruction lacks its exported footprint')
+        return [items]
+    groups = [group for group in block['entry_contexts'] if any(all(registers.get(r) == v for r, v in entry.items()) for entry in group['entries'])]
+    require(groups and all(len(group['footprints']) == len(items) for group in groups), 'observed block entry matches no exported entry context')
+    return [[{**item, 'footprint': footprint} for item, footprint in zip(items, group['footprints'])] for group in groups]
+
+def bind_blocks(export, words):
+    blocks, instructions = export['blocks'], export['instructions']
+    starts = {block['first_word']: block['index'] for block in blocks}; first = 0
+    for number, block in enumerate(blocks):
+        require(block['index'] == number and block['first_word'] == first and integer(block['word_count'], 'block size') > 0, 'exported blocks do not partition the program')
+        end = first + block['word_count']
+        require(end <= len(words) and all(instructions[i]['block'] == number for i in range(first, end)), 'instruction block differs from the block partition')
+        if block['exit'] == 'halt':
+            require(words[end - 1] == 0x73 and block['successors'] == [] and block['successor_issue_offset'] is None, 'halting block shape mismatch')
+        else:
+            integer(block['successor_issue_offset'], 'successor issue offset')
+            if block['exit'] == 'branch_with_delay_slot':
+                redirect = words[end - 2]
+                require(end - first >= 2 and redirect & 127 in (0x63, 0x6f), 'block lacks its exported branch')
+                successors = [branch_target(end - 2, redirect)] + ([end] if redirect & 127 == 0x63 else [])
+            else:
+                require(block['exit'] == 'fall_through', 'unknown block exit')
+                successors = [end]
+            require(all(s in starts for s in successors) and sorted(block['successors']) == sorted({starts[s] for s in successors}), 'exported block successors differ from the words')
+        first = end
+    require(first == len(words), 'exported blocks do not partition the program')
+    return blocks, starts
+
+def bind_export(export, observed, facts_sha256, words, pairs_sha256=None):
+    """Check export and observed events agree; returns a small summary."""
+    check_header(export, facts_sha256, pairs_sha256)
+    require(export.get('program', {}).get('words') == words and export['program'].get('word_count') == len(words), 'export differs from emitted words')
+    instructions = export['instructions']
+    require(len(instructions) == len(words) and all(item['word_index'] == i and item['word_u32'] == words[i] for i, item in enumerate(instructions)), 'incomplete resolved instruction export')
+    blocks, starts = bind_blocks(export, words)
+    halts = [item for item in observed['endpoints'] if item['kind'] == 'halt']
+    require(len(halts) == 1 and instructions[halts[0]['word_index']].get('event_kind') == 'terminal_acceptance', 'one terminal acceptance required')
+    waits = {(e['word_index'], e['edge']): e for e in observed['endpoints'] if e['kind'] == 'wait'}
+    require(len(waits) == sum(e['kind'] == 'wait' for e in observed['endpoints']), 'duplicate observed WAIT')
+    instances, fired, previous, consumed = [], [], None, 0
+    for event in observed['instructions'] + halts:
+        word, edge = event['word_index'], integer(event['edge'], 'observed issue edge')
+        require(0 <= word < len(words) and event['word_u32'] == words[word], 'resolved/observed instruction word mismatch')
+        item = instructions[word]; block = blocks[item['block']]
+        if previous is None: require(word == 0, 'execution does not enter at word 0')
+        else:
+            require(edge > previous[1], 'actual instruction edges do not advance')
+            last = blocks[instructions[previous[0]]['block']]
+            if previous[0] == last['first_word'] + last['word_count'] - 1:
+                require(word in starts and starts[word] in last['successors'], 'dynamic successor is not an exported block successor')
+                require(edge - instances[-1]['entry_edge'] >= last['successor_issue_offset'], 'successor issued before the exported drained exit')
+            else: require(word == previous[0] + 1, 'execution leaves its block before the block end')
+        if word == block['first_word']: instances.append({'block': block['index'], 'entry_edge': edge, 'epoch_origins': [edge]})
+        instance = instances[-1]; epoch = len(instance['epoch_origins']) - 1
+        current, offset = integer(item['issue_epoch'], 'issue epoch'), integer(item['epoch_offset'], 'epoch offset')
+        require(edge - instance['entry_edge'] >= integer(item['minimum_issue_cycle'], 'minimum issue cycle'), 'observed issue precedes exported block-relative lower bound')
+        if item.get('event_kind') == 'matching_wait_acceptance':
+            require((word, edge) in waits and current == epoch + 1 and offset == 0, 'matching WAIT does not start the next epoch')
+            instance['epoch_origins'].append(edge); consumed += 1
+        else: require((word, edge) not in waits and current == epoch, 'epoch changes without matching WAIT acceptance')
+        require(edge == instance['epoch_origins'][current] + offset, 'observed intra-epoch issue differs from exported block offset')
+        fired.append((word, edge)); previous = (word, edge)
+    require(consumed == len(waits), 'observed WAIT outside an exported matching wait')
+    require(item['mnemonic'] == 'ecall' and block['exit'] == 'halt', 'terminal acceptance convention mismatch')
+    entries = observed['block_entries']
+    require([(e['word_index'], e['edge']) for e in entries] == [(blocks[i['block']]['first_word'], i['entry_edge']) for i in instances], 'observed block entries differ from exported block instances')
+    require(not any(any(e['engine_state'].values()) for e in entries), 'engines not idle at a block entry')
+    keys = [(c['word_index'], c['edge']) for c in observed['commands']]
+    require(len(set(keys)) == len(keys) and set(keys) == {f for f in fired if is_command(instructions[f[0]]['mnemonic'])}, 'observed commands differ from executed compute instructions')
+    # Each dynamic instance binds to the footprints of every entry-context group its observed entry registers hold.
+    for instance, entry in zip(instances, entries):
+        instance['groups'] = context_items(export, blocks[instance['block']], entry.get('registers', {}))
+    owner = {}
+    for word, edge in fired:
+        owner[word, edge] = max((i for i in instances if i['entry_edge'] <= edge), key=lambda i: i['entry_edge'])
+    def bound(word, edge, bind):
+        instance = owner[word, edge]; offset = word - blocks[instance['block']]['first_word']
+        results = [bind(group[offset]) for group in instance['groups']]
+        return results[0]
+    checked, intervals = 0, []
+    for command in observed['commands']:
+        elements, interval = bound(command['word_index'], command['edge'], lambda item: bind_command(item, command, list(waits.values())))
+        checked += elements; intervals += [interval] if interval else []
+    loads = observed.get('scale_loads', [])
+    require(sorted((l['word_index'], l['edge']) for l in loads) == sorted(f for f in fired if instructions[f[0]]['mnemonic'] == 'seld'), 'observed scale loads differ from executed SELDs')
+    checked += sum(bound(l['word_index'], l['edge'], lambda item: bind_scale_load(item, l)) for l in loads)
+    accesses = observed.get('scalar_memory', [])
+    require(sorted((a['word_index'], a['edge']) for a in accesses) == sorted(f for f in fired if instructions[f[0]]['mnemonic'] in ('lw', 'sw')), 'observed scalar memory accesses differ from executed LW/SW')
+    checked += sum(bound(a['word_index'], a['edge'], lambda item: bind_scalar_memory(item, a)) for a in accesses)
+    for instance in instances: instance['entry_context_groups'] = len(instance.pop('groups'))
+    return {'instruction_words_bound': len(fired), 'block_instances': instances, 'memory_access_elements_bound': checked, 'dynamic_dma_intervals': intervals}
+
+def bind_footprints(export, observed, facts_sha256, pairs_sha256=None):
+    """Bind each observed command to the same command of a straight-line reference export, without issue offsets."""
+    check_header(export, facts_sha256, pairs_sha256)
+    items = [item for item in export['instructions'] if is_command(item['mnemonic'])]
+    require(len(export['blocks']) == 1 and len(items) == len(observed['commands']), 'reference export differs from observed commands')
+    waits = [e for e in observed['endpoints'] if e['kind'] == 'wait']
+    checked, intervals = 0, []
+    for item, command in zip(items, observed['commands']):
+        elements, interval = bind_command(item, command, waits)
+        checked += elements; intervals += [interval] if interval else []
+    seld, loads = [i for i in export['instructions'] if i['mnemonic'] == 'seld'], observed.get('scale_loads', [])
+    require(len(seld) == len(loads), 'reference export differs from observed scale loads')
+    checked += sum(bind_scale_load(item, load) for item, load in zip(seld, loads))
+    return {'instruction_words_bound': 0, 'block_instances': [], 'memory_access_elements_bound': checked, 'dynamic_dma_intervals': intervals}
 
 class ReplayError(Exception):
     pass
-
 
 # key: (path below TOP.AtlasCore, width)
 SIGNALS = {
@@ -114,7 +423,6 @@ for u in range(2):
     CONTROLS += [f'm{u}_{k}' for k in ('cmd', 'ww', 'cv', 'aw', 'ar', 'al', 'as', 'p0v', 'p1v', 'w0v', 'w1v', 'r0', 'r1', 'w0', 'w1', 'actr0', 'actr1', 'actw0', 'actw1')]
     CONTROLS += [f'm{u}_inf{i}' for i in range(MXU_INFLIGHT[u])]
 
-
 def vcd_edges(stream, scope='TOP.AtlasCore'):
     """Yield {'edge', 'values'} sampled just before each rising clock; unknown or malformed VCD raises."""
     wanted = {}
@@ -160,8 +468,6 @@ def vcd_edges(stream, scope='TOP.AtlasCore'):
     sample = flush()
     if sample: yield sample
 
-
-
 def bf16_power_product(lhs,rhs):
     result=bytearray()
     for offset in range(0,32,2):
@@ -174,7 +480,6 @@ def bf16_power_product(lhs,rhs):
         result+=(((a^b)&0x8000)|(e<<7)).to_bytes(2,'little')
     return bytes(result)
 
-
 # Engine activity: a command releases at the first edge after its issue where its engine shows none.
 BUSY = {'vload': lambda v: v('load_busy'), 'vstore': lambda v: v('store_busy'), 'xlu': lambda v: v('xar') | v('xaw'),
         'vpu': lambda v: int(bool(v('vpu_busy') or any(v(p + str(n)) for p in ('par', 'paw') for n in range(4))))}
@@ -184,8 +489,8 @@ for u in range(2):
 STAGES = ('reads', 'responses', 'writes')
 EVENTS = {'vload': (32, 32, 32), 'vstore': (32, 32, 32), 'xlu': (32, 32, 32)}
 # Replayed MXU operations: MxuOp code -> (mnemonic stem, (reads, responses, writes, compute beats)); a matmul.acc also reads its accumulator.
-MXU_OPS = {0: ('vmatpush.weight', (32, 32, 32, 0)), 1: ('vmatpush.acc.fp8', (32, 32, 32, 0)), 2: ('vmatpush.acc.bf16', (64, 64, 32, 0)),
-           3: ('vmatpop.fp8.acc', (32, 0, 32, 0)), 4: ('vmatpop.bf16.acc', (32, 0, 64, 0)), 5: ('vmatmul', (32, 32, 32, 32)), 6: ('vmatmul.acc', (64, 32, 32, 32))}
+MXU_OPS = dict(enumerate(zip(MXU_STEMS, ((32, 32, 32, 0), (32, 32, 32, 0), (64, 64, 32, 0),
+                                             (32, 0, 32, 0), (32, 0, 64, 0), (32, 32, 32, 32), (64, 32, 32, 32)))))
 # MXU op -> {(stage, port): events}: ports as `element` numbers them (2: matmul.acc accumulator read, 3: accumulator load).
 MXU_PORTS = {0: {('reads', 1): 32, ('responses', 1): 32, ('writes', 0): 32}, 1: {('reads', 1): 32, ('responses', 1): 32, ('writes', 3): 32},
              2: {('reads', 0): 32, ('reads', 1): 32, ('responses', 0): 32, ('responses', 1): 32, ('writes', 3): 32},
@@ -194,18 +499,18 @@ MXU_PORTS = {0: {('reads', 1): 32, ('responses', 1): 32, ('writes', 0): 32}, 1: 
              6: {('reads', 0): 32, ('reads', 2): 32, ('responses', 0): 32, ('writes', 0): 32}}
 UNCHECKED = object()  # a write whose value the validator cannot predict (matmul results; checked through pop and final memory)
 # VPU funct7 -> (ScalarISA VPU_* code on vpu.io_cmd_bits_op, selected mnemonic, layout); VLI is keyed by its mode.
-VPU_OPS = {0: (1, 'vadd.bf16', 'binary'), 2: (2, 'vsub.bf16', 'binary'), 3: (3, 'vmul.bf16', 'binary'), 4: (25, 'vminimum.bf16', 'binary'),
-           6: (24, 'vmaximum.bf16', 'binary'), 0x40: (26, 'vmov', 'unary'), 0x41: (4, 'vrecip.bf16', 'unary'), 0x42: (10, 'vexp.bf16', 'unary'),
-           0x43: (11, 'vexp2.bf16', 'unary'), 0x46: (12, 'vsquare.bf16', 'unary'), 0x47: (13, 'vcube.bf16', 'unary'), 0x48: (19, 'vrelu.bf16', 'unary'),
-           0x49: (6, 'vsin.bf16', 'unary'), 0x4a: (7, 'vcos.bf16', 'unary'), 0x4b: (8, 'vtanh.bf16', 'unary'), 0x4c: (9, 'vlog2.bf16', 'unary'),
-           0x4d: (5, 'vsqrt.bf16', 'unary'), 0x21: (14, 'vredsum.row.bf16', 'row'), 0x24: (21, 'vredmin.row.bf16', 'row'),
-           0x26: (20, 'vredmax.row.bf16', 'row'), 1: (15, 'vredsum.bf16', 'col'), 5: (23, 'vredmin.bf16', 'col'), 7: (22, 'vredmax.bf16', 'col'),
-           0x44: (17, 'vpack.bf16.fp8', 'pack'), 0x45: (18, 'vunpack.fp8.bf16', 'unpack')}
-VLI_MODES = {0: (30, 'vli.all', 'vli_pair'), 1: (29, 'vli.row', 'vli_pair'), 2: (28, 'vli.col', 'vli_single'), 3: (27, 'vli.one', 'vli_single')}
+VPU_OPS = {funct7: (code, VPU_MNEMONICS[funct7], layout) for layout, codes in {
+    'binary': {0: 1, 2: 2, 3: 3, 4: 25, 6: 24},
+    'unary': {0x40: 26, 0x41: 4, 0x42: 10, 0x43: 11, 0x46: 12, 0x47: 13, 0x48: 19,
+              0x49: 6, 0x4a: 7, 0x4b: 8, 0x4c: 9, 0x4d: 5},
+    'row': {0x21: 14, 0x24: 21, 0x26: 20}, 'col': {1: 15, 5: 23, 7: 22},
+    'pack': {0x44: 17}, 'unpack': {0x45: 18},
+}.items() for funct7, code in codes.items()}
+VLI_MODES = {mode: (code, VLI_MNEMONICS[mode], 'vli_pair' if mode < 2 else 'vli_single')
+             for mode, code in enumerate((30, 29, 28, 27))}
 # Layout -> per-port (reads, writes) counts as VectorFSM sequences them; responses equal reads.
 VPU_PORTS = {'binary': ((64, 64), (64, 0)), 'unary': ((64, 0), (64, 0)), 'row': ((32, 32), (32, 32)), 'col': ((128, 0), (64, 0)),
              'pack': ((64, 0), (32, 0)), 'unpack': ((32, 0), (64, 0)), 'vli_pair': ((0, 0), (64, 0)), 'vli_single': ((0, 0), (32, 0))}
-
 
 def event_counts(command):
     return command['counts'] if 'counts' in command else EVENTS[command['engine']] + (0,)
@@ -234,7 +539,6 @@ for u in range(2):
                         m + 'al': (kind, 'writes', 3, (m + 'al_acc', m + 'al_row'), (m + 'ald', 32, 2))})
     RESOURCE.update({m + 'ww': 'weight', m + 'aw': 'acc', m + 'as': 'acc', m + 'ar': 'acc', m + 'al': 'acc'})
 
-
 def element(command, stage, port, n):
     """(resource, id, row) of the n-th event of a stage on a port; VMEM ids are lines, acc/weight ids slots."""
     engine = command['engine']
@@ -257,7 +561,6 @@ def element(command, stage, port, n):
     if layout == 'row': return 'mreg', command['src'] + port, n
     if layout == 'unpack': return 'mreg', command['src'], n
     return 'mreg', command['src'] + (n // 32) % 2, n % 32
-
 
 def produced(command, n, port=0):
     """Data the n-th write must carry, from the command's own observed responses; None if not yet available."""
@@ -287,15 +590,13 @@ def produced(command, n, port=0):
         return VPU.vli(name[4:], command['imm'], n)
     except ValueError as error: raise ReplayError(f'{name} data outside its exact reference: {error}')
 
-
 def leaders(words):
     """Static block starts, as the compiler forms them: entry, branch targets, after delay slots and ECALL."""
     result = {0}
     for index, word in enumerate(words):
-        if word & 127 in (0x63, 0x6f): result |= {BIND.branch_target(index, word), index + 2}
+        if word & 127 in (0x63, 0x6f): result |= {branch_target(index, word), index + 2}
         elif word == 0x73: result.add(index + 1)
     return result & set(range(len(words)))
-
 
 def memories(case):
     vm, dram = {}, {}
@@ -314,7 +615,6 @@ def memories(case):
         raise ReplayError('case expectation escapes its initialized memory')
     return vm, dram, expected_vm, expected_dram
 
-
 def image(case):
     """Testbench input: initial and expected bytes of every initialized region, and the DMA beat counts."""
     _, _, vm, dram = memories(case)
@@ -324,7 +624,6 @@ def image(case):
     for base, data in case.dram.items():
         lines += [f'dram {base} {data.hex()}', f'expect_dram {base} {bytes(dram[base + i] for i in range(len(data))).hex()}']
     return '\n'.join(lines) + '\n'
-
 
 def quiescent_state(v,d,busy,engine):
     return {'vls_load_busy':v('load_busy'),'vls_store_busy':v('store_busy'),
@@ -458,7 +757,7 @@ def validate_compute_edges(samples,words,case):
                         a,b=regs[rs1],regs[rs2]
                         if funct3 in (4,5): a,b=a-(a>>31<<32),b-(b>>31<<32)
                         taken={0:a==b,1:a!=b,4:a<b,5:a>=b,6:a<b,7:a>=b}[funct3]
-                    slot=True;redirect=BIND.branch_target(pc,word) if taken else None
+                    slot=True;redirect=branch_target(pc,word) if taken else None
                 elif opcode==0x03 and funct3 in (2,6):
                     # LW/SELD: scalar LSU reads the aligned VMEM word; it becomes register rd, or its low byte scale register rd.
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
@@ -713,7 +1012,8 @@ def validate_compute_edges(samples,words,case):
             ended=True;record(endpoints,kind='halt',word_index=v('pc'),word_u32=v('word'),engine_state=quiescent_state(v,d,busy,engine))
         elif began and not ended and v('halt'): reject('unexpected halt in compute envelope')
     if not ended or live or pending or outstanding or read_queue or scalar_load or scalar_store or publication is not None: reject('incomplete compute/terminal drain trace')
-    if last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')<2: reject('trace lacks bounded post-halt drain samples')
+    halt_edge=next(e['edge'] for e in endpoints if e['kind']=='halt')
+    if last_edge-halt_edge<2: reject('trace lacks bounded post-halt drain samples')
     if collections.Counter(c['engine'] for c in commands)!=collections.Counter({k:n for k,n in case.commands.items() if n}): reject('wrong dynamic compute command coverage')
     if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
     for command in commands:
@@ -726,15 +1026,12 @@ def validate_compute_edges(samples,words,case):
     for access in scalar_memory: access.update({f'{k}_age':access[f'{k}_edge']-access['edge'] for k in ('command','response','write') if access.get(f'{k}_edge') is not None})
     concurrent=[[i,j] for i,a in enumerate(commands) for j,b in enumerate(commands[i+1:],i+1) if b['edge']<a['release_edge'] and a['edge']<b['release_edge']]
     return {'instructions':instructions,'block_entries':entries,'commands':commands,'concurrent_commands':concurrent,'endpoints':endpoints,'busy_transitions':busy_events,
-            'scale_loads':scale_loads,'scalar_memory':scalar_memory,'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-next(e['edge'] for e in endpoints if e['kind']=='halt')}
-
-
+            'scale_loads':scale_loads,'scalar_memory':scalar_memory,'sampled_edges':last_edge,'full_memory_checked_bytes':32*len(vm),'terminal_drain_edges':last_edge-halt_edge}
 
 def sh(argv, timeout, env=None):
     result = subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=timeout, env=env)
     if result.returncode: raise ReplayError(f'{Path(str(argv[0])).name} failed: {(result.stderr or result.stdout)[-2000:]}')
     return result.stdout
-
 
 def build_model(args, work):
     objdir = work / 'obj'; cxx = shutil.which('g++')
@@ -744,7 +1041,6 @@ def build_model(args, work):
             *map(str, sorted([*args.rtl.glob('*.sv'), *args.rtl.glob('*.v')])), str(HERE.parent / 'test/ee290-compute-replay.cpp')]
     sh(argv, args.timeout, {**os.environ, **({'VERILATOR_ROOT': str(args.verilator_root)} if args.verilator_root else {})})
     return objdir / 'VAtlasCore'
-
 
 def serialized(ops):
     """Delay-free reference of a final stream; each DMA wait moves up to follow its own launch, so one transfer is pending at a time."""
@@ -756,7 +1052,6 @@ def serialized(ops):
             wait = next((i for i, o in enumerate(ops) if o[0] == 'dma_wait' and channel(o) == channel(op)), None)
             if wait is not None: result.append(ops.pop(wait))
     return result
-
 
 def replay(args, case, label, consumer, select, digest, pairs_digest, model):
     """Schedule or take one case stream, run it on the model, decode and bind it; returns (result, PASS line)."""
@@ -782,16 +1077,15 @@ def replay(args, case, label, consumer, select, digest, pairs_digest, model):
         (out / 'reference.mlir').write_text(case.mlir(serialized(case.ops)))
         sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-timing', '-o', out / 'reference-final.mlir'], args.timeout)
         export = json.loads(sh([emit, '--rtl-timing-json', out / 'reference-final.mlir'], args.timeout))
-        binding = BIND.bind_footprints(export, events, digest, pairs_digest)
+        binding = bind_footprints(export, events, digest, pairs_digest)
     else:
         export = json.loads(sh([emit, '--rtl-timing-json', out / 'final.mlir'], args.timeout))
-        binding = BIND.bind_export(export, events, digest, words, pairs_digest)
+        binding = bind_export(export, events, digest, words, pairs_digest)
     (out / 'timing.json').write_text(json.dumps(export, indent=1))
     if case.check and not case.check(events): raise ReplayError(label + ': case check failed')
     return ({'case': label, 'cycles': int(match[5]), **binding},
             f'PASS {label} words={len(words)} blocks_entered={len(events["block_entries"])} accesses_bound={binding["memory_access_elements_bound"]} '
             f'concurrent={len(events["concurrent_commands"])} dma_intervals={len(binding["dynamic_dma_intervals"])}')
-
 
 def run(args):
     work = args.work.resolve(); work.mkdir(parents=True, exist_ok=True)
@@ -814,10 +1108,9 @@ def run(args):
         for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, *((paired, digest, pairs_digest) if case.pairs else (select, digest, None)), model)
                                                 for case, label, consumer in runs]):
             try: result, line = future.result()
-            except (ReplayError, BIND.BindingError) as error: raise type(error)(f'{label}: {error}') from error
+            except (ReplayError, BindingError) as error: raise type(error)(f'{label}: {error}') from error
             results.append(result); print(line, flush=True)
     return results
-
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
@@ -839,4 +1132,4 @@ if __name__ == '__main__':
     if a.cases != 'all' and not set(a.cases.split(',')) <= set(CASES.load()): p.error('unknown case')
     a.bin = a.bin.resolve()
     try: run(a)
-    except (ReplayError, BIND.BindingError, subprocess.SubprocessError, OSError, KeyError) as error: sys.exit(f'FAIL: {error}')
+    except (ReplayError, BindingError, subprocess.SubprocessError, OSError, KeyError) as error: sys.exit(f'FAIL: {error}')
