@@ -350,48 +350,41 @@ struct MachineTiming {
 int registersOf(bool fp8) { return fp8 ? 1 : 2; }
 constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 
+FailureOr<MachineTiming> timingOf(const std::string &name, Operation *at,
+                                  const timing::TimingProvider &provider) {
+  auto result = timing::machineTimingOf(provider, name, at);
+  if (failed(result))
+    return failure();
+  return MachineTiming{result->latency, result->interval};
+}
+
+FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at,
+                      const timing::TimingProvider &provider) {
+  auto t = timingOf((name + ".mxu" + Twine(unit)).str(), at, provider);
+  if (failed(t))
+    return failure();
+  return Cost{unit ? Unit::Mxu1 : Unit::Mxu0, t->interval, t->latency};
+}
+
+// Elementwise kinds share one footprint, so a kind the timing model does not
+// name costs as a move.
+FailureOr<Cost> onVpu(StringRef kind, Operation *at,
+                      const timing::TimingProvider &provider) {
+  std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
+  auto t = timingOf(timing::findOp(name) ? name : "vmov", at, provider);
+  if (failed(t))
+    return failure();
+  return Cost{Unit::Vpu, t->interval, t->latency};
+}
+
 // Work that holds the frontend from start to finish.
 Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
 
-// Provider costs use canonical operands; DMA keeps the model transfer estimate.
-class CostModel {
-public:
-  explicit CostModel(const timing::TimingProvider &provider) : provider(provider) {}
-
-  FailureOr<MachineTiming> timingOf(const std::string &name, Operation *at) const {
-    auto result = timing::machineTimingOf(provider, name, at);
-    if (failed(result))
-      return failure();
-    return MachineTiming{result->latency, result->interval};
-  }
-
-  FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at) const {
-    FailureOr<MachineTiming> t = timingOf((name + ".mxu" + Twine(unit)).str(), at);
-    if (failed(t))
-      return failure();
-    return Cost{unit ? Unit::Mxu1 : Unit::Mxu0, t->interval, t->latency};
-  }
-
-  // Elementwise kinds share one footprint, so a kind the timing model does
-  // not name costs as a move.
-  FailureOr<Cost> onVpu(StringRef kind, Operation *at) const {
-    std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
-    FailureOr<MachineTiming> t = timingOf(timing::findOp(name) ? name : "vmov", at);
-    if (failed(t))
-      return failure();
-    return Cost{Unit::Vpu, t->interval, t->latency};
-  }
-
-  FailureOr<Cost> costOf(Operation *op) const;
-
-private:
-  const timing::TimingProvider &provider;
-};
-
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
-FailureOr<Cost> CostModel::costOf(Operation *op) const {
-  FailureOr<MachineTiming> vload = timingOf("vload", op), vstore = timingOf("vstore", op);
+FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
+  FailureOr<MachineTiming> vload = timingOf("vload", op, provider);
+  FailureOr<MachineTiming> vstore = timingOf("vstore", op, provider);
   if (failed(vload) || failed(vstore))
     return failure();
   const int transfer = timing::dmaTransferCycles(kRegisterBytes);
@@ -424,7 +417,7 @@ FailureOr<Cost> CostModel::costOf(Operation *op) const {
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());
-    FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op);
+    FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op, provider);
     if (failed(push))
       return failure();
     push->unit = unit ? Unit::Weights1 : Unit::Weights0;
@@ -433,39 +426,45 @@ FailureOr<Cost> CostModel::costOf(Operation *op) const {
   if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op))
     return onMxu(isa<VirtualMXULoadAccFP8Op>(op) ? "vmatpush.acc.fp8"
                                                  : "vmatpush.acc.bf16",
-                 unitOf(op->getResult(1).getType()), op);
+                 unitOf(op->getResult(1).getType()), op, provider);
   if (auto reset = dyn_cast<VirtualMXUResetOp>(op))
-    return onMxu("vmatmul", unitOf(reset.getAcc().getType()), op);
+    return onMxu("vmatmul", unitOf(reset.getAcc().getType()), op, provider);
   if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op))
-    return onMxu("vmatmul.acc", unitOf(acc.getAcc().getType()), op);
+    return onMxu("vmatmul.acc", unitOf(acc.getAcc().getType()), op, provider);
   if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op))
     return onMxu(isa<VirtualMXUReadoutBF16Op>(op) ? "vmatpop.bf16.acc"
                                                   : "vmatpop.fp8.acc",
-                 unitOf(op->getOperand(1).getType()), op);
+                 unitOf(op->getOperand(1).getType()), op, provider);
   if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
-    FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op), multiply = onMxu("vmatmul", unit, op),
-                    pop = onMxu("vmatpop.bf16.acc", unit, op);
+    FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op, provider);
+    FailureOr<Cost> multiply = onMxu("vmatmul", unit, op, provider);
+    FailureOr<Cost> pop = onMxu("vmatpop.bf16.acc", unit, op, provider);
     if (failed(push) || failed(multiply) || failed(pop))
       return failure();
-    return blocking(unit ? Unit::Mxu1 : Unit::Mxu0, push->latency + multiply->latency + pop->latency);
+    return blocking(unit ? Unit::Mxu1 : Unit::Mxu0,
+                    push->latency + multiply->latency + pop->latency);
   }
   if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op))
-    return onVpu(unary.getKind(), op);
+    return onVpu(unary.getKind(), op, provider);
   if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op))
-    return onVpu(binary.getKind(), op);
+    return onVpu(binary.getKind(), op, provider);
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.
     int words = registersOf(true) * kRegisterBytes / 4;
-    FailureOr<MachineTiming> pack = timingOf("vpack.bf16.fp8", op), lw = timingOf("lw", op), sw = timingOf("sw", op);
+    FailureOr<MachineTiming> pack = timingOf("vpack.bf16.fp8", op, provider);
+    FailureOr<MachineTiming> lw = timingOf("lw", op, provider);
+    FailureOr<MachineTiming> sw = timingOf("sw", op, provider);
     if (failed(pack) || failed(lw) || failed(sw))
       return failure();
-    return blocking(Unit::Lsu, pack->latency + vstore->latency + words * (lw->latency + sw->latency) + vload->latency);
+    return blocking(Unit::Lsu, pack->latency + vstore->latency +
+                                   words * (lw->latency + sw->latency) +
+                                   vload->latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
-  FailureOr<MachineTiming> scalar = timingOf("addi", op);
+  FailureOr<MachineTiming> scalar = timingOf("addi", op, provider);
   if (failed(scalar))
     return failure();
   return Cost{Unit::Scalar, 1, scalar->latency};
@@ -742,14 +741,14 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
                             std::optional<unsigned> randomSeed,
-                            const CostModel &model) {
+                            const timing::TimingProvider &provider) {
   FailureOr<BlockGraph> graph = buildGraph(block);
   if (failed(graph))
     return failure();
   const BlockGraph &g = *graph;
   std::vector<Cost> costs;
   for (Operation *op : g.nodes) {
-    FailureOr<Cost> cost = model.costOf(op);
+    FailureOr<Cost> cost = costOf(op, provider);
     if (failed(cost))
       return failure();
     costs.push_back(*cost);
@@ -826,10 +825,10 @@ struct ScheduleAtlasVirtualPass
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
-    FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
+    FailureOr<timing::TimingProvider> selected =
+        selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
-    CostModel model(*selected);
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
@@ -856,7 +855,7 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, model)))
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, *selected)))
           return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here

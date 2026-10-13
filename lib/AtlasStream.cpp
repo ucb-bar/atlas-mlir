@@ -429,11 +429,10 @@ static bool sameFootprint(const Footprint &a, const Footprint &b) {
 std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
     const AtlasStream &s, size_t block, const TimingProvider &provider) {
   if (!provider.concreteEntryContexts || s.contexts.empty() || s.contexts[block].empty())
-    return {{{s.entry[block]}}};
+    return {{{s.entry[block]}, {}}};
   // Footprints are pure in the instruction and its register reads, so contexts
   // with equal footprint sequences time identically.
   std::vector<AtlasContextGroup> groups;
-  std::vector<std::vector<Footprint>> resolved;
   for (const RegValues &entry : s.contexts[block]) {
     std::vector<Footprint> footprints;
     RegValues regs = entry;
@@ -441,18 +440,29 @@ std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
       footprints.push_back(provider.footprint(s.instrs[i], regs));
       applyScalar(s.instrs[i], regs);
     }
-    auto same = [&](const std::vector<Footprint> &other) {
-      return std::equal(footprints.begin(), footprints.end(), other.begin(), other.end(), sameFootprint);
+    auto same = [&](const AtlasContextGroup &group) {
+      return std::equal(footprints.begin(), footprints.end(), group.footprints.begin(),
+                        group.footprints.end(), sameFootprint);
     };
-    auto it = llvm::find_if(resolved, same);
-    if (it == resolved.end()) {
-      resolved.push_back(std::move(footprints));
-      groups.push_back({{entry}});
-    } else {
-      groups[it - resolved.begin()].entries.push_back(entry);
-    }
+    auto it = llvm::find_if(groups, same);
+    if (it == groups.end())
+      groups.push_back({{entry}, std::move(footprints)});
+    else
+      it->entries.push_back(entry);
   }
   return groups;
+}
+
+void mlir::atlas::guardAtlasBlockDrain(DelayInsertion &delay,
+                                       const TimingProvider &provider,
+                                       int idle, const OpInfo *next) {
+  if (!next || idle <= 0)
+    return;
+  bool halt = next->opClass == OpClass::Halt;
+  if (halt || (isControlFlow(*next) && !provider.redirectWaitsForDelay))
+    delay = {idleDelays(idle - 1), true, delay.reason,
+             halt ? "a halt does not wait for a delay"
+                  : "a redirect does not wait for a delay"};
 }
 
 InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,

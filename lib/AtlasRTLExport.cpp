@@ -157,7 +157,7 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
     // its entry states (known registers) and its instructions' footprints.
     if (!trace.contexts[b].empty()) {
       Array contexts;
-      for (const AtlasTimedTrace::Context &context : trace.contexts[b]) {
+      for (const AtlasContextGroup &context : trace.contexts[b]) {
         Array entries, footprints;
         for (const RegValues &regs : context.entries) {
           Object known;

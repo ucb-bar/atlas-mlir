@@ -16,7 +16,6 @@ struct Issued {
 };
 
 constexpr int kMaxSearch = 100000;
-constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 constexpr const char *kContextReason = "another entry context of this block issues it later";
 
@@ -222,22 +221,39 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
              s.fallsThrough(block)
                  ? "this block finishes before the next one starts"
                  : "work finishes before the stream ends"};
-    if (s.fallsThrough(block)) {
-      const OpInfo &next = *instrs[end].op;
-      bool halt = next.opClass == OpClass::Halt;
-      if (halt || (isControlFlow(next) && !p.redirectWaitsForDelay))
-        after = {idleDelays(idle - 1), true, after.reason, halt ? kHaltGuard : kRedirectGuard};
-    }
+    guardAtlasBlockDrain(after, p, idle,
+                         s.fallsThrough(block) ? instrs[end].op : nullptr);
   }
   return success();
 }
 
 constexpr int kMaxContextRounds = 64;
 
-LogicalResult planBlockDelays(
+} // namespace
+
+LogicalResult mlir::atlas::atlasBlockDelays(
     const AtlasStream &s, size_t block, const TimingProvider &p,
     std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail,
-    ArrayRef<size_t> order = {}) {
+    std::optional<ArrayRef<size_t>> requestedOrder) {
+  size_t begin = s.starts[block], end = s.blockEnd(block);
+  ArrayRef<size_t> order = requestedOrder.value_or(ArrayRef<size_t>{});
+  if (requestedOrder) {
+    if (order.size() != end - begin)
+      return s.ops[begin]->emitOpError("delay planning order must contain every block instruction");
+    std::vector<bool> seen(end - begin, false);
+    for (size_t i : order) {
+      if (i < begin || i >= end || seen[i - begin])
+        return s.ops[begin]->emitOpError("delay planning order must be a permutation of this block");
+      seen[i - begin] = true;
+    }
+    if ((s.endsInHalt(block) && order.back() != end - 1) ||
+        (s.endsInBranch(block) &&
+         (order[order.size() - 2] != end - 2 || order.back() != end - 1)))
+      return s.ops[begin]->emitOpError("delay planning order must preserve the terminator and delay slot");
+    for (size_t i = begin; i < end; ++i)
+      before[i] = {};
+    after = {};
+  }
   std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, p);
   std::vector<int> cycles;
   int drained = 0;
@@ -246,7 +262,6 @@ LogicalResult planBlockDelays(
   // Raise each op's issue cycle to the latest any context needs until one
   // round leaves every context's placement unchanged, so the delays hold
   // under all of them.
-  size_t begin = s.starts[block], end = s.blockEnd(block);
   std::vector<int> floor(end - begin, 0);
   int drainFloor = 0;
   std::vector<std::pair<int, std::string>> own(end - begin, {0, ""});
@@ -287,37 +302,6 @@ LogicalResult planBlockDelays(
          << groups.size() << " entry contexts";
 }
 
-} // namespace
-
-LogicalResult mlir::atlas::atlasInOrderBlockDelays(
-    const AtlasStream &s, size_t block, const TimingProvider &p,
-    std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail) {
-  return planBlockDelays(s, block, p, before, after, tail);
-}
-
-LogicalResult mlir::atlas::atlasOrderedBlockDelays(
-    const AtlasStream &s, size_t block, const TimingProvider &p,
-    ArrayRef<size_t> order, std::vector<DelayInsertion> &before,
-    DelayInsertion &after, int &tail) {
-  size_t begin = s.starts[block], end = s.blockEnd(block);
-  if (order.size() != end - begin)
-    return s.ops[begin]->emitOpError("delay planning order must contain every block instruction");
-  std::vector<bool> seen(end - begin, false);
-  for (size_t i : order) {
-    if (i < begin || i >= end || seen[i - begin])
-      return s.ops[begin]->emitOpError("delay planning order must be a permutation of this block");
-    seen[i - begin] = true;
-  }
-  if ((s.endsInHalt(block) && order.back() != end - 1) ||
-      (s.endsInBranch(block) &&
-       (order[order.size() - 2] != end - 2 || order.back() != end - 1)))
-    return s.ops[begin]->emitOpError("delay planning order must preserve the terminator and delay slot");
-  for (size_t i = begin; i < end; ++i)
-    before[i] = {};
-  after = {};
-  return planBlockDelays(s, block, p, before, after, tail, order);
-}
-
 namespace {
 
 LogicalResult insertDelays(ModuleOp module, StringRef requested) {
@@ -331,7 +315,7 @@ LogicalResult insertDelays(ModuleOp module, StringRef requested) {
   std::vector<DelayInsertion> after(stream->starts.size());
   int tail;
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(atlasInOrderBlockDelays(*stream, b, *provider, before, after[b], tail)))
+    if (failed(atlasBlockDelays(*stream, b, *provider, before, after[b], tail)))
       return failure();
   std::vector<size_t> order(stream->ops.size());
   std::iota(order.begin(), order.end(), 0);

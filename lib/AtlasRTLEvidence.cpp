@@ -49,6 +49,33 @@ const std::map<std::string, const char *> &vpuBlocks() {
   return table;
 }
 
+struct RegisterEvent {
+  const char *key;
+  int Instr::*operand;
+  bool write;
+  int registers = 1, passes = 1, offset = 0;
+  bool twoInput = false;
+};
+
+// A null key captures a scale register at issue, without a facts event.
+const std::map<OpClass, std::vector<RegisterEvent>> &vpuEvents() {
+  static const std::map<OpClass, std::vector<RegisterEvent>> table = {
+      {OpClass::VpuElementwise, {{"read0", &Instr::rs1, false, 2},
+          {"read1", &Instr::rs2, false, 2, 1, 0, true}, {"write0", &Instr::rd, true, 2}}},
+      {OpClass::VpuPack, {{"read0", &Instr::rs2, false, 2},
+          {nullptr, &Instr::rs1, false}, {"write0", &Instr::rd, true}}},
+      {OpClass::VpuUnpack, {{"read0", &Instr::rs2, false},
+          {nullptr, &Instr::rs1, false}, {"write0", &Instr::rd, true, 2}}},
+      {OpClass::VpuRowReduce, {{"read0", &Instr::rs1, false},
+          {"read1", &Instr::rs1, false, 1, 1, 1}, {"write0", &Instr::rd, true},
+          {"write1", &Instr::rd, true, 1, 1, 1}}},
+      {OpClass::VpuColReduce, {{"read0", &Instr::rs1, false, 2, 2},
+          {"write0", &Instr::rd, true, 2}}},
+      {OpClass::VpuLoadImmPair, {{"write0", &Instr::rd, true, 2}}},
+      {OpClass::VpuLoadImmSingle, {{"write0", &Instr::rd, true}}}};
+  return table;
+}
+
 // Fills a compiler-structured footprint with one facts block's numbers.
 struct Fill {
   Footprint &f;
@@ -95,13 +122,14 @@ struct Fill {
   int last(const char *key) { const OpTimingGroup *g = group(key); return g ? g->lastAge : 0; }
   // A source is retained through its synchronous read response.
   int readEnd(const char *key) { return last(key) + latency; }
-  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1) {
+  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1,
+           bool mergeRelease = true) {
     access(key, Res::MReg, write, reg * 32, registers * 32, passes);
     auto &list = write ? f.mregWrites : f.mregReads;
     for (int i = 0; i < registers; ++i) list.push_back(reg + i);
     int end = write ? last(key) : readEnd(key);
     int &release = write ? f.writeRelease : f.readRelease;
-    release = std::max(release, end);
+    release = mergeRelease ? std::max(release, end) : end;
     return end;
   }
   // Inclusive hold end: the RTL's first free age is one past it.
@@ -179,40 +207,31 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     if (reg & 1) fill.fail("BF16 operands must name even register pairs");
   };
   if (in.imm != 0) fill.fail("unsupported MXU encoding");
-  switch (op.opClass) {
-  case OpClass::WeightPush:
-  case OpClass::AccPushFp8:
-  case OpClass::AccPushBf16: {
-    const bool weight = op.opClass == OpClass::WeightPush;
+  const bool weight = op.opClass == OpClass::WeightPush;
+  const bool paired = op.opClass == OpClass::AccPushBf16 || op.opClass == OpClass::PopBf16;
+  if (weight || op.opClass == OpClass::AccPushFp8 || op.opClass == OpClass::AccPushBf16) {
     if (in.rs2 != 0) fill.fail("unsupported MXU encoding");
-    if (op.opClass == OpClass::AccPushBf16) {
+    if (paired) {
       pair(in.rs1);
       mregRows("mreg_read0", in.rs1, false);
-      mregRows("mreg_read1", in.rs1 + 1, false);
-    } else {
-      mregRows("mreg_read1", in.rs1, false);
     }
+    mregRows("mreg_read1", in.rs1 + (paired ? 1 : 0), false);
     slotRows(weight ? "weight_write" : "acc_load", weight ? Res::Weight : Res::Acc, in.rd, true);
     track("data_busy", fill.last("data_busy"));
-    break;
-  }
-  case OpClass::PopFp8:
-  case OpClass::PopBf16:
+  } else if (op.opClass == OpClass::PopFp8 || op.opClass == OpClass::PopBf16) {
     slotRows("acc_store", Res::Acc, in.rs2, false);
-    if (op.opClass == OpClass::PopBf16) {
+    if (paired) {
       if (in.rs1 != 0) fill.fail("unsupported MXU encoding");
       pair(in.rd);
-      mregRows("mreg_write0", in.rd, true);
-      mregRows("mreg_write1", in.rd + 1, true);
     } else {
       // The scale register is read into the command at issue.
       if (in.rs1 < 0 || in.rs1 > 31) fill.fail("scale register out of range");
       f.accesses.push_back({Res::EReg, false, in.rs1, 1, 0, 1});
-      mregRows("mreg_write0", in.rd, true);
     }
+    mregRows("mreg_write0", in.rd, true);
+    if (paired) mregRows("mreg_write1", in.rd + 1, true);
     track("data_busy", fill.last("data_busy"));
-    break;
-  default: { // matmul, overwrite or accumulate
+  } else { // matmul, overwrite or accumulate
     mregRows("mreg_read0", in.rs1, false);
     track("compute", fill.last("compute"));
     if (op.opClass == OpClass::MatMulAcc) slotRows("acc_read", Res::Acc, in.rd, false);
@@ -221,8 +240,6 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     if (in.rs2 < 0 || in.rs2 > 1) fill.fail("accumulator and weight slots are 0 or 1");
     for (int age : {0, fill.last("acc_write")})
       f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * 32, 32, age, 0});
-    break;
-  }
   }
   if (fill.block)
     for (const auto &[key, group] : fill.block->events)
@@ -266,20 +283,16 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
     const Object *entry = value.getAsObject();
     auto name = entry ? entry->getString("name") : std::nullopt;
     if (!name) return factsError("op_timing block without a name");
-    OpTimingBlock block;
-    block.readLatency = integer(entry->getObject("assumptions"), "scratchpad_read_latency");
-    block.firstFreeAge = integer(entry, "first_free_age");
-    block.nextIssueAge = integer(entry, "next_issue_age");
-    block.engine = entry->getString("engine").value_or("").str();
+    OpTimingBlock block{false, entry->getString("engine").value_or("").str(), {},
+                        integer(entry, "first_free_age"), integer(entry, "next_issue_age"),
+                        integer(entry->getObject("assumptions"), "scratchpad_read_latency")};
     if (const Object *events = entry->getObject("events")) {
       block.resolved = true;
       for (const auto &[key, group] : *events) {
         const Object *g = group.getAsObject();
         auto count = integer(g, "count");
         if (!count) return factsError(name->str() + "." + key.str() + " has no count");
-        OpTimingGroup out;
-        out.count = *count;
-        out.step = integer(g, "step");
+        OpTimingGroup out{0, 0, *count, integer(g, "step")};
         if (*count > 0) {
           auto first = integer(g, "first_age"), last = integer(g, "last_age");
           if (!first || !last) return factsError(name->str() + "." + key.str() + " lacks ages");
@@ -355,9 +368,7 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
       continue; // never stable over the sweep: the record admits nothing
     auto stable = integer(record, "stable_gap");
     if (!stable || *stable < 1 || *stable > *last) return fail(where + " has malformed stable_gap");
-    OpPairFact fact;
-    fact.stableGap = *stable;
-    fact.lastGap = static_cast<int>(*last);
+    OpPairFact fact{{}, *stable, static_cast<int>(*last)};
     for (const auto &[key, entry] : *relation) {
       auto text = entry.getAsString();
       if (!text) return fail(where + " has a non-string relation");
@@ -394,12 +405,11 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
 
 llvm::json::Object RTLEvidence::applicability() const {
   auto firstFree = [&](const char *name) -> llvm::json::Value {
-    auto it = blocks.find(name);
-    if (it == blocks.end() || !it->second.firstFreeAge) return nullptr;
-    return *it->second.firstFreeAge;
+    const OpTimingBlock *b = block(name);
+    return b && b->firstFreeAge ? llvm::json::Value(*b->firstFreeAge) : llvm::json::Value(nullptr);
   };
-  auto vload = blocks.find("vlsu.vload");
-  int latency = vload != blocks.end() ? vload->second.readLatency.value_or(0) : 0;
+  const OpTimingBlock *vload = block("vlsu.vload");
+  int latency = vload ? vload->readLatency.value_or(0) : 0;
   Array operations{"scalar ALU (add..and, addi..srai, lui)", "lw", "sw", "seld", "seli", "vload", "vstore", "vtrpose.xlu",
                    "delay", "csrrw", "ecall", "beq", "bne", "blt", "bge", "bltu",
                    "bgeu", "jal"};
@@ -647,20 +657,13 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     const char *rows = load ? "mreg_write" : "mreg_read";
     x(in.rs1, false);
     fill.access(vmem, Res::Vmem, !load, int(line), 32);
-    fill.access(rows, Res::MReg, load, in.rd * 32, 32);
+    fill.mreg(rows, in.rd, load, 1, 1, /*mergeRelease=*/false);
     int busy = fill.busyEnd();
     // VLOAD/VSTORE hold only their own path: bank holds order them, and MREG
     // ports/releases order their overlap with VPU and XLU.
     fill.hold({load ? Unit::VloadPath : Unit::VstorePath}, 0, busy);
     fill.bank(int(line), vmem);
-    if (load) {
-      f.mregWrites = {in.rd};
-      f.writeRelease = fill.last(rows);
-    } else {
-      f.mregReads = {in.rd};
-      f.readRelease = fill.readEnd(rows);
-      f.writeRelease = fill.last(vmem);
-    }
+    if (!load) f.writeRelease = fill.last(vmem);
     return fill.done(busy);
   }
 
@@ -668,12 +671,8 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     if (!mreg(in.rd) || !mreg(in.rs1) || in.rs2 != 0 || in.imm != 0)
       return reject("unsupported XLU operands or encoding");
     Fill fill(f, "xlu.transpose", blocks);
-    fill.access("read", Res::MReg, false, in.rs1 * 32, 32);
-    fill.access("write", Res::MReg, true, in.rd * 32, 32);
-    f.mregReads = {in.rs1};
-    f.mregWrites = {in.rd};
-    f.readRelease = fill.readEnd("read");
-    f.writeRelease = fill.last("write");
+    fill.mreg("read", in.rs1, false, 1, 1, /*mergeRelease=*/false);
+    fill.mreg("write", in.rd, true, 1, 1, /*mergeRelease=*/false);
     int busy = fill.busyEnd();
     fill.hold({Unit::Xlu, Unit::Vpu}, 0, busy);
     return fill.done(busy);
@@ -687,49 +686,21 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     if (!immediate && in.imm != 0) return reject("unsupported VPU encoding");
     Fill fill(f, blockName, blocks);
     f.writeRelease = fill.nextIssue();
-    auto pair = [&](int reg, bool write, const char *key, int passes = 1) {
-      if (!mreg(reg) || (reg & 1)) fill.fail("BF16 operands must name even register pairs");
-      fill.mreg(key, reg, write, 2, passes);
-    };
-    auto single = [&](int reg, bool write, const char *key) {
-      if (!mreg(reg)) fill.fail("register operand out of range");
-      fill.mreg(key, reg, write);
-    };
-    switch (op.opClass) {
-    case OpClass::VpuElementwise:
-      pair(in.rs1, false, "read0");
-      if (op.twoInput) pair(in.rs2, false, "read1");
-      pair(in.rd, true, "write0");
-      break;
-    case OpClass::VpuPack:
-      pair(in.rs2, false, "read0");
-      f.accesses.push_back({Res::EReg, false, in.rs1, 1, 0, 1});
-      single(in.rd, true, "write0");
-      break;
-    case OpClass::VpuUnpack:
-      single(in.rs2, false, "read0");
-      f.accesses.push_back({Res::EReg, false, in.rs1, 1, 0, 1});
-      pair(in.rd, true, "write0");
-      break;
-    case OpClass::VpuRowReduce:
-      if ((in.rs1 & 1) || (in.rd & 1)) fill.fail("BF16 operands must name even register pairs");
-      single(in.rs1, false, "read0");
-      single(in.rs1 + 1, false, "read1");
-      single(in.rd, true, "write0");
-      single(in.rd + 1, true, "write1");
-      break;
-    case OpClass::VpuColReduce:
-      pair(in.rs1, false, "read0", /*passes=*/2);
-      pair(in.rd, true, "write0");
-      break;
-    case OpClass::VpuLoadImmPair:
-      pair(in.rd, true, "write0");
-      break;
-    case OpClass::VpuLoadImmSingle:
-      single(in.rd, true, "write0");
-      break;
-    default:
-      return reject("unsupported VPU operation");
+    auto events = vpuEvents().find(op.opClass);
+    if (events == vpuEvents().end()) return reject("unsupported VPU operation");
+    if (op.opClass == OpClass::VpuRowReduce && ((in.rs1 & 1) || (in.rd & 1)))
+      fill.fail("BF16 operands must name even register pairs");
+    for (const RegisterEvent &event : events->second) {
+      if (event.twoInput && !op.twoInput) continue;
+      int reg = in.*event.operand + event.offset;
+      if (!event.key) {
+        f.accesses.push_back({Res::EReg, false, reg, 1, 0, 1});
+        continue;
+      }
+      if (event.registers == 2) {
+        if (!mreg(reg) || (reg & 1)) fill.fail("BF16 operands must name even register pairs");
+      } else if (!mreg(reg)) fill.fail("register operand out of range");
+      fill.mreg(event.key, reg, event.write, event.registers, event.passes);
     }
     std::map<int, int> banks;
     for (const std::vector<int> *group : {&f.mregReads, &f.mregWrites})

@@ -37,6 +37,7 @@ constexpr size_t kAtlasMaxEntryContexts = 4096;
 // footprints; entries.front() represents the group.
 struct AtlasContextGroup {
   std::vector<timing::RegValues> entries;
+  std::vector<timing::Footprint> footprints;
 };
 // Groups concrete entries with equal footprints when the provider requests
 // them; otherwise uses the merged entry.
@@ -55,6 +56,11 @@ struct DelayInsertion {
   const char *guardReason = "a halt does not wait for a delay";
 };
 
+// Add a NOP guard to trailing delays if the next instruction ignores DELAY.
+void guardAtlasBlockDrain(DelayInsertion &delay,
+                          const timing::TimingProvider &provider,
+                          int idle, const timing::OpInfo *next);
+
 // The issue cycle and footprint of each stream op under one provider, and
 // each block's earliest successor issue (-1 after a halt), as verified.
 struct AtlasTimedTrace {
@@ -63,10 +69,7 @@ struct AtlasTimedTrace {
   std::vector<int> successorIssue;
   // Entry states and footprints for blocks with several context groups;
   // empty for blocks with one group.
-  struct Context {
-    std::vector<timing::RegValues> entries;
-    std::vector<timing::Footprint> footprints;
-  };
+  using Context = AtlasContextGroup;
   std::vector<std::vector<Context>> contexts;
 };
 

@@ -58,13 +58,17 @@ bool vlsOverlapsWindow(const Footprint &dma, const Footprint &f) {
   return false;
 }
 
-bool isEngineHold(const Hold &h) { return h.unit == Unit::Vpu || h.unit == Unit::Xlu; }
+enum class ReservedHolds { Engine, Other, MxuPair };
 
-Footprint holdsWhere(const Footprint &f, bool engine) {
-  Footprint out = engine ? Footprint{} : f;
+Footprint reservedFootprint(const Footprint &f, ReservedHolds selection) {
+  Footprint out = selection == ReservedHolds::Engine ? Footprint{} : f;
   out.holds.clear();
-  for (const Hold &h : f.holds)
-    if (isEngineHold(h) == engine) out.holds.push_back(h);
+  for (const Hold &h : f.holds) {
+    bool engine = h.unit == Unit::Vpu || h.unit == Unit::Xlu;
+    if (selection == ReservedHolds::MxuPair ? h.unit != Unit::MxuCompute
+                                          : engine == (selection == ReservedHolds::Engine))
+      out.holds.push_back(h);
+  }
   return out;
 }
 
@@ -85,13 +89,6 @@ std::string mregOverlap(const std::vector<int> &first, const std::vector<int> &s
       if ((first[i] & 31) == (second[j] & 31))
         out += (out.empty() ? "" : ",") + std::to_string(i) + (first[i] == second[j] ? "=" : "~") + std::to_string(j);
   return out.empty() ? "disjoint" : out;
-}
-
-Footprint withoutHold(const Footprint &f, Unit unit) {
-  Footprint out = f;
-  out.holds.erase(std::remove_if(out.holds.begin(), out.holds.end(), [&](const Hold &h) { return h.unit == unit; }),
-                  out.holds.end());
-  return out;
 }
 
 // Pair facts admit overlap only at covered gaps, matching operands and observed
@@ -225,10 +222,10 @@ public:
   std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
     if (auto command = slots ? slots->command(in, f, cycle) : std::nullopt) {
       if (in.op->engine == Engine::Vpu) {
-        table.reserve(in, holdsWhere(f, false), cycle);
-        engines.reserve(in, holdsWhere(f, true), cycle);
+        table.reserve(in, reservedFootprint(f, ReservedHolds::Other), cycle);
+        engines.reserve(in, reservedFootprint(f, ReservedHolds::Engine), cycle);
       } else {
-        table.reserve(in, withoutHold(f, Unit::MxuCompute), cycle);
+        table.reserve(in, reservedFootprint(f, ReservedHolds::MxuPair), cycle);
       }
       slots->reserve(std::move(*command));
       return {};
@@ -252,7 +249,7 @@ private:
       return busy;
     if (auto command = slots->command(in, f, cycle))
       return slots->conflict(*command);
-    return engines.conflict(in, holdsWhere(f, true), cycle);
+    return engines.conflict(in, reservedFootprint(f, ReservedHolds::Engine), cycle);
   }
 
   std::shared_ptr<const RTLEvidence> evidence;
@@ -462,35 +459,25 @@ struct SelectAtlasRTLEvidencePass
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    if (!dmaPolicy.empty() && dmaPolicy != "wait") {
-      module.emitError("unsupported DMA policy; only dma=wait is defined");
+    auto fail = [&](const std::string &message) {
+      module.emitError(message);
       signalPassFailure();
-      return;
-    }
+    };
+    if (!dmaPolicy.empty() && dmaPolicy != "wait")
+      return fail("unsupported DMA policy; only dma=wait is defined");
     auto loaded = loadRTLTimingFacts(opTiming, opTimingHash, dmaPolicy == "wait");
-    if (!loaded) {
-      module.emitError("RTL evidence selection failed: ") << llvm::toString(loaded.takeError());
-      signalPassFailure();
-      return;
-    }
-    if (opPairs.empty() != opPairsHash.empty()) {
-      module.emitError("op-pairs and op-pairs-sha256 are selected together");
-      signalPassFailure();
-      return;
-    }
+    if (!loaded)
+      return fail("RTL evidence selection failed: " + llvm::toString(loaded.takeError()));
+    if (opPairs.empty() != opPairsHash.empty())
+      return fail("op-pairs and op-pairs-sha256 are selected together");
     if (!opPairs.empty())
-      if (llvm::Error error = loaded->selectPairFacts(opPairs, opPairsHash)) {
-        module.emitError("RTL evidence selection failed: ") << llvm::toString(std::move(error));
-        signalPassFailure();
-        return;
-      }
+      if (llvm::Error error = loaded->selectPairFacts(opPairs, opPairsHash))
+        return fail("RTL evidence selection failed: " + llvm::toString(std::move(error)));
     if (auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
-        retained && retained.getValue() != kAtlasRTLTimingProviderId) {
-      module.emitError("selected RTL evidence contradicts the retained timing provider ")
-          << retained.getValue() << "; time the stream again after selection or drop the selection";
-      signalPassFailure();
-      return;
-    }
+        retained && retained.getValue() != kAtlasRTLTimingProviderId)
+      return fail("selected RTL evidence contradicts the retained timing provider " +
+                  retained.getValue().str() +
+                  "; time the stream again after selection or drop the selection");
     Builder builder(module.getContext());
     NamedAttrList fields;
     fields.set("op_timing", builder.getStringAttr(opTiming));
@@ -696,8 +683,8 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
             if (!reconciled.insert(candidate.order).second)
               continue;
             DelayInsertion after;
-            if (failed(atlasOrderedBlockDelays(s, block, p, candidate.order,
-                                               candidate.before, after, candidate.tail)))
+            if (failed(atlasBlockDelays(s, block, p, candidate.before, after,
+                                        candidate.tail, ArrayRef<size_t>(candidate.order))))
               continue;
           }
         }
@@ -709,7 +696,7 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
   RTLOrderCandidate source;
   source.before.resize(s.ops.size());
   DelayInsertion after;
-  if (failed(atlasInOrderBlockDelays(s, block, p, source.before, after, source.tail)))
+  if (failed(atlasBlockDelays(s, block, p, source.before, after, source.tail)))
     return failure();
   for (size_t i = begin; i < end; ++i)
     source.order.push_back(i);

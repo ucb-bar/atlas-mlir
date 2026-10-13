@@ -123,46 +123,33 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
 
 mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
     const TimingProvider &provider, const std::string &name, mlir::Operation *at) {
-  auto instruction = [&](int rd, int rs1, int rs2) {
-    timing::Instr in;
-    in.op = timing::findOp(name);
-    assert(in.op && "the timing model knows every machine operation");
-    in.rd = rd;
-    in.rs1 = rs1;
-    in.rs2 = rs2;
-    return in;
-  };
-  // Two instances that share no register, slot, BF16 pair or VMEM bank.
-  timing::Instr first = instruction(0, 2, 4), second = instruction(6, 8, 10);
-  switch (first.op->opClass) {
-  case timing::OpClass::WeightPush:
-  case timing::OpClass::AccPushFp8:
-  case timing::OpClass::AccPushBf16:
-    // A push names its slot and source pair; its second field is unused.
-    first = instruction(0, 0, 0);
-    second = instruction(1, 2, 0);
-    break;
-  case timing::OpClass::MatMul:
-  case timing::OpClass::MatMulAcc:
-    // MXU slot operands are 0 or 1.
-    first = instruction(0, 0, 0);
-    second = instruction(1, 2, 1);
-    break;
-  case timing::OpClass::PopFp8:
-  case timing::OpClass::PopBf16:
-    // A pop names its destination pair, scale register and accumulator slot.
-    first = instruction(0, 0, 0);
-    second = instruction(2, 0, 1);
-    break;
-  default:
-    break;
+  const OpInfo *op = findOp(name);
+  assert(op && "the timing model knows every machine operation");
+  // Two instances with disjoint register pairs, MXU slots and VMEM banks.
+  Instr first{op, 0, 2, 4}, second{op, 6, 8, 10};
+  if (op->mxu >= 0) {
+    first = {op, 0, 0, 0};
+    switch (op->opClass) {
+    case OpClass::WeightPush:
+    case OpClass::AccPushFp8:
+    case OpClass::AccPushBf16:
+      second = {op, 1, 2, 0};
+      break;
+    case OpClass::PopFp8:
+    case OpClass::PopBf16:
+      second = {op, 2, 0, 1};
+      break;
+    default:
+      second = {op, 1, 2, 1};
+      break;
+    }
   }
-  timing::RegValues regs = timing::unknownRegs();
+  RegValues regs = unknownRegs();
   regs[2] = 0;
-  regs[8] = timing::kVmemBankBytes / 4;
-  timing::Footprint firstFootprint = provider.footprint(first, regs);
-  timing::Footprint secondFootprint = provider.footprint(second, regs);
-  for (const timing::Footprint &f : {firstFootprint, secondFootprint})
+  regs[8] = kVmemBankBytes / 4;
+  Footprint firstFootprint = provider.footprint(first, regs);
+  Footprint secondFootprint = provider.footprint(second, regs);
+  for (const Footprint &f : {firstFootprint, secondFootprint})
     if (!f.error.empty())
       return at->emitOpError("virtual cost of ") << name << ": " << f.error;
   auto table = provider.createReservations();

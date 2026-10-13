@@ -16,7 +16,6 @@ using namespace mlir::atlas::timing;
 namespace {
 
 constexpr int kMaxIdle = 100000;
-constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp, with
@@ -345,7 +344,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
     // Footprints that differ between entry contexts would need one order valid
     // under each, so such a block keeps its source order.
     DelayInsertion unused;
-    if (failed(atlasInOrderBlockDelays(*stream, b, *provider, before, unused, tailIdle[b])))
+    if (failed(atlasBlockDelays(*stream, b, *provider, before, unused, tailIdle[b])))
       return failure();
     for (size_t i = stream->starts[b]; i < stream->blockEnd(b); ++i)
       order.push_back(i);
@@ -361,12 +360,10 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
                 stream->fallsThrough(b)
                     ? "this block finishes before the next one starts"
                     : "work finishes before the stream ends"};
-    if (!stream->fallsThrough(b))
-      continue;
-    const OpInfo &next = *stream->instrs[order[stream->starts[b + 1]]].op;
-    bool halt = next.opClass == OpClass::Halt;
-    if (halt || (isControlFlow(next) && !provider->redirectWaitsForDelay))
-      after[b] = {idleDelays(tailIdle[b] - 1), true, after[b].reason, halt ? kHaltGuard : kRedirectGuard};
+    guardAtlasBlockDrain(
+        after[b], *provider, tailIdle[b],
+        stream->fallsThrough(b) ? stream->instrs[order[stream->starts[b + 1]]].op
+                                : nullptr);
   }
   if (!insertDelays) {
     before.assign(stream->ops.size(), DelayInsertion{});

@@ -14,11 +14,8 @@ llvm::Expected<std::shared_ptr<timing::RTLEvidence>>
 loadSelectedRTLEvidence(ModuleOp module);
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
-// The complete RTL policy: selected footprints, exclusive engines or pair
-// reservations, drained blocks, bounded programs and NOP guards before
-// redirects. DMA: one pending transfer per channel and at most eight, disjoint
-// VMEM windows, DRAM spans shared only by reads, VLS off pending windows, MXU
-// serialized with DMA, each completed only at its matching wait in the block.
+// Complete selected RTL policy: reservations, drained blocks, bounded programs,
+// redirect guards and DMA lifetimes ending at the matching wait.
 timing::TimingProvider
 rtlTimingProvider(std::shared_ptr<const timing::RTLEvidence> evidence);
 // Registered factory: fails without valid selected evidence on the module.
