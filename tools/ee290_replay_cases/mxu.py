@@ -284,7 +284,14 @@ def readout(vm, dram):
     put(vm, STAGE + 64, DMA_ACTIVATION)
     for i, byte in enumerate(DMA_RESULT): dram[OUT + i] = byte
 
-COMMON = dict(vmem={STAGE: filler(8192, 7)}, expect=readout, commands={'dma': 3, 'vload': 2, 'mxu0': 4, 'vstore': 1},
+# Source order reuses the first staging window; virtual scheduling can leave
+# the activation in the second. Initialize that scratch tile to the same bytes
+# so readout's full-memory expectation is valid for either allocation. All
+# other staging bytes remain filler, and replay still checks every DMA write.
+DMA_STAGE_IMAGE = filler(8192, 7)
+DMA_STAGE_IMAGE = DMA_STAGE_IMAGE[:2048] + DMA_ACTIVATION + DMA_STAGE_IMAGE[3072:]
+
+COMMON = dict(vmem={STAGE: DMA_STAGE_IMAGE}, expect=readout, commands={'dma': 3, 'vload': 2, 'mxu0': 4, 'vstore': 1},
               dram={VIRTUAL_X: DMA_ACTIVATION, WEIGHT: DMA_WEIGHTS, OUT - 32: b'\xa5' * 32 + b'\x5a' * 1024 + b'\xa5' * 32}, dma=(64, 32),
               source=DMA_PROGRAM, pipeline=PIPELINE)
 DMA = {
