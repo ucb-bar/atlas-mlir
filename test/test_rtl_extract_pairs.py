@@ -163,16 +163,88 @@ class CoreVpuPairFileTests(unittest.TestCase):
                 self.assertLessEqual(expected["stable_gap"], expected["next_issue_age"])
 
 
+# Same-MXU commands: funct7 = base + unit (lib/AtlasEncoding.cpp); (accumulator field, weight-slot field) or None.
+MXU_KINDS = {"push_weight": (0, None, "vd"), "push_acc_fp8": (2, "vd", None), "push_acc_bf16": (4, "vd", None),
+             "pop_acc_fp8": (6, "vs2", None), "pop_acc_bf16": (8, "vs2", None), "matmul": (10, "vd", "vs2"),
+             "matmul_acc": (12, "vd", "vs2")}
+
+
+def mxu_fields(word):
+    return {"vd": word >> 7 & 63, "vs1": word >> 13 & 63, "vs2": word >> 19 & 63, "f7": word >> 25}
+
+
+def mxu_mreg_banks(kind, word):
+    f = mxu_fields(word)
+    if kind.startswith("pop"):
+        regs = [f["vd"], f["vd"] + 1] if kind.endswith("bf16") else [f["vd"]]
+    else:
+        regs = [f["vs1"], f["vs1"] + 1] if kind.endswith("bf16") else [f["vs1"]]
+    return {r % 32 for r in regs}
+
+
+class CoreMxuSamePairFileTests(unittest.TestCase):
+    """Every ordered pair of commands on one MXU (pairs/core_mxu_same.yaml): blocks, relations and instruction words."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw, cls.spec = pairs.load("atlas", ["core_mxu_same"])["core_mxu_same"]
+
+    def test_every_ordered_pair_and_relation_is_declared(self):
+        expected = set()
+        for unit in (0, 1):
+            for a, (_, acc_a, slot_a) in MXU_KINDS.items():
+                for b, (_, acc_b, slot_b) in MXU_KINDS.items():
+                    accs = ("same", "other") if acc_a and acc_b else (None,)
+                    slots = ("same", "other") if slot_a and slot_b else (None,)
+                    expected |= {(f"mxu{unit}.{a}", f"mxu{unit}.{b}", acc, slot) for acc in accs for slot in slots}
+        declared = {(p["as"]["first"], p["as"]["second"], p.get("relation", {}).get("accumulator"),
+                     p.get("relation", {}).get("weight_slot")) for p in self.raw["pairs"].values()}
+        self.assertEqual(len(declared), len(self.raw["pairs"]))
+        self.assertEqual(declared, expected)
+        self.assertEqual(self.raw["relation"], {"mreg_banks": "disjoint"})
+
+    def test_instruction_words_encode_the_pair_and_its_relation(self):
+        for name, pair in self.raw["pairs"].items():
+            words = [pair["first_inputs"]["instruction"], pair["second_inputs"]["instruction"]]
+            kinds = [pair["as"][side].split(".")[1] for side in ("first", "second")]
+            unit = int(pair["as"]["first"][3])
+            with self.subTest(name):
+                self.assertTrue(all(w & 0x7F == 0x77 for w in words))
+                for word, kind in zip(words, kinds):
+                    self.assertEqual(mxu_fields(word)["f7"], MXU_KINDS[kind][0] + unit)
+                fields = [mxu_fields(w) for w in words]
+                for key, index in (("accumulator", 1), ("weight_slot", 2)):
+                    relation = pair.get("relation", {}).get(key)
+                    used = [MXU_KINDS[k][index] for k in kinds]
+                    self.assertEqual(relation is not None, all(used))
+                    if relation:
+                        same = fields[0][used[0]] == fields[1][used[1]]
+                        self.assertEqual(same, relation == "same")
+                self.assertFalse(mxu_mreg_banks(kinds[0], words[0]) & mxu_mreg_banks(kinds[1], words[1]))
+
+    @unittest.skipUnless(os.environ.get("ATLAS_OP_TIMING"), "requires ATLAS_OP_TIMING")
+    def test_gaps_reach_past_the_first_commands_last_event(self):
+        import json
+        blocks = {b["name"]: b for b in json.loads(Path(os.environ["ATLAS_OP_TIMING"]).read_text())["op_timing"]}
+        for name, pair in self.raw["pairs"].items():
+            last = max(g["last_age"] for g in blocks[pair["as"]["first"]]["events"].values() if g["count"])
+            low, high = pair["gaps"].split("..")
+            with self.subTest(name):
+                self.assertEqual(int(low), 1)
+                self.assertGreater(int(high), last)
+                self.assertLessEqual(self.raw["expect"][name]["stable_gap"], last + 1)
+
+
 @unittest.skipUnless(HW_IR and EXPORTER, "requires ATLAS_HW_IR and ATLAS_HW_EXPORTER")
 class HardwarePairTests(unittest.TestCase):
-    def check(self, name):
+    def check(self, name, jobs=8):
         raw, spec = pairs.load("atlas", [name])[name]
         document = load_document(HW_IR, modules(spec), EXPORTER, pairs.needs_assertions(raw, spec))
         window = copy.deepcopy(raw)
         for pair, expected in raw["expect"].items():
             stable = expected["stable_gap"]
             window["pairs"][pair]["gaps"] = f"{max(1, stable - 1)}..{stable + 1}"
-        for record in pairs.extract(document, window, spec, jobs=8):
+        for record in pairs.extract(document, window, spec, jobs=jobs):
             pair = record["name"].split(".", 1)[1]
             expected = raw["expect"][pair]
             stable = expected["stable_gap"]
@@ -238,6 +310,11 @@ class HardwarePairTests(unittest.TestCase):
     def test_core_mxu_units(self):
         """Every ordered pair of commands across MXU0 and MXU1: gap 1 on disjoint operands with disjoint control."""
         self.check("core_mxu_units")
+
+    def test_core_mxu_same(self):
+        """Every ordered pair of commands on one MXU, per accumulator and weight-slot relation: the MXU sequencer's issue
+        assertions, the accumulation buffer's read check or a moved MREG port event bind one cycle below each stable gap."""
+        self.check("core_mxu_same", jobs=min(64, os.cpu_count() or 8))
 
 
 if __name__ == "__main__":
