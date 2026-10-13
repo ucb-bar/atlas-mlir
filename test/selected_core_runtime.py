@@ -1,8 +1,4 @@
-"""Run upstream cosim tests on the selected AtlasCore with an explicit halt state.
-
-The selected ScalarCore drives io.halted from scalar/halt_now, and optimization can drop the public
-io_halted port. Runners that take `halt_signal` receive it directly; older runners get a peek alias.
-"""
+"""Adapt upstream cosim runners to the selected AtlasCore halt state."""
 import inspect
 
 HALT_SIGNAL = "scalar/halt_now"
