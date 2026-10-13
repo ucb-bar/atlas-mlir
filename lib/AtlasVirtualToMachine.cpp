@@ -727,6 +727,12 @@ private:
            {"rhs", i32(tile(binary.getRhs()))}});
       return success();
     }
+    if (auto reduce = dyn_cast<VirtualVPUReduceOp>(op)) {
+      add("atlas.vpu_reduce", loc,
+          {{"kind", reduce.getKindAttr()}, {"dst", i32(tile(reduce.getDst()))},
+           {"src", i32(tile(reduce.getSrc()))}});
+      return success();
+    }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value)

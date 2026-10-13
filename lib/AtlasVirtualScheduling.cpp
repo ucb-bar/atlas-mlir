@@ -91,7 +91,8 @@ Effects effectsOf(Operation *op) {
     e.writes = bit(kUnit0 + matmul.getUnit());
   else if (!isLaunch(op) && !isCompletion(op) &&
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-                VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
+                VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
+                VirtualScaleConstantOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
@@ -464,6 +465,8 @@ Cost costOf(Operation *op) {
     return onVpu(unary.getKind());
   if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op))
     return onVpu(binary.getKind());
+  if (auto reduce = dyn_cast<VirtualVPUReduceOp>(op))
+    return onVpu(reduce.getKind());
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.

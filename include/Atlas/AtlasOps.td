@@ -204,6 +204,13 @@ def Atlas_VirtualVPUBinaryOp : Atlas_Op<"virtual_vpu_binary", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualVPUReduceOp : Atlas_Op<"virtual_vpu_reduce", [Pure]> {
+  let summary = "BF16 VPU row reduction: each row's result fills that row";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, StrAttr:$kind);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualOutputBF16Op :
     Atlas_Op<"virtual_output_bf16",
              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
