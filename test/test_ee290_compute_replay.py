@@ -322,6 +322,7 @@ class VerilatorReplayTest(unittest.TestCase):
         if run.returncode: raise AssertionError(run.stdout + run.stderr)
         cls.log = run.stdout
         cls.digest = hashlib.sha256(Path(FACTS).read_bytes()).hexdigest()
+        cls.pairs_digest = hashlib.sha256(Path(PAIRS).read_bytes()).hexdigest() if PAIRS else None
         cls.cases, available = {}, CASES.load()
         for name in cls.NAMES:
             directory = cls.work / name
@@ -346,7 +347,8 @@ class VerilatorReplayTest(unittest.TestCase):
     def bind(self, name, export=None, events=None):
         _, words, original_events, original_export, case = self.cases[name]
         export, events = original_export if export is None else export, original_events if events is None else events
-        return BIND.bind_footprints(export, events, self.digest) if case.final else BIND.bind_export(export, events, self.digest, words)
+        pairs = self.pairs_digest if case.pairs else None
+        return BIND.bind_footprints(export, events, self.digest, pairs) if case.final else BIND.bind_export(export, events, self.digest, words, pairs)
 
     def rejects(self, name, export=None, events=None):
         with self.assertRaises(BIND.BindingError): self.bind(name, export, events)
@@ -579,6 +581,7 @@ class VerilatorReplayTest(unittest.TestCase):
                                            lambda e: hold(e, "VMEM bank", load).__setitem__("unit", "MXU port"),
                                            lambda e: e["instructions"][index].__setitem__("epoch_offset", e["instructions"][index]["epoch_offset"] + 1),
                                            lambda e: e["evidence"].__setitem__("op_timing_sha256", "0" * 64),
+                                           lambda e: e["evidence"].__setitem__("op_pairs_sha256", "0" * 64),
                                            lambda e: e["provider"].__setitem__("id", "other")]):
             changed = copy.deepcopy(export); mutate(changed)
             with self.subTest(position=position): self.rejects(name, export=changed)

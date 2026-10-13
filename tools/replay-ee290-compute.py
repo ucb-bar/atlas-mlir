@@ -758,7 +758,7 @@ def serialized(ops):
     return result
 
 
-def replay(args, case, label, consumer, select, digest, model):
+def replay(args, case, label, consumer, select, digest, pairs_digest, model):
     """Schedule or take one case stream, run it on the model, decode and bind it; returns (result, PASS line)."""
     opt, emit, out = args.bin / 'atlas-opt', args.bin / 'atlas-emit', args.work.resolve() / label
     flags = {'delay': '--insert-atlas-delays', 'schedule': '--schedule-atlas-stream'}
@@ -782,10 +782,10 @@ def replay(args, case, label, consumer, select, digest, model):
         (out / 'reference.mlir').write_text(case.mlir(serialized(case.ops)))
         sh([opt, out / 'reference.mlir', select, flags['delay'], '--verify-atlas-timing', '-o', out / 'reference-final.mlir'], args.timeout)
         export = json.loads(sh([emit, '--rtl-timing-json', out / 'reference-final.mlir'], args.timeout))
-        binding = BIND.bind_footprints(export, events, digest)
+        binding = BIND.bind_footprints(export, events, digest, pairs_digest)
     else:
         export = json.loads(sh([emit, '--rtl-timing-json', out / 'final.mlir'], args.timeout))
-        binding = BIND.bind_export(export, events, digest, words)
+        binding = BIND.bind_export(export, events, digest, words, pairs_digest)
     (out / 'timing.json').write_text(json.dumps(export, indent=1))
     if case.check and not case.check(events): raise ReplayError(label + ': case check failed')
     return ({'case': label, 'cycles': int(match[5]), **binding},
@@ -801,7 +801,8 @@ def run(args):
     select = f'--select-atlas-rtl-evidence=op-timing={facts} op-timing-sha256={digest} dma=wait'
     if args.pairs:
         pairs = args.pairs.resolve()
-        paired = select + f' op-pairs={pairs} op-pairs-sha256={hashlib.sha256(pairs.read_bytes()).hexdigest()}'
+        pairs_digest = hashlib.sha256(pairs.read_bytes()).hexdigest()
+        paired = select + f' op-pairs={pairs} op-pairs-sha256={pairs_digest}'
     available = CASES.load(); results = []
     names = available if args.cases == 'all' else args.cases.split(',')
     if args.cases != 'all' and not args.pairs and any(available[name].pairs for name in names): raise ReplayError('selected cases need --pairs')
@@ -810,7 +811,7 @@ def run(args):
             for name in names if args.pairs or not available[name].pairs
             for consumer in available[name].consumers if args.consumer in ('both', consumer) or consumer == 'final']
     with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
-        for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, paired if case.pairs else select, digest, model)
+        for (_, label, _), future in zip(runs, [pool.submit(replay, args, case, label, consumer, *((paired, digest, pairs_digest) if case.pairs else (select, digest, None)), model)
                                                 for case, label, consumer in runs]):
             try: result, line = future.result()
             except (ReplayError, BIND.BindingError) as error: raise type(error)(f'{label}: {error}') from error

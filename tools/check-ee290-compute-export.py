@@ -104,10 +104,11 @@ def decoded_operands(word):
     return mnemonic, result
 
 
-def check_header(export, facts_sha256):
+def check_header(export, facts_sha256, pairs_sha256):
     require(export.get('schema') == SCHEMA and export.get('provider', {}).get('id') == PROVIDER, 'export schema/provider mismatch')
     require(export['provider'].get('dma_policy') == 'wait', 'DMA wait policy required')
     require(export.get('evidence', {}).get('op_timing_sha256') == facts_sha256, 'export was not resolved from the selected facts')
+    require(export['evidence'].get('op_pairs_sha256') == pairs_sha256, 'export was not resolved from the selected pair facts')
     for item in export['instructions']:
         require((item['mnemonic'], item['operands']) == decoded_operands(item['word_u32']), 'exported instruction metadata differs from selected word')
 
@@ -258,9 +259,9 @@ def bind_blocks(export, words):
     return blocks, starts
 
 
-def bind_export(export, observed, facts_sha256, words):
+def bind_export(export, observed, facts_sha256, words, pairs_sha256=None):
     """Check export and observed events agree; returns a small summary."""
-    check_header(export, facts_sha256)
+    check_header(export, facts_sha256, pairs_sha256)
     require(export.get('program', {}).get('words') == words and export['program'].get('word_count') == len(words), 'export differs from emitted words')
     instructions = export['instructions']
     require(len(instructions) == len(words) and all(item['word_index'] == i and item['word_u32'] == words[i] for i, item in enumerate(instructions)), 'incomplete resolved instruction export')
@@ -323,9 +324,9 @@ def bind_export(export, observed, facts_sha256, words):
     return {'instruction_words_bound': len(fired), 'block_instances': instances, 'memory_access_elements_bound': checked, 'dynamic_dma_intervals': intervals}
 
 
-def bind_footprints(export, observed, facts_sha256):
+def bind_footprints(export, observed, facts_sha256, pairs_sha256=None):
     """Bind each observed command to the same command of a straight-line reference export, without issue offsets."""
-    check_header(export, facts_sha256)
+    check_header(export, facts_sha256, pairs_sha256)
     items = [item for item in export['instructions'] if is_command(item['mnemonic'])]
     require(len(export['blocks']) == 1 and len(items) == len(observed['commands']), 'reference export differs from observed commands')
     waits = [e for e in observed['endpoints'] if e['kind'] == 'wait']
