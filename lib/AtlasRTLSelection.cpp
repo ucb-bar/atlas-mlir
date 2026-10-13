@@ -39,6 +39,13 @@ bool holdsMxu(const Footprint &f) {
   });
 }
 
+int holdEnd(const Footprint &f, Unit unit) {
+  int end = -1;
+  for (const Hold &h : f.holds)
+    if (h.unit == unit) end = std::max(end, h.to);
+  return end;
+}
+
 bool isVls(const Footprint &f) {
   return std::any_of(f.holds.begin(), f.holds.end(), [](const Hold &h) {
     return h.unit == Unit::VloadPath || h.unit == Unit::VstorePath;
@@ -294,6 +301,16 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     Dependence d = dataDependence(a, fa, b, fb);
     if (isLaunch(b) && holdsMxu(fa) && fa.doneAge + 1 > d.distance)
       d = {fa.doneAge + 1, EdgeKind::Order, "selected DMA launch waits for MXU work to drain"};
+    // The LSU reports a VSTORE's source register as read until the VSTORE
+    // drains; every writer but a VLOAD asserts on a pending read
+    // (MregBankTracker, pairs/core_mxu_cross.yaml).
+    if (a.op->opClass == OpClass::VStore && b.op->opClass != OpClass::VLoad)
+      for (int r : fa.mregReads)
+        if (std::find(fb.mregWrites.begin(), fb.mregWrites.end(), r) != fb.mregWrites.end() &&
+            holdEnd(fa, Unit::VstorePath) + 1 > d.distance)
+          d = {holdEnd(fa, Unit::VstorePath) + 1, EdgeKind::WAR,
+               "m" + std::to_string(r) + " reported read until the VSTORE drains at age " +
+                   std::to_string(holdEnd(fa, Unit::VstorePath))};
     // Launches keep queue order, so a wait kept ahead of every later launch
     // keeps each launch's command slot free, as the scope requires.
     if (isLaunch(b) && a.op->opClass == OpClass::DmaWait && d.distance < 1)

@@ -13,7 +13,7 @@ from test_delay_insertion import OPT, EMIT, nop, program, run, stream
 from test_rtl_gap_coverage import gapped, issue_cycles, issue_gap
 from test_rtl_timing import (CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, export, facts, facts_variant,
                              selection, vls, word_base)
-from test_rtl_vmul_timing import reduce, unary, vmul
+from test_rtl_vmul_timing import reduce, unary, vli, vmul
 from test_rtl_xlu_timing import transpose
 
 BANK_WORDS = 8192 * 8
@@ -174,6 +174,24 @@ class SelectedOverlapTest(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, gap >= boundary, result.stderr)
                     if gap < boundary:
                         self.assertIn("VMEM bank 0 busy", result.stderr)
+
+    def test_vstore_source_is_reported_read_until_it_drains(self):
+        # The MREG bank tracker reports a VSTORE's source as read through its busy window: a VPU or XLU command
+        # writing it waits for first_free_age, while a VLOAD (which checks only pending writes) follows the read
+        # release (pairs/core_mxu_cross.yaml: vstore_transpose_to_m9, vstore_vli_all_m8).
+        store = block(facts(), "vlsu.vstore")
+        drained = store["first_free_age"]
+        released = store["events"]["mreg_read"]["last_age"] + store["assumptions"]["scratchpad_read_latency"] + 1
+        setup = [*word_base(8, 2 * BANK_WORDS), *word_base(7, 3 * BANK_WORDS)]
+        writers = {"transpose": (transpose(30, 9), drained), "vli": (vli("all", 8), drained),
+                   "vload": (vls("vload", 9, 7), released)}
+        for name, (writer, boundary) in writers.items():
+            with self.subTest(writer=name):
+                self.assertGreater(boundary, 1)
+                self.assertEqual(self.verify(gapped(setup, vls("vstore", 9, 8), writer, boundary)).returncode, 0)
+                rejected = self.verify(gapped(setup, vls("vstore", 9, 8), writer, boundary - 1))
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("reported read until" if boundary == drained else "reserved for reading", rejected.stderr)
 
     def test_example_kernels(self):
         for name, kernel in KERNELS.items():
