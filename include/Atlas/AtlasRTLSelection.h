@@ -9,26 +9,22 @@
 #include <memory>
 
 namespace mlir::atlas {
-// The facts named by atlas.rtl_evidence, loaded and hash-checked; null when
-// the module carries no selection. An invalid selection is an error rather
-// than a fallback to the model.
+// Load hash-checked atlas.rtl_evidence; absent selection is null, invalid is an error.
 llvm::Expected<std::shared_ptr<timing::RTLEvidence>>
 loadSelectedRTLEvidence(ModuleOp module);
 FailureOr<std::shared_ptr<timing::RTLEvidence>>
 getSelectedRTLEvidence(ModuleOp module);
-// The complete kAtlasRTLTimingProviderId policy over selected facts: facts
-// footprints, data dependences, queued transfers (one per channel, eight
-// command slots, disjoint VMEM windows, DRAM spans shared only by reads, VLS
-// off pending windows, MXU serialized with DMA) completed only at their
-// matching wait within the block, drained basic blocks, exclusive engine
-// reservations (with selected pair facts, VPU commands overlap where a pair
-// fact admits them, up to the facts' live capacity), the instruction-memory and
-// issue-cycle bounds, and NOP guards before redirects.
+// Complete RTL policy: selected footprints and pair reservations, bounded programs,
+// drained blocks, matching DMA waits, and scalar guards before redirects.
 timing::TimingProvider
 rtlTimingProvider(std::shared_ptr<const timing::RTLEvidence> evidence);
 // Registered factory: fails without valid selected evidence on the module.
 timing::TimingRuleResult<timing::TimingProvider>
 rtlTimingProviderFactory(ModuleOp module);
+// Canonical disjoint operands measure completion latency and same-unit issue interval.
+struct MachineTiming { int latency, interval; };
+FailureOr<MachineTiming> machineTimingOf(const timing::TimingProvider &provider,
+                                       const std::string &name, Operation *at);
 // Scheduler-local heuristics: these never alter provider facts or verification.
 struct RTLSchedulingOrder {
   bool dmaEstimate = false;

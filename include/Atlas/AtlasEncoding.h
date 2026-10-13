@@ -25,9 +25,8 @@ unsigned atlasWordEncodeCount();
 // program/ABI to resolve such jumps.
 LogicalResult verifyAtlasArtifact(ModuleOp module, bool llvmBlock,
                                   llvm::SmallVectorImpl<uint32_t> &words);
-// Executable boundary (emission and LLVM handoff): rejects an explicitly
-// untimed stream and times a stream carrying selected RTL evidence even
-// without timing metadata; legacy streams without either keep their scope.
+// Rejects explicitly untimed streams and checks selected RTL timing even
+// without timing metadata; legacy streams retain their verification scope.
 LogicalResult verifyAtlasExecutable(ModuleOp module, bool llvmBlock,
                                     llvm::SmallVectorImpl<uint32_t> &words);
 

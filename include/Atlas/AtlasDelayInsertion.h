@@ -5,17 +5,15 @@
 
 namespace mlir::atlas {
 
-// Delays that keep block `block` in source order under every entry context
-// group of the provider (atlasBlockContexts); `tail` receives the idle time
-// that drains a block without a branch or halt.
+// Source-order delays valid under every entry context group.
+// `tail` drains a block without a branch or halt.
 LogicalResult atlasInOrderBlockDelays(const AtlasStream &stream, size_t block,
                                       const timing::TimingProvider &provider,
                                       std::vector<DelayInsertion> &before,
                                       DelayInsertion &after, int &tail);
 
-// Plan one block in a chosen order, given as absolute stream indices. The
-// order must preserve scalar values and the final terminator/delay slot.
-// One delay plan satisfies every entry context group of the provider.
+// Delays for an absolute-index order preserving scalar values and the
+// terminator/delay slot, valid under every entry context group.
 LogicalResult atlasOrderedBlockDelays(const AtlasStream &stream, size_t block,
                                       const timing::TimingProvider &provider,
                                       llvm::ArrayRef<size_t> order,

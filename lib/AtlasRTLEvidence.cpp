@@ -101,14 +101,6 @@ struct Fill {
     return block && block->firstFreeAge ? *block->firstFreeAge - 1 : 0;
   }
   int nextIssue() { return block && block->nextIssueAge ? *block->nextIssueAge : 0; }
-  // Last age of the VPU's own issue window. next_issue_age is when the RTL's
-  // issue-busy bit for the same opcode clears; an opcode shares logic with
-  // itself, so no next VPU opcode is admitted later (VectorFSM canIssueOp).
-  int issueEnd(int busy) {
-    if (block && (!block->nextIssueAge || *block->nextIssueAge < 1 || *block->nextIssueAge > busy + 1))
-      fail("facts block lacks a next_issue_age within its busy window");
-    return nextIssue() - 1;
-  }
   void bank(int line, const char *key) {
     f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
   }
@@ -116,16 +108,11 @@ struct Fill {
     if (from <= to)
       for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
-  // VLOAD and VSTORE hold only their own path, so they overlap each other
-  // (VmemBank holds order a shared bank) and the VPU and XLU, which meet them
-  // only at MREG ports and release ages. The VPU and XLU exclude each other: a
-  // VPU keeps the VPU slot until next_issue_age, which admits the next VPU
-  // command, and the XLU until first_free_age; the XLU holds both throughout.
-  void engine(Unit unit, int busy) {
-    hold({unit, Unit::Vpu}, 0, busy);
-  }
+  // VPU admission uses next_issue_age; XLU exclusion lasts through busy.
   void vpu(int busy) {
-    int issued = issueEnd(busy);
+    if (block && (!block->nextIssueAge || *block->nextIssueAge < 1 || *block->nextIssueAge > busy + 1))
+      fail("facts block lacks a next_issue_age within its busy window");
+    int issued = nextIssue() - 1;
     hold({Unit::Vpu}, 0, issued);
     hold({Unit::Xlu}, issued + 1, busy);
   }
@@ -152,26 +139,18 @@ const std::map<OpClass, const char *> &mxuBlocks() {
   return table;
 }
 
-// The compiler names the MREG, accumulator and weight rows each event group
-// touches; the facts give every age. A command holds its own MXU through its
-// last effect, so without pair facts commands on one MXU stay sequenced; pair
-// facts covering the unit replace the hold with pair admission (PairSlots in
-// lib/AtlasRTLSelection.cpp). The other MXU, the VPU, the XLU, the VLS
-// paths and pending DMA transfers meet it only at MREG ports and the MREG
-// release rules, as the AtlasCore pair sweeps show (pairs/core_mxu*.yaml,
-// pairs/core_dma_mxu.yaml). Accumulator and weight-slot hazards are access
-// rules. Weight reads are not extracted, so a matmul retains its whole slot
-// from issue through its last accumulator write.
+// Each MXU holds its own unit unless pair facts replace that hold. Matmul
+// retains its weight slot through the last write because weight reads lack ages.
 Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBlock> &blocks) {
   Footprint f;
   const OpInfo &op = *in.op;
-  auto block = mxuBlocks().find(op.opClass);
-  if (block == mxuBlocks().end() || op.mxu < 0 || op.mxu > 1) {
+  std::string blockName = RTLEvidence::mxuBlockName(op);
+  if (blockName.empty()) {
     f.error = kAtlasRTLTimingProviderId.str() + ": unsupported MXU operation";
     return f;
   }
   const int m = op.mxu;
-  Fill fill(f, "mxu" + std::to_string(m) + "." + block->second, blocks);
+  Fill fill(f, blockName, blocks);
   std::set<std::string> modeled;
   int busy = 0;
   auto track = [&](const char *key, int end) { modeled.insert(key); busy = std::max(busy, end); };
@@ -566,9 +545,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     return f;
   }
   if (name == "delay" || name == "ecall") return f;
-  // Control flow reads its operands at issue like ADDI. The stream verifier
-  // drains every engine before a block's successors can start, so the redirect
-  // latency only has to be at least the delay slot.
+  // Control flow reads operands at issue; the verifier drains successor edges.
   if (op.opClass == OpClass::Branch) {
     if (!xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported branch operands");
     x(in.rs1, false);
@@ -687,22 +664,23 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     f.readRelease = fill.readEnd("read");
     f.writeRelease = fill.last("write");
     int busy = fill.busyEnd();
-    fill.engine(Unit::Xlu, busy);
+    fill.hold({Unit::Xlu, Unit::Vpu}, 0, busy);
     return fill.done(busy);
   }
 
   if (op.engine == Engine::Vpu) {
-    auto block = vpuBlocks().find(name);
-    if (block == vpuBlocks().end()) return reject("unsupported VPU operation");
+    const char *blockName = vpuBlockName(name);
+    if (!blockName) return reject("unsupported VPU operation");
     const bool immediate = op.opClass == OpClass::VpuLoadImmPair ||
                            op.opClass == OpClass::VpuLoadImmSingle;
     if (!immediate && in.imm != 0) return reject("unsupported VPU encoding");
-    Fill fill(f, block->second, blocks);
-    std::vector<const char *> reads, writes;
+    Fill fill(f, blockName, blocks);
+    int writeRelease = fill.nextIssue();
     auto note = [&](bool write, const char *key, std::initializer_list<int> used) {
       auto &list = write ? f.mregWrites : f.mregReads;
       list.insert(list.end(), used);
-      (write ? writes : reads).push_back(key);
+      int &release = write ? writeRelease : f.readRelease;
+      release = std::max(release, write ? fill.last(key) : fill.readEnd(key));
     };
     auto pair = [&](int reg, bool write, const char *key, int passes = 1) {
       if (!mreg(reg) || (reg & 1)) fill.fail("BF16 operands must name even register pairs");
@@ -757,9 +735,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
           fill.fail("VPU register operands must occupy distinct physical banks (register mod 32): m" +
                     std::to_string(at->second) + " and m" + std::to_string(reg) + " share bank " +
                     std::to_string(reg & 31));
-    for (const char *key : reads) f.readRelease = std::max(f.readRelease, fill.readEnd(key));
-    f.writeRelease = fill.nextIssue();
-    for (const char *key : writes) f.writeRelease = std::max(f.writeRelease, fill.last(key));
+    f.writeRelease = writeRelease;
     int busy = fill.busyEnd();
     fill.vpu(busy);
     return fill.done(busy);

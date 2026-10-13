@@ -6,7 +6,7 @@
 #include "llvm/Support/JSON.h"
 
 namespace mlir::atlas {
-// Resolved timing of the final stream, exported only after it rechecks.
+// Export final-stream timing only after executable and timing verification.
 FailureOr<llvm::json::Object> exportAtlasRTLTiming(ModuleOp module);
 } // namespace mlir::atlas
 

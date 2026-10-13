@@ -40,9 +40,7 @@ public:
 // names policy, not RTL qualification.
 struct TimingProvider {
   std::string id;
-  // False: a branch or jump, like a halt, issues while a preceding DELAY still
-  // stalls, so the timing passes end such a stall on a NOP and verification
-  // rejects a DELAY immediately before a redirect.
+  // False: redirects issue during DELAY and need a NOP guard after it.
   bool redirectWaitsForDelay = true;
   // True: blocks are checked under each concrete entry context
   // (atlasBlockContexts) rather than only values merged over all paths.
@@ -60,9 +58,8 @@ struct TimingProvider {
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
-// One block's dependence graph under `provider`: pair dependences, DMA
-// completion conflicts resolved at the matching wait, and waits guarding
-// transfers from earlier blocks. A footprint or rule error fails the graph.
+// Provider dependences with DMA conflicts guarded by matching waits.
+// Missing footprints or rules fail the graph.
 TimingRuleResult<DepGraph> buildTimingGraph(const std::vector<Instr> &instrs,
                                             const RegValues &entry,
                                             const TimingProvider &provider);

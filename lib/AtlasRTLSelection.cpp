@@ -4,11 +4,15 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringExtras.h"
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <climits>
+#include <map>
 #include <optional>
 #include <set>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -74,10 +78,7 @@ std::vector<int> mregOperands(const Footprint &f) {
   return regs;
 }
 
-// How two commands' MREG operands overlap, as pair files state it
-// (pairs/core_mxu_shared.yaml): "i=j" where the first's i-th register is the
-// second's j-th, "i~j" where they share a physical bank (register mod 32)
-// under different registers, comma-joined; "disjoint" when no bank is shared.
+// Pair facts name equal registers as i=j, equal banks as i~j, or disjoint.
 std::string mregOverlap(const std::vector<int> &first, const std::vector<int> &second) {
   std::string out;
   for (size_t i = 0; i < first.size(); ++i)
@@ -94,16 +95,8 @@ Footprint withoutHold(const Footprint &f, Unit unit) {
   return out;
 }
 
-// Selected pair facts admit commands of one engine at once: a later command
-// may issue while an earlier one is live only where a pair fact for the two
-// (in issue order) covers that gap and their operands satisfy its relation,
-// and at most the engine's observed live capacity run together. A VPU command
-// is live from issue until its next_issue_age; it keeps its VPU and XLU holds
-// in `engines`, which excludes XLU work as one table would. An MXU command on
-// a unit the facts cover is live from issue through its busy end (its last
-// event, MREG reads through their response; never shorter than the facts'
-// last-event window) and replaces its own-unit hold, so without a fact the
-// next command on that MXU waits exactly as the hold made it wait.
+// Pair facts admit overlap only at covered gaps, matching operands and observed
+// live capacity. VPU windows end at next_issue_age; MXU windows at the busy end.
 class PairSlots {
 public:
   explicit PairSlots(const RTLEvidence &evidence) : evidence(evidence), facts(*evidence.pairFacts()) {}
@@ -185,10 +178,7 @@ private:
         return true;
     return false;
   }
-  // Every relation must be stated in a known vocabulary and hold, and it must
-  // constrain every operand kind both commands name: how their MREG operands
-  // overlap (disjoint banks, or the exact shared registers and banks) always,
-  // the accumulator and the weight slot where both use one.
+  // Require known relations for MREG banks and every shared accumulator or slot.
   static bool satisfied(const OpPairFact &fact, const Command &first, const Command &second) {
     bool banks = false, acc = false, slot = false;
     auto same = [](const std::optional<int> &a, const std::optional<int> &b, const std::string &value) {
@@ -272,10 +262,8 @@ private:
   std::optional<PairSlots> slots;
 };
 
-// Every block is verified from an idle state, so every path must reach ECALL
-// through blocks ending in a halt, a delay-slotted redirect to an instruction,
-// or a fall-through. Transfers pend one per channel and at most eight, each
-// waited on its own channel within its block.
+// Every reachable block starts idle and drains before its successor or ECALL.
+// DMA launches need distinct channels and free slots until their matching waits.
 std::string validateScope(const AtlasStream &s) {
   if (s.ops.size() > RTLEvidence::maximumProgramWords())
     return "program exceeds the 32768-word instruction memory";
@@ -347,6 +335,217 @@ std::string validateScope(const AtlasStream &s) {
 
 } // namespace
 
+static bool sameAccess(const Access &a, const Access &b) {
+  return std::tie(a.res, a.write, a.first, a.count, a.age, a.step, a.anywhere, a.atCompletion) ==
+         std::tie(b.res, b.write, b.first, b.count, b.age, b.step, b.anywhere, b.atCompletion);
+}
+
+static bool sameHold(const Hold &a, const Hold &b) {
+  return std::tie(a.unit, a.index, a.from, a.to, a.alt) == std::tie(b.unit, b.index, b.from, b.to, b.alt);
+}
+
+static bool sameFootprint(const Footprint &a, const Footprint &b) {
+  return std::equal(a.accesses.begin(), a.accesses.end(), b.accesses.begin(), b.accesses.end(), sameAccess) &&
+         std::equal(a.holds.begin(), a.holds.end(), b.holds.begin(), b.holds.end(), sameHold) &&
+         std::tie(a.mregReads, a.mregWrites, a.readRelease, a.writeRelease, a.writeDuringRead, a.vpuLive, a.doneAge, a.dmaCycles, a.error) ==
+             std::tie(b.mregReads, b.mregWrites, b.readRelease, b.writeRelease, b.writeDuringRead, b.vpuLive, b.doneAge, b.dmaCycles, b.error);
+}
+
+std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
+    const AtlasStream &s, size_t block, const TimingProvider &provider) {
+  if (!provider.concreteEntryContexts || s.contexts.empty() || s.contexts[block].empty())
+    return {{{s.entry[block]}}};
+  // Footprints are pure in the instruction and its register reads, so contexts
+  // with equal footprint sequences time identically.
+  std::vector<AtlasContextGroup> groups;
+  std::vector<std::vector<Footprint>> resolved;
+  for (const RegValues &entry : s.contexts[block]) {
+    std::vector<Footprint> footprints;
+    RegValues regs = entry;
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      footprints.push_back(provider.footprint(s.instrs[i], regs));
+      applyScalar(s.instrs[i], regs);
+    }
+    auto same = [&](const std::vector<Footprint> &other) {
+      return std::equal(footprints.begin(), footprints.end(), other.begin(), other.end(), sameFootprint);
+    };
+    auto it = llvm::find_if(resolved, same);
+    if (it == resolved.end()) {
+      resolved.push_back(std::move(footprints));
+      groups.push_back({{entry}});
+    } else {
+      groups[it - resolved.begin()].entries.push_back(entry);
+    }
+  }
+  return groups;
+}
+
+InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,
+                                                        const RegValues *context) {
+  InFlightDiagnostic diagnostic = op->emitOpError(error);
+  if (!s.contextLimit.empty())
+    diagnostic.attachNote() << s.contextLimit;
+  if (context) {
+    std::string known;
+    for (int r = 1; r < 32; ++r)
+      if ((*context)[r])
+        known += " x" + std::to_string(r) + "=0x" + llvm::utohexstr(*(*context)[r]);
+    diagnostic.attachNote() << "in the block entry context with" << (known.empty() ? " no known registers" : known);
+  }
+  return diagnostic;
+}
+
+TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
+    const std::vector<Instr> &instrs, const RegValues &entry,
+    const TimingProvider &p) {
+  TimingRuleResult<DepGraph> result;
+  DepGraph &g = result.value;
+  g.nodes = instrs;
+  int n = static_cast<int>(instrs.size());
+  RegValues regs = entry;
+  for (const Instr &in : instrs) {
+    Footprint f = p.footprint(in, regs);
+    if (!f.error.empty())
+      return {{}, f.error};
+    g.footprints.push_back(std::move(f));
+    applyScalar(in, regs);
+  }
+  // Adds an edge, or raises the distance of an existing edge between the nodes.
+  std::map<std::pair<int, int>, int> index;
+  auto add = [&](int from, int to, int distance, EdgeKind kind, const std::string &reason) {
+    auto it = index.find({from, to});
+    if (it == index.end()) {
+      index[{from, to}] = static_cast<int>(g.edges.size());
+      g.edges.push_back({from, to, distance, kind, reason});
+    } else if (distance > g.edges[it->second].distance) {
+      g.edges[it->second] = {from, to, distance, kind, reason};
+    }
+  };
+  for (int b = 0; b < n; b++)
+    for (int a = 0; a < b; a++) {
+      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
+      if (!d.error.empty())
+        return {{}, d.error};
+      if (d.value.distance > 0)
+        add(a, b, d.value.distance, d.value.kind, d.value.reason);
+    }
+  // A DMA's completion is known only once its dma.wait issues, so later
+  // conflicting accesses wait for that dma.wait.
+  for (int d = 0; d < n; d++) {
+    if (!isLaunch(g.nodes[d]))
+      continue;
+    const OpInfo &op = *g.nodes[d].op;
+    int wait = -1;
+    for (int k = d + 1; k < n && wait < 0; k++)
+      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel)
+        wait = k;
+    for (int k = d + 1; k < n; k++) {
+      if (k == wait)
+        continue;
+      auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
+      if (!conflict.error.empty())
+        return {{}, conflict.error};
+      if (!conflict.value.conflict)
+        continue;
+      if (wait >= 0 && wait < k)
+        add(wait, k, 1, conflict.value.kind,
+            std::string(edgeKindName(conflict.value.kind)) + " with " + op.name + " (done once the wait issues)");
+      else
+        add(d, k, 1, EdgeKind::Order, op.name + " may still be in flight (no dma.wait in between)");
+    }
+  }
+  // A wait for a transfer from an earlier block guards conflicting accesses
+  // and channel reuse; the transfer latched its registers at launch, so only
+  // the VMEM it moves at completion may conflict.
+  for (int w = 0; w < n; w++) {
+    const OpInfo &op = *g.nodes[w].op;
+    if (op.opClass != OpClass::DmaWait)
+      continue;
+    bool local = false;
+    for (int d = 0; d < w; d++)
+      if (isLaunch(g.nodes[d]) && g.nodes[d].op->channel == op.channel)
+        local = true;
+    if (local)
+      continue;
+    for (int k = w + 1; k < n; k++) {
+      bool guarded = isLaunch(g.nodes[k]);
+      for (const Access &a : g.footprints[k].accesses)
+        if (a.res == Res::Vmem)
+          guarded = true;
+      if (guarded)
+        add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
+    }
+  }
+  g.in.assign(n, {});
+  g.out.assign(n, {});
+  for (int e = 0; e < static_cast<int>(g.edges.size()); e++) {
+    g.out[g.edges[e].from].push_back(e);
+    g.in[g.edges[e].to].push_back(e);
+  }
+  return result;
+}
+
+FailureOr<MachineTiming> mlir::atlas::machineTimingOf(
+    const TimingProvider &provider, const std::string &name, Operation *at) {
+  auto instruction = [&](int rd, int rs1, int rs2) {
+    timing::Instr in;
+    in.op = timing::findOp(name);
+    assert(in.op && "the timing model knows every machine operation");
+    in.rd = rd;
+    in.rs1 = rs1;
+    in.rs2 = rs2;
+    return in;
+  };
+  // Two instances that share no register, slot, BF16 pair or VMEM bank.
+  timing::Instr first = instruction(0, 2, 4), second = instruction(6, 8, 10);
+  switch (first.op->opClass) {
+  case timing::OpClass::WeightPush:
+  case timing::OpClass::AccPushFp8:
+  case timing::OpClass::AccPushBf16:
+    // A push names its slot and source pair; its second field is unused.
+    first = instruction(0, 0, 0);
+    second = instruction(1, 2, 0);
+    break;
+  case timing::OpClass::MatMul:
+  case timing::OpClass::MatMulAcc:
+    // MXU slot operands are 0 or 1.
+    first = instruction(0, 0, 0);
+    second = instruction(1, 2, 1);
+    break;
+  case timing::OpClass::PopFp8:
+  case timing::OpClass::PopBf16:
+    // A pop names its destination pair, scale register and accumulator slot.
+    first = instruction(0, 0, 0);
+    second = instruction(2, 0, 1);
+    break;
+  default:
+    break;
+  }
+  timing::RegValues regs = timing::unknownRegs();
+  regs[2] = 0;
+  regs[8] = timing::kVmemBankBytes / 4;
+  timing::Footprint firstFootprint = provider.footprint(first, regs);
+  timing::Footprint secondFootprint = provider.footprint(second, regs);
+  for (const timing::Footprint &f : {firstFootprint, secondFootprint})
+    if (!f.error.empty())
+      return at->emitOpError("virtual cost of ") << name << ": " << f.error;
+  auto table = provider.createReservations();
+  if (!table.error.empty() || !table.value)
+    return at->emitOpError("virtual cost of ") << name << ": "
+           << (table.error.empty() ? "timing provider returned no reservation state" : table.error);
+  std::string why = table.value->reserve(first, firstFootprint, 0);
+  int interval = 1;
+  for (; why.empty(); ++interval) {
+    auto conflict = table.value->conflict(second, secondFootprint, interval);
+    why = conflict.error;
+    if (why.empty() && conflict.value.empty())
+      break;
+  }
+  if (!why.empty())
+    return at->emitOpError("virtual cost of ") << name << ": " << why;
+  return MachineTiming{firstFootprint.doneAge + 1, interval};
+}
+
 TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence> evidence) {
   TimingProvider p;
   p.id = kAtlasRTLTimingProviderId.str();
@@ -361,13 +560,15 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     // The LSU reports a VSTORE's source register as read until the VSTORE
     // drains; every writer but a VLOAD asserts on a pending read
     // (MregBankTracker, pairs/core_mxu_cross.yaml).
-    if (a.op->opClass == OpClass::VStore && b.op->opClass != OpClass::VLoad)
+    if (a.op->opClass == OpClass::VStore && b.op->opClass != OpClass::VLoad) {
+      int end = holdEnd(fa, Unit::VstorePath);
       for (int r : fa.mregReads)
         if (std::find(fb.mregWrites.begin(), fb.mregWrites.end(), r) != fb.mregWrites.end() &&
-            holdEnd(fa, Unit::VstorePath) + 1 > d.distance)
-          d = {holdEnd(fa, Unit::VstorePath) + 1, EdgeKind::WAR,
+            end + 1 > d.distance)
+          d = {end + 1, EdgeKind::WAR,
                "m" + std::to_string(r) + " reported read until the VSTORE drains at age " +
-                   std::to_string(holdEnd(fa, Unit::VstorePath))};
+                   std::to_string(end)};
+    }
     // Launches keep queue order, so a wait kept ahead of every later launch
     // keeps each launch's command slot free, as the scope requires.
     if (isLaunch(b) && a.op->opClass == OpClass::DmaWait && d.distance < 1)
@@ -524,9 +725,7 @@ void mlir::atlas::registerSelectAtlasRTLEvidencePass() {
 }
 
 namespace {
-// This is an ordering estimate, deliberately unrelated to the selected DMA
-// completion facts (which remain unknown). Use the existing compiler model,
-// not a fit to the synthetic replay responder.
+// Ordering uses the compiler's DMA estimate; selected completion remains unknown.
 int schedulerDMACycles(const Footprint &f) {
   for (const Access &a : f.accesses)
     if (a.res == Res::Vmem && a.atCompletion)
@@ -625,17 +824,17 @@ void mlir::atlas::estimateRTLGraphDMA(DepGraph &graph) {
 std::vector<int> mlir::atlas::rtlContentionPriorities(
     const DepGraph &graph, const std::vector<int> &issued, int bodyCount) {
   std::vector<int> priority = criticalHeights(graph);
-  std::vector<int> units(bodyCount, -1), occupancy(bodyCount);
+  std::vector<int> units(bodyCount, -1);
   // Remaining occupancy plus the shortest tail bounds completion on a busy
   // unit. Scalar operations retain their critical-height priority.
   std::map<int, std::pair<int, int>> backlog;
   for (int i = 0; i < bodyCount; ++i) {
-    occupancy[i] = primaryOccupancy(graph.footprints[i], units[i]);
+    int occupancy = primaryOccupancy(graph.footprints[i], units[i]);
     if (issued[i] >= 0 || units[i] < 0)
       continue;
     auto &entry = backlog.try_emplace(units[i], 0, INT_MAX).first->second;
-    entry.first += occupancy[i];
-    entry.second = std::min(entry.second, std::max(0, priority[i] - occupancy[i]));
+    entry.first += occupancy;
+    entry.second = std::min(entry.second, std::max(0, priority[i] - occupancy));
   }
   for (int i = 0; i < bodyCount; ++i) {
     auto found = backlog.find(units[i]);
@@ -652,8 +851,8 @@ LogicalResult mlir::atlas::selectRTLBlockSchedule(
   const auto groups = atlasBlockContexts(s, block, p);
   size_t begin = s.starts[block], end = s.blockEnd(block);
   std::vector<DepGraph> graphs;
+  std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
   for (const AtlasContextGroup &group : groups) {
-    std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
     auto built = buildTimingGraph(nodes, group.entries.front(), p);
     if (!built.error.empty())
       return emitAtlasFootprintError(s, s.ops[begin], built.error, &group.entries.front());

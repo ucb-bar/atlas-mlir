@@ -7,6 +7,7 @@
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasRTLSelection.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -353,71 +354,16 @@ constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 // Work that holds the frontend from start to finish.
 Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
 
-// Costs from the selected provider's footprints and reservations on canonical
-// operands; provider timing does not depend on the operands. DMA completion
-// is not a provider fact, so transfers keep the model's transfer estimate.
+// Provider costs use canonical operands; DMA keeps the model transfer estimate.
 class CostModel {
 public:
   explicit CostModel(const timing::TimingProvider &provider) : provider(provider) {}
 
   FailureOr<MachineTiming> timingOf(const std::string &name, Operation *at) const {
-    auto instruction = [&](int rd, int rs1, int rs2) {
-      timing::Instr in;
-      in.op = timing::findOp(name);
-      assert(in.op && "the timing model knows every machine operation");
-      in.rd = rd;
-      in.rs1 = rs1;
-      in.rs2 = rs2;
-      return in;
-    };
-    // Two instances that share no register, slot, BF16 pair or VMEM bank.
-    timing::Instr first = instruction(0, 2, 4), second = instruction(6, 8, 10);
-    switch (first.op->opClass) {
-    case timing::OpClass::WeightPush:
-    case timing::OpClass::AccPushFp8:
-    case timing::OpClass::AccPushBf16:
-      // A push names its slot and source pair; its second field is unused.
-      first = instruction(0, 0, 0);
-      second = instruction(1, 2, 0);
-      break;
-    case timing::OpClass::MatMul:
-    case timing::OpClass::MatMulAcc:
-      // MXU slot operands are 0 or 1.
-      first = instruction(0, 0, 0);
-      second = instruction(1, 2, 1);
-      break;
-    case timing::OpClass::PopFp8:
-    case timing::OpClass::PopBf16:
-      // A pop names its destination pair, scale register and accumulator slot.
-      first = instruction(0, 0, 0);
-      second = instruction(2, 0, 1);
-      break;
-    default:
-      break;
-    }
-    timing::RegValues regs = timing::unknownRegs();
-    regs[2] = 0;
-    regs[8] = timing::kVmemBankBytes / 4;
-    timing::Footprint firstFootprint = provider.footprint(first, regs);
-    timing::Footprint secondFootprint = provider.footprint(second, regs);
-    for (const timing::Footprint &f : {firstFootprint, secondFootprint})
-      if (!f.error.empty())
-        return at->emitOpError("virtual cost of ") << name << ": " << f.error;
-    auto table = provider.createReservations();
-    if (!table.error.empty() || !table.value)
-      return at->emitOpError("virtual cost of ") << name << ": "
-             << (table.error.empty() ? "timing provider returned no reservation state" : table.error);
-    std::string why = table.value->reserve(first, firstFootprint, 0);
-    int interval = 1;
-    for (; why.empty(); ++interval) {
-      auto conflict = table.value->conflict(second, secondFootprint, interval);
-      why = conflict.error;
-      if (why.empty() && conflict.value.empty())
-        break;
-    }
-    if (!why.empty())
-      return at->emitOpError("virtual cost of ") << name << ": " << why;
-    return MachineTiming{firstFootprint.doneAge + 1, interval};
+    auto result = machineTimingOf(provider, name, at);
+    if (failed(result))
+      return failure();
+    return MachineTiming{result->latency, result->interval};
   }
 
   FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at) const {

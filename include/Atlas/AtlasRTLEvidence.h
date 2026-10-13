@@ -25,19 +25,15 @@ struct OpTimingBlock {
   std::optional<int> firstFreeAge, nextIssueAge, readLatency;
 };
 
-// One merlin.op_pairs.v1 record (tools/rtl_extract/pairfacts.py): the second
-// operation may issue `gap` cycles after the first for stableGap <= gap <=
-// lastGap when the two commands' operands satisfy every `relation` entry.
+// A merlin.op_pairs.v1 record admits stableGap <= gap <= lastGap when
+// the commands' operands satisfy every relation entry.
 struct OpPairFact {
   std::map<std::string, std::string> relation;
   int stableGap = 0, lastGap = 0;
 };
 
-// Assertion-checked pair and chain results selected with the facts they were
-// derived from; `capacity` is the most operations of an engine observed live
-// at once, each live from issue until its next_issue_age where the engine's
-// blocks have one (VPU), else through its last event age (MXU); `window`
-// names that rule per engine.
+// Assertion-checked pair/chain results pinned to their source facts; capacity
+// bounds live commands through last_event_age or until next_issue_age.
 struct RTLPairFacts {
   std::string sha256;
   std::map<std::pair<std::string, std::string>, std::vector<OpPairFact>> pairs;
@@ -45,10 +41,8 @@ struct RTLPairFacts {
   std::map<std::string, std::string> window;
 };
 
-// RTL-computed operation timing (tools/rtl_extract), pinned by the facts
-// file's SHA-256. The compiler supplies footprint structure; the facts supply
-// every age, count, step, hold and release. An operation without a resolved,
-// structurally matching block is rejected.
+// SHA-pinned RTL ages fill compiler footprints; unresolved or structurally
+// mismatched blocks are rejected.
 class RTLEvidence {
 public:
   // ScalarCore fetches with a 15-bit word index.

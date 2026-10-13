@@ -34,12 +34,7 @@ Array integers(const std::vector<int> &values) {
   return result;
 }
 
-bool isLaunch(const Instr &in) {
-  return in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
-}
-
 Object footprintJSON(const Instr &in, const Footprint &footprint, bool dynamic) {
-  bool launch = isLaunch(in);
   Array accesses, holds;
   for (const Access &access : footprint.accesses) {
     Object fact{{"resource", resourceName(access.res)},
@@ -65,6 +60,7 @@ Object footprintJSON(const Instr &in, const Footprint &footprint, bool dynamic) 
       {"vpu_live", footprint.vpuLive}, {"done_age", footprint.doneAge},
       {"dma_cycles", footprint.dmaCycles}};
   if (dynamic) {
+    bool launch = in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
     result["dma_async"] = launch;
     if (launch) {
       result["done_age"] = nullptr;
@@ -208,8 +204,9 @@ mlir::atlas::exportAtlasRTLTiming(ModuleOp module) {
       {"blocks", std::move(blocks)},
       {"instructions", std::move(instructions)}};
   if (const RTLPairFacts *pairs = evidence.pairFacts()) {
-    (*result.getObject("evidence"))["op_pairs_schema"] = "merlin.op_pairs.v1";
-    (*result.getObject("evidence"))["op_pairs_sha256"] = pairs->sha256;
+    auto *selectedFacts = result.getObject("evidence");
+    (*selectedFacts)["op_pairs_schema"] = "merlin.op_pairs.v1";
+    (*selectedFacts)["op_pairs_sha256"] = pairs->sha256;
   }
   if (dynamic) {
     auto *conventions = result.getObject("conventions");

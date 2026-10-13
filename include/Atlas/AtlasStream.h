@@ -20,9 +20,8 @@ struct AtlasStream {
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
   std::vector<timing::RegValues> entry;
-  // Concrete entry states per block, from executing the CFG with each branch
-  // evaluated where its operands are known; empty past kAtlasMaxEntryContexts,
-  // with the reason in contextLimit. A block no evaluated path reaches has none.
+  // Reachable entry states, evaluating branches with known operands.
+  // Empty on contextLimit overflow; unreachable blocks have no entries.
   std::vector<std::vector<timing::RegValues>> contexts;
   std::string contextLimit;
 
@@ -39,9 +38,8 @@ constexpr size_t kAtlasMaxEntryContexts = 4096;
 struct AtlasContextGroup {
   std::vector<timing::RegValues> entries;
 };
-// The entry states a timing consumer checks `block` under: one group per
-// distinct footprint sequence of the concrete contexts when the provider asks
-// for them and they reach the block, else the merged entry alone.
+// Groups concrete entries with equal footprints when the provider requests
+// them; otherwise uses the merged entry.
 std::vector<AtlasContextGroup> atlasBlockContexts(
     const AtlasStream &stream, size_t block, const timing::TimingProvider &provider);
 // Emits a footprint error at `op`, noting why concrete contexts were
@@ -63,8 +61,8 @@ struct AtlasTimedTrace {
   std::vector<timing::Footprint> footprints;
   std::vector<int> cycles;
   std::vector<int> successorIssue;
-  // Per block verified under several context groups, each group's entry
-  // states and the footprints of the block's instructions; else empty.
+  // Entry states and footprints for blocks with several context groups;
+  // empty for blocks with one group.
   struct Context {
     std::vector<timing::RegValues> entries;
     std::vector<timing::Footprint> footprints;
