@@ -13,6 +13,15 @@ LogicalResult atlasInOrderBlockDelays(const AtlasStream &stream, size_t block,
                                       std::vector<DelayInsertion> &before,
                                       DelayInsertion &after, int &tail);
 
+// Plan one block in a chosen order, given as absolute stream indices. The
+// order must preserve scalar values and the final terminator/delay slot.
+// One delay plan satisfies every entry context group of the provider.
+LogicalResult atlasOrderedBlockDelays(const AtlasStream &stream, size_t block,
+                                      const timing::TimingProvider &provider,
+                                      llvm::ArrayRef<size_t> order,
+                                      std::vector<DelayInsertion> &before,
+                                      DelayInsertion &after, int &tail);
+
 // Register the delay insertion pass with atlas-opt.
 void registerInsertAtlasDelaysPass();
 

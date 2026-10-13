@@ -20,7 +20,7 @@ constexpr const char *kHaltGuard = "a halt does not wait for a delay";
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 constexpr const char *kContextReason = "another entry context of this block issues it later";
 
-// In-order placement of one block from `entry`. Each op issues no earlier
+// Placement of one block from `entry`, in source order or `order`. Each op issues no earlier
 // than its `floor` cycle, when given, and the block drains no earlier than
 // `drainFloor`; `cycles` and `drainedAt` receive the placement. `tail` is the
 // idle time that drains a block without a branch or halt. A nonempty floor
@@ -30,7 +30,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         ArrayRef<int> floor, int drainFloor,
                         std::vector<DelayInsertion> &before,
                         DelayInsertion &after, std::vector<int> &cycles,
-                        int &drainedAt, int &tail) {
+                        int &drainedAt, int &tail,
+                        ArrayRef<size_t> order = {}) {
   ArrayRef<Operation *> ops = s.ops;
   ArrayRef<Instr> instrs = s.instrs;
   size_t begin = s.starts[block];
@@ -117,7 +118,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     }
   };
 
-  for (size_t i = begin; i < end; ++i) {
+  for (size_t position = 0; position < end - begin; ++position) {
+    size_t i = order.empty() ? begin + position : order[position];
     const Instr &in = instrs[i];
     Footprint f = p.footprint(in, regs);
     if (!f.error.empty())
@@ -139,9 +141,9 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         }
       int idle = cycle - nextFree;
       if (idle > 0) {
-        size_t prev = i - 1;
+        size_t prev = position > 0 ? (order.empty() ? i - 1 : order[position - 1]) : i;
         bool reuse =
-            i > begin && isNop(ops[prev]) && before[prev].delays.empty();
+            position > 0 && isNop(ops[prev]) && before[prev].delays.empty();
         if (reuse)
           before[prev] = {idleDelays(idle), false, reason};
         else
@@ -156,7 +158,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
     if (isControlFlow(*in.op)) {
       // The slot issues next; the successors start drained two cycles later.
-      size_t slotIndex = i + 1;
+      size_t slotIndex = order.empty() ? i + 1 : order[position + 1];
       const Instr &slot = instrs[slotIndex];
       RegValues after = regs;
       applyScalar(in, after);
@@ -166,6 +168,10 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       if (drained() - 2 > cycle) {
         cycle = drained() - 2;
         reason = "this block finishes before the branch's successors start";
+      }
+      if (!order.empty() && !floor.empty() && floor[slotIndex - begin] - 1 > cycle) {
+        cycle = floor[slotIndex - begin] - 1;
+        reason = kContextReason;
       }
       auto fits = [&](int c) -> std::string {
         std::string why = rule(table->conflict(in, f, c));
@@ -196,7 +202,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       place(slotIndex, sf, cycle + 1, "");
       if (!fault.empty())
         return ops[i]->emitOpError(fault);
-      i = slotIndex;
+      ++position;
       continue;
     }
 
@@ -231,16 +237,15 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
 constexpr int kMaxContextRounds = 64;
 
-} // namespace
-
-LogicalResult mlir::atlas::atlasInOrderBlockDelays(
+LogicalResult planBlockDelays(
     const AtlasStream &s, size_t block, const TimingProvider &p,
-    std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail) {
+    std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail,
+    ArrayRef<size_t> order = {}) {
   std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, p);
   std::vector<int> cycles;
   int drained = 0;
   if (groups.size() == 1)
-    return timeBlock(s, block, p, groups.front().entries.front(), {}, 0, before, after, cycles, drained, tail);
+    return timeBlock(s, block, p, groups.front().entries.front(), {}, 0, before, after, cycles, drained, tail, order);
   // Raise each op's issue cycle to the latest any context needs until one
   // round leaves every context's placement unchanged, so the delays hold
   // under all of them.
@@ -254,7 +259,7 @@ LogicalResult mlir::atlas::atlasInOrderBlockDelays(
       for (size_t i = begin; i < end; ++i)
         before[i] = {};
       after = {};
-      if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail)))
+      if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail, order)))
         return failure();
       // A delay keeps the reason of the context that needs the most idle time there on its own.
       for (size_t i = begin; round == 0 && i < end; ++i) {
@@ -283,6 +288,37 @@ LogicalResult mlir::atlas::atlasInOrderBlockDelays(
   }
   return s.ops[begin]->emitOpError("delays do not converge over the block's ")
          << groups.size() << " entry contexts";
+}
+
+} // namespace
+
+LogicalResult mlir::atlas::atlasInOrderBlockDelays(
+    const AtlasStream &s, size_t block, const TimingProvider &p,
+    std::vector<DelayInsertion> &before, DelayInsertion &after, int &tail) {
+  return planBlockDelays(s, block, p, before, after, tail);
+}
+
+LogicalResult mlir::atlas::atlasOrderedBlockDelays(
+    const AtlasStream &s, size_t block, const TimingProvider &p,
+    ArrayRef<size_t> order, std::vector<DelayInsertion> &before,
+    DelayInsertion &after, int &tail) {
+  size_t begin = s.starts[block], end = s.blockEnd(block);
+  if (order.size() != end - begin)
+    return s.ops[begin]->emitOpError("delay planning order must contain every block instruction");
+  std::vector<bool> seen(end - begin, false);
+  for (size_t i : order) {
+    if (i < begin || i >= end || seen[i - begin])
+      return s.ops[begin]->emitOpError("delay planning order must be a permutation of this block");
+    seen[i - begin] = true;
+  }
+  if ((s.endsInHalt(block) && order.back() != end - 1) ||
+      (s.endsInBranch(block) &&
+       (order[order.size() - 2] != end - 2 || order.back() != end - 1)))
+    return s.ops[begin]->emitOpError("delay planning order must preserve the terminator and delay slot");
+  for (size_t i = begin; i < end; ++i)
+    before[i] = {};
+  after = {};
+  return planBlockDelays(s, block, p, before, after, tail, order);
 }
 
 namespace {
