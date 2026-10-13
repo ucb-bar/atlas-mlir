@@ -49,7 +49,122 @@ def btype(offset_bytes, rs1=13, rs2=14, funct3=4):
     return (imm >> 12) << 31 | ((imm >> 5) & 63) << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | ((imm >> 1) & 15) << 8 | ((imm >> 11) & 1) << 7 | 0x63
 
 
+def scalar_load_trace(first="lw", second="lw", same_destination=False, consecutive_stores=False):
+    """Two scalar loads, the next launch sharing the old writeback edge.
+
+    A later SW consumes the loaded register, and marker/ECALL samples bound the
+    complete execution. Command, response and write ages are 1, 2 and 3.
+    """
+    first_rd = 3 if first == "seld" else 16
+    second_rd = 3 if second == "seld" else first_rd if same_destination else 17
+    load = lambda rd, offset, kind: offset << 20 | 6 << 15 | (6 if kind == "seld" else 2) << 12 | rd << 7 | 0x03
+    store_rd = second_rd if second == "lw" else first_rd
+    stored = 0x55667788 if second == "lw" else 0x11223344
+    words = [6 << 7 | 0x13, load(first_rd, 0, first), 0x13, 0x13,
+             load(second_rd, 4, second), 0x13, 0x13, 0x13,
+             store_rd << 20 | 6 << 15 | 2 << 12 | 8 << 7 | 0x23,
+             0x13, 1 << 20 | 1 << 7 | 0x13, 0xc10 << 20 | 1 << 15 | 1 << 12 | 0x73, 0x73]
+    if consecutive_stores:
+        words[9] = first_rd << 20 | 6 << 15 | 2 << 12 | 12 << 7 | 0x23
+    samples = []
+    for edge in range(1, 16):
+        pc = min(edge - 1, len(words) - 1)
+        values = {key: 0 for key in REPLAY.SIGNALS}
+        values.update(pc=pc, word=words[pc], valid=int(edge <= 13), fire=int(edge <= 12),
+                      halt=int(edge >= 13), marker=int(edge >= 13), ecall=int(edge == 13))
+        if edge in (1, 11):
+            values.update(xw_en=1, xw_addr=6 if edge == 1 else 1, xw_data=0 if edge == 1 else 1)
+        if edge in (3, 6): values.update(scmd=1, scmd_addr=0 if edge == 3 else 4)
+        if edge in (4, 7): values.update(sresp=1, sresp_data=0x11223344 if edge == 4 else 0x55667788)
+        if edge in (5, 8):
+            kind, rd, word = (first, first_rd, 0x11223344) if edge == 5 else (second, second_rd, 0x55667788)
+            values.update(**dict(sew=1, sew_idx=rd, sew_data=word & 255) if kind == "seld"
+                          else dict(xw_en=1, xw_addr=rd, xw_data=word))
+        if edge == 10: values.update(scmd=1, scmd_store=1, scmd_addr=8, scmd_wdata=stored, scmd_wmask=15)
+        if edge == 11 and consecutive_stores:
+            values.update(scmd=1, scmd_store=1, scmd_addr=12, scmd_wdata=0x11223344, scmd_wmask=15)
+        if edge == 12: values.update(csr=1, csr_addr=0xc10, csr_op=1, csr_data=1)
+        samples.append(dict(edge=edge, values=values))
+    memory = (0x11223344).to_bytes(4, "little") + (0x55667788).to_bytes(4, "little") + bytes(24)
+    def expect(vm, dram):
+        vm[0] = vm[0][:8] + stored.to_bytes(4, "little") + vm[0][12:]
+        if consecutive_stores: vm[0] = vm[0][:12] + (0x11223344).to_bytes(4, "little") + vm[0][16:]
+    case = CASES.Case(ops=(), vmem={0: memory}, expect=expect, commands={})
+    return samples, words, case
+
+
 class PortableTest(unittest.TestCase):
+    def test_scalar_store_launch_can_share_previous_command_edge(self):
+        samples, words, case = scalar_load_trace(consecutive_stores=True)
+        events = REPLAY.validate_compute_edges(samples, words, case)
+        stores = [a for a in events["scalar_memory"] if a["kind"] == "sw"]
+        self.assertEqual([(a["address"], a["data"], a["command_age"]) for a in stores],
+                         [(8, 0x55667788, 1), (12, 0x11223344, 1)])
+        self.assertEqual(stores[0]["command_edge"], stores[1]["edge"])
+        for edge, mutation in ((10, dict(scmd=0)), (10, dict(scmd_wmask=3)),
+                               (10, dict(scmd_wdata=0x11223344)), (11, dict(scmd_addr=8)),
+                               (11, dict(scmd_wdata=0x55667788))):
+            with self.subTest(edge=edge, mutation=mutation):
+                changed = copy.deepcopy(samples)
+                changed[edge - 1]["values"].update(mutation)
+                with self.assertRaises(REPLAY.ReplayError): REPLAY.validate_compute_edges(changed, words, case)
+
+    def test_scalar_load_launch_can_share_previous_writeback_edge(self):
+        for first, second, same in (("lw", "lw", False), ("lw", "lw", True),
+                                    ("seld", "lw", False), ("lw", "seld", False)):
+            with self.subTest(first=first, second=second, same=same):
+                samples, words, case = scalar_load_trace(first, second, same)
+                events = REPLAY.validate_compute_edges(samples, words, case)
+                loads = sorted([a for a in events["scalar_memory"] if a["kind"] == "lw"]
+                               + events["scale_loads"], key=lambda a: a["edge"])
+                self.assertEqual([a["edge"] for a in loads], [2, 5])
+                self.assertEqual([a["word"] for a in loads], [0x11223344, 0x55667788])
+                self.assertEqual(loads[0]["write_edge"], loads[1]["edge"])
+                self.assertEqual([(a["command_age"], a["response_age"], a["write_age"]) for a in loads],
+                                 [(1, 2, 3), (1, 2, 3)])
+
+    def test_scalar_load_shared_edge_keeps_event_attribution_strict(self):
+        mutations = (
+            (3, dict(scmd_addr=4)),
+            (4, dict(sresp_data=0x55667788)),
+            (4, dict(sresp=0)),
+            (5, dict(xw_addr=17)),
+            (5, dict(xw_data=0x11223345)),
+            (5, dict(xw_en=0)),
+            (6, dict(scmd_addr=0)),
+            (6, dict(xw_en=1, xw_addr=31, xw_data=9)),
+            (7, dict(sresp_data=0x11223344)),
+            (8, dict(xw_addr=16)),
+            (8, dict(xw_data=0x55667789)),
+        )
+        for edge, mutation in mutations:
+            with self.subTest(edge=edge, mutation=mutation):
+                samples, words, case = scalar_load_trace()
+                samples[edge - 1]["values"].update(mutation)
+                with self.assertRaises(REPLAY.ReplayError): REPLAY.validate_compute_edges(samples, words, case)
+
+    def test_scalar_load_launch_before_previous_writeback_is_rejected(self):
+        samples, words, case = scalar_load_trace()
+        words[3], words[4] = words[4], words[3]
+        for index in (3, 4): samples[index]["values"]["word"] = words[index]
+        with self.assertRaisesRegex(REPLAY.ReplayError, "overlapping scalar load before previous writeback"):
+            REPLAY.validate_compute_edges(samples, words, case)
+
+    def test_scalar_load_shared_edge_preserves_old_reads_and_scale_attribution(self):
+        samples, words, case = scalar_load_trace()
+        # The old LW writes x16 on this edge; a new address operand still reads
+        # before that write and cannot consume the new value yet.
+        words[4] = words[4] & ~(31 << 15) | 16 << 15
+        samples[4]["values"]["word"] = words[4]
+        with self.assertRaisesRegex(REPLAY.ReplayError, "unknown scalar load operand"):
+            REPLAY.validate_compute_edges(samples, words, case)
+        for edge, mutation in ((5, dict(sew=0)), (5, dict(sew_idx=4)), (5, dict(sew_data=0x45)),
+                               (8, dict(sew_idx=4)), (8, dict(sew_data=0x89))):
+            with self.subTest(edge=edge, mutation=mutation):
+                samples, words, case = scalar_load_trace("seld", "lw") if edge == 5 else scalar_load_trace("lw", "seld")
+                samples[edge - 1]["values"].update(mutation)
+                with self.assertRaises(REPLAY.ReplayError): REPLAY.validate_compute_edges(samples, words, case)
+
     def test_bf16_power_product_reference(self):
         word = lambda codes: b"".join(x.to_bytes(2, "little") for x in codes * 4)
         self.assertEqual(REPLAY.bf16_power_product(word([0x3f80, 0x4000, 0xbf80, 0xc000]), word([0x4000, 0x3f00, 0xbf80, 0x4000])),

@@ -431,6 +431,7 @@ def validate_compute_edges(samples,words,case):
         for kind,active in BUSY.items():
             if kind not in live and kind+'_drain' not in live and active(v): reject('unbound '+kind+' activity')
         expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False,'m0_cmd':False,'m1_cmd':False}
+        new_scalar_load=None;new_scalar_store=None;scalar_write=None
         if v('valid') and began and not ended:
             pc=v('pc');word=v('word')
             if pc!=pc_expected or pc>=len(words) or word!=words[pc]: reject('retired/held instruction differs from selected program words')
@@ -444,9 +445,9 @@ def validate_compute_edges(samples,words,case):
                 if opcode==0x13 and funct3==0:
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
                     if regs[rs1] is None: reject('unknown scalar ADDI operand')
-                    if rd: regs[rd]=(regs[rs1]+immediate)&0xffffffff
+                    if rd: regs[rd]=(regs[rs1]+immediate)&0xffffffff;scalar_write=(rd,regs[rd])
                 elif opcode==0x37:
-                    if rd: regs[rd]=word&0xfffff000
+                    if rd: regs[rd]=word&0xfffff000;scalar_write=(rd,regs[rd])
                 elif opcode==0x67 and funct3==1:
                     pass # DELAY is independently bound through its actual held PC/word.
                 elif opcode==0x63 and funct3 in (0,1,4,5,6,7) or opcode==0x6f and rd==0:
@@ -461,19 +462,23 @@ def validate_compute_edges(samples,words,case):
                 elif opcode==0x03 and funct3 in (2,6):
                     # LW/SELD: scalar LSU reads the aligned VMEM word; it becomes register rd, or its low byte scale register rd.
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
-                    if scalar_load or regs[rs1] is None: reject('overlapping/unknown scalar load')
-                    scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd,'kind':'seld' if funct3==6 else 'lw'}
-                    if scalar_load['address']%4: reject('unaligned scalar load')
-                    vm_line(scalar_load['address']>>5)
-                    if funct3==2 and rd: regs[rd]=None
+                    if regs[rs1] is None: reject('unknown scalar load operand')
+                    # Capture operands before this edge's old writeback. A new
+                    # load may launch on the edge the previous load retires;
+                    # install it only after attributing that previous write.
+                    new_scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd,'kind':'seld' if funct3==6 else 'lw'}
+                    if new_scalar_load['address']%4: reject('unaligned scalar load')
+                    vm_line(new_scalar_load['address']>>5)
                 elif opcode==0x03 and funct3==7:
                     seli=(rd,(word>>20)&255)
                 elif opcode==0x23 and funct3==2:
                     immediate=((word>>25)<<5)|((word>>7)&31);immediate=immediate-4096 if immediate&2048 else immediate
-                    if scalar_store or regs[rs1] is None or regs[rs2] is None: reject('overlapping/unknown scalar store')
-                    scalar_store={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'data':regs[rs2],'kind':'sw'}
-                    if scalar_store['address']%4: reject('unaligned scalar store')
-                    vm_line(scalar_store['address']>>5)
+                    if regs[rs1] is None or regs[rs2] is None: reject('unknown scalar store operand')
+                    # A previous SW command may commit on this edge while the
+                    # next SW captures its operands for the following command.
+                    new_scalar_store={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'data':regs[rs2],'kind':'sw'}
+                    if new_scalar_store['address']%4: reject('unaligned scalar store')
+                    vm_line(new_scalar_store['address']>>5)
                 elif opcode==0x07:
                     store=bool(word&(1<<13));identity=(word>>7)&63
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
@@ -569,10 +574,14 @@ def validate_compute_edges(samples,words,case):
         if v('sresp'):
             if not scalar_load or 'word' not in scalar_load or 'response_edge' in scalar_load or v('sresp_data')!=scalar_load['word']: reject('unbound or mismatched scalar memory response')
             scalar_load['response_edge']=edge
+        load_write=False
         if scalar_load and scalar_load['kind']=='lw' and 'response_edge' in scalar_load and (not scalar_load['rd'] or v('xw_en') and v('xw_addr')==scalar_load['rd']):
             if scalar_load['rd'] and v('xw_data')!=scalar_load['word']: reject('scalar load writes a different register value')
+            load_write=bool(scalar_load['rd'])
             regs[scalar_load['rd']]=scalar_load['word'] if scalar_load['rd'] else 0
             scalar_memory.append({**scalar_load,'write_edge':edge if scalar_load['rd'] else None});scalar_load=None
+        if v('xw_en') and not load_write and (v('xw_addr'),v('xw_data'))!=scalar_write:
+            reject('unattributed or mismatched scalar register write')
         if v('sew'):
             if seli:
                 if (v('sew_idx'),v('sew_data'))!=seli: reject('mismatched SELI scale register write')
@@ -581,6 +590,13 @@ def validate_compute_edges(samples,words,case):
                 if not scalar_load or scalar_load['kind']!='seld' or 'response_edge' not in scalar_load or (v('sew_idx'),v('sew_data'))!=(scalar_load['rd'],scalar_load['word']&255): reject('unbound or mismatched scale register write')
                 scale[scalar_load['rd']]=scalar_load['word']&255;scale_loads.append({**scalar_load,'write_edge':edge});scalar_load=None
         if seli: reject('SELI without its scale register write')
+        if new_scalar_load:
+            if scalar_load: reject('overlapping scalar load before previous writeback')
+            scalar_load=new_scalar_load
+            if scalar_load['kind']=='lw' and scalar_load['rd']: regs[scalar_load['rd']]=None
+        if new_scalar_store:
+            if scalar_store: reject('overlapping scalar store before previous command')
+            scalar_store=new_scalar_store
         for stage in STAGES:
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
