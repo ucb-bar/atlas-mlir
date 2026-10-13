@@ -2,16 +2,16 @@
 
 Every gap comes from the facts: a VPU admits the next VPU command at its next_issue_age and the XLU at
 its first_free_age, and the XLU keeps both out until its first_free_age. VLOAD and VSTORE hold only their
-own path and overlap each other, the VPU and the XLU. An MXU command excludes every engine through its last
-event. Operands are disjoint (MREG physical banks, VMEM banks), so only engine admission decides.
+own path and overlap each other, the VPU and the XLU. An MXU command holds only its own MXU, so it overlaps the
+other MXU and every other engine. Operands are disjoint (MREG physical banks, VMEM banks), so only engine
+admission decides.
 """
-import functools
 import tempfile
 import unittest
 
 from test_delay_insertion import OPT, EMIT, nop, program, run, stream
 from test_rtl_gap_coverage import gapped, issue_cycles, issue_gap
-from test_rtl_timing import (CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, export, facts, facts_variant,
+from test_rtl_timing import (CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, facts, facts_variant,
                              selection, vls, word_base)
 from test_rtl_vmul_timing import reduce, unary, vli, vmul
 from test_rtl_xlu_timing import transpose
@@ -43,22 +43,13 @@ SECOND = {
 }
 
 
-@functools.lru_cache(maxsize=None)
-def mxu_free(name):
-    """One past the last held age of an MXU command's exported footprint."""
-    op = next(op for fa, _, op in (*FIRST.values(), *SECOND.values()) if fa == name)
-    result = run(OPT, program([op, HALT]), selection(), CONSUMERS[0], VERIFY)
-    holds = [h for i in export(result.stdout)["instructions"] for h in i["footprint"]["holds"]]
-    return max(h["to"] for h in holds) + 1
-
-
 def first_free(document, name):
-    return mxu_free(name) if name.startswith("mxu") else block(document, name)["first_free_age"]
+    return block(document, name)["first_free_age"]
 
 
 def expected_gap(document, first, second):
     if first.startswith("mxu") or second.startswith("mxu"):
-        return first_free(document, first)
+        return 1  # MXU0 and MXU1 differ; an MXU meets the other engines only at MREG ports and release rules
     if first.startswith("vpu.") and second.startswith("vpu."):
         return block(document, first)["next_issue_age"]
     if first.startswith("vlsu.") != second.startswith("vlsu.") or {first, second} == {"vlsu.vload", "vlsu.vstore"}:
@@ -176,14 +167,15 @@ class SelectedOverlapTest(unittest.TestCase):
                         self.assertIn("VMEM bank 0 busy", result.stderr)
 
     def test_vstore_source_is_reported_read_until_it_drains(self):
-        # The MREG bank tracker reports a VSTORE's source as read through its busy window: a VPU or XLU command
+        # The MREG bank tracker reports a VSTORE's source as read through its busy window: a VPU, XLU or MXU pop
         # writing it waits for first_free_age, while a VLOAD (which checks only pending writes) follows the read
-        # release (pairs/core_mxu_cross.yaml: vstore_transpose_to_m9, vstore_vli_all_m8).
+        # release (pairs/core_mxu_cross.yaml: vstore_transpose_to_m9, vstore_vli_all_m8, vstore_mxu*_pop_acc_bf16_m8).
         store = block(facts(), "vlsu.vstore")
         drained = store["first_free_age"]
         released = store["events"]["mreg_read"]["last_age"] + store["assumptions"]["scratchpad_read_latency"] + 1
         setup = [*word_base(8, 2 * BANK_WORDS), *word_base(7, 3 * BANK_WORDS)]
         writers = {"transpose": (transpose(30, 9), drained), "vli": (vli("all", 8), drained),
+                   "pop": (("mxu_pop", 'format = "bf16", unit = 0 : i32, dst = 8 : i32, slot = 0 : i32, scale_reg = 0 : i32'), drained),
                    "vload": (vls("vload", 9, 7), released)}
         for name, (writer, boundary) in writers.items():
             with self.subTest(writer=name):

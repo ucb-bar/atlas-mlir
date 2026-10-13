@@ -11,7 +11,7 @@ import unittest
 
 import yaml
 
-from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, without_delays
+from test_delay_insertion import OPT, EMIT, ROOT, addi, nop, program, run, stream, without_delays
 from test_rtl_timing import (CONSUMERS, FACTS, HALT, MARKER, VERIFY, block, delay, export, facts,
                              facts_variant, selected, vls)
 
@@ -31,8 +31,7 @@ STRUCTURE = {
     "matmul_acc": {"mreg_read0": ("mreg", False, "reg"), "acc_read": ("acc", False, "acc"),
                    "acc_write": ("acc", True, "acc")},
 }
-EXCLUDED = {("MXU in-flight matmuls", 0), ("MXU in-flight matmuls", 1), ("VPU", 0), ("XLU", 0),
-            ("VLOAD path", 0), ("VSTORE path", 0)}
+OWN_UNIT = "MXU in-flight matmuls"  # the only hold: a command sequences its own MXU (pairs/core_mxu*.yaml)
 
 
 def mxu(operation, unit, reg=2, acc=0, slot=0, scale=0):
@@ -122,7 +121,7 @@ class SelectedMXUTimingTest(unittest.TestCase):
                         self.assertEqual({(a["resource"], a["write"], a["first"], a["count"], a["age"], a["step"])
                                           for a in footprint["accesses"]}, expected)
                         self.assertEqual(footprint["done_age"], end)
-                        self.assertEqual({(h["unit"], h["index"]) for h in footprint["holds"]}, EXCLUDED)
+                        self.assertEqual({(h["unit"], h["index"]) for h in footprint["holds"]}, {(OWN_UNIT, unit)})
                         self.assertTrue(all(h["from"] == 0 and h["to"] == end for h in footprint["holds"]))
                         self.assertNotEqual(run(EMIT, without_delays(result.stdout)).returncode, 0)
 
@@ -141,32 +140,42 @@ class SelectedMXUTimingTest(unittest.TestCase):
                 self.assertEqual(issues[1] - issues[0], gap)
                 self.check([a, b, HALT], True, CONSUMERS[1], VERIFY)
 
-    def hold_end(self, op, unit):
-        result = self.check([addi(6, 0, 256), op, HALT], True, CONSUMERS[0], VERIFY)
-        footprint = export(result.stdout)["instructions"][1]["footprint"]
-        return max(h["to"] for h in footprint["holds"] if h["unit"] == unit)
-
-    def test_mxus_and_vector_engines_are_mutually_excluded(self):
+    def test_mxu_overlaps_other_engines_at_the_mreg_rules(self):
+        """Disjoint operands: MXU against the other MXU, VPU, XLU and VLS at gap 1 in both orders (the AtlasCore sweeps
+        of pairs/core_mxu*.yaml). Shared registers wait for the MREG release rules and a shared physical bank for its
+        port, accepted at the facts-derived boundary and rejected one cycle earlier; same-MXU commands keep the busy rule."""
         document = facts()
-        matmul0, matmul1 = busy(block(document, "mxu0.matmul")), busy(block(document, "mxu1.matmul"))
-        add = ("vpu_binary", 'kind = "add", dst = 40 : i32, lhs = 20 : i32, rhs = 50 : i32')
-        cases = [
-            (mxu("matmul", 0), mxu("push_weight", 1, reg=22), matmul0 + 1),
-            (mxu("matmul", 1), mxu("matmul", 0, reg=22), matmul1 + 1),
-            (mxu("matmul", 1), ("xlu_transpose", "dst = 40 : i32, src = 22 : i32"), matmul1 + 1),
-            (mxu("matmul", 1), add, matmul1 + 1),
-            (mxu("pop_acc_bf16", 0), vls("vstore", 22), busy(block(document, "mxu0.pop_acc_bf16")) + 1),
-            (vls("vload", 22), mxu("push_weight", 1), self.hold_end(vls("vload", 22), "VLOAD path") + 1),
-            (vls("vstore", 22), mxu("pop_acc_bf16", 1), self.hold_end(vls("vstore", 22), "VSTORE path") + 1),
-            (add, mxu("matmul", 0), block(document, "vpu.add")["first_free_age"]),
-        ]
-        for first, second, gap in cases:
+        latency = block(document, "vlsu.vload")["assumptions"]["scratchpad_read_latency"]
+        group = lambda name, key: block(document, name)["events"][key]
+        add = ("vpu_binary", 'kind = "add", dst = 40 : i32, lhs = 36 : i32, rhs = 50 : i32')
+        transpose = ("xlu_transpose", "dst = 44 : i32, src = 46 : i32")
+        others = {"add": add, "transpose": transpose, "vload": vls("vload", 56), "vstore": vls("vstore", 58)}
+        disjoint = [(mxu(op, u), other) for u in (0, 1) for op in OPERATIONS for other in others.values()]
+        disjoint += [(mxu(a, u), mxu(b, 1 - u, reg=22)) for u in (0, 1) for a in OPERATIONS for b in OPERATIONS]
+        ops = lambda first, second, g: [addi(6, 0, 256), first, *spacer(g), second, delay(130), nop(), HALT]
+        for first, second in disjoint + [(b, a) for a, b in disjoint]:
             with self.subTest(first=first[1], second=second[1]):
-                ops = lambda g: [addi(6, 0, 256), first, *spacer(g), second, delay(130), nop(), HALT]
-                self.assertEqual(selected(ops(gap), VERIFY).returncode, 0)
-                rejected = selected(ops(gap - 1), VERIFY)
-                self.assertNotEqual(rejected.returncode, 0)
-                self.assertIn("busy", rejected.stderr)
+                result = selected(ops(first, second, 1), VERIFY)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for u in (0, 1):
+            pop, matmul = f"mxu{u}.pop_acc_bf16", f"mxu{u}.matmul"
+            port = group(matmul, "mreg_read0")["last_age"] - group("vlsu.vstore", "mreg_read")["first_age"] + 1
+            cases = [  # (first, second, boundary): RAW, WAR and one physical bank
+                (mxu("pop_acc_bf16", u, reg=22), vls("vstore", 22), group(pop, "mreg_write0")["last_age"] + 1),
+                (vls("vload", 22), mxu("matmul", u, reg=22), group("vlsu.vload", "mreg_write")["last_age"] + 1),
+                (mxu("matmul", u, reg=22), vls("vload", 22), group(matmul, "mreg_read0")["last_age"] + latency + 1),
+                # The LSU reports a VSTORE's source as read until it drains (pairs/core_mxu_cross.yaml).
+                (vls("vstore", 22), mxu("pop_acc_bf16", u, reg=22),
+                 max(group("vlsu.vstore", "mreg_read")["last_age"] + latency + 1, block(document, "vlsu.vstore")["first_free_age"])),
+                (mxu("matmul", u, reg=12), vls("vstore", 44), port),
+                (mxu("matmul", u), mxu("pop_acc_bf16", u, reg=22), busy(block(document, matmul)) + 1)]
+            for first, second, gap in cases:
+                with self.subTest(first=first[1], second=second[1], gap=gap):
+                    self.assertGreater(gap, 1)
+                    self.assertEqual(selected(ops(first, second, gap), VERIFY).returncode, 0)
+                    rejected = selected(ops(first, second, gap - 1), VERIFY)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertRegex(rejected.stderr, "reserved for|reported read until|port busy|MXU in-flight matmuls")
 
     def test_mxu_tile_program_is_scheduled_and_rechecked(self):
         ops = [("alu_imm", 'kind = "addi", dst = 6 : i32, src = 0 : i32, immediate = 0 : i32'),
@@ -224,11 +233,20 @@ class SelectedMXUTimingTest(unittest.TestCase):
                         self.check([matmul, HALT], False, consumer, path=path, diagnostic=diagnostic)
                 self.check([mxu("matmul", 0), HALT], True, CONSUMERS[0], VERIFY, path=path)
 
-    def test_pending_dma_requires_wait_before_mxu(self):
+    def test_mxu_runs_beside_a_pending_transfer(self):
+        # pairs/core_dma_mxu.yaml: every MXU command keeps its isolated events beside a DMA load or store, and the
+        # transfer keeps its beats; the launch needs no MXU drain.
         from test_rtl_dma_timing import setup, transfer, wait
-        self.check([*setup(), transfer(), mxu("matmul", 1), wait(), HALT], False, CONSUMERS[0], dma="wait")
-        for consumer in CONSUMERS:
-            self.check([*setup(), transfer(), wait(), mxu("matmul", 1), HALT], True, consumer, VERIFY, dma="wait")
+        from test_rtl_gap_coverage import issue_gap
+        for unit in (0, 1):
+            for first, second in ((transfer(), mxu("matmul", unit)), (mxu("matmul", unit), transfer())):
+                for consumer in CONSUMERS:
+                    with self.subTest(unit=unit, first=first[0], consumer=consumer):
+                        result = self.check([*setup(), first, second, wait(), HALT], True, consumer, VERIFY, dma="wait")
+                        order = [op for op, _, _ in stream(result.stdout)]
+                        self.assertLess(order.index("mxu_matmul"), order.index("dma_wait"))
+                        if consumer == CONSUMERS[0]:
+                            self.assertEqual(issue_gap(result.stdout, first, second), 1)
 
     def test_unselected_mxu_rules_are_unchanged(self):
         # Built-in (npu_model) rules: MXU1 back-to-back matmuls share read port 0 for 32 cycles;

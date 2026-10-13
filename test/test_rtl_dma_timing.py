@@ -104,6 +104,8 @@ class SelectedDMATimingTest(unittest.TestCase):
             "VLS off the pending window": [*base, transfer(), vls("vload", 4, 9), wait(), HALT],
             "VPU beside a pending transfer": [*base, transfer(), vmul, wait(), HALT],
             "XLU beside a pending transfer": [*base, transfer(), xlu, wait(), HALT],
+            "MXU beside a pending transfer": [*base, transfer(), matmul, wait(), HALT],
+            "launch beside running MXU work": [*base, matmul, transfer(), wait(), HALT],
             "wait right after launch": [*base, transfer(), wait(), HALT],
         }
         rejected = {
@@ -111,7 +113,6 @@ class SelectedDMATimingTest(unittest.TestCase):
             "overlapping windows": ([*base, transfer(), transfer(channel=1, dram=3), wait(), wait(1), HALT], IN_FLIGHT),
             "load and store of one DRAM span": ([*base, transfer(), transfer("store", 1, 7), wait(), wait(1), HALT], IN_FLIGHT),
             "VLS on the pending window": ([*base, transfer(), vls("vload"), wait(), HALT], IN_FLIGHT),
-            "MXU beside a pending transfer": ([*base, transfer(), matmul, wait(), HALT], IN_FLIGHT),
         }
         windows = [op for c in range(9) for op in word_base(10 + c, 64 * c)]
         launches = [transfer(channel=c % 8, reg=10 + c) for c in range(8)]

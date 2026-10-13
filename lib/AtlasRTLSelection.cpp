@@ -30,15 +30,6 @@ bool isLaunch(const Instr &in) {
   return in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore;
 }
 
-// MXU commands were not swept beside a pending transfer and stay serialized
-// with DMA; VLS, VPU and XLU kept their isolated events in every swept run.
-bool holdsMxu(const Footprint &f) {
-  return std::any_of(f.holds.begin(), f.holds.end(), [](const Hold &h) {
-    return h.unit == Unit::MxuCompute || h.unit == Unit::MxuPort || h.unit == Unit::MxuAccRead ||
-           h.unit == Unit::MxuAccWrite || h.unit == Unit::MxuWeightStream || h.unit == Unit::MxuAccStream;
-  });
-}
-
 int holdEnd(const Footprint &f, Unit unit) {
   int end = -1;
   for (const Hold &h : f.holds)
@@ -299,8 +290,6 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
   };
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     Dependence d = dataDependence(a, fa, b, fb);
-    if (isLaunch(b) && holdsMxu(fa) && fa.doneAge + 1 > d.distance)
-      d = {fa.doneAge + 1, EdgeKind::Order, "selected DMA launch waits for MXU work to drain"};
     // The LSU reports a VSTORE's source register as read until the VSTORE
     // drains; every writer but a VLOAD asserts on a pending read
     // (MregBankTracker, pairs/core_mxu_cross.yaml).
@@ -318,11 +307,12 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
     return TimingRuleResult<Dependence>{d, {}};
   };
   // Pending windows stay disjoint from each other and from VLS tiles; DRAM
-  // spans may be shared only by reads; MXU commands wait for every transfer.
+  // spans may be shared only by reads. VLS, VPU, XLU and MXU commands kept
+  // their isolated events beside a pending transfer in every swept run.
   p.dmaConflict = [](const Footprint &dma, const Footprint &f) {
     DMACompletionConflict result;
     result.conflict = conflictsAtCompletion(dma, f, result.kind);
-    if (!result.conflict && (holdsMxu(f) || (isVls(f) && vlsOverlapsWindow(dma, f))))
+    if (!result.conflict && isVls(f) && vlsOverlapsWindow(dma, f))
       result = {true, EdgeKind::Order};
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };

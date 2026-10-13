@@ -153,11 +153,14 @@ const std::map<OpClass, const char *> &mxuBlocks() {
 }
 
 // The compiler names the MREG, accumulator and weight rows each event group
-// touches; the facts give every age. A command holds both MXUs and every other
-// vector engine through its last effect, so MXU work is never overlapped: the
-// selected facts carry no pair evidence. Accumulator and weight-slot hazards are
-// access rules. Weight reads are not extracted, so a matmul retains its whole
-// slot from issue through its last accumulator write.
+// touches; the facts give every age. A command holds its own MXU through its
+// last effect, so commands on one MXU stay sequenced (same-MXU pipelining needs
+// pair facts as a selected input). The other MXU, the VPU, the XLU, the VLS
+// paths and pending DMA transfers meet it only at MREG ports and the MREG
+// release rules, as the AtlasCore pair sweeps show (pairs/core_mxu*.yaml,
+// pairs/core_dma_mxu.yaml). Accumulator and weight-slot hazards are access
+// rules. Weight reads are not extracted, so a matmul retains its whole slot
+// from issue through its last accumulator write.
 Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBlock> &blocks) {
   Footprint f;
   const OpInfo &op = *in.op;
@@ -239,9 +242,7 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     for (const auto &[key, group] : fill.block->events)
       if (group.count > 0 && !modeled.count(key))
         fill.fail("event group " + key + " is not modeled for this operation");
-  for (int unit = 0; unit < 2; ++unit) f.holds.push_back({Unit::MxuCompute, unit, 0, busy});
-  for (Unit unit : {Unit::Vpu, Unit::Xlu, Unit::VloadPath, Unit::VstorePath})
-    f.holds.push_back({unit, 0, 0, busy});
+  f.holds.push_back({Unit::MxuCompute, m, 0, busy});
   return fill.done(busy);
 }
 
@@ -450,13 +451,14 @@ llvm::json::Object RTLEvidence::applicability() const {
           {"vpu_to_vpu_issue_gap", "next_issue_age"},
           {"vpu_to_xlu_issue_gap", "first_free_age"},
           {"xlu_first_free_age", firstFree("xlu.transpose")},
-          {"mxu_commands_serialized_with_both_mxus_and_vector_engines", true},
+          {"mxu_commands_sequenced_per_unit", true},
+          {"mxu_overlaps_other_mxu_vpu_xlu_and_vls", "mreg_port_and_release_rules_only"},
           {"mxu_weight_slot_retained_by_matmul", "issue_through_last_accumulator_write"},
           {"marker_and_terminal_require_prior_writes_complete", true},
           {"delay_immediately_before_terminal_supported", false},
           {"maximum_program_words", static_cast<int64_t>(maximumProgramWords())}}},
-      {"unsupported", Array{dma ? "mxu_commands_beside_a_pending_dma_transfer" : "dma_and_dynamic_completion",
-          "mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
+      {"unsupported", Array{dma ? "dma_completion_latency" : "dma_and_dynamic_completion",
+          "same_mxu_pipelining", "engine_work_or_dma_live_across_block_boundaries",
           "addresses_that_vary_beyond_4096_block_entry_contexts",
           "concurrent_engine_or_host_memory_traffic",
           "alternative_memory_implementations_without_review"}},
@@ -485,7 +487,7 @@ llvm::json::Object RTLEvidence::applicability() const {
         {"completion_latency", nullptr},
         {"pending_vmem_windows", "disjoint from each other and from VLS tiles; scalar reads may share a store's window"},
         {"pending_dram_spans", "disjoint unless both transfers read"},
-        {"engines_beside_pending_transfers", "VLS, VPU and XLU keep their isolated timing; MXU waits"},
+        {"engines_beside_pending_transfers", "VLS, VPU, XLU and MXU keep their isolated timing"},
         {"publication_requires_matching_wait", true}};
     result.getArray("environment_assumptions")->push_back(
         "fresh_host_START_resets_global_dma_base_to_zero; DMA_queues_already_quiescent");

@@ -1,14 +1,14 @@
 """Virtual programs lowered untimed and timed by the rtl-op-timing-v1 provider (ATLAS_OOT_BIN_DIR, ATLAS_OP_TIMING).
 
 Transfers queue one per channel into eight command slots with disjoint VMEM windows, waited within their block;
-VLS, VPU and XLU run beside them and MXU commands wait for them. A virtual schedule that puts MXU work beside a
-pending transfer stays on the model provider. Loops whose addresses move are timed under each concrete entry context.
+VLS, VPU, XLU and MXU commands run beside them, so virtual schedules that put MXU work beside a pending transfer
+compile under the provider. Loops whose addresses move are timed under each concrete entry context.
 """
 import json
 import tempfile
 import unittest
 
-from test_delay_insertion import EMIT, OPT, addi, program, run, without_delays
+from test_delay_insertion import EMIT, OPT, addi, program, run, stream, without_delays
 from test_rtl_timing import CONSUMERS, FACTS, HALT, PROVIDER, VERIFY, block, facts_variant, selection
 from test_virtual_dma import copy
 from test_virtual_lowering import EXAMPLES, virtual_chain, virtual_pressure
@@ -21,7 +21,6 @@ SERIAL = ("virtual_bf16_vpu_program", "virtual_bf16_shared_relu", "virtual_bf16_
           "virtual_mxu_seeded_fp8", "virtual_dma_tiles",  # seli sets the FP8 scale register
           # The FP8 pack relayout loop moves its lw/sw addresses every iteration: one entry context each.
           "virtual_fp8_two_layer_mlp", "virtual_fp8_two_layer_mlp_bias")
-MXU_BESIDE_DMA = "'atlas.mxu_push' op order conflict with atlas.dma"
 WAIT = ("dma_wait", "channel = 0 : i32")
 # Two transfers in flight on channels 0 and 1, then both waited (test_untimed_pipeline's manual multichannel stream).
 TWO_CHANNELS = [addi(6, 0, 0), addi(7, 0, 1024), addi(1, 0, 0), addi(2, 0, 32),
@@ -29,6 +28,20 @@ TWO_CHANNELS = [addi(6, 0, 0), addi(7, 0, 1024), addi(1, 0, 0), addi(2, 0, 32),
                 ("dma", 'direction = "load", channel = 1 : i32, reg = 7 : i32, dram = 1 : i32, size = 2 : i32'),
                 WAIT, ("dma_wait", "channel = 1 : i32"), HALT]
 SERIALIZED = TWO_CHANNELS[:5] + [WAIT] + TWO_CHANNELS[5:6] + TWO_CHANNELS[7:]
+
+
+def mxu_beside_transfer(text):
+    """Some MXU command issues between a DMA launch and the wait on its channel."""
+    pending = set()
+    for op, fields, _ in stream(text):
+        channel = fields.split("channel = ")[1].split(" ")[0] if "channel = " in fields else None
+        if op == "dma":
+            pending.add(channel)
+        elif op == "dma_wait":
+            pending.discard(channel)
+        elif op.startswith("mxu") and pending:
+            return True
+    return False
 
 
 def checked(test, source, *options, tool=OPT):
@@ -115,12 +128,16 @@ class VirtualRTLTimingTest(unittest.TestCase):
                     timed = checked(self, untimed, selection(dma="wait"), consumer, VERIFY)
                     timed_by(self, timed, PROVIDER)
                     self.assertTrue(checked(self, timed, tool=EMIT))
-        # The virtual schedule of the overlap program puts a weight push beside a pending transfer; the MXU waits.
-        scheduled = checked(self, source, *SCHEDULED)
-        for consumer in CONSUMERS:
-            with self.subTest(program="scheduled overlap program", consumer=consumer):
-                rejected(self, scheduled, selection(dma="wait"), consumer, diagnostic=MXU_BESIDE_DMA)
-                timed_by(self, checked(self, scheduled, consumer, VERIFY), MODEL)
+        # Virtual schedules that put MXU work beside a pending transfer (rejected while MXU waited for transfers).
+        for name in ("virtual_sched_overlap", "virtual_dma_mxu", "virtual_dma_mxu_bf16"):
+            scheduled = checked(self, (EXAMPLES / f"{name}.mlir").read_text(), *SCHEDULED)
+            for consumer in CONSUMERS:
+                with self.subTest(program=f"scheduled {name}", consumer=consumer):
+                    timed = checked(self, scheduled, selection(dma="wait"), consumer, VERIFY)
+                    timed_by(self, timed, PROVIDER)
+                    self.assertTrue(checked(self, timed, tool=EMIT))
+                    if consumer == CONSUMERS[0]:  # delay insertion keeps the virtual order; the stream scheduler may reorder
+                        self.assertTrue(mxu_beside_transfer(timed), "no MXU command between a launch and its wait")
 
     def test_bf16_pairs_sharing_a_physical_bank_are_rejected(self):
         # Seventeen live pairs put colors 0 and 16 in m0/m1 and m32/m33, one VPU bank apart.
