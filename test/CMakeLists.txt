@@ -32,4 +32,3 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
-

@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -95,21 +94,13 @@ public:
   }
 
   uint32_t scalar(bool csr, bool write, uint32_t address, uint32_t data = 0) {
-    if (csr) {
-      dut.io_csrTL_a_bits_opcode = write ? 0 : 4;
-      dut.io_csrTL_a_bits_size = 2;
-      dut.io_csrTL_a_bits_source = 0;
-      dut.io_csrTL_a_bits_address = address;
-      dut.io_csrTL_a_bits_data = data;
-      dut.io_csrTL_a_valid = 1;
-    } else {
-      dut.io_imemTL_a_bits_opcode = write ? 0 : 4;
-      dut.io_imemTL_a_bits_size = 2;
-      dut.io_imemTL_a_bits_source = 0;
-      dut.io_imemTL_a_bits_address = address;
-      dut.io_imemTL_a_bits_data = data;
-      dut.io_imemTL_a_valid = 1;
-    }
+    (csr ? dut.io_csrTL_a_bits_opcode : dut.io_imemTL_a_bits_opcode) = write ? 0 : 4;
+    (csr ? dut.io_csrTL_a_bits_size : dut.io_imemTL_a_bits_size) = 2;
+    (csr ? dut.io_csrTL_a_bits_source : dut.io_imemTL_a_bits_source) = 0;
+    (csr ? dut.io_csrTL_a_bits_address : dut.io_imemTL_a_bits_address) = address;
+    (csr ? dut.io_csrTL_a_bits_data : dut.io_imemTL_a_bits_data) = data;
+    auto &valid = csr ? dut.io_csrTL_a_valid : dut.io_imemTL_a_valid;
+    valid = 1;
     dut.clock = 0;
     evaluate();
     unsigned waits = 0;
@@ -118,8 +109,7 @@ public:
       tick();
     }
     tick();
-    if (csr) dut.io_csrTL_a_valid = 0;
-    else dut.io_imemTL_a_valid = 0;
+    valid = 0;
     evaluate();
     waits = 0;
     while (!(csr ? dut.io_csrTL_d_valid : dut.io_imemTL_d_valid)) {

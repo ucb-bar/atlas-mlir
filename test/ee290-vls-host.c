@@ -1,7 +1,4 @@
-/* Integrated host loader for the bounded EE290SimConfig VLS witness.
- * atlas_program.inc is generated from the supplied final MLIR by atlas-emit.
- * Atlas RTL and existing baremetal infrastructure are read-only references.
- */
+/* EE290SimConfig VLS witness; atlas-emit generates atlas_program.inc. */
 #include <stdint.h>
 #include <stdio.h>
 #include "atlas_program.inc"
@@ -63,11 +60,7 @@ int main(void) {
     for (; poll < 100000U; ++poll) {
       status = read32(CSR + 0x08);
       marker = read32(CSR + 0x10);
-      /* Halted reflects halt_now combinationally; its registered reason can
-       * settle one cycle later. START cleared that reason to zero, so wait
-       * for a nonzero reason before judging ECALL versus illegal/EBREAK.
-       * A halted-without-reason state remains bounded by the poll limit.
-       */
+      /* The halt reason can settle one cycle after halted; wait for both. */
       if ((status & 1U) && ((status >> 1) & 3U)) break;
     }
     fence();
