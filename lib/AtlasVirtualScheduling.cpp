@@ -374,11 +374,8 @@ Cost onMxu(StringRef name, unsigned unit) {
   return {unit ? Unit::Mxu1 : Unit::Mxu0, t.interval, t.latency};
 }
 
-// Elementwise kinds share one footprint, so a kind the timing model does not
-// name costs as a move.
 Cost onVpu(StringRef kind) {
-  std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
-  MachineTiming t = timingOf(timing::findOp(name) ? name : "vmov");
+  MachineTiming t = timingOf(timing::vpuMnemonic(kind.str()));
   return {Unit::Vpu, t.interval, t.latency};
 }
 
