@@ -189,7 +189,8 @@ class VerilatorReplayTest(unittest.TestCase):
              "mxu0_under_dma_load_schedule", "mxu1_under_dma_store_delay", "mxu0_beside_vector_delay", "mxu1_beside_vector_schedule",
              "virtual_dma_mxu_delay", "mxu_both_units_schedule",
              "virtual_fp8_mlp_delay", "virtual_fp8_mlp_scheduled_schedule",
-             *(("slots_exp_relu_delay", "slots_chain_delay", "slots_chain_schedule") if PAIRS else ()))
+             *(("slots_exp_relu_delay", "slots_chain_delay", "slots_chain_schedule", "mxu0_tile_pipelined_delay",
+                "mxu1_tile_pipelined_schedule", "mxu0_two_tiles_delay", "mxu1_k2_delay") if PAIRS else ()))
     # Selected mnemonic -> facts block (vpu.<op>, mxu<u>.<op>).
     FACTS = {"vadd.bf16": "add", "vsub.bf16": "sub", "vmul.bf16": "mul", "vmaximum.bf16": "pairmax", "vminimum.bf16": "pairmin", "vmov": "mov",
              "vexp.bf16": "exp", "vexp2.bf16": "exp2", "vsquare.bf16": "square", "vcube.bf16": "cube", "vrelu.bf16": "relu",
@@ -337,6 +338,37 @@ class VerilatorReplayTest(unittest.TestCase):
         command = next(c for c in changed["commands"] if c["edge"] == second["edge"])
         command["reads"][3]["edge"] += 1
         self.rejects("slots_exp_relu_delay", events=changed)
+
+    @unittest.skipUnless(PAIRS, "requires pair facts (ATLAS_PAIR_FACTS)")
+    def test_commands_on_one_mxu_overlap_at_their_pair_facts(self):
+        def unit(name, engine):
+            return sorted((c for c in self.cases[name][2]["commands"] if c["engine"] == engine), key=lambda c: c["edge"])
+        # The pop issues while its matmul still writes the accumulator: at age 64 on MXU0, 4 on MXU1.
+        for name, engine, gap in (("mxu0_tile_pipelined_delay", "mxu0", 64), ("mxu1_tile_pipelined_schedule", "mxu1", 4)):
+            with self.subTest(name=name):
+                _, matmul, pop = unit(name, engine)
+                self.assertEqual(pop["edge"] - matmul["edge"], gap)
+                self.assertLess(pop["edge"], matmul["release_edge"])
+                self.assertGreater(self.bind(name)["memory_access_elements_bound"], 0)
+        # Two MXU0 matmuls on other accumulators and slots 32 apart; the K=2 accumulation pushes the next weights one
+        # cycle into the first MXU1 matmul.
+        matmuls = [c for c in unit("mxu0_two_tiles_delay", "mxu0") if c["mnemonic"] == "vmatmul.mxu0"]
+        self.assertEqual(matmuls[1]["edge"] - matmuls[0]["edge"], 32)
+        first, push = [c for c in unit("mxu1_k2_delay", "mxu1") if c["mnemonic"] in ("vmatmul.mxu1", "vmatpush.weight.mxu1")][1:3]
+        self.assertEqual((first["mnemonic"], push["mnemonic"], push["edge"] - first["edge"]), ("vmatmul.mxu1", "vmatpush.weight.mxu1", 1))
+        # During the overlap a dropped accumulator write of the matmul, or a pop row written to another address, is rejected.
+        name = "mxu0_tile_pipelined_delay"
+        _, matmul, pop = unit(name, "mxu0")
+        during = lambda key: lambda v, edge: v[key] and pop["edge"] <= edge < matmul["release_edge"]
+        self.mutate(name, during("m0_aw"), lambda v: v.__setitem__("m0_aw", 0))
+        self.mutate(name, during("m0_w0"), lambda v: v.__setitem__("m0_wrow0", v["m0_wrow0"] ^ 1))
+        events = self.cases[name][2]
+        index = lambda command: next(n for n, c in enumerate(events["commands"]) if c["edge"] == command["edge"])
+        for position, mutate in enumerate([lambda m, p: p["writes"][0].__setitem__("edge", p["writes"][0]["edge"] + 1),
+                                           lambda m, p: m["writes"][-1].__setitem__("edge", m["writes"][-1]["edge"] - 1),
+                                           lambda m, p: m.__setitem__("release_edge", p["release_edge"])]):
+            changed = copy.deepcopy(events); mutate(changed["commands"][index(matmul)], changed["commands"][index(pop)])
+            with self.subTest(position=position): self.rejects(name, events=changed)
 
     def test_vmul_trace_mutations_are_rejected(self):
         for key, predicate, value in [("prid0", lambda v: v["pr0"] and v["prid0"] == 1, 0), ("prrow0", lambda v: v["pr0"], lambda x: x ^ 1),

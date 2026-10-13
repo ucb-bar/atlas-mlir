@@ -186,6 +186,12 @@ EVENTS = {'vload': (32, 32, 32), 'vstore': (32, 32, 32), 'xlu': (32, 32, 32)}
 # Replayed MXU operations: MxuOp code -> (mnemonic stem, (reads, responses, writes, compute beats)); a matmul.acc also reads its accumulator.
 MXU_OPS = {0: ('vmatpush.weight', (32, 32, 32, 0)), 1: ('vmatpush.acc.fp8', (32, 32, 32, 0)), 2: ('vmatpush.acc.bf16', (64, 64, 32, 0)),
            3: ('vmatpop.fp8.acc', (32, 0, 32, 0)), 4: ('vmatpop.bf16.acc', (32, 0, 64, 0)), 5: ('vmatmul', (32, 32, 32, 32)), 6: ('vmatmul.acc', (64, 32, 32, 32))}
+# MXU op -> {(stage, port): events}: ports as `element` numbers them (2: matmul.acc accumulator read, 3: accumulator load).
+MXU_PORTS = {0: {('reads', 1): 32, ('responses', 1): 32, ('writes', 0): 32}, 1: {('reads', 1): 32, ('responses', 1): 32, ('writes', 3): 32},
+             2: {('reads', 0): 32, ('reads', 1): 32, ('responses', 0): 32, ('responses', 1): 32, ('writes', 3): 32},
+             3: {('reads', 0): 32, ('writes', 0): 32}, 4: {('reads', 0): 32, ('writes', 0): 32, ('writes', 1): 32},
+             5: {('reads', 0): 32, ('responses', 0): 32, ('writes', 0): 32},
+             6: {('reads', 0): 32, ('reads', 2): 32, ('responses', 0): 32, ('writes', 0): 32}}
 UNCHECKED = object()  # a write whose value the validator cannot predict (matmul results; checked through pop and final memory)
 # VPU funct7 -> (ScalarISA VPU_* code on vpu.io_cmd_bits_op, selected mnemonic, layout); VLI is keyed by its mode.
 VPU_OPS = {0: (1, 'vadd.bf16', 'binary'), 2: (2, 'vsub.bf16', 'binary'), 3: (3, 'vmul.bf16', 'binary'), 4: (25, 'vminimum.bf16', 'binary'),
@@ -359,6 +365,16 @@ def validate_compute_edges(samples,words,case):
         return not any(vpu_left(c,s,p) for s in STAGES[:2] for p in range(2)) and all(vpu_left(c,'writes',p)<=(1 if v('pw'+str(p)) else 0) for p in range(2))
     def vpu_released(c):
         return not any(vpu_left(c,s,p) for s in STAGES for p in range(2)) and not any(v('paw'+str(n)) and v('pawid'+str(n)) in c['dests'] for n in range(4))
+    # Live MXU commands of a unit, oldest first. Commands on one MXU overlap where the selected pair facts admit them; an
+    # event goes to the oldest live command still expecting one on that port and resource (the sequencer runs one
+    # command per port engine and retires matmuls in order), and a command with company releases once its events are
+    # done and no live marker names an operand only it uses.
+    def mxus(u): return live.get(f'mxu{u}_drain',[])+([live[f'mxu{u}']] if f'mxu{u}' in live else [])
+    def mxu_left(c,stage,port): return MXU_PORTS[c['op']].get((stage,port),0)-sum(e.get('port',0)==port for e in c[stage])
+    def mxu_released(c,u):
+        others={r for o in mxus(u) if o is not c for r in o['sources']|o['dests']}
+        done=all(mxu_left(c,s,p)==0 for s,p in MXU_PORTS[c['op']]) and len(c['compute'])==MXU_OPS[c['op']][1][3]
+        return done and not any(v(f'm{u}_act{d}{p}') and v(f'm{u}_act{d}id{p}') in c['sources' if d=='r' else 'dests']-others for d in 'rw' for p in range(2))
     for sample in samples:
         edge=sample['edge'];last_edge=edge
         derived={f'm{u}_resp{p}':prior_reads.get((u,p),0) for u in range(2) for p in range(2)}
@@ -401,13 +417,19 @@ def validate_compute_edges(samples,words,case):
             if vpu_released(drain):
                 drain['release_edge']=edge;live['vpu_drain'].remove(drain)
                 if not live['vpu_drain']: del live['vpu_drain']
-        for kind in [k for k in live if k!='vpu_drain']:
-            command=live[kind]
-            if edge>command['edge'] and (vpu_released(command) if kind=='vpu' and 'vpu_drain' in live else not BUSY[kind](v)):
+        for u in range(2):
+            for drain in list(live.get(f'mxu{u}_drain',())):
+                if mxu_released(drain,u):
+                    if tuple(len(drain[s]) for s in STAGES)+(len(drain['compute']),)!=event_counts(drain): reject(f'mxu{u} released before its events completed')
+                    drain['release_edge']=edge;live[f'mxu{u}_drain'].remove(drain)
+                    if not live[f'mxu{u}_drain']: del live[f'mxu{u}_drain']
+        for kind in [k for k in live if not k.endswith('_drain')]:
+            command=live[kind];company=kind+'_drain' in live
+            if edge>command['edge'] and (vpu_released(command) if kind=='vpu' and company else mxu_released(command,int(kind[3])) if kind.startswith('mxu') and company else not BUSY[kind](v)):
                 if tuple(len(command[s]) for s in STAGES)+(len(command.get('compute',())),)!=event_counts(command): reject(kind+' released before its events completed')
                 command['release_edge']=edge;del live[kind]
         for kind,active in BUSY.items():
-            if kind not in live and not (kind=='vpu' and 'vpu_drain' in live) and active(v): reject('unbound '+kind+' activity')
+            if kind not in live and kind+'_drain' not in live and active(v): reject('unbound '+kind+' activity')
         expected_cmd={'cmd':False,'xcmd':False,'pcmd':False,'dma_launch':False,'m0_cmd':False,'m1_cmd':False}
         if v('valid') and began and not ended:
             pc=v('pc');word=v('word')
@@ -519,6 +541,9 @@ def validate_compute_edges(samples,words,case):
                         created['slot']=next((s for s in (0,1) if not held&({0,1} if both else {s})),None)
                         if created['slot'] is None: reject('VPU command issued while its port pairs are live')
                         if previous: live.setdefault('vpu_drain',[]).append(live.pop('vpu'))
+                    elif previous and created['engine'].startswith('mxu'):
+                        # The earlier command drains beside the new one; the binder holds every event to its isolated footprint.
+                        live.setdefault(created['engine']+'_drain',[]).append(live.pop(created['engine']))
                     elif previous: reject('command issued while its engine is live')
                     created.update(_queue=([],[]),_data=([],[],[]));live[created['engine']]=created;commands.append(created)
                 pc_expected=target if in_slot and target is not None else pc+1
@@ -561,6 +586,9 @@ def validate_compute_edges(samples,words,case):
                 if where!=stage or not v(key): continue
                 command=live.get(kind)
                 if kind=='vpu': command=next((c for c in vpus() if vpu_left(c,stage,port)>0),None)
+                elif kind.startswith('mxu') and stage=='responses': command=next((c for c in mxus(int(kind[3])) if c['_queue'][port]),None)
+                elif kind.startswith('mxu'):
+                    command=next((c for c in mxus(int(kind[3])) if mxu_left(c,stage,port)>0 and (element(c,stage,port,0) or ('',))[0]==RESOURCE[key]),None)
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
                 if kind=='vpu': port-=command['slot']
                 n=sum(e.get('port',0)==port for e in command[stage])
@@ -590,7 +618,7 @@ def validate_compute_edges(samples,words,case):
                 record(command[stage],id=identity,row=row,data_hex=observed.hex(),**({'port':port} if kind=='vpu' or kind.startswith('mxu') else {}),
                        **({'resource':RESOURCE.get(key,'mreg')} if kind.startswith('mxu') else {}))
         for u in range(2):
-            kind,m=f'mxu{u}',f'm{u}_';command=live.get(kind)
+            kind,m=f'mxu{u}',f'm{u}_';command=next((c for c in mxus(u) if c['op'] in (5,6) and len(c['compute'])<32),None)
             if v(m+'cv'):
                 if not command or command['op'] not in (5,6) or len(command['compute'])>=32: reject('unattributed or excess MXU compute beat')
                 n=len(command['compute']);act=data((m+'act',32,1))
@@ -600,7 +628,7 @@ def validate_compute_edges(samples,words,case):
                 record(command['compute'],row=n)
             for p in range(2):
                 for direction,allowed in (('r','sources'),('w','dests')):
-                    if v(f'{m}act{direction}{p}') and (not command or v(f'{m}act{direction}id{p}') not in command[allowed]): reject('MXU live resource operand mismatch')
+                    if v(f'{m}act{direction}{p}') and v(f'{m}act{direction}id{p}') not in {r for c in mxus(u) for r in c[allowed]}: reject('MXU live resource operand mismatch')
         # Live markers name the active command's operands; they need not cover the launch edge.
         active=live.get('xlu')
         if v('xar') and (not active or v('xarid')!=active['src']) or v('xaw') and (not active or v('xawid')!=active['dst']): reject('XLU active operand mismatch')
