@@ -5,8 +5,11 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/IR/AsmState.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/Path.h"
 #include <algorithm>
 #include <iterator>
 
@@ -85,6 +88,18 @@ RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
           capacity(RegisterKind::Scalar, mixedFp8, hasPack)};
 }
 
+std::string mlir::atlas::locationText(Location loc) {
+  if (auto file = dyn_cast<FileLineColRange>(loc))
+    return llvm::formatv("{0}:{1}:{2}",
+                         llvm::sys::path::filename(file.getFilename()),
+                         file.getStartLine(), file.getStartColumn())
+        .str();
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  loc.print(os);
+  return text;
+}
+
 VirtualAllocationPlan::VirtualAllocationPlan()
     : fixedResources(selectedResources()) {}
 
@@ -97,19 +112,23 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   dmaTransfers.clear();
   scalarArgumentRegs.clear();
   findReservations(function, mixedFp8, hasPack);
-  if (failed(colorValues(RegisterKind::BF16)) ||
-      failed(colorValues(RegisterKind::FP8)) ||
-      failed(colorValues(RegisterKind::Scalar)))
-    return failure();
-  for (BlockArgument arg : function.getArguments())
-    scalarArgumentRegs.push_back(scalar(arg));
+  // Every resource is placed even after one does not fit, so the diagnostics
+  // and report() name each one that does not.
+  bool fits = true;
+  for (RegisterKind kind :
+       {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
+    fits &= succeeded(colorValues(kind));
+  if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
+    for (BlockArgument arg : function.getArguments())
+      scalarArgumentRegs.push_back(scalar(arg));
 
   // MXU and DMA state never crosses a block, so each block places its own.
   unsigned nextTransfer = 0;
-  for (Block &block : function.getBody())
-    if (failed(placeMXU(block)) || failed(placeDMA(block, nextTransfer)))
-      return failure();
-  return success();
+  for (Block &block : function.getBody()) {
+    fits &= succeeded(placeMXU(block));
+    fits &= succeeded(placeDMA(block, nextTransfer));
+  }
+  return success(fits);
 }
 
 // Each weight holds the lowest free slot of its unit until its last use; each
@@ -364,6 +383,16 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     }
   } while (changed);
 
+  RegisterPressure &demand = pressure[static_cast<unsigned>(kind)];
+  demand = {};
+  demand.capacity = capacity(kind, mixedFp8, hasPack);
+  auto note = [&](const Set &live, Operation *at) {
+    if (live.size() > demand.peak) {
+      demand.peak = live.size();
+      demand.peakAt = at;
+    }
+  };
+
   llvm::DenseMap<Value, Set> neighbors;
   for (Value value : values)
     neighbors[value];
@@ -390,12 +419,14 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   for (Block &block : function.getBody()) {
     Set live = liveOut[&block];
     clique(live);
+    note(live, block.getTerminator());
     for (Operation &op : llvm::reverse(block.getOperations())) {
       if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
         Value condition = branch.getCondition();
         if (selected(condition)) {
           live.insert(condition);
           clique(live);
+          note(live, &op);
         }
         continue;
       }
@@ -408,6 +439,11 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       for (Value operand : op.getOperands())
         if (selected(operand))
           operands.push_back(operand);
+      // No result reuses an operand's register, so both are held at once.
+      Set held = live;
+      held.insert(results.begin(), results.end());
+      held.insert(operands.begin(), operands.end());
+      note(held, &op);
       for (Value result : results) {
         for (Value other : live)
           interfere(result, other);
@@ -430,6 +466,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     for (Value first : args)
       for (Value second : args)
         interfere(first, second);
+    live.insert(args.begin(), args.end());
+    note(live, &block.front());
   }
 
   // Stable degree-first coloring reduces pressure without depending on
@@ -439,7 +477,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   });
   llvm::DenseMap<Value, unsigned> colors;
   unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
-  unsigned count = capacity(kind, mixedFp8, hasPack);
+  unsigned count = demand.capacity;
+  unsigned used = 0;
   for (Value value : values) {
     bool assigned = false;
     for (unsigned color = 0; color < count; ++color) {
@@ -449,6 +488,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       });
       if (!conflict) {
         colors[value] = color;
+        used = std::max(used, color + 1);
         assigned = true;
         break;
       }
@@ -475,6 +515,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     else
       scalarRegs[value] = firstScalar + colors[value];
   }
+  demand.used = used;
   return success();
 }
 
@@ -524,4 +565,125 @@ llvm::ArrayRef<int32_t> VirtualAllocationPlan::scalarArguments() const {
 
 const FixedResourcePlacement &VirtualAllocationPlan::fixed() const {
   return fixedResources;
+}
+
+llvm::json::Object VirtualAllocationPlan::report() const {
+  using llvm::json::Array;
+  using llvm::json::Object;
+  func::FuncOp function = this->function;
+  static constexpr const char *kKindNames[] = {"bf16", "fp8", "scalar"};
+  Object registers;
+  for (unsigned kind = 0; kind < pressure.size(); ++kind) {
+    const RegisterPressure &demand = pressure[kind];
+    Object entry{{"capacity", demand.capacity}, {"peak_live", demand.peak}};
+    if (demand.peakAt)
+      entry["peak_at"] = locationText(demand.peakAt->getLoc()) + " " +
+                         demand.peakAt->getName().getStringRef().str();
+    entry["used"] = demand.used ? llvm::json::Value(*demand.used) : nullptr;
+    entry["fits"] = demand.used.has_value();
+    registers[kKindNames[kind]] = std::move(entry);
+  }
+
+  // Each placed value, named as the function prints it.
+  AsmState names(function.getOperation());
+  Array values;
+  std::array<std::array<unsigned, 2>, 2> slotsUsed{};
+  unsigned windowsUsed = 0;
+  auto place = [&](Value value) {
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    value.printAsOperand(os, names);
+    Object entry{{"value", name}, {"loc", locationText(value.getLoc())}};
+    auto registersOf = [&](const llvm::DenseMap<Value, unsigned> &placed,
+                           StringRef kind, unsigned width) {
+      entry["kind"] = kind;
+      // A value of a kind that did not fit has no register.
+      auto found = placed.find(value);
+      if (found == placed.end())
+        return;
+      Array regs;
+      for (unsigned half = 0; half < width; ++half)
+        regs.push_back(found->second + half);
+      entry["registers"] = std::move(regs);
+    };
+    Type type = value.getType();
+    if (isa<VirtualBF16Type>(type)) {
+      registersOf(tileRegs, "bf16", 2);
+    } else if (isa<VirtualFP8Type>(type)) {
+      registersOf(fp8Regs, "fp8", 1);
+    } else if (type.isInteger(1) || type.isInteger(32)) {
+      registersOf(scalarRegs, "scalar", 1);
+    } else if (auto mxu = mxuResources.find(value); mxu != mxuResources.end()) {
+      bool weight = isa<VirtualMXUWeightType>(type);
+      entry["kind"] = weight ? "mxu_weight" : "mxu_acc";
+      entry["unit"] = mxu->second.unit;
+      entry["slot"] = mxu->second.slot;
+      unsigned &used = slotsUsed[mxu->second.unit][weight ? 0 : 1];
+      used = std::max(used, mxu->second.slot + 1);
+    } else if (auto dma = dmaTransfers.find(value); dma != dmaTransfers.end()) {
+      // Windows are taken lowest first, so the most in use is the most in
+      // flight at once.
+      unsigned window = (dma->second.stagingWord - fixedResources.stagingWord) /
+                        kStagingWindowWords;
+      entry["kind"] = "dma";
+      entry["transfer"] = dma->second.id;
+      entry["channel"] = dma->second.channel;
+      entry["staging_window"] = window;
+      windowsUsed = std::max(windowsUsed, window + 1);
+    } else {
+      return;
+    }
+    values.push_back(std::move(entry));
+  };
+  for (Block &block : function.getBody()) {
+    for (BlockArgument arg : block.getArguments())
+      place(arg);
+    for (Operation &op : block)
+      for (Value result : op.getResults())
+        place(result);
+  }
+
+  Array units;
+  for (const auto &used : slotsUsed)
+    units.push_back(
+        Object{{"weight_slots_used", used[0]}, {"acc_slots_used", used[1]}});
+
+  // VMEM in 4-byte words, as the lowering addresses it.
+  SmallVector<std::tuple<uint32_t, std::string, uint32_t>> windows;
+  if (function.getNumArguments())
+    windows.push_back({fixedResources.mailboxWord, "control mailbox", 256});
+  function.walk([&](Operation *op) {
+    if (auto input = dyn_cast<VirtualInputBF16Op>(op))
+      windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
+                         llvm::formatv("input {0}", input.getIndex()), 512});
+    else if (auto input = dyn_cast<VirtualInputFP8Op>(op))
+      windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
+                         llvm::formatv("input {0}", input.getIndex()), 256});
+    else if (auto output = dyn_cast<VirtualOutputBF16Op>(op))
+      windows.push_back({fixedResources.outputWord + output.getIndex() * 512,
+                         llvm::formatv("output {0}", output.getIndex()), 512});
+  });
+  if (hasPack) {
+    windows.push_back({fixedResources.packWord, "pack", 256});
+    windows.push_back({fixedResources.packRelayoutWord, "pack relayout", 256});
+  }
+  for (unsigned window = 0; window < windowsUsed; ++window)
+    windows.push_back(
+        {fixedResources.stagingWord + window * kStagingWindowWords,
+         llvm::formatv("DMA staging {0}", window), kStagingWindowWords});
+  llvm::sort(windows);
+  windows.erase(std::unique(windows.begin(), windows.end()), windows.end());
+  Array vmem;
+  for (const auto &[word, use, words] : windows)
+    vmem.push_back(Object{{"use", use}, {"word", word}, {"words", words}});
+
+  return Object{
+      {"registers", std::move(registers)},
+      {"mxu", Object{{"slots_per_unit", kVirtualMXUSlots},
+                     {"units", std::move(units)}}},
+      {"dma", Object{{"channels", kDMAChannels},
+                     {"staging_windows", kDMAChannels},
+                     {"peak_in_flight", windowsUsed}}},
+      {"vmem", std::move(vmem)},
+      {"values", std::move(values)}};
 }

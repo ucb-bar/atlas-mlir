@@ -319,6 +319,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         else if (auto a = dyn_cast<VPUBinaryOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VPUReduceOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VLIOp>(op)) destination = a.getDst();
+        else if (auto a = dyn_cast<XLUTransposeOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<MXUPopOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VLoadOp>(op)) destination = int32_t(a.getDst()) - (v.type == "bf16" ? 1 : 0);
       }
@@ -483,6 +484,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           auto reduce = dyn_cast<VPUReduceOp>(op); if (!reduce || reduce.getDst() != unsigned(v.reg) || reduce.getKind() != v.kind || v.operands.size() != 1 || !tensorRead(reduce.getSrc(),v.operands[0])) return error("tensor reduce fields or origins differ");
         } else if (v.def == "atlas.virtual_vpu_splat") {
           auto vli = dyn_cast<VLIOp>(op); if (!vli || vli.getDst() != unsigned(v.reg) || vli.getMode() != "all" || vli.getImmediate() != v.constant) return error("tensor splat fields differ");
+        } else if (v.def == "atlas.virtual_xlu_transpose") {
+          auto xlu = dyn_cast<XLUTransposeOp>(op); if (!xlu || xlu.getDst() != unsigned(v.reg) || v.operands.size() != 1 || !tensorRead(xlu.getSrc(),v.operands[0])) return error("tensor transpose fields or origins differ");
         } else if (!isa<VLoadOp,MXUPopOp>(op)) return error("unsupported tensor source result site");
         if (isa<VLoadOp>(op) && !matches(s,v,v.id))
           return error("tensor result is claimed before all of its halves are produced");

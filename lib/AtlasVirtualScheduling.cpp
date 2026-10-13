@@ -94,7 +94,8 @@ Effects effectsOf(Operation *op) {
   else if (!isDMA(op) &&
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
-                VirtualVPUSplatOp, VirtualScaleConstantOp,
+                VirtualVPUSplatOp, VirtualXLUTransposeOp,
+                VirtualScaleConstantOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
@@ -296,7 +297,7 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
 
 // The functional units an operation can occupy. Each MXU pushes weights
 // through its own stream, beside its array.
-enum class Unit { Scalar, Lsu, Vpu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
+enum class Unit { Scalar, Lsu, Vpu, Xlu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
 constexpr unsigned kUnits = static_cast<unsigned>(Unit::Weights1) + 1;
 
 // What an operation costs: it holds one functional unit for `busy` cycles,
@@ -449,6 +450,10 @@ Cost costOf(Operation *op) {
         timing::vpuMnemonic(op->getAttrOfType<StringAttr>("kind").str()));
   if (isa<VirtualVPUSplatOp>(op))
     return onVpu("vli.all");
+  if (isa<VirtualXLUTransposeOp>(op)) {
+    MachineTiming t = timingOf("vtrpose.xlu");
+    return {Unit::Xlu, t.interval, t.latency};
+  }
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.
