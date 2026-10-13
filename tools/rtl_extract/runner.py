@@ -8,25 +8,18 @@ from .spec import ages, variant
 RUN_ONLY = {"operations", "variants", "checks", "expect", "raw", "only", "limit", "tail",
             "reset_cycles", "flush_cycles", "description"}
 
-
 def modules(spec):
-    """Modules a spec needs: the simulated tops (recipes with several circuits extend this) and derivation sources."""
     return [spec["module"]] + ([spec["partner"]["module"]] if "partner" in spec else []) + derive.modules(spec)
 
-
 def busy_signals(spec):
-    """``busy`` is one signal or a list whose OR is the busy level."""
     return [spec["busy"]] if isinstance(spec["busy"], str) else list(spec["busy"] or [])
 
-
 def control_signals(spec):
-    """Signals whose values decide timing; they must be known after reset and flush."""
     signals = busy_signals(spec)
     signals += [e["valid"] for e in spec["events"].values()]
     signals += [op["next_issue"]["signal"] for op in spec["operations"].values() if "next_issue" in op]
     signals += [r["request"]["valid"] for r in spec["responders"].values()]
     return list(dict.fromkeys(signals))
-
 
 def observed(spec):
     signals = control_signals(spec) + [s for e in spec["events"].values() for s in e.get("fields", {}).values()]
@@ -35,20 +28,14 @@ def observed(spec):
         signals += [responder["request"]["tag"]] if "tag" in responder["request"] else []
     return list(dict.fromkeys(signals))
 
-
 def group_valid(spec, group):
-    """The circuit signal that decides ``group``: an event's valid, or the circuit's side of a responder handshake
-    (request valid, response ready)."""
     if group in spec["events"]:
         return spec["events"][group]["valid"]
     name, _, side = group.rpartition(".")
     require(name in spec["responders"] and side in ("request", "response"), f"Unknown event group {group!r}")
     return spec["responders"][name][side]["valid" if side == "request" else "ready"]
 
-
 def respond(spec, queues, age, values):
-    """Drive each responder's inputs for ``age``: request ready from its ``accept`` pattern, and the oldest due
-    response (valid, tag) held until it fires. Responses are in order."""
     for name, responder in spec["responders"].items():
         accept = responder["accept"]
         values[responder["request"]["ready"]] = accept[age % len(accept)]
@@ -57,10 +44,7 @@ def respond(spec, queues, age, values):
         if "tag" in responder["response"]:
             values[responder["response"]["tag"]] = head[1] if head is not None else 0
 
-
 def handshakes(spec, queues, age, values, out, events):
-    """Record ``<responder>.request`` and ``<responder>.response`` fires at ``age`` and update the queues. The
-    response ready must be known while a response is offered; a request's tag and fields must be known when it fires."""
     for name, responder in spec["responders"].items():
         request, response = responder["request"], responder["response"]
         if values[response["valid"]]:
@@ -75,7 +59,6 @@ def handshakes(spec, queues, age, values, out, events):
             queues[name].append((age + responder["latency"], fields.get("tag")))
             events[f"{name}.request"] = fields
 
-
 def build_single(document, spec):
     outputs = [s for s in observed(spec) if s not in spec["probes"]]
     inputs = {spec["clock"], spec["reset"], *spec["inputs"]}
@@ -85,7 +68,6 @@ def build_single(document, spec):
         unmatched(spec["invariants"], circuit.matched)
     return circuit
 
-
 def schedule(operation):
     commands = {}
     for key, command in operation["commands"].items():
@@ -93,7 +75,6 @@ def schedule(operation):
             require(age not in commands, f"Two commands at age {age}")
             commands[age] = command
     return commands
-
 
 def reset_and_flush(circuit, spec, control):
     idle = {**spec["inputs"], spec["clock"]: 0}
@@ -109,9 +90,7 @@ def reset_and_flush(circuit, spec, control):
     unknown = [key for key in cone - circuit.unreset if circuit.state[key] is None]
     require(not unknown, f"{len(unknown)} control registers remain unknown after reset/flush")
 
-
 def run_single(circuit, spec, name):
-    """Drive one operation's commands by age, feed responses back and record per-age events."""
     commands, control = schedule(spec["operations"][name]), control_signals(spec)
     reset_and_flush(circuit, spec, control)
     pending, queues, trace, free = set(), {name: [] for name in spec["responders"]}, [], None
@@ -142,13 +121,10 @@ def run_single(circuit, spec, name):
             break
     return trace
 
-
 RECIPES = {"single": (build_single, run_single),
            "coupled": (lambda document, spec: coupled.build(document, spec, observed(spec)), run_single)}
 
-
 def failures(circuit, trace):
-    """Invariants that fired or were unknown, each with its first age, in order of first age."""
     first = {}
     for entry in trace:
         for name, how in entry["violations"]:
@@ -156,10 +132,8 @@ def failures(circuit, trace):
     return [{"name": n, **circuit.invariants[n], "how": how, "age": age}
             for n, (age, how) in sorted(first.items(), key=lambda x: (x[1][0], x[0]))]
 
-
 def failure(item):
     return f"invariant {item['message']} ({item['path'] or '/'}) {item['how']}"
-
 
 def summarize(trace, spec, name):
     operation = spec["operations"][name]
@@ -176,13 +150,11 @@ def summarize(trace, spec, name):
         result["next_issue_age"] = issue
     return result
 
-
 def signature(spec):
     events = {n: {k: v for k, v in e.items() if k != "response"} | ({"response": e["response"]["input"]} if "response" in e else {})
               for n, e in spec["events"].items()}
     return json.dumps({**{k: v for k, v in spec.items() if k not in RUN_ONLY}, "events": events,
                        "inputs": sorted(spec["inputs"]), "control": control_signals(spec)}, sort_keys=True)
-
 
 def lookup(records, path):
     name, _, fields = path.partition(".")
@@ -192,9 +164,7 @@ def lookup(records, path):
         value = value[field] if isinstance(value, dict) and field in value else None
     return value
 
-
 def apply_checks(spec, records):
-    """Spec-level equalities between records; a failure makes every named record unresolved."""
     local = {r["name"].split(".", 1)[1]: r for r in records}
     for check in spec["checks"]:
         names = [p.partition(".")[0] for p in check["equal"]]
@@ -207,9 +177,7 @@ def apply_checks(spec, records):
                 facts.unresolve(local[name], reason)
     return records
 
-
 def extract(document, spec):
-    """Records for every operation of the base spec and of each variant."""
     records, circuits, derived = [], {}, {}
     for name in [None, *spec["variants"]]:
         current = variant(spec, name)

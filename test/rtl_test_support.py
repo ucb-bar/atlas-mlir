@@ -2,12 +2,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
-
-import yaml
+import sys
 
 from test_delay_insertion import OPT, EMIT, ROOT, addi, cycles, nop, program, run, stream, without_delays
 from test_virtual_dma import copy
 from test_virtual_lowering import EXAMPLES, virtual_chain, virtual_pressure
+
+sys.path.insert(0, str(ROOT / "tools"))
+from rtl_extract.specs import load_spec as pair_spec  # generated AtlasCore specs resolve by path
 
 FACTS = os.environ.get("ATLAS_OP_TIMING")
 PAIRS = os.environ.get("ATLAS_PAIR_FACTS")  # merlin.op_pairs.v1 derived from FACTS (tools/rtl_extract/pairfacts.py)
@@ -17,9 +19,6 @@ VERIFY = "--verify-atlas-timing"
 HALT = ("trap", 'kind = "ecall"')
 MARKER = ("csr", 'kind = "rrw", dst = 0 : i32, source = 1 : i32, address = 3088 : i32')
 VLS_COPY = ROOT / "test/examples/ee290_vls_copy.mlir"
-
-def pair_spec(path):
-    return yaml.safe_load(Path(path).read_text())
 
 def checked(test, source, *options, tool=OPT, diagnostic=None):
     result = run(tool, source, *options)

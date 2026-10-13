@@ -2,7 +2,7 @@
 import copy
 from pathlib import Path
 
-import yaml
+from . import specs as spec_files
 
 from .control import require
 
@@ -22,12 +22,10 @@ OPERATION_KEYS = ({"commands"}, {"description", "next_issue"})
 EXCLUDE_KEYS = ({"reason"}, {"path", "module", "message"})
 VARIANT_FIXED = {"engine", "module", "variants", "checks", "expect", "operation_table", "system", "command", "decode"}
 
-
 def keys(value, required, optional, where):
     require(isinstance(value, dict), f"{where}: expected a mapping")
     require(not required - set(value), f"{where}: missing keys {sorted(required - set(value))}")
     require(not set(value) - required - optional, f"{where}: unknown keys {sorted(set(value) - required - optional)}")
-
 
 def ages(key):
     if isinstance(key, int):
@@ -37,25 +35,21 @@ def ages(key):
     require(0 <= first <= last, f"Unsupported command age range: {key!r}")
     return list(range(first, last + 1))
 
-
 def substitute(value, code):
     if isinstance(value, dict):
         return {k: substitute(v, code) for k, v in value.items()}
     return code if value == "$code" else value
-
 
 def symbols(value):
     if isinstance(value, dict):
         return {s for v in value.values() for s in symbols(v)}
     return {value[1:]} if isinstance(value, str) and value.startswith("$") else set()
 
-
 def merge(base, overlay):
     result = copy.deepcopy(base)
     for key, value in overlay.items():
         result[key] = merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else copy.deepcopy(value)
     return result
-
 
 def validate(spec, where):
     recipe = spec.get("recipe", "single")
@@ -141,10 +135,7 @@ def validate(spec, where):
     require(set(spec.get("only", spec["operations"])) <= set(spec["operations"]), f"{where}: only names unknown operations")
     return spec
 
-
 def invariants(value, where):
-    """``{exclude?: [{reason, path?, module?, message?}]}``: every live assertion of the simulated hierarchy except
-    the excluded ones must stay 0 (see ``control.select``)."""
     keys(value, set(), {"exclude"}, where)
     require(isinstance(value.setdefault("exclude", []), list), f"{where}: exclude must be a list")
     for rule in value["exclude"]:
@@ -152,10 +143,9 @@ def invariants(value, where):
         require(isinstance(rule["reason"], str) and rule["reason"].strip(), f"{where}: exclude needs a reason")
     return value
 
-
 def load_spec(path):
     path = Path(path)
-    raw = yaml.safe_load(path.read_text())
+    raw = spec_files.load_spec(path)
     spec = validate(raw, path.name)
     for name, overlay in spec["variants"].items():
         require("/" not in name and "." not in name, f"{path.name}: invalid variant name {name!r}")
@@ -164,31 +154,24 @@ def load_spec(path):
     spec["raw"] = raw
     return spec
 
-
 def variant(spec, name):
-    """The spec with variant ``name`` applied (``None`` is the base spec)."""
     if name is None:
         return spec
     merged = validate(merge({k: v for k, v in spec["raw"].items() if k != "variants"}, spec["variants"][name]), name)
     merged["raw"] = spec["raw"]
     return merged
 
-
 def available_engines(target):
-    return sorted(p.stem for p in (TARGETS / target).glob("*.yaml"))
-
+    return spec_files.available(target, "")
 
 def available_systems(target):
-    return sorted(p.stem for p in (TARGETS / target / "system").glob("*.yaml"))
-
+    return spec_files.available(target, "system")
 
 def load_system(target, name):
-    """A multi-engine spec from ``targets/<target>/system/``; never part of the per-engine facts."""
     require(name in available_systems(target), f"Unknown system spec for {target}: {name}")
     spec = load_spec(TARGETS / target / "system" / f"{name}.yaml")
     require(spec["engine"] == name, "Spec engine names must match their file names")
     return spec
-
 
 def load_target(target, engines=None):
     names = available_engines(target)
@@ -198,3 +181,15 @@ def load_target(target, engines=None):
     specs = {name: load_spec(TARGETS / target / f"{name}.yaml") for name in selected}
     require(all(s["engine"] == n for n, s in specs.items()), "Spec engine names must match their file names")
     return specs
+
+def load_sweeps(target, group, names, engine_specs, validate):
+    available = spec_files.available(target, group)
+    selected = available if names is None else list(names)
+    require(set(selected) <= set(available), f"Unknown {group[:-1]} files: {sorted(set(selected) - set(available))}")
+    raws = {n: spec_files.load_spec(TARGETS / target / group / f"{n}.yaml") for n in selected}
+    engine_specs = dict(engine_specs or {})
+    missing = sorted({r["engine"] for r in raws.values()} - set(engine_specs))
+    engines = [m for m in missing if m in available_engines(target)]
+    engine_specs.update(load_target(target, engines) if engines else {})
+    engine_specs.update({m: load_system(target, m) for m in missing if m not in engines})
+    return {n: (validate(r, engine_specs[r["engine"]], f"{group}/{n}.yaml"), engine_specs[r["engine"]]) for n, r in raws.items()}

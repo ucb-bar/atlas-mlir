@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""Lower the elaborated EE290 FIRRTL to retained HW/Comb/Seq IR (`firtool --ir-hw`) plus a manifest.
+"""Retain verified EE290 hardware IR and its manifest in a new output directory.
 
-Supply the elaborated FIRRTL, its final annotation sidecar and the firtool lowering options.
-This does not elaborate Chisel or run a simulator. `--output` must be a new directory.
-Use `--mode debug` for timing extraction: retain named values and sequential memories
-with the debug optimization pipeline (the default retains the legacy memory replacement).
+Use --mode debug for named-value timing IR; legacy replaces sequential memories.
 """
 import argparse
 import hashlib
@@ -22,7 +19,6 @@ HIERARCHY = {
 
 
 def lowering_command(firtool, firrtl, prepared, options, out, mode):
-    """Keep the two lowering policies explicit; debug matches the timing baseline."""
     hw = out / ("ee290.debug.hw.mlir" if mode == "debug" else "ee290.hw.mlir")
     command = [firtool, "--format=fir", "--export-module-hierarchy", "--verify-each=true",
                "--warn-on-unprocessed-annotations", "--disable-annotation-classless",
@@ -38,7 +34,7 @@ def lowering_command(firtool, firrtl, prepared, options, out, mode):
 
 
 def prepare_annotations(sidecar, out):
-    """Only hierarchy output paths change; embedded blackboxes retain their content."""
+    """Redirect hierarchy files, preserving embedded blackboxes."""
     for annotation in sidecar:
         if annotation.get("class") in HIERARCHY:
             annotation["filename"] = str(out / HIERARCHY[annotation["class"]])

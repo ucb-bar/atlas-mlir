@@ -1,26 +1,16 @@
-"""Two control circuits clocked together, with same-cycle wiring between them resolved by fixed-point iteration.
-
-Spec keys (recipe ``coupled``): the primary circuit is ``module`` with the usual ``cuts``/``probes``;
-``partner: {module, inputs: [names], cuts?, probes?, unreset?}`` is the second circuit, where ``inputs`` lists
-which top-level ``inputs`` (stimulus, responses, partner cut names) belong to it; ``links: {input: output}``
-drives an input port of one circuit with the same-cycle value of an output (port or probe) of the other.
-Linked inputs start unknown each cycle and are refined until stable, so a combinational loop between the
-circuits leaves its values unknown and fails the run instead of picking an order.
-"""
+"""Clock two control circuits together with same-cycle links."""
 from .control import ControlCircuit, require, unmatched
 from .spec import keys
 
 PARTNER_KEYS = ({"module", "inputs"}, {"cuts", "probes", "unreset"})
-
 
 def ports(document, module, direction):
     found = [m for m in document["modules"] if m["name"] == module]
     require(found, f"Missing module: {module}")
     return {p["name"] for p in found[0]["ports"] if p["direction"] == direction}
 
-
 class CoupledCircuit:
-    """Same interface as ``ControlCircuit`` (``registers``, ``state``, ``cone``, ``cycle``) over two circuits."""
+    """Clock two circuits with links settled before committing state."""
 
     def __init__(self, circuits, links):
         self.circuits, self.links = circuits, links
@@ -42,7 +32,6 @@ class CoupledCircuit:
         return next(i for i, c in enumerate(self.circuits) if name in c.outputs)
 
     def cone(self, names):
-        """Registers behind ``names``, following links into the circuit that drives each reached linked input."""
         found, pending, done = set(), list(names), set()
         while pending:
             name = pending.pop()
@@ -70,9 +59,7 @@ class CoupledCircuit:
             values = refined
         raise ValueError("Linked inputs did not settle")
 
-
 def build(document, spec, signals):
-    """``signals`` are the observed names; each must be an output port or probe of exactly one circuit."""
     partner, links = spec["partner"], spec["links"]
     keys(partner, *PARTNER_KEYS, "partner")
     require(isinstance(links, dict) and links, "links: expected a non-empty mapping")

@@ -1,5 +1,4 @@
-"""Synthetic checks (no hardware IR): ControlCircuit, spec loading, runner, derivation, coupled recipe, unreset rules,
-assertion invariants, op_timing document."""
+"""Synthetic control, specification, runner, responder and evidence checks."""
 import copy
 import hashlib
 import json
@@ -7,20 +6,15 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-
 import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from rtl_extract import derive, facts, pairs
+from rtl_extract import derive, facts, pairs, runner
 from rtl_extract.control import ControlCircuit, assertions, select
 from rtl_extract.runner import extract, modules
 from rtl_extract.spec import load_spec, load_target, variant
 
-
 def operation(ident, kind, operands, typ="i1", **attrs):
-    return {"id": ident, "kind": kind, "operands": operands, "results": [ident],
-            "result_types": [typ], "attributes": attrs, "has_regions": False}
-
+    return {"id": ident, "kind": kind, "operands": operands, "results": [ident], "result_types": [typ], "attributes": attrs, "has_regions": False}
 
 def module(name, inputs, outputs, operations, clocked=True):
     """``inputs``: names (i1) or (name, type); ``outputs``: (name, driving value[, type])."""
@@ -30,7 +24,6 @@ def module(name, inputs, outputs, operations, clocked=True):
             "ports": [{"name": n, "direction": "input", "value": n, "type": t} for n, t in ins]
                      + [{"name": n, "direction": "output", "value": v, "type": t} for n, v, t in outs]}
 
-
 def instance(name, target, pins, results):
     """``pins``: {port: value}; ``results``: [(port, type)], result ids are ``name.port``."""
     return {"id": name, "kind": "hw.instance", "operands": list(pins.values()), "results": [f"{name}.{p}" for p, _ in results],
@@ -38,43 +31,33 @@ def instance(name, target, pins, results):
             "attributes": {"moduleName": f"@{target}", "instanceName": name, "argNames": json.dumps(list(pins)),
                            "resultNames": json.dumps([p for p, _ in results])}}
 
-
 def write_spec(directory, value):
     path = Path(directory) / f"{value['engine']}.yaml"
     path.write_text(yaml.safe_dump(value))
     return path
 
-
 def load(value):
     with tempfile.TemporaryDirectory() as directory:
         return load_spec(write_spec(directory, value))
 
-
 def records(value, document):
     return {r["name"]: r for r in extract(document, load(value))}
-
 
 def zero():
     return operation("zero", "hw.constant", [], value="false")
 
-
 def one():
     return operation("one", "hw.constant", [], value="true")
 
-
 def pipe(name="Pipe"):
-    return module(name, ["req", ("payload", "i8")], [("out", "reg")], [
-        zero(), operation("reg", "seq.firreg", ["req", "clock", "reset", "zero"], name="valid")])
-
+    return module(name, ["req", ("payload", "i8")], [("out", "reg")], [ zero(), operation("reg", "seq.firreg", ["req", "clock", "reset", "zero"], name="valid")])
 
 def build(m):
     return ControlCircuit({"modules": [m]}, m["name"], ["out"], {"clock", "reset", "req"})
 
-
 def trace(c):
     c.cycle({"req": 0, "reset": 1})
     return [c.cycle({"req": int(t == 0), "reset": 0})["out"] for t in range(5)]
-
 
 def child(operands, target="Pipe"):
     """Instance named ``child`` of ``target`` whose single result is the id ``reg``."""
@@ -82,8 +65,8 @@ def child(operands, target="Pipe"):
     item = instance("child", target, pins, [("out", "i1")])
     return item | {"id": "reg", "results": ["reg"]}
 
-
 class ControlTests(unittest.TestCase):
+
     def test_pipeline_register_addition_changes_timing(self):
         m = pipe()
         self.assertEqual(trace(build(m)), [0, 1, 0, 0, 0])
@@ -151,8 +134,7 @@ class ControlTests(unittest.TestCase):
 
     def test_array_indices_follow_hw_order(self):
         m = pipe()
-        m["operations"] = [zero(), one(), operation("array", "hw.array_create", ["one", "zero"], "!hw.array<2xi1>"),
-                           operation("reg", "hw.array_get", ["array", "zero"])]
+        m["operations"] = [zero(), one(), operation("array", "hw.array_create", ["one", "zero"], "!hw.array<2xi1>"), operation("reg", "hw.array_get", ["array", "zero"])]
         self.assertEqual(build(m).cycle({})["out"], 0)
 
     def test_renamed_clock_and_reset_ports(self):
@@ -181,7 +163,6 @@ class ControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing named value"):
             ControlCircuit(doc, "Top", [], {"clock", "reset"}, probes={"x": {"path": "child", "value": "absent"}})
 
-
 def engine():
     """Command starts busy and a request; the response retires the request one cycle later."""
     return {"modules": [module("Engine", ["cmd", "resp", ("payload", "i8")], [("req", "req"), ("done", "done"), ("busy", "busy")], [
@@ -191,15 +172,13 @@ def engine():
         operation("hold", "comb.mux", ["done", "zero", "busy"]),
         operation("next", "comb.mux", ["cmd", "one", "hold"]),
         operation("busy", "seq.firreg", ["next", "clock", "reset", "zero"])])]}
-
-
 TOY = {"engine": "toy", "module": "Engine", "limit": 40, "busy": "busy", "inputs": {"cmd": 0, "resp": 0},
        "events": {"request": {"valid": "req", "response": {"input": "resp", "latency": 1}}, "done": {"valid": "done"}},
        "operations": {"pulse": {"commands": {0: {"cmd": 1}}}},
        "variants": {"slow": {"events": {"request": {"response": {"latency": 3}}}}}}
 
-
 class SpecTests(unittest.TestCase):
+
     def test_valid_spec_and_variant(self):
         spec = load(TOY)
         self.assertEqual(spec["reset_cycles"], 16)
@@ -238,13 +217,12 @@ class SpecTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown engines"):
             load_target("atlas", ["not_an_engine"])
 
-
 class RunnerTests(unittest.TestCase):
+
     def test_responses_drive_events_and_release(self):
         found = records(TOY, engine())
         base, slow = found["toy.pulse"], found["toy.pulse/slow"]
-        self.assertEqual((base["status"], base["events"]["request"]["first_age"], base["events"]["done"]["first_age"],
-                          base["first_free_age"]), ("computed", 1, 3, 4))
+        self.assertEqual((base["status"], base["events"]["request"]["first_age"], base["events"]["done"]["first_age"], base["first_free_age"]), ("computed", 1, 3, 4))
         self.assertEqual((slow["events"]["done"]["first_age"], slow["first_free_age"]), (5, 6))
         self.assertEqual(slow["assumptions"]["scratchpad_read_latency"], 3)
 
@@ -278,7 +256,6 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(record["status"], "unresolved")
         self.assertIn("unknown after reset/flush", record["reason"])
 
-
 def system(stages=1, firmem=(1,)):
     """Sys instantiates a decoder (instruction bits 26:25 are the op), an engine and a memory answering after ``stages``."""
     eng = module("Eng", ["io_cmd_valid", ("io_cmd_bits_op", "i2"), ("io_cmd_bits_tag", "i3"), "io_resp_valid", ("io_resp_bits", "i8")],
@@ -295,8 +272,7 @@ def system(stages=1, firmem=(1,)):
     memory = module("Mem", ["io_eng_valid", ("io_eng_bits_row", "i3"), "io_other_valid"], [("io_engResp_valid", f"stage{stages - 1}")],
                     [zero(), *chain, *[operation(f"bank{i}", "seq.firmem", [], "!seq.firmem<8 x 8>", readLatency=f"{n} : i32")
                                        for i, n in enumerate(firmem)]])
-    decoder = module("Dec", [("io_instr", "i32")], [("io_op", "op", "i2")],
-                     [operation("op", "comb.extract", ["io_instr"], "i2", lowBit="25 : i32")], clocked=False)
+    decoder = module("Dec", [("io_instr", "i32")], [("io_op", "op", "i2")], [operation("op", "comb.extract", ["io_instr"], "i2", lowBit="25 : i32")], clocked=False)
     top = module("Sys", [("instr", "i32")], [], [
         zero(), operation("three", "hw.constant", [], "i3", value="3 : i3"),
         operation("s1_instr", "hw.wire", ["instr"], "i32", name="s1_instr"),
@@ -307,8 +283,6 @@ def system(stages=1, firmem=(1,)):
         instance("mem", "Mem", {"clock": "clock", "reset": "reset", "io_eng_valid": "eng.io_req_valid",
                                 "io_eng_bits_row": "eng.io_req_bits_tag", "io_other_valid": "zero"}, [("io_engResp_valid", "i1")])])
     return {"modules": [top, eng, memory, decoder]}
-
-
 DERIVED = {"engine": "toy", "module": "Eng", "system": "Sys", "command": "io_cmd", "limit": 40, "busy": "io_busy",
            "inputs": {"io_cmd_bits_tag": 5},
            "decode": {"input": "io_cmd_bits_op", "instruction": {"instance": "dec", "port": "io_instr"},
@@ -317,8 +291,8 @@ DERIVED = {"engine": "toy", "module": "Eng", "system": "Sys", "command": "io_cmd
            "operations": {"go": {"commands": {0: {"io_cmd_valid": 1, "io_cmd_bits_op": "$go", "io_cmd_bits_tag": 2}}}},
            "variants": {"slow": {"events": {"req": {"response": {"latency": 3}}}}}}
 
-
 class DeriveTests(unittest.TestCase):
+
     def resolve(self, value=DERIVED, doc=None):
         return derive.resolve(doc or system(), load(value))
 
@@ -351,8 +325,7 @@ class DeriveTests(unittest.TestCase):
     def test_extra_response_register_wins_and_both_are_reported(self):
         spec, notes = self.resolve(doc=system(stages=2))
         self.assertEqual(spec["events"]["req"]["response"]["latency"], 2)
-        self.assertEqual({k: notes["scratchpad_read_derivation"]["req"][k] for k in ("measured", "memory_read_latency")},
-                         {"measured": 2, "memory_read_latency": 1})
+        self.assertEqual({k: notes["scratchpad_read_derivation"]["req"][k] for k in ("measured", "memory_read_latency")}, {"measured": 2, "memory_read_latency": 1})
 
     def test_declared_latency_overrides_and_reports_measured(self):
         resolved, notes = derive.resolve(system(), variant(load(DERIVED), "slow"))
@@ -441,7 +414,6 @@ class DeriveTests(unittest.TestCase):
         self.assertEqual(spec["operations"]["stop"]["commands"][0]["io_cmd_bits_op"], "$stop")
         self.assertEqual(derive.resolve(system(), spec)[0]["operations"]["stop"]["commands"][0]["io_cmd_bits_op"], 2)
 
-
 def pair(hold=False):
     """A registers ``cmd`` into ``req`` and passes ``ack`` straight to ``seen``; B echoes ``in`` and registers it."""
     a = module("A", ["cmd", "ack"], [("req", "req"), ("seen", "seen")],
@@ -450,15 +422,13 @@ def pair(hold=False):
         (operation("resp", "seq.firreg", ["in", "clock", "reset", "zero"]),)
     b = module("B", ["in"], [("echo", "echo"), ("resp", "resp")], [zero(), one(), operation("echo", "hw.wire", ["in"]), *resp])
     return {"modules": [a, b]}
-
-
 PAIR = {"engine": "pair", "module": "A", "recipe": "coupled", "limit": 8,
         "inputs": {"cmd": 0}, "partner": {"module": "B", "inputs": []}, "links": {"in": "req", "ack": "echo"},
         "events": {"req": {"valid": "req"}, "seen": {"valid": "seen"}, "resp": {"valid": "resp"}},
         "operations": {"pulse": {"commands": {0: {"cmd": 1}}}}}
 
-
 class CoupledTests(unittest.TestCase):
+
     def pulse(self, value=PAIR, doc=None):
         return records(value, doc or pair())["pair.pulse"]
 
@@ -505,7 +475,6 @@ class CoupledTests(unittest.TestCase):
         self.assertEqual(record["status"], "unresolved")
         self.assertIn("unapproved input: data", record["reason"])
 
-
 class UnresetTests(unittest.TestCase):
     """``unreset`` allowlists registers that stay unknown after reset/flush; stale, unmatched or already-known entries fail."""
     META = {"path": "", "name": "meta"}
@@ -522,8 +491,7 @@ class UnresetTests(unittest.TestCase):
         return extract(doc, load(value))[0]
 
     def single(self, unreset=()):
-        return self.extracted({"modules": [self.masked("M", "cmd")]}, {
-            "module": "M", "inputs": {"cmd": 0}, "unreset": list(unreset), "events": {"flag": {"valid": "flag"}}})
+        return self.extracted({"modules": [self.masked("M", "cmd")]}, { "module": "M", "inputs": {"cmd": 0}, "unreset": list(unreset), "events": {"flag": {"valid": "flag"}}})
 
     def coupled(self, unreset=(), partner_unreset=()):
         doc = pair()
@@ -560,11 +528,9 @@ class UnresetTests(unittest.TestCase):
         record = self.coupled(partner_unreset=[self.META])
         self.assertEqual((record["status"], record["events"]["seen"]["first_age"]), ("computed", 2), record.get("reason"))
 
-
 def region(ident, kind, operands=(), **attrs):
     return {"id": ident, "kind": kind, "operands": list(operands), "results": [], "result_types": [],
             "attributes": attrs, "has_regions": kind != "sv.error", "location": "loc(\"X.scala\":1:1)"}
-
 
 def assertion(ident, condition, message, ifdef_branch=1, kind="sv.error"):
     """Operations and site of a Chisel-style assertion (``ifdef SYNTHESIS`` / ``always posedge`` / ``if`` / macro ``if``)."""
@@ -577,10 +543,8 @@ def assertion(ident, condition, message, ifdef_branch=1, kind="sv.error"):
     parents = [f"{ident}.ifdef", f"{ident}.always", f"{ident}.if", f"{ident}.verbose"]
     return ops, {"op": ident, "parents": [{"op": p, "region": ifdef_branch if i == 0 else 0} for i, p in enumerate(parents)]}
 
-
 def engines(shared=False, unknown=False, disabled=False):
-    """Counters A and B (``go_x`` loads 3, ``busy_x`` while counting) and one assertion: B issued while A is busy.
-    ``shared`` makes B's start wait for A, ``unknown`` ORs an unreset register into the assertion."""
+    """Counters with optional shared control or unknown assertion state; B must not issue while A is busy."""
     ops = [operation("zero2", "hw.constant", [], "i2", value="0 : i2"), operation("one2", "hw.constant", [], "i2", value="1 : i2"),
            operation("three", "hw.constant", [], "i2", value="3 : i2"), zero(), one(),
            {"id": "clk", "kind": "seq.from_clock", "operands": ["clock"], "results": ["clk"], "result_types": ["i1"], "attributes": {}}]
@@ -599,13 +563,10 @@ def engines(shared=False, unknown=False, disabled=False):
     site_ops, site = assertion("err", "fire2" if unknown else "fire", "B issued while A busy", 0 if disabled else 1)
     m = module("Two", ["go_a", "go_b"], [("out_a", "busy_a"), ("out_b", "busy_b"), ("busy", "busy")], ops + site_ops)
     return {**m, "assertions": [site]}
-
-
 TWO = {"engine": "two", "module": "Two", "inputs": {"go_a": 0, "go_b": 0}, "busy": "busy", "limit": 24,
        "events": {"a": {"valid": "out_a"}, "b": {"valid": "out_b"}},
        "operations": {"a": {"commands": {0: {"go_a": 1}}}, "b": {"commands": {0: {"go_b": 1}}},
                       "both": {"commands": {0: {"go_a": 1}, 2: {"go_b": 1}}}}}
-
 
 def two_pairs(m, invariants=None, shared=()):
     spec = load(TWO)
@@ -614,8 +575,8 @@ def two_pairs(m, invariants=None, shared=()):
         raw["invariants"] = invariants
     return pairs.extract({"modules": [m]}, pairs.validate(raw, spec, "two.yaml"), spec)[0]
 
-
 class InvariantTests(unittest.TestCase):
+
     def test_assertion_sites_follow_guards_and_macros(self):
         found = assertions(engines())
         self.assertEqual(len(found), 1)
@@ -661,21 +622,18 @@ class InvariantTests(unittest.TestCase):
                  ("no assertion export", {"modules": [{k: v for k, v in m.items() if k != "assertions"}]}, {}, "exported without assertions"),
                  ("unapproved input", {"modules": [m]}, {}, "unapproved input: go_b"))
         for label, document, rules, message in cases:
-            spec = load({**TWO, "invariants": rules, "inputs": {"go_a": 0} if label == "unapproved input" else TWO["inputs"],
-                         "operations": {"a": TWO["operations"]["a"]}})
+            spec = load({**TWO, "invariants": rules, "inputs": {"go_a": 0} if label == "unapproved input" else TWO["inputs"], "operations": {"a": TWO["operations"]["a"]}})
             with self.subTest(label):
                 self.assertIn(message, extract(document, spec)[0]["reason"])
         with self.assertRaisesRegex(ValueError, "missing keys"):
             load({**TWO, "invariants": {"exclude": [{"message": "x"}]}})
 
     def test_shared_control_detection(self):
-        self.assertEqual(two_pairs(engines())["shared_control"],
-                         {"groups": [["a"], ["b"]], "registers": [1, 1], "shared_registers": [], "shared_inputs": [], "disjoint": True})
+        self.assertEqual(two_pairs(engines())["shared_control"], {"groups": [["a"], ["b"]], "registers": [1, 1], "shared_registers": [], "shared_inputs": [], "disjoint": True})
         shared = two_pairs(engines(shared=True))["shared_control"]
         self.assertEqual((shared["shared_registers"], shared["disjoint"]), (["/cnt_a"], False))
         both = two_pairs(engines(), shared=[{"input": "go_a", "reason": "r"}])["shared_control"]
         self.assertTrue(both["disjoint"])
-
 
 class OpTimingDocument(unittest.TestCase):
     SPEC = {"engine": "toy", "module": "Toy", "reset_cycles": 4, "flush_cycles": 4, "limit": 32,
@@ -700,8 +658,7 @@ class OpTimingDocument(unittest.TestCase):
 
     def test_computed_block_follows_the_timing_conventions(self):
         block = self.blocks(facts.record(self.SPEC, "pulse", "slow", self.RESULT, evidence="simulated"))[0]["op_timing"][0]
-        self.assertEqual((block["name"], block["module"], block["engine"], block["operation"], block["variant"]),
-                         ("toy.pulse/slow", "Toy", "toy", "pulse", "slow"))
+        self.assertEqual((block["name"], block["module"], block["engine"], block["operation"], block["variant"]), ("toy.pulse/slow", "Toy", "toy", "pulse", "slow"))
         self.assertEqual((block["source"], block["evidence"]), ("control_simulation", "simulated"))
         self.assertEqual((block["events"], block["first_free_age"], block["next_issue_age"]), (self.EVENTS, 7, 5))
         self.assertEqual(block["assumptions"], {"scratchpad_read_latency": 2, "reset_cycles": 4, "flush_cycles": 4, "limit": 32})
@@ -725,6 +682,128 @@ class OpTimingDocument(unittest.TestCase):
         self.assertEqual((block["events"], block["first_free_age"], block["next_issue_age"]), (None, None, None))
         self.assertEqual(block["evidence"], "Check failed: a == b")
 
+def client():
+    """Tag-5 requests wait for acceptance; responses retire on odd ages when ready."""
+    return module("Client", ["go", "req_ready", "resp_valid", ("resp_tag", "i3")],
+                  [("req_valid", "want"), ("req_tag", "five", "i3"), ("resp_ready", "rdy"), ("done", "done"), ("busy", "busy")], [
+        zero(), one(), operation("five", "hw.constant", [], "i3", value="5 : i3"),
+        operation("want", "seq.firreg", ["want_next", "clock", "reset", "zero"], name="want"),
+        operation("waiting", "seq.firreg", ["wait_next", "clock", "reset", "zero"], name="waiting"),
+        operation("rdy", "seq.firreg", ["rdy_next", "clock", "reset", "zero"], name="rdy"),
+        operation("rdy_next", "comb.xor", ["rdy", "one"]),
+        operation("fire", "comb.and", ["want", "req_ready"]),
+        operation("resp_fire", "comb.and", ["resp_valid", "rdy"]),
+        operation("hold", "comb.mux", ["fire", "zero", "want"]),
+        operation("want_next", "comb.mux", ["go", "one", "hold"]),
+        operation("wait_hold", "comb.mux", ["resp_fire", "zero", "waiting"]),
+        operation("wait_next", "comb.mux", ["fire", "one", "wait_hold"]),
+        operation("tagged", "comb.icmp", ["resp_tag", "five"], predicate="0 : i64"),
+        operation("done", "comb.and", ["resp_fire", "tagged"]),
+        operation("busy", "comb.or", ["want", "waiting"])])
+RESPONDER_SPEC = {"engine": "client", "module": "Client", "inputs": {"go": 0}, "busy": "busy", "limit": 24,
+        "events": {"done": {"valid": "done"}},
+        "responders": {"mem": {"request": {"valid": "req_valid", "ready": "req_ready", "tag": "req_tag"},
+                               "response": {"valid": "resp_valid", "ready": "resp_ready", "tag": "resp_tag"},
+                               "latency": 3, "accept": [0, 1]}},
+        "operations": {"go": {"commands": {0: {"go": 1}}}}}
 
+def events_of(trace):
+    return sorted((e["age"], group, fields) for e in trace for group, fields in e["events"].items())
+
+class ResponderTests(unittest.TestCase):
+
+    def run_client(self, **overlay):
+        spec = load({**RESPONDER_SPEC, "responders": {"mem": {**RESPONDER_SPEC["responders"]["mem"], **overlay}}})
+        document = {"modules": [client()]}
+        circuit = runner.build_single(document, spec)
+        return runner.run_single(circuit, spec, "go"), spec
+
+    def test_request_waits_for_accept_and_response_is_held_until_ready(self):
+        trace, _ = self.run_client()
+        # go at 0; the request is valid from age 1 and accepted at the first odd age; due at 4, ready only at odd ages.
+        self.assertEqual(events_of(trace), [(1, "mem.request", {"tag": 5}), (5, "done", {}), (5, "mem.response", {"tag": 5})])
+        self.assertEqual([e["signals"]["resp_ready"] for e in trace[:6]], [0, 1, 0, 1, 0, 1])
+        self.assertEqual(runner.summarize(trace, _, "go")["first_free_age"], 6)
+
+    def test_accept_pattern_and_latency_move_the_handshakes(self):
+        trace, _ = self.run_client(accept=[0, 0, 0, 1], latency=2)
+        self.assertEqual([(a, g) for a, g, _ in events_of(trace)], [(3, "mem.request"), (5, "done"), (5, "mem.response")])
+
+    def test_request_fields_are_recorded_and_must_be_known(self):
+        trace, _ = self.run_client(request={"valid": "req_valid", "ready": "req_ready", "tag": "req_tag", "fields": {"copy": "req_tag"}})
+        self.assertEqual(events_of(trace)[0], (1, "mem.request", {"copy": 5, "tag": 5}))
+
+    def test_responder_signals_are_observed_and_control(self):
+        spec = load(RESPONDER_SPEC)
+        self.assertIn("req_valid", runner.control_signals(spec))
+        self.assertNotIn("resp_ready", runner.control_signals(spec))
+        self.assertTrue({"req_valid", "req_tag", "resp_ready"} <= set(runner.observed(spec)))
+        self.assertEqual(spec["inputs"], {"go": 0, "req_ready": 0, "resp_valid": 0, "resp_tag": 0})
+        self.assertEqual(runner.group_valid(spec, "mem.request"), "req_valid")
+        self.assertEqual(runner.group_valid(spec, "mem.response"), "resp_ready")
+        self.assertEqual(runner.group_valid(spec, "done"), "done")
+        with self.assertRaises(ValueError):
+            runner.group_valid(spec, "other.request")
+
+    def test_invalid_responders_are_rejected(self):
+        mem = RESPONDER_SPEC["responders"]["mem"]
+        bad = {"latency zero": {**mem, "latency": 0},
+               "accept level": {**mem, "accept": [2]},
+               "accept empty": {**mem, "accept": []},
+               "unknown key": {**mem, "order": "any"},
+               "response fields": {**mem, "response": {**mem["response"], "fields": {"x": "req_tag"}}},
+               "field named tag": {**mem, "request": {**mem["request"], "fields": {"tag": "req_tag"}}},
+               "missing ready": {**mem, "request": {"valid": "req_valid"}}}
+        for label, responder in bad.items():
+            with self.subTest(label), self.assertRaises(ValueError):
+                load({**RESPONDER_SPEC, "responders": {"mem": responder}})
+        with self.assertRaises(ValueError):
+            load({**RESPONDER_SPEC, "responders": {"done": mem}})
+
+    def test_pair_sweep_compares_handshakes(self):
+        # The client against itself: a second go at an even gap requests at g+1 (odd, accepted) and is answered at
+        # g+5 as in isolation; at an odd gap the request slips to g+2, which the handshake comparison rejects.
+        spec = load(RESPONDER_SPEC)
+        document = {"modules": [client()]}
+        import tempfile
+        import yaml
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.yaml"
+            path.write_text(yaml.safe_dump({"engine": "client", "pairs": {"p": {"first": "go", "second": "go", "gaps": "1..6"}}}))
+            raw = pairs.load_file(path, spec)
+        record = pairs.extract(document, raw, spec)[0]
+        self.assertEqual([(r["from"], r["result"]) for r in record["results"]], [(g, "accepted" if g % 2 == 0 else "missing mem.request events") for g in range(1, 7)])
+        self.assertEqual((record["min_gap"], record["stable_gap"]), (2, 6))
+
+class UnresetMatchTests(unittest.TestCase):
+
+    def masked(self):
+        """``flag`` is a reset valid ANDed with two hold registers that stay unknown until the first command."""
+        return module("M", ["cmd"], [("flag", "flag")], [
+            zero(), one(), operation("valid", "seq.firreg", ["cmd", "clock", "reset", "zero"], name="valid"),
+            operation("next_a", "comb.mux", ["cmd", "one", "meta_a"]), operation("meta_a", "seq.firreg", ["next_a", "clock"], name="meta_a"),
+            operation("next_b", "comb.mux", ["cmd", "one", "meta_b"]), operation("meta_b", "seq.firreg", ["next_b", "clock"], name="meta_b"),
+            operation("both", "comb.and", ["meta_a", "meta_b"]), operation("flag", "comb.and", ["valid", "both"])])
+
+    def record(self, unreset):
+        value = {"engine": "meta", "module": "M", "limit": 6, "inputs": {"cmd": 0}, "unreset": unreset,
+                 "events": {"flag": {"valid": "flag"}}, "operations": {"pulse": {"commands": {0: {"cmd": 1}}}}}
+        return runner.extract({"modules": [self.masked()]}, load(value))[0]
+
+    def test_match_selects_every_register_it_names(self):
+        record = self.record([{"path": "", "match": "meta_[ab]"}])
+        self.assertEqual((record["status"], record["events"]["flag"]["first_age"]), ("computed", 1), record.get("reason"))
+        self.assertEqual(self.record([{"path": "", "match": "meta_a"}, {"path": "", "name": "meta_b"}])["status"], "computed")
+
+    def test_match_without_registers_or_with_a_known_register_fails(self):
+        self.assertIn("matches 0 registers", self.record([{"path": "", "match": "meta_[ab]"}, {"path": "", "match": "nothing.*"}])["reason"])
+        self.assertIn("known after reset/flush", self.record([{"path": "", "match": "(meta_[ab]|valid)"}])["reason"])
+        self.assertIn("matches 0 registers", self.record([{"path": "", "match": "meta"}])["reason"])  # whole-name match
+
+    def test_selector_takes_one_of_name_and_match(self):
+        for selector in ({"path": "", "name": "meta_a", "match": "meta_b"}, {"path": ""}):
+            with self.subTest(selector), self.assertRaises(ValueError):
+                load({"engine": "meta", "module": "M", "inputs": {"cmd": 0}, "unreset": [selector],
+                                "events": {"flag": {"valid": "flag"}}, "operations": {"pulse": {"commands": {0: {"cmd": 1}}}}})
 if __name__ == "__main__":
     unittest.main()

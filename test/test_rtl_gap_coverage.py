@@ -19,7 +19,6 @@ import functools
 import json
 import os
 from pathlib import Path
-import sys
 import unittest
 
 from rtl_test_support import (
@@ -28,7 +27,6 @@ from rtl_test_support import (
     transpose, vli, vls, vpu, wait, word_base, pair_spec, decode_mxu,
 )
 
-sys.path.insert(0, str(ROOT / "tools"))
 
 DMA_FIELDS = (31 << 7) | (31 << 15) | (31 << 20)  # DMA register fields; the operands arrive on the cuts
 

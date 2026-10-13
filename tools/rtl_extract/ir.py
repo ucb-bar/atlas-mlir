@@ -5,16 +5,12 @@ import subprocess
 
 from .control import require
 
-
 def export(hw_ir, modules, exporter, assertions=False):
     flags = ["--assertions"] if assertions else []
     raw = subprocess.check_output([str(Path(exporter).resolve()), *flags, str(Path(hw_ir).resolve()), *sorted(set(modules))])
     return json.loads(raw)
 
-
 def load_document(hw_ir, modules, exporter, assertions=False):
-    """Export ``modules`` and every hw.module they instantiate (extern modules stay declarations); ``assertions``
-    adds each module's assertion sites."""
     names = set(modules)
     while True:
         document = export(hw_ir, names, exporter, assertions)

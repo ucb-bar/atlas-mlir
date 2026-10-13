@@ -1,45 +1,16 @@
-"""Sequences of N operations at uniform spacing: operation i is issued ``i * gap`` ages after the first.
-
-A sequence file ``targets/<target>/sequences/<name>.yaml`` names an engine spec of the same target and declares chains:
-
-    engine: <spec stem>                # targets/<target>/<stem>.yaml or targets/<target>/system/<stem>.yaml
-    equivalent: {<name>: [group, ...]} # optional; as in pair files
-    ignore: [group, ...]               # optional; as in pair files
-    invariants: {exclude: [...]}       # optional; replaces the spec's invariants, as in pair files
-    sequences:
-      <sequence>:
-        ops:                           # a cycle; a chain of length n takes its first n entries, repeating the cycle
-          - op: <operation>            # issued at its own command ages + i * gap
-            inputs: {input: value}     # optional operand overlay on every command of this entry
-            guards: [{signal, bit?}]   # optional; default: the operation's next_issue. Must be clear at its issue age.
-            as: <name>                 # optional; the op_timing block the entry stands for (default <engine>.<op>)
-        lengths: "a..b"                # chain lengths (at least 2)
-        gaps: "a..b"                   # swept spacings (inclusive, from 1)
-    expect: {<sequence>: {<length>: <stable_gap>}}   # regression values read only by tests
-
-A spacing is accepted for a chain when the pair rules hold for all operations at once (``pairs.judge``): no command
-ages collide, control stays known and busy drains, every guard is clear at each issue age after the first, every
-invariant stays 0 at every age (unknown fails), and the
-event multiset equals the union of the isolated runs, each shifted by its issue offset. A rejection names the missing
-or unexpected events and the chain positions that lost events. ``stable_gap`` is, per chain length, the smallest
-spacing from which every swept spacing is accepted. Python stays target-agnostic: names and operands live in YAML.
-"""
+"""Sweep uniformly spaced chains with the pair acceptance rules."""
 from collections import Counter
-import json
 from pathlib import Path
 
-import yaml
-
-from . import derive, pairs
+from . import derive, pairs, specs as spec_files
 from .control import require
 from .runner import RECIPES, observed
-from .spec import TARGETS, ages, available_engines, invariants, keys, load_system, load_target
+from .spec import ages, invariants, keys, load_sweeps
 
 FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect", "invariants"})
 SEQUENCE_KEYS = ({"ops", "lengths", "gaps"}, {"description"})
 OP_KEYS = ({"op"}, {"inputs", "guards", "as"})
 SCHEMA = "rtl_extract.op_sequences.v1"
-
 
 def validate(raw, spec, where):
     keys(raw, *FILE_KEYS, where)
@@ -71,46 +42,27 @@ def validate(raw, spec, where):
                 f"{where}: expect.{name} must map chain lengths of the sequence to stable gaps")
     return raw
 
-
 def step(entry):
-    """The entry as a pair-style ``second`` (operation and optional guards) for ``pairs.guards``."""
     return {"second": entry["op"], **({"guards": entry["guards"]} if "guards" in entry else {})}
 
-
 def available(target):
-    return sorted(p.stem for p in (TARGETS / target / "sequences").glob("*.yaml"))
-
+    return spec_files.available(target, "sequences")
 
 def load_file(path, spec):
     path = Path(path)
-    return validate(yaml.safe_load(path.read_text()), spec, path.name)
-
+    return validate(spec_files.load_spec(path), spec, path.name)
 
 def load(target, names=None, specs=None):
-    """``{name: (sequence file, engine spec)}`` for the sequence files of ``target``."""
-    selected = available(target) if names is None else list(names)
-    require(set(selected) <= set(available(target)), f"Unknown sequence files: {sorted(set(selected) - set(available(target)))}")
-    raws = {n: yaml.safe_load((TARGETS / target / "sequences" / f"{n}.yaml").read_text()) for n in selected}
-    specs = dict(specs or {})
-    missing = sorted({r["engine"] for r in raws.values()} - set(specs))
-    engines = [m for m in missing if m in available_engines(target)]
-    specs.update(load_target(target, engines) if engines else {})
-    specs.update({m: load_system(target, m) for m in missing if m not in engines})
-    return {n: (validate(r, specs[r["engine"]], f"sequences/{n}.yaml"), specs[r["engine"]]) for n, r in raws.items()}
-
+    return load_sweeps(target, "sequences", names, specs, validate)
 
 def chain(sequence, length):
     return [sequence["ops"][i % len(sequence["ops"])] for i in range(length)]
 
-
 def timeline(spec, steps, gap):
-    """``(timeline, schedules)`` with operation ``i`` shifted by ``i * gap``; ``timeline`` is ``None`` on a collision."""
     schedules = [pairs.commands(spec, s["op"], s.get("inputs", {}), i * gap) for i, s in enumerate(steps)]
     return pairs.merge(schedules), schedules
 
-
 def lost(expected, actual):
-    """Chain positions whose expected events are not all present, in order of the actual events they claim."""
     remaining, positions = Counter(actual), []
     for i, events in enumerate(expected):
         wanted = Counter(events)
@@ -119,9 +71,7 @@ def lost(expected, actual):
         remaining -= wanted & remaining
     return positions
 
-
 def difference(expected, actual):
-    """Per-group counts of missing and unexpected events, e.g. ``missing compute x32, acc_write x32``."""
     parts = []
     for label, counter in (("missing", Counter(expected) - Counter(actual)), ("unexpected", Counter(actual) - Counter(expected))):
         groups = Counter(g for (g, _, _), n in counter.items() for _ in range(n))
@@ -129,9 +79,7 @@ def difference(expected, actual):
             parts.append(f"{label} " + ", ".join(f"{g} x{n}" for g, n in sorted(groups.items())))
     return "; ".join(parts)
 
-
 def trial(circuit, spec, raw, steps, alone, gap):
-    """``None`` if the chain is accepted at spacing ``gap``, otherwise the reason it is not."""
     merged, schedules = timeline(spec, steps, gap)
     expected = [[(g, a + i * gap, f) for g, a, f in events] for i, events in enumerate(alone)]
     flat = sorted(e for events in expected for e in events)
@@ -139,28 +87,21 @@ def trial(circuit, spec, raw, steps, alone, gap):
     explain = lambda flat, actual: f"{difference(flat, actual)} (ops {lost(expected, actual) or 'none'})"
     return pairs.describe(pairs.judge(circuit, spec, raw, merged, issues, flat, explain))
 
-
 def isolated(circuit, spec, raw, entry):
-    """The events of one chain entry issued alone."""
     return pairs.isolate(circuit, spec, raw, "", entry["op"], entry.get("inputs", {}))[0]
 
-
 def key(entry):
-    return json.dumps(entry, sort_keys=True)
+    return entry["op"], tuple(sorted(entry.get("inputs", {}).items()))
 
-
-CONTEXT = {}
-
+TASK = None
 
 def cell(task):
-    """One (case, gap) trial; ``CONTEXT`` is inherited by forked workers."""
     case, gap = task
-    context = CONTEXT["context"]
-    return trial(context["circuit"], context["spec"], context["raw"], context["cases"][case][1], context["cases"][case][2], gap)
-
+    circuit, spec, raw, cases = TASK
+    return trial(circuit, spec, raw, cases[case][1], cases[case][2], gap)
 
 def extract(document, raw, spec, jobs=1, only=None):
-    """One record per (sequence, length): per-spacing results, the minimum accepted spacing and the stable spacing."""
+    global TASK
     concrete, _ = derive.resolve(document, pairs.prepared(raw, spec), {})
     circuit = RECIPES[concrete["recipe"]][0](document, concrete)
     selected = [n for n in raw["sequences"] if only is None or n in only]
@@ -175,11 +116,11 @@ def extract(document, raw, spec, jobs=1, only=None):
         pairs.TASK = None
     cases = [(name, steps, [alone[key(s)] for s in steps], length) for name, steps, length in chains]
     tasks = [(c, gap) for c, case in enumerate(cases) for gap in ages(raw["sequences"][case[0]]["gaps"])]
-    CONTEXT["context"] = {"circuit": circuit, "spec": concrete, "raw": raw, "cases": cases}
+    TASK = (circuit, concrete, raw, cases)
     try:
         reasons = pairs.parallel(cell, tasks, jobs)
     finally:
-        CONTEXT.clear()
+        TASK = None
     records = []
     for c, (name, steps, _, length) in enumerate(cases):
         results = [(gap, reason) for (case, gap), reason in zip(tasks, reasons) if case == c]
@@ -196,32 +137,8 @@ def extract(document, raw, spec, jobs=1, only=None):
             records[-1]["invariants"] = {"checked": len(circuit.invariants), "excluded": circuit.excluded}
     return records
 
-
 def main(argv=None):
-    import argparse
-    from . import facts
-    from .ir import load_document
-    from .runner import modules
-    parser = argparse.ArgumentParser(description="Sweep declared operation chains (see tools/rtl_extract/sequences.py).")
-    parser.add_argument("--hw-ir", type=Path, required=True)
-    parser.add_argument("--exporter", type=Path, required=True)
-    parser.add_argument("--target", default="atlas")
-    parser.add_argument("--sequences", nargs="+", help="sequence files (default: every file under targets/<target>/sequences/)")
-    parser.add_argument("--only", nargs="+", help="sequence names within the files (default: all)")
-    parser.add_argument("--jobs", type=int, default=1, help="worker processes for the (chain, spacing) trials")
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args(argv)
-    loaded = load(args.target, args.sequences)
-    unknown = set(args.only or ()) - {n for raw, _ in loaded.values() for n in raw["sequences"]}
-    require(not unknown, f"Unknown sequences: {sorted(unknown)}")
-    document = load_document(args.hw_ir, sorted({m for _, s in loaded.values() for m in modules(s)}), args.exporter,
-                             any(pairs.needs_assertions(r, s) for r, s in loaded.values()))
-    records = [r for raw, spec in loaded.values() for r in extract(document, raw, spec, args.jobs, args.only and set(args.only))]
-    facts.write(args.output, {"schema": SCHEMA, "hw_ir": {"path": str(args.hw_ir.resolve()), "sha256": facts.sha256(args.hw_ir)},
-                              "op_sequences": records})
-    print(json.dumps({r["name"]: {"min_gap": r["min_gap"], "stable_gap": r["stable_gap"]} for r in records}, indent=1))
-    return 0
-
+    return pairs.sweep_main("sequences", load, extract, SCHEMA, argv)
 
 if __name__ == "__main__":
     raise SystemExit(main())

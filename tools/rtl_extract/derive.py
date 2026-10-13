@@ -1,8 +1,4 @@
-"""Spec inputs derived from the IR: bundle ports, memory response latency and decoded command codes.
-
-``resolve(document, spec)`` returns a concrete spec (every input, field, latency and code known) plus
-the derivation notes reported in record assumptions. Every derivation fails closed.
-"""
+"""Resolve command ports, memory latency and decoder codes from HW IR."""
 import copy
 import json
 
@@ -10,24 +6,18 @@ from .control import ControlCircuit, integer, require
 
 LIMIT = 64
 
-
 def modules(spec):
-    """Extra modules a spec needs in the document: the system instantiating engine, memories and decoder."""
     return [spec["system"]] if spec.get("system") else []
-
 
 def table(document):
     return {m["name"]: m for m in document["modules"]}
-
 
 def ports(document, name):
     found = table(document).get(name)
     require(found is not None, f"Missing module: {name}")
     return {p["name"]: p for p in found["ports"]}
 
-
 def instances(document, top, name):
-    """Instance paths under ``top`` (``a/b``) whose module is ``name``."""
     mods, found, stack = table(document), [], [("", top)]
     while stack:
         path, current = stack.pop()
@@ -40,16 +30,13 @@ def instances(document, top, name):
                     stack.append((path_, child))
     return found
 
-
 def unique(document, top, name):
     require(top in table(document), f"Missing module: {top}")
     found = instances(document, top, name)
     require(len(found) == 1, f"{top} instantiates {name} {len(found)} times; expected exactly once")
     return found[0]
 
-
 def locate(document, top, path):
-    """``(parent module, parent path, instance op)`` of the instance at ``path`` under ``top``."""
     mods, module, parent = table(document), table(document)[top], ""
     names = path.split("/")
     for i, name in enumerate(names):
@@ -60,14 +47,11 @@ def locate(document, top, path):
         parent = f"{parent}/{name}".lstrip("/")
         module = mods[ops[0]["attributes"]["moduleName"].lstrip("@")]
 
-
 def pins(op):
     attrs = op["attributes"]
     return dict(zip(json.loads(attrs["argNames"]), op["operands"])), dict(zip(json.loads(attrs["resultNames"]), op["results"]))
 
-
 def driver(document, top, path, port):
-    """Selector (and value id) of the value driving input ``port`` of the instance at ``path``."""
     module, parent, op = locate(document, top, path)
     value = pins(op)[0].get(port)
     require(value is not None, f"Missing instance input: {path}.{port}")
@@ -80,15 +64,12 @@ def driver(document, top, path, port):
     require(name, f"{path}.{port} is driven by an unnamed {source['kind']}")
     return {"path": parent, "value": name}, value
 
-
 def prefix(selector, path):
     if "instance" in selector:
         return {"instance": f"{path}/{selector['instance']}", "result": selector["result"]}
     return {"path": f"{path}/{selector.get('path', '')}".strip("/"), "value": selector["value"]}
 
-
 def control_field(document, spec, owner, port):
-    """True when ``port`` depends only on approved inputs through supported operations (not a payload)."""
     approved = {spec["clock"], spec["reset"], *spec["inputs"], *spec.get("links", {})}
     cuts = spec["cuts"] if owner == spec["module"] else spec.get("partner", {}).get("cuts", {})
     try:
@@ -97,9 +78,7 @@ def control_field(document, spec, owner, port):
     except (ValueError, RecursionError):
         return False
 
-
 def expand_ports(document, spec):
-    """Inputs of the ``command`` bundle and valid/fields of event ``bundle``s, read from the module ports."""
     if spec.get("command"):
         bundle, found = spec["command"], ports(document, spec["module"])
         names = [n for n, p in found.items() if p["direction"] == "input" and (n == f"{bundle}_valid" or n.startswith(f"{bundle}_bits_"))]
@@ -123,9 +102,7 @@ def expand_ports(document, spec):
         for command in op["commands"].values():
             require(set(command) <= set(spec["inputs"]), f"operations.{name} drives undeclared inputs {sorted(set(command) - set(spec['inputs']))}")
 
-
 def measure(document, memory, request, response, clock, reset, reset_cycles, flush_cycles):
-    """Ages from a one-cycle ``request`` pulse to ``response`` valid, all other memory inputs idle at 0."""
     found = ports(document, memory)
     inputs = {n for n, p in found.items() if p["direction"] == "input"}
     circuit = ControlCircuit(document, memory, [response], inputs, None, None, clock, reset)
@@ -140,9 +117,7 @@ def measure(document, memory, request, response, clock, reset, reset_cycles, flu
             return age
     raise ValueError(f"{memory}.{response} did not answer {request} within {LIMIT} ages")
 
-
 def read_latency(document, memory):
-    """The ``readLatency`` attribute shared by every ``seq.firmem`` in the memory hierarchy (None without one)."""
     mods, seen, stack, found = table(document), set(), [memory], set()
     while stack:
         name = stack.pop()
@@ -157,9 +132,7 @@ def read_latency(document, memory):
     require(len(found) <= 1, f"{memory} mixes memory read latencies {sorted(found)}")
     return next(iter(found), None)
 
-
 def response(document, spec, group, cache):
-    """Latency observed by ``group``: the memory port wired to its valid and response input, simulated."""
     event, owners = spec["events"][group], [spec["module"]] + ([spec["partner"]["module"]] if "partner" in spec else [])
     owner = [m for m in owners if ports(document, m).get(event["valid"], {}).get("direction") == "output"]
     require(len(owner) == 1, f"events.{group}: {event['valid']} must be an output of exactly one module")
@@ -184,9 +157,7 @@ def response(document, spec, group, cache):
                       "measured": measured, "memory_read_latency": attribute}
     return cache[key]
 
-
 def decode(document, spec, cache):
-    """Codes the system's decoder delivers to the engine input ``decode.input`` for each declared instruction word."""
     key = ("decode", spec["module"], json.dumps(spec["decode"], sort_keys=True))
     if key in cache:
         return cache[key]
@@ -212,7 +183,6 @@ def decode(document, spec, cache):
     cache[key] = codes
     return codes
 
-
 def substitute(value, codes):
     if isinstance(value, dict):
         return {k: substitute(v, codes) for k, v in value.items()}
@@ -221,9 +191,7 @@ def substitute(value, codes):
         return codes[value[1:]]
     return value
 
-
 def resolve(document, spec, cache=None):
-    """``(spec, notes)``: the spec with derived ports, latencies and codes; notes go into record assumptions."""
     cache = {} if cache is None else cache
     spec = copy.deepcopy(spec)
     expand_ports(document, spec)

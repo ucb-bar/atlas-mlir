@@ -4,34 +4,21 @@ import json
 import operator
 import re
 
-
 def require(condition, message):
     if not condition:
         raise ValueError(message)
 
-
 def integer(text):
     return int(text == "true") if text in ("true", "false") else int(text.split(" : ")[0])
-
 
 def width(typ):
     require(typ.startswith("i") and typ[1:].isdigit(), f"Unsupported integer type: {typ}")
     return int(typ[1:])
 
-
 FIRES_WHEN = {"sv.error": None, "sv.fatal": None, "sv.assert": 0}  # sv.assert fires when its operand is 0
 
-
 def assertions(module):
-    """Assertions of one exported module (``hw_ir_export --assertions``), one per guard.
-
-    Macros are read as in a simulation build: every ``ifdef`` macro is undefined and every ``sv.macro.ref``
-    condition (``ASSERT_VERBOSE_COND_``, ``STOP_COND_``) is 1, so an assertion is ``live`` unless it sits in an
-    ``ifdef`` then-branch or a macro else-branch. It fires when every ``(value, level)`` term holds: the enclosing
-    ``sv.if`` conditions (1 in then-, 0 in else-branches) and, for ``sv.assert``, its operand at 0. ``clock`` is the
-    enclosing single-edge ``sv.always posedge``; anything else is recorded as ``problem``. ``sv.error`` and
-    ``sv.fatal`` under the same guard are one assertion.
-    """
+    """Simulation macros are disabled; each assertion fires when all guard terms hold."""
     ops = {op["id"]: op for op in module["operations"]}
     definitions = {v: op for op in module["operations"] for v in op["results"]}
     found = {}
@@ -65,19 +52,8 @@ def assertions(module):
         entry["message"] = entry["message"] or text
     return list(found.values())
 
-
 class ControlCircuit:
-    """Slice hierarchy at register boundaries, then execute exact finite-width control.
-
-    Only requested outputs and their transitive state updates are included; a dependency on an
-    unapproved input or unsupported operation fails construction. ``probes`` expose inner values as
-    extra outputs and ``cuts`` replace them with named inputs; selectors are ``{"instance": "a/b",
-    "result": name}`` or ``{"value": name, "path": "a/b"}`` (matched on ``name``, then ``sv.namehint``).
-    ``unreset`` lists registers allowed to stay unknown after reset/flush as ``{"path": "a/b", "name": reg}``
-    (path ``""`` is the top), each naming exactly one register, or ``{"path", "match": regex}`` naming every
-    register under ``path`` whose name matches the whole expression (at least one). ``invariants`` (see ``select``)
-    are assertions in the hierarchy whose firing conditions become extra outputs named in ``self.invariants``.
-    """
+    """Execute approved control cones, exposing probes, cuts, unreset registers and assertions."""
     allowed = {"hw.constant", "hw.wire", "seq.firreg", "comb.mux", "comb.and",
                "comb.or", "comb.xor", "comb.add", "comb.sub", "comb.icmp",
                "comb.extract", "comb.concat", "comb.shru", "comb.shl",
@@ -110,7 +86,6 @@ class ControlCircuit:
         self.state = {node: None for node in self.registers}
 
     def register(self, selector):
-        """Registers a selector names: one for ``name``, every whole-name regex match (at least one) for ``match``."""
         require(isinstance(selector, dict) and set(selector) in ({"path", "name"}, {"path", "match"}),
                 f"Unsupported register selector: {selector}")
         path = "".join("/" + n for n in selector["path"].split("/") if n)
@@ -221,7 +196,6 @@ class ControlCircuit:
         return key
 
     def watch(self, path, item):
-        """Add the firing condition of assertion ``item`` at instance ``path`` as an output."""
         name = f"{self.top}{path}#{item['id']}"
         where = f"invariant {name} ({first_line(item['message'])})"
         require(item["problem"] is None, f"{where}: {item['problem']}")
@@ -243,8 +217,7 @@ class ControlCircuit:
         self.invariants[name] = {"path": path, "message": first_line(item["message"]), "location": item["location"]}
 
     def reach(self, names, stop=()):
-        """Registers and input names the named outputs depend on, including state feedback; traversal does not enter
-        nodes under the instance paths in ``stop``."""
+        """Registers and inputs reached from outputs, stopping at declared instance paths."""
         seen, registers, inputs, stack = set(), set(), set(), [self.outputs[n] for n in names]
         while stack:
             key = stack.pop()
@@ -331,13 +304,10 @@ class ControlCircuit:
         self.state = {key: get(args[2] if len(args) == 3 and get(args[1]) else args[0]) for key, args in self.registers.items()}
         return outputs
 
-
 def first_line(text):
     return (text or "").split("\n")[0].removeprefix("Assertion failed: ")
 
-
 def sites(modules, top):
-    """``(path, module, assertion)`` for every assertion in the instance hierarchy under ``top``."""
     @cache
     def below(name):
         module = modules[name]
@@ -351,11 +321,8 @@ def sites(modules, top):
         return tuple(found)
     return list(below(top))
 
-
 def select(modules, top, rules):
-    """``(selected, excluded)``: every live assertion under ``top`` except those matched by an ``exclude`` rule
-    (``{path?, module?, message?, reason}``; ``path`` is an instance path prefix, ``message`` a regular expression),
-    and the indices of the rules that matched. Disabled assertions are excluded with the macro reading as reason."""
+    """Select live assertions and track exclusions and matched rules."""
     selected, excluded, used = [], [], set()
     for path, module, item in sites(modules, top):
         if not item["live"]:
@@ -369,11 +336,9 @@ def select(modules, top, rules):
             selected.append((path, item))
     return selected, excluded, used
 
-
 def unmatched(rules, matched):
     unused = [rule for i, rule in enumerate(rules.get("exclude", [])) if i not in matched]
     require(not unused, f"Invariant exclusions match no assertion: {unused}")
-
 
 def matches(rule, path, module, item):
     prefix = "".join("/" + n for n in rule.get("path", "").split("/") if n)
