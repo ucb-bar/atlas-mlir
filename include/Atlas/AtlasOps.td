@@ -189,6 +189,13 @@ def Atlas_VirtualVPUReduceOp : Atlas_Op<"virtual_vpu_reduce", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualVPUSplatOp : Atlas_Op<"virtual_vpu_splat", [Pure]> {
+  let summary = "BF16 tile with every element set to the same raw BF16 bits";
+  let arguments = (ins I32Attr:$bits);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualOutputBF16Op :
     Atlas_Op<"virtual_output_bf16",
              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {

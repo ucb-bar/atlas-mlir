@@ -151,6 +151,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     if (op) for (Value v : op->getOperands()) if (tracked(v.getType())) operands.push_back(ids.lookup(v));
     SmallVector<NamedAttribute> f = {field("id",i(ids.lookup(value))), field("block",i(blocks.lookup(value.getParentBlock()))), field("reg",i(reg)), field("type",b.getStringAttr(type)), field("def",b.getStringAttr(op ? op->getName().getStringRef() : "argument")), field("operands",b.getDenseI32ArrayAttr(operands))};
     if (auto c = dyn_cast_or_null<arith::ConstantOp>(op)) f.push_back(field("constant",i(uint32_t(cast<IntegerAttr>(c.getValue()).getValue().getSExtValue()))));
+    if (auto splat = dyn_cast_or_null<VirtualVPUSplatOp>(op)) f.push_back(field("constant",i(splat.getBits())));
     if (auto cmp = dyn_cast_or_null<arith::CmpIOp>(op)) f.push_back(field("predicate",i(int32_t(cmp.getPredicate()))));
     if (op) if (auto kind = op->getAttrOfType<StringAttr>("kind")) f.push_back(field("kind",kind));
     values.push_back(dictionary(f));
@@ -232,7 +233,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     if (!id || *id != int32_t(values.size()) || !block || *block < 0 || *block >= int32_t(br.size()) || !reg || def.empty() || !d.getAs<DenseI32ArrayAttr>("operands")) return bad();
     if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > 64 || (type == "bf16" && *reg % 2)) return bad();
     ValueRecord r{*id,*block,*reg,type,def,contractString(d,"kind").str(),contractI32Array(d,"operands")};
-    if (def == "arith.constant") { auto n = contractI32(d,"constant"); if (!n || !r.operands.empty()) return bad(); r.constant = uint32_t(*n); }
+    if (def == "arith.constant" || def == "atlas.virtual_vpu_splat") { auto n = contractI32(d,"constant"); if (!n || !r.operands.empty()) return bad(); r.constant = uint32_t(*n); }
     if (def == "arith.cmpi") { auto p = contractI32(d,"predicate"); if (!p || *p < 0 || *p > 9 || r.operands.size() != 2) return bad(); r.predicate = *p; }
     if (def == "arith.addi" && r.operands.size() != 2) return bad();
     values.push_back(r);
@@ -317,6 +318,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         if (auto a = dyn_cast<VPUUnaryOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VPUBinaryOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VPUReduceOp>(op)) destination = a.getDst();
+        else if (auto a = dyn_cast<VLIOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<MXUPopOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VLoadOp>(op)) destination = int32_t(a.getDst()) - (v.type == "bf16" ? 1 : 0);
       }
@@ -479,6 +481,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           auto binary = dyn_cast<VPUBinaryOp>(op); if (!binary || binary.getDst() != unsigned(v.reg) || binary.getKind() != v.kind || v.operands.size() != 2 || !tensorRead(binary.getLhs(),v.operands[0]) || !tensorRead(binary.getRhs(),v.operands[1])) return error("tensor binary fields or origins differ");
         } else if (v.def == "atlas.virtual_vpu_reduce") {
           auto reduce = dyn_cast<VPUReduceOp>(op); if (!reduce || reduce.getDst() != unsigned(v.reg) || reduce.getKind() != v.kind || v.operands.size() != 1 || !tensorRead(reduce.getSrc(),v.operands[0])) return error("tensor reduce fields or origins differ");
+        } else if (v.def == "atlas.virtual_vpu_splat") {
+          auto vli = dyn_cast<VLIOp>(op); if (!vli || vli.getDst() != unsigned(v.reg) || vli.getMode() != "all" || vli.getImmediate() != v.constant) return error("tensor splat fields differ");
         } else if (!isa<VLoadOp,MXUPopOp>(op)) return error("unsupported tensor source result site");
         if (isa<VLoadOp>(op) && !matches(s,v,v.id))
           return error("tensor result is claimed before all of its halves are produced");

@@ -94,7 +94,7 @@ Effects effectsOf(Operation *op) {
   else if (!isDMA(op) &&
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
-                VirtualScaleConstantOp,
+                VirtualVPUSplatOp, VirtualScaleConstantOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
@@ -375,8 +375,8 @@ Cost onMxu(StringRef name, unsigned unit) {
   return {unit ? Unit::Mxu1 : Unit::Mxu0, t.interval, t.latency};
 }
 
-Cost onVpu(StringRef kind) {
-  MachineTiming t = timingOf(timing::vpuMnemonic(kind.str()));
+Cost onVpu(const std::string &name) {
+  MachineTiming t = timingOf(name);
   return {Unit::Vpu, t.interval, t.latency};
 }
 
@@ -444,12 +444,11 @@ Cost costOf(Operation *op) {
                         onMxu("vmatmul", unit).latency +
                         onMxu("vmatpop.bf16.acc", unit).latency);
   }
-  if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op))
-    return onVpu(unary.getKind());
-  if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op))
-    return onVpu(binary.getKind());
-  if (auto reduce = dyn_cast<VirtualVPUReduceOp>(op))
-    return onVpu(reduce.getKind());
+  if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp>(op))
+    return onVpu(
+        timing::vpuMnemonic(op->getAttrOfType<StringAttr>("kind").str()));
+  if (isa<VirtualVPUSplatOp>(op))
+    return onVpu("vli.all");
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.

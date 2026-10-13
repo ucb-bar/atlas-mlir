@@ -274,6 +274,10 @@ LogicalResult VirtualVPUReduceOp::verify() {
   return success();
 }
 
+LogicalResult VirtualVPUSplatOp::verify() {
+  return inRange(getOperation(), "bits (raw BF16)", getBits(), 0, 65535);
+}
+
 LogicalResult VLoadOp::verify() {
   if (getFormat() != "raw")
     return emitOpError("format must be raw; one instruction moves 1024 bytes");

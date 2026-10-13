@@ -782,6 +782,12 @@ private:
            {"src", i32(tile(reduce.getSrc()))}});
       return success();
     }
+    if (auto splat = dyn_cast<VirtualVPUSplatOp>(op)) {
+      add("atlas.vli", loc,
+          {{"mode", str("all")}, {"dst", i32(tile(splat.getDst()))},
+           {"immediate", i32(splat.getBits())}});
+      return success();
+    }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value)
