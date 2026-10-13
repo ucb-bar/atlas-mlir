@@ -1,8 +1,4 @@
-// Prints the compiler's built-in footprints (lib/AtlasTiming.cpp) for the named
-// mnemonics with fixed legal operands, for test/test_rtl_extract_compiler.py to
-// compare with timing computed from the RTL. Operands come from each operand
-// kind: m registers d/1/2 = m4/m8/m12, accumulator or weight slot d/2 = 1/0,
-// x registers d/1/2 = x5/x8/x9 with x8 = 0 as the base, e registers d/1 = e2/e3.
+// Print built-in footprints with fixed legal operands for test_rtl_extract_compiler.
 #include "Atlas/AtlasTiming.h"
 #include <iostream>
 #include <string>
@@ -10,17 +6,10 @@
 using namespace mlir::atlas::timing;
 
 static const char *resourceName(Res r) {
-  switch (r) {
-  case Res::XReg: return "XReg";
-  case Res::EReg: return "EReg";
-  case Res::MReg: return "MReg";
-  case Res::Acc: return "Acc";
-  case Res::Weight: return "Weight";
-  case Res::Vmem: return "Vmem";
-  case Res::DmaBase: return "DmaBase";
-  case Res::Dram: return "Dram";
-  }
-  return "invalid";
+  static const char *names[] = {
+      "XReg", "EReg", "MReg", "Acc", "Weight", "Vmem", "DmaBase", "Dram"};
+  unsigned index = static_cast<unsigned>(r);
+  return index < sizeof(names) / sizeof(*names) ? names[index] : "invalid";
 }
 
 // Unit enumerator names, in declaration order.

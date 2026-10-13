@@ -1,20 +1,7 @@
-# test_rtl_extract_compiler.py compares merlin.op_timing.v1 op_timing against
-# built-in compiler footprints printed by rtl-timing-facts-probe.cpp.
-# Ages count cycles after issue (age 0 = command cycle).
-# events compares a fact group with the union of accesses selected by
-# "<resource> <r|w> [rd|rs1|rs2[+N]]" (MReg element = register*32).
-# Each access touches at age+i*step; first_age, last_age, touch count and spacing
-# must match (spacing is null below two touches or when uneven).
-# Every MReg, Acc, Weight and Vmem compiler access must belong to a compared group.
-# scalars: [fact field, compiler expression, relation]; relation defaults to "=".
-# ">=" permits only an intentionally conservative bound, never a claimed equality.
-# Expressions name footprint fields, hold.<Unit> (inclusive end, 0 if absent),
-# or events.<group>.<field>, optionally followed by "+ N". Busy first-free ages
-# equal hold end+1. VPU next_issue_age = write_release; first_free_age = vpu_live+1.
-# VLS next_issue_age = path hold end+1; write_release = last MReg write age.
-# MXU busy last ages = stream/compute hold ends (pop: write_release).
-# Nonempty fact groups must be compared or not_modeled; every record must be
-# mapped or not_modeled_records. Selected mode builds footprints from the facts.
+# test_rtl_extract_compiler compares RTL event ages/counts/spacing with probe accesses.
+# Selectors: resource r|w [rd|rs1|rs2[+N]]; MReg elements are register*32+row.
+# Scalars: [fact, footprint/hold/events expression [+ N], relation (= by default)].
+# Every storage access and nonempty fact group must be compared or marked not modeled.
 
 families:
   vls_load:
