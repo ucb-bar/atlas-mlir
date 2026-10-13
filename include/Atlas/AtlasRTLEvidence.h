@@ -35,11 +35,14 @@ struct OpPairFact {
 
 // Assertion-checked pair and chain results selected with the facts they were
 // derived from; `capacity` is the most operations of an engine observed live
-// at once, each live from issue until its next_issue_age.
+// at once, each live from issue until its next_issue_age where the engine's
+// blocks have one (VPU), else through its last event age (MXU); `window`
+// names that rule per engine.
 struct RTLPairFacts {
   std::string sha256;
   std::map<std::pair<std::string, std::string>, std::vector<OpPairFact>> pairs;
   std::map<std::string, int> capacity;
+  std::map<std::string, std::string> window;
 };
 
 // RTL-computed operation timing (tools/rtl_extract), pinned by the facts
@@ -57,7 +60,7 @@ public:
   bool dmaWait() const { return dma; }
 
   // VLOAD and VSTORE hold their own path; the VPU and XLU exclude each other;
-  // an MXU command holds every engine through its last event.
+  // an MXU command holds its own MXU through its last event.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   llvm::json::Object applicability() const;
 
@@ -67,6 +70,8 @@ public:
   const RTLPairFacts *pairFacts() const { return pairs.get(); }
   // The facts block of a VPU mnemonic, or null.
   static const char *vpuBlockName(const std::string &mnemonic);
+  // The facts block of an MXU command (mxu<unit>.<operation>), or empty.
+  static std::string mxuBlockName(const OpInfo &op);
   const OpTimingBlock *block(const std::string &name) const;
 
 private:

@@ -94,8 +94,9 @@ def operation(engine, name, fields, base):
             kind, at = ("weight_fp8", slot) if name == "push_weight" else (name[5:], acc)
             return [], ("mxu_push", f'kind = "{kind}", unit = {unit} : i32, src = {src} : i32, slot = {at} : i32')
         if name in ("pop_acc_bf16", "pop_acc_fp8"):
+            scale = fields.get("scale", 0) if name == "pop_acc_fp8" else 0
             return [], ("mxu_pop", f'format = "{name[8:]}", unit = {unit} : i32, dst = {src} : i32, '
-                                   f'slot = {acc} : i32, scale_reg = 0 : i32')
+                                   f'slot = {acc} : i32, scale_reg = {scale} : i32')
     return None
 
 
@@ -116,7 +117,8 @@ def core_operation(fields, base):
         pop = name.startswith("pop")
         return operation(f"mxu{unit}", name, {"io_cmd_bits_mregId": vd if pop else vs1,
                                               "io_cmd_bits_accSel": vs2 if pop else vd,
-                                              "io_cmd_bits_weightSlot": vd if name == "push_weight" else vs2}, base)
+                                              "io_cmd_bits_weightSlot": vd if name == "push_weight" else vs2,
+                                              "scale": vs1}, base)
     if opcode == 0x7b and word >> 26 == 0:
         vmem, dram, size = 2 * base, 2 * base + 1, 2 * base + 2
         setup = [*word_base(vmem, fields["dma_vmem_addr"]), *word_base(dram, fields["dma_dram_addr"]),

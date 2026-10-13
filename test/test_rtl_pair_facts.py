@@ -73,6 +73,27 @@ class PairFactsSelectionTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(message, result.stderr)
 
+    def test_capacity_windows_must_match_the_engine(self):
+        """A VPU engine is live until next_issue_age and an MXU through its last event; any other window, or none, fails."""
+        def window(engine, value):
+            def mutate(document):
+                entries = [c for c in document["capacity"] if c["engine"] == engine]
+                if not entries:
+                    entries = [{"engine": engine, "live": 1, "witness": {"source": "-", "gap": 1}}]
+                    document["capacity"].append(entries[0])
+                if value is None: entries[0].pop("window", None)
+                else: entries[0]["window"] = value
+            return mutate
+        with tempfile.TemporaryDirectory() as directory:
+            for n, (engine, value) in enumerate((("vpu", "last_event_age"), ("vpu", None), ("mxu0", "next_issue_age"),
+                                                  ("mxu1", "busy"), ("core", "last_event_age"))):
+                variant = Path(directory) / str(n)
+                variant.mkdir()
+                with self.subTest(engine=engine, window=value):
+                    result = run(OPT, self.SOURCE, selection(pairs=pairs_variant(variant, window(engine, value))))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("malformed capacity entry", result.stderr)
+
     def test_recorded_selection_is_rechecked(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "op-pairs.json"

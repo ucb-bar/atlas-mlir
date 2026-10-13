@@ -154,8 +154,9 @@ const std::map<OpClass, const char *> &mxuBlocks() {
 
 // The compiler names the MREG, accumulator and weight rows each event group
 // touches; the facts give every age. A command holds its own MXU through its
-// last effect, so commands on one MXU stay sequenced (same-MXU pipelining needs
-// pair facts as a selected input). The other MXU, the VPU, the XLU, the VLS
+// last effect, so without pair facts commands on one MXU stay sequenced; pair
+// facts covering the unit replace the hold with pair admission (PairSlots in
+// lib/AtlasRTLSelection.cpp). The other MXU, the VPU, the XLU, the VLS
 // paths and pending DMA transfers meet it only at MREG ports and the MREG
 // release rules, as the AtlasCore pair sweeps show (pairs/core_mxu*.yaml,
 // pairs/core_dma_mxu.yaml). Accumulator and weight-slot hazards are access
@@ -320,6 +321,12 @@ const char *RTLEvidence::vpuBlockName(const std::string &mnemonic) {
   return it == vpuBlocks().end() ? nullptr : it->second;
 }
 
+std::string RTLEvidence::mxuBlockName(const OpInfo &op) {
+  auto it = mxuBlocks().find(op.opClass);
+  if (it == mxuBlocks().end() || op.mxu < 0 || op.mxu > 1) return {};
+  return "mxu" + std::to_string(op.mxu) + "." + it->second;
+}
+
 const OpTimingBlock *RTLEvidence::block(const std::string &name) const {
   auto it = blocks.find(name);
   return it == blocks.end() ? nullptr : &it->second;
@@ -373,13 +380,27 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
     }
     result->pairs[{first->str(), second->str()}].push_back(std::move(fact));
   }
+  // An engine's commands are live until next_issue_age when its blocks have
+  // one (pairfacts.py), else through their last event age.
+  auto windowOf = [&](llvm::StringRef engine) -> std::optional<std::string> {
+    std::optional<std::string> found;
+    for (const auto &[name, b] : blocks)
+      if (b.resolved && b.engine == engine) {
+        std::string window = b.nextIssueAge ? "next_issue_age" : "last_event_age";
+        if (found && *found != window) return std::nullopt;
+        found = window;
+      }
+    return found;
+  };
   for (const auto &value : *capacity) {
     const Object *entry = value.getAsObject();
     auto engine = entry ? entry->getString("engine") : std::nullopt;
     auto live = integer(entry, "live");
-    if (!engine || !live || *live < 1 || entry->getString("window") != "next_issue_age" ||
+    auto window = entry ? entry->getString("window") : std::nullopt;
+    if (!engine || !live || *live < 1 || !window || windowOf(*engine) != window->str() ||
         !result->capacity.emplace(engine->str(), *live).second)
       return fail("malformed capacity entry");
+    result->window[engine->str()] = window->str();
   }
   result->sha256 = expectedSha256.str();
   pairs = std::move(result);
@@ -466,11 +487,27 @@ llvm::json::Object RTLEvidence::applicability() const {
   if (pairs) {
     Object *admission = result.getObject("admission");
     (*admission)["vpu_to_vpu_issue_gap"] = "pair_fact_stable_gap_when_operands_satisfy_its_relation_else_next_issue_age";
-    Object capacity;
+    Object capacity, windows;
     for (const auto &[engine, live] : pairs->capacity) capacity[engine] = live;
+    for (const auto &[engine, window] : pairs->window) windows[engine] = window;
+    // An MXU with pair facts admits commands on itself where a fact covers the
+    // gap (lib/AtlasRTLSelection.cpp); the other keeps its busy rule.
+    Array pipelined;
+    for (const char *unit : {"mxu0", "mxu1"})
+      if (pairs->capacity.count(unit)) pipelined.push_back(unit);
+    if (!pipelined.empty()) {
+      (*admission)["mxu_commands_sequenced_per_unit"] = false;
+      (*admission)["mxu_to_same_mxu_issue_gap"] =
+          "pair_fact_stable_gap_when_operands_satisfy_its_relation_else_busy_end_plus_one";
+      (*admission)["mxu_pipelined_units"] = std::move(pipelined);
+      Array *unsupported = result.getArray("unsupported");
+      auto same = std::find(unsupported->begin(), unsupported->end(), llvm::json::Value("same_mxu_pipelining"));
+      if (pairs->capacity.count("mxu0") && pairs->capacity.count("mxu1") && same != unsupported->end())
+        unsupported->erase(same);
+    }
     result["pair_facts"] = Object{{"schema", "merlin.op_pairs.v1"}, {"sha256", pairs->sha256},
                                   {"operation_pairs", static_cast<int64_t>(pairs->pairs.size())},
-                                  {"live_capacity", std::move(capacity)}};
+                                  {"live_capacity", std::move(capacity)}, {"live_window", std::move(windows)}};
   }
   if (dma) {
     result["dma_domain"] = Object{
