@@ -4,13 +4,18 @@ The FP8 tile and accumulate cases of mxu.py rerun with pair facts, so the pop is
 accumulator (age 64 on MXU0, 4 on MXU1) and an accumulating matmul while its accumulator push or weight push runs. Two
 tiles run back to back on one unit with both weight slots and both accumulators (the second weight push and matmul
 beside the first matmul), and a K=2 accumulation pushes the second weight tile into the other slot while the first
-matmul runs, then accumulates into the same accumulator. Every MREG operand lies in its own physical bank, so the
-pair facts apply; `check` requires two commands of the unit to have been live together.
+matmul runs, then accumulates into the same accumulator. Every MREG operand of these lies in its own physical bank.
+#15's virtual programs (virtual_dma_mxu and the FP8 two-layer MLPs, with and without biases) rerun with pair facts:
+their lowerings reuse an MXU source register, or pop onto a register in the source's physical bank, so the
+shared-operand pair facts apply. `check` requires two commands of one unit to have been live together (and, for the
+MLPs, the relayout loop's moves).
 """
 from dataclasses import replace
 
 from . import END, Case, add, filler, put, vload, vstore
+from .fp8_mlp import CASES as MLP_CASES
 from .mxu import CASES as MXU_CASES, accumulator_codes, fixture, reference
+from .virtual_dma_mxu import CASES as VIRTUAL_DMA_CASES
 
 
 def same_unit(events, engine):
@@ -69,3 +74,8 @@ for unit in (0, 1):
                                         check=overlap, pairs=True)
     CASES[f'{engine}_k2'] = Case(k2(unit) + END, {0: IMAGE}, k2_result, {'vload': 4, engine: 5, 'vstore': 2},
                                  check=overlap, pairs=True)
+CASES['virtual_dma_mxu_pipelined'] = replace(VIRTUAL_DMA_CASES['virtual_dma_mxu'], consumers=('delay', 'schedule'), pairs=True,
+                                             check=lambda events: bool(same_unit(events, 'mxu0')))
+for name in ('virtual_fp8_mlp', 'virtual_fp8_mlp_bias'):
+    base = MLP_CASES[name]
+    CASES[f'{name}_pipelined'] = replace(base, pairs=True, check=lambda events, c=base.check: c(events) and any(same_unit(events, f'mxu{u}') for u in (0, 1)))
