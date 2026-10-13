@@ -316,6 +316,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       } else {
         if (auto a = dyn_cast<VPUUnaryOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VPUBinaryOp>(op)) destination = a.getDst();
+        else if (auto a = dyn_cast<VPUReduceOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<MXUPopOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VLoadOp>(op)) destination = int32_t(a.getDst()) - (v.type == "bf16" ? 1 : 0);
       }
@@ -476,6 +477,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (!tensorRead(unary.getSrc(),v.operands[0])) return error("tensor unary operand lost its source origin");
         } else if (v.def == "atlas.virtual_vpu_binary") {
           auto binary = dyn_cast<VPUBinaryOp>(op); if (!binary || binary.getDst() != unsigned(v.reg) || binary.getKind() != v.kind || v.operands.size() != 2 || !tensorRead(binary.getLhs(),v.operands[0]) || !tensorRead(binary.getRhs(),v.operands[1])) return error("tensor binary fields or origins differ");
+        } else if (v.def == "atlas.virtual_vpu_reduce") {
+          auto reduce = dyn_cast<VPUReduceOp>(op); if (!reduce || reduce.getDst() != unsigned(v.reg) || reduce.getKind() != v.kind || v.operands.size() != 1 || !tensorRead(reduce.getSrc(),v.operands[0])) return error("tensor reduce fields or origins differ");
         } else if (!isa<VLoadOp,MXUPopOp>(op)) return error("unsupported tensor source result site");
         if (isa<VLoadOp>(op) && !matches(s,v,v.id))
           return error("tensor result is claimed before all of its halves are produced");
