@@ -201,6 +201,23 @@ class HardwareSequenceTests(unittest.TestCase):
                     if expected > record["gaps"][0]:
                         self.assertEqual(record["min_gap"], expected, record["results"])
 
+    def test_core_mxu(self):
+        """Same-MXU chains on AtlasCore (sequences/core_mxu.yaml), every assertion checked: each chain length is rejected
+        one spacing below its stable gap and accepted at it and one above. One extraction runs every window."""
+        raw, spec = sequences.load("atlas", ["core_mxu"])["core_mxu"]
+        document = load_document(HW_IR, modules(spec), EXPORTER, True)
+        window = copy.deepcopy(raw)
+        window["sequences"] = {f"{name}_{length}": {**raw["sequences"][name], "lengths": length, "gaps": f"{max(1, stable - 1)}..{stable + 1}"}
+                               for name, lengths in raw["expect"].items() for length, stable in lengths.items()}
+        for record in sequences.extract(document, window, spec, min(64, os.cpu_count() or 1)):
+            name, length = record["sequence"].rsplit("_", 1)
+            expected = raw["expect"][name][int(length)]
+            with self.subTest(record["name"]):
+                self.assertEqual(record["invariants"], {"checked": 177, "excluded": []})
+                self.assertEqual(record["stable_gap"], expected, record["results"])
+                if expected > 1:
+                    self.assertEqual(record["min_gap"], expected, record["results"])
+
     def test_mxu0(self):
         self.check("mxu0")
 
