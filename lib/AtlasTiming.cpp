@@ -103,6 +103,21 @@ const OpInfo *mlir::atlas::timing::findOp(const std::string &name) {
   return it == byName.end() ? nullptr : it->second;
 }
 
+std::string mlir::atlas::timing::vpuMnemonic(const std::string &kind) {
+  if (kind == "mov")
+    return "vmov";
+  if (kind == "min")
+    return "vminimum.bf16";
+  if (kind == "max")
+    return "vmaximum.bf16";
+  // row_max -> vredmax.row.bf16, col_sum -> vredsum.bf16.
+  if (kind.rfind("row_", 0) == 0)
+    return "vred" + kind.substr(4) + ".row.bf16";
+  if (kind.rfind("col_", 0) == 0)
+    return "vred" + kind.substr(4) + ".bf16";
+  return "v" + kind + ".bf16";
+}
+
 bool mlir::atlas::timing::isControlFlow(const OpInfo &op) {
   return op.opClass == OpClass::Branch || op.opClass == OpClass::Jump;
 }

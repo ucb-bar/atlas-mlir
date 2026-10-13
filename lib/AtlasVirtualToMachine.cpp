@@ -714,18 +714,12 @@ private:
       return success();
     }
     if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op)) {
-      if (unary.getKind() != "mov" && unary.getKind() != "relu")
-        return unary.emitOpError(
-            "virtual-to-machine admission currently requires mov or relu");
       add("atlas.vpu_unary", loc,
           {{"kind", unary.getKindAttr()}, {"dst", i32(tile(unary.getDst()))},
            {"src", i32(tile(unary.getSrc()))}});
       return success();
     }
     if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
-      if (binary.getKind() != "add")
-        return binary.emitOpError(
-            "virtual-to-machine binary VPU admission currently requires add");
       add("atlas.vpu_binary", loc,
           {{"kind", binary.getKindAttr()},
            {"dst", i32(tile(binary.getDst()))},

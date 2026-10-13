@@ -72,15 +72,12 @@ FailureOr<Instr> toInstr(Operation *op) {
     in.rs2 = x.getSlot();
     in.rs1 = x.getScaleReg();
   } else if (auto x = dyn_cast<VPUBinaryOp>(op)) {
-    name = llvm::StringSwitch<std::string>(x.getKind())
-               .Case("min", "vminimum.bf16")
-               .Case("max", "vmaximum.bf16")
-               .Default("v" + x.getKind().str() + ".bf16");
+    name = vpuMnemonic(x.getKind().str());
     in.rd = x.getDst();
     in.rs1 = x.getLhs();
     in.rs2 = x.getRhs();
   } else if (auto x = dyn_cast<VPUUnaryOp>(op)) {
-    name = x.getKind() == "mov" ? "vmov" : "v" + x.getKind().str() + ".bf16";
+    name = vpuMnemonic(x.getKind().str());
     in.rd = x.getDst();
     in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<VPUPackOp>(op)) {
@@ -90,9 +87,7 @@ FailureOr<Instr> toInstr(Operation *op) {
     in.rs2 = x.getSrc();
     in.rs1 = x.getScaleReg();
   } else if (auto x = dyn_cast<VPUReduceOp>(op)) {
-    StringRef kind = x.getKind(); // col_sum, row_max, ...
-    std::string reduction = "vred" + kind.drop_front(4).str();
-    name = reduction + (kind.starts_with("row") ? ".row.bf16" : ".bf16");
+    name = vpuMnemonic(x.getKind().str());
     in.rd = x.getDst();
     in.rs1 = x.getSrc();
   } else if (auto x = dyn_cast<VLIOp>(op)) {
