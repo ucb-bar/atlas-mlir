@@ -19,6 +19,7 @@ compiler must meet is the gap after the last other failure. Two launches never k
 is queued), so they bind launch order only. Any firing assertion binds as stable_gap does.
 """
 from concurrent.futures import ThreadPoolExecutor
+import functools
 import json
 import os
 from pathlib import Path
@@ -65,7 +66,9 @@ def records():
     return found
 
 
+@functools.lru_cache(maxsize=None)
 def pair_files():
+    """The pair recipe and every target pair file, loaded once (pair_program only reads them)."""
     from rtl_extract import pairs
     return pairs, pairs.load("atlas")
 
