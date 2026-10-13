@@ -2,7 +2,7 @@
 import copy
 from pathlib import Path
 
-from . import specs as spec_files
+import yaml
 
 from .control import require
 
@@ -143,9 +143,25 @@ def invariants(value, where):
         require(isinstance(rule["reason"], str) and rule["reason"].strip(), f"{where}: exclude needs a reason")
     return value
 
+def read_spec(path):
+    """A target spec's raw content: its YAML file, or a generated AtlasCore enumeration of that name."""
+    path = Path(path).resolve()
+    if path.parent.parent == TARGETS / "atlas":
+        from .targets.atlas.gen_core import GENERATED, generate
+        if f"{path.parent.name}/{path.name}" in GENERATED:
+            return generate(f"{path.parent.name}/{path.name}")
+    return yaml.safe_load(path.read_text())
+
+def spec_names(target, group=""):
+    names = {path.stem for path in (TARGETS / target / group).glob("*.yaml")}
+    if target == "atlas":
+        from .targets.atlas.gen_core import GENERATED
+        names.update(Path(name).stem for name in GENERATED if Path(name).parent.as_posix() == group)
+    return sorted(names)
+
 def load_spec(path):
     path = Path(path)
-    raw = spec_files.load_spec(path)
+    raw = read_spec(path)
     spec = validate(raw, path.name)
     for name, overlay in spec["variants"].items():
         require("/" not in name and "." not in name, f"{path.name}: invalid variant name {name!r}")
@@ -162,10 +178,10 @@ def variant(spec, name):
     return merged
 
 def available_engines(target):
-    return spec_files.available(target, "")
+    return spec_names(target, "")
 
 def available_systems(target):
-    return spec_files.available(target, "system")
+    return spec_names(target, "system")
 
 def load_system(target, name):
     require(name in available_systems(target), f"Unknown system spec for {target}: {name}")
@@ -183,10 +199,10 @@ def load_target(target, engines=None):
     return specs
 
 def load_sweeps(target, group, names, engine_specs, validate):
-    available = spec_files.available(target, group)
+    available = spec_names(target, group)
     selected = available if names is None else list(names)
     require(set(selected) <= set(available), f"Unknown {group[:-1]} files: {sorted(set(selected) - set(available))}")
-    raws = {n: spec_files.load_spec(TARGETS / target / group / f"{n}.yaml") for n in selected}
+    raws = {n: read_spec(TARGETS / target / group / f"{n}.yaml") for n in selected}
     engine_specs = dict(engine_specs or {})
     missing = sorted({r["engine"] for r in raws.values()} - set(engine_specs))
     engines = [m for m in missing if m in available_engines(target)]

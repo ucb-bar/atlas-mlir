@@ -2,10 +2,10 @@
 from collections import Counter
 from pathlib import Path
 
-from . import derive, pairs, specs as spec_files
+from . import derive, pairs
 from .control import require
 from .runner import RECIPES, observed
-from .spec import ages, invariants, keys, load_sweeps
+from .spec import ages, invariants, keys, load_sweeps, read_spec, spec_names
 
 FILE_KEYS = ({"engine", "sequences"}, {"description", "equivalent", "ignore", "expect", "invariants"})
 SEQUENCE_KEYS = ({"ops", "lengths", "gaps"}, {"description"})
@@ -46,11 +46,11 @@ def step(entry):
     return {"second": entry["op"], **({"guards": entry["guards"]} if "guards" in entry else {})}
 
 def available(target):
-    return spec_files.available(target, "sequences")
+    return spec_names(target, "sequences")
 
 def load_file(path, spec):
     path = Path(path)
-    return validate(spec_files.load_spec(path), spec, path.name)
+    return validate(read_spec(path), spec, path.name)
 
 def load(target, names=None, specs=None):
     return load_sweeps(target, "sequences", names, specs, validate)

@@ -20,7 +20,7 @@ from rtl_extract import derive, pairfacts, pairs, sequences
 from rtl_extract.ir import load_document
 from rtl_extract.runner import RECIPES, modules
 from rtl_extract.spec import TARGETS, ages
-from rtl_extract.specs import load_spec as resolved_spec
+from rtl_extract.spec import read_spec as resolved_spec
 HW_IR = os.environ.get("ATLAS_HW_IR")
 EXPORTER = os.environ.get("ATLAS_HW_EXPORTER")
 op = synthetic.operation

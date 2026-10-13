@@ -4,10 +4,10 @@ import copy
 import multiprocessing
 from pathlib import Path
 
-from . import derive, specs as spec_files
+from . import derive
 from .control import require
 from .runner import RECIPES, failure, failures, group_valid, observed, schedule
-from .spec import ages, invariants, keys, load_sweeps
+from .spec import ages, invariants, keys, load_sweeps, read_spec, spec_names
 
 FILE_KEYS = ({"engine", "pairs"}, {"description", "equivalent", "ignore", "expect", "invariants", "shared", "relation"})
 PAIR_KEYS = ({"first", "second", "gaps"}, {"description", "first_inputs", "second_inputs", "guards", "as", "relation"})
@@ -70,11 +70,11 @@ def guards(spec, pair):
     return [second["next_issue"]] if "next_issue" in second else []
 
 def available(target):
-    return spec_files.available(target, "pairs")
+    return spec_names(target, "pairs")
 
 def load_file(path, spec):
     path = Path(path)
-    return validate(spec_files.load_spec(path), spec, path.name)
+    return validate(read_spec(path), spec, path.name)
 
 def load(target, names=None, specs=None):
     return load_sweeps(target, "pairs", names, specs, validate)
