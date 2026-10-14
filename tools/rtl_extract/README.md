@@ -71,7 +71,7 @@ A trial issues the second operation at the selected gap. Acceptance requires kno
 
 [sequences.py](sequences.py) loads `sequences/NAME.yaml`: named chains with an `ops` cycle (`op`, optional `inputs`, `guards`, `as`), `lengths` and `gaps`. Position `i` issues at `i * gap`; the same acceptance rules apply to the full chain. `rtl_extract.op_sequences.v1` records include inputs and per-length gaps. `--jobs N` parallelizes isolated runs and trials. Both CLIs take `--hw-ir`, `--exporter` and `--output`; use `--pairs` or `--sequences` to select names. Artifact commands and compiler gap-coverage semantics live in the [overview](../../docs/rtl-timing/README.md).
 
-[pairfacts.py](pairfacts.py) joins assertion-checked sweeps with resolved timing blocks into `merlin.op_pairs.v1`. It pins timing and source documents by SHA-256, checks the hardware IR agrees, validates records against current specs and rejects duplicate `(first, second, relation)` records. Pair aliases and relations come from those specs; the [known limits](../../docs/rtl-timing/README.md#not-covered) explain the binding boundary. Pair facts retain the swept range and stable gap. Capacity is the maximum observed live count with a witness, using `next_issue_age` where declared or the last event inclusive otherwise; all blocks of an engine must use the same window convention. Per-gap detail stays in sweeps.
+[pairfacts.py](pairfacts.py) joins assertion-checked sweeps with resolved timing blocks into `merlin.op_pairs.v1`. It pins timing and source documents by SHA-256, checks the hardware IR agrees, validates records against current specs and rejects duplicate `(first, second, relation)` records. Pair records carry both operand overlays, resolved aliases and merged relations; sequence steps carry overlays and resolved aliases, including empty overlays. Missing metadata or a mismatch with the current spec requires regeneration. Each source records canonical digests of its sweep and engine specs. Pair facts retain the swept range and stable gap. Capacity is the maximum observed live count with a witness, using `next_issue_age` where declared or the last event inclusive otherwise; all blocks of an engine must use the same window convention. Per-gap detail stays in sweeps.
 
 ## Extend and check
 
@@ -82,3 +82,5 @@ Add an engine spec with approved inputs, events and commands; encode alternative
 ```sh
 PYTHONPATH=tools:test "$VPY" -m unittest test_rtl_extract_hw.CompilerCrossCheck
 ```
+
+`tools/regenerate-rtl-timing.py` rebuilds the complete artifact inventory with cached stages, reference checks and `env.sh`; see [Reproduce](../../docs/rtl-timing/README.md#reproduce).

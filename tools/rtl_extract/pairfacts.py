@@ -1,11 +1,12 @@
 """Bind assertion-checked sweeps to operation facts and observed live capacity."""
+import hashlib
 import json
 from pathlib import Path
 
 from . import pairs, sequences
 from .control import require
 from .facts import sha256
-from .spec import ages
+from .spec import SPECS, ages, available_engines, read_spec
 
 SCHEMA = "merlin.op_pairs.v1"
 
@@ -25,6 +26,18 @@ def assertions(record):
 def stem(path, prefix, available, engine):
     name = Path(path).stem.removeprefix(prefix)
     return name if name in available else engine
+
+def spec_digests(group, loaded):
+    paths = {f"{group}/{name}.yaml" for name in loaded}
+    paths.update(f"{'' if spec['engine'] in available_engines() else 'system/'}{spec['engine']}.yaml"
+                 for _, spec in loaded.values())
+    return [{"name": path, "sha256": hashlib.sha256(json.dumps(read_spec(SPECS / path), sort_keys=True).encode()).hexdigest()}
+            for path in sorted(paths)]
+
+def match_setup(record, expected, where):
+    for field, value in expected.items():
+        require(field in record, f"{record['name']}: missing sweep metadata {field!r}; regenerate {where}")
+        require(record[field] == value, f"{record['name']}: {field} does not match {where}")
 
 class Builder:
     def __init__(self, op_timing):
@@ -73,9 +86,10 @@ class Builder:
             require(pair is not None and (pair["first"], pair["second"]) == (record["first"], record["second"])
                     and [ages(pair["gaps"])[0], ages(pair["gaps"])[-1]] == record["gaps"],
                     f"{record['name']}: does not match pairs/{name}.yaml")
-            first, second = (pair.get("as", {}).get(side, f"{spec['engine']}.{pair[side]}") for side in ("first", "second"))
+            match_setup(record, pairs.setup(raw, spec, pair), f"pairs/{name}.yaml")
+            first, second = (record["as"][side] for side in ("first", "second"))
             a, b = self.block(first, record["name"]), self.block(second, record["name"])
-            relation = {**raw.get("relation", {}), **pair.get("relation", {})}
+            relation = record["relation"]
             key = (first, second, json.dumps(relation, sort_keys=True))
             require(key not in self.keys, f"{record['name']}: a second record for {first} -> {second} under {relation}")
             self.keys.add(key)
@@ -84,6 +98,7 @@ class Builder:
                                  "stable_gap": record["stable_gap"], "assertions": assertions(record), "source": record["name"]})
             for gap in accepted(record):
                 self.observe([(a, 0), (b, gap)], record["name"], gap)
+        return spec_digests("pairs", loaded)
 
     def sequence_sweep(self, path, document):
         require(document.get("schema") == sequences.SCHEMA, f"{path}: expected schema {sequences.SCHEMA}")
@@ -98,11 +113,17 @@ class Builder:
             raw, spec = loaded[name]
             declared = raw["sequences"].get(record["sequence"])
             steps = sequences.chain(declared, record["length"]) if declared else None
-            require(steps and [{"op": s["op"], **({"inputs": s["inputs"]} if "inputs" in s else {})} for s in steps] == record["ops"],
+            require(steps and record["length"] in ages(declared["lengths"])
+                    and [ages(declared["gaps"])[0], ages(declared["gaps"])[-1]] == record["gaps"],
                     f"{record['name']}: does not match sequences/{name}.yaml")
-            chain = [self.block(s.get("as", f"{spec['engine']}.{s['op']}"), record["name"]) for s in steps]
+            require("ops" in record, f"{record['name']}: missing sweep metadata 'ops'; regenerate sequences/{name}.yaml")
+            require(len(record["ops"]) == len(steps), f"{record['name']}: does not match sequences/{name}.yaml")
+            for entry, expected in zip(record["ops"], sequences.setup(spec, steps)):
+                match_setup({"name": record["name"], **entry}, expected, f"sequences/{name}.yaml")
+            chain = [self.block(s["as"], record["name"]) for s in record["ops"]]
             for gap in accepted(record):
                 self.observe([(block, i * gap) for i, block in enumerate(chain)], record["name"], gap)
+        return spec_digests("sequences", loaded)
 
     def document(self, op_timing_path, sources):
         return {"schema": SCHEMA, "hw_ir": self.hw_ir,
@@ -116,8 +137,8 @@ def build(op_timing_path, pair_paths, sequence_paths=()):
     for paths, add in ((pair_paths, builder.pair_sweep), (sequence_paths, builder.sequence_sweep)):
         for path in paths:
             document = json.loads(Path(path).read_text())
-            add(path, document)
-            sources.append({"path": str(Path(path).resolve()), "sha256": sha256(path), "schema": document["schema"]})
+            specs = add(path, document)
+            sources.append({"path": str(Path(path).resolve()), "sha256": sha256(path), "schema": document["schema"], "specs": specs})
     return builder.document(op_timing_path, sources)
 
 def write(path, document):

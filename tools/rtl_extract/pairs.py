@@ -211,6 +211,11 @@ def check_task(task):
 def side_key(pair, side):
     return pair[side], tuple(sorted(pair.get(f"{side}_inputs", {}).items()))
 
+def setup(raw, spec, pair):
+    return {**{f"{side}_inputs": dict(pair.get(f"{side}_inputs", {})) for side in ("first", "second")},
+            "as": {side: pair.get("as", {}).get(side, f"{spec['engine']}.{pair[side]}") for side in ("first", "second")},
+            "relation": {**raw.get("relation", {}), **pair.get("relation", {})}}
+
 def extract(document, raw, spec, jobs=1):
     global TASK
     concrete, _ = derive.resolve(document, prepared(raw, spec), {})
@@ -235,7 +240,8 @@ def extract(document, raw, spec, jobs=1):
         results = [(o["gap"], describe(o)) for o in mine]
         low, high = limits(results)
         records.append({"name": f"{spec['engine']}.{name}", "engine": spec["engine"], "module": spec["module"],
-                        "first": pair["first"], "second": pair["second"], "gaps": [results[0][0], results[-1][0]],
+                        "first": pair["first"], "second": pair["second"], **setup(raw, spec, pair),
+                        "gaps": [results[0][0], results[-1][0]],
                         "min_gap": low, "stable_gap": high, "guards": guards(concrete, pair), "results": runs(results),
                         "rejected": [o for o in mine if not o["accepted"]],
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} gaps, "

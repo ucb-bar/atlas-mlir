@@ -58,6 +58,10 @@ def load(names=None, specs=None):
 def chain(sequence, length):
     return [sequence["ops"][i % len(sequence["ops"])] for i in range(length)]
 
+def setup(spec, steps):
+    return [{"op": s["op"], "inputs": dict(s.get("inputs", {})), "as": s.get("as", f"{spec['engine']}.{s['op']}")}
+            for s in steps]
+
 def timeline(spec, steps, gap):
     schedules = [pairs.commands(spec, s["op"], s.get("inputs", {}), i * gap) for i, s in enumerate(steps)]
     return pairs.merge(schedules), schedules
@@ -127,7 +131,7 @@ def extract(document, raw, spec, jobs=1, only=None):
         low, high = pairs.limits(results)
         records.append({"name": f"{spec['engine']}.{name}/{length}", "engine": spec["engine"], "module": spec["module"],
                         "sequence": name, "length": length,
-                        "ops": [{"op": s["op"], **({"inputs": s["inputs"]} if "inputs" in s else {})} for s in steps],
+                        "ops": setup(spec, steps),
                         "gaps": [results[0][0], results[-1][0]], "min_gap": low, "stable_gap": high,
                         "results": pairs.runs(results),
                         "evidence": f"{concrete['recipe']} control simulation of {spec['module']}: {len(results)} spacings, "

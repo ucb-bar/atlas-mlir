@@ -50,6 +50,15 @@ def sweep(module, pair, spec=SPEC, extra=None):
 
 class SyntheticPairTests(unittest.TestCase):
 
+    def test_records_capture_operand_setup_and_resolved_names(self):
+        record = sweep(counter(), {"first": "go", "second": "go", "gaps": "1..6", "second_inputs": {"go": 1},
+                                   "as": {"second": "other.go"}, "relation": {"bank": "same"}},
+                       extra={"relation": {"bank": "other", "slot": "same"}})
+        self.assertEqual({k: record[k] for k in ("first_inputs", "second_inputs", "as", "relation")},
+                         {"first_inputs": {}, "second_inputs": {"go": 1},
+                          "as": {"first": "toy.go", "second": "other.go"},
+                          "relation": {"bank": "same", "slot": "same"}})
+
     def test_ignored_launch_is_rejected_until_busy_clears(self):
         record = sweep(counter(), {"first": "go", "second": "go", "gaps": "1..6"})
         self.assertEqual((record["min_gap"], record["stable_gap"]), (4, 4))
@@ -228,6 +237,13 @@ class InvariantSequenceTests(unittest.TestCase):
 
 class SyntheticSequenceTests(unittest.TestCase):
 
+    def test_records_capture_empty_overlays_and_resolved_names(self):
+        sequence = {"ops": [{"op": "go"}, {"op": "go", "inputs": {"go": 1}, "as": "other.go"}],
+                    "lengths": 2, "gaps": "1..5"}
+        record = sequence_sweep(queue(), sequence)[2]
+        self.assertEqual(record["ops"], [{"op": "go", "inputs": {}, "as": "toy.go"},
+                                         {"op": "go", "inputs": {"go": 1}, "as": "other.go"}])
+
     def test_two_deep_queue_rejects_the_third_command(self):
         records = sequence_sweep(queue(), {"ops": [{"op": "go"}], "lengths": "2..4", "gaps": "1..5"})
         self.assertEqual({n: r["stable_gap"] for n, r in records.items()}, {2: 1, 3: 2, 4: 2})
@@ -390,7 +406,11 @@ def runs(accepted_from, last):
     return out + [{"from": accepted_from, "to": last, "result": "accepted"}]
 
 def pair(name, stable, invariants=CHECKED):
+    raw = resolved_spec(SPECS / "pairs/core_vpu.yaml")
+    setup = raw["pairs"][name]
     record = {"name": f"core.{name}", "engine": "core", "module": "AtlasCore", "first": "add", "second": "add_hi",
+              "first_inputs": setup["first_inputs"], "second_inputs": setup["second_inputs"], "as": setup["as"],
+              "relation": {**raw.get("relation", {}), **setup.get("relation", {})},
               "gaps": [1, 71], "min_gap": stable, "stable_gap": stable, "results": runs(stable, 71)}
     return {**record, "invariants": invariants} if invariants else record
 
@@ -398,6 +418,7 @@ def chain(stable, length=3):
     ops = [{"op": "exp"}, {"op": "relu", "inputs": {"io_cmd_bits_vs1": 18, "io_cmd_bits_vs2": 22, "io_cmd_bits_vd": 26}},
            {"op": "exp", "inputs": {"io_cmd_bits_vs1": 34, "io_cmd_bits_vs2": 38, "io_cmd_bits_vd": 42}},
            {"op": "relu", "inputs": {"io_cmd_bits_vs1": 50, "io_cmd_bits_vs2": 54, "io_cmd_bits_vd": 58}}][:length]
+    ops = [{**s, "inputs": s.get("inputs", {}), "as": f"vpu.{s['op']}"} for s in ops]
     return {"name": f"vpu.exp_relu_exp/{length}", "engine": "vpu", "module": "VectorEngineTop", "sequence": "exp_relu_exp",
             "length": length, "ops": ops, "gaps": [1, 135], "min_gap": stable, "stable_gap": stable,
             "results": runs(stable, 135), "invariants": CHECKED}
@@ -425,6 +446,32 @@ class PairFactsTests(unittest.TestCase):
         self.assertEqual((first["stable_gap"], first["gaps"], first["assertions"]), (1, [1, 71], {"checked": 7, "excluded": 0}))
         self.assertEqual(second["source"], "core.exp_exp")
         self.assertNotIn("results", first)
+        self.assertEqual(document["sources"][0]["specs"], [
+            {"name": name, "sha256": SPEC_DIGESTS[name]} for name in ("pairs/core_vpu.yaml", "system/core.yaml")])
+
+    def test_missing_sweep_metadata_requires_regeneration(self):
+        for field in ("first_inputs", "second_inputs", "as", "relation"):
+            record = pair("exp_relu", 1)
+            del record[field]
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, f"missing sweep metadata '{field}'"):
+                self.build([record])
+        for field in ("inputs", "as"):
+            record = chain(33)
+            del record["ops"][0][field]
+            with self.subTest(sequence_field=field), self.assertRaisesRegex(ValueError, f"missing sweep metadata '{field}'"):
+                self.build([pair("exp_relu", 1)], [record])
+
+    def test_sweep_metadata_must_match_the_spec(self):
+        for field, value in (("first_inputs", {}), ("second_inputs", {}),
+                             ("as", {"first": "vpu.sin", "second": "vpu.relu"}), ("relation", {})):
+            record = {**pair("exp_relu", 1), field: value}
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, f"{field} does not match pairs/core_vpu.yaml"):
+                self.build([record])
+        for field, value in (("inputs", {"io_cmd_bits_vs1": 1}), ("as", "vpu.sin")):
+            record = chain(33)
+            record["ops"][0][field] = value
+            with self.subTest(sequence_field=field), self.assertRaisesRegex(ValueError, f"{field} does not match sequences/core_vpu.yaml"):
+                self.build([pair("exp_relu", 1)], [record])
 
     def test_capacity_is_what_the_runs_show(self):
         self.assertEqual(self.build([pair("exp_exp", 65)])["capacity"][0]["live"], 1)
@@ -432,7 +479,11 @@ class PairFactsTests(unittest.TestCase):
         self.assertEqual(two, [{"engine": "vpu", "live": 2, "window": "next_issue_age", "witness": {"source": "core.exp_relu", "gap": 1}}])
         # exp, relu, exp at 33: the third issues as the first retires, so two stay live; a run accepted at 1 shows three.
         self.assertEqual(self.build([pair("exp_exp", 65)], [chain(33)])["capacity"][0]["live"], 2)
-        self.assertEqual(self.build([pair("exp_exp", 65)], [chain(1)])["capacity"][0]["live"], 3)
+        document = self.build([pair("exp_exp", 65)], [chain(1)])
+        self.assertEqual(document["capacity"][0]["live"], 3)
+        self.assertEqual(document["sources"][1]["specs"][0],
+                         {"name": "sequences/core_vpu.yaml", "sha256": SPEC_DIGESTS["sequences/core_vpu.yaml"]})
+        self.assertEqual([s["name"] for s in document["sources"][1]["specs"]], ["sequences/core_vpu.yaml", "vpu.yaml"])
 
     def test_inputs_fail_closed(self):
         unchecked = pair("exp_relu", 1, invariants=None)
@@ -470,13 +521,18 @@ MXU_TIMING = {"schema": "merlin.op_timing.v1", "hw_ir": HW,
                             mxu_block("mxu0.matmul", 94), mxu_block("mxu0.pop_acc_bf16", 32), mxu_block("mxu0.push_weight", 32)]}
 
 def mxu_pair(name, stable, last=100):
+    raw = resolved_spec(SPECS / "pairs/core_mxu_same.yaml")
+    setup = raw["pairs"][name]
     return {"name": f"core.{name}", "engine": "core", "module": "AtlasCore", "first": "mxu0_matmul", "second": "mxu0_matmul",
+            "first_inputs": setup["first_inputs"], "second_inputs": setup["second_inputs"], "as": setup["as"],
+            "relation": {**raw.get("relation", {}), **setup.get("relation", {})},
             "gaps": [1, last], "min_gap": stable, "stable_gap": stable, "results": runs(stable, last), "invariants": CHECKED}
 
 def mxu_chain(stable, length=3):
     return {"name": f"core.mxu0_matmul_other_acc_same_slot/{length}", "engine": "core", "module": "AtlasCore",
             "sequence": "mxu0_matmul_other_acc_same_slot", "length": length,
-            "ops": [{"op": "mxu0_matmul", "inputs": {"instruction": w}} for w in (0x14000077, 0x140080f7, 0x14010077)][:length],
+            "ops": [{"op": "mxu0_matmul", "inputs": {"instruction": w}, "as": "mxu0.matmul"}
+                    for w in (0x14000077, 0x140080f7, 0x14010077)][:length],
             "gaps": [1, 100], "min_gap": stable, "stable_gap": stable, "results": runs(stable, 100), "invariants": CHECKED}
 
 class MxuPairFactsTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 """Compiler issue gaps never undercut the RTL pair sweeps.
 
-For each record, a program issues the pair's two operations with the pair file's operand overlays,
+For each record, a program issues the pair's two operations with its recorded operand overlays,
 separated by DELAY; the smallest gap --verify-atlas-timing accepts under the selected provider must be
 at least the record's bound. System pairs (engines `core` and `core_dma`) are decoded from AtlasCore
 instruction words and must re-encode to them. Unsupported pairs must be provider rejections, and an
@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from rtl_test_support import (
     BINARY, EMIT, FACTS, HALT, IN_FLIGHT, LIMIT, MXU_WORDS, OPT, PAIRS, PROVIDER, REDUCE, ROOT,
@@ -154,6 +155,18 @@ def selected_gap(setup, first, second, tail, limit):
 def consumer_gap(setup, first, second, tail, *selection):
     result = run(OPT, program([*setup, first, second, *tail, HALT]), *selection, "--insert-atlas-delays")
     return issue_gap(result.stdout, first, second) if result.returncode == 0 else None
+
+class PairOperandTests(unittest.TestCase):
+    def test_program_uses_recorded_overlays_including_empty_ones(self):
+        from rtl_extract import pairs
+        pair = {"first": "a", "second": "b", "first_inputs": {"value": 7}, "second_inputs": {"value": 9}}
+        spec = {"inputs": {"value": 0}, "operations": {n: {"commands": {0: {"value": 1}}} for n in ("a", "b")}}
+        record = {"name": "toy.p", "engine": "toy", "first": "a", "second": "b",
+                  "first_inputs": {}, "second_inputs": {"value": 2}}
+        with patch(__name__ + ".pair_files", return_value=(pairs, {"toy": ({"pairs": {"p": pair}}, spec)})), \
+             patch(__name__ + ".operation", return_value=([], ("dummy", ""))) as build:
+            self.assertIsNotNone(pair_program(record))
+        self.assertEqual([call.args[2]["value"] for call in build.call_args_list], [1, 2])
 
 @unittest.skipUnless(FACTS and OPT.is_file(), "requires explicit RTL timing facts and built Atlas tools")
 class RTLGapCoverageTest(unittest.TestCase):

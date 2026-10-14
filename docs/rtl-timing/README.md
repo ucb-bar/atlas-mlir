@@ -42,100 +42,32 @@ Gap coverage uses `stable_gap`, except for a pair with a DMA launch: a rejected 
 
 ## Reproduce
 
-Run from this repository root with the prepared environment and a new output directory. Selected inputs are read-only. Keep sweeps beside facts for gap-test discovery. Loops invoke one command per artifact; extraction, sweeps and model builds can exceed a minute.
+Run from the repository root with the prepared environment. Inputs stay read-only; outputs and cache receipts live under the selected build root.
 
 ```sh
 source build/env.sh
-export PYTHONPATH="$PWD/tools:$PYTHONPATH"
-unset ATLAS_TIMING_PROBE
-X=$PWD/build/manual-rtl-extract
 R=${ATLAS_HW_IR%/build/rtl-extract/ir-debug/*}
-P=${R%/generators/*}/.conda-env/riscv-tools
-INPUT=$R/build/rtl-timing/ee290-portable-helper-check/inputs
-H=$X/ir-debug/ee290.debug.hw.mlir
-E=$X/exporter/hw_ir_export
+C=${R%/generators/*}
+X=$PWD/build/regen
+"$VPY" tools/regenerate-rtl-timing.py --build-root "$X" --python "$VPY" \
+  --firrtl "$R/build/rtl-timing/ee290-portable-helper-check/inputs/input.fir" \
+  --annotations "$R/build/rtl-timing/ee290-portable-helper-check/inputs/original.anno.json" \
+  --lowering-options "$R/build/rtl-timing/ee290-portable-helper-check/inputs/lowering-options.txt" \
+  --circt-prefix "$C/.conda-env/riscv-tools" \
+  --rtl "$R/build/rtl-timing/atlascore-replay-002/inputs" --bin "$ATLAS_OOT_BIN_DIR" \
+  --verilator "$C/.conda-env/bin/verilator_bin" \
+  --verilator-root "$C/.conda-env/share/verilator" --jobs 32 \
+  --check "$R/build/rtl-extract/out" --reference-hw-ir "$ATLAS_HW_IR"
+source "$X/env.sh"
 ```
 
-Retained debug HW IR and manifest, then exporter:
+The [manifest](../../tools/rtl_extract/specs/regenerate.json) selects thirteen pair sweeps, four sequence sweeps and combined pair facts. The command also lowers and verifies debug HW IR, builds the exporter and Verilator model, extracts operation facts, cross-checks the CMake `rtl-timing-facts-probe` from `--bin`, and verifies 80/111 unique replay passes without/with pairs. Build the probe with the compiler before running. MXU chains validate spacing but stay outside the selected two-command capacity evidence.
 
-```sh
-"$VPY" tools/retain-ee290-hw-ir.py --mode debug \
-  --firrtl "$INPUT/input.fir" --annotations "$INPUT/original.anno.json" \
-  --lowering-options "$INPUT/lowering-options.txt" \
-  --firtool "$P/bin/firtool" --circt-opt "$P/bin/circt-opt" --output "$X/ir-debug"
-cmake -S tools/rtl_extract/export -B "$X/exporter" \
-  -DCMAKE_BUILD_TYPE=Release -DCIRCT_DIR="$P/lib/cmake/circt" \
-  -DMLIR_DIR="$P/lib/cmake/mlir" -DLLVM_DIR="$P/lib/cmake/llvm"
-cmake --build "$X/exporter" -j32
-```
+Stage keys include commands, tool versions and source/input digests, including generated-spec code. Output digests and replay inventories must also match before a stage skips. `run.json`, `runs/` and `logs/` retain results. An unchanged rerun skips every stage; sweeps can take hours on a first run. At most 32 workers run concurrently.
 
-Debug lowering preserves named values and inline memories. Hierarchy-output paths depend on `X`, so IR digests can differ with output location; downstream artifacts must use the same IR.
+`--stages lower,exporter,facts,compiler_facts,probe,model,pairs-core_dma` selects a fast subset; `sweeps` selects every sweep. Selection does not run missing prerequisites. `--check-only` compares existing outputs. Checks compare the selected timing artifacts, every gap and every record field, verifying hardware/dependency SHA pins before normalizing source paths and the two FIRRTL hierarchy-output destinations. Old sweeps lack operand metadata and intentionally differ; old pair facts must be regenerated.
 
-Operation facts and compiler selection copy:
-
-```sh
-"$VPY" -m rtl_extract --hw-ir "$H" --exporter "$E" --output "$X/out/all.json"
-cp "$X/out/all.json" "$X/out/compiler-facts.json"
-```
-
-Pair and sequence sweeps:
-
-```sh
-for name in vlsu vpu mxu0 mxu1 core core_vpu core_dma core_dma_mxu core_mxu core_mxu_cross core_mxu_units core_mxu_same core_mxu_shared; do
-  "$VPY" -m rtl_extract.pairs --hw-ir "$H" --exporter "$E" \
-    --pairs "$name" --jobs 32 --output "$X/out/pairs-$name.json"
-done
-for name in mxu0 mxu1 core_vpu core_mxu; do
-  "$VPY" -m rtl_extract.sequences --hw-ir "$H" --exporter "$E" \
-    --sequences "$name" --jobs 32 --output "$X/out/sequences-$name.json"
-done
-```
-
-Generated specs load through [spec.py](../../tools/rtl_extract/spec.py). Export them for inspection; expectations are pinned regressions, not extraction inputs.
-
-```sh
-for name in pairs/core pairs/core_dma pairs/core_dma_mxu pairs/core_mxu pairs/core_mxu_cross pairs/core_mxu_units pairs/core_mxu_same pairs/core_mxu_shared pairs/core_vpu sequences/core_vpu sequences/core_mxu system/core system/core_dma; do
-  "$VPY" tools/rtl_extract/specs/gen_core.py "$name.yaml" --output "$X/specs/$name.yaml"
-done
-```
-
-VPU, MXU and combined pair facts:
-
-```sh
-"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
-  --pairs "$X/out/pairs-core_vpu.json" --sequences "$X/out/sequences-core_vpu.json" \
-  --output "$X/out/op-pairs-vpu.json"
-"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
-  --pairs "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
-  --output "$X/out/op-pairs-mxu.json"
-"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
-  --pairs "$X/out/pairs-core_vpu.json" "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
-  --sequences "$X/out/sequences-core_vpu.json" --output "$X/out/op-pairs.json"
-```
-
-MXU chains validate uniform spacing; including them in selection raises observed capacity beyond the reviewed two-command rule.
-
-CMake timing probe and replay with the prepared model:
-
-```sh
-cmake --build build/compiler --target rtl-timing-facts-probe -j32
-"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
-  --bin "$ATLAS_OOT_BIN_DIR" --model "$ATLAS_EE290_COMPUTE_MODEL" --work "$X/replay" --jobs 32
-"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
-  --pairs "$X/out/op-pairs.json" --bin "$ATLAS_OOT_BIN_DIR" \
-  --model "$ATLAS_EE290_COMPUTE_MODEL" --work "$X/replay-pairs" --jobs 32
-```
-
-To reproduce the model from selected SV:
-
-```sh
-"$VPY" tools/replay-ee290-compute.py --facts "$X/out/compiler-facts.json" \
-  --bin "$ATLAS_OOT_BIN_DIR" --rtl "$R/build/rtl-timing/atlascore-replay-002/inputs" \
-  --verilator "${R%/generators/*}/.conda-env/bin/verilator_bin" \
-  --verilator-root "${R%/generators/*}/.conda-env/share/verilator" --work "$X/replay-built" --jobs 32
-```
-
-The model is written to that work directory's `obj/VAtlasCore`.
+Generated specs load through [spec.py](../../tools/rtl_extract/spec.py); `tools/rtl_extract/specs/gen_core.py NAME.yaml --output PATH` exports one for inspection. Expectations are pinned regressions, not extraction inputs. `tools/replay-ee290-compute.py` remains the standalone model/replay entry point.
 
 Compiler selection and resolved export (substitute an untimed physical program):
 
@@ -154,6 +86,5 @@ Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pair selection;
 - Unbounded same-unit overlap: selection caps each unit at two live commands, although some uniformly spaced MXU chains accept three.
 - Exact weight-read timing: matmul conservatively owns its weight slot through its last accumulator write.
 - DMA completion latency, concurrent host traffic, or memories outside selected assumptions.
-- Pair-sweep records omit operand overlays, `as` names and relations; `rtl_extract.pairfacts` takes them from current YAML by block name, and binding them in records requires a re-sweep.
 - Virtual scheduling models same-unit intervals, not physical cross-engine exclusion; the physical verifier checks the lowered stream.
 - A VLOAD write into an MREG bank still being read is not asserted by RTL; compiler release rules protect it.
