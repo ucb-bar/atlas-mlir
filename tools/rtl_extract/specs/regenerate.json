@@ -1,0 +1,25 @@
+{
+  "schema": "rtl_extract.regenerate.v1",
+  "sweeps": [
+    {"kind": "pairs", "name": "vlsu", "output": "out/pairs-vlsu.json", "reference": "pairs-vlsu.json"},
+    {"kind": "pairs", "name": "vpu", "output": "out/pairs-vpu.json", "reference": "pairs-vpu.json"},
+    {"kind": "pairs", "name": "mxu0", "output": "out/pairs-mxu0.json", "reference": "pairs-mxu0.json"},
+    {"kind": "pairs", "name": "mxu1", "output": "out/pairs-mxu1.json", "reference": "pairs-mxu1.json"},
+    {"kind": "pairs", "name": "core", "output": "out/pairs-core.json", "reference": "pairs-core.json"},
+    {"kind": "pairs", "name": "core_vpu", "output": "out/pairs-core_vpu.json", "reference": "pairs-core_vpu.json", "shards": 29},
+    {"kind": "pairs", "name": "core_dma", "output": "out/pairs-core_dma.json", "reference": "system/pairs-core_dma.json"},
+    {"kind": "pairs", "name": "core_dma_mxu", "output": "out/pairs-core_dma_mxu.json", "reference": "system/pairs-core_dma_mxu.json"},
+    {"kind": "pairs", "name": "core_mxu", "output": "out/pairs-core_mxu.json", "reference": "system/pairs-core_mxu.json"},
+    {"kind": "pairs", "name": "core_mxu_cross", "output": "out/pairs-core_mxu_cross.json", "reference": "system/pairs-core_mxu_cross.json"},
+    {"kind": "pairs", "name": "core_mxu_units", "output": "out/pairs-core_mxu_units.json", "reference": "system/pairs-core_mxu_units.json"},
+    {"kind": "pairs", "name": "core_mxu_same", "output": "out/pairs-core_mxu_same.json", "reference": "system/pairs-core_mxu_same.json"},
+    {"kind": "pairs", "name": "core_mxu_shared", "output": "out/pairs-core_mxu_shared.json", "reference": "system/pairs-core_mxu_shared.json"},
+    {"kind": "sequences", "name": "mxu0", "output": "out/sequences-mxu0.json", "reference": "sequences-mxu0.json"},
+    {"kind": "sequences", "name": "mxu1", "output": "out/sequences-mxu1.json", "reference": "sequences-mxu1.json"},
+    {"kind": "sequences", "name": "core_vpu", "output": "out/sequences-core_vpu.json", "reference": "sequences-core_vpu.json"},
+    {"kind": "sequences", "name": "core_mxu", "output": "out/sequences-core_mxu.json", "reference": "system/sequences-core_mxu.json"}
+  ],
+  "pair_facts": {"pairs": ["out/pairs-core_vpu.json", "out/pairs-core_mxu_same.json", "out/pairs-core_mxu_shared.json"], "sequences": ["out/sequences-core_vpu.json"]},
+  "replay": {"replay": 80, "replay_pairs": 111},
+  "environment": {"ATLAS_HW_IR": "ir-debug/ee290.debug.hw.mlir", "ATLAS_HW_EXPORTER": "exporter/hw_ir_export", "ATLAS_OP_TIMING": "out/compiler-facts.json", "ATLAS_PAIR_FACTS": "out/op-pairs.json", "ATLAS_VPU_SEQUENCES": "out/sequences-core_vpu.json", "ATLAS_EE290_COMPUTE_MODEL": "model/VAtlasCore"}
+}
