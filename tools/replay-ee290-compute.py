@@ -59,9 +59,10 @@ def branch_target(index, word):
         immediate = (word >> 31) << 20 | ((word >> 12) & 255) << 12 | ((word >> 20) & 1) << 11 | ((word >> 21) & 1023) << 1; bits = 21
     return index + ((immediate - (1 << bits) if immediate >> (bits - 1) else immediate) >> 1)
 
+COMMANDS = {m for m, _ in ENGINES.values()} | set(VPU_MNEMONICS.values()) | set(VLI_MNEMONICS)
+
 def is_command(mnemonic):
-    return mnemonic in {m for m, _ in ENGINES.values()} or mnemonic in VPU_MNEMONICS.values() or mnemonic in VLI_MNEMONICS or \
-        mnemonic.startswith(('dma.load.ch', 'dma.store.ch')) or '.mxu' in mnemonic
+    return mnemonic in COMMANDS or mnemonic.startswith(('dma.load.ch', 'dma.store.ch')) or '.mxu' in mnemonic
 
 def decoded_operands(word):
     opcode = word & 127; rd = (word >> 7) & 31; rs1 = (word >> 15) & 31; rs2 = (word >> 20) & 31
@@ -273,7 +274,7 @@ def bind_export(export, observed, facts_sha256, words, pairs_sha256=None):
     require(len(halts) == 1 and instructions[halts[0]['word_index']].get('event_kind') == 'terminal_acceptance', 'one terminal acceptance required')
     waits = {(e['word_index'], e['edge']): e for e in observed['endpoints'] if e['kind'] == 'wait'}
     require(len(waits) == sum(e['kind'] == 'wait' for e in observed['endpoints']), 'duplicate observed WAIT')
-    instances, fired, previous, consumed = [], [], None, 0
+    instances, fired, owner, previous, consumed = [], [], {}, None, 0
     for event in observed['instructions'] + halts:
         word, edge = event['word_index'], integer(event['edge'], 'observed issue edge')
         require(0 <= word < len(words) and event['word_u32'] == words[word], 'resolved/observed instruction word mismatch')
@@ -295,7 +296,7 @@ def bind_export(export, observed, facts_sha256, words, pairs_sha256=None):
             instance['epoch_origins'].append(edge); consumed += 1
         else: require((word, edge) not in waits and current == epoch, 'epoch changes without matching WAIT acceptance')
         require(edge == instance['epoch_origins'][current] + offset, 'observed intra-epoch issue differs from exported block offset')
-        fired.append((word, edge)); previous = (word, edge)
+        fired.append((word, edge)); owner[word, edge] = instance; previous = (word, edge)
     require(consumed == len(waits), 'observed WAIT outside an exported matching wait')
     require(item['mnemonic'] == 'ecall' and block['exit'] == 'halt', 'terminal acceptance convention mismatch')
     entries = observed['block_entries']
@@ -306,9 +307,6 @@ def bind_export(export, observed, facts_sha256, words, pairs_sha256=None):
     # Each dynamic instance binds to the footprints of every entry-context group its observed entry registers hold.
     for instance, entry in zip(instances, entries):
         instance['groups'] = context_items(export, blocks[instance['block']], entry.get('registers', {}))
-    owner = {}
-    for word, edge in fired:
-        owner[word, edge] = max((i for i in instances if i['entry_edge'] <= edge), key=lambda i: i['entry_edge'])
     def bound(word, edge, bind):
         instance = owner[word, edge]; offset = word - blocks[instance['block']]['first_word']
         results = [bind(group[offset]) for group in instance['groups']]
@@ -526,9 +524,8 @@ PORT_EVENTS = {'vr': ('vload', 'reads', 0, ('vr_bank', 'vr_addr'), None), 'vresp
 for n in range(2):
     PORT_EVENTS.update({f'pr{n}': ('vpu', 'reads', n, (f'prid{n}', f'prrow{n}'), None), f'presp{n}': ('vpu', 'responses', n, None, f'pdata{n}'),
                         f'pw{n}': ('vpu', 'writes', n, (f'pwid{n}', f'pwrow{n}'), f'pwdata{n}')})
-# MXU events also name their resource; acc/weight ids are slots. MREG responses (m<u>_resp<p>) are derived:
-# MregFile answers a read on the next edge. Vector data are (signal prefix, lanes, bytes per lane). Ports 2 and 3
-# are the accumulator compute read (matmul.acc psum) and accumulator load (acc push).
+# MREG responses are derived one edge after each read. Vector data: (signal prefix, lanes, bytes per lane).
+# Accumulator ports 2/3 carry matmul.acc reads / acc-push writes; acc/weight ids are slots.
 RESOURCE = {}
 for u in range(2):
     m, kind = f'm{u}_', f'mxu{u}'
@@ -653,9 +650,8 @@ def validate_compute_edges(samples,words,case):
     def vm_line(line):
         if line not in vm: reject('VMEM access outside the case-initialized lines')
         return vm[line]
-    # Live VPU commands, oldest first. VectorFSM runs two slots: a two-port command (binary, row) takes both port
-    # pairs, a single-port command the slot whose port pair it uses (`slot`); events record the command's own port.
-    def vpus(): return live.get('vpu_drain',[])+([live['vpu']] if 'vpu' in live else [])
+    # VectorFSM has two slots; binary/row commands own both port pairs. Events use command-relative ports.
+    def live_commands(kind): return live.get(kind+'_drain',[])+([live[kind]] if kind in live else [])
     def vpu_ports(c): return {0,1} if c['layout'] in ('binary','row') else {c['slot']}
     def vpu_left(c,stage,port):
         logical=port-c['slot']
@@ -666,14 +662,10 @@ def validate_compute_edges(samples,words,case):
         return not any(vpu_left(c,s,p) for s in STAGES[:2] for p in range(2)) and all(vpu_left(c,'writes',p)<=(1 if v('pw'+str(p)) else 0) for p in range(2))
     def vpu_released(c):
         return not any(vpu_left(c,s,p) for s in STAGES for p in range(2)) and not any(v('paw'+str(n)) and v('pawid'+str(n)) in c['dests'] for n in range(4))
-    # Live MXU commands of a unit, oldest first. Commands on one MXU overlap where the selected pair facts admit them; an
-    # event goes to the oldest live command still expecting one on that port and resource (the sequencer runs one
-    # command per port engine and retires matmuls in order), and a command with company releases once its events are
-    # done and no live marker names an operand only it uses.
-    def mxus(u): return live.get(f'mxu{u}_drain',[])+([live[f'mxu{u}']] if f'mxu{u}' in live else [])
+    # The sequencer retires matmuls in order; attribute each port/resource event to its oldest unfinished command.
     def mxu_left(c,stage,port): return MXU_PORTS[c['op']].get((stage,port),0)-sum(e.get('port',0)==port for e in c[stage])
     def mxu_released(c,u):
-        others={r for o in mxus(u) if o is not c for r in o['sources']|o['dests']}
+        others={r for o in live_commands(f'mxu{u}') if o is not c for r in o['sources']|o['dests']}
         done=all(mxu_left(c,s,p)==0 for s,p in MXU_PORTS[c['op']]) and len(c['compute'])==MXU_OPS[c['op']][1][3]
         return done and not any(v(f'm{u}_act{d}{p}') and v(f'm{u}_act{d}id{p}') in c['sources' if d=='r' else 'dests']-others for d in 'rw' for p in range(2))
     for sample in samples:
@@ -716,18 +708,14 @@ def validate_compute_edges(samples,words,case):
         for command in commands:
             if command['engine']=='vpu' and command['next_issue_age'] is None and edge>command['edge'] and not v('vpu_busy')>>command['op']&1:
                 command['next_issue_age']=edge-command['edge']
-        # A VPU command issued before the newest one (at its next_issue_age, or beside it in the other slot) releases
-        # once its events are done and no write marker names its destination; so does the newest while it has company.
-        for drain in list(live.get('vpu_drain',())):
-            if vpu_released(drain):
-                drain['release_edge']=edge;live['vpu_drain'].remove(drain)
-                if not live['vpu_drain']: del live['vpu_drain']
-        for u in range(2):
-            for drain in list(live.get(f'mxu{u}_drain',())):
-                if mxu_released(drain,u):
-                    if tuple(len(drain[s]) for s in STAGES)+(len(drain['compute']),)!=event_counts(drain): reject(f'mxu{u} released before its events completed')
-                    drain['release_edge']=edge;live[f'mxu{u}_drain'].remove(drain)
-                    if not live[f'mxu{u}_drain']: del live[f'mxu{u}_drain']
+        # Commands with company release once their events and exclusive live markers drain.
+        for kind in ('vpu','mxu0','mxu1'):
+            for drain in list(live.get(kind+'_drain',())):
+                if vpu_released(drain) if kind=='vpu' else mxu_released(drain,int(kind[3])):
+                    if kind!='vpu' and tuple(len(drain[s]) for s in STAGES)+(len(drain['compute']),)!=event_counts(drain):
+                        reject(kind+' released before its events completed')
+                    drain['release_edge']=edge;live[kind+'_drain'].remove(drain)
+                    if not live[kind+'_drain']: del live[kind+'_drain']
         for kind in [k for k in live if not k.endswith('_drain')]:
             command=live[kind];company=kind+'_drain' in live
             if edge>command['edge'] and (vpu_released(command) if kind=='vpu' and company else mxu_released(command,int(kind[3])) if kind.startswith('mxu') and company else not BUSY[kind](v)):
@@ -768,9 +756,7 @@ def validate_compute_edges(samples,words,case):
                     # LW/SELD: scalar LSU reads the aligned VMEM word; it becomes register rd, or its low byte scale register rd.
                     immediate=word>>20;immediate=immediate-4096 if immediate&2048 else immediate
                     if regs[rs1] is None: reject('unknown scalar load operand')
-                    # Capture operands before this edge's old writeback. A new
-                    # load may launch on the edge the previous load retires;
-                    # install it only after attributing that previous write.
+                    # Capture operands before old writeback, then install this load after attributing that write.
                     new_scalar_load={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'rd':rd,'kind':'seld' if funct3==6 else 'lw'}
                     if new_scalar_load['address']%4: reject('unaligned scalar load')
                     vm_line(new_scalar_load['address']>>5)
@@ -779,8 +765,7 @@ def validate_compute_edges(samples,words,case):
                 elif opcode==0x23 and funct3==2:
                     immediate=((word>>25)<<5)|((word>>7)&31);immediate=immediate-4096 if immediate&2048 else immediate
                     if regs[rs1] is None or regs[rs2] is None: reject('unknown scalar store operand')
-                    # A previous SW command may commit on this edge while the
-                    # next SW captures its operands for the following command.
+                    # A previous SW may commit on this edge while the next captures operands for the following edge.
                     new_scalar_store={'edge':edge,'word_index':pc,'word_u32':word,'address':(regs[rs1]+immediate)&0xffffffff,'data':regs[rs2],'kind':'sw'}
                     if new_scalar_store['address']%4: reject('unaligned scalar store')
                     vm_line(new_scalar_store['address']>>5)
@@ -846,8 +831,8 @@ def validate_compute_edges(samples,words,case):
                     if created['engine']=='vpu':
                         # Beside live VPU work the issue-busy bit must be clear and the command's port pairs free:
                         # held by no command, or by one whose last write fires on this edge.
-                        if vpus() and v('vpu_busy')>>created['op']&1: reject('VPU command issued while its issue-busy bit is set')
-                        held={p for c in vpus() if not vpu_done(c) for p in vpu_ports(c)}
+                        if live_commands('vpu') and v('vpu_busy')>>created['op']&1: reject('VPU command issued while its issue-busy bit is set')
+                        held={p for c in live_commands('vpu') if not vpu_done(c) for p in vpu_ports(c)}
                         both=created['layout'] in ('binary','row')
                         created['slot']=next((s for s in (0,1) if not held&({0,1} if both else {s})),None)
                         if created['slot'] is None: reject('VPU command issued while its port pairs are live')
@@ -907,10 +892,10 @@ def validate_compute_edges(samples,words,case):
             for key,(kind,where,port,address,carried) in PORT_EVENTS.items():
                 if where!=stage or not v(key): continue
                 command=live.get(kind)
-                if kind=='vpu': command=next((c for c in vpus() if vpu_left(c,stage,port)>0),None)
-                elif kind.startswith('mxu') and stage=='responses': command=next((c for c in mxus(int(kind[3])) if c['_queue'][port]),None)
+                if kind=='vpu': command=next((c for c in live_commands('vpu') if vpu_left(c,stage,port)>0),None)
+                elif kind.startswith('mxu') and stage=='responses': command=next((c for c in live_commands(kind) if c['_queue'][port]),None)
                 elif kind.startswith('mxu'):
-                    command=next((c for c in mxus(int(kind[3])) if mxu_left(c,stage,port)>0 and (element(c,stage,port,0) or ('',))[0]==RESOURCE[key]),None)
+                    command=next((c for c in live_commands(kind) if mxu_left(c,stage,port)>0 and (element(c,stage,port,0) or ('',))[0]==RESOURCE[key]),None)
                 if command is None: reject(f'unattributed {key} event: no live {kind} command')
                 if kind=='vpu': port-=command['slot']
                 n=sum(e.get('port',0)==port for e in command[stage])
@@ -940,7 +925,7 @@ def validate_compute_edges(samples,words,case):
                 record(command[stage],id=identity,row=row,data_hex=observed.hex(),**({'port':port} if kind=='vpu' or kind.startswith('mxu') else {}),
                        **({'resource':RESOURCE.get(key,'mreg')} if kind.startswith('mxu') else {}))
         for u in range(2):
-            kind,m=f'mxu{u}',f'm{u}_';command=next((c for c in mxus(u) if c['op'] in (5,6) and len(c['compute'])<32),None)
+            kind,m=f'mxu{u}',f'm{u}_';command=next((c for c in live_commands(f'mxu{u}') if c['op'] in (5,6) and len(c['compute'])<32),None)
             if v(m+'cv'):
                 if not command or command['op'] not in (5,6) or len(command['compute'])>=32: reject('unattributed or excess MXU compute beat')
                 n=len(command['compute']);act=data((m+'act',32,1))
@@ -950,14 +935,14 @@ def validate_compute_edges(samples,words,case):
                 record(command['compute'],row=n)
             for p in range(2):
                 for direction,allowed in (('r','sources'),('w','dests')):
-                    if v(f'{m}act{direction}{p}') and v(f'{m}act{direction}id{p}') not in {r for c in mxus(u) for r in c[allowed]}: reject('MXU live resource operand mismatch')
+                    if v(f'{m}act{direction}{p}') and v(f'{m}act{direction}id{p}') not in {r for c in live_commands(f'mxu{u}') for r in c[allowed]}: reject('MXU live resource operand mismatch')
         # Live markers name the active command's operands; they need not cover the launch edge.
         active=live.get('xlu')
         if v('xar') and (not active or v('xarid')!=active['src']) or v('xaw') and (not active or v('xawid')!=active['dst']): reject('XLU active operand mismatch')
         for port in range(4):
             for direction in ('par','paw'):
                 if v(direction+str(port)):
-                    actives=vpus() or reject('unbound VPU live resource marker')
+                    actives=live_commands('vpu') or reject('unbound VPU live resource marker')
                     if v(direction+'id'+str(port)) not in {r for c in actives for r in c['sources' if direction=='par' else 'dests']}: reject('VPU live resource operand mismatch')
         # DMA: A requests follow launch order; responses carry their source's command; a load response is written to VMEM in the
         # edge it is accepted (D ready is the VMEM write grant), and a store reads VMEM for the command being requested.

@@ -51,13 +51,10 @@ class Replay {
     }
     if(response) std::cout<<"DMA_D cycle="<<cycles<<'\n';
   }
-
   void evaluate() {
-    dut.eval();
-    trace.dump(time++);
+    dut.eval(); trace.dump(time++);
     if (context.gotFinish()) throw std::runtime_error("RTL stopped or asserted");
   }
-
   void exchange(CData &valid, const CData &ready, const CData &response, const char *port) {
     auto wait = [&](const CData &signal, const char *phase) {
       unsigned waits = 0;
@@ -66,50 +63,28 @@ class Replay {
         tick();
       }
     };
-    valid = 1;
-    dut.clock = 0;
-    evaluate();
-    wait(ready, " A");
-    tick();
-    valid = 0;
-    evaluate();
-    wait(response, " D");
+    valid = 1; dut.clock = 0; evaluate(); wait(ready, " A");
+    tick(); valid = 0; evaluate(); wait(response, " D");
   }
-
 public:
   Replay(const char *wave, uint64_t cycleLimit) : limit(cycleLimit) {
-    context.traceEverOn(true);
-    dut.trace(&trace, 3);
-    trace.open(wave);
-    dut.clock = 0;
-    dut.reset = 1;
+    context.traceEverOn(true); dut.trace(&trace, 3); trace.open(wave);
+    dut.clock = 0; dut.reset = 1;
     dut.io_imemTL_a_valid = dut.io_csrTL_a_valid = dut.io_vmemTL_a_valid = 0;
     dut.io_imemTL_d_ready = dut.io_csrTL_d_ready = dut.io_vmemTL_d_ready = 1;
     dut.io_dmaTL_a_ready = 1;
-    dut.io_dmaTL_d_valid = 0;
-    dut.io_dmaTL_d_bits_source = 0;
+    dut.io_dmaTL_d_valid = 0; dut.io_dmaTL_d_bits_source = 0;
     for (unsigned i = 0; i < 8; ++i) dut.io_dmaTL_d_bits_data[i] = 0;
     evaluate();
     for (unsigned i = 0; i < 4; ++i) tick();
-    dut.reset = 0;
-    tick();
+    dut.reset = 0; tick();
   }
-
   ~Replay() { dut.final(); trace.close(); }
-
   void tick() {
     if (++cycles > limit) throw std::runtime_error("cycle bound exceeded");
-    dut.clock = 0;
-    service();
-    evaluate(); // distinct timestamp: inputs settle before the rising edge
-    accept();
-    dut.clock = 1;
-    evaluate();
-    dut.clock = 0;
-    evaluate();
-
+    dut.clock = 0; service(); evaluate(); // inputs settle before the rising edge
+    accept(); dut.clock = 1; evaluate(); dut.clock = 0; evaluate();
   }
-
   uint32_t scalar(bool csr, bool write, uint32_t address, uint32_t data = 0) {
     (csr ? dut.io_csrTL_a_bits_opcode : dut.io_imemTL_a_bits_opcode) = write ? 0 : 4;
     (csr ? dut.io_csrTL_a_bits_size : dut.io_imemTL_a_bits_size) = 2;
@@ -121,25 +96,20 @@ public:
     uint32_t result = csr ? dut.io_csrTL_d_bits_data : dut.io_imemTL_d_bits_data;
     auto opcode = csr ? dut.io_csrTL_d_bits_opcode : dut.io_imemTL_d_bits_opcode;
     if (opcode != (write ? 0 : 1)) throw std::runtime_error("scalar response opcode mismatch");
-    tick();
-    return result;
+    tick(); return result;
   }
-
   std::array<uint32_t, 8> memory(bool write, unsigned line, const std::array<uint32_t, 8> &data = {}) {
     dut.io_vmemTL_a_bits_opcode = write ? 0 : 4;
     dut.io_vmemTL_a_bits_size = 5; // 32 bytes: one full physical line
-    dut.io_vmemTL_a_bits_source = 0;
-    dut.io_vmemTL_a_bits_address = 0x20000000U + 32 * line;
+    dut.io_vmemTL_a_bits_source = 0; dut.io_vmemTL_a_bits_address = 0x20000000U + 32 * line;
     dut.io_vmemTL_a_bits_mask = 0xffffffffU;
     for (unsigned i = 0; i < 8; ++i) dut.io_vmemTL_a_bits_data[i] = data[i];
     exchange(dut.io_vmemTL_a_valid, dut.io_vmemTL_a_ready, dut.io_vmemTL_d_valid, "VMEM");
     std::array<uint32_t, 8> result;
     for (unsigned i = 0; i < 8; ++i) result[i] = dut.io_vmemTL_d_bits_data[i];
     if (dut.io_vmemTL_d_bits_opcode != (write ? 0 : 1)) throw std::runtime_error("VMEM response opcode mismatch");
-    tick();
-    return result;
+    tick(); return result;
   }
-
   // Memory contents come from the case image; every initialized byte is checked.
   struct Region { uint64_t base; std::vector<uint8_t> bytes; };
   std::vector<Region> vmemInit, dramInit, vmemExpect, dramExpect;
@@ -203,7 +173,6 @@ public:
       }
     std::cout<<"EE290_COMPUTE_PASSED checked_vmem_bytes="<<vmemBytes<<" checked_dram_bytes="<<dramBytes<<" reads="<<reads<<" writes="<<writes<<" a_stalls="<<astalls<<" delayed_response_cycles="<<dwaits<<" status="<<status<<" marker="<<marker<<" illegal_pc="<<illegal<<" cycles="<<cycles<<'\n';
   }
-
 };
 
 int main(int argc, char **argv) {
@@ -211,16 +180,14 @@ int main(int argc, char **argv) {
   try {
     std::ifstream input(argv[1]);
     if (!input) throw std::runtime_error("cannot read selected program words");
-    std::vector<uint32_t> words;
-    uint64_t word;
+    std::vector<uint32_t> words; uint64_t word;
     while (input >> std::hex >> word) {
       if (word > 0xffffffffULL || words.size() >= 8192) throw std::runtime_error("invalid program word");
       words.push_back(word);
     }
     if (!input.eof() || words.empty()) throw std::runtime_error("malformed/empty program words");
     Replay replay(argv[2], std::stoull(argv[3]));
-    replay.run(words,argv[4]);
-    return 0;
+    replay.run(words,argv[4]); return 0;
   } catch (const std::exception &error) {
     std::cerr << "EE290_COMPUTE_FAILED " << error.what() << '\n';
     return 1;
