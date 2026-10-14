@@ -1,7 +1,7 @@
 # Atomic virtual DMA: one boundary between virtual and physical assembly
 
 Branch: `feat/atomic-virtual-dma`, from `handwritten-implementation` at
-`aa52abf` (PR #15). Status: design sketch, nothing implemented yet.
+`aa52abf` (PR #15). Status: Phase 1 is implemented.
 
 ## Goal
 
@@ -165,7 +165,8 @@ atlas-emit
   VLOAD(s) into the destination register(s) right before the first machine
   instruction that reads them. If the first use is in another block, emit them
   at the end of the defining block in Phase 1; Phase 2 sinks them across
-  blocks.
+  blocks. If all eight staging windows hold unread loads, the oldest load's
+  VLOADs are emitted before the launch that reuses its window.
 - **Store:** VSTORE(s) into staging, then `atlas.dma`, at the op.
 - **No waits for explicit DMA.** Launch and VLOADs carry
   `atlas.virtual_dma_transfer`, so checkers can pair them.

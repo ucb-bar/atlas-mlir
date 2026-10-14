@@ -202,7 +202,8 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
 // it, or the block end. A load prefers the load channel and a store the store
 // channel, else the lowest free channel, and the lowest free window. With no
 // channel free, the oldest transfer's DMA completes first; with no window
-// free, the oldest store's, since a load's window holds its unread tile.
+// free, the oldest store's, else the oldest load's, whose staging VLOADs
+// lowering then emits before this launch instead of at the tile's first use.
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                                               unsigned &nextTransfer) {
   struct InFlight {
@@ -265,11 +266,9 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       ++window;
     if (window == kDMAChannels) {
       auto store = llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow && !t.loaded; });
-      if (store == inFlight.end())
-        return op.emitOpError("launches a DMA transfer while every staging window holds a "
-                              "loaded tile awaiting its first use");
-      window = store->window;
-      completeDMA(*store);
+      InFlight &oldest = store != inFlight.end() ? *store : *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow; });
+      window = oldest.window;
+      oldest.holdsChannel = oldest.holdsWindow = false;
     }
     release();
     unsigned halves =

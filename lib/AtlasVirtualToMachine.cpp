@@ -77,13 +77,16 @@ public:
       currentCFGBlock = cfgBlocks.lookup(&block);
       mark(labelFor(&block));
       for (Operation &op : block) {
-        // A load's staging VLOADs go right before its first use; the block's
-        // terminator flushes the rest. They belong to the load.
-        if (op.hasTrait<OpTrait::IsTerminator>())
+        // A load's staging VLOADs go right before its first use, or before a
+        // launch that reuses its staging window; the block's terminator
+        // flushes the rest. They belong to the load.
+        if (op.hasTrait<OpTrait::IsTerminator>()) {
           flushLoads(op.getLoc());
-        else
+        } else {
+          flushReusedWindow(op);
           for (Value operand : op.getOperands())
             flushLoad(operand, op.getLoc());
+        }
         size_t first = planned.size();
         if (failed(lowerOperation(op)))
           return failure();
@@ -552,6 +555,16 @@ private:
     for (size_t n = first; n < planned.size(); ++n)
       planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(load.source));
     planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTensorResult), i32(load.result));
+  }
+
+  // placeDMA gives a launch an unread load's window only when all are taken.
+  void flushReusedWindow(Operation &op) {
+    if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+      return;
+    uint32_t window = allocation.dma(op.getResult(0)).stagingWord;
+    for (Value tile : SmallVector<Value>(pendingOrder))
+      if (pendingLoads.lookup(tile).placement->stagingWord == window)
+        flushLoad(tile, op.getLoc());
   }
 
   void flushLoads(Location loc) {

@@ -201,6 +201,7 @@ class VirtualDMATest(unittest.TestCase):
 
     def test_completion_operations_are_not_virtual_instructions(self) -> None:
         source = copy()
+        # Negative cases verify that the removed completion ops are rejected.
         for operation in (
             f'    %io3, %again = "atlas.virtual_dma_await_bf16"(%io2, %tile) : ({STATE}, {tile("bf16")}) -> ({STATE}, {tile("bf16")})',
             f'    %io3 = "atlas.virtual_dma_wait"(%io2, %tile) : ({STATE}, {tile("bf16")}) -> {STATE}',

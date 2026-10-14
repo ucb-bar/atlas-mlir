@@ -301,9 +301,10 @@ private:
     return success();
   }
 
-  // Where lowering places each atomic load's staging VLOADs: before the
-  // first operation that reads its tile, in operand order, else before the
-  // block terminator, in launch order. Keyed by that operation.
+  // Where lowering places each atomic load's staging VLOADs: before a launch
+  // that reuses its staging window, else before the first operation that
+  // reads its tile, in operand order, else before the block terminator, in
+  // launch order. Keyed by that operation.
   void collectStagingLoads() {
     for (Block &block : function.getBody()) {
       SmallVector<std::pair<Value, Value>> pending; // tile, transfer key
@@ -313,6 +314,18 @@ private:
             stagingLoads[&op].push_back(key);
           pending.clear();
           continue;
+        }
+        bool launch = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+        if (launch && dmaPlacements.contains(op.getResult(0))) {
+          uint32_t window = dmaPlacements.lookup(op.getResult(0))->stagingWord;
+          for (auto it = pending.begin(); it != pending.end();) {
+            if (dmaPlacements.lookup(it->second)->stagingWord == window) {
+              stagingLoads[&op].push_back(it->second);
+              it = pending.erase(it);
+            } else {
+              ++it;
+            }
+          }
         }
         for (Value operand : op.getOperands()) {
           auto found = llvm::find_if(pending, [&](auto &p) { return p.first == operand; });

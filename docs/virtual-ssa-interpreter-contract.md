@@ -86,17 +86,17 @@ checks; an interpreter still needs dynamic arity, type, current-token, and
 step-limit checks. The existing virtual stream verifier additionally requires
 the current state token on each CFG edge and one return block for outputs.
 
-## Explicit DMA completion and scalar values
+## Atomic DMA and scalar values
 
 Channel-free DMA tile operations take ordinary i32 SSA values for DRAM byte addresses and byte lengths. The current admission proves these operands from constants and unflagged wrapping additions, requires complete FP8/BF16 tiles (1,024/2,048 bytes), and checks 32-byte DRAM alignment and the selected 32-bit address range. No scalar register is encoded by the SSA name. The contract fixes the upper DRAM half at zero and does not yet admit runtime DMA addresses or lengths.
 
-An interpreter must distinguish a pending transfer from a ready tensor. `virtual_dma_load_fp8/bf16` creates a pending-load identity; its matching `virtual_dma_await_fp8/bf16` produces the usable tile. `virtual_dma_store_fp8/bf16` captures an immutable source tile into transfer-owned staging, and `virtual_dma_wait` establishes completion of the external write. Treat the staging as a private logical buffer owned through completion, not as an assigned VMEM window. An untimed interpreter may perform the copy eagerly internally, but must preserve these visibility and handle-lifetime rules.
+`virtual_dma_load_fp8/bf16` reads DRAM and returns a ready tile at its position in the virtual state chain. `virtual_dma_store_fp8/bf16` writes its source tile to DRAM at its position and returns only the next state. Interpret these operations sequentially, including overlapping reads and writes, just like boundary I/O. No pending-transfer identities, DMA handles or completion bookkeeping are needed.
 
-Up to two pending transfers may complete in either order within their defining block ([admission](dialect-reference.md#channel-free-virtual-dma-and-scalar-ssa)); awaiting B exposes B, not A. Keep transfer identities independent of channels, staging windows and scalar helpers; scalar capture at launch does not release source memory (physical ownership and release belong to [issue #10](https://github.com/ucb-bar/atlas-mlir/issues/10)).
+Channels, staging windows, asynchronous launches and waits belong to the physical stage ([admission](dialect-reference.md#channel-free-virtual-dma-and-scalar-ssa)). The virtual evaluator models memory effects directly rather than physical transport resources.
 
 Every executed transfer span must lie in supplied regions or ABI payload mappings without holes, and loads must read initialized bytes. Boundary I/O and explicit DMA share execution-owned bytes, returned as final host-visible snapshots; unwritten output bytes and FP8 slot padding are undefined unless supplied.
 
-The environment must keep external load sources stable and exclude conflicting accesses to transfer ranges until completion. The IR checks do not prove host-side synchronization.
+The environment must exclude conflicting external accesses to transfer ranges while the program executes. The IR checks do not prove host-side synchronization.
 
 ## Explicit MXU handle extension
 
@@ -138,7 +138,7 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 
 ## Admitted forms and numerical sources
 
-The evaluator executes these 23 `atlas.virtual_*` forms plus `arith.constant/addi/cmpi` (all ten predicates), `cf.br/cond_br` and `func.return`. `S/B/F/E` are state/BF16/FP8/scale, `L8/L16/D` pending FP8-load/BF16-load/store handles and `W<u>/A<u>` weight/accumulator handles on unit `u = 0..1`; final letters name audit rows.
+The evaluator executes these 20 `atlas.virtual_*` forms plus `arith.constant/addi/cmpi` (all ten predicates), `cf.br/cond_br` and `func.return`. `S/B/F/E` are state/BF16/FP8/scale and `W<u>/A<u>` weight/accumulator handles on unit `u = 0..1`; final letters name audit rows.
 
 | Suffix | Operands → results | Admission / meaning |
 | --- | --- | --- |
@@ -150,10 +150,8 @@ The evaluator executes these 23 `atlas.virtual_*` forms plus `arith.constant/add
 | `pack_fp8` | `B → F` | `scale_code = 127` (`RtlNumerics.to_fp8`); P |
 | `scale_constant` | `() → E` | Raw `code = 0..255` |
 | `mxu_matmul` | `F, F → B` | `unit = 0..1`; reset contraction; M |
-| `dma_load_fp8` / `dma_load_bf16` | `S, i32, i32 → S, L8/L16` | Length 1,024 / 2,048; D |
-| `dma_await_fp8` / `dma_await_bf16` | `S, L8/L16 → S, F/B` | Consume handle; expose tile; D |
-| `dma_store_fp8` / `dma_store_bf16` | `S, F/B, i32, i32 → S, D` | Length 1,024 / 2,048; capture source; D |
-| `dma_wait` | `S, D → S` | Consume handle; complete external output; D |
+| `dma_load_fp8` / `dma_load_bf16` | `S, i32, i32 → S, F/B` | Length 1,024 / 2,048; read DRAM in state order; D |
+| `dma_store_fp8` / `dma_store_bf16` | `S, F/B, i32, i32 → S` | Length 1,024 / 2,048; write DRAM in state order; D |
 | `mxu_load_weight` | `S, F → S, W<u>` | Resident identity; M |
 | `mxu_load_acc_fp8` / `mxu_load_acc_bf16` | `S, F/B → S, A<u>` | Unscaled / BF16 seed; M |
 | `mxu_reset` | `S, F, W<u> → S, A<u>` | Initial contraction; M |
@@ -170,7 +168,7 @@ In required mode on 2026-10-09 and again on 2026-10-10 at the branch head, every
 | P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | `mxu{0,1}_legacy_pack` and the physical converter/transport probe | PACK→MXU chains beyond `legacy_pack` |
 | M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | `mxu{0,1}_{continuation,seed_bf16,seed_fp8}`, `dma_mxu_*`, `two_chains_*` | Exceptional BF16 accumulator encodings on the core |
 | R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | None (no row reads out FP8) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |
-| D | Owned snapshots, matching completion, raw serialization, mapped spans, guards, two-handle cases; [pointer lifetime](dma-pointer-lifetime-observation.md) | `dma_pending_work`, `two_dma_reverse_await`, `dma_fp8_copy`, traffic counts | Pending-write conflicts and mixed boundary/memory write aliases unqualified |
+| D | Sequential memory effects, raw serialization, mapped spans and guards; [pointer lifetime](dma-pointer-lifetime-observation.md) | `dma_pending_work`, `two_dma_reverse_await`, `dma_fp8_copy`, traffic counts | Mixed boundary/memory write aliases unqualified |
 
 Pins: selected RTL `0079c0541111197741a231c002e3843fa6f545b2` and `npu-model` `0c4a1f9ee508c9e81fc9f21354229fa3a51c86e6`. The base reference suites (`test_*_reference.py`, handoff and inventory tests) assert this RTL pin, but the model was built from a checkout reporting `2ae0bef`, so those pin assertions fail until refreshed; their executions on the model pass.
 

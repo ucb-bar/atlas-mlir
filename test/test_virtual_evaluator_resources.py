@@ -322,6 +322,7 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
 
     def test_format_mismatches_and_completion_operations_fail_parsing(self) -> None:
         source = read_program()
+        # This negative case verifies that the removed completion op is rejected.
         await_ = f'%s2, %v = "atlas.virtual_dma_await_bf16"(%s1, %h) : ({S}, {B}) -> ({S}, {B})'
         for text in (source.replace(f"-> ({S}, {B})", f"-> ({S}, {F})"),
                      wrap(input_tile("bf16"), *constants("fp8"), store("fp8", "io", "s1", "h"), final="s1"),
