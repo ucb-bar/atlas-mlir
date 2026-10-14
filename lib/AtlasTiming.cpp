@@ -612,8 +612,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     // VMEM contents remain owned by the transfer until its matching wait.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
-    // Unlike npu_model, which counts bytes, AtlasCore.scala takes the DMA VMEM
-    // address in words, as for VLS bases.
+    // AtlasCore.scala takes the DMA VMEM address in words, as for VLS bases.
     auto addr = reg(regs, vmemReg);
     if (addr)
       *addr *= 4;
