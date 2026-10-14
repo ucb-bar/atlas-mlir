@@ -422,6 +422,29 @@ class VerilatorReplayTest(unittest.TestCase):
                 self.assertEqual(commands[second]["edge"] - commands[first]["edge"], 1)
                 self.assertGreater(self.bind(name)["memory_access_elements_bound"], 0)
 
+    def test_vpu_issue_busy_clear_must_match_its_own_unit_hold(self):
+        name = "vmul_delay"
+        command = next(c for c in self.cases[name][2]["commands"] if c["engine"] == "vpu")
+        clear_edge = command["edge"] + command["next_issue_age"]
+        bit = 1 << command["op"]
+        self.assertFalse(command["next_issue_companion"])
+        for shift, set_busy in ((-1, False), (1, True)):
+            with self.subTest(clear_shift=shift):
+                samples = copy.deepcopy(self.cases[name][0])
+                edge = clear_edge - 1 if shift < 0 else clear_edge
+                values = next(s["values"] for s in samples if s["edge"] == edge)
+                self.assertEqual(bool(values["vpu_busy"] & bit), not set_busy)
+                values["vpu_busy"] = values["vpu_busy"] | bit if set_busy else values["vpu_busy"] & ~bit
+                # Preserve all other opcode bits and port activity so validation
+                # reaches binding instead of rejecting the command's drain.
+                events = self.validate(name, samples)
+                observed = next(c for c in events["commands"] if c["engine"] == "vpu")
+                self.assertEqual(observed["next_issue_age"], command["next_issue_age"] + shift)
+                self.assertFalse(observed["next_issue_companion"])
+                with self.assertRaisesRegex(BIND.BindingError,
+                        r"observed VPU issue-busy clear differs from its own-unit hold end \+ 1"):
+                    self.bind(name, events=events)
+
     @unittest.skipUnless(PAIRS, "requires pair facts (ATLAS_PAIR_FACTS)")
     def test_two_vpu_commands_run_in_their_own_slots(self):
         for name, slots in (("slots_exp_relu_delay", [0, 0, 1]), ("slots_chain_delay", [0, 0, 1, 0]), ("slots_chain_schedule", [0, 0, 1, 0])):

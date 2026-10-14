@@ -193,6 +193,11 @@ def bind_command(item, command, waits):
     require(len(own) == 1 and all(h['from'] == 0 and (release == integer(h['to'], 'hold end') + 1 or kind == 'vpu' and h['to'] < release) for h in own),
             'observed engine release differs from its own-unit hold end + 1')
     issued = own[0]['to'] + 1 if kind == 'vpu' else 0
+    if kind == 'vpu':
+        clear = integer(command['next_issue_age'], 'observed VPU issue-busy clear age')
+        # VectorFSM canIssueOp: a companion can add slot/logic restrictions, delaying this opcode's clear.
+        require(clear > 0 and (issued <= clear if command['next_issue_companion'] else issued == clear),
+                'observed VPU issue-busy clear differs from its own-unit hold end + 1')
     vmem_ages = [age(e) for e in command[vmem_field]] if vmem_field else []
     for hold in footprint['holds']:
         if any(hold is h for h in own): continue
@@ -707,6 +712,10 @@ def validate_compute_edges(samples,words,case):
         if engine&~busy: reject('engine busy omitted from scalar bridge')
         if busy&~sum(1<<c for c in pending): reject('busy without observed pending DMA')
         if any(edge>c['edge'] and len(c['responses'])<c['beats'] and not busy>>ch&1 for ch,c in pending.items()): reject('pending DMA lost busy protection')
+        # Capture the first post-issue clear of each opcode bit, even if its command has already drained.
+        for command in commands:
+            if command['engine']=='vpu' and command['next_issue_age'] is None and edge>command['edge'] and not v('vpu_busy')>>command['op']&1:
+                command['next_issue_age']=edge-command['edge']
         # A VPU command issued before the newest one (at its next_issue_age, or beside it in the other slot) releases
         # once its events are done and no write marker names its destination; so does the newest while it has company.
         for drain in list(live.get('vpu_drain',())):
@@ -797,6 +806,7 @@ def validate_compute_edges(samples,words,case):
                     if any(r%2 for r in {'binary':(vs1,vs2,vd),'pack':(src,),'unpack':(vd,),'vli_pair':(vd,),'vli_single':()}.get(layout,(src,vd))): reject('VPU pair operand is not even')
                     (reads,writes),pair=VPU_PORTS[layout],lambda r:{r,r+1}
                     created={**common,'engine':'vpu','mnemonic':mnemonic,'op':code,'layout':layout,'dst':vd,'lhs':lhs,'rhs':rhs,'src':src,
+                             'next_issue_age':None,
                              'scale':scale[vs1&31],'imm':word>>16,'counts':(sum(reads),sum(reads),sum(writes),0),
                              'sources':{'binary':pair(vs1)|pair(vs2),'unpack':{src},'vli_pair':set(),'vli_single':set()}.get(layout,pair(src)),
                              'dests':{vd} if layout in ('pack','vli_single') else pair(vd)};expected_cmd['pcmd']=True
@@ -1013,6 +1023,12 @@ def validate_compute_edges(samples,words,case):
     if last_edge-halt_edge<2: reject('trace lacks bounded post-halt drain samples')
     if collections.Counter(c['engine'] for c in commands)!=collections.Counter({k:n for k,n in case.commands.items() if n}): reject('wrong dynamic compute command coverage')
     if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
+    vpu_commands=[c for c in commands if c['engine']=='vpu']
+    for command in vpu_commands:
+        if command['next_issue_age'] is None: reject('VPU command lacks an observed issue-busy clear after issue')
+        # Samples precede the rising edge: a successor issued on the clear edge cannot delay that clear.
+        command['next_issue_companion']=any(other is not command and other['edge']<command['edge']+command['next_issue_age'] and
+                                          command['edge']<other['release_edge'] for other in vpu_commands)
     for command in commands:
         for key in [k for k in command if k.startswith('_')]: del command[key]
         for field in ('reads','responses','writes','compute'):

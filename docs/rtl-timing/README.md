@@ -155,6 +155,5 @@ Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pair selection;
 - Exact weight-read timing: matmul conservatively owns its weight slot through its last accumulator write.
 - DMA completion latency, concurrent host traffic, or memories outside selected assumptions.
 - Pair-sweep records omit operand overlays, `as` names and relations; `rtl_extract.pairfacts` takes them from current YAML by block name, and binding them in records requires a re-sweep.
-- Replay does not bind the VPU own-unit hold end; the pair-sweep guard check and 256 comparisons in the [compiler cross-check](verification.md#extraction-and-compiler-cross-check) cover it.
 - Virtual scheduling models same-unit intervals, not physical cross-engine exclusion; the physical verifier checks the lowered stream.
 - A VLOAD write into an MREG bank still being read is not asserted by RTL; compiler release rules protect it.
