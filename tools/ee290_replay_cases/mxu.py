@@ -204,7 +204,7 @@ RELU_PROGRAM = """module {
   }
 }
 """
-PIPELINE = ('--verify-atlas-virtual-stream', '--schedule-atlas-virtual', '--lower-atlas-virtual-to-machine')
+PIPELINE = ('--verify-atlas-virtual-stream', '--schedule-atlas-virtual', '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
 RELU_RESULT = b''.join(elementwise('vrelu.bf16', RELU_IN[32 * r:32 * r + 32]) for r in range(64))
 def relu_output(vm, dram):
     put(vm, RELU_IN_LINE, RELU_IN); put(vm, RELU_OUT_LINE, RELU_RESULT)
@@ -225,14 +225,14 @@ PRODUCT = reference(DMA_ACTIVATION, DMA_WEIGHTS)
 TOTAL = accumulator_codes(reference(DMA_ACTIVATION, DMA_WEIGHTS, accumulator_codes(PRODUCT)))
 DMA_RESULT = b''.join(quantize(b''.join(c.to_bytes(2, 'little') for c in TOTAL[32 * r:32 * r + 32]), DMA_SCALE) for r in range(32))
 def readout(vm, dram):
-    put(vm, STAGE, DMA_RESULT); put(vm, STAGE + 64, DMA_ACTIVATION)
+    put(vm, STAGE, DMA_RESULT)
     for i, byte in enumerate(DMA_RESULT): dram[OUT + i] = byte
 
-# Initialize the second staging window with activation too: source order reuses the first window,
-# while virtual scheduling may use the second. This keeps full-memory expectations valid for both.
+# The second staging window ends holding whichever tile was loaded last, which depends on load order, so it is
+# scratch; the store's window and the two unused windows are checked, as are every DMA launch and the DRAM result.
 DMA_STAGE_IMAGE = filler(8192, 7)
-DMA_STAGE_IMAGE = DMA_STAGE_IMAGE[:2048] + DMA_ACTIVATION + DMA_STAGE_IMAGE[3072:]
-COMMON = dict(vmem={STAGE: DMA_STAGE_IMAGE}, expect=readout, commands={'dma': 3, 'vload': 2, 'mxu0': 4, 'vstore': 1},
+COMMON = dict(vmem={STAGE: DMA_STAGE_IMAGE[:2048], STAGE + 64: DMA_STAGE_IMAGE[2048:4096], STAGE + 128: DMA_STAGE_IMAGE[4096:]},
+              scratch=(STAGE + 64,), expect=readout, commands={'dma': 3, 'vload': 2, 'mxu0': 4, 'vstore': 1},
               dram={VIRTUAL_X: DMA_ACTIVATION, WEIGHT: DMA_WEIGHTS, OUT - 32: b'\xa5' * 32 + b'\x5a' * 1024 + b'\xa5' * 32}, dma=(64, 32),
               source=DMA_PROGRAM, pipeline=PIPELINE)
 DMA = {
@@ -282,5 +282,5 @@ def mlp(bias, pipeline):
     source = (EXAMPLES / ('virtual_fp8_two_layer_mlp_bias.mlir' if bias else 'virtual_fp8_two_layer_mlp.mlir')).read_text()
     return Case((), vmem, expect, commands, dram={INPUT: inputs, output - 32: b'\xa5' * 32 + b'\x5a' * 2048 + b'\xa5' * 32},
                 dma=(224 if bias else 96, 64), source=source, pipeline=pipeline, check=relayout_moves)
-LOWER = ('--verify-atlas-virtual-stream', '--lower-atlas-virtual-to-machine')
+LOWER = ('--verify-atlas-virtual-stream', '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
 MLP = {'virtual_fp8_mlp': mlp(False, LOWER), 'virtual_fp8_mlp_scheduled': mlp(False, PIPELINE), 'virtual_fp8_mlp_bias': mlp(True, LOWER)}

@@ -617,11 +617,12 @@ def memories(case):
     return vm, dram, expected_vm, expected_dram
 
 def image(case):
-    """Testbench input: initial and expected bytes of every initialized region, and the DMA beat counts."""
+    """Testbench input: initial and expected bytes of every initialized region but scratch, and the DMA beat counts."""
     _, _, vm, dram = memories(case)
     lines = [f'dma {case.dma[0]} {case.dma[1]}']
     for first, data in case.vmem.items():
-        lines += [f'vmem {first} {data.hex()}', f'expect_vmem {first} {CASES.tile(vm, first, len(data) // 32).hex()}']
+        lines.append(f'vmem {first} {data.hex()}')
+        if first not in case.scratch: lines.append(f'expect_vmem {first} {CASES.tile(vm, first, len(data) // 32).hex()}')
     for base, data in case.dram.items():
         lines += [f'dram {base} {data.hex()}', f'expect_dram {base} {bytes(dram[base + i] for i in range(len(data))).hex()}']
     return '\n'.join(lines) + '\n'
@@ -1007,7 +1008,8 @@ def validate_compute_edges(samples,words,case):
     halt_edge=next(e['edge'] for e in endpoints if e['kind']=='halt')
     if last_edge-halt_edge<2: reject('trace lacks bounded post-halt drain samples')
     if collections.Counter(c['engine'] for c in commands)!=collections.Counter({k:n for k,n in case.commands.items() if n}): reject('wrong dynamic compute command coverage')
-    if vm!=expected_vm or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
+    scratch={first+r for first in case.scratch for r in range(len(case.vmem[first])//32)}
+    if any(vm[k]!=expected_vm[k] for k in vm.keys()-scratch) or vm.keys()!=expected_vm.keys() or dram!=expected_dram: reject('observed composed VMEM/DRAM state differs from the case expectation')
     vpu_commands=[c for c in commands if c['engine']=='vpu']
     for command in vpu_commands:
         if command['next_issue_age'] is None: reject('VPU command lacks an observed issue-busy clear after issue')

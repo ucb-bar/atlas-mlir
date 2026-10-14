@@ -89,8 +89,8 @@ class RTLTimingExportTest(unittest.TestCase):
             self.assertEqual(checked(self, source, "--rtl-timing-json", tool=EMIT, diagnostic=diagnostic), "")
 
 MODEL = "npu-model-rtl-match-v1"
-LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine")
-SCHEDULED = ("--verify-atlas-virtual-stream", "--schedule-atlas-virtual", "--lower-atlas-virtual-to-machine")
+LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+SCHEDULED = ("--verify-atlas-virtual-stream", "--schedule-atlas-virtual", "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
 def mxu_beside_transfer(text):
     pending = set()
     for op, fields, _ in stream(text):
@@ -181,7 +181,7 @@ class VirtualRTLTimingTest(unittest.TestCase):
         by_facts = checked(self, source, selection(dma="wait"), "--schedule-atlas-virtual")
         self.assertIn("atlas.rtl_evidence", by_facts)
         self.assertNotIn("atlas.timing_provider", by_facts)
-        timed = checked(self, by_facts, "--lower-atlas-virtual-to-machine", "--insert-atlas-delays", VERIFY)
+        timed = checked(self, by_facts, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits", "--insert-atlas-delays", VERIFY)
         self.assertIn(f'atlas.timing_provider = "{PROVIDER}"', timed)
         self.assertTrue(checked(self, timed, tool=EMIT))
         with tempfile.TemporaryDirectory(prefix="atlas-virtual-facts-") as directory:

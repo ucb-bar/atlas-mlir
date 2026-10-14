@@ -76,7 +76,7 @@ For an untimed physical `prog.mlir`:
 "$ATLAS_EMIT" --rtl-timing-json "$X/final.mlir" > "$X/resolved.json"
 ```
 
-Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pairs; `--insert-atlas-delays` preserves source order. Virtual programs first use `--verify-atlas-virtual-stream --schedule-atlas-virtual --lower-atlas-virtual-to-machine`; selection survives lowering. Virtual costs use provider latencies and same-unit intervals on canonical operands.
+Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pairs; `--insert-atlas-delays` preserves source order. Virtual programs first use `--verify-atlas-virtual-stream --schedule-atlas-virtual --lower-atlas-virtual-to-machine --insert-atlas-dma-waits`; selection survives lowering. Virtual costs use provider latencies and same-unit intervals on canonical operands.
 
 ## Not covered
 

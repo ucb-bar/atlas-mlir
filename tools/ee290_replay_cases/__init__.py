@@ -14,6 +14,7 @@ class Case:
     source: str = ''      # a virtual program instead of `ops`; `pipeline` lowers it before facts selection
     pipeline: tuple = ()
     pairs: bool = False   # scheduled with the pair facts selected (replay --pairs)
+    scratch: tuple = ()   # first lines of `vmem` regions the program may use but whose final bytes are not checked
     def mlir(self, ops=None):
         if self.source and ops is None: return self.source
         lines = ['module {', '  %s0 = "atlas.start"() : () -> !atlas.state']
