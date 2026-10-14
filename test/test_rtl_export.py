@@ -1,4 +1,4 @@
-"""Resolved exports describe the checked final stream, including lowered virtual programs."""
+"""Checked stream exports and virtual lowering."""
 
 import hashlib
 import json
@@ -40,14 +40,12 @@ class RTLTimingExportTest(unittest.TestCase):
     def test_header_and_applicability(self):
         value = export(self.selected[CONSUMERS[0]])
         document = facts()
-        self.assertEqual(value["schema"], "atlas.resolved_rtl_timing.v0")
-        self.assertEqual(value["target_config"], "EE290SimConfig")
-        self.assertEqual(value["qualification"], "conditional")
+        expected = {"schema": "atlas.resolved_rtl_timing.v0", "target_config": "EE290SimConfig",
+                    "qualification": "conditional", "provider": {"id": PROVIDER, "version": 1, "dma_policy": "none"},
+                    "evidence": {"op_timing_schema": "merlin.op_timing.v1", "op_timing_sha256": sha256(FACTS),
+                                 "hardware_ir_sha256": document["hw_ir"]["sha256"]}}
+        self.assertEqual({key: value[key] for key in expected}, expected)
         self.assertIs(value["scheduling_qualified"], False)
-        self.assertEqual(value["provider"], {"id": PROVIDER, "version": 1, "dma_policy": "none"})
-        self.assertEqual(value["evidence"], {"op_timing_schema": "merlin.op_timing.v1",
-                                             "op_timing_sha256": sha256(FACTS),
-                                             "hardware_ir_sha256": document["hw_ir"]["sha256"]})
         applicability = value["applicability"]
         latency = block(document, "vlsu.vload")["assumptions"]["scratchpad_read_latency"]
         self.assertIn(f"sram_read_response_{latency}_cycles_after_request", applicability["environment_assumptions"])
@@ -73,7 +71,8 @@ class RTLTimingExportTest(unittest.TestCase):
                 for number, b in enumerate(blocks):
                     members = instructions[b["first_word"]:b["first_word"] + b["word_count"]]
                     self.assertEqual({i["block"] for i in members}, {number})
-                    self.assertEqual((members[0]["minimum_issue_cycle"], members[0]["issue_epoch"], members[0]["epoch_offset"]), (0, 0, 0))
+                    self.assertEqual([members[0][k] for k in ("minimum_issue_cycle", "issue_epoch", "epoch_offset")],
+                                     [0, 0, 0])
                     self.assertEqual(b["entry_state"], "idle_engines_no_pending_dma")
                 self.assertEqual(sum(b["word_count"] for b in blocks), len(instructions))
                 branch = next(i for i in instructions if i["mnemonic"] == "blt")
@@ -87,10 +86,7 @@ class RTLTimingExportTest(unittest.TestCase):
         self.assertNotEqual(changed, source)
         for source, diagnostic in ((VLS_COPY.read_text(), "requires selected evidence"),
                                    (without_delays(source), "insufficient issue spacing"), (changed, "mismatch")):
-            result = run(EMIT, source, "--rtl-timing-json")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "")
-            self.assertIn(diagnostic, result.stderr)
+            self.assertEqual(checked(self, source, "--rtl-timing-json", tool=EMIT, diagnostic=diagnostic), "")
 
 MODEL = "npu-model-rtl-match-v1"
 LOWER = ("--verify-atlas-virtual-stream", "--lower-atlas-virtual-to-machine")
@@ -141,9 +137,9 @@ class VirtualRTLTimingTest(unittest.TestCase):
             self.assertTrue(checked(self, timed, tool=EMIT))
             structured = checked(self, timed, "--convert-atlas-to-llvm-calls")
             self.assertIn("atlas.rtl_evidence", structured)
-            self.assertIn("op_timing_sha256", checked(self, structured, "--finalize-atlas-llvm-calls"))
-            self.assertEqual(checked(self, structured, "--finalize-atlas-llvm-calls"),
-                             checked(self, timed, "--convert-atlas-to-llvm"))
+            finalized = checked(self, structured, "--finalize-atlas-llvm-calls")
+            self.assertIn("op_timing_sha256", finalized)
+            self.assertEqual(finalized, checked(self, timed, "--convert-atlas-to-llvm"))
             checked(self, without_delays(timed), VERIFY,
                     diagnostic="insufficient issue spacing|timing resource conflict")
         checked(self, ordered, "--insert-atlas-delays=provider=" + MODEL, diagnostic="selected RTL evidence excludes")
@@ -165,7 +161,8 @@ class VirtualRTLTimingTest(unittest.TestCase):
 
     def test_bf16_pairs_sharing_a_physical_bank_are_rejected(self):
         source = virtual_pressure(17).replace('    %io18 = "atlas.virtual_output_bf16"(%io17, %t0)',
-            '    %sum = "atlas.virtual_vpu_binary"(%t0, %t16) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16\n'
+            '    %sum = "atlas.virtual_vpu_binary"(%t0, %t16) {kind = "add"} : '
+            '(!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16\n'
             '    %io18 = "atlas.virtual_output_bf16"(%io17, %sum)')
         self.assertIn("%sum", source)
         untimed = checked(self, source, *LOWER)
@@ -173,12 +170,14 @@ class VirtualRTLTimingTest(unittest.TestCase):
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
                 checked(self, untimed, selection(dma="wait"), consumer,
-                         diagnostic=r"VPU register operands must occupy distinct physical banks \(register mod 32\): m0 and m32 share bank 0")
+                         diagnostic=r"VPU register operands must occupy distinct physical banks \(register mod 32\): "
+                                    "m0 and m32 share bank 0")
 
     def test_virtual_scheduler_costs_from_the_selected_provider(self):
         source = (EXAMPLES / "virtual_bf16_vpu_program.mlir").read_text()
         checked(self, source, "--schedule-atlas-virtual=provider=" + PROVIDER, diagnostic="requires selected evidence")
-        checked(self, source, selection(dma="wait"), "--schedule-atlas-virtual=provider=" + MODEL, diagnostic="selected RTL evidence excludes")
+        checked(self, source, selection(dma="wait"), "--schedule-atlas-virtual=provider=" + MODEL,
+                diagnostic="selected RTL evidence excludes")
         by_facts = checked(self, source, selection(dma="wait"), "--schedule-atlas-virtual")
         self.assertIn("atlas.rtl_evidence", by_facts)
         self.assertNotIn("atlas.timing_provider", by_facts)

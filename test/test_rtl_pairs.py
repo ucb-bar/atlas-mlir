@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rtl_test_support import (CONSUMERS, FACTS, HALT, OPT, PAIRS, ROOT, VERIFY, addi, block, busy,
+from rtl_test_support import (CONSUMERS, FACTS, HALT, OPT, PAIRS, ROOT, VERIFY, addi, block, busy, checked,
     decode_mxu, export, facts, gapped, issue_cycles, issue_gap, mxu, pair_spec,
     pairs_variant, program, run, selection, separated, spaced, stream, transpose, vls, vpu,)
 
@@ -51,9 +51,8 @@ class PairAdmissionTest(unittest.TestCase):
                     self.assertIn("no pair fact admits", stderr)
                 reverse = self.record(self.document, f"vpu.{second}", f"vpu.{first}")["stable_gap"]
                 for consumer in CONSUMERS:
-                    timed = run(OPT, program([a, b, HALT]), self.with_pairs, consumer, VERIFY)
-                    self.assertEqual(timed.returncode, 0, timed.stderr)
-                    placed = issue_gap(timed.stdout, a, b)
+                    timed = checked(self, program([a, b, HALT]), self.with_pairs, consumer, VERIFY)
+                    placed = issue_gap(timed, a, b)
                     self.assertEqual(abs(placed), gap if placed > 0 else reverse)
 
     def test_mxu_admission_and_data_boundaries(self):
@@ -131,13 +130,13 @@ class PairAdmissionTest(unittest.TestCase):
         for engine, ops, second_cycle, third_cycle, diagnostic in cases:
             with self.subTest(engine=engine):
                 prefix = [ops[0], *separated(second_cycle)]
-                stderr = self.boundary(lambda g: gapped(prefix, ops[1], ops[2], g), third_cycle - second_cycle, offset=second_cycle)
+                stderr = self.boundary(lambda g: gapped(prefix, ops[1], ops[2], g),
+                                       third_cycle - second_cycle, offset=second_cycle)
                 self.assertIn(diagnostic, stderr)
                 self.assertIn(f"first permitted cycle {third_cycle}", stderr)
                 for consumer in CONSUMERS:
-                    timed = run(OPT, program([*ops, HALT]), self.with_pairs, consumer, VERIFY)
-                    self.assertEqual(timed.returncode, 0, timed.stderr)
-                    cycles = [c for op, _, c in issue_cycles(timed.stdout) if op == ops[0][0]]
+                    timed = checked(self, program([*ops, HALT]), self.with_pairs, consumer, VERIFY)
+                    cycles = [c for op, _, c in issue_cycles(timed) if op == ops[0][0]]
                     self.assertEqual(cycles, [0, second_cycle, third_cycle])
                 if engine == "mxu0":
                     with tempfile.TemporaryDirectory() as directory:
@@ -184,10 +183,9 @@ class PairAdmissionTest(unittest.TestCase):
     def test_without_applicable_pairs_preserves_schedules(self):
         ops = [vpu(n, SETS[i]) for i, n in enumerate(("exp", "relu", "exp"))]
         for consumer in CONSUMERS:
-            timed = run(OPT, program([*ops, HALT]), self.plain, consumer, VERIFY)
-            self.assertEqual(timed.returncode, 0, timed.stderr)
+            timed = checked(self, program([*ops, HALT]), self.plain, consumer, VERIFY)
             holds = [block(self.facts, f"vpu.{n}")["next_issue_age"] for n in ("exp", "relu")]
-            self.assertEqual([c for op, _, c in issue_cycles(timed.stdout) if op == "vpu_unary"],
+            self.assertEqual([c for op, _, c in issue_cycles(timed) if op == "vpu_unary"],
                              [0, holds[0], sum(holds)])
         with tempfile.TemporaryDirectory() as directory:
             path = pairs_variant(directory, lambda d: d.update(
@@ -200,17 +198,14 @@ class PairAdmissionTest(unittest.TestCase):
             for name, source, option in cases:
                 for consumer in CONSUMERS:
                     with self.subTest(name=name, consumer=consumer):
-                        timed = [run(OPT, source, o, consumer, VERIFY) for o in (self.plain, option)]
-                        for result in timed:
-                            self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual(stream(timed[0].stdout), stream(timed[1].stdout))
+                        timed = [checked(self, source, o, consumer, VERIFY) for o in (self.plain, option)]
+                        self.assertEqual(stream(timed[0]), stream(timed[1]))
 
     def test_export_admission(self):
         source = program([mxu("matmul", 0, reg=12), mxu("pop_acc_bf16", 0, reg=24), HALT])
         for option, units in ((self.with_pairs, ["mxu0", "mxu1"]), (self.plain, None)):
-            timed = run(OPT, source, option, CONSUMERS[0], VERIFY)
-            self.assertEqual(timed.returncode, 0, timed.stderr)
-            applicability = export(timed.stdout)["applicability"]
+            timed = checked(self, source, option, CONSUMERS[0], VERIFY)
+            applicability = export(timed)["applicability"]
             self.assertEqual(applicability["admission"].get("mxu_pipelined_units"), units)
             self.assertEqual(applicability["admission"]["mxu_commands_sequenced_per_unit"], units is None)
             self.assertEqual("same_mxu_pipelining" in applicability["unsupported"], units is None)

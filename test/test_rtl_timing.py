@@ -6,7 +6,7 @@ import unittest
 
 from rtl_test_support import (
     CONSUMERS, DMA_LOAD, DMA_WAIT, EMIT, FACTS, HALT, MARKER, OPT, PAIRS, PROVIDER, RTLTestSupport,
-    VERIFY, VLOAD, VLS_COPY, VLS_LOOP, addi, block, branch, cycles, delay, dma_setup, export, facts,
+    VERIFY, VLOAD, VLS_COPY, VLS_LOOP, addi, block, branch, checked, cycles, delay, dma_setup, export, facts,
     facts_variant, gapped, jal, lui, nop, pairs_variant, program, run, scalar_load, scalar_store,
     selection, sha256, stream, unary, vls, without_delays, word_base)
 
@@ -18,45 +18,34 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
         self.assertNotIn("atlas.timing_state", unmarked)
         for tool, args in ((EMIT, []), (OPT, ["--convert-atlas-to-llvm"]), (OPT, ["--convert-atlas-to-llvm-calls"])):
             with self.subTest(args=args):
-                unsafe = run(tool, unmarked, *args)
-                self.assertNotEqual(unsafe.returncode, 0)
-                self.assertIn("insufficient issue spacing", unsafe.stderr)
+                checked(self, unmarked, *args, tool=tool, diagnostic="insufficient issue spacing")
         self.assertEqual(run(EMIT, unmarked, "--allow-untimed").returncode, 0)
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
                 timed = self.check(VLS_COPY.read_text(), True, consumer, VERIFY).stdout
                 stripped = re.sub(r', atlas\.timing_(state|provider) = "[^"]*"', "", timed)
                 self.assertNotIn("atlas.timing_state", stripped)
-                emitted = run(EMIT, timed)
-                self.assertEqual(emitted.returncode, 0, emitted.stderr)
-                self.assertEqual(run(EMIT, stripped).stdout, emitted.stdout)
+                emitted = checked(self, timed, tool=EMIT)
+                self.assertEqual(run(EMIT, stripped).stdout, emitted)
                 self.assertEqual(run(OPT, stripped, "--convert-atlas-to-llvm").returncode, 0)
-                unsafe = run(OPT, without_delays(timed), VERIFY)
-                self.assertNotEqual(unsafe.returncode, 0)
-                self.assertIn("insufficient issue spacing", unsafe.stderr)
+                checked(self, without_delays(timed), VERIFY, diagnostic="insufficient issue spacing")
 
     def test_selection_is_explicit_and_checked(self):
         self.check([HALT], False, VERIFY, digest="0" * 64, diagnostic="mismatch")
         self.check([HALT], False, VERIFY, digest="abc", diagnostic="SHA-256 is required")
-        unselected = run(OPT, program([HALT]), VERIFY)
-        self.assertEqual(unselected.returncode, 0, unselected.stderr)
-        self.assertIn('atlas.timing_provider = "npu-model-rtl-match-v1"', unselected.stdout)
-        explicit = run(OPT, program([HALT]), f"{VERIFY}=provider={PROVIDER}")
-        self.assertNotEqual(explicit.returncode, 0)
-        self.assertIn("requires selected evidence", explicit.stderr)
-        model = run(OPT, program([HALT]), selection(), f"{VERIFY}=provider=npu-model-rtl-match-v1")
-        self.assertNotEqual(model.returncode, 0)
-        self.assertIn("selected RTL evidence excludes", model.stderr)
+        self.assertIn('atlas.timing_provider = "npu-model-rtl-match-v1"', checked(self, program([HALT]), VERIFY))
+        checked(self, program([HALT]), f"{VERIFY}=provider={PROVIDER}", diagnostic="requires selected evidence")
+        checked(self, program([HALT]), selection(), f"{VERIFY}=provider=npu-model-rtl-match-v1",
+                diagnostic="selected RTL evidence excludes")
         good = self.check([HALT], True, VERIFY).stdout
         self.assertIn(f'atlas.timing_provider = "{PROVIDER}"', good)
         for source, diagnostic in ((good.replace(facts()["hw_ir"]["sha256"], "1" * 64), "different hardware IR"),
-                (good.replace(f', provider = "{PROVIDER}"}}', f', provider = "{PROVIDER[:-1]}9"}}'), "unsupported RTL evidence provider"),
+                (good.replace(f', provider = "{PROVIDER}"}}', f', provider = "{PROVIDER[:-1]}9"}}'),
+                 "unsupported RTL evidence provider"),
                 (good.replace(f', provider = "{PROVIDER}"}}', f', dma = "latency", provider = "{PROVIDER}"}}'),
                  "unsupported DMA policy")):
             self.assertNotEqual(source, good)
-            checked = run(OPT, source, "--insert-atlas-delays")
-            self.assertNotEqual(checked.returncode, 0)
-            self.assertIn(diagnostic, checked.stderr)
+            checked(self, source, "--insert-atlas-delays", diagnostic=diagnostic)
 
     def test_missing_unresolved_and_disagreeing_blocks_fail_closed(self):
         load = lambda d: block(d, "vlsu.vload")
@@ -80,13 +69,14 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
                 self.check([HALT], False, VERIFY, path=facts_variant(directory, mutate), diagnostic="RTL timing facts")
 
     def test_exact_memory_admission_boundaries(self):
-        for first, second, mreg, words, boundary, conflict in (("vload", "vload", 63, 65792, 35, "VLOAD path 0 busy"),
-                ("vstore", "vstore", 63, 65792, 35, "VSTORE path 0 busy"),
-                *((a, b, r, w, gap, conflict) for a, b, release, bank in (
-                    ("vload", "vstore", 35, 30), ("vstore", "vload", 34, 34))
-                  for r, w, gap, conflict in ((63, 768, bank, "VMEM bank 0 busy"),
-                    (4, 65792, release, "insufficient issue spacing")))):
-            for gap in ((boundary - 1, boundary) if boundary > 1 else (1,)):
+        cases = (("vload", "vload", 63, 65792, 35, "VLOAD path 0 busy"),
+                 ("vstore", "vstore", 63, 65792, 35, "VSTORE path 0 busy"),
+                 ("vload", "vstore", 63, 768, 30, "VMEM bank 0 busy"),
+                 ("vload", "vstore", 4, 65792, 35, "insufficient issue spacing"),
+                 ("vstore", "vload", 63, 768, 34, "VMEM bank 0 busy"),
+                 ("vstore", "vload", 4, 65792, 34, "insufficient issue spacing"))
+        for first, second, mreg, words, boundary, conflict in cases:
+            for gap in (boundary - 1, boundary):
                 with self.subTest(first=first, second=second, mreg=mreg, words=words, gap=gap):
                     self.check(gapped([addi(6, 0, 256), *word_base(8, words)], vls(first),
                                       vls(second, mreg, 8), gap), gap == boundary, VERIFY,
@@ -108,7 +98,8 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
                                     gap == bound, VERIFY, diagnostic=None if gap == bound else "x5")
                 if gap == bound:
                     load = next(i for i in export(result.stdout)["instructions"] if i["mnemonic"] == "lw")
-                    self.assertEqual(next(a["first"] for a in load["footprint"]["accesses"] if a["resource"] == "vmem"), 8)
+                    self.assertEqual(next(a["first"] for a in load["footprint"]["accesses"]
+                                          if a["resource"] == "vmem"), 8)
 
     def test_memory_operand_domains_and_encoding(self):
         rows = [(word_base(6, (bank * 8192 + row) * 8), vls(kind, 0 if row == 0 else 63), True, None)
@@ -140,39 +131,36 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
                 with self.subTest(setup=setup, instruction=instruction, consumer=consumer):
                     result = self.check([*setup, instruction, HALT], accepted, consumer, VERIFY,
                                         diagnostic=None if accepted else (
-                                            "VLS effective tile" if instruction[0] in ("vload", "vstore") and setup else PROVIDER))
+                                            "VLS effective tile" if instruction[0] in ("vload", "vstore") and setup
+                                            else PROVIDER))
                     if encoded is not None:
-                        emitted = run(EMIT, result.stdout)
-                        self.assertEqual(emitted.returncode, 0, emitted.stderr)
-                        self.assertEqual([int(w, 16) >> 20 for w in emitted.stdout.split()
+                        emitted = checked(self, result.stdout, tool=EMIT)
+                        self.assertEqual([int(w, 16) >> 20 for w in emitted.split()
                                           if int(w, 16) & 0x7f == 0x07], [encoded])
         for offset in (-2049, 2048, 4095):
             with self.subTest(unencoded_offset=offset):
                 self.check([*word_base(6, 65536), vls("vload", offset=offset), HALT], False,
                            CONSUMERS[0], diagnostic="must be in [-2048, 2047]")
 
-    def test_terminal_and_marker_admission(self):
-        prefix = [addi(6, 0, 256), VLOAD]
-        for suffix, diagnostic in (([delay(31), nop(), MARKER, HALT], "atlas.complete waits for prior fixed-latency work"),
-                                   ([delay(31), nop(), HALT], "halt precedes completion of in-flight fixed-latency work"),
-                                   ([delay(100), HALT], "halt does not wait for a preceding DELAY")):
-            self.check([*prefix, *suffix], False, VERIFY, diagnostic=diagnostic)
-        self.check([*prefix, delay(32), nop(), HALT], True, VERIFY)
-        self.check([*prefix, delay(32), nop(), MARKER, HALT], True, VERIFY)
-
-    def test_block_exit_drain_boundary(self):
+    def test_terminal_marker_and_block_exit_boundaries(self):
         def loop(tail):
             body = [addi(6, 0, 256), addi(13, 0, 0), addi(14, 0, 3), VLOAD, delay(33),
                     vls("vstore", 4, 6, 32), addi(13, 13, 1), *tail]
             return [*body, branch("blt", 13, 14, 3 - len(body)), nop(), HALT]
-        self.check(loop([delay(29), nop()]), True, VERIFY)
-        self.check(loop([delay(28), nop()]), False, VERIFY,
-                   diagnostic="redirect reaches a successor before fixed-latency work drains")
-        self.check(loop([delay(30)]), False, VERIFY, diagnostic="redirect does not wait for a preceding DELAY")
+        prefix = [addi(6, 0, 256), VLOAD]
         fall = [addi(6, 0, 256), addi(13, 0, 1), branch("beq", 13, 0, 4), nop(), VLOAD]
-        self.check([*fall, delay(33), nop(), HALT], True, VERIFY)
-        self.check([*fall, delay(32), nop(), HALT], False, VERIFY,
-                   diagnostic="fixed-latency work remains live across a block boundary")
+        cases = (([*prefix, delay(31), nop(), MARKER, HALT], "atlas.complete waits for prior fixed-latency work"),
+                 ([*prefix, delay(31), nop(), HALT], "halt precedes completion of in-flight fixed-latency work"),
+                 ([*prefix, delay(100), HALT], "halt does not wait for a preceding DELAY"),
+                 ([*prefix, delay(32), nop(), HALT], None), ([*prefix, delay(32), nop(), MARKER, HALT], None),
+                 (loop([delay(29), nop()]), None),
+                 (loop([delay(28), nop()]), "redirect reaches a successor before fixed-latency work drains"),
+                 (loop([delay(30)]), "redirect does not wait for a preceding DELAY"),
+                 ([*fall, delay(33), nop(), HALT], None),
+                 ([*fall, delay(32), nop(), HALT], "fixed-latency work remains live across a block boundary"))
+        for ops, diagnostic in cases:
+            with self.subTest(ops=ops):
+                self.check(ops, diagnostic is None, VERIFY, diagnostic=diagnostic)
         to_halt = [addi(6, 0, 256), addi(13, 0, 1), branch("beq", 13, 0, 3), nop(), VLOAD, HALT]
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
@@ -219,7 +207,8 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
         self.check(unbounded, True, CONSUMERS[0], VERIFY)
         moving = [*unbounded[:4], addi(6, 6, 256), *unbounded[4:]]
         moving[6] = branch("blt", 13, 14, -4)
-        result = self.check(moving, False, CONSUMERS[0], diagnostic="unknown VLS base cannot establish bounded address domain")
+        result = self.check(moving, False, CONSUMERS[0],
+                            diagnostic="unknown VLS base cannot establish bounded address domain")
         self.assertIn("note: concrete register contexts exceed 4096 block entries", result.stderr)
 
     def test_control_flow_shape_is_checked(self):
@@ -239,7 +228,8 @@ class SelectedRTLTimingTest(RTLTestSupport, unittest.TestCase):
         for consumer in CONSUMERS:
             with self.subTest(consumer=consumer):
                 self.check(across, False, consumer, dma="wait",
-                           diagnostic="still pending when its block ends; selected RTL timing requires atlas.dma_wait on channel 0")
+                           diagnostic="still pending when its block ends; selected RTL timing requires "
+                                      "atlas.dma_wait on channel 0")
                 self.check(inside, True, consumer, VERIFY, dma="wait")
         self.check(across, False, VERIFY, dma="wait", diagnostic="still pending when its block ends")
 
@@ -268,18 +258,15 @@ class PairFactsSelectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "op-pairs.json"
             path.write_bytes(Path(PAIRS).read_bytes())
-            result = run(OPT, self.SOURCE, selection(pairs=path), CONSUMERS[0], VERIFY)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            document = export(result.stdout)
+            result = checked(self, self.SOURCE, selection(pairs=path), CONSUMERS[0], VERIFY)
+            document = export(result)
             self.assertEqual(document["evidence"]["op_pairs_sha256"], sha256(PAIRS))
             self.assertEqual(document["applicability"]["pair_facts"]["sha256"], sha256(PAIRS))
             path.write_text(path.read_text() + " ")
-            for source, diagnostic in ((result.stdout, "selected pair facts hash mismatch"),
-                    (result.stdout.replace("op_pairs_sha256", "op_pairs_digest"), "incomplete RTL pair facts selection")):
+            for source, diagnostic in ((result, "selected pair facts hash mismatch"),
+                    (result.replace("op_pairs_sha256", "op_pairs_digest"), "incomplete RTL pair facts selection")):
                 with self.subTest(diagnostic=diagnostic):
-                    checked = run(OPT, source, CONSUMERS[0])
-                    self.assertNotEqual(checked.returncode, 0)
-                    self.assertIn(diagnostic, checked.stderr)
+                    checked(self, source, CONSUMERS[0], diagnostic=diagnostic)
 
     def test_invalid_selections_are_rejected(self):
         def window(engine, value):
@@ -294,7 +281,8 @@ class PairFactsSelectionTest(unittest.TestCase):
             return mutate
         mutations = [("different hardware IR", lambda d: d["hw_ir"].update(sha256="0" * 64)),
             ("different op_timing facts", lambda d: d["op_timing"].update(sha256="0" * 64)),
-            ("not checked against RTL assertions", lambda d: d["op_pairs"][0].update(assertions={"checked": 0, "excluded": 0})),
+            ("not checked against RTL assertions",
+             lambda d: d["op_pairs"][0].update(assertions={"checked": 0, "excluded": 0})),
             ("names no resolved facts block", lambda d: d["op_pairs"][0].update(second="vpu.unknown")),
             ("malformed stable_gap", lambda d: d["op_pairs"][0].update(stable_gap=0)),
             ("expected schema merlin.op_pairs.v1", lambda d: d.update(schema="rtl_extract.op_pairs.v1")),
@@ -309,9 +297,7 @@ class PairFactsSelectionTest(unittest.TestCase):
                 cases.append((diagnostic, selection(pairs=pairs_variant(directory, mutate, f"pairs-{n}.json"))))
             for diagnostic, option in cases:
                 with self.subTest(diagnostic=diagnostic, option=option):
-                    checked = run(OPT, self.SOURCE, option)
-                    self.assertNotEqual(checked.returncode, 0)
-                    self.assertIn(diagnostic, checked.stderr)
+                    checked(self, self.SOURCE, option, diagnostic=re.escape(diagnostic))
 
 
 if __name__ == "__main__":

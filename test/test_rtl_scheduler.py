@@ -1,8 +1,8 @@
 import re
 import unittest
 
-from rtl_test_support import (DMA_SECOND, EMIT, FACTS, HALT, OPT, PAIRS, VERIFY, VLOAD, addi, branch, dma_setup, export,
-    jal, nop, program, run, selection, stream, transfer, unary, vls, wait, word_base,)
+from rtl_test_support import (DMA_SECOND, EMIT, FACTS, HALT, OPT, PAIRS, VERIFY, VLOAD, addi, branch, checked,
+    dma_setup, export, jal, nop, program, selection, stream, transfer, unary, vls, wait, word_base,)
 
 LEGACY = "--schedule-atlas-stream=rtl-dma-estimate=false rtl-best-of=false"
 ESTIMATE = "--schedule-atlas-stream=rtl-dma-estimate=true rtl-best-of=false"
@@ -14,8 +14,7 @@ def issue_cycle(instruction):
 
 def estimated_dma_cost(document):
     assert len(document["blocks"]) == 1
-    pending, extra, stall = {}, {}, 0
-    last = 0
+    pending, stall, last = {}, 0, 0
     for instruction in document["instructions"]:
         mnemonic = instruction["mnemonic"]
         cycle = issue_cycle(instruction) + stall
@@ -24,22 +23,21 @@ def estimated_dma_cost(document):
         if match:
             kind, channel = match[1], int(match[2])
             if kind == "wait":
-                ready, _ = pending.pop(channel)
-                delay = max(0, ready + extra.pop(channel) - cycle)
+                ready, _, extra = pending.pop(channel)
+                delay = max(0, ready + extra - cycle)
                 stall += delay
                 cycle += delay
             else:
                 window = next(a for a in footprint["accesses"] if a["resource"] == "vmem" and a["at_completion"])
-                byte_count = 32 * window["count"]
-                latency = max(1, 2 * ((byte_count + 11) // 4), (byte_count + 63) // 64)
-                pending[channel] = (cycle + latency, window["first"] // 8192)
-                extra[channel] = 0
+                size = 32 * window["count"]
+                latency = max(1, 2 * ((size + 11) // 4), (size + 63) // 64)
+                pending[channel] = [cycle + latency, window["first"] // 8192, 0]
         if mnemonic in ("vload", "vstore"):
             window = next(a for a in footprint["accesses"] if a["resource"] == "vmem")
             bank = window["first"] // 8192
-            for channel, (_, dma_bank) in pending.items():
-                if dma_bank == bank:
-                    extra[channel] += 32
+            for entry in pending.values():
+                if entry[1] == bank:
+                    entry[2] += 32
         last = cycle
     assert not pending
     return last
@@ -49,31 +47,21 @@ def estimated_dma_cost(document):
 class RTLSchedulerTest(unittest.TestCase):
     def schedule(self, ops, policy=BEST, pairs=None, dma=None):
         source = ops if isinstance(ops, str) else program(ops)
-        result = run(OPT, source, selection(pairs=pairs, dma=dma), policy, VERIFY)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        emitted = run(EMIT, result.stdout)
-        self.assertEqual(emitted.returncode, 0, emitted.stderr)
-        return result.stdout, emitted.stdout, export(result.stdout)
+        timed = checked(self, source, selection(pairs=pairs, dma=dma), policy, VERIFY)
+        return timed, checked(self, timed, tool=EMIT), export(timed)
 
-    def test_model_provider_ignores_rtl_policy_flags(self):
-        source = program([addi(6, 0, 256), vls("vload"), vls("vstore", offset=32), HALT])
-        legacy = run(OPT, source, LEGACY, VERIFY)
-        self.assertEqual(legacy.returncode, 0, legacy.stderr)
-        words = run(EMIT, legacy.stdout)
-        self.assertEqual(words.returncode, 0, words.stderr)
-        for policy in (ESTIMATE, BEST_NO_HINT, BEST):
-            with self.subTest(policy=policy):
-                result = run(OPT, source, policy, VERIFY)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, legacy.stdout)
-                self.assertEqual(run(EMIT, result.stdout).stdout, words.stdout)
-
-    def test_ties_keep_legacy_bytes(self):
-        for ops in ([HALT], [addi(4, 0, 7), addi(5, 4, 1), HALT]):
-            legacy = self.schedule(ops, LEGACY)
+    def test_policy_flags_preserve_legacy_bytes_when_costs_tie(self):
+        cases = [([addi(6, 0, 256), VLOAD, vls("vstore", offset=32), HALT], ())]
+        cases += [(ops, (selection(),)) for ops in ([HALT], [addi(4, 0, 7), addi(5, 4, 1), HALT])]
+        for ops, options in cases:
+            source = program(ops)
+            legacy = checked(self, source, *options, LEGACY, VERIFY)
+            words = checked(self, legacy, tool=EMIT)
             for policy in (ESTIMATE, BEST_NO_HINT, BEST):
-                with self.subTest(ops=ops, policy=policy):
-                    self.assertEqual(self.schedule(ops, policy)[:2], legacy[:2])
+                with self.subTest(ops=ops, selected=bool(options), policy=policy):
+                    result = checked(self, source, *options, policy, VERIFY)
+                    self.assertEqual(result, legacy)
+                    self.assertEqual(checked(self, result, tool=EMIT), words)
 
     def test_dma_hint_launches_transfer_before_independent_compute(self):
         ops = [*dma_setup(size=1024), *word_base(8, 65536), transfer(),
