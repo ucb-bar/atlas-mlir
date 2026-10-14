@@ -5,6 +5,7 @@
 #define ATLAS_TEST_VERIFICATIONTESTSUPPORT_H
 
 #include "Atlas/AtlasDelayInsertion.h"
+#include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"

@@ -20,6 +20,7 @@ int main(int argc, char **argv) {
   DialectRegistry registry;
   registry.insert<atlas::AtlasDialect, arith::ArithDialect, cf::ControlFlowDialect, func::FuncDialect>();
   atlas::registerLowerAtlasVirtualToMachinePass();
+  atlas::registerInsertAtlasDMAWaitsPass();
   atlas::registerInsertAtlasDelaysPass();
   MLIRContext context(registry);
   ScopedDiagnosticHandler handler(&context, [](Diagnostic &diagnostic) {

@@ -330,12 +330,25 @@ static LogicalResult checkLLVMBlockTargets(llvm::ArrayRef<Operation *> encodedOp
 }
 
 LogicalResult mlir::atlas::verifyAtlasArtifact(
-    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
+    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words,
+    bool allowPendingDMAWaits) {
   if (failed(verify(module)) || failed(verifyAtlasTimingState(module))) return failure();
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
   bool generated = *kind == AtlasArtifactKind::Generated;
+  if (generated && module->hasAttr(kAtlasDMAWaitsPending)) {
+    if (!allowPendingDMAWaits)
+      return module.emitOpError("generated stream still needs its DMA waits; "
+                                "run --insert-atlas-dma-waits first");
+    if (failed(encodeAtlasWords(module, words)))
+      return failure();
+    llvm::SmallVector<Operation *> encoded;
+    for (Operation &op : module.getBody()->getOperations())
+      if (!isa<StartOp>(op))
+        encoded.push_back(&op);
+    return llvmBlock ? checkLLVMBlockTargets(encoded) : success();
+  }
   auto ctx = buildAtlasVerificationContext(module, generated);
   if (failed(ctx))
     return failure();
