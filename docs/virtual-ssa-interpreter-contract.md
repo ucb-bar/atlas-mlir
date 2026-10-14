@@ -145,8 +145,8 @@ The evaluator executes these 22 `atlas.virtual_*` forms plus `arith.constant/add
 | `start` | `() → S` | Unique first entry operation |
 | `input_bf16` / `input_fp8` | `S → S, B/F` | Nonnegative `index`; snapshot input |
 | `output_bf16` | `S, B → S` | Unique `index`; publish snapshot |
-| `vpu_unary` | `B → B` | `kind`: `mov`, `relu`; V1 |
-| `vpu_binary` | `B, B → B` | `kind`: `add`; V2 |
+| `vpu_unary` | `B → B` | `kind`: `mov`, `relu`, `exp2`, `recip` (`rcp` backend); V1, V5 |
+| `vpu_binary` | `B, B → B` | `kind`: `add`, `sub`, `mul`; V2, V5 |
 | `vpu_reduce` | `B → B` | `kind`: `row_sum`, `row_min`, `row_max`; each result fills its row; V3 |
 | `vpu_splat` | `() → B` | Raw BF16 `bits : i32` in `0..65535`, copied into all 1,024 elements; V4 |
 | `pack_fp8` | `B → F` | `scale_code = 127` (`RtlNumerics.to_fp8`); P |
@@ -161,7 +161,7 @@ The evaluator executes these 22 `atlas.virtual_*` forms plus `arith.constant/add
 | `mxu_readout_bf16` | `S, A<u> → S, B` | Consume version, retain weights; M |
 | `mxu_readout_fp8` | `S, A<u>, E → S, F` | Constant scale; selected converter; R |
 
-Row sum uses a balanced FP32 tree, final BF16 rounding and the ADD host-mode check. Row min/max use the model's BF16 bit ordering and preserve selected encodings. Splat copies raw bits.
+Row sum uses a balanced FP32 tree and final BF16 rounding; SUB chops FP32 results, while MUL rounds BF16 products. All four host arithmetic modes share the nearest-even/gradual-underflow check. EXP2/RECIP use raw-bit RTL tables. Row min/max preserve selected encodings; splat copies raw bits.
 
 In required mode on 2026-10-09 and again on 2026-10-10 at the branch head, every row of `test/test_virtual_evaluator_core.py`, including scheduled variants, matched the reference on the selected-core Arc model, which is not cross-checked against Verilator or VCS; the evidence is bounded by its fidelity to the selected RTL, and [issue #9](https://github.com/ucb-bar/atlas-mlir/issues/9) closes only when the team accepts that bound.
 
@@ -171,6 +171,7 @@ In required mode on 2026-10-09 and again on 2026-10-10 at the branch head, every
 | V2 | FP32 RNE/BF16 chop path with canonical NaN and directed signed-zero, subnormal, overflow, infinity and NaN cases; [addition](vpu-add-observation.md) | `vpu` and `dma_pending_work` (ADD on patterned tiles) | The `1 + 3/512` chop-versus-nearest-even literal and the directed special cases on the core |
 | V3 | Row broadcast, tree/rounding and exceptional-value literals | None added | Emitted-program comparison |
 | V4 | Raw BF16 splats, including signed zero and NaNs | None added | Emitted `vli.all` comparison |
+| V5 | Bounded arithmetic literals, captured fractional unary outputs, and guarded source/scheduled softmax/attention cases | None added | Emitted-program comparison; broader numerical qualification |
 | P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | `mxu{0,1}_legacy_pack` and the physical converter/transport probe | PACK→MXU chains beyond `legacy_pack` |
 | M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | `mxu{0,1}_{continuation,seed_bf16,seed_fp8}`, `dma_mxu_*`, `two_chains_*` | Exceptional BF16 accumulator encodings on the core |
 | R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | None (no row reads out FP8) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |

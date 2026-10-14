@@ -35,6 +35,10 @@ INPUTS = '''
 MOV = '%m = "atlas.virtual_vpu_unary"(%a) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
 RELU = MOV.replace('kind = "mov"', 'kind = "relu"')
 ADD = '%sum = "atlas.virtual_vpu_binary"(%a, %b) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16'
+SUB = ADD.replace('kind = "add"', 'kind = "sub"')
+MUL = ADD.replace('kind = "add"', 'kind = "mul"')
+EXP2 = MOV.replace('kind = "mov"', 'kind = "exp2"')
+RECIP = MOV.replace('kind = "mov"', 'kind = "recip"')
 PACK = '%packed = "atlas.virtual_pack_fp8"(%a) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
 
 # FP32 nearest-even plus BF16 chopping, gradual underflow, signed zeros and canonical NaNs.
@@ -47,6 +51,50 @@ ADD_CASES = (
     (0x0000, 0x8000, 0x0000), (0x3F80, 0xBF80, 0x0000),
     (0x7F7F, 0x7F7F, 0x7F80), (0xFF7F, 0xFF7F, 0xFF80),
     (0x7F80, 0xFF80, 0x7FC0), (0xFFA1, 0x3F80, 0x7FC0),
+)
+# SUB uses FP32 arithmetic and BF16 chopping.
+SUB_CASES = (
+    (0x3E80, 0x3EC0, 0xBE00), (0x3E8F, 0x3ECF, 0xBE00),
+    (0x3F80, 0x3B40, 0x3F7F), (0xBF80, 0x3BC0, 0xBF80),
+    (0x3F80, 0xBBC0, 0x3F80), (0x3F80, 0xBC40, 0x3F81),
+    (0x0081, 0x0080, 0x0001), (0x0080, 0x0081, 0x8001),
+    (0x007F, 0x8001, 0x0080), (0x0001, 0x0001, 0x0000),
+    (0x8000, 0x0000, 0x8000), (0x8000, 0x8000, 0x0000),
+    (0x7F7F, 0xFF7F, 0x7F80), (0xFF7F, 0x7F7F, 0xFF80),
+    (0x7F80, 0x7F80, 0x7FC0), (0xFFA1, 0x3F80, 0x7FC0),
+)
+# MUL uses BF16 nearest-even rounding, including subnormals.
+MUL_CASES = (
+    (0x3E80, 0x3EC0, 0x3DC0), (0x3E81, 0x3EC1, 0x3DC3),
+    (0x3E82, 0x3EC2, 0x3DC5), (0x3E8F, 0x3ECF, 0x3DE7),
+    (0x3F81, 0x3F81, 0x3F82), (0x3F81, 0x3FC0, 0x3FC2),
+    (0x3F83, 0x3FC0, 0x3FC4), (0xBF81, 0x3FC0, 0xBFC2),
+    (0x3FC0, 0x3FC0, 0x4010), (0x0080, 0x3F00, 0x0040),
+    (0x0080, 0x3F7F, 0x0080), (0x0001, 0x3F00, 0x0000),
+    (0x0003, 0x3F00, 0x0002), (0x0005, 0x3F00, 0x0002),
+    (0x8001, 0x3F00, 0x8000), (0x8003, 0x3F00, 0x8002),
+    (0x8000, 0xBF80, 0x0000), (0x0000, 0xBF80, 0x8000),
+    (0x7F7F, 0x4000, 0x7F80), (0xFF7F, 0x4000, 0xFF80),
+    (0x7F80, 0x0000, 0x7FC0), (0xFFC1, 0x3F80, 0x7FC0),
+)
+# Captured VPU bits: npu-model@0c4a1f9, tests/rtl/vector_traces.json, bank 4/row 0.
+# SHA256: 05fccec50691381c3cf1f3c693f71e2b976bc501879e100af2492c6eabdeed17.
+FRACTIONAL_INPUTS = tuple(range(0x3E80, 0x3E90))
+EXP2_FRACTIONAL = (0x3F98, 0x3F98, 0x3F99, 0x3F99, 0x3F99, 0x3F99, 0x3F99, 0x3F9A,
+                   0x3F9A, 0x3F9A, 0x3F9A, 0x3F9B, 0x3F9B, 0x3F9B, 0x3F9B, 0x3F9B)
+RECIP_FRACTIONAL = (0x4080, 0x407E, 0x407C, 0x407A, 0x4078, 0x4076, 0x4074, 0x4072,
+                    0x4070, 0x406F, 0x406D, 0x406B, 0x406A, 0x4068, 0x4066, 0x4065)
+EXP2_CASES = tuple(zip(FRACTIONAL_INPUTS, EXP2_FRACTIONAL)) + (
+    (0x0000, 0x3F80), (0x8000, 0x3F80), (0x3F80, 0x4000),
+    (0xBF80, 0x3F00), (0x4000, 0x4080), (0xC000, 0x3E80),
+)
+# RcpLUT corners, including exponent wrap: diagnostics/characterize_vpu_recip.py.
+RECIP_CASES = tuple(zip(FRACTIONAL_INPUTS, RECIP_FRACTIONAL)) + (
+    (0x0000, 0x7F80), (0x8000, 0xFF80), (0x0001, 0x7F80), (0x8001, 0xFF80),
+    (0x007F, 0x7F80), (0x807F, 0xFF80), (0x7F80, 0x0000), (0xFF80, 0x8000),
+    (0x7FC1, 0x0000), (0xFFA1, 0x8000), (0x3F80, 0x3F80), (0xBF80, 0xBF80),
+    (0x4000, 0x3F00), (0xC000, 0xBF00), (0x0080, 0x7E80), (0x7F00, 0x0000),
+    (0x7F7F, 0x7F80), (0xFF7F, 0xFF80),
 )
 # Source-derived unit-scale FP8Pack expectations: even/odd RNE ties, exponent carry, flush around the
 # minimum normal, saturation and specials. Rounded 480 is 0x7e here, unlike the MXU converter's 0x7f.
@@ -182,6 +230,39 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
         left, right, expected = (repeated([case[i] for case in ADD_CASES]) for i in range(3))
         self.assertEqual(evaluate_tile_operation(operation(ADD), (left, right)), expected)
 
+    def test_sub_and_mul_match_independent_rounding_and_special_literals(self) -> None:
+        for source, cases in ((SUB, SUB_CASES), (MUL, MUL_CASES)):
+            left, right, expected = (repeated([case[i] for case in cases]) for i in range(3))
+            with self.subTest(source=source):
+                self.assertEqual(evaluate_tile_operation(operation(source), (left, right)), expected)
+
+    def test_exp2_and_recip_match_independent_bounded_literals(self) -> None:
+        for source, cases in ((EXP2, EXP2_CASES), (RECIP, RECIP_CASES)):
+            tile, expected = (repeated([case[i] for case in cases]) for i in range(2))
+            with self.subTest(source=source):
+                self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), expected)
+
+    def test_attention_helpers_revalidate_operand_arity_and_format(self) -> None:
+        tile, fp8 = repeated((0,)), repeated((0,), "fp8")
+        for source, arity in ((SUB, 2), (MUL, 2), (EXP2, 1), (RECIP, 1)):
+            for operands in ((tile,) * (arity - 1), (tile,) * (arity + 1), (fp8,) * arity):
+                with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
+                    evaluate_tile_operation(operation(source), operands)
+            op = operation(source)
+            op.operands = ()
+            with self.subTest(source=source), self.assertRaisesRegex(VirtualInterfaceError, "signature"):
+                evaluate_tile_operation(op, (tile,) * arity)
+
+    def test_integer_unary_tables_do_not_require_the_host_arithmetic_probe(self) -> None:
+        from npu_model.configs.numerics import RtlNumerics
+
+        # Unary tables bypass the host arithmetic probe.
+        with patch.object(RtlNumerics, "add", side_effect=AssertionError("integer tables need no FP probe")):
+            for source, cases in ((EXP2, EXP2_CASES), (RECIP, RECIP_CASES)):
+                tile, expected = (repeated([case[i] for case in cases]) for i in range(2))
+                with self.subTest(source=source):
+                    self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), expected)
+
     def test_pack_literals_and_asymmetric_logical_row_major_layout(self) -> None:
         cases = PACK_CASES + ((0x7FC1, 0x00), (0xFFC1, 0x00))
         # Unequal row/column strides cross both halves of every register pair.
@@ -205,7 +286,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                                  (MOV, (None,)), (MOV, [tile]), (MOV, None)):
             with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
                 evaluate_tile_operation(operation(source), operands)
-        for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("mul")),
+        for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("div")),
                                          (PACK, "scale_code", builtin.IntegerAttr(128, builtin.i32))):
             op = operation(source)
             op.attributes[name] = attribute
@@ -258,7 +339,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                 sys.exit(0)
             raise AssertionError("operation accepted a host that flushes subnormals")
         '''
-        for source in (ADD, REDUCE):
+        for source in (ADD, SUB, MUL, REDUCE):
             with self.subTest(source=source):
                 self.run_isolated(script, source)
 
@@ -284,7 +365,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                     continue
                 raise AssertionError(f"operation accepted directed rounding mode {mode:#x}")
         '''
-        for source in (ADD, REDUCE):
+        for source in (ADD, SUB, MUL, REDUCE):
             with self.subTest(source=source):
                 self.run_isolated(script, source)
 

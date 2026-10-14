@@ -112,6 +112,29 @@ class VirtualParserInterfaceTest(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedVirtualMode, "supported kinds"):
             parse_program(source(reduce_op=reduce.replace("row_sum", "col_sum")))
 
+    def test_attention_kinds_admit_both_field_forms_and_reject_malformed_fields(self) -> None:
+        for unary in ("exp2", "recip"):
+            for binary in ("sub", "mul"):
+                generic = FLAT.replace('kind = "relu"', f'kind = "{unary}"').replace('kind = "add"', f'kind = "{binary}"')
+                canonical = generic.replace("{kind =", "<{kind =").replace("{index =", "<{index =").replace("} :", "}> :")
+                for form in (generic, canonical):
+                    with self.subTest(unary=unary, binary=binary, canonical=form == canonical):
+                        self.assertEqual(len(parse_program(form).operations), 6)
+                for kind in (unary, binary):
+                    field = f'{{kind = "{kind}"}}'
+                    malformed = (
+                        (generic.replace(field, "{}"), "expected attributes"),
+                        (generic.replace(field, '{kind = 0 : i32}'), "supported kinds"),
+                        (generic.replace(field, f'{{kind = "{kind}", invented = 0 : i32}}'), "expected attributes"),
+                        (generic.replace(field, f'<{field}> {field}'), "duplicate attribute/property"),
+                    )
+                    for text, message in malformed:
+                        with self.subTest(kind=kind, message=message), self.assertRaisesRegex(VirtualInterfaceError, message):
+                            parse_program(text)
+        for old, new in (("relu", "rcp"), ("relu", "mul"), ("add", "exp2"), ("add", "recip")):
+            with self.subTest(old=old, new=new), self.assertRaisesRegex(UnsupportedVirtualMode, "supported kinds"):
+                parse_program(FLAT.replace(f'kind = "{old}"', f'kind = "{new}"'))
+
     def test_parser_rejects_unsupported_and_malformed_programs(self) -> None:
         canonical = example("virtual_bf16_shared_relu.mlir").replace('{index = 0 : i32}', '<{index = 0 : i32}>')
         seeded = example("virtual_mxu_seeded_fp8.mlir")
@@ -119,7 +142,7 @@ class VirtualParserInterfaceTest(unittest.TestCase):
             (FLAT.replace("atlas.virtual_start", "atlas.start"), "unsupported virtual operation"),
             (FLAT.replace("atlas.virtual_vpu_unary", "atlas.virtual_invented"), "unsupported virtual operation"),
             (FLAT.replace('kind = "relu"', 'kind = "sqrt"'), "supported kinds"),
-            (FLAT.replace('kind = "add"', 'kind = "mul"'), "supported kinds"),
+            (FLAT.replace('kind = "add"', 'kind = "div"'), "supported kinds"),
             (example("virtual_fp8_two_layer_mlp.mlir").replace("scale_code = 127", "scale_code = 128"), "scale_code 127"),
         )
         malformed = (

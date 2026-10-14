@@ -62,10 +62,11 @@ log for Nicolas. The upstream integration and Shuttle host ELF belong to the
 other owner in the work split; model/RTL execution and hardware validation
 belong to Nicolas.
 
-The Python virtual evaluator supports `mov`, `relu`, and `add`, together with
-BF16 row sum/min/max and raw BF16 splats. Attention evaluation still needs
-`sub`, `mul`, `exp2`, `recip`, and FP8 transpose. Compilation and contract tests
-do not replace numerical execution.
+The Python virtual evaluator supports `mov`, `relu`, `add`, `sub`, `mul`,
+`exp2`, `recip`, BF16 row sum/min/max and raw BF16 splats. Softmax and the
+pre-transposed-key attention fixture have bounded numerical and scheduling
+regressions; the transposed-key fixture still needs evaluator FP8 transpose.
+Compilation and contract tests do not replace numerical execution.
 Two-input comparisons, surrounding-memory checks, and repeated kernel
 invocation remain integration acceptance criteria.
 

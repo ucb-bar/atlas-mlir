@@ -241,7 +241,7 @@ def _check_atlas_operation(op: Operation) -> None:
         _require(0 <= _integer_attribute(op, "code") <= 255, f"{name}: scale code must be in 0..255")
     if "kind" in attributes:
         kind = fields["kind"]
-        kinds_by_operation = {"vpu_unary": ("mov", "relu"), "vpu_binary": ("add",), "vpu_reduce": ("row_sum", "row_min", "row_max")}
+        kinds_by_operation = {"vpu_unary": ("mov", "relu", "exp2", "recip"), "vpu_binary": ("add", "sub", "mul"), "vpu_reduce": ("row_sum", "row_min", "row_max")}
         allowed = kinds_by_operation[short]
         if not isinstance(kind, builtin.StringAttr) or kind.data not in allowed:
             raise UnsupportedVirtualMode(f"{name}: supported kinds are {allowed}")
@@ -378,8 +378,8 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     torch, RtlNumerics = _numerics("VPU")
     # Reinterpret owned raw bits: floating-point conversion would lose encodings.
     owned = tuple(torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16).reshape(32, 32) for tile in operands)
-    if kind in ("add", "row_sum"):
-        # FP32 add and reduction require nearest-even rounding and gradual underflow.
+    if kind in ("add", "sub", "mul", "row_sum"):
+        # Require nearest-even rounding and gradual underflow.
         probe_a = torch.tensor((0x0001, 0x0080, 0x3F80, 0xBF80), dtype=torch.uint16).view(torch.bfloat16)
         probe_b = torch.tensor((0x0001, 0x8081, 0x8001, 0x0001), dtype=torch.uint16).view(torch.bfloat16)
         if tuple(RtlNumerics.add(probe_a, probe_b).view(torch.uint16).tolist()) != (0x0002, 0x8001, 0x3F80, 0xBF80):
@@ -394,10 +394,18 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
         result = result.expand_as(owned[0])
     elif kind == "add":
         result = RtlNumerics.add(*owned)
+    elif kind == "sub":
+        result = RtlNumerics.sub(*owned)
+    elif kind == "mul":
+        result = RtlNumerics.mul(*owned)
+    elif kind == "relu":
+        result = RtlNumerics.unary("relu", owned[0])
+    elif kind == "exp2":
+        result = RtlNumerics.unary("exp2", owned[0])
+    elif kind == "recip":
+        result = RtlNumerics.unary("rcp", owned[0])
     elif kind == "pack_fp8":
         result = RtlNumerics.to_fp8(owned[0], _integer_attribute(op, "scale_code"))
-    else:
-        result = RtlNumerics.unary(kind, owned[0])
     fp8 = kind == "pack_fp8"
     return Tile("fp8" if fp8 else "bf16", tuple(result.contiguous().view(torch.uint8 if fp8 else torch.uint16).flatten().tolist()))
 
