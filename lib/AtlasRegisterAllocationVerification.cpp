@@ -127,13 +127,13 @@ private:
         return true;
     if (!hasPack)
       return false;
-    // x15 is intentionally reserved along with the pack helper's x10..x17.
+    // All of x10..x17 belongs to the pack helper.
     if (reg >= 10 && reg <= 17)
       return true;
     return reg == fixed.packSourceRegs[0] || reg == fixed.packSourceRegs[1] ||
            reg == fixed.packDestinationReg || reg == fixed.packRowReg ||
-           reg == fixed.packRowsReg || reg == fixed.packTemporaryRegs[0] ||
-           reg == fixed.packTemporaryRegs[1];
+           reg == fixed.packRowsReg ||
+           llvm::is_contained(fixed.packTemporaryRegs, reg);
   }
 
   LogicalResult verifyAssignments() {
@@ -444,8 +444,9 @@ private:
       // The relayout loop loads unknown memory and advances its pointers and
       // row counter. Do not assume a fixed iteration count for aliased helpers.
       for (unsigned reg : {fixed.packSourceRegs[0], fixed.packSourceRegs[1],
-                           fixed.packDestinationReg, fixed.packRowReg,
-                           fixed.packTemporaryRegs[0], fixed.packTemporaryRegs[1]})
+                           fixed.packDestinationReg, fixed.packRowReg})
+        write(reg, std::nullopt);
+      for (unsigned reg : fixed.packTemporaryRegs)
         write(reg, std::nullopt);
       write(fixed.inputBaseReg, fixed.packRelayoutWord);
       return success();

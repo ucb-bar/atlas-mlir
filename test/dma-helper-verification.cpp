@@ -283,13 +283,17 @@ void packHelperTests(MLIRContext &context) {
       assignment.reg += 8;
   auto fixed = fixedPlacement();
   fixed.scaleReg = 3; fixed.outputWord = 65536; fixed.packWord = 32768; fixed.packRelayoutWord = 33024;
-  fixed.packSourceRegs = {10, 11}; fixed.packDestinationReg = 12; fixed.packRowReg = 13; fixed.packRowsReg = 14; fixed.packTemporaryRegs = {16, 17};
+  fixed.packSourceRegs = {10, 11}; fixed.packDestinationReg = 12; fixed.packRowReg = 13; fixed.packRowsReg = 14; fixed.packTemporaryRegs = {16, 17, 15};
   expectAssignments(f, "pack preserves unrelated persistent half-size helper", f.transfers, true, {}, Policy::Preserved, fixed);
   fixed.packRowsReg = fixed.halfSizeReg;
   expectAssignments(f, "pack row-count write destroys later boundary half-size", f.transfers, false, {halfSize}, Policy::Preserved, fixed);
   fixed.packRowsReg = 14;
-  fixed.packTemporaryRegs[0] = fixed.halfSizeReg;
-  expectAssignments(f, "pack temporary makes later boundary half-size unknown", f.transfers, false, {halfSize}, Policy::Preserved, fixed);
+  for (unsigned n = 0; n < fixed.packTemporaryRegs.size(); ++n) {
+    unsigned saved = fixed.packTemporaryRegs[n];
+    fixed.packTemporaryRegs[n] = fixed.halfSizeReg;
+    expectAssignments(f, "pack temporary makes later boundary half-size unknown", f.transfers, false, {halfSize}, Policy::Preserved, fixed);
+    fixed.packTemporaryRegs[n] = saved;
+  }
 }
 
 constexpr StringLiteral scalarSwap = R"mlir(

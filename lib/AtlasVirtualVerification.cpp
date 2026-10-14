@@ -236,8 +236,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
             "pending DMA handles cannot cross CFG blocks");
     }
     if (!dma.pending.empty() &&
-        isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-            VirtualPackFP8Op>(operation))
+        isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(operation))
       return operation.emitOpError(
           "must complete pending DMA before implicit memory operations");
     if (auto start = dyn_cast<VirtualStartOp>(operation)) {

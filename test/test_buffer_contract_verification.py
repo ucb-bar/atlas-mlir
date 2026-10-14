@@ -174,7 +174,9 @@ class BufferContractVerificationTest(unittest.TestCase):
                 assert_boundaries(self, lower(source))
                 stages = handoff_chain(self, untimed)
                 self.assertIn(contract_text(untimed, "buffer"), stages["structured"])
-        elsewhere = stray_store(lower(STRAIGHT, timed=False)).replace("immediate = 64 : i32", "immediate = 300 : i32", 1)
+        elsewhere = rewrite_line(stray_store(lower(STRAIGHT, timed=False)),
+                                 lambda line: '"atlas.upper"' in line and "dst = 27 : i32, immediate = 64 : i32" in line,
+                                 lambda line: line.replace("immediate = 64 : i32", "immediate = 300 : i32"))
         assert_boundaries(self, elsewhere)
 
     def test_contract_records_every_dma_store_capture(self) -> None:

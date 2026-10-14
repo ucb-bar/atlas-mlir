@@ -75,7 +75,9 @@ FixedResourcePlacement selectedResources() {
   resources.packDestinationReg = 12;
   resources.packRowReg = 13;
   resources.packRowsReg = 14;
-  resources.packTemporaryRegs = {16, 17};
+  // x15 was already reserved for PACK. Use it to pipeline scalar loads and
+  // stores without reducing the capacity for virtual scalar values.
+  resources.packTemporaryRegs = {16, 17, 15};
   resources.mxuWeightSlot = 0;
   resources.mxuAccSlot = 0;
   return resources;

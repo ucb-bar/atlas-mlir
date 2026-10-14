@@ -57,7 +57,7 @@ struct FixedResourcePlacement {
   unsigned packDestinationReg;
   unsigned packRowReg;
   unsigned packRowsReg;
-  std::array<unsigned, 2> packTemporaryRegs;
+  std::array<unsigned, 3> packTemporaryRegs;
   unsigned mxuWeightSlot;
   unsigned mxuAccSlot;
 };

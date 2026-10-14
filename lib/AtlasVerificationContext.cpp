@@ -77,7 +77,8 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
       }
       if (target)
         for (const AtlasDMAInterval &interval : intervals)
-          if (*target > interval.launchPC && *target <= interval.waitPC)
+          if (*target > interval.launchPC && *target <= interval.waitPC &&
+              !(currentPC > interval.launchPC && currentPC < interval.waitPC))
             return op.emitOpError(
                 "generated redirect target enters a pending DMA interval");
     }

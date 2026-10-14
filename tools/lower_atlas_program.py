@@ -9,7 +9,7 @@ The output directory receives:
                     DMA channel, peak demand against capacity per register
                     kind, the VMEM windows used, whether it fits, and every
                     error; written even when the program does not fit
-  4-timed.mlir      after the timing pass
+  4-timed.mlir      after --schedule-atlas-stream (the default timing pass)
   5-words.hex       instruction words, from atlas-emit
   5-map.json        the word-to-operation map, from atlas-emit --map-json
   5-program.json    the decoded program, from atlas-emit --program-json
@@ -59,7 +59,8 @@ def main() -> int:
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
     parser.add_argument("--timing", choices=("insert-atlas-delays", "schedule-atlas-stream"),
-                        default="insert-atlas-delays")
+                        default="schedule-atlas-stream",
+                        help="machine timing pass (default: schedule-atlas-stream)")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)

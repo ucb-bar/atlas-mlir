@@ -504,6 +504,34 @@ class VirtualSchedulingTest(unittest.TestCase):
                 overlapped |= pending > 0
         self.assertTrue(overlapped, ops)
 
+    def test_queued_dma_launches_before_compute_and_awaits_after_it(self) -> None:
+        # Three source transfers exceed the two pending slots. The first two
+        # commands can issue together even though their engine work serializes.
+        # Independent compute belongs after those launches and before DMA.WAIT,
+        # which stalls the frontend until the corresponding transfer completes.
+        source = function("queue", [
+            start(), inp("io0", "io1", "t", 0),
+            const("a", -1879046144), const("b", -1879044096),
+            const("c", -1879042048), const("size", 2048),
+            dma_load("io1", "io2", "e1", "a", "size", "bf16"),
+            dma_await("io2", "io3", "a1", "e1", "bf16"),
+            dma_load("io3", "io4", "e2", "b", "size", "bf16"),
+            dma_await("io4", "io5", "b1", "e2", "bf16"),
+            dma_load("io5", "io6", "e3", "c", "size", "bf16"),
+            dma_await("io6", "io7", "c1", "e3", "bf16"),
+            unary("y", "t"), add("ab", "a1", "b1"),
+            add("abc", "ab", "c1"), add("r", "abc", "y"),
+            outp("io7", "o", "r", 0), f"return %o : {S}"])
+        ops = blocks(self.assert_preserves_program(source, "queued DMA"))[0]["ops"]
+        launches = positions(ops, "dma_load_bf16")
+        awaits = positions(ops, "dma_await_bf16")
+        [compute] = positions(ops, "vpu_unary")
+        self.assertLess(launches[1], compute)
+        self.assertLess(compute, awaits[0])
+        self.assertLess(awaits[0], launches[2], "a pending slot must be freed")
+        for seed in SEEDS:
+            self.scheduled(source, f"random-seed={seed}")
+
     def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
         # A store and a load are pending and complete load first. The PACK
         # after both, which no transfer may overlap, stays after each wait,
@@ -620,7 +648,7 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertTrue(any(op == "atlas.virtual_vpu_unary"
                             for op in body[load + 1:await_]), body)
 
-    def test_pack_never_enters_a_dma_interval(self) -> None:
+    def test_pack_can_enter_a_dma_interval_and_still_lower(self) -> None:
         source = cfg_cases()["C16 pack beside an explicit DMA"]
         for seed in [None, *SEEDS]:
             options = [] if seed is None else [f"random-seed={seed}"]
@@ -628,7 +656,9 @@ class VirtualSchedulingTest(unittest.TestCase):
             [load] = positions(ops, "dma_load_fp8")
             [await_] = positions(ops, "dma_await_fp8")
             [pack] = positions(ops, "pack_fp8")
-            self.assertFalse(load < pack < await_, (seed, ops))
+            self.assertTrue(lowers(self.scheduled(source, *options)), (seed, ops))
+            if seed is None:
+                self.assertTrue(load < pack < await_, (seed, ops))
 
     def test_mxu_slot_dependences_are_exact(self) -> None:
         # Three chains on MXU0. Two weights and two accumulators fit at once,

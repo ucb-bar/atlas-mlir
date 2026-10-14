@@ -131,7 +131,7 @@ void pack(MLIRContext &context) {
   if (!module) return;
   std::vector<Operation *> loads;
   for (Operation &op : module->getBody()->getOperations()) if (copyLoad(op)) loads.push_back(&op);
-  for (size_t n = 2; n < loads.size(); n += 2) moveBefore(loads[n], loads[n - 1]);
+  moveBefore(loads[1], loads[0]);
   check(accepts(*module), "reordered independent copy pairs keep the interleave", diagnostics);
 }
 

@@ -83,6 +83,21 @@ template <typename S> struct AtlasForwardEntries {
   std::vector<S> entries;
   std::vector<bool> reached;
 };
+// Exact pending launch identities at each reachable CFG entry. Joins must
+// agree; exits must complete transfers. The same identities must reach every
+// backedge; bounded helper-loop proofs separately forbid loop DMA commands.
+using AtlasPendingDMA = std::array<std::optional<size_t>, 8>;
+FailureOr<AtlasForwardEntries<AtlasPendingDMA>>
+atlasPendingDMAEntries(const AtlasStream &stream);
+// Inclusive/exclusive byte bounds proved by executing a bounded, decidable
+// single-block helper loop from all non-backedge incoming scalar facts.
+using AtlasScalarMemoryBounds =
+    llvm::DenseMap<size_t, std::pair<uint64_t, uint64_t>>;
+FailureOr<AtlasScalarMemoryBounds>
+atlasHelperMemoryBounds(const AtlasStream &stream);
+void applyAtlasProvenMemoryBounds(timing::Footprint &footprint, size_t index,
+                                 const AtlasScalarMemoryBounds &bounds);
+
 // Forward worklist from block 0: `transfer` turns a copy of a block's entry
 // state into its exit state (failure aborts), `join(into, incoming)` returns
 // whether a reached entry changed, and `successors` may replace the edges.

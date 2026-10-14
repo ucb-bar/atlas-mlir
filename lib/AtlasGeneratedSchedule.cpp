@@ -18,10 +18,15 @@ bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
   if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
           VPUReduceOp, VLIOp, XLUTransposeOp, VLoadOp, VStoreOp, ALURegOp,
-          ALUImmOp, UpperOp>(op))
+          ALUImmOp, UpperOp, VPUPackOp>(op))
     return true;
+  // Helper provenance admits PACK scalar work structurally; the bounded
+  // loop proof and DMA memory checker still prove every actual VMEM access.
+  if (isa<ScalarStoreOp, BranchOp>(op))
+    return op->hasAttr("atlas.virtual_cfg_helper");
   if (auto load = dyn_cast<ScalarLoadOp>(op))
-    return load.getKind() == "seli";
+    return load.getKind() == "seli" ||
+           (load.getKind() == "lw" && op->hasAttr("atlas.virtual_cfg_helper"));
   return false;
 }
 

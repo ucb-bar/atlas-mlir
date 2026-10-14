@@ -62,11 +62,10 @@ bool isCompletion(Operation *op) {
   return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op);
 }
 
-// Boundary tiles and the pack move memory without a transfer handle, so they
-// run with no explicit transfer pending.
+// Boundary tiles issue hidden DMA and require an idle explicit-transfer set.
+// PACK uses separate scratch VMEM; generated checks prove that disjointness.
 bool isImplicitMemory(Operation *op) {
-  return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-             VirtualPackFP8Op>(op);
+  return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op);
 }
 
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
@@ -336,6 +335,10 @@ struct Cost {
   int busy;
   int latency;
   int frontend = 1;
+  // A DMA command issues before its engine becomes free. Its transfer starts
+  // after frontend staging, then queues behind earlier commands. Other units
+  // still use busy/latency relative to the operation's issue cycle.
+  bool queuedDMA = false;
 };
 
 // A machine operation's timing by npu_model's rules: cycles until its work
@@ -420,9 +423,12 @@ Cost costOf(Operation *op) {
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
     int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
-    return {Unit::Dma, cycles, cycles};
+    return {Unit::Dma, cycles, cycles, 1, true};
   }
   if (isa<VirtualDMAAwaitBF16Op, VirtualDMAAwaitFP8Op>(op)) {
+    // The launch's finished time is the queued transfer's completion. The
+    // SSA edge therefore delays this operation's start and stalls in-order
+    // issue at DMA.WAIT, before the VLOADs modeled below.
     // One VLOAD per register; each after the first waits for the load path.
     int behind =
         (registersOf(isa<VirtualDMAAwaitFP8Op>(op)) - 1) * vload.interval;
@@ -433,8 +439,8 @@ Cost costOf(Operation *op) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int staged = (registers - 1) * vstore.interval + vstore.latency;
-    int cycles = staged + timing::dmaTransferCycles(registers * kRegisterBytes);
-    return {Unit::Dma, cycles, cycles, staged + 1};
+    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
+    return {Unit::Dma, cycles, cycles, staged + 1, true};
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());
@@ -472,14 +478,18 @@ Cost costOf(Operation *op) {
     return {Unit::Xlu, t.interval, t.latency};
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM one word at a time in a
-    // scalar loop.
+    // Three rotating temporaries interleave loads and stores. The load path
+    // has a three-cycle issue interval, so it limits the copy throughput.
+    // Include each row's control and priming costs, plus scalar setup
+    // and the preloop drain (36 cycles, calibrated against the simulator).
     int words = registersOf(true) * kRegisterBytes / 4;
-    return blocking(Unit::Lsu,
-                    timingOf("vpack.bf16.fp8").latency + vstore.latency +
-                        words * (timingOf("lw").latency +
-                                 timingOf("sw").latency) +
-                        vload.latency);
+    int frontend = timingOf("vpack.bf16.fp8").latency + vstore.latency +
+                   words * std::max(2, timingOf("lw").interval) +
+                   32 * 8 + 36;
+    // PACK finishes issuing at the relayout VLOAD; its result becomes ready
+    // after that load completes.
+    return {Unit::Lsu, frontend + vload.interval, frontend + vload.latency,
+            frontend + 1};
   }
   // Scalar control, a DMA wait, or nothing at all.
   return {Unit::Scalar, 1, timingOf("addi").latency};
@@ -588,7 +598,9 @@ public:
       : g(g), costs(costs), finished(g.nodes.size(), 0) {}
 
   int start(unsigned node) const {
-    int cycle = std::max(frontend, unitFree[unit(node)]);
+    int cycle = costs[node].queuedDMA
+                    ? frontend
+                    : std::max(frontend, unitFree[unit(node)]);
     for (unsigned pred : g.preds[node])
       cycle = std::max(cycle, finished[pred]);
     return cycle;
@@ -601,8 +613,13 @@ public:
 
   void place(unsigned node) {
     int cycle = start(node);
-    finished[node] = cycle + costs[node].latency;
-    unitFree[unit(node)] = cycle + costs[node].busy;
+    const Cost &cost = costs[node];
+    int workStart = cost.queuedDMA
+                        ? std::max(cycle + cost.frontend - 1,
+                                   unitFree[unit(node)])
+                        : cycle;
+    finished[node] = workStart + cost.latency;
+    unitFree[unit(node)] = workStart + cost.busy;
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }

@@ -165,15 +165,18 @@ class DelayInsertionTest(unittest.TestCase):
             (dma_then_vload, "a delay cannot cover a DMA transfer"),
             (slow_slot, "delay-slot instruction must be single-cycle"),
             (dma_then_vload[:-1] + [slow_slot[0], nop(), ("dma_wait", "channel = 0 : i32")],
-             "DMA completion before a block boundary"),
+             ""),
             ([("jump", 'kind = "jalr", dst = 0 : i32, base = 1 : i32, offset = 0 : i32'), nop()],
              "register target"),
             ([("upper", 'kind = "auipc", dst = 1 : i32, immediate = 0 : i32')], "own instruction index"),
         ):
             with self.subTest(message=message):
                 result = run(OPT, program(ops), "--insert-atlas-delays")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(message, result.stderr)
+                if not message:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":

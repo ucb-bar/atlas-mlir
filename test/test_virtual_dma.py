@@ -284,7 +284,6 @@ class VirtualDMATest(unittest.TestCase):
             f'    %hidden_io, %hidden = "atlas.virtual_input_bf16"(%s0) {{index = 3 : i32}} : ({STATE}) -> ({STATE}, {tile("bf16")})',
             f'    %hidden_io, %hidden = "atlas.virtual_input_fp8"(%s0) {{index = 3 : i32}} : ({STATE}) -> ({STATE}, {tile("fp8")})',
             f'    %hidden_io = "atlas.virtual_output_bf16"(%s0, %seed) {{index = 1 : i32}} : ({STATE}, {tile("bf16")}) -> {STATE}',
-            f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} : ({tile("bf16")}) -> {tile("fp8")}',
         ):
             with self.subTest(operation=operation):
                 before = "s0" if "virtual_pack" in operation else "hidden_io"

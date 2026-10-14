@@ -40,6 +40,19 @@ class LowerAtlasProgramTest(unittest.TestCase):
             self.assertEqual(replay.returncode, 0, replay.stderr)
             self.assertEqual((done / "5-words.hex").read_bytes(), original)
 
+    def test_default_timing_schedules_the_machine_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            default = Path(temp) / "default"
+            explicit = Path(temp) / "explicit"
+            for output, options in ((default, ()),
+                                    (explicit, ("--timing", "schedule-atlas-stream"))):
+                result = drive(ATTENTION, output, *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--schedule-atlas-stream",
+                              (output / "commands.txt").read_text())
+            self.assertEqual((default / "5-words.hex").read_bytes(),
+                             (explicit / "5-words.hex").read_bytes())
+
     def test_missing_tool_is_logged_without_a_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             done = Path(temp) / "out"

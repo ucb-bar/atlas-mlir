@@ -14,8 +14,10 @@ python3 tools/lower_atlas_program.py \
   --output-dir out/attention
 ```
 
-Use a new or empty output directory. `--timing schedule-atlas-stream` selects
-physical scheduling instead of the default `insert-atlas-delays`.
+Use a new or empty output directory. The default timing pass is
+`schedule-atlas-stream`, which schedules physical instructions and inserts
+their required delays. `--timing insert-atlas-delays` preserves physical
+instruction order while inserting delays.
 `virtual_attention_tile_transposed_key.mlir` computes the key transpose on the
 XLU; `virtual_attention_tile.mlir` expects the transposed key in DRAM.
 `virtual_softmax_tile.mlir` exercises just the BF16 softmax path.

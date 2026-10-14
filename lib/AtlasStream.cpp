@@ -396,6 +396,138 @@ bool mlir::atlas::atlasBlockExits(const AtlasStream &s, size_t block) {
   return s.endsInBranch(block) && (!s.targetOf.lookup(s.ops[end - 2]) || (s.instrs[end - 2].op->opClass == OpClass::Branch && end == s.ops.size()));
 }
 
+FailureOr<AtlasForwardEntries<AtlasPendingDMA>>
+mlir::atlas::atlasPendingDMAEntries(const AtlasStream &s) {
+  AtlasForwardEntries<AtlasPendingDMA> result{
+      std::vector<AtlasPendingDMA>(s.starts.size()),
+      std::vector<bool>(s.starts.size(), false)};
+  if (s.starts.empty()) return result;
+  // Exact joins reject skipping or repeating an incomplete transfer. A
+  // source loop may launch and complete a transfer each iteration: cyclic
+  // CFG membership alone does not mean that interval crosses its backedge.
+  // The bounded helper-loop proof separately forbids all DMA commands in
+  // its counted loop, whose pending interval must survive every iteration.
+  result.reached[0] = true;
+  std::deque<size_t> work{0};
+  while (!work.empty()) {
+    size_t b = work.front(); work.pop_front();
+    AtlasPendingDMA pending = result.entries[b];
+    for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
+      Operation *op = s.ops[i];
+      if (auto dma = dyn_cast<DMAOp>(op)) {
+        if (pending[dma.getChannel()])
+          return dma.emitOpError("another DMA launch while its channel is pending on a CFG path");
+        pending[dma.getChannel()] = i;
+      } else if (auto wait = dyn_cast<DMAWaitOp>(op)) {
+        auto &launch = pending[wait.getChannel()];
+        if (!launch) {
+          // Hand-authored streams may explicitly wait for an idle channel.
+          // Generated streams require a captured launch on every path.
+          if (op->getParentOp()->hasAttr("atlas.generated_from_virtual"))
+            return wait.emitOpError("DMA.WAIT has no pending DMA transfer on a CFG path");
+          continue;
+        }
+        if (s.ops[*launch]->getAttr("atlas.virtual_dma_transfer") !=
+            op->getAttr("atlas.virtual_dma_transfer"))
+          return wait.emitOpError("DMA.WAIT must match its CFG pending transfer ID");
+        launch.reset();
+      }
+    }
+    if (atlasBlockExits(s, b))
+      for (auto launch : pending)
+        if (launch) return s.ops[*launch]->emitOpError("DMA may still be in flight when its CFG path exits; a delay cannot cover a DMA transfer");
+    for (size_t next : s.succs[b]) {
+      if (!result.reached[next]) {
+        result.reached[next] = true;
+        result.entries[next] = pending;
+        work.push_back(next);
+      } else if (result.entries[next] != pending) {
+        return s.ops[s.starts[next]]->emitOpError("CFG incoming edges disagree on pending DMA intervals");
+      }
+    }
+  }
+  return result;
+}
+
+FailureOr<AtlasScalarMemoryBounds>
+mlir::atlas::atlasHelperMemoryBounds(const AtlasStream &s) {
+  AtlasScalarMemoryBounds bounds;
+  for (size_t b = 0; b < s.starts.size(); ++b) {
+    if (!s.endsInBranch(b)) continue;
+    auto branch = dyn_cast<BranchOp>(s.ops[s.blockEnd(b) - 2]);
+    if (!branch || !branch->hasAttr("atlas.virtual_cfg_helper") ||
+        s.targetOf.lookup(branch) != s.ops[s.starts[b]]) continue;
+    RegValues regs = unknownRegs();
+    bool incoming = false;
+    for (size_t pred = 0; pred < s.starts.size(); ++pred) {
+      if (pred == b || !llvm::is_contained(s.succs[pred], b)) continue;
+      RegValues exit = s.entry[pred];
+      for (size_t pc = s.starts[pred]; pc < s.blockEnd(pred); ++pc)
+        applyScalar(s.instrs[pc], exit);
+      if (!incoming) { regs = exit; incoming = true; }
+      else mergeInto(regs, exit);
+    }
+    if (!incoming) return branch.emitOpError("helper memory proof requires a non-backedge entry");
+    bool finished = false;
+    for (unsigned iteration = 0; iteration < 256; ++iteration) {
+      std::optional<bool> again;
+      for (size_t pc = s.starts[b]; pc < s.blockEnd(b); ++pc) {
+        Operation *op = s.ops[pc];
+        if (isa<DMAOp, DMAWaitOp, JumpOp>(op) ||
+            (isa<BranchOp>(op) && op != branch.getOperation()))
+          return op->emitOpError("helper memory proof forbids DMA and nested redirects in the loop");
+        unsigned width = 0, base = 0;
+        int64_t offset = 0;
+        if (auto load = dyn_cast<ScalarLoadOp>(op); load && load.getKind() == "lw") {
+          width = 4; base = load.getBase(); offset = signedValue(load.getOffsetAttr());
+        } else if (auto store = dyn_cast<ScalarStoreOp>(op)) {
+          width = store.getKind() == "sw" ? 4 : store.getKind() == "sh" ? 2 : 1;
+          base = store.getBase(); offset = signedValue(store.getOffsetAttr());
+        }
+        if (width) {
+          if (!regs[base]) return op->emitOpError("cannot prove helper scalar VMEM address");
+          uint32_t address = *regs[base] + uint32_t(offset);
+          address &= ~(width - 1);
+          if (uint64_t(address) + width > kVmemBytes)
+            return op->emitOpError("helper scalar VMEM access exceeds capacity");
+          auto found = bounds.find(pc);
+          if (found == bounds.end()) bounds[pc] = {address, uint64_t(address) + width};
+          else {
+            found->second.first = std::min(found->second.first, uint64_t(address));
+            found->second.second = std::max(found->second.second, uint64_t(address) + width);
+          }
+        }
+        if (op == branch.getOperation()) {
+          auto lhs = regs[branch.getLhs()], rhs = regs[branch.getRhs()];
+          if (!lhs || !rhs) return branch.emitOpError("helper memory proof requires a decidable loop exit");
+          StringRef kind = branch.getKind();
+          again = kind == "beq" ? *lhs == *rhs : kind == "bne" ? *lhs != *rhs :
+                  kind == "blt" ? int32_t(*lhs) < int32_t(*rhs) :
+                  kind == "bge" ? int32_t(*lhs) >= int32_t(*rhs) :
+                  kind == "bltu" ? *lhs < *rhs : *lhs >= *rhs;
+        }
+        applyScalar(s.instrs[pc], regs);
+      }
+      if (again && !*again) { finished = true; break; }
+    }
+    if (!finished) return branch.emitOpError("helper memory proof loop does not exit within 256 iterations");
+  }
+  return bounds;
+}
+
+void mlir::atlas::applyAtlasProvenMemoryBounds(
+    Footprint &f, size_t pc, const AtlasScalarMemoryBounds &bounds) {
+  auto found = bounds.find(pc);
+  if (found == bounds.end()) return;
+  auto [begin, end] = found->second;
+  for (Access &a : f.accesses)
+    if (a.res == Res::Vmem) {
+      a.first = begin / 32;
+      a.count = (end + 31) / 32 - a.first;
+      a.anywhere = false;
+    }
+}
+
 LogicalResult mlir::atlas::checkAtlasStream(
     const AtlasStream &s, const TimingProvider &provider) {
   if (s.ops.empty())
@@ -409,13 +541,27 @@ LogicalResult mlir::atlas::checkAtlasStream(
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
+  auto entries = atlasPendingDMAEntries(s);
+  auto bounds = atlasHelperMemoryBounds(s);
+  if (failed(entries) || failed(bounds)) return failure();
+  llvm::DenseMap<size_t, Footprint> captured;
+  for (size_t b = 0; b < s.starts.size(); ++b) {
+    RegValues regs = s.entry[b];
+    for (size_t pc = s.starts[b]; pc < s.blockEnd(b); ++pc) {
+      if (isa<DMAOp>(s.ops[pc])) captured[pc] = provider.footprint(s.instrs[pc], regs);
+      applyScalar(s.instrs[pc], regs);
+    }
+  }
   for (size_t b = 0; b < s.starts.size(); ++b) {
     RegValues regs = s.entry[b];
     std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+    for (unsigned ch = 0; ch < 8; ++ch)
+      if (auto launch = entries->entries[b][ch]) pending[ch].push_back({*launch, captured[*launch]});
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
       Footprint f = provider.footprint(in, regs);
+      applyAtlasProvenMemoryBounds(f, i, *bounds);
       if (!f.error.empty())
         return s.ops[i]->emitOpError(f.error);
       if (f.doneAge < 0)
@@ -459,14 +605,6 @@ LogicalResult mlir::atlas::checkAtlasStream(
         pending[op.channel].push_back({i, f});
       applyScalar(in, regs);
     }
-    // Timing is checked one block at a time, so a transfer must complete in
-    // the block that starts it, as verifyAtlasTimedStream requires.
-    for (int ch = 0; ch < 8; ++ch)
-      if (!pending[ch].empty())
-        return s.ops[pending[ch].back().first]->emitOpError(
-            "may still be in flight when its block ends; timing requires DMA "
-            "completion before a block boundary, so add atlas.dma_wait in "
-            "this block");
   }
   return success();
 }
@@ -591,6 +729,10 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     const AtlasStream &s, const TimingProvider &provider) {
   if (failed(checkAtlasStream(s, provider)))
     return failure();
+  // The common CFG check preserves captured DMA identities across blocks.
+  // Fixed-latency work still drains at every boundary, so a successor needs
+  // only its own reservations. onWait conservatively extends those local
+  // reservations for an arbitrary DMA stall, including a cross-block wait.
   struct Issued { size_t index; Footprint footprint; int cycle; };
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
@@ -601,7 +743,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
     TimingReservations &table = *reservations.value;
     std::vector<Issued> issued;
-    std::array<Operation *, 8> pendingDMA{};
     int cycle = 0;
     int drained = 0;
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
@@ -642,10 +783,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         reservationError = table.onWait(in, cycle);
       if (!reservationError.empty())
         return s.ops[i]->emitOpError(reservationError);
-      if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
-        pendingDMA[in.op->channel] = s.ops[i];
-      else if (in.op->opClass == OpClass::DmaWait)
-        pendingDMA[in.op->channel] = nullptr;
       issued.push_back({i, f, cycle});
       drained = std::max(drained, cycle + f.doneAge + 1);
       applyScalar(in, regs);
@@ -656,9 +793,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
       cycle += gap.value;
     }
-    for (Operation *launch : pendingDMA)
-      if (launch)
-        return launch->emitOpError("timing verification requires DMA completion before a block boundary");
     if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
       int idle = 0;
       if (s.fallsThrough(block))

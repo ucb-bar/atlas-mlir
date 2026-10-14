@@ -555,7 +555,9 @@ private:
     // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
     // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
     // in the free upper half of input VMEM and interleave its two 512-byte
-    // halves through a bounded 32-row scalar loop.
+    // halves through the bounded 32-row scalar loop. Three temporaries let
+    // stores of earlier words cover load-use latency while overlapping scalar
+    // loads and stores.
     materializeScalar(fixed().outputBaseReg, fixed().packWord, loc);
     add("atlas.vstore", loc,
         {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
@@ -567,19 +569,31 @@ private:
     materializeScalar(fixed().packRowsReg, 32, loc);
     unsigned loop = newLabel();
     mark(loop);
-    for (unsigned word = 0; word < 4; ++word) {
-      for (unsigned half = 0; half < 2; ++half) {
-        unsigned source = fixed().packSourceRegs[half];
-        unsigned temp = fixed().packTemporaryRegs[half];
-        add("atlas.scalar_load", loc,
-            {{"kind", str("lw")}, {"dst", i32(temp)},
-             {"base", i32(source)}, {"offset", i32(4 * word)}});
-        add("atlas.scalar_store", loc,
-            {{"kind", str("sw")}, {"src", i32(temp)},
-             {"base", i32(fixed().packDestinationReg)},
-             {"offset", i32(4 * word + 16 * half)}});
-      }
+    constexpr unsigned wordsPerRow = 8;
+    auto copyLoad = [&](unsigned index) {
+      unsigned half = index / 4, word = index % 4;
+      add("atlas.scalar_load", loc,
+          {{"kind", str("lw")},
+           {"dst", i32(fixed().packTemporaryRegs[index % 3])},
+           {"base", i32(fixed().packSourceRegs[half])},
+           {"offset", i32(4 * word)}});
+    };
+    auto copyStore = [&](unsigned index) {
+      unsigned half = index / 4, word = index % 4;
+      add("atlas.scalar_store", loc,
+          {{"kind", str("sw")},
+           {"src", i32(fixed().packTemporaryRegs[index % 3])},
+           {"base", i32(fixed().packDestinationReg)},
+           {"offset", i32(16 * half + 4 * word)}});
+    };
+    copyLoad(0);
+    copyLoad(1);
+    for (unsigned index = 2; index < wordsPerRow; ++index) {
+      copyLoad(index);
+      copyStore(index - 2);
     }
+    copyStore(wordsPerRow - 2);
+    copyStore(wordsPerRow - 1);
     for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
                          fixed().packDestinationReg})
       add("atlas.alu_imm", loc,
