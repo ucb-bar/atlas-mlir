@@ -1,6 +1,6 @@
 # rtl_extract: timing from CIRCT HW IR
 
-`rtl_extract` executes HW IR control logic cycle by cycle to derive operation events, release ages and issue spacing. Module names, ports, instructions and stimulus belong in target specs. See the [provider overview](../../docs/rtl-timing/README.md) for compiler guarantees, assumptions, limits and artifact reproduction, and the [evidence map](../../docs/rtl-timing/verification.md) for the checks behind them.
+`rtl_extract` executes HW IR control logic cycle by cycle to derive operation events, release ages and issue spacing. Module names, ports, instructions and stimulus belong in specs. See the [provider overview](../../docs/rtl-timing/README.md) for compiler guarantees, assumptions, limits and artifact reproduction, and the [evidence map](../../docs/rtl-timing/verification.md) for the checks behind them.
 
 ## Build and run
 
@@ -17,7 +17,7 @@ Use debug HW IR with named values and retained on-chip memories; see [Reproduce]
 
 ```sh
 PYTHONPATH=tools python3 -m rtl_extract --hw-ir ee290.debug.hw.mlir \
-  --exporter build/rtl-extract/exporter/hw_ir_export --target atlas --engines xlu \
+  --exporter build/rtl-extract/exporter/hw_ir_export --engines xlu \
   --output build/rtl-extract/out/xlu.json
 ```
 
@@ -27,10 +27,10 @@ Omit `--engines` to extract every engine. Missing control dependencies or unsupp
 
 The [exporter](export/CMakeLists.txt) produces JSON; [ir.py](ir.py) loads requested modules and their instance closure. [control.py](control.py) slices control cones at registers and executes exact finite-width operations with unknown propagation. [derive.py](derive.py) resolves bundle ports, memory latency and command codes; [runner.py](runner.py) executes recipes; [summaries.py](summaries.py) reduces traces; [facts.py](facts.py) writes timing blocks.
 
-[spec.py](spec.py) validates YAML keys and loads specs through `read_spec(path)`. The six engine specs, engine pair specs and MXU engine chains remain YAML files. AtlasCore system specs, core pair enumerations and core chains are generated on load by [gen_core.py](targets/atlas/gen_core.py); their logical YAML names still work with the sweep CLI. To inspect one:
+[spec.py](spec.py) validates YAML keys and loads specs through `read_spec(path)`. The six engine specs, engine pair specs and MXU engine chains remain YAML files. AtlasCore system specs, core pair enumerations and core chains are generated on load by [gen_core.py](specs/gen_core.py); their logical YAML names still work with the sweep CLI. To inspect one:
 
 ```sh
-python3 tools/rtl_extract/targets/atlas/gen_core.py pairs/core_vpu.yaml \
+python3 tools/rtl_extract/specs/gen_core.py pairs/core_vpu.yaml \
   --output build/rtl-extract/specs/pairs/core_vpu.yaml
 ```
 
@@ -44,7 +44,7 @@ Events summarize first/last ages, count, spacing, row order and optional split s
 
 ## Single-circuit schema
 
-See [spec.py](spec.py) for validation and [vlsu.yaml](targets/atlas/vlsu.yaml) for an engine example. A run resets and flushes before age 0. Control-cone registers must then be known except declared `unreset` registers; control signals must be known every age, and fields whenever their event is valid.
+See [spec.py](spec.py) for validation and [vlsu.yaml](specs/vlsu.yaml) for an engine example. A run resets and flushes before age 0. Control-cone registers must then be known except declared `unreset` registers; control signals must be known every age, and fields whenever their event is valid.
 
 - Required: `engine`, `module`, `events`. `inputs` maps approved control inputs to idle integer values. `command: PREFIX` approves `PREFIX_valid` and `PREFIX_bits_*` input ports, defaulting them to zero.
 - `events.GROUP` uses `valid: SIGNAL` or `bundle: PREFIX`. Bundles derive valid, approve an input ready port and include fields supported by the control cone; explicit `fields: {NAME: SIGNAL}` overrides this expansion. `row` reports row contiguity; `split_by` separates streams.
@@ -61,7 +61,7 @@ See [spec.py](spec.py) for validation and [vlsu.yaml](targets/atlas/vlsu.yaml) f
 
 ## Coupled circuits
 
-`recipe: coupled` adds `partner: {module, inputs, cuts?, probes?, unreset?}` and `links: {INPUT: OUTPUT}`. Partner inputs name entries in the top-level `inputs`. [coupled.py](coupled.py) starts linked inputs unknown each cycle and evaluates both circuits until links settle before committing state. Unknown links stay unknown; links that do not settle fail. Every observed signal must belong to exactly one circuit. [scalar_lsu.yaml](targets/atlas/scalar_lsu.yaml) is the ScalarCore/LSU example.
+`recipe: coupled` adds `partner: {module, inputs, cuts?, probes?, unreset?}` and `links: {INPUT: OUTPUT}`. Partner inputs name entries in the top-level `inputs`. [coupled.py](coupled.py) starts linked inputs unknown each cycle and evaluates both circuits until links settle before committing state. Unknown links stay unknown; links that do not settle fail. Every observed signal must belong to exactly one circuit. [scalar_lsu.yaml](specs/scalar_lsu.yaml) is the ScalarCore/LSU example.
 
 ## Pair and chain sweeps
 
@@ -69,7 +69,7 @@ See [spec.py](spec.py) for validation and [vlsu.yaml](targets/atlas/vlsu.yaml) f
 
 A trial issues the second operation at the selected gap. Acceptance requires known control, drain, clear issue guards and the exact event multiset of both isolated runs, with the second shifted by the gap. The default guard is the second operation's `next_issue`. Output schema `rtl_extract.op_pairs.v1` retains per-gap results and rejection reasons, `min_gap`, `stable_gap` (the smallest gap whose remaining swept gaps all pass), assertion counts and, for disjoint event groups, shared-control reachability.
 
-[sequences.py](sequences.py) loads `sequences/NAME.yaml`: named chains with an `ops` cycle (`op`, optional `inputs`, `guards`, `as`), `lengths` and `gaps`. Position `i` issues at `i * gap`; the same acceptance rules apply to the full chain. `rtl_extract.op_sequences.v1` records include inputs and per-length gaps. `--jobs N` parallelizes isolated runs and trials. Both CLIs take `--hw-ir`, `--exporter`, `--target` and `--output`; use `--pairs` or `--sequences` to select names. Artifact commands and compiler gap-coverage semantics live in the [overview](../../docs/rtl-timing/README.md).
+[sequences.py](sequences.py) loads `sequences/NAME.yaml`: named chains with an `ops` cycle (`op`, optional `inputs`, `guards`, `as`), `lengths` and `gaps`. Position `i` issues at `i * gap`; the same acceptance rules apply to the full chain. `rtl_extract.op_sequences.v1` records include inputs and per-length gaps. `--jobs N` parallelizes isolated runs and trials. Both CLIs take `--hw-ir`, `--exporter` and `--output`; use `--pairs` or `--sequences` to select names. Artifact commands and compiler gap-coverage semantics live in the [overview](../../docs/rtl-timing/README.md).
 
 [pairfacts.py](pairfacts.py) joins assertion-checked sweeps with resolved timing blocks into `merlin.op_pairs.v1`. It pins timing and source documents by SHA-256, checks the hardware IR agrees, validates records against current specs and rejects duplicate `(first, second, relation)` records. Pair aliases and relations come from those specs; the [known limits](../../docs/rtl-timing/README.md#not-covered) explain the binding boundary. Pair facts retain the swept range and stable gap. Capacity is the maximum observed live count with a witness, using `next_issue_age` where declared or the last event inclusive otherwise; all blocks of an engine must use the same window convention. Per-gap detail stays in sweeps.
 

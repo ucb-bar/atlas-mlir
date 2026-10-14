@@ -6,7 +6,7 @@ import yaml
 
 from .control import require
 
-TARGETS = Path(__file__).resolve().parent / "targets"
+SPECS = Path(__file__).resolve().parent / "specs"
 REQUIRED = {"engine", "module", "events"}
 OPTIONAL = {"description", "recipe", "clock", "reset", "reset_cycles", "flush_cycles", "limit", "tail", "inputs",
             "busy", "probes", "cuts", "operations", "operation_table", "variants", "checks", "expect", "unreset",
@@ -144,19 +144,18 @@ def invariants(value, where):
     return value
 
 def read_spec(path):
-    """A target spec's raw content: its YAML file, or a generated AtlasCore enumeration of that name."""
+    """A spec's raw content: its YAML file, or a generated AtlasCore enumeration of that name."""
     path = Path(path).resolve()
-    if path.parent.parent == TARGETS / "atlas":
-        from .targets.atlas.gen_core import GENERATED, generate
+    if path.parent.parent == SPECS:
+        from .specs.gen_core import GENERATED, generate
         if f"{path.parent.name}/{path.name}" in GENERATED:
             return generate(f"{path.parent.name}/{path.name}")
     return yaml.safe_load(path.read_text())
 
-def spec_names(target, group=""):
-    names = {path.stem for path in (TARGETS / target / group).glob("*.yaml")}
-    if target == "atlas":
-        from .targets.atlas.gen_core import GENERATED
-        names.update(Path(name).stem for name in GENERATED if Path(name).parent.as_posix() == group)
+def spec_names(group=""):
+    names = {path.stem for path in (SPECS / group).glob("*.yaml")}
+    from .specs.gen_core import GENERATED
+    names.update(Path(name).stem for name in GENERATED if Path(name).parent.as_posix() == group)
     return sorted(names)
 
 def load_spec(path):
@@ -177,35 +176,34 @@ def variant(spec, name):
     merged["raw"] = spec["raw"]
     return merged
 
-def available_engines(target):
-    return spec_names(target, "")
+def available_engines():
+    return spec_names("")
 
-def available_systems(target):
-    return spec_names(target, "system")
+def available_systems():
+    return spec_names("system")
 
-def load_system(target, name):
-    require(name in available_systems(target), f"Unknown system spec for {target}: {name}")
-    spec = load_spec(TARGETS / target / "system" / f"{name}.yaml")
+def load_system(name):
+    require(name in available_systems(), f"Unknown system spec: {name}")
+    spec = load_spec(SPECS / "system" / f"{name}.yaml")
     require(spec["engine"] == name, "Spec engine names must match their file names")
     return spec
 
-def load_target(target, engines=None):
-    names = available_engines(target)
-    require(names, f"Unknown target: {target}")
+def load_specs(engines=None):
+    names = available_engines()
     selected = names if engines is None else list(engines)
-    require(set(selected) <= set(names), f"Unknown engines for {target}: {sorted(set(selected) - set(names))}")
-    specs = {name: load_spec(TARGETS / target / f"{name}.yaml") for name in selected}
+    require(set(selected) <= set(names), f"Unknown engines: {sorted(set(selected) - set(names))}")
+    specs = {name: load_spec(SPECS / f"{name}.yaml") for name in selected}
     require(all(s["engine"] == n for n, s in specs.items()), "Spec engine names must match their file names")
     return specs
 
-def load_sweeps(target, group, names, engine_specs, validate):
-    available = spec_names(target, group)
+def load_sweeps(group, names, engine_specs, validate):
+    available = spec_names(group)
     selected = available if names is None else list(names)
     require(set(selected) <= set(available), f"Unknown {group[:-1]} files: {sorted(set(selected) - set(available))}")
-    raws = {n: read_spec(TARGETS / target / group / f"{n}.yaml") for n in selected}
+    raws = {n: read_spec(SPECS / group / f"{n}.yaml") for n in selected}
     engine_specs = dict(engine_specs or {})
     missing = sorted({r["engine"] for r in raws.values()} - set(engine_specs))
-    engines = [m for m in missing if m in available_engines(target)]
-    engine_specs.update(load_target(target, engines) if engines else {})
-    engine_specs.update({m: load_system(target, m) for m in missing if m not in engines})
+    engines = [m for m in missing if m in available_engines()]
+    engine_specs.update(load_specs(engines) if engines else {})
+    engine_specs.update({m: load_system(m) for m in missing if m not in engines})
     return {n: (validate(r, engine_specs[r["engine"]], f"{group}/{n}.yaml"), engine_specs[r["engine"]]) for n, r in raws.items()}

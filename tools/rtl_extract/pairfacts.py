@@ -27,10 +27,9 @@ def stem(path, prefix, available, engine):
     return name if name in available else engine
 
 class Builder:
-    def __init__(self, op_timing, target):
+    def __init__(self, op_timing):
         self.blocks = {b["name"]: b for b in op_timing["op_timing"]}
         self.hw_ir = op_timing["hw_ir"]
-        self.target = target
         self.records, self.capacity, self.keys, self.windows = [], {}, set(), {}
 
     def block(self, name, where):
@@ -63,12 +62,12 @@ class Builder:
     def pair_sweep(self, path, document):
         require(document.get("schema") == pairs.SCHEMA, f"{path}: expected schema {pairs.SCHEMA}")
         self.same_ir(document, path)
-        available = pairs.available(self.target)
+        available = pairs.available()
         loaded = {}
         for record in document["op_pairs"]:
             name = stem(path, "pairs-", available, record["engine"])
             if name not in loaded:
-                loaded.update(pairs.load(self.target, [name]))
+                loaded.update(pairs.load([name]))
             raw, spec = loaded[name]
             pair = raw["pairs"].get(record["name"].split(".", 1)[1])
             require(pair is not None and (pair["first"], pair["second"]) == (record["first"], record["second"])
@@ -89,13 +88,13 @@ class Builder:
     def sequence_sweep(self, path, document):
         require(document.get("schema") == sequences.SCHEMA, f"{path}: expected schema {sequences.SCHEMA}")
         self.same_ir(document, path)
-        available = sequences.available(self.target)
+        available = sequences.available()
         loaded = {}
         for record in document["op_sequences"]:
             assertions(record)
             name = stem(path, "sequences-", available, record["engine"])
             if name not in loaded:
-                loaded.update(sequences.load(self.target, [name]))
+                loaded.update(sequences.load([name]))
             raw, spec = loaded[name]
             declared = raw["sequences"].get(record["sequence"])
             steps = sequences.chain(declared, record["length"]) if declared else None
@@ -111,8 +110,8 @@ class Builder:
                 "sources": sources, "op_pairs": self.records,
                 "capacity": [self.capacity[e] for e in sorted(self.capacity)]}
 
-def build(op_timing_path, pair_paths, sequence_paths=(), target="atlas"):
-    builder = Builder(json.loads(Path(op_timing_path).read_text()), target)
+def build(op_timing_path, pair_paths, sequence_paths=()):
+    builder = Builder(json.loads(Path(op_timing_path).read_text()))
     sources = []
     for paths, add in ((pair_paths, builder.pair_sweep), (sequence_paths, builder.sequence_sweep)):
         for path in paths:
@@ -134,10 +133,9 @@ def main(argv=None):
     parser.add_argument("--op-timing", type=Path, required=True, help="merlin.op_timing.v1 facts of the same hardware IR")
     parser.add_argument("--pairs", type=Path, nargs="+", required=True, help="rtl_extract.op_pairs.v1 sweep files")
     parser.add_argument("--sequences", type=Path, nargs="*", default=[], help="rtl_extract.op_sequences.v1 sweep files")
-    parser.add_argument("--target", default="atlas")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    document = build(args.op_timing, args.pairs, args.sequences, args.target)
+    document = build(args.op_timing, args.pairs, args.sequences)
     write(args.output, document)
     print(json.dumps({"op_pairs": len(document["op_pairs"]), "capacity": document["capacity"]}, indent=1))
     return 0

@@ -50,7 +50,7 @@ def records():
 @functools.lru_cache(maxsize=None)
 def pair_files():
     from rtl_extract import pairs
-    return pairs, pairs.load("atlas")
+    return pairs, pairs.load()
 
 def operation(engine, name, fields, base):
     if engine == "vlsu" and name in ("vload", "vstore"):
@@ -80,7 +80,7 @@ def core_operation(fields, base):
         setup = [*word_base(vmem, fields["dma_vmem_addr"]), *word_base(dram, fields["dma_dram_addr"]),
                  *word_base(size, fields["dma_size"])]
         return setup, transfer("store" if word >> 25 else "load", (word >> 12) & 7, vmem, dram, size)
-    words = pair_spec(ROOT / "tools/rtl_extract/targets/atlas/vpu.yaml")["decode"]["words"]
+    words = pair_spec(ROOT / "tools/rtl_extract/specs/vpu.yaml")["decode"]["words"]
     name = next((n for n, w in words.items() if w & 127 == opcode and
                  (w >> 25 == word >> 25 if opcode == 0x57 else (w >> 12) & 7 == (word >> 12) & 7)), None)
     if name in ("fp8unpack", "fp8pack"):

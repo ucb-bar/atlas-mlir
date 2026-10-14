@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from rtl_extract import derive, facts, pairs, runner
 from rtl_extract.ir import load_document
 from rtl_extract.runner import extract, modules
-from rtl_extract.spec import available_engines, load_system, load_target
+from rtl_extract.spec import available_engines, load_system, load_specs
 REPO = Path(__file__).resolve().parents[1]
 EMIT = os.environ.get("ATLAS_EMIT")
 MAP = yaml.safe_load((REPO / "test/rtl-timing-facts-map.yaml").read_text())
@@ -53,7 +53,7 @@ class EngineCase(unittest.TestCase):
     def setUpClass(cls):
         if cls.engine is None:
             raise unittest.SkipTest("engine base class")
-        cls.spec = load_target("atlas", [cls.engine])[cls.engine]
+        cls.spec = load_specs([cls.engine])[cls.engine]
         cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER)
         cls.records = cls.extract(cls.document)
     @classmethod
@@ -176,7 +176,7 @@ class VpuTest(EngineCase):
 class ResponseLatencyTest(unittest.TestCase):
 
     def test_every_memory_response_is_one_cycle(self):
-        specs = load_target("atlas")
+        specs = load_specs()
         document = load_document(HW_IR, sorted({m for s in specs.values() for m in modules(s)}), EXPORTER)
         for name, spec in specs.items():
             resolved, notes = derive.resolve(document, spec)
@@ -195,7 +195,7 @@ class SystemTest(unittest.TestCase):
             ("vpu", "add"): ("add", {"read0": "vpu_read0", "read1": "vpu_read1", "write0": "vpu_write0"})}
     @classmethod
     def setUpClass(cls):
-        cls.spec = load_system("atlas", "core")
+        cls.spec = load_system("core")
         cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER, assertions=True)
         cls.records = {r["name"].split(".", 1)[1]: r for r in extract(cls.document, cls.spec)}
 
@@ -205,7 +205,7 @@ class SystemTest(unittest.TestCase):
                 self.assertEqual(record["status"], "computed", record.get("reason"))
 
     def test_engine_events_match(self):
-        engines = load_target("atlas", sorted({e for e, _ in self.SAME}))
+        engines = load_specs(sorted({e for e, _ in self.SAME}))
         for (engine, op), (system_op, groups) in self.SAME.items():
             spec = {**engines[engine], "operations": {op: engines[engine]["operations"][op]}, "variants": {}, "checks": []}
             alone = extract(self.document, spec)[0]
@@ -233,7 +233,7 @@ DMA_RESPONSES = (("fast", {"accept": [1], "latency": 1}, 450),
 class HardwareDMATests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.raw, cls.spec = pairs.load("atlas", ["core_dma"])["core_dma"]
+        cls.raw, cls.spec = pairs.load(["core_dma"])["core_dma"]
         cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER, True)
         cls.concrete, _ = derive.resolve(cls.document, cls.spec, {})
         cls.circuit = runner.build_single(cls.document, cls.concrete)
@@ -337,7 +337,7 @@ class HardwareMXUBesideDMATests(unittest.TestCase):
     """pairs/core_dma_mxu.yaml: every MXU command on both units against a DMA load or store, in both orders."""
     @classmethod
     def setUpClass(cls):
-        cls.raw, cls.spec = pairs.load("atlas", ["core_dma_mxu"])["core_dma_mxu"]
+        cls.raw, cls.spec = pairs.load(["core_dma_mxu"])["core_dma_mxu"]
         cls.document = load_document(HW_IR, modules(cls.spec), EXPORTER, True)
 
     def test_pair_windows(self):
@@ -379,7 +379,7 @@ def load_facts():
             raise ValueError(f"{os.environ['ATLAS_OP_TIMING']}: expected schema {facts.SCHEMA}, found {document.get('schema')!r}")
         records = document["op_timing"]
     elif os.environ.get("ATLAS_HW_IR") and os.environ.get("ATLAS_HW_EXPORTER"):
-        specs = load_target("atlas", available_engines("atlas"))
+        specs = load_specs(available_engines())
         document = load_document(os.environ["ATLAS_HW_IR"], sorted({m for s in specs.values() for m in modules(s)}), os.environ["ATLAS_HW_EXPORTER"])
         records = [facts.block(r) for s in specs.values() for r in extract(document, s)]
     else:
@@ -546,7 +546,7 @@ def mlir(ops):
 class CompilerWordsTest(unittest.TestCase):
 
     def test_decode_words_match_compiler_encoding(self):
-        declared = {(e, n): w for e, s in load_target("atlas").items() for n, w in s.get("decode", {}).get("words", {}).items()}
+        declared = {(e, n): w for e, s in load_specs().items() for n, w in s.get("decode", {}).get("words", {}).items()}
         ops = compiler_ops()
         self.assertEqual(set(declared), set(ops))
         keys = sorted(ops)

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from rtl_extract import derive, facts, pairs, runner
 from rtl_extract.control import ControlCircuit, assertions, select
 from rtl_extract.runner import extract, modules
-from rtl_extract.spec import load_spec, load_target, variant
+from rtl_extract.spec import load_spec, load_specs, variant
 
 def operation(ident, kind, operands, typ="i1", **attrs):
     return {"id": ident, "kind": kind, "operands": operands, "results": [ident], "result_types": [typ], "attributes": attrs, "has_regions": False}
@@ -212,7 +212,7 @@ class SpecTests(unittest.TestCase):
 
     def test_unknown_engine_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown engines"):
-            load_target("atlas", ["not_an_engine"])
+            load_specs(["not_an_engine"])
 
 class RunnerTests(unittest.TestCase):
 

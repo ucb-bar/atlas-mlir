@@ -6,17 +6,16 @@ from pathlib import Path
 from . import facts
 from .ir import load_document
 from .runner import extract, modules
-from .spec import available_engines, load_target
+from .spec import load_specs
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hw-ir", type=Path, required=True, help="CIRCT HW dialect IR (.mlir)")
     parser.add_argument("--exporter", type=Path, required=True, help="hw_ir_export built from tools/rtl_extract/export")
-    parser.add_argument("--target", default="atlas")
-    parser.add_argument("--engines", nargs="+", help="default: every spec under targets/<target>/")
+    parser.add_argument("--engines", nargs="+", help="default: every spec under specs/")
     parser.add_argument("--output", type=Path, required=True, help="merlin.op_timing.v1 JSON")
     args = parser.parse_args(argv)
-    specs = load_target(args.target, args.engines or available_engines(args.target))
+    specs = load_specs(args.engines)
     document = load_document(args.hw_ir, sorted({m for s in specs.values() for m in modules(s)}), args.exporter)
     records = [r for spec in specs.values() for r in extract(document, spec)]
     facts.write(args.output, facts.document(args.hw_ir, records))

@@ -69,15 +69,15 @@ def guards(spec, pair):
     second = spec["operations"][pair["second"]]
     return [second["next_issue"]] if "next_issue" in second else []
 
-def available(target):
-    return spec_names(target, "pairs")
+def available():
+    return spec_names("pairs")
 
 def load_file(path, spec):
     path = Path(path)
     return validate(read_spec(path), spec, path.name)
 
-def load(target, names=None, specs=None):
-    return load_sweeps(target, "pairs", names, specs, validate)
+def load(names=None, specs=None):
+    return load_sweeps("pairs", names, specs, validate)
 
 def prepared(raw, spec):
     return {**spec, "invariants": raw["invariants"]} if "invariants" in raw else spec
@@ -255,14 +255,13 @@ def sweep_main(kind, load, extract, schema, argv=None):
     parser = argparse.ArgumentParser(description=f"Sweep declared operation {kind}.")
     parser.add_argument("--hw-ir", type=Path, required=True)
     parser.add_argument("--exporter", type=Path, required=True)
-    parser.add_argument("--target", default="atlas")
     parser.add_argument(f"--{kind}", nargs="+", help="spec names (default: all)")
     if kind == "sequences":
         parser.add_argument("--only", nargs="+", help="sequence names (default: all)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=1, help="worker processes")
     args = parser.parse_args(argv)
-    loaded = load(args.target, getattr(args, kind))
+    loaded = load(getattr(args, kind))
     only = getattr(args, "only", None)
     if kind == "sequences":
         unknown = set(only or ()) - {n for raw, _ in loaded.values() for n in raw[kind]}

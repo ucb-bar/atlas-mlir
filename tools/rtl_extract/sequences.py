@@ -45,15 +45,15 @@ def validate(raw, spec, where):
 def step(entry):
     return {"second": entry["op"], **({"guards": entry["guards"]} if "guards" in entry else {})}
 
-def available(target):
-    return spec_names(target, "sequences")
+def available():
+    return spec_names("sequences")
 
 def load_file(path, spec):
     path = Path(path)
     return validate(read_spec(path), spec, path.name)
 
-def load(target, names=None, specs=None):
-    return load_sweeps(target, "sequences", names, specs, validate)
+def load(names=None, specs=None):
+    return load_sweeps("sequences", names, specs, validate)
 
 def chain(sequence, length):
     return [sequence["ops"][i % len(sequence["ops"])] for i in range(length)]

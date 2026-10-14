@@ -9,7 +9,7 @@ import sys
 
 import yaml
 
-TARGET = Path(__file__).resolve().parent
+SPECS = Path(__file__).resolve().parent
 KINDS = {"push_weight": (0, False, True), "push_acc_fp8": (2, True, False),
     "push_acc_bf16": (4, True, False), "pop_acc_fp8": (6, True, False),
     "pop_acc_bf16": (8, True, False), "matmul": (10, True, True), "matmul_acc": (12, True, True),}
@@ -101,7 +101,7 @@ def mxu_pairs(facts, sweep=None, shared=False):
     return yaml.safe_dump(raw, sort_keys=False)
 
 
-def vpu_pairs(facts, sweep=None, spec_path=TARGET / "vpu.yaml"):
+def vpu_pairs(facts, sweep=None, spec_path=SPECS / "vpu.yaml"):
     words = yaml.safe_load(spec_path.read_text())["decode"]["words"]
     nia = {r["operation"]: r["next_issue_age"] for r in facts["op_timing"] if r["engine"] == "vpu"}
     if set(words) != set(nia) or len(words) != 29:

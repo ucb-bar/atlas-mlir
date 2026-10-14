@@ -74,7 +74,7 @@ Debug lowering preserves named values and inline memories. Hierarchy-output path
 Operation facts and compiler selection copy:
 
 ```sh
-"$VPY" -m rtl_extract --hw-ir "$H" --exporter "$E" --target atlas --output "$X/out/all.json"
+"$VPY" -m rtl_extract --hw-ir "$H" --exporter "$E" --output "$X/out/all.json"
 cp "$X/out/all.json" "$X/out/compiler-facts.json"
 ```
 
@@ -82,11 +82,11 @@ Pair and sequence sweeps:
 
 ```sh
 for name in vlsu vpu mxu0 mxu1 core core_vpu core_dma core_dma_mxu core_mxu core_mxu_cross core_mxu_units core_mxu_same core_mxu_shared; do
-  "$VPY" -m rtl_extract.pairs --hw-ir "$H" --exporter "$E" --target atlas \
+  "$VPY" -m rtl_extract.pairs --hw-ir "$H" --exporter "$E" \
     --pairs "$name" --jobs 32 --output "$X/out/pairs-$name.json"
 done
 for name in mxu0 mxu1 core_vpu core_mxu; do
-  "$VPY" -m rtl_extract.sequences --hw-ir "$H" --exporter "$E" --target atlas \
+  "$VPY" -m rtl_extract.sequences --hw-ir "$H" --exporter "$E" \
     --sequences "$name" --jobs 32 --output "$X/out/sequences-$name.json"
 done
 ```
@@ -95,20 +95,20 @@ Generated specs load through [spec.py](../../tools/rtl_extract/spec.py). Export 
 
 ```sh
 for name in pairs/core pairs/core_dma pairs/core_dma_mxu pairs/core_mxu pairs/core_mxu_cross pairs/core_mxu_units pairs/core_mxu_same pairs/core_mxu_shared pairs/core_vpu sequences/core_vpu sequences/core_mxu system/core system/core_dma; do
-  "$VPY" tools/rtl_extract/targets/atlas/gen_core.py "$name.yaml" --output "$X/specs/$name.yaml"
+  "$VPY" tools/rtl_extract/specs/gen_core.py "$name.yaml" --output "$X/specs/$name.yaml"
 done
 ```
 
 VPU, MXU and combined pair facts:
 
 ```sh
-"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
   --pairs "$X/out/pairs-core_vpu.json" --sequences "$X/out/sequences-core_vpu.json" \
   --output "$X/out/op-pairs-vpu.json"
-"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
   --pairs "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
   --output "$X/out/op-pairs-mxu.json"
-"$VPY" -m rtl_extract.pairfacts --target atlas --op-timing "$X/out/compiler-facts.json" \
+"$VPY" -m rtl_extract.pairfacts --op-timing "$X/out/compiler-facts.json" \
   --pairs "$X/out/pairs-core_vpu.json" "$X/out/pairs-core_mxu_same.json" "$X/out/pairs-core_mxu_shared.json" \
   --sequences "$X/out/sequences-core_vpu.json" --output "$X/out/op-pairs.json"
 ```

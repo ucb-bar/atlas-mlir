@@ -19,7 +19,7 @@ import test_rtl_extract_synthetic as synthetic
 from rtl_extract import derive, pairfacts, pairs, sequences
 from rtl_extract.ir import load_document
 from rtl_extract.runner import RECIPES, modules
-from rtl_extract.spec import TARGETS, ages
+from rtl_extract.spec import SPECS, ages
 from rtl_extract.spec import read_spec as resolved_spec
 HW_IR = os.environ.get("ATLAS_HW_IR")
 EXPORTER = os.environ.get("ATLAS_HW_EXPORTER")
@@ -89,8 +89,8 @@ class SyntheticPairTests(unittest.TestCase):
             with self.subTest(label), self.assertRaisesRegex(ValueError, message):
                 pairs.validate(copy.deepcopy(raw), spec, "toy.yaml")
 
-    def test_target_pair_files_validate(self):
-        loaded = pairs.load("atlas")
+    def test_pair_files_validate(self):
+        loaded = pairs.load()
         self.assertTrue(loaded)
         for name, (raw, spec) in loaded.items():
             self.assertEqual(set(raw.get("expect", {})), set(raw["pairs"]), name)
@@ -99,7 +99,7 @@ class SyntheticPairTests(unittest.TestCase):
 class HardwarePairTests(unittest.TestCase):
 
     def check(self, name, jobs=8):
-        raw, spec = pairs.load("atlas", [name])[name]
+        raw, spec = pairs.load([name])[name]
         document = load_document(HW_IR, modules(spec), EXPORTER, pairs.needs_assertions(raw, spec))
         window = copy.deepcopy(raw)
         for pair, expected in raw["expect"].items():
@@ -131,7 +131,7 @@ class HardwarePairTests(unittest.TestCase):
 
     def test_core_vpu_sample(self):
         """One window per VPU timing class, bound by issue-busy assertions and next_issue_age."""
-        raw, spec = pairs.load("atlas", ["core_vpu"])["core_vpu"]
+        raw, spec = pairs.load(["core_vpu"])["core_vpu"]
         document = load_document(HW_IR, modules(spec), EXPORTER, True)
         window = copy.deepcopy(raw)
         window["pairs"] = {n: window["pairs"][n] for n in self.CORE_VPU_SAMPLE}
@@ -294,8 +294,8 @@ class SyntheticSequenceTests(unittest.TestCase):
             with self.subTest(label), self.assertRaisesRegex(ValueError, message):
                 sequences.validate(copy.deepcopy(raw), spec, "toy.yaml")
 
-    def test_target_sequence_files_validate(self):
-        loaded = sequences.load("atlas")
+    def test_sequence_files_validate(self):
+        loaded = sequences.load()
         self.assertTrue(loaded)
         for name, (raw, spec) in loaded.items():
             for sequence, lengths in raw["expect"].items():
@@ -308,7 +308,7 @@ class HardwareSequenceTests(unittest.TestCase):
     JOBS = min(os.cpu_count() or 1, 8)
 
     def check(self, name):
-        raw, spec = sequences.load("atlas", [name])[name]
+        raw, spec = sequences.load([name])[name]
         document = load_document(HW_IR, modules(spec), EXPORTER, pairs.needs_assertions(raw, spec))
         self.assertTrue(raw["expect"])
         for sequence, lengths in raw["expect"].items():
@@ -323,7 +323,7 @@ class HardwareSequenceTests(unittest.TestCase):
 
     def test_core_mxu(self):
         """Check each MXU window through the core decoder with all assertions enabled."""
-        raw, spec = sequences.load("atlas", ["core_mxu"])["core_mxu"]
+        raw, spec = sequences.load(["core_mxu"])["core_mxu"]
         document = load_document(HW_IR, modules(spec), EXPORTER, True)
         window = copy.deepcopy(raw)
         window["sequences"] = {f"{name}_{length}": {**raw["sequences"][name], "lengths": length, "gaps": f"{max(1, stable - 1)}..{stable + 1}"}
@@ -345,7 +345,7 @@ class HardwareSequenceTests(unittest.TestCase):
 
     def test_mxu_assertions_bind_chains(self):
         """Accumulator write/load invariants reject gap 64, which event comparison alone accepts."""
-        raw, spec = sequences.load("atlas", ["mxu0"])["mxu0"]
+        raw, spec = sequences.load(["mxu0"])["mxu0"]
         document = load_document(HW_IR, modules(spec), EXPORTER, True)
         window = copy.deepcopy(raw)
         window["sequences"] = {"s": {**raw["sequences"]["push_acc_matmul_acc_same_acc"], "lengths": 3, "gaps": "63..64"}}
@@ -358,7 +358,7 @@ class HardwareSequenceTests(unittest.TestCase):
 
     def test_mxu1_boundary_block_is_the_chain_at_gap_32(self):
         """matmul_acc_at_32 matches the rejected boundary chain, including its missing accumulator writes."""
-        raw, spec = sequences.load("atlas", ["mxu1"])["mxu1"]
+        raw, spec = sequences.load(["mxu1"])["mxu1"]
         document = load_document(HW_IR, modules(spec), EXPORTER)
         concrete, _ = derive.resolve(document, spec, {})
         circuit = RECIPES[concrete["recipe"]][0](document, concrete)
@@ -535,8 +535,7 @@ class AtlasPairFactsTests(unittest.TestCase):
         self.assertEqual(sum(r["stable_gap"] == 1 for r in records), 402)
         self.assertTrue(all(r["assertions"]["checked"] == 177 and r["relation"] == {"mreg_banks": "disjoint"} for r in records))
         self.assertEqual([c["live"] for c in document["capacity"] if c["engine"] == "vpu"], [2])
-TARGET = TARGETS / "atlas"
-MODULE = importlib.util.spec_from_file_location("atlas_gen_core", TARGET / "gen_core.py")
+MODULE = importlib.util.spec_from_file_location("atlas_gen_core", SPECS / "gen_core.py")
 GENERATOR = importlib.util.module_from_spec(MODULE)
 MODULE.loader.exec_module(GENERATOR)
 SPEC_DIGESTS = {'pairs/core.yaml': 'caece41795d3b6ce93d0c37c6abdb7f16495b8229a356bb212f7b7de1c6fabea',
@@ -571,14 +570,14 @@ SPEC_ORDER_DIGESTS = {'pairs/core.yaml': '35ea71f0e7cb75783f6ff82bdd11ff14f1e3fc
 class GeneratorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.specs = {name: resolved_spec(TARGET / path) for name, path in (
+        cls.specs = {name: resolved_spec(SPECS / path) for name, path in (
             ("vpu", "pairs/core_vpu.yaml"), ("mxu-same", "pairs/core_mxu_same.yaml"),
             ("mxu-shared", "pairs/core_mxu_shared.yaml"), ("mxu-chains", "sequences/core_mxu.yaml"))}
         cls.generators = {"vpu": GENERATOR.vpu_pairs, "mxu-same": GENERATOR.mxu_pairs, "mxu-shared": partial(GENERATOR.mxu_pairs, shared=True), "mxu-chains": GENERATOR.mxu_chains}
 
     def facts(self, name):
         if name == "vpu":
-            words = yaml.safe_load((TARGET / "vpu.yaml").read_text())["decode"]["words"]
+            words = yaml.safe_load((SPECS / "vpu.yaml").read_text())["decode"]["words"]
             return {"op_timing": [{"engine": "vpu", "operation": op, "next_issue_age": self.specs[name]["expect"][f"{op}_{op}"]["next_issue_age"]} for op in words]}
         ages = {pair["as"]["first"]: int(pair["gaps"].split("..")[1]) - 6 for pair in self.specs["mxu-same"]["pairs"].values()}
         return {"op_timing": [{"name": op, "engine": op.split(".")[0], "events": {
@@ -603,7 +602,7 @@ class GeneratorTests(unittest.TestCase):
     def test_canonical_spec_digests(self):
         for path, expected in SPEC_DIGESTS.items():
             with self.subTest(path=path):
-                document = resolved_spec(TARGET / path)
+                document = resolved_spec(SPECS / path)
                 canonical = json.dumps(document, sort_keys=True).encode()
                 self.assertEqual(hashlib.sha256(canonical).hexdigest(), expected)
                 records = document.get("pairs", document.get("sequences", document.get("operations")))
@@ -611,7 +610,7 @@ class GeneratorTests(unittest.TestCase):
                 self.assertEqual(order, SPEC_ORDER_DIGESTS[path])
                 document.setdefault("invariants", {}).setdefault("exclude", []).append({"message": "mutated", "reason": "test"})
                 next(iter(records.values()))["mutated"] = True
-                canonical = json.dumps(resolved_spec(TARGET / path), sort_keys=True).encode()
+                canonical = json.dumps(resolved_spec(SPECS / path), sort_keys=True).encode()
                 self.assertEqual(hashlib.sha256(canonical).hexdigest(), expected)
 
     def test_generators_with_and_without_sweeps(self):
@@ -667,7 +666,7 @@ class GeneratorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "nested/output.yaml"
             for name in SPEC_DIGESTS:
-                expected = resolved_spec(TARGET / name)
+                expected = resolved_spec(SPECS / name)
                 self.assertEqual(GENERATOR.main([name, "--output", str(output)]), 0)
                 self.assertEqual(yaml.safe_load(output.read_text()), expected)
                 stream = io.StringIO()

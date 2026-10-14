@@ -150,7 +150,7 @@ class PairAdmissionTest(unittest.TestCase):
 
     def test_chain_sweeps(self):
         for engine in ("vpu", "mxu"):
-            raw = pair_spec(ROOT / f"tools/rtl_extract/targets/atlas/sequences/core_{engine}.yaml")
+            raw = pair_spec(ROOT / f"tools/rtl_extract/specs/sequences/core_{engine}.yaml")
             rows = [(name, length, gap) for name, lengths in raw["expect"].items() for length, gap in lengths.items()]
             def scan(row):
                 name, length, stable = row
