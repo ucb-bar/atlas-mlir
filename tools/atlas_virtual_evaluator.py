@@ -182,6 +182,7 @@ _SIGNATURES = {
     "vpu_reduce": (("bf16",), ("bf16",), ("kind",)),
     "vpu_splat": ((), ("bf16",), ("bits",)),
     "pack_fp8": (("bf16",), ("fp8",), ("scale_code",)),
+    "xlu_transpose": (("fp8",), ("fp8",), ()),
     "mxu_matmul": (("fp8", "fp8"), ("bf16",), ("unit",)),
     "mxu_load_weight": (("state", "fp8"), ("state", "mxu_weight"), ("unit",)),
     "mxu_load_acc_fp8": (("state", "fp8"), ("state", "mxu_acc"), ("unit",)),
@@ -361,17 +362,20 @@ def _numerics(unit: str):
 
 
 def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
-    """Evaluate a pure VPU/pack operation, including FP8 results without boundary I/O."""
+    """Evaluate a pure tile operation, including FP8 results without boundary I/O."""
     _require(isinstance(op, Operation), "expected a parsed virtual operation")
     _check_atlas_operation(op)
     name = operation_name(op)
-    if name not in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8"):
+    if name not in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8", "atlas.virtual_xlu_transpose"):
         raise UnsupportedVirtualMode(f"not a supported pure tile operation: {name}")
     _require(isinstance(operands, tuple) and all(isinstance(tile, Tile) for tile in operands), "tile operation operands must be a tuple of Tile values")
     formats = tuple(_type_kind(value.type)[0] for value in op.operands)
     _require(tuple(tile.format for tile in operands) == formats, f"{name}: expected tile operand formats {formats}")
     if name == "atlas.virtual_vpu_splat":
         return Tile("bf16", (_integer_attribute(op, "bits"),) * 1024)
+    elif name == "atlas.virtual_xlu_transpose":
+        src = operands[0]
+        return Tile("fp8", tuple(src.bits[col * 32 + row] for row in range(32) for col in range(32)))
     kind = _atlas_fields(op)["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
     if kind == "mov":
         return operands[0]
@@ -710,7 +714,7 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             elif name == "atlas.virtual_start":
                 _require(state is None, "virtual_start cannot execute twice")
                 state = values[op.results[0]] = object()
-            elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8"):
+            elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8", "atlas.virtual_xlu_transpose"):
                 values[op.results[0]] = evaluate_tile_operation(op, tuple(value(operand, Tile) for operand in op.operands))
             elif name == "atlas.virtual_scale_constant":
                 values[op.results[0]] = _integer_attribute(op, "code")

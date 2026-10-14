@@ -41,6 +41,9 @@ EXP2 = MOV.replace('kind = "mov"', 'kind = "exp2"')
 RECIP = MOV.replace('kind = "mov"', 'kind = "recip"')
 PACK = '%packed = "atlas.virtual_pack_fp8"(%a) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
 
+FP8_INPUTS = INPUTS.replace("input_bf16", "input_fp8").replace("virtual_bf16", "virtual_fp8")
+TRANSPOSE = '%transposed = "atlas.virtual_xlu_transpose"(%a) : (!atlas.virtual_fp8) -> !atlas.virtual_fp8'
+
 # FP32 nearest-even plus BF16 chopping, gradual underflow, signed zeros and canonical NaNs.
 ADD_CASES = (
     (0x3F80, 0x3BC0, 0x3F80), (0xBF80, 0xBBC0, 0xBF80),
@@ -112,6 +115,10 @@ def operation(source: str):
     return parse_program("module {" + INPUTS + source + "}").operations[-1]
 
 
+def transpose_operation():
+    return parse_program("module {" + FP8_INPUTS + TRANSPOSE + "}").operations[-1]
+
+
 def repeated(values, format="bf16") -> Tile:
     return Tile(format, tuple(values[i % len(values)] for i in range(1024)))
 
@@ -153,6 +160,55 @@ def row_reduction_fixture():
         for index, kind in enumerate(("row_sum", "row_min", "row_max"), 1)
     }
     return tile, expected
+
+
+class VirtualEvaluatorTransposeTest(unittest.TestCase):
+    def test_transpose_preserves_all_raw_fp8_codes_without_numerics(self) -> None:
+        rows = tuple(tuple((row * 37 + col * 11) & 255 for col in range(32)) for row in range(32))
+        source = Tile("fp8", tuple(bits for row in rows for bits in row))
+        self.assertEqual(set(source.bits), set(range(256)))
+        expected = Tile("fp8", tuple(bits for column in zip(*rows) for bits in column))
+        original = source.bits
+        with patch("atlas_virtual_evaluator._numerics", side_effect=AssertionError("transpose needs no numerics")):
+            transposed = evaluate_tile_operation(transpose_operation(), (source,))
+            self.assertEqual(transposed, expected)
+            self.assertEqual(evaluate_tile_operation(transpose_operation(), (transposed,)), source)
+        self.assertEqual(source.bits, original)
+        self.assertIsNot(transposed, source)
+
+    def test_transpose_moves_asymmetric_special_bytes_across_halves_and_edges(self) -> None:
+        bits = [0x38] * 1024
+        placements = ((0, 31, 0x80), (31, 0, 0x00), (15, 16, 0x7F), (16, 15, 0xFF),
+                      (1, 30, 0x01), (30, 1, 0x81), (7, 23, 0x7E), (23, 7, 0xFE))
+        for row, col, value in placements:
+            bits[row * 32 + col] = value
+        result = evaluate_tile_operation(transpose_operation(), (Tile("fp8", tuple(bits)),))
+        targets = ((31, 0, 0x80), (0, 31, 0x00), (16, 15, 0x7F), (15, 16, 0xFF),
+                   (30, 1, 0x01), (1, 30, 0x81), (23, 7, 0x7E), (7, 23, 0xFE))
+        for row, col, value in targets:
+            with self.subTest(row=row, col=col):
+                self.assertEqual(result.bits[row * 32 + col], value)
+        self.assertEqual(sum(value != 0x38 for value in result.bits), len(targets))
+
+    def test_transpose_helper_checks_runtime_operands_and_revalidates_operation(self) -> None:
+        fp8, bf16 = repeated((0x7F,), "fp8"), repeated((0,))
+        for operands in ((), (fp8, fp8), (bf16,), [fp8], (None,), None):
+            with self.subTest(operands=operands), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(transpose_operation(), operands)
+        for mutation in ("kind", "property", "operands", "input_type", "result_type"):
+            op = transpose_operation()
+            if mutation == "kind":
+                op.attributes["kind"] = builtin.StringAttr("mov")
+            elif mutation == "property":
+                op.properties["invented"] = builtin.IntegerAttr(0, builtin.i32)
+            elif mutation == "operands":
+                op.operands = ()
+            elif mutation == "input_type":
+                op.operands[0]._type = operation(MOV).operands[0].type
+            else:
+                op.results[0]._type = operation(MOV).results[0].type
+            with self.subTest(mutation=mutation), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(op, (fp8,))
 
 
 class VirtualEvaluatorReductionTest(unittest.TestCase):

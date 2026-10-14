@@ -63,9 +63,9 @@ other owner in the work split; model/RTL execution and hardware validation
 belong to Nicolas.
 
 The Python virtual evaluator supports `mov`, `relu`, `add`, `sub`, `mul`,
-`exp2`, `recip`, BF16 row sum/min/max and raw BF16 splats. Softmax and the
-pre-transposed-key attention fixture have bounded numerical and scheduling
-regressions; the transposed-key fixture still needs evaluator FP8 transpose.
+`exp2`, `recip`, BF16 row sum/min/max, raw BF16 splats and raw FP8 transpose.
+Softmax and both attention fixtures have bounded numerical, guarded-memory
+and scheduling regressions, including an asymmetric key-orientation check.
 Compilation and contract tests do not replace numerical execution.
 Two-input comparisons, surrounding-memory checks, and repeated kernel
 invocation remain integration acceptance criteria.

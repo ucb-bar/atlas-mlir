@@ -138,7 +138,7 @@ finite, exactly representable inputs; it is not a full-domain FP8/BF16 oracle.
 
 ## Admitted forms and numerical sources
 
-The evaluator executes these 22 `atlas.virtual_*` forms plus `arith.constant/addi/cmpi` (all ten predicates), `cf.br/cond_br` and `func.return`. `S/B/F/E` are state/BF16/FP8/scale and `W<u>/A<u>` weight/accumulator handles on unit `u = 0..1`; final letters name audit rows.
+The evaluator executes these 23 `atlas.virtual_*` forms plus `arith.constant/addi/cmpi` (all ten predicates), `cf.br/cond_br` and `func.return`. `S/B/F/E` are state/BF16/FP8/scale and `W<u>/A<u>` weight/accumulator handles on unit `u = 0..1`; final letters name audit rows.
 
 | Suffix | Operands → results | Admission / meaning |
 | --- | --- | --- |
@@ -150,6 +150,7 @@ The evaluator executes these 22 `atlas.virtual_*` forms plus `arith.constant/add
 | `vpu_reduce` | `B → B` | `kind`: `row_sum`, `row_min`, `row_max`; each result fills its row; V3 |
 | `vpu_splat` | `() → B` | Raw BF16 `bits : i32` in `0..65535`, copied into all 1,024 elements; V4 |
 | `pack_fp8` | `B → F` | `scale_code = 127` (`RtlNumerics.to_fp8`); P |
+| `xlu_transpose` | `F → F` | Swap rows/columns of raw FP8 bytes; X |
 | `scale_constant` | `() → E` | Raw `code = 0..255` |
 | `mxu_matmul` | `F, F → B` | `unit = 0..1`; reset contraction; M |
 | `dma_load_fp8` / `dma_load_bf16` | `S, i32, i32 → S, F/B` | Length 1,024 / 2,048; read DRAM in state order; D |
@@ -172,6 +173,7 @@ In required mode on 2026-10-09 and again on 2026-10-10 at the branch head, every
 | V3 | Row broadcast, tree/rounding and exceptional-value literals | None added | Emitted-program comparison |
 | V4 | Raw BF16 splats, including signed zero and NaNs | None added | Emitted `vli.all` comparison |
 | V5 | Bounded arithmetic literals, captured fractional unary outputs, and guarded source/scheduled softmax/attention cases | None added | Emitted-program comparison; broader numerical qualification |
+| X | All 256 byte encodings, fixed coordinates, guarded DMA, asymmetric attention and scheduled variants | None added | Emitted-program XLU/transport comparison |
 | P | Scale-127 converter: ties, carry, saturation, underflow, specials, logical order; [E8M0 pack](vpu-e8m0-pack-observation.md) | `mxu{0,1}_legacy_pack` and the physical converter/transport probe | PACK→MXU chains beyond `legacy_pack` |
 | M | Per-MAC MXU0 and anchor MXU1 adapters: orientation, rounding, reset/continuation, seeds, handles; [discriminator](mxu-arithmetic-discriminator-observation.md) | `mxu{0,1}_{continuation,seed_bf16,seed_fp8}`, `dma_mxu_*`, `two_chains_*` | Exceptional BF16 accumulator encodings on the core |
 | R | MXU converter, special scale codes, reserved rounded ±480; [MXU1 continuation](mxu1-continuation-observation.md) | None (no row reads out FP8) | Selected-core comparison; VPU pack divides by scale while MXU pop multiplies |

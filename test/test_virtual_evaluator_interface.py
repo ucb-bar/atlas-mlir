@@ -13,7 +13,7 @@ from atlas_virtual_evaluator import (  # noqa: E402
     EvaluationResult, MemoryRegion, RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, compare_results, evaluate,
     operation_name, parse_program,
 )
-from test_virtual_evaluator_arithmetic import INPUTS, relu  # noqa: E402
+from test_virtual_evaluator_arithmetic import FP8_INPUTS, INPUTS, TRANSPOSE, relu  # noqa: E402
 
 
 def example(name: str) -> str:
@@ -111,6 +111,26 @@ class VirtualParserInterfaceTest(unittest.TestCase):
                 parse_program(text)
         with self.assertRaisesRegex(UnsupportedVirtualMode, "supported kinds"):
             parse_program(source(reduce_op=reduce.replace("row_sum", "col_sum")))
+
+    def test_transpose_has_one_fp8_operand_and_result_and_no_fields(self) -> None:
+        def source(op=TRANSPOSE, inputs=FP8_INPUTS):
+            return "module {" + inputs + op + "}"
+
+        for suffix in ("", " {}", " <{}>"):
+            text = TRANSPOSE.replace(" : (", suffix + " : (")
+            with self.subTest(suffix=suffix):
+                self.assertEqual(operation_name(parse_program(source(text)).operations[-1]), "atlas.virtual_xlu_transpose")
+        malformed = (
+            (source(inputs=INPUTS, op=TRANSPOSE.replace("(!atlas.virtual_fp8)", "(!atlas.virtual_bf16)")), "signature"),
+            (source(TRANSPOSE.replace("-> !atlas.virtual_fp8", "-> !atlas.virtual_bf16")), "signature"),
+            (source(TRANSPOSE.replace("(%a)", "()").replace("(!atlas.virtual_fp8)", "()")), "signature"),
+            (source(TRANSPOSE.replace("(%a)", "(%a, %b)").replace("(!atlas.virtual_fp8)", "(!atlas.virtual_fp8, !atlas.virtual_fp8)")), "signature"),
+            (source(TRANSPOSE.replace(" : (", ' {kind = "mov"} : (')), "expected attributes"),
+            (source(TRANSPOSE.replace(" : (", ' <{invented = 0 : i32}> : (')), "expected attributes"),
+        )
+        for text, message in malformed:
+            with self.subTest(source=text), self.assertRaisesRegex(VirtualInterfaceError, message):
+                parse_program(text)
 
     def test_attention_kinds_admit_both_field_forms_and_reject_malformed_fields(self) -> None:
         for unary in ("exp2", "recip"):

@@ -50,6 +50,20 @@ def attention_cases():
         yield name, RuntimeInputs(memory=(initial,)), EvaluationResult({}, (expected,))
 
 
+def key_orientation_inputs():
+    identity = bytes(diagonal("fp8", 0x38).bits)
+    key = bytearray(1024)
+    for row, col, bits in ((2, 19, 0x38), (11, 3, 0x40), (25, 7, 0x48)):
+        key[row * 32 + col] = bits
+    rows = tuple(key[start:start + 32] for start in range(0, 1024, 32))
+    stored_key = bytes(bits for column in zip(*rows) for bits in column)
+    inputs = []
+    for layout in (stored_key, bytes(key)):
+        initial, _ = guarded_memory(identity + layout + identity, (0,) * 1024, 0xC00)
+        inputs.append(RuntimeInputs(memory=(initial,)))
+    return tuple(inputs)
+
+
 class VirtualEvaluatorAttentionTest(unittest.TestCase):
     def test_softmax_matches_independent_bits_and_preserves_memory(self) -> None:
         program = parse_program((EXAMPLES / "virtual_softmax_tile.mlir").read_text())
@@ -59,11 +73,34 @@ class VirtualEvaluatorAttentionTest(unittest.TestCase):
                 compare_results(expected, evaluate(program, inputs))
 
     def test_attention_matches_independent_bits_and_preserves_memory(self) -> None:
-        program = parse_program((EXAMPLES / "virtual_attention_tile.mlir").read_text())
-        cases = tuple(attention_cases())
-        for name, inputs, expected in (*cases, cases[0]):
-            with self.subTest(case=name):
-                compare_results(expected, evaluate(program, inputs))
+        for fixture in ("virtual_attention_tile.mlir", "virtual_attention_tile_transposed_key.mlir"):
+            program = parse_program((EXAMPLES / fixture).read_text())
+            cases = tuple(attention_cases())
+            for name, inputs, expected in (*cases, cases[0]):
+                with self.subTest(fixture=fixture, case=name):
+                    compare_results(expected, evaluate(program, inputs))
+
+    def attention_output(self, inputs: RuntimeInputs, result: EvaluationResult) -> bytes:
+        self.assertEqual(dict(result.outputs), {})
+        self.assertEqual(len(result.memory), 1)
+        before, after = inputs.memory[0], result.memory[0]
+        self.assertEqual(after.address, before.address)
+        self.assertEqual(len(after.data), len(before.data))
+        start = BASE + 0xC00 - before.address
+        end = start + 2048
+        self.assertEqual(after.data[:start], before.data[:start])
+        self.assertEqual(after.data[end:], before.data[end:])
+        return after.data[start:end]
+
+    def test_transposed_key_matches_prepared_key_and_changes_orientation(self) -> None:
+        ordinary = parse_program((EXAMPLES / "virtual_attention_tile.mlir").read_text())
+        transposed = parse_program((EXAMPLES / "virtual_attention_tile_transposed_key.mlir").read_text())
+        prepared_inputs, logical_inputs = key_orientation_inputs()
+        expected = self.attention_output(prepared_inputs, evaluate(ordinary, prepared_inputs))
+        actual = self.attention_output(logical_inputs, evaluate(transposed, logical_inputs))
+        wrong = self.attention_output(logical_inputs, evaluate(ordinary, logical_inputs))
+        self.assertEqual(actual, expected)
+        self.assertNotEqual(actual, wrong)
 
     def test_mlp_bias_baseline_still_produces_three(self) -> None:
         program = parse_program((EXAMPLES / "virtual_fp8_two_layer_mlp_bias.mlir").read_text())
@@ -77,7 +114,8 @@ class VirtualEvaluatorAttentionTest(unittest.TestCase):
         if not tool.is_file():
             self.skipTest("set ATLAS_OOT_BIN_DIR to the matching atlas-opt build")
         for fixture, cases in (("virtual_softmax_tile.mlir", softmax_cases),
-                               ("virtual_attention_tile.mlir", attention_cases)):
+                               ("virtual_attention_tile.mlir", attention_cases),
+                               ("virtual_attention_tile_transposed_key.mlir", attention_cases)):
             source = (EXAMPLES / fixture).read_text()
             original = parse_program(source)
             for seed in (None, 0, 5):
@@ -90,6 +128,12 @@ class VirtualEvaluatorAttentionTest(unittest.TestCase):
                     with self.subTest(fixture=fixture, seed=seed, case=name):
                         reference, actual = evaluate(original, inputs), evaluate(scheduled, inputs)
                         compare_results(expected, actual)
+                        compare_results(reference, actual)
+                if fixture == "virtual_attention_tile_transposed_key.mlir":
+                    _, inputs = key_orientation_inputs()
+                    with self.subTest(fixture=fixture, seed=seed, case="key_orientation"):
+                        reference, actual = evaluate(original, inputs), evaluate(scheduled, inputs)
+                        self.attention_output(inputs, actual)
                         compare_results(reference, actual)
 
 
