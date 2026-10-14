@@ -14,6 +14,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -69,6 +70,103 @@ def repeated(values, format="bf16") -> Tile:
 
 def relu(tile: Tile) -> Tile:
     return Tile("bf16", tuple(0 if bits & 0x8000 else bits for bits in tile.bits))
+
+
+SPLAT = '%splat = "atlas.virtual_vpu_splat"() {bits = 0 : i32} : () -> !atlas.virtual_bf16'
+REDUCE = '%reduced = "atlas.virtual_vpu_reduce"(%a) {kind = "row_sum"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
+# Each row is padded with +0. Expected sum/min/max are independent raw literals.
+REDUCTION_CASES = (
+    ((0x3F80,) * 32, 0x4200, 0x3F80, 0x3F80),
+    ((0x4000,) * 32, 0x4280, 0x4000, 0x4000),
+    # Final BF16 rounding retains two half-ULP terms; BF16 intermediate rounding loses them.
+    ((0x3F80, 0x3B80, 0x3B80), 0x3F81, 0x0000, 0x3F80),
+    # Halfway sums select the even BF16 mantissa, rounding down or up as needed.
+    ((0x3F80, 0x3B80), 0x3F80, 0x0000, 0x3F80),
+    ((0x3F81, 0x3B80), 0x3F82, 0x0000, 0x3F81),
+    # Final BF16 RNE rounds up here; BF16 bit chopping would retain 0x3F80.
+    ((0x3F80,) + (0,) * 15 + (0x3BC0,), 0x3F81, 0x0000, 0x3F80),
+    ((0xBF80, 0xC000, 0x4040), 0x0000, 0xC000, 0x4040),
+    # Adjacent FP32 pairs lose both ones: tree=0, sequential=1, exact=2.
+    ((0x4C00, 0x3F80, 0xCC00, 0x3F80), 0x0000, 0xCC00, 0x4C00),
+    ((0x0000, 0x8000), 0x0000, 0x8000, 0x0000),
+    ((0x8000,) * 32, 0x8000, 0x8000, 0x8000),
+    ((0x7FC1, 0x3F80), 0x7FC0, 0x0000, 0x7FC1),
+    ((0xFFC1, 0xBF80), 0x7FC0, 0xFFC1, 0x0000),
+    ((0x7F80, 0xFF80), 0x7FC0, 0xFF80, 0x7F80),
+    ((0x0001, 0x0001), 0x0002, 0x0000, 0x0001),
+)
+
+
+def row_reduction_fixture():
+    rows = tuple(REDUCTION_CASES[row % len(REDUCTION_CASES)] for row in range(32))
+    tile = Tile("bf16", tuple(bits for values, *_ in rows for bits in values + (0,) * (32 - len(values))))
+    expected = {
+        kind: Tile("bf16", tuple(case[index] for case in rows for _ in range(32)))
+        for index, kind in enumerate(("row_sum", "row_min", "row_max"), 1)
+    }
+    return tile, expected
+
+
+class VirtualEvaluatorReductionTest(unittest.TestCase):
+    def test_splat_preserves_raw_bf16_encodings(self) -> None:
+        for bits in (0x0000, 0x8000, 0x0001, 0x3F80, 0x7F80, 0x7F81, 0x7FC1, 0xFFFF):
+            source = SPLAT.replace("bits = 0", f"bits = {bits}")
+            with self.subTest(bits=hex(bits)), patch("atlas_virtual_evaluator._numerics", side_effect=AssertionError("splat needs no numerics")):
+                self.assertEqual(evaluate_tile_operation(operation(source), ()), repeated((bits,)))
+
+    def test_reductions_round_and_broadcast_rows(self) -> None:
+        tile, expected = row_reduction_fixture()
+        for kind, wanted in expected.items():
+            source = REDUCE.replace('"row_sum"', f'"{kind}"')
+            with self.subTest(kind=kind):
+                self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), wanted)
+
+    def test_reductions_preserve_all_32_row_identities(self) -> None:
+        # Rows contain 1, 2, 4, ...; each 0x80 step increments the BF16 exponent.
+        codes = tuple(0x3F80 + (row << 7) for row in range(32))
+        tile = Tile("bf16", tuple(code for code in codes for _ in range(32)))
+        # Summing 32 equal powers of two increments the exponent by five.
+        for kind, offset in (("row_sum", 0x0280), ("row_min", 0), ("row_max", 0)):
+            wanted = Tile("bf16", tuple(code + offset for code in codes for _ in range(32)))
+            with self.subTest(kind=kind):
+                self.assertEqual(evaluate_tile_operation(operation(REDUCE.replace("row_sum", kind)), (tile,)), wanted)
+
+    def test_full_evaluation_publishes_reductions_and_raw_splats(self) -> None:
+        tile, reductions = row_reduction_fixture()
+        operations = [
+            REDUCE.replace("%reduced", f"%{kind}").replace('"row_sum"', f'"{kind}"')
+            for kind in reductions
+        ]
+        values = list(reductions.items())
+        for name, bits in (("negative_zero", 0x8000), ("nan_payload", 0x7FC1)):
+            operations.append(SPLAT.replace("%splat", f"%{name}").replace("bits = 0", f"bits = {bits}"))
+            values.append((name, repeated((bits,))))
+        states = ("s2",) + tuple(f"out{index}" for index in range(len(values)))
+        operations.extend(
+            output(states[index], states[index + 1], name, index)
+            for index, (name, _) in enumerate(values)
+        )
+        for canonical in (False, True):
+            body = operations if not canonical else [text.replace(" {", " <{").replace("} :", "}> :") for text in operations]
+            source = "module {" + INPUTS + "\n".join(body) + "\n}"
+            with self.subTest(canonical=canonical):
+                result = evaluate(parse_program(source), RuntimeInputs({0: tile, 1: repeated((0,))}))
+                self.assertEqual(dict(result.outputs), {index: wanted for index, (_, wanted) in enumerate(values)})
+
+    def test_helper_checks_operands_and_revalidates_fields(self) -> None:
+        tile, fp8 = repeated((0,)), repeated((0,), "fp8")
+        for source, operands in ((SPLAT, (tile,)), (SPLAT, []), (REDUCE, ()), (REDUCE, (tile, tile)), (REDUCE, (fp8,))):
+            with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(operation(source), operands)
+        for bits in (-1, 65536):
+            op = operation(SPLAT)
+            op.attributes["bits"] = builtin.IntegerAttr(bits, builtin.i32)
+            with self.subTest(bits=bits), self.assertRaisesRegex(VirtualInterfaceError, "bits must be in"):
+                evaluate_tile_operation(op, ())
+        op = operation(REDUCE)
+        op.attributes["kind"] = builtin.StringAttr("col_sum")
+        with self.assertRaises(UnsupportedVirtualMode):
+            evaluate_tile_operation(op, (tile,))
 
 
 class VirtualEvaluatorVpuTest(unittest.TestCase):
@@ -135,36 +233,40 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
         with self.assertRaises(VirtualInterfaceError):
             evaluate_tile_operation(None, (tile,))
 
-    def run_isolated(self, script: str) -> None:
+    def run_isolated(self, script: str, source: str = ADD) -> None:
         prelude = f'''
             import sys
             sys.path.insert(0, "tools")
             from atlas_virtual_evaluator import Tile, UnsupportedVirtualMode, evaluate_tile_operation, parse_program
-            op = parse_program({"module {" + INPUTS + ADD + "}"!r}).operations[-1]
+            op = parse_program({"module {" + INPUTS + source + "}"!r}).operations[-1]
             tile = Tile("bf16", (0x3f80,) * 1024)
+            operands = (tile,) * len(op.operands)
         '''
         child = subprocess.run([sys.executable, "-c", textwrap.dedent(prelude) + textwrap.dedent(script)], cwd=ROOT, capture_output=True, text=True, timeout=60)
         if child.returncode == 77:
             self.skipTest("host cannot select the required floating-point mode")
         self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
 
-    def test_add_rejects_host_flush_to_zero_in_an_isolated_process(self) -> None:
-        self.run_isolated('''
+    def test_fp32_operations_reject_host_flush_to_zero_in_an_isolated_process(self) -> None:
+        script = '''
             import torch
             if not torch.set_flush_denormal(True):
                 sys.exit(77)
             try:
-                evaluate_tile_operation(op, (tile, tile))
+                evaluate_tile_operation(op, operands)
             except UnsupportedVirtualMode:
                 sys.exit(0)
-            raise AssertionError("normal add accepted a host that flushes subnormals")
-        ''')
+            raise AssertionError("operation accepted a host that flushes subnormals")
+        '''
+        for source in (ADD, REDUCE):
+            with self.subTest(source=source):
+                self.run_isolated(script, source)
 
-    def test_add_rejects_directed_rounding_in_an_isolated_process(self) -> None:
+    def test_fp32_operations_reject_directed_rounding_in_an_isolated_process(self) -> None:
         if platform.machine() not in ("x86_64", "AMD64", "i386", "i686") or platform.libc_ver()[0] != "glibc":
             self.skipTest("requires the verified x86 glibc fenv ABI")
         # FE_DOWNWARD/UPWARD/TOWARDZERO verified in /usr/include/bits/fenv.h.
-        self.run_isolated('''
+        script = '''
             import ctypes
             try:
                 setround = ctypes.CDLL(None).fesetround
@@ -172,16 +274,19 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                 sys.exit(77)
             setround.argtypes = (ctypes.c_int,)
             setround.restype = ctypes.c_int
-            evaluate_tile_operation(op, (tile, tile))
+            evaluate_tile_operation(op, operands)
             for mode in (0x400, 0x800, 0xC00):
                 if setround(mode) != 0:
                     sys.exit(77)
                 try:
-                    evaluate_tile_operation(op, (tile, tile))
+                    evaluate_tile_operation(op, operands)
                 except UnsupportedVirtualMode:
                     continue
-                raise AssertionError(f"normal add accepted directed rounding mode {mode:#x}")
-        ''')
+                raise AssertionError(f"operation accepted directed rounding mode {mode:#x}")
+        '''
+        for source in (ADD, REDUCE):
+            with self.subTest(source=source):
+                self.run_isolated(script, source)
 
 
 ZERO8, ZERO16 = Tile("fp8", (0,) * 1024), Tile("bf16", (0,) * 1024)

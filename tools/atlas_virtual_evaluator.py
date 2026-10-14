@@ -179,6 +179,8 @@ _SIGNATURES = {
     "output_bf16": (("state", "bf16"), ("state",), ("index",)),
     "vpu_unary": (("bf16",), ("bf16",), ("kind",)),
     "vpu_binary": (("bf16", "bf16"), ("bf16",), ("kind",)),
+    "vpu_reduce": (("bf16",), ("bf16",), ("kind",)),
+    "vpu_splat": ((), ("bf16",), ("bits",)),
     "pack_fp8": (("bf16",), ("fp8",), ("scale_code",)),
     "mxu_matmul": (("fp8", "fp8"), ("bf16",), ("unit",)),
     "mxu_load_weight": (("state", "fp8"), ("state", "mxu_weight"), ("unit",)),
@@ -239,9 +241,12 @@ def _check_atlas_operation(op: Operation) -> None:
         _require(0 <= _integer_attribute(op, "code") <= 255, f"{name}: scale code must be in 0..255")
     if "kind" in attributes:
         kind = fields["kind"]
-        allowed = ("mov", "relu") if short == "vpu_unary" else ("add",)
+        kinds_by_operation = {"vpu_unary": ("mov", "relu"), "vpu_binary": ("add",), "vpu_reduce": ("row_sum", "row_min", "row_max")}
+        allowed = kinds_by_operation[short]
         if not isinstance(kind, builtin.StringAttr) or kind.data not in allowed:
             raise UnsupportedVirtualMode(f"{name}: supported kinds are {allowed}")
+    if short == "vpu_splat":
+        _require(0 <= _integer_attribute(op, "bits") <= 65535, f"{name}: bits must be in 0..65535")
     if short == "pack_fp8" and _integer_attribute(op, "scale_code") != 127:
         raise UnsupportedVirtualMode(f"{name}: only scale_code 127 is admitted")
 
@@ -360,23 +365,34 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     _require(isinstance(op, Operation), "expected a parsed virtual operation")
     _check_atlas_operation(op)
     name = operation_name(op)
-    if name not in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
+    if name not in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8"):
         raise UnsupportedVirtualMode(f"not a supported pure tile operation: {name}")
     _require(isinstance(operands, tuple) and all(isinstance(tile, Tile) for tile in operands), "tile operation operands must be a tuple of Tile values")
     formats = tuple(_type_kind(value.type)[0] for value in op.operands)
     _require(tuple(tile.format for tile in operands) == formats, f"{name}: expected tile operand formats {formats}")
+    if name == "atlas.virtual_vpu_splat":
+        return Tile("bf16", (_integer_attribute(op, "bits"),) * 1024)
     kind = _atlas_fields(op)["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
     if kind == "mov":
         return operands[0]
     torch, RtlNumerics = _numerics("VPU")
     # Reinterpret owned raw bits: floating-point conversion would lose encodings.
     owned = tuple(torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16).reshape(32, 32) for tile in operands)
-    if kind == "add":
-        # Host FP32 must preserve subnormals and round before the BF16 bit chop.
+    if kind in ("add", "row_sum"):
+        # FP32 add and reduction require nearest-even rounding and gradual underflow.
         probe_a = torch.tensor((0x0001, 0x0080, 0x3F80, 0xBF80), dtype=torch.uint16).view(torch.bfloat16)
         probe_b = torch.tensor((0x0001, 0x8081, 0x8001, 0x0001), dtype=torch.uint16).view(torch.bfloat16)
         if tuple(RtlNumerics.add(probe_a, probe_b).view(torch.uint16).tolist()) != (0x0002, 0x8001, 0x3F80, 0xBF80):
-            raise UnsupportedVirtualMode("BF16 add requires FP32 round-to-nearest-even with gradual underflow")
+            raise UnsupportedVirtualMode(f"BF16 {kind} requires FP32 round-to-nearest-even with gradual underflow")
+    if name == "atlas.virtual_vpu_reduce":
+        if kind == "row_sum":
+            result = RtlNumerics.row_sum(owned[0])
+        elif kind == "row_min":
+            result = RtlNumerics.amin(owned[0], dim=1)
+        elif kind == "row_max":
+            result = RtlNumerics.amax(owned[0], dim=1)
+        result = result.expand_as(owned[0])
+    elif kind == "add":
         result = RtlNumerics.add(*owned)
     elif kind == "pack_fp8":
         result = RtlNumerics.to_fp8(owned[0], _integer_attribute(op, "scale_code"))
@@ -686,7 +702,7 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
             elif name == "atlas.virtual_start":
                 _require(state is None, "virtual_start cannot execute twice")
                 state = values[op.results[0]] = object()
-            elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_pack_fp8"):
+            elif name in ("atlas.virtual_vpu_unary", "atlas.virtual_vpu_binary", "atlas.virtual_vpu_reduce", "atlas.virtual_vpu_splat", "atlas.virtual_pack_fp8"):
                 values[op.results[0]] = evaluate_tile_operation(op, tuple(value(operand, Tile) for operand in op.operands))
             elif name == "atlas.virtual_scale_constant":
                 values[op.results[0]] = _integer_attribute(op, "code")

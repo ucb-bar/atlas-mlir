@@ -76,6 +76,42 @@ class VirtualParserInterfaceTest(unittest.TestCase):
         inputs = RuntimeInputs({0: Tile("bf16", (0xBF80, 0x3F80) * 512)})
         compare_results(evaluate(parse_program(relu), inputs), evaluate(parse_program(canonical), inputs))
 
+    def test_splat_and_reduction_attributes_properties_and_signatures(self) -> None:
+        splat = '%c = "atlas.virtual_vpu_splat"() {bits = 16256 : i32} : () -> !atlas.virtual_bf16'
+        reduce = '%r = "atlas.virtual_vpu_reduce"(%a) {kind = "row_sum"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
+
+        def source(splat_op=splat, reduce_op=reduce):
+            return "module {" + INPUTS + splat_op + "\n" + reduce_op + "}"
+
+        for bits in (0, 16256, 65535):
+            for kind in ("row_sum", "row_min", "row_max"):
+                generic = source(splat.replace("16256", str(bits)), reduce.replace("row_sum", kind))
+                canonical = generic.replace(f'{{bits = {bits} : i32}}', f'<{{bits = {bits} : i32}}>')
+                canonical = canonical.replace(f'{{kind = "{kind}"}}', f'<{{kind = "{kind}"}}>')
+                for form in (generic, canonical):
+                    with self.subTest(bits=bits, kind=kind, canonical=form == canonical):
+                        self.assertEqual(len(parse_program(form).operations), 5)
+
+        malformed = (
+            (source(splat.replace("16256", "-1")), "bits must be in"),
+            (source(splat.replace("16256", "65536")), "bits must be in"),
+            (source(splat.replace("16256 : i32", "16256 : i64")), "bits : i32"),
+            (source(splat.replace("{bits = 16256 : i32}", "{}")), "expected attributes"),
+            (source(splat.replace("{bits = 16256 : i32}", '{bits = 16256 : i32, kind = "mov"}')), "expected attributes"),
+            (source(splat.replace("()", "(%a)", 1).replace(": () ->", ": (!atlas.virtual_bf16) ->")), "signature"),
+            (source(splat.replace("!atlas.virtual_bf16", "!atlas.virtual_fp8")), "signature"),
+            (source(splat.replace("{bits = 16256 : i32}", "<{bits = 16256 : i32}> {bits = 16256 : i32}")), "duplicate attribute/property"),
+            (source(reduce_op=reduce.replace('kind = "row_sum"', 'kind = 0 : i32')), "supported kinds"),
+            (source(reduce_op=reduce.replace("(%a)", "()").replace("(!atlas.virtual_bf16)", "()")), "signature"),
+            (source(reduce_op=reduce.replace("(%a)", "(%a, %a)").replace("(!atlas.virtual_bf16)", "(!atlas.virtual_bf16, !atlas.virtual_bf16)")), "signature"),
+            (source(reduce_op=reduce.replace("{kind = \"row_sum\"}", "{}")), "expected attributes"),
+        )
+        for text, message in malformed:
+            with self.subTest(message=message, source=text), self.assertRaisesRegex(VirtualInterfaceError, message):
+                parse_program(text)
+        with self.assertRaisesRegex(UnsupportedVirtualMode, "supported kinds"):
+            parse_program(source(reduce_op=reduce.replace("row_sum", "col_sum")))
+
     def test_parser_rejects_unsupported_and_malformed_programs(self) -> None:
         canonical = example("virtual_bf16_shared_relu.mlir").replace('{index = 0 : i32}', '<{index = 0 : i32}>')
         seeded = example("virtual_mxu_seeded_fp8.mlir")
