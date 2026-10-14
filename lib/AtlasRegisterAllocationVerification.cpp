@@ -21,7 +21,8 @@ using ValueSet = llvm::DenseSet<Value>;
 using HelperRegisters = std::array<std::optional<uint32_t>, 32>;
 using HelperWriters = std::array<Operation *, 32>;
 
-// A DMA launch's transfer handle and DRAM byte and size operands; null otherwise.
+// A DMA operation's transfer key (its state result) and DRAM byte and size
+// operands; null otherwise.
 struct DMALaunch {
   Value transfer, dram, size;
 };
@@ -30,7 +31,7 @@ DMALaunch dmaLaunch(Operation &op) {
   llvm::TypeSwitch<Operation *>(&op)
       .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
             VirtualDMAStoreBF16Op>([&](auto x) {
-        launch = {x.getTransfer(), x.getDramByte(), x.getSizeBytes()};
+        launch = {x.getNext(), x.getDramByte(), x.getSizeBytes()};
       });
   return launch;
 }
@@ -61,6 +62,7 @@ public:
       return failure();
     for (const VirtualDMAAssignment &assignment : dmaAssignments)
       dmaPlacements[assignment.transfer] = &assignment.placement;
+    collectStagingLoads();
     for (Block &block : function.getBody()) {
       for (BlockArgument arg : block.getArguments())
         collect(arg);
@@ -299,6 +301,32 @@ private:
     return success();
   }
 
+  // Where lowering places each atomic load's staging VLOADs: before the
+  // first operation that reads its tile, in operand order, else before the
+  // block terminator, in launch order. Keyed by that operation.
+  void collectStagingLoads() {
+    for (Block &block : function.getBody()) {
+      SmallVector<std::pair<Value, Value>> pending; // tile, transfer key
+      for (Operation &op : block) {
+        if (op.hasTrait<OpTrait::IsTerminator>()) {
+          for (auto &[tile, key] : pending)
+            stagingLoads[&op].push_back(key);
+          pending.clear();
+          continue;
+        }
+        for (Value operand : op.getOperands()) {
+          auto found = llvm::find_if(pending, [&](auto &p) { return p.first == operand; });
+          if (found != pending.end()) {
+            stagingLoads[&op].push_back(found->second);
+            pending.erase(found);
+          }
+        }
+        if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op) && dmaPlacements.contains(op.getResult(0)))
+          pending.push_back({op.getResult(1), op.getResult(0)});
+      }
+    }
+  }
+
   LogicalResult checkHelperWrite(Operation &op, Value transfer, unsigned reg, const ValueSet &live, StringRef phase) {
     for (Value value : ordered(live)) {
       if (!isScalar(value) || registers.lookup(value) != reg)
@@ -334,18 +362,6 @@ private:
         return failure();
       return checkHelperWrite(op, transfer, placement.stagingReg, live, "launch staging materialization");
     }
-
-    bool writesBase = false;
-    if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op)) {
-      transfer = await.getTransfer();
-      writesBase = true; // Both policies materialize the second half's base.
-    } else if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op)) {
-      transfer = await.getTransfer();
-      writesBase = awaitBasePolicy == DMAAwaitBasePolicy::Rematerialized;
-    }
-    if (writesBase)
-      return checkHelperWrite(op, transfer, dmaPlacements.lookup(transfer)->stagingReg, live,
-                              "await staging materialization");
     return success();
   }
 
@@ -389,6 +405,12 @@ private:
       if (writers)
         (*writers)[reg] = &op;
     };
+    // Sunk staging VLOADs run before this operation, each setting the base
+    // of every half it reads.
+    for (Value loaded : stagingLoads.lookup(&op)) {
+      const DMATransferPlacement &p = *dmaPlacements.lookup(loaded);
+      write(p.stagingReg, p.stagingWord + 256 * (p.halves - 1));
+    }
     auto [transfer, dram, size] = dmaLaunch(op);
     if (transfer) {
       const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
@@ -398,22 +420,6 @@ private:
         write(p.sizeReg, contents[registers.lookup(size)]);
       // A BF16 store also writes its second-half base, then restores this one.
       write(p.stagingReg, p.stagingWord);
-      return success();
-    }
-    if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
-      transfer = await.getTransfer();
-    else if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op))
-      transfer = await.getTransfer();
-    if (transfer) {
-      const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
-      if (awaitBasePolicy == DMAAwaitBasePolicy::Rematerialized)
-        write(p.stagingReg, p.stagingWord);
-      else if (diagnose && failed(helperRead(op, contents, p.stagingReg,
-                   p.stagingWord, "pending DMA staging base is not preserved",
-                   writers, transfer)))
-        return failure();
-      if (p.halves > 1)
-        write(p.stagingReg, p.stagingWord + 256);
       return success();
     }
 
@@ -618,6 +624,11 @@ private:
         }
       }
       transfer(op, live);
+      // A sunk staging VLOAD runs before `op`, while its operands are live.
+      for (Value loaded : stagingLoads.lookup(&op))
+        if (failed(checkHelperWrite(op, loaded, dmaPlacements.lookup(loaded)->stagingReg,
+                                    live, "staging VLOAD materialization")))
+          return failure();
       if (failed(checkClique(ordered(live), op.getLoc(), "live values")))
         return failure();
     }
@@ -645,6 +656,7 @@ private:
   llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments;
   DMAAwaitBasePolicy awaitBasePolicy;
   llvm::DenseMap<Value, const DMATransferPlacement *> dmaPlacements;
+  llvm::DenseMap<Operation *, SmallVector<Value, 2>> stagingLoads;
   AsmState assemblyState;
   bool hasPack = false;
   ValueSet known;

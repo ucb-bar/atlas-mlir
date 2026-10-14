@@ -166,7 +166,7 @@ def _type_kind(attr: Attribute) -> tuple[str, int | None]:
             parameter = attr.value.data.strip()
             if kind in ("mxu_weight", "mxu_acc") and parameter in ("0", "1"):
                 return kind, int(parameter)
-            if not parameter and kind in ("state", "bf16", "fp8", "scale", "dma_load_bf16", "dma_load_fp8", "dma_store"):
+            if not parameter and kind in ("state", "bf16", "fp8", "scale"):
                 return kind, None
     raise UnsupportedVirtualMode(f"unsupported virtual type: {attr}")
 
@@ -189,13 +189,11 @@ _SIGNATURES = {
     "mxu_readout_bf16": (("state", "mxu_acc"), ("state", "bf16"), ()),
     "mxu_readout_fp8": (("state", "mxu_acc", "scale"), ("state", "fp8"), ()),
     "scale_constant": ((), ("scale",), ("code",)),
-    "dma_load_fp8": (("state", "i32", "i32"), ("state", "dma_load_fp8"), ()),
-    "dma_load_bf16": (("state", "i32", "i32"), ("state", "dma_load_bf16"), ()),
-    "dma_await_fp8": (("state", "dma_load_fp8"), ("state", "fp8"), ()),
-    "dma_await_bf16": (("state", "dma_load_bf16"), ("state", "bf16"), ()),
-    "dma_store_fp8": (("state", "fp8", "i32", "i32"), ("state", "dma_store"), ()),
-    "dma_store_bf16": (("state", "bf16", "i32", "i32"), ("state", "dma_store"), ()),
-    "dma_wait": (("state", "dma_store"), ("state",), ()),
+    # Atomic DMA: a load returns its tile and a store completes in place.
+    "dma_load_fp8": (("state", "i32", "i32"), ("state", "fp8"), ()),
+    "dma_load_bf16": (("state", "i32", "i32"), ("state", "bf16"), ()),
+    "dma_store_fp8": (("state", "fp8", "i32", "i32"), ("state",), ()),
+    "dma_store_bf16": (("state", "bf16", "i32", "i32"), ("state",), ()),
 }
 
 _STANDARD_PROPERTIES = {"arith.constant": {"value"}, "arith.addi": {"overflowFlags"}, "arith.cmpi": {"predicate"},
@@ -503,25 +501,13 @@ def _boundary_address(program: ParsedProgram, kind: str, index: int) -> int | No
     return None if attribute is None else attribute.value.data + index * 2048
 
 
-def _check_dma_handles(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
-    pending: dict[SSAValue, tuple[int, int, bool]] = {}
+def _check_dma(operations: tuple[Operation, ...], boundaries: tuple[tuple[int, int, str], ...], constants: dict[SSAValue, int | None]) -> None:
+    # Atomic DMA has no pending transfers; only the control mailbox is off limits.
     for op in operations:
         name = operation_name(op).removeprefix("atlas.virtual_")
         if name.startswith(("dma_load_", "dma_store_")):
             address, length = _dma_span(op, constants)
-            writes = name.startswith("dma_store_")
-            _require(len(pending) < 2, "at most two pending DMA transfers are admitted")
             _require(not any(kind == "control" and _overlaps(address, length, other, size) for other, size, kind in boundaries), "DMA must not overlap the control mailbox")
-            # As the dialect verifier requires, transfers that share DRAM bytes while either writes are never pending together.
-            _require(not any((writes or pending_writes) and _overlaps(address, length, other, size) for other, size, pending_writes in pending.values()),
-                     "DMA conflicts with a pending transfer on the same DRAM bytes while either writes them")
-            pending[op.results[1]] = (address, length, writes)
-        elif name.startswith("dma_await_") or name == "dma_wait":
-            _require(op.operands[1] in pending, f"{name}: expected a pending, unconsumed DMA handle")
-            del pending[op.operands[1]]
-        elif name in ("input_bf16", "input_fp8", "output_bf16", "pack_fp8"):
-            _require(not pending, f"{name}: pending DMA must complete before implicit I/O or pack")
-    _require(not pending, "every pending DMA transfer must complete before block exit")
 
 
 def _tile_bytes(tile: Tile) -> bytes:
@@ -564,13 +550,6 @@ class _Memory:
 
     def snapshots(self) -> tuple[MemoryRegion, ...]:
         return tuple(MemoryRegion(region.address, self.read(region.address, len(region.data))) for region in self.regions)
-
-
-@dataclass(frozen=True)
-class _Transfer:
-    address: int
-    data: bytes
-    format: TileFormat
 
 
 def _edges(op: Operation) -> tuple[tuple[Block, tuple[SSAValue, ...]], ...]:
@@ -628,10 +607,10 @@ def _check_execution(program: ParsedProgram) -> dict[Block, tuple[Operation, ...
                 owner, defined_at = definitions[operand]
                 available = defined_at < position if owner is block else dominance.dominates(owner, block)
                 _require(available, f"{operation_name(op)}: operand definition does not dominate its use")
-                if _type_kind(operand.type)[0] in ("mxu_weight", "mxu_acc", "dma_load_fp8", "dma_load_bf16", "dma_store"):
-                    _require(owner is block, "MXU/DMA handles cannot cross block boundaries")
+                if _type_kind(operand.type)[0] in ("mxu_weight", "mxu_acc"):
+                    _require(owner is block, "MXU handles cannot cross block boundaries")
         _check_mxu_handles(operations)
-        _check_dma_handles(operations, boundaries, constants)
+        _check_dma(operations, boundaries, constants)
     return blocks
 
 
@@ -744,18 +723,11 @@ def evaluate(program: ParsedProgram, inputs: RuntimeInputs, *, max_steps: int = 
                 elif name.startswith(("atlas.virtual_dma_load_", "atlas.virtual_dma_store_")):
                     address, length = (value(operand, Scalar).bits for operand in op.operands[-2:])
                     format: TileFormat = "fp8" if name.endswith("fp8") else "bf16"
-                    store = name.startswith("atlas.virtual_dma_store_")
                     memory.check_span(address, length)
-                    data = _tile_bytes(value(op.operands[1], Tile)) if store else memory.read(address, length)
-                    values[op.results[1]] = _Transfer(address, data, format)
-                elif name.startswith("atlas.virtual_dma_await_") or name == "atlas.virtual_dma_wait":
-                    transfer = value(op.operands[1])
-                    _require(isinstance(transfer, _Transfer), "expected an executed DMA transfer")
-                    if name == "atlas.virtual_dma_wait":
-                        memory.write(transfer.address, transfer.data)
+                    if name.startswith("atlas.virtual_dma_store_"):
+                        memory.write(address, _tile_bytes(value(op.operands[1], Tile)))
                     else:
-                        values[op.results[1]] = _tile_from_bytes(transfer.data, transfer.format)
-                    del values[op.operands[1]]
+                        values[op.results[1]] = _tile_from_bytes(memory.read(address, length), format)
                 state = values[op.results[0]] = object()
         else:
             return final_result()

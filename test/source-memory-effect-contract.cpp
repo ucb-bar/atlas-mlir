@@ -27,29 +27,26 @@ std::string storeThenLoad(StringRef in, StringRef tile) {
   return R"mlir(    %a = arith.constant -1879048192 : i32
     %b = arith.constant -1879048192 : i32
     %size = arith.constant 1024 : i32
-    %s2, %store = "atlas.virtual_dma_store_fp8"()mlir" + in.str() + ", " + tile.str() + R"mlir(, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s3 = "atlas.virtual_dma_wait"(%s2, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    %s4, %load = "atlas.virtual_dma_load_fp8"(%s3, %b, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s5, %result = "atlas.virtual_dma_await_fp8"(%s4, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    %s2 = "atlas.virtual_dma_store_fp8"()mlir" + in.str() + ", " + tile.str() + R"mlir(, %a, %size) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> !atlas.virtual_state
+    %s4, %result = "atlas.virtual_dma_load_fp8"(%s2, %b, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
 )mlir";
 }
 
 std::string blockHeader(StringRef name, StringRef arguments) { return ("  ^" + name + "(" + arguments + "):\n").str(); }
 
-const std::string sourceText = program("", "", storeThenLoad("%s1", "%input") + "    return %s5 : !atlas.virtual_state\n");
+const std::string sourceText = program("", "", storeThenLoad("%s1", "%input") + "    return %s4 : !atlas.virtual_state\n");
 const std::string loopText = program("", "",
     "    cf.br ^loop(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8)\n" + blockHeader("loop", "%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8") +
     storeThenLoad("%state", "%tile") + "    %choose = arith.constant true\n"
-    "    cf.cond_br %choose, ^loop(%s5, %tile : !atlas.virtual_state, !atlas.virtual_fp8), ^exit(%s5 : !atlas.virtual_state)\n" +
+    "    cf.cond_br %choose, ^loop(%s4, %tile : !atlas.virtual_state, !atlas.virtual_fp8), ^exit(%s4 : !atlas.virtual_state)\n" +
     blockHeader("exit", "%final : !atlas.virtual_state") + "    return %final : !atlas.virtual_state\n");
 const std::string branchText = program("%choose : i1", ",\n    atlas.control_dram_base = 2466250752 : i64",
     "    cf.cond_br %choose, ^left(%s1, %input : !atlas.virtual_state, !atlas.virtual_fp8), ^right(%s1 : !atlas.virtual_state)\n" +
     blockHeader("left", "%state : !atlas.virtual_state, %tile : !atlas.virtual_fp8") + storeThenLoad("%state", "%tile") +
-    "    cf.br ^join(%s5 : !atlas.virtual_state)\n" + blockHeader("right", "%rstate : !atlas.virtual_state") + R"mlir(    %raddr = arith.constant -1879048192 : i32
+    "    cf.br ^join(%s4 : !atlas.virtual_state)\n" + blockHeader("right", "%rstate : !atlas.virtual_state") + R"mlir(    %raddr = arith.constant -1879048192 : i32
     %rsize = arith.constant 1024 : i32
-    %r1, %rload = "atlas.virtual_dma_load_fp8"(%rstate, %raddr, %rsize) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %r2, %rresult = "atlas.virtual_dma_await_fp8"(%r1, %rload) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    cf.br ^join(%r2 : !atlas.virtual_state)
+    %r1, %rresult = "atlas.virtual_dma_load_fp8"(%rstate, %raddr, %rsize) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    cf.br ^join(%r1 : !atlas.virtual_state)
 )mlir" + blockHeader("join", "%final : !atlas.virtual_state") + "    return %final : !atlas.virtual_state\n");
 
 // Literal source expectations and manually issued groups isolate this obligation; final integration separately
@@ -80,7 +77,7 @@ struct Fixture : IssuedStream {
       for (Operation &op : body) {
         llvm::for_each(op.getResults(), add);
         if (isa<VirtualDMAStoreFP8Op, VirtualDMALoadFP8Op>(op)) {
-          dma.push_back({op.getResult(1), {2 + transfer, 1, transfer, 131072 + 256 * transfer, 4, 5, 9}});
+          dma.push_back({op.getResult(0), {2 + transfer, 1, transfer, 131072 + 256 * transfer, 4, 5, 9}});
           ++transfer;
         }
       }
@@ -155,7 +152,7 @@ void straight(MLIRContext &context) {
       check(effects.size() == 3, "literal implicit-input/explicit-store/explicit-load cardinality");
       auto store = cast<DictionaryAttr>(effects[1]), load = cast<DictionaryAttr>(effects[2]);
       check(integer(store, "source") == 5 && integer(store, "launch") == 4 && integer(store, "completion") == 5, "literal store source identity and completion");
-      check(integer(load, "source") == 7 && uint32_t(integer(load, "dram_byte")) == 0x90000000u + offset && integer(load, "bytes") == 1024, "literal load span and source identity");
+      check(integer(load, "source") == 6 && uint32_t(integer(load, "dram_byte")) == 0x90000000u + offset && integer(load, "bytes") == 1024, "literal load span and source identity");
       auto pred = load.getAs<DenseI32ArrayAttr>("predecessors").asArrayRef();
       check(offset < 1024 ? pred == ArrayRef<int32_t>({1}) : pred.empty(), "literal source-overlap predecessor set");
       f.group(0); if (reorder) { f.group(2); f.group(1); } else { f.group(1); f.group(2); } f.halt();

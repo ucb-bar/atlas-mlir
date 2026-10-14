@@ -77,6 +77,13 @@ public:
       currentCFGBlock = cfgBlocks.lookup(&block);
       mark(labelFor(&block));
       for (Operation &op : block) {
+        // A load's staging VLOADs go right before its first use; the block's
+        // terminator flushes the rest. They belong to the load.
+        if (op.hasTrait<OpTrait::IsTerminator>())
+          flushLoads(op.getLoc());
+        else
+          for (Value operand : op.getOperands())
+            flushLoad(operand, op.getLoc());
         size_t first = planned.size();
         if (failed(lowerOperation(op)))
           return failure();
@@ -88,7 +95,7 @@ public:
           }
           planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGOperation), i32(cfgOperations.lookup(&op)));
           for (Value result : op.getResults()) {
-            if (!cfgTracked(result)) continue;
+            if (!cfgTracked(result) || pendingLoads.count(result)) continue;
             StringRef name = result.getType().isInteger(1) || result.getType().isInteger(32)
                 ? kAtlasTagScalarResult : kAtlasTagTensorResult;
             planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
@@ -124,8 +131,8 @@ public:
         for (Value result : op.getResults())
           recordPlacement(result);
         if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-          Value handle = op.getResult(1);
-          dmaAssignments.push_back({handle, allocation.dma(handle)});
+          Value transfer = op.getResult(0);
+          dmaAssignments.push_back({transfer, allocation.dma(transfer)});
         }
       }
     }
@@ -155,6 +162,9 @@ public:
     }
     (*emitted)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
     (*emitted)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
+    // Explicit DMA launches without waits; insert-atlas-dma-waits adds them.
+    if (!dmaAssignments.empty())
+      (*emitted)->setAttr(kAtlasDMAWaitsPending, builder.getUnitAttr());
     (*emitted)->removeAttr(kAtlasTimingProvider);
     (*emitted)->setAttr(kAtlasCFGContract, *cfgContract);
     (*emitted)->setAttr(kAtlasDMAContract, *dmaContract);
@@ -168,7 +178,8 @@ public:
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
     llvm::SmallVector<uint32_t> words;
-    if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words)))
+    if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words,
+                                   /*allowPendingDMAWaits=*/true)))
       return failure();
     module->setAttrs((*emitted)->getAttrs());
     module.getBodyRegion().takeBody(emitted->getBodyRegion());
@@ -187,7 +198,8 @@ private:
   BoolAttr boolean(bool value) { return attrs.getBoolAttr(value); }
 
   void add(StringRef name, Location loc, Fields fields = {},
-           std::optional<unsigned> target = std::nullopt) {
+           std::optional<unsigned> target = std::nullopt,
+           std::optional<unsigned> tileCommand = std::nullopt) {
     PlannedOp step{name.str(), {}, loc, target};
     step.attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBlock), i32(currentCFGBlock));
     if (currentCFGEdge)
@@ -198,11 +210,14 @@ private:
       step.attrs.emplace_back(StringAttr::get(module.getContext(), kAtlasTagMXUCommand), i32(nextMXUCommand++));
     planned.push_back(std::move(step));
     if (name == "atlas.vload" || name == "atlas.vstore" || name == "atlas.dma" || name == "atlas.dma_wait")
-      tagTileCommand();
+      tagTileCommand(tileCommand);
   }
 
-  void tagTileCommand() {
-    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTileCommand), i32(nextTileCommand++));
+  // Commands are numbered in source expansion order; an atomic DMA reserves
+  // its wait and VLOAD commands at the launch and issues them later.
+  void tagTileCommand(std::optional<unsigned> id = std::nullopt) {
+    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTileCommand),
+                                      i32(id ? *id : nextTileCommand++));
   }
 
   unsigned newLabel() { return nextLabel++; }
@@ -495,26 +510,53 @@ private:
          {"atlas.virtual_dma_transfer", i32(placement.id)}});
   }
 
-  LogicalResult completeDMA(Value transfer, std::optional<unsigned> dst,
-                            Operation &op) {
+  // A launched load whose staging VLOADs wait for its tile's first use.
+  struct PendingLoad {
+    const DMATransferPlacement *placement;
+    unsigned dst;
+    unsigned firstVLoad;
+    int32_t source, result;
+  };
+
+  void launchLoad(Operation &op, Value tile, unsigned dst) {
+    Value transfer = op.getResult(0);
+    launchDMA(transfer, op.getOperand(1), op.getOperand(2), std::nullopt, op.getLoc());
     const DMATransferPlacement &placement = allocation.dma(transfer);
-    Location loc = op.getLoc();
-    add("atlas.dma_wait", loc,
-        {{"channel", i32(placement.channel)},
-         {"atlas.virtual_dma_transfer", i32(placement.id)}});
-    if (dst) {
-      // Transfers share the staging register, and the DMA latched its own
-      // copy at launch, so another launch may have moved it since. Set it
-      // for each VLOAD, as every scratch register is set where it is read.
-      for (unsigned half = 0; half < placement.halves; ++half) {
-        materializeScalar(placement.stagingReg,
-                          placement.stagingWord + half * 256, loc);
-        add("atlas.vload", loc,
-            {{"dst", i32(*dst + half)}, {"base", i32(placement.stagingReg)},
-             {"offset", i32(0)}, {"format", str("raw")}});
-      }
+    ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
+    pendingLoads[tile] = {&placement, dst, nextTileCommand,
+                          int32_t(cfgOperations.lookup(&op)),
+                          int32_t(cfgValues.lookup(tile))};
+    pendingOrder.push_back(tile);
+    nextTileCommand += placement.halves;
+  }
+
+  void flushLoad(Value tile, Location loc) {
+    auto found = pendingLoads.find(tile);
+    if (found == pendingLoads.end())
+      return;
+    PendingLoad load = found->second;
+    pendingLoads.erase(found);
+    llvm::erase(pendingOrder, tile);
+    size_t first = planned.size();
+    // Transfers share the staging register, and the DMA latched its own copy
+    // at launch, so another launch may have moved it since. Set it for each
+    // VLOAD, as every scratch register is set where it is read.
+    const DMATransferPlacement &placement = *load.placement;
+    for (unsigned half = 0; half < placement.halves; ++half) {
+      materializeScalar(placement.stagingReg, placement.stagingWord + half * 256, loc);
+      add("atlas.vload", loc,
+          {{"dst", i32(load.dst + half)}, {"base", i32(placement.stagingReg)},
+           {"offset", i32(0)}, {"format", str("raw")}},
+          std::nullopt, load.firstVLoad + half);
     }
-    return success();
+    for (size_t n = first; n < planned.size(); ++n)
+      planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(load.source));
+    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTensorResult), i32(load.result));
+  }
+
+  void flushLoads(Location loc) {
+    while (!pendingOrder.empty())
+      flushLoad(pendingOrder.front(), loc);
   }
 
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
@@ -586,31 +628,25 @@ private:
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
     if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
-      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
-                std::nullopt, loc);
+      launchLoad(op, load.getValue(), fp8(load.getValue()));
       return success();
     }
     if (auto load = dyn_cast<VirtualDMALoadBF16Op>(op)) {
-      launchDMA(load.getTransfer(), load.getDramByte(), load.getSizeBytes(),
-                std::nullopt, loc);
+      launchLoad(op, load.getValue(), tile(load.getValue()));
       return success();
     }
-    if (auto await = dyn_cast<VirtualDMAAwaitFP8Op>(op))
-      return completeDMA(await.getTransfer(), fp8(await.getValue()), op);
-    if (auto await = dyn_cast<VirtualDMAAwaitBF16Op>(op))
-      return completeDMA(await.getTransfer(), tile(await.getValue()), op);
     if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+      launchDMA(store.getNext(), store.getDramByte(), store.getSizeBytes(),
                 fp8(store.getSrc()), loc);
+      ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
       return success();
     }
     if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-      launchDMA(store.getTransfer(), store.getDramByte(), store.getSizeBytes(),
+      launchDMA(store.getNext(), store.getDramByte(), store.getSizeBytes(),
                 tile(store.getSrc()), loc);
+      ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
       return success();
     }
-    if (auto wait = dyn_cast<VirtualDMAWaitOp>(op))
-      return completeDMA(wait.getTransfer(), std::nullopt, op);
     if (auto input = dyn_cast<VirtualInputBF16Op>(op)) {
       uint64_t index = input.getIndexAttr().getValue().getZExtValue();
       for (unsigned half = 0; half < 2; ++half)
@@ -863,6 +899,8 @@ private:
   unsigned nextLabel = 0;
   unsigned nextMXUCommand = 0;
   unsigned nextTileCommand = 0;
+  llvm::DenseMap<Value, PendingLoad> pendingLoads;
+  SmallVector<Value> pendingOrder;
   uint64_t inputBase = 0, outputBase = 0;
   std::optional<uint64_t> controlBase;
 };

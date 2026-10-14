@@ -177,13 +177,11 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
       .Case(VirtualInputBF16Op::getOperationName(), {6, 2})
       .Case(VirtualOutputBF16Op::getOperationName(), {6, 2})
       .Case(VirtualInputFP8Op::getOperationName(), {3, 1})
-      .Case(VirtualDMALoadFP8Op::getOperationName(), {1, 1})
-      .Case(VirtualDMALoadBF16Op::getOperationName(), {1, 1})
-      .Case(VirtualDMAStoreFP8Op::getOperationName(), {2, 1})
-      .Case(VirtualDMAStoreBF16Op::getOperationName(), {3, 1})
-      .Case(VirtualDMAAwaitFP8Op::getOperationName(), {2, 0})
-      .Case(VirtualDMAAwaitBF16Op::getOperationName(), {3, 0})
-      .Case(VirtualDMAWaitOp::getOperationName(), {1, 0})
+      // Atomic DMA owns its launch, its wait and its staging VLOADs or VSTOREs.
+      .Case(VirtualDMALoadFP8Op::getOperationName(), {3, 1})
+      .Case(VirtualDMALoadBF16Op::getOperationName(), {4, 1})
+      .Case(VirtualDMAStoreFP8Op::getOperationName(), {3, 1})
+      .Case(VirtualDMAStoreBF16Op::getOperationName(), {4, 1})
       .Case(VirtualPackFP8Op::getOperationName(), {2, 0})
       .Default({0, 0});
 }
@@ -263,7 +261,6 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                      0, 4, -1, -1, {*wait})))
         return function.emitOpError("tile contract has invalid scalar argument placement");
   }
-  llvm::DenseMap<Value, int32_t> launches;
   for (Block &block : function.getBody()) {
     for (Operation &op : block) {
       auto tensorReg = [&](Value value) -> FailureOr<unsigned> {
@@ -307,7 +304,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         }
       } else if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
                      VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-        Value handle = op.getResult(1);
+        // A transfer is keyed by its operation's state result.
+        Value handle = op.getResult(0);
         const auto &p = transfers.find(handle)->second->placement;
         DictionaryAttr source = dmaRecords.find(p.id)->second;
         bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
@@ -332,18 +330,11 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                           p.channel, p.id, after);
         if (failed(launch))
           return failure();
-        launches[handle] = *launch;
-      } else if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op)) {
-        Value handle = op.getOperand(1);
-        auto assignment = transfers.find(handle);
-        auto launch = launches.find(handle);
-        if (assignment == transfers.end() || launch == launches.end())
-          return op.emitOpError("tile contract completion has no source launch");
-        const auto &p = assignment->second->placement;
-        auto wait = addWait(launch->second, p.channel, p.id);
+        // insert-atlas-dma-waits issues the wait; a load's VLOADs follow it.
+        auto wait = addWait(*launch, p.channel, p.id);
         if (failed(wait))
           return failure();
-        if (!isa<VirtualDMAWaitOp>(op)) {
+        if (!store) {
           auto reg = tensorReg(op.getResult(1));
           if (failed(reg))
             return failure();

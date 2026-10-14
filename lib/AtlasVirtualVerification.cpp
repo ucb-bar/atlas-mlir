@@ -46,42 +46,6 @@ DRAMEffect dramEffect(Operation *launch) {
       });
 }
 
-// The explicit transfers in flight within a block, completing in any order:
-// each handle and its launch.
-struct VirtualDMATransfers {
-  SmallVector<std::pair<Value, Operation *>, kMaxPendingVirtualDMA> pending;
-
-  LogicalResult verify(Operation &op) {
-    if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-      if (pending.size() == kMaxPendingVirtualDMA)
-        return op.emitOpError("must complete a pending DMA before another launch; at most ")
-               << kMaxPendingVirtualDMA << " may be pending";
-      for (auto [handle, launch] : pending)
-        if (virtualDMAConflict(&op, launch)) {
-          InFlightDiagnostic diagnostic = op.emitOpError(
-              "must not touch the DRAM bytes of a pending DMA transfer while either writes them");
-          diagnostic.attachNote(launch->getLoc()) << "pending transfer launched here";
-          return diagnostic;
-        }
-      pending.push_back({op.getResult(1), &op});
-      return success();
-    }
-    auto found = llvm::find_if(pending, [&](const auto &transfer) {
-      return transfer.first == op.getOperand(1);
-    });
-    if (found == pending.end())
-      return op.emitOpError("must consume a pending DMA transfer");
-    pending.erase(found);
-    return success();
-  }
-
-  LogicalResult verifyClosed(Operation *where) {
-    if (!pending.empty())
-      return where->emitOpError("must complete pending DMA before block exit");
-    return success();
-  }
-};
-
 // Track the weights resident on each unit and the current version of each
 // live accumulator, at most one per hardware slot, within a block. A weight
 // stays resident while it has uses left, so every use finds it.
@@ -195,7 +159,6 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
                                  llvm::DenseSet<int64_t> &outputIndices) {
   Value state;
   VirtualMXUResources mxu;
-  VirtualDMATransfers dma;
   if (cfg) {
     if (entry) {
       for (BlockArgument arg : block.getArguments())
@@ -229,17 +192,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
           operand.getParentBlock() != &block)
         return operation.emitOpError(
             "virtual MXU handles cannot cross CFG blocks");
-      if (isa<VirtualDMALoadFP8Type, VirtualDMALoadBF16Type,
-              VirtualDMAStoreType>(operand.getType()) &&
-          operand.getParentBlock() != &block)
-        return operation.emitOpError(
-            "pending DMA handles cannot cross CFG blocks");
     }
-    if (!dma.pending.empty() &&
-        isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-            VirtualPackFP8Op>(operation))
-      return operation.emitOpError(
-          "must complete pending DMA before implicit memory operations");
     if (auto start = dyn_cast<VirtualStartOp>(operation)) {
       if (!entry || &operation != &block.front() || ++starts != 1 || state) {
         start.emitOpError("virtual_start must be the unique first entry operation");
@@ -278,16 +231,14 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       ++outputs;
       continue;
     }
+    // Atomic: a load returns its tile and a store completes in place, in
+    // state order. Physical waits come after lowering.
     if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-            VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
-            VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
-            VirtualDMAWaitOp>(operation)) {
+            VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(operation)) {
       if (!state || operation.getOperand(0) != state)
         return operation.emitOpError("nonlinear virtual state chain");
-      if (failed(dma.verify(operation)))
-        return failure();
       state = operation.getResult(0);
-      if (isa<VirtualDMAWaitOp>(operation))
+      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(operation))
         ++outputs;
       continue;
     }
@@ -339,8 +290,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     }
     if (cfg) {
       if (operation.hasTrait<OpTrait::IsTerminator>() &&
-          (failed(mxu.verifyClosed(&operation)) ||
-           failed(dma.verifyClosed(&operation))))
+          failed(mxu.verifyClosed(&operation)))
         return failure();
       if (auto branch = dyn_cast<cf::BranchOp>(operation))
         return verifySuccessor(operation, branch.getDest(),
@@ -368,9 +318,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     block.getParentOp()->emitOpError("virtual CFG block has no terminator");
     return failure();
   }
-  if (failed(mxu.verifyClosed(block.getParentOp())))
-    return failure();
-  return dma.verifyClosed(block.getParentOp());
+  return mxu.verifyClosed(block.getParentOp());
 }
 
 LogicalResult verifyVirtualFunction(func::FuncOp function) {
@@ -411,7 +359,7 @@ LogicalResult verifyVirtualFunction(func::FuncOp function) {
   for (Block &block : function.getBody())
     for (Operation &op : block)
       if (isa<VirtualOutputBF16Op, VirtualDMAStoreFP8Op,
-              VirtualDMAStoreBF16Op, VirtualDMAWaitOp>(op) &&
+              VirtualDMAStoreBF16Op>(op) &&
           &block != returnBlock) {
         op.emitOpError("virtual CFG outputs must be in the return block");
         return failure();

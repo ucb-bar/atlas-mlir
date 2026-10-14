@@ -393,14 +393,6 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
 
     def test_invalid_control_flow_and_dominance_are_rejected(self) -> None:
         source = function(INPUTS + SELECT, "%choose: i1")
-        handle = function('''
-          %s = "atlas.virtual_start"() : () -> !atlas.virtual_state
-          %address = arith.constant 0 : i32
-          %size = arith.constant 2048 : i32
-          %next, %handle = "atlas.virtual_dma_load_bf16"(%s, %address, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-          cf.br ^exit(%next, %handle : !atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-        ^exit(%state: !atlas.virtual_state, %pending: !atlas.virtual_dma_load_bf16):
-          func.return %state : !atlas.virtual_state''')
         forward = function('''
           %s = "atlas.virtual_start"() : () -> !atlas.virtual_state
           %sum = arith.addi %later, %later : i32
@@ -432,7 +424,7 @@ class VirtualEvaluatorCFGTest(unittest.TestCase):
             (source.replace("%state: !atlas.virtual_state", "%state: !atlas.virtual_dma_store"), ""),
         )
         cases = [(changed, message, RuntimeInputs(TILES, (Scalar(1, 1),))) for changed, message in selected]
-        cases += [(handle, "non-entry block", RuntimeInputs()), (forward, "does not dominate", RuntimeInputs()), (visited, "", RuntimeInputs())]
+        cases += [(forward, "does not dominate", RuntimeInputs()), (visited, "", RuntimeInputs())]
         for index, (changed, message, inputs) in enumerate(cases):
             with self.subTest(case=index), self.assertRaisesRegex(VirtualInterfaceError, message):
                 evaluate(parse_program(changed), inputs)

@@ -25,7 +25,7 @@ def run(tool: str, source: str, *options: str) -> subprocess.CompletedProcess[st
 
 
 def lower(source: str, *, timed: bool = True) -> str:
-    result = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+    result = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
     if result.returncode:
         raise AssertionError(result.stderr)
     if timed:
@@ -229,13 +229,13 @@ class VirtualLoweringTest(unittest.TestCase):
         # fail; the actual dependency chain needs only two simultaneously.
         self.assertIn('dst = 0 : i32', machine)
         rejected = run('atlas-opt', virtual_pressure(32),
-                       '--lower-atlas-virtual-to-machine')
+                       '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('interference exceeds 31 physical pairs', rejected.stderr)
         unqualified = virtual_chain(1).replace('kind = "relu"',
                                                 'kind = "exp"')
         rejected = run('atlas-opt', unqualified,
-                       '--lower-atlas-virtual-to-machine')
+                       '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('admission currently requires mov or relu',
                       rejected.stderr)
@@ -254,7 +254,7 @@ class VirtualLoweringTest(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 result = run("atlas-opt", changed,
-                             "--lower-atlas-virtual-to-machine")
+                             "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
         machine = lower(source)
@@ -267,7 +267,7 @@ class VirtualLoweringTest(unittest.TestCase):
         missing_control = dynamic.replace(
             ", atlas.control_dram_base = 2415927296 : i64", "")
         rejected = run("atlas-opt", missing_control,
-                       "--lower-atlas-virtual-to-machine")
+                       "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("control_dram_base", rejected.stderr)
 

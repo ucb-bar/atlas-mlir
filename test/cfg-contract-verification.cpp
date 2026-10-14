@@ -77,7 +77,7 @@ void run(MLIRContext &context) {
 }
 
 void delaySlot(MLIRContext &context) {
-  auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine");
+  auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits");
   check(module && succeeded(verifyAtlasGeneratedCFGContract(*module)), "standalone CFG checker accepts fixture", diagnostics);
   if (!module)
     return;
@@ -109,7 +109,7 @@ void rawTensorWrites(MLIRContext &context) {
       {"atlas.mxu_pop", true, "format = \"bf16\", unit = 0 : i32, slot = 0 : i32, scale_reg = 0 : i32"},
       {"atlas.mxu_pop", false, "format = \"fp8\", unit = 0 : i32, slot = 0 : i32, scale_reg = 1 : i32"}};
   for (const Writer &w : writers) {
-    auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine");
+    auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits");
     VStoreOp store;
     if (module)
       module->walk([&](VStoreOp candidate) { store = candidate.getSrc() % 2 ? candidate : store; });
@@ -144,16 +144,14 @@ void bindings(MLIRContext &context) {
       %addr = arith.constant -1879048192 : i32
       %size = arith.constant 1024 : i32
       %size_bf16 = arith.constant 2048 : i32
-      %s2, %load = "atlas.virtual_dma_load_fp8"(%s1, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-      %s3, %x = "atlas.virtual_dma_await_fp8"(%s2, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+      %s2, %x = "atlas.virtual_dma_load_fp8"(%s1, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
       %legacy = "atlas.virtual_mxu_matmul"(%x, %packed) {unit = 0 : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16
-      %s4, %weight = "atlas.virtual_mxu_load_weight"(%s3, %packed) {unit = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_fp8) -> (!atlas.virtual_state, !atlas.virtual_mxu_weight<0>)
+      %s4, %weight = "atlas.virtual_mxu_load_weight"(%s2, %packed) {unit = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_fp8) -> (!atlas.virtual_state, !atlas.virtual_mxu_weight<0>)
       %s5, %acc = "atlas.virtual_mxu_reset"(%s4, %x, %weight) : (!atlas.virtual_state, !atlas.virtual_fp8, !atlas.virtual_mxu_weight<0>) -> (!atlas.virtual_state, !atlas.virtual_mxu_acc<0>)
       %s6, %y = "atlas.virtual_mxu_readout_bf16"(%s5, %acc) : (!atlas.virtual_state, !atlas.virtual_mxu_acc<0>) -> (!atlas.virtual_state, !atlas.virtual_bf16)
       %s7 = "atlas.virtual_output_bf16"(%s6, %y) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
-      %s8, %store = "atlas.virtual_dma_store_bf16"(%s7, %legacy, %addr, %size_bf16) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-      %s9 = "atlas.virtual_dma_wait"(%s8, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-      return %s9 : !atlas.virtual_state
+      %s8 = "atlas.virtual_dma_store_bf16"(%s7, %legacy, %addr, %size_bf16) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+      return %s8 : !atlas.virtual_state
     }
   })mlir", "binding fixture typed source");
   if (!module)
@@ -182,11 +180,10 @@ void bindings(MLIRContext &context) {
   const std::tuple<StringRef, StringRef, SmallVector<int32_t>> expected[] = {
       {"atlas.virtual_input_bf16", "tile_commands", {3, 4, 5, 6, 7, 8}},
       {"atlas.virtual_pack_fp8", "tile_commands", {9, 10}},
-      {"atlas.virtual_dma_load_fp8", "tile_commands", {11}},
-      {"atlas.virtual_dma_await_fp8", "tile_commands", {12, 13}},
+      // Atomic DMA owns its launch, wait and staging VLOADs or VSTOREs.
+      {"atlas.virtual_dma_load_fp8", "tile_commands", {11, 12, 13}},
       {"atlas.virtual_output_bf16", "tile_commands", {14, 15, 16, 17, 18, 19}},
-      {"atlas.virtual_dma_store_bf16", "tile_commands", {20, 21, 22}},
-      {"atlas.virtual_dma_wait", "tile_commands", {23}},
+      {"atlas.virtual_dma_store_bf16", "tile_commands", {20, 21, 22, 23}},
       {"atlas.virtual_mxu_matmul", "mxu_commands", {0, 1, 2}},
       {"atlas.virtual_mxu_load_weight", "mxu_commands", {3}},
       {"atlas.virtual_mxu_reset", "mxu_commands", {4}},

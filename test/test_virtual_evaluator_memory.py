@@ -1,6 +1,6 @@
 """DMA byte effects and shared external bytes over independent raw snapshots, without Atlas tools.
 
-SSA tiles stay immutable while explicit DMA completion and boundary I/O update shared memory.
+SSA tiles stay immutable while atomic DMA stores and boundary I/O update shared memory in state order.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import MemoryRegion, RuntimeInputs, Scalar, Tile, VirtualInterfaceError, evaluate, parse_program  # noqa: E402
 from test_virtual_evaluator_arithmetic import repeated  # noqa: E402
 from test_virtual_evaluator_resources import (  # noqa: E402
-    S as STATE, STORE, bf16_bytes, branch, constants, input_tile, load, output, ready, store, type_for as tile_type, wait, wrap,
+    S as STATE, bf16_bytes, branch, constants, input_tile, load, output, ready, store, type_for as tile_type, wait, wrap,
 )
 
 
@@ -52,19 +52,21 @@ class Stream:
     def input(self, fmt="bf16", index=0):
         return self.effect(f"input_{fmt}", result_type=tile_type(fmt), attrs=f"{{index = {index} : i32}}")
 
+    # Atomic DMA: load() returns the tile and store() completes in place;
+    # await_() and wait() keep the older call shapes as no-ops.
     def load(self, address, fmt="bf16"):
         addr, size = self.constant(address), self.constant(1024 if fmt == "fp8" else 2048)
-        return self.effect(f"dma_load_{fmt}", (addr, size), ("i32", "i32"), f"!atlas.virtual_dma_load_{fmt}")
+        return self.effect(f"dma_load_{fmt}", (addr, size), ("i32", "i32"), tile_type(fmt))
 
-    def await_(self, handle, fmt="bf16"):
-        return self.effect(f"dma_await_{fmt}", (handle,), (f"!atlas.virtual_dma_load_{fmt}",), tile_type(fmt))
+    def await_(self, tile, fmt="bf16"):
+        return tile
 
     def store(self, value, address, fmt="bf16"):
         addr, size = self.constant(address), self.constant(1024 if fmt == "fp8" else 2048)
-        return self.effect(f"dma_store_{fmt}", (value, addr, size), (tile_type(fmt), "i32", "i32"), STORE)
+        self.effect(f"dma_store_{fmt}", (value, addr, size), (tile_type(fmt), "i32", "i32"))
 
     def wait(self, handle):
-        self.effect("dma_wait", (handle,), (STORE,))
+        pass
 
     def output(self, value, index=0):
         self.effect("output_bf16", (value,), (tile_type("bf16"),), attrs=f"{{index = {index} : i32}}")
@@ -297,18 +299,16 @@ class VirtualEvaluatorAliasesTest(unittest.TestCase):
         wanted = Tile("bf16", tuple(0x3838 if col < 16 else 0x1234 for row in range(32) for col in range(32)))
         self.assertEqual((dict(result.outputs), result.memory), ({0: wanted}, (padding,)))
 
-    def test_pending_partial_write_conflicts_do_not_depend_on_wait_order(self):
-        for first, second in (("load", "store"), ("store", "load"), ("store", "store")):
-            launches = [load("bf16", before, f"s{index + 1}", f"h{index}", addr) if direction == "load" else store("bf16", before, f"s{index + 1}", f"h{index}", addr=addr)
-                        for index, (direction, before, addr) in enumerate(((first, "io", "addr"), (second, "s1", "second")))]
-            for reverse in (False, True):
-                completions = [ready("bf16", f"s{position + 2}", f"s{position + 3}", f"h{index}", f"tile{index}") if (first, second)[index] == "load"
-                               else wait(f"s{position + 2}", f"s{position + 3}", f"h{index}") for position, index in enumerate((1, 0) if reverse else (0, 1))]
-                source = wrap(input_tile("bf16"), *constants(address=INPUT), f"%second = arith.constant {INPUT + 1024} : i32", *launches, *completions, final="s4")
-                runtime = RuntimeInputs({0: repeated((0x3F80,))}, memory=(MemoryRegion(INPUT, b"?" * 3072),))
-                with self.subTest(first=first, second=second, reverse=reverse), self.assertRaisesRegex(VirtualInterfaceError, "conflicts"):
-                    evaluate(parse_program(source), runtime)
-
+    def test_overlapping_transfers_apply_in_state_order(self):
+        first, second = repeated((0x38,), "fp8"), repeated((0x40,), "fp8")
+        stream = Stream()
+        a, b = stream.input("fp8", 0), stream.input("fp8", 1)
+        stream.store(a, BASE, "fp8")
+        stream.store(b, BASE, "fp8")
+        stream.store(stream.load(BASE, "fp8"), BASE + 0x2000, "fp8")
+        runtime = RuntimeInputs({0: first, 1: second}, memory=(MemoryRegion(BASE, b"?" * 1024), MemoryRegion(BASE + 0x2000, b"!" * 1024)))
+        self.assertEqual(evaluate(stream.program(), runtime).memory,
+                         (MemoryRegion(BASE, bytes(second.bits)), MemoryRegion(BASE + 0x2000, bytes(second.bits))))
 
 if __name__ == "__main__":
     unittest.main()

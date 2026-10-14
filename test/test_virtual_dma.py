@@ -1,4 +1,7 @@
-"""Logical tile DMA events are verified before physical allocation exists."""
+"""Atomic tile DMA is verified before physical allocation exists.
+
+A virtual load returns its tile and a store completes in place; physical
+DMA waits come from insert-atlas-dma-waits after lowering."""
 
 from __future__ import annotations
 
@@ -9,7 +12,6 @@ from test_virtual_mxu_handles import program, load, reset, accumulate, readout
 
 
 STATE = "!atlas.virtual_state"
-STORE = "!atlas.virtual_dma_store"
 EXAMPLE = ROOT / "test/examples/virtual_dma_tiles.mlir"
 
 
@@ -17,31 +19,16 @@ def tile(fmt: str) -> str:
     return f"!atlas.virtual_{fmt}"
 
 
-def event(fmt: str) -> str:
-    return f"!atlas.virtual_dma_load_{fmt}"
-
-
-def dma_load(fmt: str, before: str = "io0", after: str = "io1", handle: str = "pending", addr: str = "addr", size: str = "size") -> str:
-    return (f'    %{after}, %{handle} = "atlas.virtual_dma_load_{fmt}"'
+def dma_load(fmt: str, before: str = "io0", after: str = "io2", result: str = "tile", addr: str = "addr", size: str = "size") -> str:
+    return (f'    %{after}, %{result} = "atlas.virtual_dma_load_{fmt}"'
             f'(%{before}, %{addr}, %{size}) : ({STATE}, i32, i32) '
-            f'-> ({STATE}, {event(fmt)})')
-
-
-def dma_await(fmt: str, before: str = "io1", after: str = "io2", handle: str = "pending", result: str = "tile") -> str:
-    return (f'    %{after}, %{result} = "atlas.virtual_dma_await_{fmt}"'
-            f'(%{before}, %{handle}) : ({STATE}, {event(fmt)}) '
             f'-> ({STATE}, {tile(fmt)})')
 
 
-def dma_store(fmt: str, before: str = "io2", after: str = "io3", value: str = "tile", handle: str = "store") -> str:
-    return (f'    %{after}, %{handle} = "atlas.virtual_dma_store_{fmt}"'
+def dma_store(fmt: str, before: str = "io2", after: str = "io4", value: str = "tile") -> str:
+    return (f'    %{after} = "atlas.virtual_dma_store_{fmt}"'
             f'(%{before}, %{value}, %addr, %size) : '
-            f'({STATE}, {tile(fmt)}, i32, i32) -> ({STATE}, {STORE})')
-
-
-def dma_wait(before: str = "io3", after: str = "io4", handle: str = "store") -> str:
-    return (f'    %{after} = "atlas.virtual_dma_wait"(%{before}, %{handle}) '
-            f': ({STATE}, {STORE}) -> {STATE}')
+            f'({STATE}, {tile(fmt)}, i32, i32) -> {STATE}')
 
 
 def constants(fmt: str, address: int = -2147483648, size: int | None = None) -> list[str]:
@@ -66,7 +53,7 @@ def copy(fmt: str = "bf16", *, flat: bool = False, address: int = -2147483648, s
     return wrap([
         f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
         *constants(fmt, address, size),
-        dma_load(fmt), dma_await(fmt), dma_store(fmt), dma_wait(),
+        dma_load(fmt), dma_store(fmt),
     ], flat=flat)
 
 
@@ -95,9 +82,10 @@ class VirtualDMATest(unittest.TestCase):
                 with self.subTest(fmt=fmt, flat=flat):
                     first = self.accepted(copy(fmt, flat=flat))
                     self.assertEqual(first, self.accepted(first))
-                    self.assertIn(event(fmt), first)
-                    self.assertIn(STORE, first)
+                    self.assertIn(f"-> ({STATE}, {tile(fmt)})", first)
                     self.assertIn(f'"atlas.virtual_dma_store_{fmt}"', first)
+                    self.assertNotIn("virtual_dma_await", first)
+                    self.assertNotIn("virtual_dma_wait", first)
                     self.assertNotIn('"atlas.virtual_output_bf16"', first)
         first = self.accepted(EXAMPLE.read_text())
         self.assertEqual(first, self.accepted(first))
@@ -198,105 +186,56 @@ class VirtualDMATest(unittest.TestCase):
                 source = source.replace("arith.constant 2048 : i1", "arith.constant true")
             self.rejected(source, stream=False)
 
-    def test_load_handles_are_format_specific_and_stores_require_matching_tiles(self) -> None:
+    def test_loads_produce_format_tiles_and_stores_require_matching_tiles(self) -> None:
         for fmt, other in (("fp8", "bf16"), ("bf16", "fp8")):
-            self.rejected(copy(fmt).replace(dma_await(fmt), dma_await(other)), stream=False)
+            self.rejected(copy(fmt).replace(f"-> ({STATE}, {tile(fmt)})", f"-> ({STATE}, {tile(other)})"),
+                          stream=False)
             self.rejected(copy(fmt).replace(dma_store(fmt), dma_store(other)), stream=False)
-        self.rejected(copy().replace(dma_wait(), dma_wait(handle="pending")), stream=False)
 
     def test_channel_attributes_cannot_select_physical_resources(self) -> None:
-        operations = [dma_load("bf16"), dma_await("bf16"), dma_store("bf16"), dma_wait()]
-        for operation in operations:
+        for operation in (dma_load("bf16"), dma_store("bf16")):
             with self.subTest(operation=operation):
                 changed = operation.replace(") :", ") {channel = 0 : i32} :")
                 self.rejected(copy().replace(operation, changed),
                               "virtual DMA does not select a physical channel", stream=False)
 
-    def test_pending_load_and_store_must_finish_before_exit(self) -> None:
+    def test_completion_operations_are_not_virtual_instructions(self) -> None:
         source = copy()
-        self.rejected(source.replace("\n" + dma_await("bf16") + "\n" + dma_store("bf16")
-                                     + "\n" + dma_wait(), "").replace("return %io4", "return %io1"),
-                      "must complete pending DMA before block exit")
-        self.rejected(source.replace("\n" + dma_wait(), "").replace("return %io4", "return %io3"),
-                      "must complete pending DMA before block exit")
-        for flat in (True, False):
-            source = copy(flat=flat)
-            self.rejected(source.replace("\n" + dma_wait(), "").replace("return %io4", "return %io3"),
-                          "must complete pending DMA before block exit")
-
-    def test_two_pending_transfers_complete_in_any_order_across_formats_and_directions(self) -> None:
-        source = copy()
-        for fmt in ("fp8", "bf16"):
-            with self.subTest(fmt=fmt):
-                second = ("    %other_size = arith.constant " + str(1024 if fmt == "fp8" else 2048)
-                          + " : i32\n" + dma_load(fmt, before="io1", after="extra_io",
-                                                   handle="extra", size="other_size"))
-                completion = dma_await(fmt, before="extra_io", after="done_io", handle="extra",
-                                       result="extra_tile")
-                # The second load completes first.
-                self.accepted(source.replace(dma_await("bf16"), second + "\n" + completion + "\n"
-                                             + dma_await("bf16", before="done_io")))
-                third = dma_load(fmt, before="extra_io", after="third_io", handle="third",
-                                 size="other_size")
-                self.rejected(source.replace(dma_await("bf16"), second + "\n" + third + "\n"
-                                             + dma_await("bf16", before="third_io")),
-                              "must complete a pending DMA before another launch; at most 2 may be pending")
-        # A load of other DRAM may overlap a store, and the store may complete
-        # first; a load of the stored bytes may not.
-        def load_beside_store(addr: str) -> str:
-            return source.replace(dma_wait(), "    %other = arith.constant -2147481600 : i32\n"
-                                  + dma_load("bf16", before="io3", after="extra_io", handle="extra", addr=addr)
-                                  + "\n" + dma_wait(before="extra_io", after="done_io") + "\n"
-                                  + dma_await("bf16", before="done_io", after="io4", handle="extra",
-                                              result="extra_tile"))
-        self.accepted(load_beside_store("other"))
-        self.rejected(load_beside_store("addr"),
-                      "must not touch the DRAM bytes of a pending DMA transfer while either writes them")
-        stores = ("    %other_addr = arith.constant -2147481600 : i32\n    %third_addr = arith.constant -2147479552 : i32\n"
-                  + dma_store("bf16", before="io3", after="extra_io", handle="extra").replace("%addr", "%other_addr") + "\n"
-                  + dma_store("bf16", before="extra_io", after="third_io", handle="third").replace("%addr", "%third_addr"))
-        self.rejected(source.replace(dma_wait(), stores + "\n" + dma_wait(before="third_io")),
-                      "must complete a pending DMA before another launch; at most 2 may be pending")
-
-    def test_completion_handles_cannot_be_reused_or_mismatched(self) -> None:
-        source = copy()
-        self.rejected(source.replace(dma_store("bf16"), dma_await("bf16", before="io2", after="again_io", result="again")
-                                     + "\n" + dma_store("bf16", before="again_io")),
-                      "must consume a pending DMA transfer")
-        self.rejected(source.replace("return %io4", dma_wait(before="io4", after="again_io") + "\n    return %again_io"),
-                      "must consume a pending DMA transfer")
-        changed = source.replace(dma_store("bf16"), dma_load("bf16", before="io2", after="next_io", handle="next")
-                                 + "\n" + dma_await("bf16", before="next_io", after="ready_io", result="next_tile")
-                                 + "\n" + dma_store("bf16", before="ready_io"))
-        self.rejected(changed, "must consume a pending DMA transfer")
-
-    def test_pending_dma_preserves_the_linear_virtual_state_chain(self) -> None:
-        source = copy()
-        self.rejected(source.replace(dma_await("bf16"), dma_await("bf16", before="io0")),
-                      "nonlinear virtual state chain")
-        self.rejected(source.replace(dma_wait(), dma_wait(before="io2")),
-                      "nonlinear virtual state chain")
-        self.rejected(source.replace("return %io4", "return %io3"),
-                      "must return the current virtual state")
-
-    def test_hidden_dma_and_vmem_operations_fail_while_pending(self) -> None:
         for operation in (
-            f'    %hidden_io, %hidden = "atlas.virtual_input_bf16"(%s0) {{index = 3 : i32}} : ({STATE}) -> ({STATE}, {tile("bf16")})',
-            f'    %hidden_io, %hidden = "atlas.virtual_input_fp8"(%s0) {{index = 3 : i32}} : ({STATE}) -> ({STATE}, {tile("fp8")})',
-            f'    %hidden_io = "atlas.virtual_output_bf16"(%s0, %seed) {{index = 1 : i32}} : ({STATE}, {tile("bf16")}) -> {STATE}',
-            f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} : ({tile("bf16")}) -> {tile("fp8")}',
+            f'    %io3, %again = "atlas.virtual_dma_await_bf16"(%io2, %tile) : ({STATE}, {tile("bf16")}) -> ({STATE}, {tile("bf16")})',
+            f'    %io3 = "atlas.virtual_dma_wait"(%io2, %tile) : ({STATE}, {tile("bf16")}) -> {STATE}',
         ):
             with self.subTest(operation=operation):
-                before = "s0" if "virtual_pack" in operation else "hidden_io"
-                source = program(*constants("bf16"), dma_load("bf16", before="io2", after="s0"),
-                                 operation, dma_await("bf16", before=before, after="s1"), final_state="s1")
-                self.rejected(source, "must complete pending DMA before implicit memory operations")
-                source = program(*constants("bf16"),
-                                 dma_store("bf16", before="io2", after="s0", value="seed"),
-                                 operation, dma_wait(before=before, after="s1"), final_state="s1")
-                self.rejected(source, "must complete pending DMA before implicit memory operations")
+                self.rejected(source.replace(dma_store("bf16"), operation + "\n" + dma_store("bf16", before="io3")),
+                              stream=False)
 
-    def test_pure_tile_work_and_mxu_compute_are_allowed_while_pending(self) -> None:
+    def test_dma_has_no_pending_limit_and_keeps_state_order(self) -> None:
+        source = copy()
+        loads = "\n".join(dma_load("bf16", before=before, after=after, result=result)
+                          for before, after, result in (("io2", "l1", "t1"), ("l1", "l2", "t2"), ("l2", "l3", "t3")))
+        self.accepted(source.replace(dma_store("bf16"), loads + "\n" + dma_store("bf16", before="l3")))
+        # A load after a store of the same bytes reads what the store wrote.
+        reload = dma_load("bf16", before="io4", after="io5", result="again")
+        self.accepted(source.replace("return %io4", reload + "\n    return %io5"))
+
+    def test_dma_preserves_the_linear_virtual_state_chain(self) -> None:
+        source = copy()
+        self.rejected(source.replace(dma_store("bf16"), dma_store("bf16", before="io0")),
+                      "nonlinear virtual state chain")
+        self.rejected(source.replace("return %io4", "return %io2"),
+                      "must return the current virtual state")
+
+    def test_boundary_tiles_and_pack_may_follow_dma(self) -> None:
+        for operation, after in (
+            (f'    %s1, %hidden = "atlas.virtual_input_bf16"(%s0) {{index = 3 : i32}} : ({STATE}) -> ({STATE}, {tile("bf16")})', "s1"),
+            (f'    %s1 = "atlas.virtual_output_bf16"(%s0, %seed) {{index = 1 : i32}} : ({STATE}, {tile("bf16")}) -> {STATE}', "s1"),
+            (f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} : ({tile("bf16")}) -> {tile("fp8")}', "s0"),
+        ):
+            with self.subTest(operation=operation):
+                self.accepted(program(*constants("bf16"), dma_load("bf16", before="io2", after="s0"),
+                                      operation, final_state=after))
+
+    def test_pure_tile_work_and_mxu_compute_may_follow_a_load(self) -> None:
         pure = (f'    %independent = "atlas.virtual_vpu_unary"(%seed) {{kind = "relu"}} '
                 f': ({tile("bf16")}) -> {tile("bf16")}')
         matmul = (f'    %product = "atlas.virtual_mxu_matmul"(%x, %w) {{unit = 1 : i32}} '
@@ -305,11 +244,7 @@ class VirtualDMATest(unittest.TestCase):
             *constants("bf16"), load("io2", "s0", "weight"),
             dma_load("bf16", before="s0", after="s1"), pure, matmul,
             reset("s1", "s2", "acc0"), accumulate("s2", "s3", "acc1", "acc0"),
-            dma_await("bf16", before="s3", after="s4"),
-            readout("s4", "s5", "mxu_tile", "acc1"), final_state="s5"))
-        self.accepted(copy().replace(dma_wait(),
-            f'    %independent = "atlas.virtual_vpu_unary"(%tile) {{kind = "relu"}} '
-            f': ({tile("bf16")}) -> {tile("bf16")}\n' + dma_wait()))
+            readout("s3", "s4", "mxu_tile", "acc1"), final_state="s4"))
 
     def test_completed_tiles_can_cross_cfg_edges_without_dma_handles(self) -> None:
         source = copy().replace(dma_store("bf16"),
@@ -318,43 +253,24 @@ class VirtualDMATest(unittest.TestCase):
             + dma_store("bf16", before="ready", value="value"))
         self.accepted(source)
 
-    def test_cfg_branch_loads_complete_locally_and_join_by_tile(self) -> None:
+    def test_cfg_branch_loads_join_by_tile(self) -> None:
         source = wrap([
             f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
             *constants("bf16"),
             f"    cf.cond_br %choose, ^left(%io0 : {STATE}), ^right(%io0 : {STATE})",
             f"  ^left(%left_io: {STATE}):",
-            dma_load("bf16", before="left_io", after="left_pending", handle="left_event"),
-            dma_await("bf16", before="left_pending", after="left_ready", handle="left_event", result="left_tile"),
+            dma_load("bf16", before="left_io", after="left_ready", result="left_tile"),
             f"    cf.br ^join(%left_ready, %left_tile : {STATE}, {tile('bf16')})",
             f"  ^right(%right_io: {STATE}):",
-            dma_load("bf16", before="right_io", after="right_pending", handle="right_event"),
-            dma_await("bf16", before="right_pending", after="right_ready", handle="right_event", result="right_tile"),
+            dma_load("bf16", before="right_io", after="right_ready", result="right_tile"),
             f"    cf.br ^join(%right_ready, %right_tile : {STATE}, {tile('bf16')})",
             f"  ^join(%joined_io: {STATE}, %joined_tile: {tile('bf16')}):",
-            dma_store("bf16", before="joined_io", value="joined_tile"), dma_wait(),
+            dma_store("bf16", before="joined_io", value="joined_tile"),
         ], arguments="%choose: i1")
         first = self.accepted(source)
         self.assertEqual(first, self.accepted(first))
-        self.rejected(source.replace("(%right_pending, %right_event)",
-                                     "(%right_pending, %left_event)"))
-
-    def test_pending_events_cannot_cross_edges_by_argument_or_capture(self) -> None:
-        source = copy()
-        changed = source.replace(dma_await("bf16"),
-            f"    cf.br ^next(%io1, %pending : {STATE}, {event('bf16')})\n"
-            f"  ^next(%edge_io: {STATE}, %edge_event: {event('bf16')}):\n"
-            + dma_await("bf16", before="edge_io", handle="edge_event"))
-        self.rejected(changed, "must complete pending DMA before block exit")
-        changed = source.replace(dma_await("bf16"),
-            f"    cf.br ^next(%io1 : {STATE})\n"
-            f"  ^next(%edge_io: {STATE}):\n" + dma_await("bf16", before="edge_io"))
-        self.rejected(changed, "must complete pending DMA before block exit")
-        changed = source.replace(dma_wait(),
-            f"    cf.br ^next(%io3 : {STATE})\n"
-            f"  ^next(%edge_io: {STATE}):\n" + dma_wait(before="edge_io"))
-        self.rejected(changed, "must complete pending DMA before block exit")
-        self.rejected(source.replace("@dma()", f"@dma(%external: {event('bf16')})"))
+        # The right branch cannot use the left branch's tile.
+        self.rejected(source.replace("(%right_ready, %right_tile", "(%right_ready, %left_tile"))
 
     def test_cfg_store_and_completion_must_be_in_the_unique_return_block(self) -> None:
         source = copy()
@@ -382,7 +298,7 @@ class VirtualDMATest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertTrue(result.stderr)
                     self.assertEqual(result.stdout, "")
-            lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+            lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
             if "func.func" in source:
                 self.assertEqual(lowered.returncode, 0, lowered.stderr)
                 self.assertNotRegex(lowered.stdout, r'(?m)^\s*%[^\n=]+\s*=\s*"atlas\.virtual_')
