@@ -4,7 +4,7 @@ The `rtl-op-timing-v1` provider schedules, inserts delays and verifies concrete 
 
 ![Chisel and SystemVerilog converge in CIRCT core dialects](figures/chisel_and_sv_circt_convergence.svg)
 
-See the [extractor reference](../../tools/rtl_extract/README.md) for simulation and schemas, and the [verification map](verification.md) for evidence.
+See the [extraction walkthrough](extraction-walkthrough.md) for how one VLOAD goes from Chisel to a compiler rule, the [extractor reference](../../tools/rtl_extract/README.md) for simulation and schemas, and the [verification map](verification.md) for evidence.
 
 ## The provider
 
@@ -83,6 +83,6 @@ Add `op-pairs=$X/out/op-pairs.json op-pairs-sha256=<digest>` for pairs; `--inser
 - Runtime-dependent addresses, moving addresses beyond 4096 entry contexts, or engine/DMA work crossing blocks.
 - Unbounded same-unit overlap: selection caps units at two commands despite some accepted three-command MXU chains.
 - Exact weight-read timing: matmul owns its weight slot through the last accumulator write.
-- DMA completion latency, concurrent host traffic or alternative memories. Measured EE290Sim latency curves ([npu_model](https://github.com/ucb-ee194-tapeout/npu_model/pull/66)) could later recalibrate the scheduler's DMA ordering estimate; this affects ordering only, never admission.
+- DMA completion latency, concurrent host traffic or alternative memories. The scheduler's DMA ordering estimate (516 cycles per KiB) could be recalibrated to the EE290Sim latency curve now in [npu_model](https://github.com/ucb-ee194-tapeout/npu_model/pull/66) (about 780 cycles per KiB); this affects ordering only, never admission.
 - Virtual cross-engine exclusion; physical verification checks the lowered stream.
 - RTL assertions for VLOAD writes into still-read MREG banks; compiler release rules protect them.
