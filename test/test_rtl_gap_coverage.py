@@ -108,7 +108,9 @@ def pair_program(record, source=""):
         return None
     sides = []
     for side, base in (("first", 6), ("second", 8)):
-        overlay = record.get(f"{side}_inputs", pair.get(f"{side}_inputs", {}))
+        if f"{side}_inputs" not in record:
+            raise AssertionError(f"{record['name']}: sweep record lacks {side}_inputs; regenerate the sweep")
+        overlay = record[f"{side}_inputs"]
         commands = pairs.commands(spec, pair[side], overlay)
         if list(commands) != [0]:
             return None
@@ -167,6 +169,9 @@ class PairOperandTests(unittest.TestCase):
              patch(__name__ + ".operation", return_value=([], ("dummy", ""))) as build:
             self.assertIsNotNone(pair_program(record))
         self.assertEqual([call.args[2]["value"] for call in build.call_args_list], [1, 2])
+        del record["first_inputs"]
+        with patch(__name__ + ".pair_files", return_value=(pairs, {"toy": ({"pairs": {"p": pair}}, spec)})):
+            self.assertRaisesRegex(AssertionError, "lacks first_inputs", pair_program, record)
 
 @unittest.skipUnless(FACTS and OPT.is_file(), "requires explicit RTL timing facts and built Atlas tools")
 class RTLGapCoverageTest(unittest.TestCase):
