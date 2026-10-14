@@ -666,7 +666,12 @@ public:
   // first; then the one that frees the frontend first, so a blocking
   // transfer waits for work that can run beside it; then the one with the
   // longest path to the block's end; then the earliest in source order.
-  std::vector<unsigned> listSchedule(const KindCounts &capacity) const {
+  // A load starts as soon as the frontend is free, so with `lookahead` loaded
+  // tiles awaiting their first use, another load waits while anything else
+  // is ready: a PACK or boundary tile must not drain transfers whose users
+  // all come after it.
+  std::vector<unsigned> listSchedule(const KindCounts &capacity,
+                                     unsigned lookahead) const {
     Pressure pressure(block, g.nodes, liveness);
     auto over = [&](const KindCounts &counts, int slack) {
       int total = 0;
@@ -674,7 +679,19 @@ public:
         total += std::max(0, counts[k] - (capacity[k] - slack));
       return total;
     };
+    llvm::SmallDenseSet<Value> unused;
+    auto isLoad = [](Operation *op) {
+      return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+    };
     return build([&](const Machine &machine, ArrayRef<unsigned> ready) {
+      auto held = [&](unsigned node) {
+        return unused.size() >= lookahead && isLoad(g.nodes[node]);
+      };
+      SmallVector<unsigned> eligible;
+      llvm::copy_if(ready, std::back_inserter(eligible),
+                    [&](unsigned node) { return !held(node); });
+      if (eligible.empty())
+        eligible.assign(ready.begin(), ready.end());
       auto key = [&](unsigned node) {
         Operation *op = g.nodes[node];
         int start = machine.start(node);
@@ -683,16 +700,21 @@ public:
                           machine.frontendAfter(node, start), -heights[node],
                           node);
       };
-      unsigned best = ready.front();
+      unsigned best = eligible.front();
       auto bestKey = key(best);
-      for (unsigned node : ready.drop_front()) {
+      for (unsigned node : ArrayRef(eligible).drop_front()) {
         auto nodeKey = key(node);
         if (nodeKey < bestKey) {
           best = node;
           bestKey = nodeKey;
         }
       }
-      pressure.place(g.nodes[best]);
+      Operation *op = g.nodes[best];
+      for (Value operand : op->getOperands())
+        unused.erase(operand);
+      if (isLoad(op))
+        unused.insert(op->getResult(1));
+      pressure.place(op);
       return best;
     });
   }
@@ -758,7 +780,8 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
 
 // Reorder one block when the schedule fits the allocator's capacity and the
 // source order does not, or when it is faster without giving up a fit the
-// source order has. A random order is taken as it is.
+// source order has. The schedule is the fastest fitting list schedule over a
+// few load lookaheads. A random order is taken as it is.
 LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
@@ -781,8 +804,6 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
 
   std::vector<unsigned> source(g.nodes.size());
   std::iota(source.begin(), source.end(), 0u);
-  std::vector<unsigned> order = scheduler.listSchedule(capacity);
-  SmallVector<Operation *> ops = opsOf(order);
   auto fits = [&](ArrayRef<Operation *> candidate) {
     KindCounts peak = scheduler.peakPressure(candidate);
     for (unsigned k = 0; k < kKinds.size(); ++k)
@@ -790,8 +811,25 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
         return false;
     return true;
   };
-  bool sourceFits = fits(g.nodes), scheduleFits = fits(ops);
-  bool faster = scheduler.makespan(order) < scheduler.makespan(source);
+  std::vector<unsigned> order;
+  SmallVector<Operation *> ops;
+  bool scheduleFits = false;
+  int span = 0;
+  for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
+    std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
+    SmallVector<Operation *> candidateOps = opsOf(candidate);
+    bool candidateFits = fits(candidateOps);
+    int candidateSpan = scheduler.makespan(candidate);
+    if (order.empty() || std::pair(!candidateFits, candidateSpan) <
+                             std::pair(!scheduleFits, span)) {
+      order = std::move(candidate);
+      ops = std::move(candidateOps);
+      scheduleFits = candidateFits;
+      span = candidateSpan;
+    }
+  }
+  bool sourceFits = fits(g.nodes);
+  bool faster = span < scheduler.makespan(source);
   if (sourceFits ? scheduleFits && faster : scheduleFits || faster)
     reorder(block, ops);
   return success();
