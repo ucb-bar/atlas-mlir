@@ -35,54 +35,51 @@ class CacheTest(unittest.TestCase):
                                 stage_key(commands, inputs, versions))
 
     def test_skip_changed_input_and_corrupt_output(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source, output = root / 'input', root / 'output'
-            source.write_text('first')
-            command = [sys.executable, '-c',
-                       'from pathlib import Path; import sys; Path(sys.argv[2]).write_bytes(Path(sys.argv[1]).read_bytes())',
-                       str(source), str(output)]
-            def run():
-                return StageRunner(root, root).run('copy', [command], [source], [output], {'python': sys.version})
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        source, output = root / 'input', root / 'output'
+        source.write_text('first')
+        command = [sys.executable, '-c',
+                   'from pathlib import Path; import sys; Path(sys.argv[2]).write_bytes(Path(sys.argv[1]).read_bytes())',
+                   str(source), str(output)]
+        def run():
+            return StageRunner(root, root).run('copy', [command], [source], [output], {'python': sys.version})
+        self.assertEqual(run()['status'], 'produced')
+        self.assertEqual(run()['status'], 'skipped')
+        source.write_text('second')
+        self.assertEqual(run()['status'], 'produced')
+        self.assertEqual(output.read_text(), 'second')
+        for mutate in (lambda: output.write_text('corrupt'), output.unlink):
+            mutate()
             self.assertEqual(run()['status'], 'produced')
-            self.assertEqual(run()['status'], 'skipped')
-            source.write_text('second')
-            self.assertEqual(run()['status'], 'produced')
-            self.assertEqual(output.read_text(), 'second')
-            for mutate in (lambda: output.write_text('corrupt'), output.unlink):
-                mutate()
-                self.assertEqual(run()['status'], 'produced')
-            state = json.loads((root / 'state.json').read_text())['copy']
-            self.assertEqual(state['outputs'], [{'path': 'output', 'sha256': sha256(output)}])
-            self.assertEqual(state['inputs'][0]['path'], 'input')
+        state = json.loads((root / 'state.json').read_text())['copy']
+        self.assertEqual(state['outputs'], [{'path': 'output', 'sha256': sha256(output)}])
+        self.assertEqual(state['inputs'][0]['path'], 'input')
 
     def test_failure_does_not_cache_success(self):
         import subprocess
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            runner = StageRunner(root, root)
-            with self.assertRaises(subprocess.CalledProcessError):
-                runner.run('broken', [[sys.executable, '-c', 'raise SystemExit(2)']], [],
-                           [root / 'missing'], {})
-            self.assertEqual(runner.records[0]['status'], 'failed')
-            self.assertNotIn('broken', runner.state)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        runner = StageRunner(root, root)
+        with self.assertRaises(subprocess.CalledProcessError):
+            runner.run('broken', [[sys.executable, '-c', 'raise SystemExit(2)']], [],
+                       [root / 'missing'], {})
+        self.assertEqual(runner.records[0]['status'], 'failed')
+        self.assertNotIn('broken', runner.state)
 
     def test_inventory_outputs_are_validated(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            script = root / 'produce.py'
-            script.write_text('from pathlib import Path\nimport json\n'
-                'Path("trace").write_text("valid")\n'
-                'Path("summary.json").write_text(json.dumps({"outputs":[{"path":"trace"}]}))\n')
-            def run():
-                return StageRunner(root, root).run('replay', [[sys.executable, script]], [script],
-                    [root / 'summary.json'], {}, output_inventory=root / 'summary.json')
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        script = root / 'produce.py'
+        script.write_text('from pathlib import Path\nimport json\n'
+            'Path("trace").write_text("valid")\n'
+            'Path("summary.json").write_text(json.dumps({"outputs":[{"path":"trace"}]}))\n')
+        def run():
+            return StageRunner(root, root).run('replay', [[sys.executable, script]], [script],
+                [root / 'summary.json'], {}, output_inventory=root / 'summary.json')
+        self.assertEqual(run()['status'], 'produced')
+        self.assertEqual(run()['status'], 'skipped')
+        for mutate in ((root / 'trace').unlink, lambda: (root / 'trace').write_text('corrupt'),
+                       lambda: (root / 'summary.json').write_text('invalid json')):
+            mutate()
             self.assertEqual(run()['status'], 'produced')
-            self.assertEqual(run()['status'], 'skipped')
-            for mutate in ((root / 'trace').unlink, lambda: (root / 'trace').write_text('corrupt'),
-                           lambda: (root / 'summary.json').write_text('invalid json')):
-                mutate()
-                self.assertEqual(run()['status'], 'produced')
     def test_restricted_symlink_is_rejected_before_target_inspection(self):
         with patch.object(Path, 'is_symlink', side_effect=lambda p: p.name == 'alias', autospec=True) as inspect, \
              patch('os.readlink', return_value='/tmp/restricted-' + 'vl' + 'si/child'):
@@ -91,19 +88,18 @@ class CacheTest(unittest.TestCase):
         self.assertEqual([call.args[0] for call in inspect.call_args_list], [Path('/tmp'), Path('/tmp/alias')])
 
     def test_receipt_log_and_temporary_paths_are_checked(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for name in ('state.json', 'receipt.json.tmp', 'copy.log'):
-                runner = StageRunner(root, root)
-                def checked(path):
-                    if Path(path).name == name:
-                        raise ValueError('restricted child')
-                    return safe_path(path)
-                with self.subTest(name=name), patch.object(cache, 'safe_path', side_effect=checked):
-                    with self.assertRaisesRegex(ValueError, 'restricted child'):
-                        if name == 'state.json': StageRunner(root, root)
-                        elif name.endswith('.tmp'): cache.write_json(root / 'receipt.json', {})
-                        else: runner.run('copy', [], [], [root / 'output'], {})
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for name in ('state.json', 'receipt.json.tmp', 'copy.log'):
+            runner = StageRunner(root, root)
+            def checked(path):
+                if Path(path).name == name:
+                    raise ValueError('restricted child')
+                return safe_path(path)
+            with self.subTest(name=name), patch.object(cache, 'safe_path', side_effect=checked):
+                with self.assertRaisesRegex(ValueError, 'restricted child'):
+                    if name == 'state.json': StageRunner(root, root)
+                    elif name.endswith('.tmp'): cache.write_json(root / 'receipt.json', {})
+                    else: runner.run('copy', [], [], [root / 'output'], {})
 
     def test_output_symlink_cannot_escape_build_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +173,11 @@ class RegenCheckTests(unittest.TestCase):
         self.assertTrue(any("missing artifact archive/" in d for d in differences))
         for name in self.n: (self.g / "evidence" / name).rename(self.g / name)
         self.assertEqual(self.compare(), [])
+        for name in self.n: (self.r / "system" / name).rename(self.r / name)
+        self.assertEqual(self.compare({name: f"system/{name}" for name in self.n}), [])
+        differences = self.compare({self.n[0]: f"archive/{self.n[0]}"})
+        self.assertTrue(any("missing artifact archive/" in d for d in differences))
+        for name in self.n: (self.r / name).rename(self.r / "system" / name)
         (self.r / "stale-unchecked").mkdir()
         (self.r / "system" / self.n[1]).rename(self.r / "stale-unchecked" / self.n[1])
         self.assertTrue(any("missing artifact pairs-vpu.json" in d for d in self.compare()))
@@ -250,47 +251,48 @@ class RegenCheckTests(unittest.TestCase):
 
 class ModelAdapterTests(unittest.TestCase):
     def test_makeflags_and_inventory(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            arg = f'CXX={root}/compiler/g++ LINK={root}/compiler/g++ AR={root}/compiler/ar'
-            self.assertEqual(model.command_record(['-MAKEFLAGS', arg], root),
-                             ['-MAKEFLAGS', 'CXX=compiler/g++ LINK=compiler/g++ AR=compiler/ar'])
-            work = root / 'replay'; work.mkdir()
-            (work / 'case.txt').write_bytes(b'passed'); (work / 'summary.json').write_text('old')
-            self.assertEqual(model.inventory(work, root, [work / 'summary.json']),
-                             [{'path': 'replay/case.txt', 'sha256': hashlib.sha256(b'passed').hexdigest()}])
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        arg = f'CXX={root}/compiler/g++ LINK={root}/compiler/g++ AR={root}/compiler/ar'
+        self.assertEqual(model.command_record(['-MAKEFLAGS', arg], root),
+                         ['-MAKEFLAGS', 'CXX=compiler/g++ LINK=compiler/g++ AR=compiler/ar'])
+        work = root / 'replay'; work.mkdir()
+        (work / 'case.txt').write_bytes(b'passed'); (work / 'summary.json').write_text('old')
+        self.assertEqual(model.inventory(work, root, [work / 'summary.json']),
+                         [{'path': 'replay/case.txt', 'sha256': hashlib.sha256(b'passed').hexdigest()}])
     def test_replay_receipt_and_count(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); work = root / 'replay'; work.mkdir()
-            (work / 'case.txt').write_text('passed')
-            args = argparse.Namespace(script=root / 'helper.py', build_root=root, work=work, summary=None, expected_pass=2)
-            helper = SimpleNamespace(run=lambda args: [{'case': 'a'}, {'case': 'b'}])
-            with patch.object(model, 'load_helper', return_value=helper):
-                result = model.replay(args)
-                self.assertEqual(result['pass_count'], 2)
-                self.assertEqual(json.loads((work / 'summary.json').read_text()), result)
-                args.expected_pass = 3
-                with self.assertRaisesRegex(ValueError, 'expected 3, got 2'): model.replay(args)
-                args.expected_pass = 2; helper.run = lambda args: [{'case': 'a'}, {'case': 'a'}]
-                with self.assertRaisesRegex(ValueError, 'duplicate'): model.replay(args)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        work = root / 'replay'
+        work.mkdir()
+        (work / 'case.txt').write_text('passed')
+        args = argparse.Namespace(script=root / 'helper.py', build_root=root, work=work, summary=None, expected_pass=2)
+        helper = SimpleNamespace(run=lambda args: [{'case': 'a'}, {'case': 'b'}])
+        with patch.object(model, 'load_helper', return_value=helper):
+            result = model.replay(args)
+            self.assertEqual(result['pass_count'], 2)
+            self.assertEqual(json.loads((work / 'summary.json').read_text()), result)
+            args.expected_pass = 3
+            with self.assertRaisesRegex(ValueError, 'expected 3, got 2'): model.replay(args)
+            args.expected_pass = 2; helper.run = lambda args: [{'case': 'a'}, {'case': 'a'}]
+            with self.assertRaisesRegex(ValueError, 'duplicate'): model.replay(args)
 
     def test_actual_model_command(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); rtl = root / 'rtl'; rtl.mkdir()
-            (rtl / 'source.sv').write_text('module X; endmodule')
-            args = argparse.Namespace(script=root / 'helper.py', output=root / 'model/VAtlasCore', build_root=root,
-                                      rtl=rtl, verilator='verilator', verilator_root=None)
-            helper = SimpleNamespace(sh=lambda *args: '')
-            def build(args, work):
-                helper.sh(['verilator', '--Mdir', str(work / 'obj'), *args.rtl.glob('*.sv')], 30)
-                (work / 'obj').mkdir(); binary = work / 'obj/VAtlasCore'; binary.write_bytes(b'binary')
-                return binary
-            helper.build_model = build
-            with patch.object(model, 'load_helper', return_value=helper), patch.object(model.subprocess, 'run', return_value=SimpleNamespace(stdout='Verilator 5\n')):
-                result = model.model(args)
-            self.assertEqual(result['commands'][0]['argv'], ['verilator', '--Mdir', 'model/obj', 'rtl/source.sv'])
-            self.assertEqual(args.output.read_bytes(), b'binary')
-            self.assertTrue((root / 'model/build.json').is_file())
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        rtl = root / 'rtl'
+        rtl.mkdir()
+        (rtl / 'source.sv').write_text('module X; endmodule')
+        args = argparse.Namespace(script=root / 'helper.py', output=root / 'model/VAtlasCore', build_root=root,
+                                  rtl=rtl, verilator='verilator', verilator_root=None)
+        helper = SimpleNamespace(sh=lambda *args: '')
+        def build(args, work):
+            helper.sh(['verilator', '--Mdir', str(work / 'obj'), *args.rtl.glob('*.sv')], 30)
+            (work / 'obj').mkdir(); binary = work / 'obj/VAtlasCore'; binary.write_bytes(b'binary')
+            return binary
+        helper.build_model = build
+        with patch.object(model, 'load_helper', return_value=helper), patch.object(model.subprocess, 'run', return_value=SimpleNamespace(stdout='Verilator 5\n')):
+            result = model.model(args)
+        self.assertEqual(result['commands'][0]['argv'], ['verilator', '--Mdir', 'model/obj', 'rtl/source.sv'])
+        self.assertEqual(args.output.read_bytes(), b'binary')
+        self.assertTrue((root / 'model/build.json').is_file())
 
 class RegenSweepTests(unittest.TestCase):
     def test_partition(self):
@@ -334,32 +336,30 @@ class ManifestTests(unittest.TestCase):
             driver.stages(self.config, 'nonexistent')
 
     def test_extraction_cache_covers_generated_and_file_specs(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args = driver.argparse.Namespace(python=Path(sys.executable), cmake='cmake', cxx='g++', circt_prefix=root)
-            runner = driver.argparse.Namespace(run=Mock())
-            with patch.object(driver, 'executable', side_effect=lambda p: Path(p)), \
-                 patch.object(driver, 'version', return_value='test'), \
-                 patch.object(driver.subprocess, 'check_output', return_value='test'):
-                driver.regenerate(args, self.config, root, runner, ['facts'])
-            inputs = runner.run.call_args.args[2]
-            self.assertIn(REPO / 'tools/rtl_extract/specs/gen_core.py', inputs)
-            self.assertIn(REPO / 'tools/rtl_extract/specs/vpu.yaml', inputs)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        args = driver.argparse.Namespace(python=Path(sys.executable), cmake='cmake', cxx='g++', circt_prefix=root)
+        runner = driver.argparse.Namespace(run=Mock())
+        with patch.object(driver, 'executable', side_effect=lambda p: Path(p)), \
+             patch.object(driver, 'version', return_value='test'), \
+             patch.object(driver.subprocess, 'check_output', return_value='test'):
+            driver.regenerate(args, self.config, root, runner, ['facts'])
+        inputs = runner.run.call_args.args[2]
+        self.assertIn(REPO / 'tools/rtl_extract/specs/gen_core.py', inputs)
+        self.assertIn(REPO / 'tools/rtl_extract/specs/vpu.yaml', inputs)
 
     def test_environment_and_output_confinement(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args = driver.argparse.Namespace(bin=root / 'bin', python=Path(sys.executable))
-            driver.emit_environment(args, self.config, root)
-            env = dict(shlex.split(line)[1].split('=', 1) for line in (root / 'env.sh').read_text().splitlines())
-            self.assertEqual(env['ATLAS_PAIR_FACTS'], str(root / 'out/op-pairs.json'))
-            self.assertEqual(env['ATLAS_TIMING_PROBE'], str(args.bin / 'rtl-timing-facts-probe'))
-            self.assertEqual(len(env['ATLAS_PAIR_SWEEPS'].split(os.pathsep)), 13)
-            self.assertEqual(env['ATLAS_OP_PAIRS'].split(os.pathsep),
-                             [str(root / f'out/pairs-mxu{i}.json') for i in (0, 1)])
-            for name in ('../outside', str(root.parent / 'outside')):
-                with self.assertRaisesRegex(ValueError, 'escapes'):
-                    driver.output_path(root, name)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        args = driver.argparse.Namespace(bin=root / 'bin', python=Path(sys.executable))
+        driver.emit_environment(args, self.config, root)
+        env = dict(shlex.split(line)[1].split('=', 1) for line in (root / 'env.sh').read_text().splitlines())
+        self.assertEqual(env['ATLAS_PAIR_FACTS'], str(root / 'out/op-pairs.json'))
+        self.assertEqual(env['ATLAS_TIMING_PROBE'], str(args.bin / 'rtl-timing-facts-probe'))
+        self.assertEqual(len(env['ATLAS_PAIR_SWEEPS'].split(os.pathsep)), 13)
+        self.assertEqual(env['ATLAS_OP_PAIRS'].split(os.pathsep),
+                         [str(root / f'out/pairs-mxu{i}.json') for i in (0, 1)])
+        for name in ('../outside', str(root.parent / 'outside')):
+            with self.assertRaisesRegex(ValueError, 'escapes'):
+                driver.output_path(root, name)
 
 if __name__ == '__main__':
     unittest.main()

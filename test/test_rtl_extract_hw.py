@@ -143,11 +143,9 @@ class VlsuTest(EngineCase):
 class VpuTest(EngineCase):
     engine = "vpu"
 
-    def test_all_operations_present(self):
+    def test_all_operations_and_busy_release(self):
         self.assertEqual(len(self.records), 29)
         self.assertNotIn("fp8", self.records)
-
-    def test_busy_release_not_before_next_issue(self):
         for name, record in self.records.items():
             with self.subTest(name):
                 self.assertGreaterEqual(record["first_free_age"], record["next_issue_age"])
@@ -490,16 +488,12 @@ class CompilerCrossCheck(unittest.TestCase):
             raise unittest.SkipTest("requires ATLAS_OP_TIMING, or ATLAS_HW_IR and ATLAS_HW_EXPORTER")
         cls.probe = run_probe(exe, sorted({m for _, m in mapped_ops().values()}))
 
-    def test_compiler_rules_match_rtl_facts(self):
+    def test_compiler_rules_and_fact_coverage(self):
         rows = compare(self.facts, self.probe)
         failed = [r for r in rows if not r[6]]
         self.assertEqual(failed, [], "\n" + table(failed))
-
-    def test_every_fact_compared_or_not_modeled(self):
-        self.assertEqual(coverage(self.facts), [])
-
-    def test_not_modeled_records_exist(self):
         self.assertLessEqual(set(MAP["not_modeled_records"]), set(self.facts))
+        self.assertEqual(coverage(self.facts), [])
 
     def test_perturbed_fact_is_reported(self):
         facts = copy.deepcopy(self.facts)
@@ -597,8 +591,7 @@ class RetainTest(unittest.TestCase):
         out, result = self.run_tool(HW.replace("@DmaEngine", "@Other"))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads((out / "manifest.json").read_text())["state"], "structure_check_failed")
-SOURCE = Path(__file__).resolve().parents[1] / "tools" / "retain-ee290-hw-ir.py"
-SPEC = importlib.util.spec_from_file_location("retain_hw_ir", SOURCE)
+SPEC = importlib.util.spec_from_file_location("retain_hw_ir", TOOL)
 retain = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(retain)
 

@@ -42,10 +42,7 @@ SPEC = {"engine": "toy", "module": "Toy", "inputs": {"go": 0}, "busy": "busy", "
 
 def sweep(module, pair, spec=SPEC, extra=None):
     spec_ = synthetic.load(spec)
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "toy.yaml"
-        path.write_text(yaml.safe_dump({"engine": "toy", "pairs": {"p": pair}, **(extra or {})}))
-        raw = pairs.load_file(path, spec_)
+    raw = synthetic.load_sweep(pairs.load_file, {"engine": "toy", "pairs": {"p": pair}, **(extra or {})}, spec_)
     return pairs.extract({"modules": [module]}, raw, spec_)[0]
 
 class SyntheticPairTests(unittest.TestCase):
@@ -59,12 +56,10 @@ class SyntheticPairTests(unittest.TestCase):
                           "as": {"first": "toy.go", "second": "other.go"},
                           "relation": {"bank": "same", "slot": "same"}})
 
-    def test_ignored_launch_is_rejected_until_busy_clears(self):
+    def test_ignored_launch_is_rejected_with_and_without_guards(self):
         record = sweep(counter(), {"first": "go", "second": "go", "gaps": "1..6"})
         self.assertEqual((record["min_gap"], record["stable_gap"]), (4, 4))
         self.assertEqual(record["results"][0], {"from": 1, "to": 3, "result": "guard busy set; missing out events"})
-
-    def test_event_check_alone_rejects_an_ignored_launch(self):
         record = sweep(counter(), {"first": "go", "second": "go", "gaps": "1..6", "guards": []})
         self.assertEqual(record["stable_gap"], 4)
         self.assertEqual(record["results"][0]["result"], "missing out events")
@@ -128,7 +123,6 @@ class HardwarePairTests(unittest.TestCase):
                     self.assertEqual(record["shared_control"]["disjoint"], expected["disjoint"], record["shared_control"])
 
 
-
     def test_pair_windows(self):
         for name in ("vlsu", "vpu", "core", "mxu0", "mxu1", "core_mxu", "core_mxu_cross", "core_mxu_units", "core_mxu_shared", "core_mxu_same"):
             with self.subTest(spec=name):
@@ -159,12 +153,6 @@ class HardwarePairTests(unittest.TestCase):
                     self.assertIn("issue-busy bit is set", record["results"][0]["result"])
 
 
-
-
-
-
-
-
 def queue():
     """Two commands may occupy the four-stage queue; further launches are ignored."""
     stages = [op(f"sr{i}", "seq.firreg", [("accept" if i == 0 else f"sr{i - 1}"), "clock", "reset", "zero"], name=f"sr{i}") for i in range(4)]
@@ -180,10 +168,8 @@ QUEUE_SPEC = {"engine": "toy", "module": "Queue", "inputs": {"go": 0}, "busy": "
 def sequence_sweep(module, sequence, spec=QUEUE_SPEC, extra=None):
     """``{length: record}`` for one sequence of a synthetic engine."""
     spec_ = synthetic.load(spec)
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "toy.yaml"
-        path.write_text(yaml.safe_dump({"engine": "toy", "sequences": {"s": sequence}, **(extra or {})}))
-        raw = sequences.load_file(path, spec_)
+    raw = synthetic.load_sweep(sequences.load_file, {
+        "engine": "toy", "sequences": {"s": sequence}, **(extra or {})}, spec_)
     return {r["length"]: r for r in sequences.extract({"modules": [module]}, raw, spec_)}
 
 def chains(module, sequence, invariants=None, spec=synthetic.TWO):
@@ -251,13 +237,11 @@ class SyntheticSequenceTests(unittest.TestCase):
         self.assertEqual(records[3]["results"][0], {"from": 1, "to": 1, "result": "missing out x1 (ops [2])"})
         self.assertEqual(records[4]["results"][0], {"from": 1, "to": 1, "result": "missing out x2 (ops [2, 3])"})
 
-    def test_restart_merges_events_until_streams_abut(self):
+    def test_restart_and_guards_reject_overlapping_sequences(self):
         spec = SPEC
         records = sequence_sweep(counter(True), {"ops": [{"op": "go", "guards": []}], "lengths": "2..3", "gaps": "1..6"}, spec)
         self.assertEqual({n: (r["min_gap"], r["stable_gap"]) for n, r in records.items()}, {2: (3, 3), 3: (3, 3)})
         self.assertRegex(records[3]["results"][0]["result"], "^missing out")
-
-    def test_guard_applies_to_every_operation_after_the_first(self):
         records = sequence_sweep(counter(True), {"ops": [{"op": "go"}], "lengths": 3, "gaps": "1..6"}, SPEC)
         self.assertEqual(records[3]["stable_gap"], 4)
         self.assertEqual(records[3]["results"][0]["result"], "guard busy set at op 1; guard busy set at op 2; missing out x4 (ops [1, 2])")
@@ -353,10 +337,8 @@ class HardwareSequenceTests(unittest.TestCase):
                 if expected > 1:
                     self.assertEqual(record["min_gap"], expected, record["results"])
 
-    def test_mxu0(self):
+    def test_mxu_windows(self):
         self.check("mxu0")
-
-    def test_mxu1(self):
         self.check("mxu1")
 
     def test_mxu_assertions_bind_chains(self):
@@ -423,20 +405,27 @@ def chain(stable, length=3):
             "length": length, "ops": ops, "gaps": [1, 135], "min_gap": stable, "stable_gap": stable,
             "results": runs(stable, 135), "invariants": CHECKED}
 
+def build_pair_facts(files, op_timing=OP_TIMING, hw=HW):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "facts.json").write_text(json.dumps(op_timing))
+        paths = {"pairs": [], "sequences": []}
+        for n, (stem, records) in enumerate(files):
+            kind = "pairs" if stem.startswith("pairs-") else "sequences"
+            key = f"op_{kind}"
+            path = root / str(n) / f"{stem}.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps({"schema": f"rtl_extract.{key}.v1", "hw_ir": hw, key: records}))
+            paths[kind].append(path)
+        return pairfacts.build(root / "facts.json", paths["pairs"], paths["sequences"])
+
 class PairFactsTests(unittest.TestCase):
 
     def build(self, records, chains=(), op_timing=OP_TIMING, hw=HW):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "facts.json").write_text(json.dumps(op_timing))
-            (root / "pairs-core_vpu.json").write_text(json.dumps({"schema": "rtl_extract.op_pairs.v1", "hw_ir": hw, "op_pairs": records}))
-            sequences = []
-            if chains:
-                sequences = [root / "sequences-core_vpu.json"]
-                sequences[0].write_text(json.dumps({"schema": "rtl_extract.op_sequences.v1", "hw_ir": hw, "op_sequences": list(chains)}))
-            return pairfacts.build(root / "facts.json", [root / "pairs-core_vpu.json"], sequences)
+        files = [("pairs-core_vpu", records)] + ([("sequences-core_vpu", list(chains))] if chains else [])
+        return build_pair_facts(files, op_timing, hw)
 
-    def test_records_name_blocks_and_carry_the_pair_file_relation(self):
+    def test_records_bind_blocks_relations_and_written_format(self):
         document = self.build([pair("exp_relu", 1), pair("exp_exp", 65)])
         self.assertEqual(document["schema"], "merlin.op_pairs.v1")
         self.assertEqual(document["hw_ir"], HW)
@@ -448,6 +437,12 @@ class PairFactsTests(unittest.TestCase):
         self.assertNotIn("results", first)
         self.assertEqual(document["sources"][0]["specs"], [
             {"name": name, "sha256": SPEC_DIGESTS[name]} for name in ("pairs/core_vpu.yaml", "system/core.yaml")])
+        document = self.build([pair("exp_relu", 1)])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "op-pairs.json"
+            pairfacts.write(path, document)
+            self.assertEqual(json.loads(path.read_text()), document)
+            self.assertIn('    {"first": "vpu.exp", "second": "vpu.relu"', path.read_text())
 
     def test_missing_sweep_metadata_requires_regeneration(self):
         for field in ("first_inputs", "second_inputs", "as", "relation"):
@@ -504,14 +499,6 @@ class PairFactsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match sequences/core_vpu.yaml"):
             self.build([pair("exp_relu", 1)], [wrong])
 
-    def test_written_document_keeps_one_record_per_line(self):
-        document = self.build([pair("exp_relu", 1)])
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "op-pairs.json"
-            pairfacts.write(path, document)
-            self.assertEqual(json.loads(path.read_text()), document)
-            self.assertIn('    {"first": "vpu.exp", "second": "vpu.relu"', path.read_text())
-
 def mxu_block(name, last):
     """An MXU block: no next_issue_age, live through its last event age."""
     return {"name": name, "engine": name.split(".")[0], "operation": name.split(".")[1],
@@ -539,18 +526,7 @@ class MxuPairFactsTests(unittest.TestCase):
     """Same-MXU sweeps (pairs/core_mxu_same.yaml, sequences/core_mxu.yaml): relations and the last-event window."""
 
     def build(self, files, op_timing=MXU_TIMING):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "facts.json").write_text(json.dumps(op_timing))
-            paths = {"pairs": [], "sequences": []}
-            for n, (stem, records) in enumerate(files):
-                kind = "pairs" if stem.startswith("pairs-") else "sequences"
-                schema = "rtl_extract.op_pairs.v1" if kind == "pairs" else "rtl_extract.op_sequences.v1"
-                path = root / str(n) / f"{stem}.json"
-                path.parent.mkdir()
-                path.write_text(json.dumps({"schema": schema, "hw_ir": HW, ("op_pairs" if kind == "pairs" else "op_sequences"): records}))
-                paths[kind].append(path)
-            return pairfacts.build(root / "facts.json", paths["pairs"], paths["sequences"])
+        return build_pair_facts(files, op_timing)
 
     def test_records_carry_accumulator_and_weight_slot_relations(self):
         document = self.build([("pairs-core_mxu_same", [mxu_pair("mxu0_mm_pop16_acc_other", 1), mxu_pair("mxu0_mm_pop16_acc_same", 64), mxu_pair("mxu0_mm_pw_slot_other", 1)])])
@@ -623,6 +599,21 @@ SPEC_ORDER_DIGESTS = {'pairs/core.yaml': '35ea71f0e7cb75783f6ff82bdd11ff14f1e3fc
     'system/core.yaml': 'fd94a0d853783561813b9397cd8b4e7722b81826e93e51e51a2bebc6a31b7cb8',
     'system/core_dma.yaml': 'd16cf75075c8a0e4948b160685dc2e05500dc0b638a3ceef5f2ccf7e31689617',}
 
+MXU_SPEC_DIGESTS = {
+    "mxu0.yaml": ("46464661e97125bf70eced3f9e9fc7471751f8a1b724ccdc85cb4a13fd4543d5",
+        "56cbc26234e5df120a73313dba06934c34cce71a48b7fff95f41572483f9d8e3"),
+    "mxu1.yaml": ("607c8962e07a3e7b3a2fa88fec45bb269bdb48bdee701a5d35409866cb8711b3",
+        "9e12aad408ff31bb2988fc93009c8eec6febd719e7e77ea91423e14ee3887709"),
+    "pairs/mxu0.yaml": ("d3c175c27a7143de2e342a4a97218d78abab9239da811ec51eb2f35541e5efba",
+        "79091fefd8f49ebd327101deace0d161517daa3db446bc5c0c4adbd83919cd76"),
+    "pairs/mxu1.yaml": ("de47da80222d18f01930074c8e403d02c0c71240b9158044f8ce10e3cfa7e0bd",
+        "9816b62ddf1663408e3b90600c7cc92f1bac3de71113f655c47636f8c327c060"),
+    "sequences/mxu0.yaml": ("f6adc610797839b0c7421e94598dfe0747dd4059ff9f7b13c2b3fbb262e26dd0",
+        "9813d7915e933269174014e050b909ea0dd764a03d5dd233093ed315ecd6e860"),
+    "sequences/mxu1.yaml": ("c70da394fed52b7103d142ddcbfbc12cd05b60186ecc9dc05eb440b5f4af2f89",
+        "d5d610bdf2b49dc4c99aac7429026a021c4c1e2935395c081a68e56f9f7b847a"),
+}
+
 class GeneratorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -668,6 +659,14 @@ class GeneratorTests(unittest.TestCase):
                 next(iter(records.values()))["mutated"] = True
                 canonical = json.dumps(resolved_spec(SPECS / path), sort_keys=True).encode()
                 self.assertEqual(hashlib.sha256(canonical).hexdigest(), expected)
+
+    def test_generated_mxu_specs_keep_content_and_order(self):
+        for name, expected in MXU_SPEC_DIGESTS.items():
+            with self.subTest(name=name):
+                document = resolved_spec(SPECS / name)
+                actual = tuple(hashlib.sha256(json.dumps(document, sort_keys=sort).encode()).hexdigest()
+                               for sort in (True, False))
+                self.assertEqual(actual, expected)
 
     def test_generators_with_and_without_sweeps(self):
         for name, count in (("vpu", 841), ("mxu-same", 196), ("mxu-shared", 536), ("mxu-chains", 50)):
