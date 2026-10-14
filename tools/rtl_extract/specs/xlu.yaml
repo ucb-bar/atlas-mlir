@@ -5,39 +5,26 @@ description: Register-buffer transpose engine; one command at age 0 while idle.
 limit: 160
 system: AtlasCore
 command: io_cmd
-inputs:
-  io_cmd_bits_op: 3
-  io_cmd_bits_srcMregId: 13
-  io_cmd_bits_dstMregId: 55
-decode:
-  input: io_cmd_bits_op
-  instruction: {instance: scalar/decoder, port: io_instr}
-  words: {vtrpose: 0x0000006b}
+inputs: {io_cmd_bits_op: 3, io_cmd_bits_srcMregId: 13, io_cmd_bits_dstMregId: 55}
+decode: {input: io_cmd_bits_op, instruction: {instance: scalar/decoder, port: io_instr}, words: {vtrpose: 0x0000006b}}
 busy: io_busy
 events:
-  read:
-    bundle: io_mregReadReq
-    row: row
-    response: {input: io_mregReadResp_valid, memory: MregFile}
-  write:
-    bundle: io_mregWriteReq
-    row: row
+  read: {bundle: io_mregReadReq, row: row, response: {input: io_mregReadResp_valid, memory: MregFile}}
+  write: {bundle: io_mregWriteReq, row: row}
 operations:
   transpose:
-    commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: $vtrpose, io_cmd_bits_srcMregId: 3, io_cmd_bits_dstMregId: 7}
+    commands: {0: {io_cmd_valid: 1, io_cmd_bits_op: $vtrpose, io_cmd_bits_srcMregId: 3, io_cmd_bits_dstMregId: 7}}
 variants:
-  response_latency_3:         # each MREG read response arrives three cycles after its request
-    events: {read: {response: {latency: 3}}}
-  busy_command:               # a different command held valid while busy must not disturb the transpose
-    operations:
-      transpose:
-        commands:
-          "1..40": {io_cmd_valid: 1, io_cmd_bits_op: $vtrpose, io_cmd_bits_srcMregId: 21, io_cmd_bits_dstMregId: 42}
+  # Each MREG response arrives three cycles after its request.
+  response_latency_3: {events: {read: {response: {latency: 3}}}}
+  # A different command held valid while busy must not disturb the transpose.
+  busy_command:
+    operations: {transpose: {commands: {1..40: {io_cmd_valid: 1, io_cmd_bits_op: $vtrpose, io_cmd_bits_srcMregId: 21,
+              io_cmd_bits_dstMregId: 42}}}}
 checks:
-  - equal: [transpose.events, transpose/busy_command.events]
-    reason: operands are captured at issue and busy commands are ignored
-  - equal: [transpose.first_free_age, transpose/busy_command.first_free_age]
+  - {equal: [transpose.events, transpose/busy_command.events], reason: operands are captured at issue and busy commands
+        are ignored}
+  - {equal: [transpose.first_free_age, transpose/busy_command.first_free_age]}
 # Regression values used only by tests; the extractor never reads them.
 expect:
   transpose:
@@ -45,13 +32,8 @@ expect:
       read: {first_age: 1, last_age: 32, count: 32, step: 1, row_contiguous: true, values: {mregId: [3]}}
       write: {first_age: 34, last_age: 65, count: 32, step: 1, row_contiguous: true, values: {mregId: [7]}}
     first_free_age: 66
-  transpose/response_latency_3:
-    events:
-      read: {first_age: 1, count: 32, step: 1}
-      write: {first_age: 36, count: 32, step: 1}
-    first_free_age: 68
+  transpose/response_latency_3: {events: {read: {first_age: 1, count: 32, step: 1}, write: {first_age: 36, count: 32,
+          step: 1}}, first_free_age: 68}
   transpose/busy_command:
-    events:
-      read: {first_age: 1, count: 32}
-      write: {first_age: 34, count: 32}
+    events: {read: {first_age: 1, count: 32}, write: {first_age: 34, count: 32}}
     first_free_age: 66

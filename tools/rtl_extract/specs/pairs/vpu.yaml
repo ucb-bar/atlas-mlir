@@ -2,36 +2,17 @@
 # which the frontend asserts but does not stall on.
 engine: vpu
 description: Second VPU command issued while the first is in flight.
-invariants: {}           # every VectorEngineTop assertion
-equivalent:              # the overlap path may serve the second command on the other port pair
-  read: [read0, read1]
-  write: [write0, write1]
+# every VectorEngineTop assertion
+invariants: {}
+# the overlap path may serve the second command on the other port pair
+equivalent: {read: [read0, read1], write: [write0, write1]}
 pairs:
-  add_add:
-    first: add
-    second: add
-    second_inputs: &other {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}
-    gaps: 1..70
-  exp_relu:              # two single-input ops that share no lane logic
-    first: exp
-    second: relu
-    second_inputs: *other
-    gaps: 1..70
-  exp_exp2:              # shared lane logic
-    first: exp
-    second: exp2
-    second_inputs: *other
-    gaps: 1..70
-  exp_add:               # second needs both read slots
-    first: exp
-    second: add
-    second_inputs: *other
-    gaps: 1..70
-  rmax_exp:
-    first: rmax
-    second: exp
-    second_inputs: *other
-    gaps: 1..40
+  add_add: {first: add, second: add, second_inputs: &other
+      {io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}, gaps: 1..70}
+  exp_relu: {first: exp, second: relu, second_inputs: *other, gaps: 1..70}
+  exp_exp2: {first: exp, second: exp2, second_inputs: *other, gaps: 1..70}
+  exp_add: {first: exp, second: add, second_inputs: *other, gaps: 1..70}
+  rmax_exp: {first: rmax, second: exp, second_inputs: *other, gaps: 1..40}
 # Regression values used only by tests (full sweeps); the extractor never reads them. exp_add below 65 locks the
 # engine (busy never clears) and exp_exp2 drops writes; the guard and the VPU issue assertions reject those gaps.
 expect:

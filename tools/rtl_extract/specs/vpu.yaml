@@ -5,61 +5,43 @@ description: Vector engine top; two MREG read ports, two MREG write ports, per-o
 limit: 320
 system: AtlasCore
 command: io_cmd
-inputs:
-  io_cmd_bits_op: 1
-  io_cmd_bits_vs1: 18
-  io_cmd_bits_vs2: 22
-  io_cmd_bits_vd: 26
+inputs: {io_cmd_bits_op: 1, io_cmd_bits_vs1: 18, io_cmd_bits_vs2: 22, io_cmd_bits_vd: 26}
+# fp8 has no instruction and no timing contract here
 decode:
-  input: io_cmd_bits_op       # fp8 has no instruction and no timing contract here
+  input: io_cmd_bits_op
   instruction: {instance: scalar/decoder, port: io_instr}
-  words:
-    add: 0x00000057
-    sub: 0x04000057
-    mul: 0x06000057
-    rcp: 0x82000057
-    sqrt: 0x9a000057
-    sin: 0x92000057
-    cos: 0x94000057
-    tanh: 0x96000057
-    log: 0x98000057
-    exp: 0x84000057
-    exp2: 0x86000057
-    square: 0x8c000057
-    cube: 0x8e000057
-    rsum: 0x42000057
-    csum: 0x02000057
-    fp8pack: 0x88000057
-    fp8unpack: 0x8a000057
-    relu: 0x90000057
-    rmax: 0x4c000057
-    rmin: 0x48000057
-    cmax: 0x0e000057
-    cmin: 0x0a000057
-    pairmax: 0x0c000057
-    pairmin: 0x08000057
-    mov: 0x80000057
-    vliOne: 0x0000605f
-    vliCol: 0x0000405f
-    vliRow: 0x0000205f
-    vliAll: 0x0000005f
+  words: {add: 0x00000057, sub: 0x04000057, mul: 0x06000057, rcp: 0x82000057, sqrt: 0x9a000057,
+    sin: 0x92000057, cos: 0x94000057, tanh: 0x96000057, log: 0x98000057, exp: 0x84000057,
+    exp2: 0x86000057, square: 0x8c000057, cube: 0x8e000057, rsum: 0x42000057, csum: 0x02000057,
+    fp8pack: 0x88000057, fp8unpack: 0x8a000057, relu: 0x90000057, rmax: 0x4c000057, rmin: 0x48000057,
+    cmax: 0x0e000057, cmin: 0x0a000057, pairmax: 0x0c000057, pairmin: 0x08000057, mov: 0x80000057,
+    vliOne: 0x0000605f, vliCol: 0x0000405f, vliRow: 0x0000205f, vliAll: 0x0000005f}
 busy: io_busy
 events:
-  read0: {bundle: io_mregReadReq0, row: row, split_by: mregId, response: {input: io_mregReadResp0_valid, memory: MregFile}}
-  read1: {bundle: io_mregReadReq1, row: row, split_by: mregId, response: {input: io_mregReadResp1_valid, memory: MregFile}}
+  read0: {bundle: io_mregReadReq0, row: row, split_by: mregId,
+    response: {input: io_mregReadResp0_valid, memory: MregFile}}
+  read1: {bundle: io_mregReadReq1, row: row, split_by: mregId,
+    response: {input: io_mregReadResp1_valid, memory: MregFile}}
   write0: {bundle: io_mregWriteReq0, row: row, split_by: mregId}
   write1: {bundle: io_mregWriteReq1, row: row, split_by: mregId}
 operation_table:
   template:
-    commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_vs1: 2, io_cmd_bits_vs2: 6, io_cmd_bits_vd: 10}
+    commands: {0: {io_cmd_valid: 1, io_cmd_bits_op: $code, io_cmd_bits_vs1: 2, io_cmd_bits_vs2: 6, io_cmd_bits_vd: 10}}
     next_issue: {signal: io_issueBusy, bit: $code}
-checks:                      # timing families sharing a first-write age
-  - equal: [add.events.write0.first_age, sub.events.write0.first_age, mul.events.write0.first_age, rcp.events.write0.first_age, sqrt.events.write0.first_age, sin.events.write0.first_age, cos.events.write0.first_age, tanh.events.write0.first_age, log.events.write0.first_age, exp.events.write0.first_age, exp2.events.write0.first_age, square.events.write0.first_age, cube.events.write0.first_age, relu.events.write0.first_age, pairmax.events.write0.first_age, pairmin.events.write0.first_age, mov.events.write0.first_age, rmax.events.write0.first_age, rmin.events.write0.first_age]
+# timing families sharing a first-write age
+checks:
+  - equal: [add.events.write0.first_age, sub.events.write0.first_age, mul.events.write0.first_age,
+      rcp.events.write0.first_age, sqrt.events.write0.first_age, sin.events.write0.first_age,
+      cos.events.write0.first_age, tanh.events.write0.first_age, log.events.write0.first_age,
+      exp.events.write0.first_age, exp2.events.write0.first_age, square.events.write0.first_age,
+      cube.events.write0.first_age, relu.events.write0.first_age, pairmax.events.write0.first_age,
+      pairmin.events.write0.first_age, mov.events.write0.first_age, rmax.events.write0.first_age,
+      rmin.events.write0.first_age]
     reason: element-wise, pairwise and row max/min ops share the simple pipeline depth
   - equal: [csum.events.write0.first_age, cmax.events.write0.first_age, cmin.events.write0.first_age]
     reason: column reductions share one first-write age
-  - equal: [vliAll.events.write0.first_age, vliRow.events.write0.first_age, vliCol.events.write0.first_age, vliOne.events.write0.first_age]
+  - equal: [vliAll.events.write0.first_age, vliRow.events.write0.first_age, vliCol.events.write0.first_age,
+      vliOne.events.write0.first_age]
     reason: immediate fills share one first-write age
 # Regression values used only by tests; the extractor never reads them.
 expect:

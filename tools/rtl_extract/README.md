@@ -23,24 +23,20 @@ PYTHONPATH=tools python3 -m rtl_extract --hw-ir ee290.debug.hw.mlir \
 
 Omit `--engines` to extract every engine. Missing control dependencies or unsupported operations produce unresolved blocks; the CLI exits 1 if any block is unresolved. `python3` needs PyYAML; use the prepared `VPY` interpreter for tests.
 
-## Implementation and specs
+## Specs and output
 
-The [exporter](export/CMakeLists.txt) produces JSON; [ir.py](ir.py) loads requested modules and their instance closure. [control.py](control.py) slices control cones at registers and executes exact finite-width operations with unknown propagation. [derive.py](derive.py) resolves bundle ports, memory latency and command codes; [runner.py](runner.py) executes recipes; [summaries.py](summaries.py) reduces traces; [facts.py](facts.py) writes timing blocks.
-
-[spec.py](spec.py) validates YAML keys and loads specs through `read_spec(path)`. The six engine specs, engine pair specs and MXU engine chains remain YAML files. AtlasCore system specs, core pair enumerations and core chains are generated on load by [gen_core.py](specs/gen_core.py); their logical YAML names still work with the sweep CLI. To inspect one:
+[spec.py](spec.py) validates specs through `read_spec(path)`, loading YAML or [gen_core.py](specs/gen_core.py) enumerations. Generated MXU specs and AtlasCore system specs, pairs and chains retain their logical YAML names for the sweep CLI. Inspect one with:
 
 ```sh
 python3 tools/rtl_extract/specs/gen_core.py pairs/core_vpu.yaml \
   --output build/rtl-extract/specs/pairs/core_vpu.yaml
 ```
 
-Generator choices are listed by `--help`. Generated expectations are regression pins, not inputs to extraction.
-
-## Timing output
+Generator choices are listed by `--help`; expectations are regression pins, never extraction inputs.
 
 The document is `{schema: "merlin.op_timing.v1", hw_ir: {path, sha256}, op_timing: [...]}`. Each block names `<engine>.<op>` or `<engine>.<op>/<variant>` and carries module, engine, operation, optional variant, `source: control_simulation`, evidence, assumptions, events and `first_free_age`. `next_issue_age` appears for engines declaring it. The JSON has no status field: unresolved blocks have null timing values and an explanation in `evidence`. The document pins the input IR, not the exporter or specs.
 
-Events summarize first/last ages, count, spacing, row order and optional split streams. Response latencies appear in `assumptions.scratchpad_read_latency`; RTL-derived latencies also carry `scratchpad_read_derivation`. Unknown values are never replaced by estimates.
+Events summarize first/last ages, count, spacing, row order and optional split streams. Response latencies appear in `assumptions.scratchpad_read_latency`; derived latencies also carry `scratchpad_read_derivation`. Unknown values are never replaced by estimates.
 
 ## Single-circuit schema
 
@@ -73,14 +69,8 @@ A trial issues the second operation at the selected gap. Acceptance requires kno
 
 [pairfacts.py](pairfacts.py) joins assertion-checked sweeps with resolved timing blocks into `merlin.op_pairs.v1`. It pins timing and source documents by SHA-256, checks the hardware IR agrees, validates records against current specs and rejects duplicate `(first, second, relation)` records. Pair records carry both operand overlays, resolved aliases and merged relations; sequence steps carry overlays and resolved aliases, including empty overlays. Missing metadata or a mismatch with the current spec requires regeneration. Each source records canonical digests of its sweep and engine specs. Pair facts retain the swept range and stable gap. Capacity is the maximum observed live count with a witness, using `next_issue_age` where declared or the last event inclusive otherwise; all blocks of an engine must use the same window convention. Per-gap detail stays in sweeps.
 
-## Extend and check
+## Check and reproduce
 
-Add an engine spec with approved inputs, events and commands; encode alternatives in variants and equalities in `checks`. New control operations need exact semantics plus a mutation or rejection test in [test_rtl_extract_synthetic.py](../../test/test_rtl_extract_synthetic.py). Add hardware regressions under `EngineCase` in [test_rtl_extract_hw.py](../../test/test_rtl_extract_hw.py). Pair/chain behavior, pair facts and generated-spec pins are checked by [test_rtl_extract_pairs.py](../../test/test_rtl_extract_pairs.py).
+New control operations need exact semantics and a mutation or rejection test in [synthetic tests](../../test/test_rtl_extract_synthetic.py). [Hardware tests](../../test/test_rtl_extract_hw.py) cover engine regressions and `CompilerCrossCheck`; [pair tests](../../test/test_rtl_extract_pairs.py) cover pairs, chains, pair facts and generated-spec pins. The [facts map](../../test/rtl-timing-facts-map.yaml) requires equality, a conservative bound or an explicit unmodeled declaration for every record and nonempty group.
 
-`CompilerCrossCheck` in the hardware test compares mapped RTL quantities with compiler footprints through the CMake target `rtl-timing-facts-probe` in the build's `bin`. [rtl-timing-facts-map.yaml](../../test/rtl-timing-facts-map.yaml) declares equality or conservative bounds and unmodeled records/groups; every record and nonempty group needs coverage. `ATLAS_OOT_BIN_DIR` selects the binary directory; `ATLAS_TIMING_PROBE` overrides it. `ATLAS_OP_TIMING` selects facts; otherwise `ATLAS_HW_IR` and `ATLAS_HW_EXPORTER` derive them.
-
-```sh
-PYTHONPATH=tools:test "$VPY" -m unittest test_rtl_extract_hw.CompilerCrossCheck
-```
-
-`tools/regenerate-rtl-timing.py` rebuilds the complete artifact inventory with cached stages, reference checks and `env.sh`; see [Reproduce](../../docs/rtl-timing/README.md#reproduce).
+`CompilerCrossCheck` uses the CMake target `rtl-timing-facts-probe` from `ATLAS_OOT_BIN_DIR` (override with `ATLAS_TIMING_PROBE`) and `ATLAS_OP_TIMING`, or derives facts from `ATLAS_HW_IR`/`ATLAS_HW_EXPORTER`. The [reproduction guide](../../docs/rtl-timing/README.md#reproduce) documents the regeneration tool, cached stages, reference checks and `env.sh`.

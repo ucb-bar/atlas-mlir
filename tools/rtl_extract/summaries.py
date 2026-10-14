@@ -1,4 +1,5 @@
 """Generic summaries of per-age traces: event streams, release and next-issue ages."""
+from .control import clear
 
 def stream(ages):
     ages = sorted(ages)
@@ -43,6 +44,4 @@ def busy_contiguous(trace, start, free):
     return all(bool(e["busy"]) == (start < e["age"] < free) for e in trace if e["age"] > start)
 
 def next_issue_age(trace, start, signal, bit=None):
-    def clear(value):
-        return value is not None and not (value >> bit & 1 if bit is not None else value)
-    return next((e["age"] for e in trace if e["age"] > start and clear(e["signals"][signal])), None)
+    return next((e["age"] for e in trace if e["age"] > start and clear(e["signals"][signal], bit)), None)

@@ -4,61 +4,44 @@ module: LSU
 description: >
   Vector load/store paths of the LSU; one command at age 0 while idle. VLOAD reads 32 VMEM lines and writes
   32 MREG rows; VSTORE reads 32 MREG rows and writes 32 VMEM lines. The LSU never stalls on a response, so the
-  derived response latency is what the memories deliver, not something the LSU enforces. VMEM row fields are line offsets
-  within a bank (bankAddr); they are zero-based only for a bank-aligned base (bankAddr 0).
+  derived response latency is what the memories deliver, not something the LSU enforces. VMEM row fields are line
+  offsets within a bank (bankAddr); they are zero-based only for a bank-aligned base (bankAddr 0).
 limit: 80
 system: AtlasCore
 command: io_cmd
-inputs:
-  io_cmd_bits_op: 3
-  io_cmd_bits_mregBank: 60
-  io_cmd_bits_vmemLineAddr: 16383
+inputs: {io_cmd_bits_op: 3, io_cmd_bits_mregBank: 60, io_cmd_bits_vmemLineAddr: 16383}
 decode:
   input: io_cmd_bits_op
   instruction: {instance: scalar/decoder, port: io_instr}
   words: {vload: 0x00000007, vstore: 0x00002007}
-busy: io_vecBusy              # load path | store path; next_issue below uses each operation's own path busy
+# load path | store path; next_issue below uses each operation's own path busy
+busy: io_vecBusy
 events:
-  vmem_read:                  # VLOAD source rows
-    bundle: io_vmemVecRead
-    row: bankAddr
-    response: {input: io_vmemVecReadData_valid, memory: Vmem}
-  mreg_write: {bundle: io_mregWriteReq, row: row}          # VLOAD destination rows
-  mreg_read:                  # VSTORE source rows
-    bundle: io_mregReadReq
-    row: row
-    response: {input: io_mregReadResp_valid, memory: MregFile}
-  vmem_write: {bundle: io_vmemVecWrite, row: bankAddr}     # VSTORE destination rows
+  vmem_read: {bundle: io_vmemVecRead, row: bankAddr, response: {input: io_vmemVecReadData_valid, memory: Vmem}}
+  mreg_write: {bundle: io_mregWriteReq, row: row}
+  mreg_read: {bundle: io_mregReadReq, row: row, response: {input: io_mregReadResp_valid, memory: MregFile}}
+  vmem_write: {bundle: io_vmemVecWrite, row: bankAddr}
 operations:
-  vload:
-    commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: $vload, io_cmd_bits_mregBank: 5, io_cmd_bits_vmemLineAddr: 8192}   # bank 1, line 0
+  vload:  # bank 1, line 0
+    commands: {0: {io_cmd_valid: 1, io_cmd_bits_op: $vload, io_cmd_bits_mregBank: 5, io_cmd_bits_vmemLineAddr: 8192}}
     next_issue: {signal: io_vloadBusy}
-  vstore:
-    commands:
-      0: {io_cmd_valid: 1, io_cmd_bits_op: $vstore, io_cmd_bits_mregBank: 9, io_cmd_bits_vmemLineAddr: 16384}  # bank 2, line 0
+  vstore:  # bank 2, line 0
+    commands: {0: {io_cmd_valid: 1, io_cmd_bits_op: $vstore, io_cmd_bits_mregBank: 9, io_cmd_bits_vmemLineAddr: 16384}}
     next_issue: {signal: io_vstoreBusy}
 variants:
-  response_latency_2:         # computed fact only: the LSU does not wait, so a late response misaligns or drops rows
-    events:
-      vmem_read: {response: {latency: 2}}
-      mreg_read: {response: {latency: 2}}
-  operands:                   # other bank, MREG id and a nonzero in-bank offset; timing must not move
-    operations:
-      vload:
-        commands:
-          0: {io_cmd_bits_mregBank: 42, io_cmd_bits_vmemLineAddr: 41024}   # bank 5, line 64
-      vstore:
-        commands:
-          0: {io_cmd_bits_mregBank: 17, io_cmd_bits_vmemLineAddr: 24608}   # bank 3, line 32
+  # The LSU never waits; a late response misaligns or drops rows.
+  response_latency_2: {events: {vmem_read: {response: {latency: 2}}, mreg_read: {response: {latency: 2}}}}
+  # Bank/MREG ids and in-bank offsets vary; timing must not move.
+  operands: {operations: {vload: {commands: {0: {io_cmd_bits_mregBank: 42, io_cmd_bits_vmemLineAddr: 41024}}}, vstore: {
+          commands: {0: {io_cmd_bits_mregBank: 17, io_cmd_bits_vmemLineAddr: 24608}}}}}
 checks:
-  - equal: [vload.first_free_age, vload/operands.first_free_age]
-    reason: operands are captured at issue and do not reach control
-  - equal: [vload.next_issue_age, vload/operands.next_issue_age]
-  - equal: [vload.events.mreg_write.first_age, vload/operands.events.mreg_write.first_age]
-  - equal: [vstore.first_free_age, vstore/operands.first_free_age]
-  - equal: [vstore.next_issue_age, vstore/operands.next_issue_age]
-  - equal: [vstore.events.vmem_write.first_age, vstore/operands.events.vmem_write.first_age]
+  - {equal: [vload.first_free_age, vload/operands.first_free_age], reason: operands are captured at issue and do not
+        reach control}
+  - {equal: [vload.next_issue_age, vload/operands.next_issue_age]}
+  - {equal: [vload.events.mreg_write.first_age, vload/operands.events.mreg_write.first_age]}
+  - {equal: [vstore.first_free_age, vstore/operands.first_free_age]}
+  - {equal: [vstore.next_issue_age, vstore/operands.next_issue_age]}
+  - {equal: [vstore.events.vmem_write.first_age, vstore/operands.events.vmem_write.first_age]}
 # Regression values used only by tests; the extractor never reads them.
 expect:
   vload:
@@ -77,25 +60,12 @@ expect:
       mreg_write: {count: 0}
     first_free_age: 35
     next_issue_age: 35
-  # Computed facts, not legality: with a two-cycle response the LSU drops the last response and pairs each
-  # written row with the following row's index (rows 1..31 written), because it never waits for data.
-  vload/response_latency_2:
-    events:
-      vmem_read: {first_age: 1, last_age: 32, count: 32}
-      mreg_write: {first_age: 4, last_age: 34, count: 31, row_contiguous: false}
-    first_free_age: 35
-  vstore/response_latency_2:
-    events:
-      mreg_read: {first_age: 1, last_age: 32, count: 32}
-      vmem_write: {first_age: 4, last_age: 34, count: 31, row_contiguous: false}
-    first_free_age: 35
-  vload/operands:
-    events:
-      vmem_read: {first_age: 1, last_age: 32, count: 32, values: {bankIdx: [5]}}
-      mreg_write: {first_age: 3, last_age: 34, count: 32, values: {mregId: [42]}}
-    first_free_age: 35
-  vstore/operands:
-    events:
-      mreg_read: {first_age: 1, last_age: 32, count: 32, values: {mregId: [17]}}
-      vmem_write: {first_age: 3, last_age: 34, count: 32, values: {bankIdx: [3]}}
-    first_free_age: 35
+  # A two-cycle response drops the last response and pairs each write with the next row's index (rows 1..31).
+  vload/response_latency_2: {events: {vmem_read: {first_age: 1, last_age: 32, count: 32}, mreg_write: {first_age: 4,
+          last_age: 34, count: 31, row_contiguous: false}}, first_free_age: 35}
+  vstore/response_latency_2: {events: {mreg_read: {first_age: 1, last_age: 32, count: 32}, vmem_write: {first_age: 4,
+          last_age: 34, count: 31, row_contiguous: false}}, first_free_age: 35}
+  vload/operands: {events: {vmem_read: {first_age: 1, last_age: 32, count: 32, values: {bankIdx: [5]}}, mreg_write: {
+          first_age: 3, last_age: 34, count: 32, values: {mregId: [42]}}}, first_free_age: 35}
+  vstore/operands: {events: {mreg_read: {first_age: 1, last_age: 32, count: 32, values: {mregId: [17]}}, vmem_write: {
+          first_age: 3, last_age: 34, count: 32, values: {bankIdx: [3]}}}, first_free_age: 35}

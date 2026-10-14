@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-from rtl_extract.regen_cache import StageRunner, safe_path, sha256, source_files, write_json
+from rtl_extract.regen_cache import StageRunner, output_path, safe_path, source_files, write_json
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / 'tools/rtl_extract/specs/regenerate.json'
@@ -32,12 +32,6 @@ def executable(value):
 
 def version(path):
     return subprocess.check_output([str(path), '--version'], text=True, stderr=subprocess.STDOUT).strip()
-
-def output_path(root, relative):
-    path = safe_path(root / relative)
-    if not path.resolve().is_relative_to(root.resolve()):
-        raise ValueError(f'output escapes build root: {relative}')
-    return path
 
 def emit_environment(args, config, root):
     paths = {name: str(output_path(root, value)) for name, value in config['environment'].items()}

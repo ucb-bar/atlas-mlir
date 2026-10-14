@@ -144,18 +144,19 @@ def invariants(value, where):
     return value
 
 def read_spec(path):
-    """A spec's raw content: its YAML file, or a generated AtlasCore enumeration of that name."""
+    """Load raw YAML or a generated enumeration under the same logical path."""
     path = Path(path).resolve()
-    if path.parent.parent == SPECS:
+    if path.is_relative_to(SPECS):
         from .specs.gen_core import GENERATED, generate
-        if f"{path.parent.name}/{path.name}" in GENERATED:
-            return generate(f"{path.parent.name}/{path.name}")
+        name = path.relative_to(SPECS).as_posix()
+        if name in GENERATED:
+            return generate(name)
     return yaml.safe_load(path.read_text())
 
 def spec_names(group=""):
     names = {path.stem for path in (SPECS / group).glob("*.yaml")}
     from .specs.gen_core import GENERATED
-    names.update(Path(name).stem for name in GENERATED if Path(name).parent.as_posix() == group)
+    names.update(Path(name).stem for name in GENERATED if Path(name).parent == Path(group))
     return sorted(names)
 
 def load_spec(path):

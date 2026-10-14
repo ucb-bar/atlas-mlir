@@ -5,7 +5,7 @@ import multiprocessing
 from pathlib import Path
 
 from . import derive
-from .control import require
+from .control import clear, require
 from .runner import RECIPES, failure, failures, group_valid, observed, schedule
 from .spec import ages, invariants, keys, load_sweeps, read_spec, spec_names
 
@@ -106,9 +106,6 @@ def difference(expected, actual):
     extra = list((Counter(actual) - Counter(expected)).elements())
     first = min(missing + extra, key=lambda x: x[1])
     return f"{'missing' if first in missing else 'unexpected'} {first[0]} events"
-
-def clear(value, bit):
-    return value is not None and not (value >> bit & 1 if bit is not None else value)
 
 def merge(schedules):
     merged = {}

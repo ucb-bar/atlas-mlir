@@ -15,6 +15,9 @@ def width(typ):
     require(typ.startswith("i") and typ[1:].isdigit(), f"Unsupported integer type: {typ}")
     return int(typ[1:])
 
+def clear(value, bit=None):
+    return value is not None and not (value >> bit & 1 if bit is not None else value)
+
 FIRES_WHEN = {"sv.error": None, "sv.fatal": None, "sv.assert": 0}  # sv.assert fires when its operand is 0
 
 def assertions(module):

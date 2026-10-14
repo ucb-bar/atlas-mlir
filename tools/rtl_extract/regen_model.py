@@ -3,25 +3,11 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import time
 
-from .regen_cache import safe_path, source_files, sha256, write_json
-
-def relative(path, root):
-    return os.path.relpath(safe_path(path), safe_path(root))
-
-def command_record(argv, root):
-    result = []
-    for arg in map(str, argv):
-        if Path(arg).is_absolute(): arg = relative(arg, root)
-        elif arg.startswith('CXX='):
-            tokens = [token.split('=', 1) for token in shlex.split(arg)]
-            arg = shlex.join(name + '=' + relative(value, root) for name, value in tokens)
-        result.append(arg)
-    return result
+from .regen_cache import command_record, relative, safe_path, source_files, sha256, write_json
 
 def inventory(directory, root, exclude=()):
     excluded = set(map(safe_path, exclude))

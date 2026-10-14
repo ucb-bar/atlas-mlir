@@ -69,9 +69,7 @@ class _Artifacts:
         path = safe_path(path)
         if path not in self.hardware_cache:
             raw = path.read_bytes()
-            normalized = _HIERARCHY_OUTPUT.sub(
-                lambda match: match[1] + b'"' + match[2] + b'"' + match[3], raw
-            )
+            normalized = _HIERARCHY_OUTPUT.sub(lambda match: match[1] + b'"' + match[2] + b'"' + match[3], raw)
             self.hardware_cache[path] = (hashlib.sha256(raw).hexdigest(), hashlib.sha256(normalized).hexdigest())
         digest, semantic_digest = self.hardware_cache[path]
         if digest != link["sha256"]:
@@ -88,6 +86,10 @@ class _Artifacts:
             return direct
         if len(name.parts) == 1 and alternate.is_file():
             return alternate
+        # Partial reference runs flatten the legacy system/ layout.
+        flat = safe_path(self.root / name.name)
+        if name.parent == Path("system") and flat.is_file():
+            return flat
         raise ValueError(f"missing artifact {name}")
 
     def load(self, name):
@@ -151,8 +153,7 @@ def _diff(generated, reference, where, differences):
         differences.append(f"{where}: generated {generated!r}; reference {reference!r}")
     elif isinstance(generated, (dict, list)):
         is_list = isinstance(generated, list)
-        left, right = (dict(enumerate(value)) if is_list else value
-                       for value in (generated, reference))
+        left, right = (dict(enumerate(value)) if is_list else value for value in (generated, reference))
         for key in sorted(left.keys() | right.keys()):
             label = f"{where}[{key}]" if is_list else f"{where}.{key}"
             if key not in left:

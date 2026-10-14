@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import time
 
@@ -51,6 +52,29 @@ def source_files(directory, suffixes=None):
 def sha256(path):
     return file_sha256(safe_path(path))
 
+def relative(path, root):
+    return os.path.relpath(safe_path(path), safe_path(root))
+
+def command_record(argv, root):
+    result = []
+    for arg in map(str, argv):
+        head, sep, tail = arg.partition('=')
+        if arg.startswith('/'):
+            arg = relative(arg, root)
+        elif arg.startswith('CXX='):
+            tokens = [token.split('=', 1) for token in shlex.split(arg)]
+            arg = shlex.join(name + '=' + relative(value, root) for name, value in tokens)
+        elif sep and tail.startswith('/'):
+            arg = head + '=' + relative(tail, root)
+        result.append(arg)
+    return result
+
+def output_path(root, name):
+    path = safe_path(root / name)
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f'output escapes build root: {name}')
+    return path
+
 def stage_key(commands, inputs, versions):
     payload = {'commands': commands, 'inputs': inputs, 'versions': versions}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -73,29 +97,17 @@ class StageRunner:
         self.records = []
 
     def relative(self, path):
-        return os.path.relpath(safe_path(path), self.root)
+        return relative(path, self.root)
 
     def describe(self, paths):
         return [{'path': self.relative(path), 'sha256': sha256(path)}
                 for path in sorted(set(map(safe_path, paths)), key=str)]
 
     def command(self, argv):
-        # Keep flags intact; replace absolute path tokens (including --flag=/path).
-        result = []
-        for arg in map(str, argv):
-            head, sep, tail = arg.partition('=')
-            if arg.startswith('/'):
-                arg = self.relative(arg)
-            elif sep and tail.startswith('/'):
-                arg = head + '=' + self.relative(tail)
-            result.append(arg)
-        return result
+        return command_record(argv, self.root)
 
     def output_path(self, path):
-        path = safe_path(path)
-        if not path.resolve().is_relative_to(self.root.resolve()):
-            raise ValueError('stage output escapes build root')
-        return path
+        return output_path(self.root, path)
 
     def run(self, name, commands, inputs, outputs, versions, prepare=None,
             output_inventory=None):

@@ -4,13 +4,13 @@
 Use --mode debug for named-value timing IR; legacy replaces sequential memories.
 """
 import argparse
-import hashlib
 import json
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from rtl_extract.facts import sha256
 
 HIERARCHY = {"sifive.enterprise.firrtl.TestHarnessHierarchyAnnotation": "model_module_hierarchy.json",
     "sifive.enterprise.firrtl.ModuleHierarchyAnnotation": "top_module_hierarchy.json",}
@@ -36,14 +36,6 @@ def prepare_annotations(sidecar, out):
         if annotation.get("class") in HIERARCHY:
             annotation["filename"] = str(out / HIERARCHY[annotation["class"]])
     return sidecar
-
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def main():

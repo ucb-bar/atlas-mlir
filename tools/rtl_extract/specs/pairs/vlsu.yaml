@@ -3,31 +3,18 @@
 engine: vlsu
 description: VLOAD/VSTORE issued back to back on the LSU's separate load and store paths.
 invariants:
-  exclude:
-    - message: "^ASSERT FAIL: scalar (load|store)"
-      reason: the scalar command port is not driven by the vlsu spec; scalar-path checks run in core.yaml
+  exclude: [{message: '^ASSERT FAIL: scalar (load|store)', reason: the scalar command port is not driven by the vlsu
+          spec; scalar-path checks run in core.yaml}]
 shared:
   - {input: io_cmd_valid, reason: one command port; two commands never share an age}
   - {input: io_cmd_bits_op, reason: opcode of that command}
 pairs:
-  vload_vstore:
-    first: vload
-    second: vstore
-    gaps: 1..40
-  vstore_vload:
-    first: vstore
-    second: vload
-    gaps: 1..40
-  vload_vload:
-    first: vload
-    second: vload
-    second_inputs: {io_cmd_bits_mregBank: 42, io_cmd_bits_vmemLineAddr: 41024}   # m42, bank 5
-    gaps: 1..40
-  vstore_vstore:
-    first: vstore
-    second: vstore
-    second_inputs: {io_cmd_bits_mregBank: 17, io_cmd_bits_vmemLineAddr: 24608}   # m17, bank 3
-    gaps: 1..40
+  vload_vstore: {first: vload, second: vstore, gaps: 1..40}
+  vstore_vload: {first: vstore, second: vload, gaps: 1..40}
+  vload_vload: {first: vload, second: vload, second_inputs: {io_cmd_bits_mregBank: 42, io_cmd_bits_vmemLineAddr: 41024},
+      gaps: 1..40}
+  vstore_vstore: {first: vstore, second: vstore,
+    second_inputs: {io_cmd_bits_mregBank: 17, io_cmd_bits_vmemLineAddr: 24608}, gaps: 1..40}
 # Regression values used only by tests (full sweeps); the extractor never reads them. Gap 34 of a same-path pair is
 # blocked only by the busy guard: the events would be unchanged.
 expect:

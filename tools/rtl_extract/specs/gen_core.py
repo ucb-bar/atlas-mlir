@@ -185,7 +185,9 @@ def mxu_chains(sweep=None):
 
 GENERATED = ("pairs/core_vpu.yaml", "pairs/core_mxu_same.yaml", "pairs/core_mxu_shared.yaml", "sequences/core_mxu.yaml",
              "pairs/core_mxu_cross.yaml", "pairs/core_mxu_units.yaml", "pairs/core_mxu.yaml", "pairs/core_dma_mxu.yaml",
-             "pairs/core_dma.yaml", "pairs/core.yaml", "sequences/core_vpu.yaml", "system/core.yaml", "system/core_dma.yaml")
+             "pairs/core_dma.yaml", "pairs/core.yaml", "sequences/core_vpu.yaml", "system/core.yaml",
+             "system/core_dma.yaml", "pairs/mxu0.yaml", "pairs/mxu1.yaml", "sequences/mxu0.yaml",
+             "sequences/mxu1.yaml", "mxu0.yaml", "mxu1.yaml")
 
 EQUIVALENT = {'vpu_read': ['vpu_read0', 'vpu_read1'], 'vpu_write': ['vpu_write0', 'vpu_write1']}
 SHARED = [
@@ -573,38 +575,29 @@ VPU_CHAINS = [
     ('exp_fp8pack_vlicol', 'pack and fill commands overlapping a transcendental', ('exp', 'fp8pack', 'vliCol', 'relu')),
 ]
 
-CORE_PROBES = {'lsu_busy': {'instance': 'lsu', 'result': 'io_vecBusy'},
-    'vpu_busy': {'instance': 'vpu', 'result': 'io_busy'}, 'xlu_busy': {'instance': 'xlu', 'result': 'io_busy'},
-    'lsu_vmem_read': {'instance': 'lsu', 'result': 'io_vmemVecRead_valid'},
-    'lsu_vmem_read_bank': {'instance': 'lsu', 'result': 'io_vmemVecRead_bits_bankIdx'},
-    'lsu_vmem_read_row': {'instance': 'lsu', 'result': 'io_vmemVecRead_bits_bankAddr'},
-    'lsu_vmem_write': {'instance': 'lsu', 'result': 'io_vmemVecWrite_valid'},
-    'lsu_vmem_write_bank': {'instance': 'lsu', 'result': 'io_vmemVecWrite_bits_bankIdx'},
-    'lsu_vmem_write_row': {'instance': 'lsu', 'result': 'io_vmemVecWrite_bits_bankAddr'},
-    'lsu_mreg_read': {'instance': 'lsu', 'result': 'io_mregReadReq_valid'},
-    'lsu_mreg_read_id': {'instance': 'lsu', 'result': 'io_mregReadReq_bits_mregId'},
-    'lsu_mreg_read_row': {'instance': 'lsu', 'result': 'io_mregReadReq_bits_row'},
-    'lsu_mreg_write': {'instance': 'lsu', 'result': 'io_mregWriteReq_valid'},
-    'lsu_mreg_write_id': {'instance': 'lsu', 'result': 'io_mregWriteReq_bits_mregId'},
-    'lsu_mreg_write_row': {'instance': 'lsu', 'result': 'io_mregWriteReq_bits_row'},
-    'vpu_read0': {'instance': 'vpu', 'result': 'io_mregReadReq0_valid'},
-    'vpu_read0_id': {'instance': 'vpu', 'result': 'io_mregReadReq0_bits_mregId'},
-    'vpu_read0_row': {'instance': 'vpu', 'result': 'io_mregReadReq0_bits_row'},
-    'vpu_read1': {'instance': 'vpu', 'result': 'io_mregReadReq1_valid'},
-    'vpu_read1_id': {'instance': 'vpu', 'result': 'io_mregReadReq1_bits_mregId'},
-    'vpu_read1_row': {'instance': 'vpu', 'result': 'io_mregReadReq1_bits_row'},
-    'vpu_write0': {'instance': 'vpu', 'result': 'io_mregWriteReq0_valid'},
-    'vpu_write0_id': {'instance': 'vpu', 'result': 'io_mregWriteReq0_bits_mregId'},
-    'vpu_write0_row': {'instance': 'vpu', 'result': 'io_mregWriteReq0_bits_row'},
-    'vpu_write1': {'instance': 'vpu', 'result': 'io_mregWriteReq1_valid'},
-    'vpu_write1_id': {'instance': 'vpu', 'result': 'io_mregWriteReq1_bits_mregId'},
-    'vpu_write1_row': {'instance': 'vpu', 'result': 'io_mregWriteReq1_bits_row'},
-    'xlu_read': {'instance': 'xlu', 'result': 'io_mregReadReq_valid'},
-    'xlu_read_id': {'instance': 'xlu', 'result': 'io_mregReadReq_bits_mregId'},
-    'xlu_read_row': {'instance': 'xlu', 'result': 'io_mregReadReq_bits_row'},
-    'xlu_write': {'instance': 'xlu', 'result': 'io_mregWriteReq_valid'},
-    'xlu_write_id': {'instance': 'xlu', 'result': 'io_mregWriteReq_bits_mregId'},
-    'xlu_write_row': {'instance': 'xlu', 'result': 'io_mregWriteReq_bits_row'},}
+CORE_PROBES = {f"{engine}_busy": {"instance": engine, "result": signal}
+               for engine, signal in (("lsu", "io_vecBusy"), ("vpu", "io_busy"), ("xlu", "io_busy"))}
+CORE_EVENTS = {}
+for direction in ("read", "write"):
+    name, bundle = f"lsu_vmem_{direction}", f"io_vmemVec{direction.title()}"
+    CORE_PROBES.update({name: {"instance": "lsu", "result": bundle + "_valid"},
+        name + "_bank": {"instance": "lsu", "result": bundle + "_bits_bankIdx"},
+        name + "_row": {"instance": "lsu", "result": bundle + "_bits_bankAddr"}})
+    CORE_EVENTS[f"vmem_{direction}"] = {
+        "valid": name, "fields": {"bankIdx": name + "_bank", "bankAddr": name + "_row"}, "row": "bankAddr"}
+for engine, ports in (("lsu", ("read", "write")), ("vpu", ("read0", "read1", "write0", "write1")),
+                      ("xlu", ("read", "write"))):
+    for port in ports:
+        name = f"{engine}_" + ("mreg_" if engine == "lsu" else "") + port
+        direction = "Read" if port.startswith("read") else "Write"
+        bundle = f"io_mreg{direction}Req" + (port[-1] if port[-1].isdigit() else "")
+        CORE_PROBES.update({name: {"instance": engine, "result": bundle + "_valid"},
+            name + "_id": {"instance": engine, "result": bundle + "_bits_mregId"},
+            name + "_row": {"instance": engine, "result": bundle + "_bits_row"}})
+        event = {"valid": name, "fields": {"mregId": name + "_id", "row": name + "_row"}, "row": "row"}
+        if engine == "vpu":
+            event["split_by"] = "mregId"
+        CORE_EVENTS["mreg_" + port if engine == "lsu" else name] = event
 DMA_PROBES = {'dma_channel0': {'instance': 'dma', 'result': 'io_channelBusy_0'},
  'dma_channel1': {'instance': 'dma', 'result': 'io_channelBusy_1'},
  'dma_launched0': {'path': '', 'value': 'dmaLaunched_0'}, 'dma_launched1': {'path': '', 'value': 'dmaLaunched_1'},
@@ -639,17 +632,6 @@ MXU_PROBES = {'{unit}_read0': {'instance': '{unit}', 'result': 'io_mregReadReq0_
     '{unit}_data_busy': {'instance': '{unit}', 'result': 'io_dataBusy'},
     '{unit}_compute_busy': {'instance': '{unit}', 'result': 'io_computeBusy'},}
 
-CORE_EVENTS = {
-    'vmem_read': {'valid': 'lsu_vmem_read', 'fields': {'bankIdx': 'lsu_vmem_read_bank', 'bankAddr': 'lsu_vmem_read_row'}, 'row': 'bankAddr'},
-    'vmem_write': {'valid': 'lsu_vmem_write', 'fields': {'bankIdx': 'lsu_vmem_write_bank', 'bankAddr': 'lsu_vmem_write_row'}, 'row': 'bankAddr'},
-    'mreg_read': {'valid': 'lsu_mreg_read', 'fields': {'mregId': 'lsu_mreg_read_id', 'row': 'lsu_mreg_read_row'}, 'row': 'row'},
-    'mreg_write': {'valid': 'lsu_mreg_write', 'fields': {'mregId': 'lsu_mreg_write_id', 'row': 'lsu_mreg_write_row'}, 'row': 'row'},
-    'vpu_read0': {'valid': 'vpu_read0', 'fields': {'mregId': 'vpu_read0_id', 'row': 'vpu_read0_row'}, 'row': 'row', 'split_by': 'mregId'},
-    'vpu_read1': {'valid': 'vpu_read1', 'fields': {'mregId': 'vpu_read1_id', 'row': 'vpu_read1_row'}, 'row': 'row', 'split_by': 'mregId'},
-    'vpu_write0': {'valid': 'vpu_write0', 'fields': {'mregId': 'vpu_write0_id', 'row': 'vpu_write0_row'}, 'row': 'row', 'split_by': 'mregId'},
-    'vpu_write1': {'valid': 'vpu_write1', 'fields': {'mregId': 'vpu_write1_id', 'row': 'vpu_write1_row'}, 'row': 'row', 'split_by': 'mregId'},
-    'xlu_read': {'valid': 'xlu_read', 'fields': {'mregId': 'xlu_read_id', 'row': 'xlu_read_row'}, 'row': 'row'},
-    'xlu_write': {'valid': 'xlu_write', 'fields': {'mregId': 'xlu_write_id', 'row': 'xlu_write_row'}, 'row': 'row'},}
 DMA_EVENTS = {'dma_vmem_write': {'valid': 'dma_vmem_write_grant',
                     'fields': {'bankIdx': 'dma_vmem_write_bank', 'bankAddr': 'dma_vmem_write_line'}},
  'dma_vmem_read': {'valid': 'dma_vmem_read_grant',
@@ -784,10 +766,183 @@ def core_system(dma=False):
     return copy.deepcopy({k: spec[k] for k in SYSTEM_KEYS["core_dma" if dma else "core"]})
 
 
+ENGINE_MXU_PAIRS = (
+    ('matmul_matmul_same_acc', 'matmul', 'matmul', 64, 32),
+    ('matmul_matmul_same_acc_other_slot', 'matmul', 'matmul', 64, 32),
+    ('matmul_matmul_other_acc', 'matmul', 'matmul', 32, 32),
+    ('matmul_matmul_other_acc_other_slot', 'matmul', 'matmul', 32, 32),
+    ('push_acc_fp8_matmul_acc', 'push_acc_fp8', 'matmul_acc', 1, 33),
+    ('push_acc_fp8_matmul_acc_other_acc', 'push_acc_fp8', 'matmul_acc', 1, 1),
+    ('push_weight_matmul', 'push_weight', 'matmul', 1, 32),
+    ('matmul_push_weight', 'matmul', 'push_weight', 63, 32),
+    ('push_weight_push_weight_same_slot', 'push_weight', 'push_weight', 32, 32),
+    ('push_weight_matmul_other_slot', 'push_weight', 'matmul', 1, 1),
+    ('matmul_push_weight_other_slot', 'matmul', 'push_weight', 1, 1),
+    ('push_weight_push_weight_other_slot', 'push_weight', 'push_weight', 32, 32),
+    ('matmul_pop_acc_bf16', 'matmul', 'pop_acc_bf16', 64, 4),
+    ('matmul_acc_matmul_acc_same_acc', 'matmul_acc', 'matmul_acc', 64, 32),
+    ('matmul_matmul_acc_same_acc', 'matmul', 'matmul_acc', 64, 32),
+    ('pop_acc_bf16_matmul_same_acc', 'pop_acc_bf16', 'matmul', 1, 1),
+    ('pop_acc_bf16_pop_acc_bf16_same_acc', 'pop_acc_bf16', 'pop_acc_bf16', 32, 32),
+    ('matmul_pop_acc_bf16_other_acc', 'matmul', 'pop_acc_bf16', 1, 1),
+    ('matmul_acc_matmul_acc_other_acc', 'matmul_acc', 'matmul_acc', 32, 32),
+    ('matmul_matmul_acc_other_acc', 'matmul', 'matmul_acc', 32, 32),
+    ('pop_acc_bf16_matmul_other_acc', 'pop_acc_bf16', 'matmul', 1, 1),
+    ('pop_acc_bf16_pop_acc_bf16_other_acc', 'pop_acc_bf16', 'pop_acc_bf16', 32, 32),
+)
+
+# Chain operands are (operation abbreviation, MREG override, accumulator, weight slot).
+ENGINE_MXU_CHAINS = (
+    ('matmul_same_acc_same_slot', 'back-to-back matmuls, same acc and same slot between neighbors',
+     [('mm', None, 0, 0)], 2, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('matmul_same_acc_other_slot', 'back-to-back matmuls, same acc and other slot between neighbors',
+     [('mm', None, 0, 0), ('mm', 22, 0, 1)], 2, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('matmul_other_acc_same_slot', 'back-to-back matmuls, other acc and same slot between neighbors',
+     [('mm', None, 0, 0), ('mm', 22, 1, 0)], 2, (32, 32, 32, 32), (32, 32, 32, 32)),
+    ('matmul_other_acc_other_slot', 'back-to-back matmuls, other acc and other slot between neighbors',
+     [('mm', None, 0, 0), ('mm', 22, 1, 1)], 2, (32, 32, 32, 32), (32, 32, 32, 32)),
+    ('matmul_acc_same_acc', 'back-to-back matmul_acc on one accumulator',
+     [('mma', None, 0, 0)], 2, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('matmul_acc_other_acc', 'back-to-back matmul_acc alternating accumulators',
+     [('mma', None, 0, 0), ('mma', 22, 1, 0)], 2, (32, 32, 32, 32), (32, 32, 32, 32)),
+    ('matmul_then_matmul_acc_same_acc', 'matmul, then matmul_acc accumulating into the same accumulator, repeating',
+     [('mm', None, 0, 0), ('mma', 22, 0, 0)], 2, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('push_acc_matmul_acc_same_acc', 'push_acc_fp8 then matmul_acc on the same accumulator, repeating',
+     [('pa8', None, 0, 0), ('mma', 22, 0, 0)], 2, (1, 94, 94, 94), (33, 34, 34, 34)),
+    ('push_acc_matmul_acc_other_acc', 'push_acc_fp8 then matmul_acc, alternating accumulators',
+     [('pa8', None, 0, 0), ('mma', 22, 0, 0), ('pa8', 26, 1, 0), ('mma', 30, 1, 0)],
+     2, (1, 16, 16, 32), (33, 33, 33, 33)),
+    ('matmul_pop_same_acc', 'matmul then pop_acc_bf16 of the same accumulator, repeating',
+     [('mm', None, 0, 0), ('pop16', 22, 0, 0)], 2, (64, 64, 64, 64), (4, 16, 16, 16)),
+    ('matmul_pop_other_acc', 'matmul then pop_acc_bf16 of the other accumulator, repeating',
+     [('mm', None, 0, 0), ('pop16', 22, 1, 0)], 2, (1, 32, 32, 32), (1, 16, 16, 16)),
+    ('push_weight_matmul_pop_same', 'push_weight, matmul, pop_acc_bf16 on one weight slot and accumulator, repeating',
+     [('pw', None, 0, 0), ('mm', 22, 0, 0), ('pop16', 26, 0, 0)], 3, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('push_weight_matmul_pop_alternating', 'push_weight, matmul, pop_acc_bf16 alternating weight slot and accumulator',
+     [('pw', None, 0, 0), ('mm', 22, 0, 0), ('pop16', 26, 0, 0),
+      ('pw', 30, 0, 1), ('mm', 34, 1, 1), ('pop16', 38, 1, 0)], 3, (64, 64, 64, 64), (32, 32, 32, 32)),
+    ('push_weight_matmul_other_slot', 'push_weight then matmul on the other weight slot',
+     [('pw', None, 0, 0), ('mm', 22, 0, 1)], 2, (1, 16), (1, 16)),
+    ('push_weight_same_slot', 'back-to-back push_weight on one slot',
+     [('pw', None, 0, 0)], 2, (32, 32, 32), (32, 32, 32)),
+    ('push_weight_other_slot', 'back-to-back push_weight alternating slots',
+     [('pw', None, 0, 0), ('pw', 22, 0, 1)], 2, (32, 32, 32), (32, 32, 32)),
+)
+
+
+def mxu_engine(unit):
+    spec = {"engine": f"mxu{unit}", "module": "InnerProductTreesTop" if unit else "SystolicArrayTop",
+        "description": ("Inner-product-tree" if unit else "Systolic-array") +
+                       " MXU; operands mreg 2 / acc 0, idle mreg 22 / acc 1.",
+        "reset_cycles": 100, "flush_cycles": 100, "limit": 160, "unreset": [],
+        "system": "AtlasCore", "command": "io_cmd", "inputs": {"io_cmd_bits_mregId": 22, "io_cmd_bits_accSel": 1},
+        "decode": {"input": "io_cmd_bits_op", "instruction": {"instance": "scalar/decoder", "port": "io_instr"},
+                   "words": {kind: word(kind, unit, 0) for kind in KINDS}}, "probes": {}, "events": {},
+        "operation_table": {"template": {"commands": {
+            0: {"io_cmd_valid": 1, "io_cmd_bits_op": "$code", "io_cmd_bits_mregId": 2, "io_cmd_bits_accSel": 0}}}}}
+    # These uninitialized registers are read only under a RegInit valid in the sequencer.
+    names = []
+    for port in range(2):
+        names += [f"p{port}Cmd_{field}" for field in (("op", "accSel", "weightSlot") if unit else ("op",))]
+        names.append(f"p{port}Row")
+    names += ["w0Cmd_op", "w0Row", "w1Row"]
+    names += [f"inflight_{i}_{field}" for i in range(2 if unit else 3) for field in ("accSel", "rowsWritten")]
+    spec["unreset"] = [{"path": "seq", "name": name} for name in names]
+    spec["probes"] = {name: {"instance": "seq", "result": result} for name, result in (
+        ("compute_valid", "io_compute_valid"), ("weight_write_valid", "io_weightWriteReq_valid"),
+        ("acc_write_valid", "io_accComputeWrite_valid"), ("acc_write_row", "io_accComputeWrite_bits_rowIdx"),
+        ("acc_read_en", "io_accComputeReadEn"), ("acc_read_row", "io_accComputeReadAddr_rowIdx"),
+        ("acc_load_valid", "io_accLoadReq_valid"), ("acc_load_row", "io_accLoadReq_bits_rowIdx"),
+        ("acc_store_en", "io_accStoreReadEn"), ("acc_store_row", "io_accStoreAddr_rowIdx"))}
+    for direction in ("read", "write"):
+        for port in range(2):
+            bundle = f"io_mreg{direction.title()}Req{port}"
+            event = {"bundle": bundle, "row": "row"}
+            if direction == "read":
+                event["response"] = {"input": f"io_mregReadResp{port}_valid", "memory": "MregFile"}
+            spec["events"][f"mreg_{direction}{port}"] = event
+    spec["events"].update({"compute": {"valid": "compute_valid"}, "weight_write": {"valid": "weight_write_valid"}})
+    for event, valid in (("acc_write", "acc_write_valid"), ("acc_read", "acc_read_en"),
+                         ("acc_load", "acc_load_valid"), ("acc_store", "acc_store_en")):
+        spec["events"][event] = {"valid": valid, "fields": {"row": event + "_row"}, "row": "row"}
+    spec["events"].update({"data_busy": {"valid": "io_dataBusy"}, "compute_busy": {"valid": "io_computeBusy"}})
+    if unit:
+        # Age 32 is accepted behind PushAccFP8, but this MatmulAcc writes no accumulator rows.
+        spec["operations"] = {"matmul_acc_at_32": {"commands": {
+            0: {"io_cmd_valid": 1, "io_cmd_bits_op": "$push_acc_fp8", "io_cmd_bits_mregId": 2, "io_cmd_bits_accSel": 0},
+            32: {"io_cmd_valid": 1, "io_cmd_bits_op": "$matmul_acc",
+                 "io_cmd_bits_mregId": 22, "io_cmd_bits_accSel": 0}}}}
+    spec["checks"] = [{"equal": ["matmul.events.acc_write.first_age", "matmul_acc.events.acc_write.first_age"],
+                       "reason": "overwrite and accumulate share the accumulator write age"}]
+    first, last = (3, 34) if unit else (63, 94)
+    write = {"first_age": first, "last_age": last, "count": 32, "step": 1, "row_contiguous": True}
+    spec["expect"] = {
+        "matmul": {"assumptions": {"scratchpad_read_latency": 1}, "events": {
+            "mreg_read0": {"first_age": 0, "last_age": 31, "count": 32,
+                           "row_contiguous": True, "values": {"mregId": [2]}},
+            "compute": {"first_age": 1, "last_age": 32, "count": 32},
+            "acc_write": write.copy(), "acc_read": {"count": 0},
+            "compute_busy": {"first_age": 1, "last_age": last, "count": last}}},
+        "matmul_acc": {"events": {"acc_write": write.copy(),
+                                  "acc_read": {"first_age": 0, "last_age": 31, "count": 32, "row_contiguous": True}}},
+        "push_weight": {"events": {"mreg_read1": {"first_age": 0, "count": 32, "values": {"mregId": [2]}},
+            "weight_write": {"first_age": 1, "last_age": 32, "count": 32},
+            "data_busy": {"first_age": 1, "last_age": 32, "count": 32}}},
+        "pop_acc_bf16": {"events": {"acc_store": {"first_age": 0, "last_age": 31, "count": 32, "row_contiguous": True},
+            "mreg_write0": {"first_age": 1, "last_age": 32, "count": 32, "values": {"mregId": [2]}},
+            "mreg_write1": {"first_age": 1, "last_age": 32, "count": 32, "values": {"mregId": [3]}}}}}
+    if unit:
+        spec["expect"]["matmul_acc_at_32"] = {"events": {"acc_load": {"first_age": 1, "last_age": 32, "count": 32},
+                                                        "compute": {"count": 0}, "acc_write": {"count": 0}}}
+    return spec
+
+
+def engine_mxu_spec(group, unit):
+    spec = {"engine": f"mxu{unit}", "description": (
+        f"Second MXU{unit} command issued while the first is in flight, same or other accumulator / weight slot "
+        "(slot is the first's unless named other_slot)." if group == "pairs" else
+        "Chains of 2-6 MXU commands; accumulator and weight-slot relations between neighbors."),
+        "ignore": ["data_busy", "compute_busy"], "invariants": {}, group: {}, "expect": {}}
+    # Busy flags are levels; issue assertions and per-command events decide overlap legality.
+    if group == "pairs":
+        for name, first, second, gap0, gap1 in ENGINE_MXU_PAIRS:
+            inputs = {"io_cmd_bits_mregId": 22}
+            if "other_acc" in name:
+                inputs["io_cmd_bits_accSel"] = 1
+            if "other_slot" in name:
+                inputs["io_cmd_bits_weightSlot"] = 1
+            spec[group][name] = {"first": first, "second": second, "second_inputs": inputs,
+                                 "gaps": "1..66" if unit == 0 else "1..40"}
+            spec["expect"][name] = {"min_gap": gap1 if unit else gap0, "stable_gap": gap1 if unit else gap0}
+    else:
+        for name, description, cycle, start, gaps0, gaps1 in ENGINE_MXU_CHAINS:
+            ops = []
+            for short, reg, acc, slot in cycle:
+                op = {"op": next(kind for kind, abbreviation in SHORT.items() if abbreviation == short)}
+                if reg is not None:
+                    op["inputs"] = {"io_cmd_bits_mregId": reg}
+                    if acc:
+                        op["inputs"]["io_cmd_bits_accSel"] = acc
+                    if slot:
+                        op["inputs"]["io_cmd_bits_weightSlot"] = slot
+                ops.append(op)
+            gaps = gaps1 if unit else gaps0
+            limit = 40 if unit else 110 if name == "push_acc_matmul_acc_same_acc" else 80
+            spec[group][name] = {"description": description, "ops": ops,
+                                "lengths": f"{start}..{start + len(gaps) - 1}", "gaps": f"1..{limit}"}
+            spec["expect"][name] = {start + i: gap for i, gap in enumerate(gaps)}
+    return spec
+
+
 def generate(name, facts=None, sweep=None):
     name = str(name).removesuffix(".yaml")
     if name + ".yaml" not in GENERATED:
         raise ValueError(f"Unknown generated spec: {name}")
+    if name in {f"{group}/mxu{unit}" for group in ("pairs", "sequences") for unit in (0, 1)}:
+        group, engine = name.split("/")
+        return engine_mxu_spec(group, int(engine[-1]))
+    if name in ("mxu0", "mxu1"):
+        return mxu_engine(int(name[-1]))
     if name.startswith("system/"):
         return core_system(name == "system/core_dma")
     if name == "pairs/core_vpu":
