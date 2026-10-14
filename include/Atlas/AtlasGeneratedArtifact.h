@@ -20,6 +20,9 @@ constexpr llvm::StringLiteral kAtlasBufferContract = "atlas.virtual_buffer_contr
 constexpr llvm::StringLiteral kAtlasTimingState = "atlas.timing_state";
 constexpr llvm::StringLiteral kAtlasTimingProvider = "atlas.timing_provider";
 constexpr llvm::StringLiteral kAtlasRTLEvidence = "atlas.rtl_evidence";
+// Set by virtual-to-machine lowering, which launches explicit DMA without
+// waits; insert-atlas-dma-waits completes the stream and removes it.
+constexpr llvm::StringLiteral kAtlasDMAWaitsPending = "atlas.dma_waits_pending";
 // Per-instruction correspondence tags that only generated artifacts carry.
 constexpr llvm::StringLiteral kAtlasTagDMATransfer = "atlas.virtual_dma_transfer";
 constexpr llvm::StringLiteral kAtlasTagMXUCommand = "atlas.virtual_mxu_command";

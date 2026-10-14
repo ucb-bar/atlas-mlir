@@ -12,6 +12,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasRTLExport.cpp
   AtlasStream.cpp
   AtlasDelayInsertion.cpp
+  AtlasDMAWaitInsertion.cpp
   AtlasScheduling.cpp
   AtlasVirtualVerification.cpp
   AtlasVirtualToMachine.cpp

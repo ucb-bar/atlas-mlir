@@ -298,7 +298,7 @@ class VirtualMXUHandleTest(unittest.TestCase):
                 result = run(tool, source, *options)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
-        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         self.assertNotIn("!atlas.virtual_", lowered.stdout)
         emitted = run("atlas-emit", lowered.stdout)

@@ -22,12 +22,10 @@ def signed(value: int) -> int:
 
 
 def transfer(index: int, kind: str, address: str) -> str:
-    state, launched, done, handle = f"%s{2 * index + 1}", f"%s{2 * index + 2}", f"%s{2 * index + 3}", f"%t{index}"
+    state, done = f"%s{2 * index + 1}", f"%s{2 * index + 3}"
     if kind == "store":
-        return (f'    {launched}, {handle} = "atlas.virtual_dma_store_fp8"({state}, %tile, {address}, %size) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> ({STATE}, !atlas.virtual_dma_store)\n'
-                f'    {done} = "atlas.virtual_dma_wait"({launched}, {handle}) : ({STATE}, !atlas.virtual_dma_store) -> {STATE}')
-    return (f'    {launched}, {handle} = "atlas.virtual_dma_load_fp8"({state}, {address}, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_dma_load_fp8)\n'
-            f'    {done}, {handle}_value = "atlas.virtual_dma_await_fp8"({launched}, {handle}) : ({STATE}, !atlas.virtual_dma_load_fp8) -> ({STATE}, !atlas.virtual_fp8)')
+        return f'    {done} = "atlas.virtual_dma_store_fp8"({state}, %tile, {address}, %size) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}'
+    return f'    {done}, %t{index}_value = "atlas.virtual_dma_load_fp8"({state}, {address}, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)'
 
 
 def program(first: str, second: str, *, second_address: int = X) -> str:
@@ -60,10 +58,8 @@ LOOP = f'''module {{
     %size = arith.constant 1024 : i32
     %one = arith.constant 1 : i32
     %limit = arith.constant 2 : i32
-    %l1, %first = "atlas.virtual_dma_load_fp8"(%state, %x, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_dma_load_fp8)
-    %l2, %a = "atlas.virtual_dma_await_fp8"(%l1, %first) : ({STATE}, !atlas.virtual_dma_load_fp8) -> ({STATE}, !atlas.virtual_fp8)
-    %l3, %second = "atlas.virtual_dma_load_fp8"(%l2, %x, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_dma_load_fp8)
-    %l4, %b = "atlas.virtual_dma_await_fp8"(%l3, %second) : ({STATE}, !atlas.virtual_dma_load_fp8) -> ({STATE}, !atlas.virtual_fp8)
+    %l2, %a = "atlas.virtual_dma_load_fp8"(%state, %x, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)
+    %l4, %b = "atlas.virtual_dma_load_fp8"(%l2, %x, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)
     %next = arith.addi %i, %one : i32
     %more = arith.cmpi slt, %next, %limit : i32
     cf.cond_br %more, ^loop(%l4, %next : {STATE}, i32), ^exit(%l4 : {STATE})
@@ -71,13 +67,10 @@ LOOP = f'''module {{
     %ex = arith.constant {signed(X)} : i32
     %ez = arith.constant {signed(Y)} : i32
     %esize = arith.constant 1024 : i32
-    %e1, %store = "atlas.virtual_dma_store_fp8"(%final, %tile, %ex, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> ({STATE}, !atlas.virtual_dma_store)
-    %e2 = "atlas.virtual_dma_wait"(%e1, %store) : ({STATE}, !atlas.virtual_dma_store) -> {STATE}
-    %e3, %load = "atlas.virtual_dma_load_fp8"(%e2, %ex, %esize) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_dma_load_fp8)
-    %e4, %value = "atlas.virtual_dma_await_fp8"(%e3, %load) : ({STATE}, !atlas.virtual_dma_load_fp8) -> ({STATE}, !atlas.virtual_fp8)
-    %e5, %keep = "atlas.virtual_dma_store_fp8"(%e4, %tile, %ez, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> ({STATE}, !atlas.virtual_dma_store)
-    %e6 = "atlas.virtual_dma_wait"(%e5, %keep) : ({STATE}, !atlas.virtual_dma_store) -> {STATE}
-    return %e6 : {STATE}
+    %e1 = "atlas.virtual_dma_store_fp8"(%final, %tile, %ex, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
+    %e4, %value = "atlas.virtual_dma_load_fp8"(%e1, %ex, %esize) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)
+    %e5 = "atlas.virtual_dma_store_fp8"(%e4, %tile, %ez, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
+    return %e5 : {STATE}
   }}
 }}
 '''
@@ -89,20 +82,25 @@ def source_operations(machine: str) -> list[tuple[int, int, str]]:
 
 
 def transfer_groups(machine: str) -> list[set[int]]:
-    """Each explicit transfer's launch and completion source identities, in source order."""
-    return [{identity, identity + 1} for _, identity, name in source_operations(machine) if name in LAUNCHES]
+    """Each explicit transfer's source identity, in source order: one atomic operation."""
+    return [{identity} for _, identity, name in source_operations(machine) if name in LAUNCHES]
 
 
 def swap_sources(machine: str, first: set[int], second: set[int]) -> str:
+    """Move every instruction of the second transfer, in order, before the first transfer starts.
+
+    A load's wait and staging VLOADs may sit later than its launch, before its
+    tile's first use, so the second transfer completes entirely before the first.
+    """
     ops = operations(machine)
     tag = re.compile(r"atlas\.virtual_cfg_source = (\d+) : i32")
     owner = lambda line: int(tag.search(line)[1]) if tag.search(line) else None
     start = next(n for n, line in enumerate(ops) if owner(line) in first)
-    middle = next(n for n, line in enumerate(ops) if owner(line) in second)
-    end = max(n for n, line in enumerate(ops) if owner(line) in second) + 1
-    if start >= middle or any(owner(line) not in (None, *first, *second) for line in ops[start:end]):
-        raise AssertionError("source groups must be adjacent and complete")
-    return reorder(machine, ops[:start] + ops[middle:end] + ops[start:middle] + ops[end:])
+    moved = [n for n, line in enumerate(ops) if owner(line) in second]
+    if not moved or moved[0] <= start:
+        raise AssertionError("the second transfer must follow the first")
+    rest = [line for n, line in enumerate(ops[start:], start) if n not in set(moved)]
+    return reorder(machine, ops[:start] + [ops[n] for n in moved] + rest)
 
 
 class SourceMemoryContractTest(unittest.TestCase):

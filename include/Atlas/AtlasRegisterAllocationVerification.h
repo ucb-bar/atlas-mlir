@@ -10,17 +10,20 @@ struct VirtualRegisterAssignment {
   unsigned reg;
 };
 
+// Atomic DMA always rematerializes: lowering places each staging VLOAD
+// before the load's first use and sets its base there. The policy is kept
+// for callers and no longer changes the check.
 enum class DMAAwaitBasePolicy {
-  Preserved,      // The first VLOAD uses the base established at launch.
+  Preserved,
   Rematerialized // Each VLOAD rematerializes its staging base (PR #13).
 };
 
 // Requires a verified, admitted virtual CFG and live source IR. Checks the
 // supplied assignments independently of the allocator's interference graph.
 // DMA assignments must cover every source transfer; helper writes must spare
-// live scalars and uncaptured operands. With explicit DMA, the pending staging
-// base (under Preserved) and the 1024-byte helper are checked by constant
-// propagation over source lowering effects; choose the policy lowering uses.
+// live scalars and uncaptured operands. With explicit DMA, each staging
+// VLOAD's base and the 1024-byte helper are checked by constant propagation
+// over source lowering effects.
 LogicalResult verifyAtlasRegisterAllocation(
     func::FuncOp function,
     llvm::ArrayRef<VirtualRegisterAssignment> assignments,

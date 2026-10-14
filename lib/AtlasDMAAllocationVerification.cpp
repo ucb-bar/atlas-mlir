@@ -23,11 +23,6 @@ bool isLaunch(Operation *op) {
              VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
 }
 
-bool isCompletion(Operation *op) {
-  return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op,
-             VirtualDMAWaitOp>(op);
-}
-
 class DMAAllocationVerifier {
 public:
   DMAAllocationVerifier(func::FuncOp function,
@@ -39,7 +34,7 @@ public:
     for (Block &block : function.getBody())
       for (Operation &op : block)
         if (isLaunch(&op))
-          transfers.push_back(op.getResult(1));
+          transfers.push_back(op.getResult(0));
 
     llvm::DenseSet<unsigned> transferIds;
     for (const VirtualDMAAssignment &assignment : assignments) {
@@ -48,8 +43,8 @@ public:
       if (!transfer || !known.contains(transfer))
         return function.emitOpError("DMA assignment refers to a foreign, stale, or untracked value");
       Operation *launch = transfer.getDefiningOp();
-      if (!launch || !isLaunch(launch) || launch->getResult(1) != transfer)
-        return assignmentError(transfer, "DMA assignment does not refer to a transfer launch handle");
+      if (!launch || !isLaunch(launch) || launch->getResult(0) != transfer)
+        return assignmentError(transfer, "DMA assignment does not refer to a DMA operation's state result");
       if (placements.contains(transfer))
         return assignmentError(transfer, "duplicate DMA assignment");
       if (failed(verifyGeometry(transfer, assignment.placement)))
@@ -62,31 +57,9 @@ public:
       if (!placements.contains(transfer))
         return assignmentError(transfer, "missing DMA assignment");
 
-    for (Block &block : function.getBody()) {
-      llvm::DenseSet<Value> pending;
-      for (Operation &op : block) {
-        if (isLaunch(&op)) {
-          Value transfer = op.getResult(1);
-          const DMATransferPlacement &placement = *placements.lookup(transfer);
-          for (Value other : pending) {
-            const DMATransferPlacement &previous = *placements.lookup(other);
-            if (placement.channel == previous.channel)
-              return conflictError(op, transfer, other, "simultaneously owned DMA channel");
-            uint64_t end = uint64_t(placement.stagingWord) + placement.halves * kHalfWords;
-            uint64_t previousEnd = uint64_t(previous.stagingWord) + previous.halves * kHalfWords;
-            if (placement.stagingWord < previousEnd && previous.stagingWord < end)
-              return conflictError(op, transfer, other, "overlapping simultaneously owned DMA staging ranges");
-          }
-          pending.insert(transfer);
-        } else if (isCompletion(&op)) {
-          Value transfer = op.getOperand(1);
-          if (!pending.erase(transfer))
-            return op.emitOpError("DMA completion requires a pending block-local transfer handle");
-        }
-      }
-      if (!pending.empty())
-        return block.getTerminator()->emitOpError("DMA ownership remains pending at block exit");
-    }
+    // Atomic virtual DMA has no pending interval here. insert-atlas-dma-waits
+    // completes a transfer before its channel or staging window is reused,
+    // and the generated DMA checks verify every overlap in the timed stream.
     return success();
   }
 
@@ -108,14 +81,6 @@ private:
   LogicalResult assignmentError(Value transfer, StringRef message) {
     auto diagnostic = function.emitOpError(message);
     noteTransfer(diagnostic, transfer, "assigned transfer");
-    return failure();
-  }
-
-  LogicalResult conflictError(Operation &op, Value transfer, Value other,
-                              StringRef message) {
-    auto diagnostic = op.emitOpError(message);
-    noteTransfer(diagnostic, transfer, "new transfer");
-    noteTransfer(diagnostic, other, "pending transfer");
     return failure();
   }
 

@@ -265,7 +265,7 @@ class VirtualMXULoweringTest(unittest.TestCase):
             for changed, expected in cases:
                 with self.subTest(unit=unit, expected=expected):
                     self.assertNotEqual(changed, valid)
-                    result = run("atlas-opt", changed, "--lower-atlas-virtual-to-machine")
+                    result = run("atlas-opt", changed, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertEqual(result.stdout, "")
                     self.assertIn(expected, result.stderr)

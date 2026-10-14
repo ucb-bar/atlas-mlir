@@ -23,8 +23,12 @@ unsigned atlasWordEncodeCount();
 // llvmBlock additionally requires statically in-block direct branch targets and
 // rejects unresolved JALR, since one inline assembly block has no external Atlas
 // program/ABI to resolve such jumps.
+// A generated stream still marked kAtlasDMAWaitsPending is rejected unless
+// `allowPendingDMAWaits`; virtual-to-machine lowering then checks only its
+// structure and encoding, and insert-atlas-dma-waits verifies the rest.
 LogicalResult verifyAtlasArtifact(ModuleOp module, bool llvmBlock,
-                                  llvm::SmallVectorImpl<uint32_t> &words);
+                                  llvm::SmallVectorImpl<uint32_t> &words,
+                                  bool allowPendingDMAWaits = false);
 // Rejects explicitly untimed streams and checks selected RTL timing even
 // without timing metadata; legacy streams retain their verification scope.
 LogicalResult verifyAtlasExecutable(ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words);

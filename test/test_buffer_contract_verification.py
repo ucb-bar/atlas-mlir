@@ -48,12 +48,10 @@ STRAIGHT = f'''module {{
 {pack("p", "x")}
     %addr = arith.constant -1879035904 : i32
     %size = arith.constant 1024 : i32
-    %s2, %stored = "atlas.virtual_dma_store_fp8"(%s1, %p, %addr, %size) : ({S}, {F}, i32, i32) -> ({S}, !atlas.virtual_dma_store)
-    %s3 = "atlas.virtual_dma_wait"(%s2, %stored) : ({S}, !atlas.virtual_dma_store) -> {S}
-    %s4, %loading = "atlas.virtual_dma_load_fp8"(%s3, %addr, %size) : ({S}, i32, i32) -> ({S}, !atlas.virtual_dma_load_fp8)
-    %s5, %back = "atlas.virtual_dma_await_fp8"(%s4, %loading) : ({S}, !atlas.virtual_dma_load_fp8) -> ({S}, {F})
+    %s2 = "atlas.virtual_dma_store_fp8"(%s1, %p, %addr, %size) : ({S}, {F}, i32, i32) -> {S}
+    %s4, %back = "atlas.virtual_dma_load_fp8"(%s2, %addr, %size) : ({S}, i32, i32) -> ({S}, {F})
 {matmul("y", "back", "p")}
-    %s6 = "atlas.virtual_output_bf16"(%s5, %y) {{index = 0 : i32}} : ({S}, {B}) -> {S}
+    %s6 = "atlas.virtual_output_bf16"(%s4, %y) {{index = 0 : i32}} : ({S}, {B}) -> {S}
     return %s6 : {S}
   }}
 }}

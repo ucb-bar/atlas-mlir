@@ -54,20 +54,22 @@ unsigned unitOf(Type type) {
   return cast<VirtualMXUAccType>(type).getUnit();
 }
 
-bool isLaunch(Operation *op) {
+// Atomic virtual DMA: a load returns its tile, a store completes in place.
+bool isDMA(Operation *op) {
   return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
              VirtualDMAStoreBF16Op>(op);
 }
 
-bool isCompletion(Operation *op) {
-  return isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(op);
+// Boundary tiles move memory through helper DMA, so explicit DMA keeps its
+// source order around them.
+bool isImplicitMemory(Operation *op) {
+  return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op);
 }
 
-// Boundary tiles and the pack move memory without a transfer handle, so they
-// run with no explicit transfer pending.
-bool isImplicitMemory(Operation *op) {
-  return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-             VirtualPackFP8Op>(op);
+// Operations that insert-atlas-dma-waits completes every transfer before: the
+// generated stream admits no transfer beside a PACK or a helper DMA.
+bool drainsDMA(Operation *op) {
+  return isImplicitMemory(op) || isa<VirtualPackFP8Op>(op);
 }
 
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
@@ -90,7 +92,7 @@ Effects effectsOf(Operation *op) {
     e.reads |= bit(kUnit0 + unitOf(op->getOperand(1).getType()));
   else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op))
     e.writes = bit(kUnit0 + matmul.getUnit());
-  else if (!isLaunch(op) && !isCompletion(op) &&
+  else if (!isDMA(op) &&
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
@@ -98,8 +100,8 @@ Effects effectsOf(Operation *op) {
   return e;
 }
 
-// A resource with a few interchangeable slots: explicit DMA transfers in
-// flight, or the weights or accumulators of one MXU unit. Along the source
+// A resource with a few interchangeable slots: the weights or accumulators
+// of one MXU unit. Along the source
 // order each holder takes the slot freed longest ago, and the next holder of
 // a slot waits for every last use of the one before. An order keeping these
 // edges never needs more slots than there are.
@@ -224,16 +226,6 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
     }
     return users;
   };
-  // The completion of the transfer `launch` starts: its only user.
-  auto completionOf = [&](unsigned launch) -> std::optional<unsigned> {
-    Value transfer = g.nodes[launch]->getResult(1);
-    if (!transfer.hasOneUse())
-      return std::nullopt;
-    std::optional<unsigned> node = nodeOf(*transfer.user_begin());
-    if (!node || !isCompletion(g.nodes[*node]))
-      return std::nullopt;
-    return node;
-  };
   // The readout ending the accumulator chain `acc` starts. Each version is
   // used once, by the accumulate that replaces it or the readout.
   auto chainEnd = [&](Value acc) -> std::optional<unsigned> {
@@ -250,53 +242,33 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
     return std::nullopt;
   };
 
-  // Explicit transfers run at the same time unless one is a store and they
-  // may touch the same DRAM bytes; then the later one launches after the
-  // earlier completes, as a verified source already orders them. Implicit
-  // memory work keeps its place among the transfers, so nothing is pending
-  // when it runs.
-  SmallVector<unsigned> launches, completions, transfersAndCompletions,
-      implicit;
+  // Atomic DMA keeps its state order around boundary tiles, and between two
+  // operations that may touch the same DRAM bytes while one writes. Any
+  // other DMA may move; insert-atlas-dma-waits completes it where needed.
+  SmallVector<unsigned> transfers, implicit;
   for (unsigned i = 0; i < n; ++i) {
-    Operation *op = g.nodes[i];
-    if (isLaunch(op)) {
-      std::optional<unsigned> completion = completionOf(i);
-      if (!completion)
-        return cannotOrder(op, "its transfer is not completed once in it");
-      launches.push_back(i);
-      completions.push_back(*completion);
-    }
-    if (isLaunch(op) || isCompletion(op))
-      transfersAndCompletions.push_back(i);
-    else if (isImplicitMemory(op))
+    if (isDMA(g.nodes[i]))
+      transfers.push_back(i);
+    else if (isImplicitMemory(g.nodes[i]))
       implicit.push_back(i);
   }
   for (unsigned m : implicit)
-    for (unsigned d : transfersAndCompletions)
+    for (unsigned d : transfers)
       edge(std::min(m, d), std::max(m, d));
-  for (unsigned a = 0; a < launches.size(); ++a)
-    for (unsigned b = a + 1; b < launches.size(); ++b)
-      if (virtualDMAConflict(g.nodes[launches[a]], g.nodes[launches[b]])) {
-        assert(completions[a] < launches[b] &&
-               "the verifier never leaves conflicting transfers pending together");
-        edge(completions[a], launches[b]);
-      }
+  for (unsigned a = 0; a < transfers.size(); ++a)
+    for (unsigned b = a + 1; b < transfers.size(); ++b)
+      if (virtualDMAConflict(g.nodes[transfers[a]], g.nodes[transfers[b]]))
+        edge(transfers[a], transfers[b]);
 
-  // Slot limits. A transfer is last used by its completion, a weight by its
-  // users, or by its load if it has none, and an accumulator chain by the
-  // readout that ends it.
-  SlotPool transfers(kMaxPendingVirtualDMA);
+  // Slot limits. A weight is last used by its users, or by its load if it has
+  // none, and an accumulator chain by the readout that ends it.
   std::array<SlotPool, 2> weights = {SlotPool(kVirtualMXUSlots),
                                      SlotPool(kVirtualMXUSlots)};
   std::array<SlotPool, 2> accumulators = {SlotPool(kVirtualMXUSlots),
                                           SlotPool(kVirtualMXUSlots)};
-  for (unsigned i = 0, t = 0; i < n; ++i) {
+  for (unsigned i = 0; i < n; ++i) {
     Operation *op = g.nodes[i];
-    if (isLaunch(op)) {
-      if (!transfers.acquire(i, {completions[t++]}, edge))
-        return cannotOrder(op, "it has more DMA transfers pending at once "
-                               "than the verifier allows");
-    } else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
       std::optional<SmallVector<unsigned, 2>> users =
           usersOf(load.getWeight());
       if (!users)
@@ -335,7 +307,16 @@ struct Cost {
   int busy;
   int latency;
   int frontend = 1;
+  // An atomic DMA lowers to a launch the frontend issues without waiting for
+  // the engine; its transfer (`busy` cycles) queues behind earlier ones after
+  // `frontend` staging cycles, and `latency` counts from the transfer start.
+  bool queuedDMA = false;
+  // Every explicit transfer completes first (drainsDMA).
+  bool drains = false;
 };
+
+// Explicit transfers in flight at once: one per DMA channel and staging window.
+constexpr unsigned kMaxQueuedDMA = 8;
 
 // A machine operation's timing under the selected provider: cycles until its
 // work is done, and until the same operation on other registers and slots can
@@ -389,23 +370,26 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   if (isa<VirtualOutputBF16Op>(op))
     return blocking(Unit::Dma,
                     registersOf(false) * (vstore->latency + transfer));
+  // An atomic load's tile is ready once its transfer lands and its VLOADs
+  // (one per register) finish. A consumer cannot start before then, so the
+  // list scheduler puts independent work between the load and its MXU, VPU,
+  // pack or store user, where insert-atlas-dma-waits will put the DMA.WAIT.
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
     int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
-    return Cost{Unit::Dma, cycles, cycles};
-  }
-  if (isa<VirtualDMAAwaitBF16Op, VirtualDMAAwaitFP8Op>(op)) {
-    // One VLOAD per register; each after the first waits for the load path.
-    int behind =
-        (registersOf(isa<VirtualDMAAwaitFP8Op>(op)) - 1) * vload->interval;
-    return Cost{Unit::Lsu, behind + vload->interval, behind + vload->latency, behind + 1};
+    int loaded = (registers - 1) * vload->interval + vload->latency;
+    Cost cost{Unit::Dma, cycles, cycles + loaded};
+    cost.queuedDMA = true;
+    return cost;
   }
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int staged = (registers - 1) * vstore->interval + vstore->latency;
-    int cycles = staged + timing::dmaTransferCycles(registers * kRegisterBytes);
-    return Cost{Unit::Dma, cycles, cycles, staged + 1};
+    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
+    Cost cost{Unit::Dma, cycles, cycles, staged + 1};
+    cost.queuedDMA = true;
+    return cost;
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());
@@ -558,9 +542,24 @@ public:
       : g(g), costs(costs), finished(g.nodes.size(), 0) {}
 
   int start(unsigned node) const {
-    int cycle = std::max(frontend, unitFree[unit(node)]);
+    const Cost &cost = costs[node];
+    int cycle = cost.queuedDMA ? frontend : std::max(frontend, unitFree[unit(node)]);
+    if (cost.drains)
+      for (int end : transfers)
+        cycle = std::max(cycle, end);
     for (unsigned pred : g.preds[node])
       cycle = std::max(cycle, finished[pred]);
+    if (cost.queuedDMA) {
+      // With every channel busy, a launch issues once the earliest ends.
+      SmallVector<int, kMaxQueuedDMA> busy;
+      for (int end : transfers)
+        if (end > cycle)
+          busy.push_back(end);
+      if (busy.size() >= kMaxQueuedDMA) {
+        llvm::sort(busy);
+        cycle = busy[busy.size() - kMaxQueuedDMA];
+      }
+    }
     return cycle;
   }
 
@@ -571,8 +570,15 @@ public:
 
   void place(unsigned node) {
     int cycle = start(node);
-    finished[node] = cycle + costs[node].latency;
-    unitFree[unit(node)] = cycle + costs[node].busy;
+    const Cost &cost = costs[node];
+    // A queued transfer starts after its staging and every earlier transfer.
+    int work = cost.queuedDMA
+                   ? std::max(cycle + cost.frontend - 1, unitFree[unit(node)])
+                   : cycle;
+    finished[node] = work + cost.latency;
+    unitFree[unit(node)] = work + cost.busy;
+    if (cost.queuedDMA)
+      transfers.push_back(work + cost.busy);
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }
@@ -588,6 +594,8 @@ private:
   ArrayRef<Cost> costs;
   std::vector<int> finished;
   std::array<int, kUnits> unitFree{};
+  // When each explicit transfer placed so far completes.
+  SmallVector<int> transfers;
   int frontend = 0;
 };
 
@@ -628,7 +636,12 @@ public:
   // first; then the one that frees the frontend first, so a blocking
   // transfer waits for work that can run beside it; then the one with the
   // longest path to the block's end; then the earliest in source order.
-  std::vector<unsigned> listSchedule(const KindCounts &capacity) const {
+  // A load starts as soon as the frontend is free, so with `lookahead` loaded
+  // tiles awaiting their first use, another load waits while anything else
+  // is ready: a PACK or boundary tile must not drain transfers whose users
+  // all come after it.
+  std::vector<unsigned> listSchedule(const KindCounts &capacity,
+                                     unsigned lookahead) const {
     Pressure pressure(block, g.nodes, liveness);
     auto over = [&](const KindCounts &counts, int slack) {
       int total = 0;
@@ -636,7 +649,19 @@ public:
         total += std::max(0, counts[k] - (capacity[k] - slack));
       return total;
     };
+    llvm::SmallDenseSet<Value> unused;
+    auto isLoad = [](Operation *op) {
+      return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+    };
     return build([&](const Machine &machine, ArrayRef<unsigned> ready) {
+      auto held = [&](unsigned node) {
+        return unused.size() >= lookahead && isLoad(g.nodes[node]);
+      };
+      SmallVector<unsigned> eligible;
+      llvm::copy_if(ready, std::back_inserter(eligible),
+                    [&](unsigned node) { return !held(node); });
+      if (eligible.empty())
+        eligible.assign(ready.begin(), ready.end());
       auto key = [&](unsigned node) {
         Operation *op = g.nodes[node];
         int start = machine.start(node);
@@ -645,16 +670,21 @@ public:
                           machine.frontendAfter(node, start), -heights[node],
                           node);
       };
-      unsigned best = ready.front();
+      unsigned best = eligible.front();
       auto bestKey = key(best);
-      for (unsigned node : ready.drop_front()) {
+      for (unsigned node : ArrayRef(eligible).drop_front()) {
         auto nodeKey = key(node);
         if (nodeKey < bestKey) {
           best = node;
           bestKey = nodeKey;
         }
       }
-      pressure.place(g.nodes[best]);
+      Operation *op = g.nodes[best];
+      for (Value operand : op->getOperands())
+        unused.erase(operand);
+      if (isLoad(op))
+        unused.insert(op->getResult(1));
+      pressure.place(op);
       return best;
     });
   }
@@ -720,7 +750,8 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
 
 // Reorder one block when the schedule fits the allocator's capacity and the
 // source order does not, or when it is faster without giving up a fit the
-// source order has. A random order is taken as it is.
+// source order has. The schedule is the fastest fitting list schedule over a
+// few load lookaheads. A random order is taken as it is.
 LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
@@ -733,6 +764,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   for (Operation *op : g.nodes) {
     FailureOr<Cost> cost = costOf(op, provider);
     if (failed(cost)) return failure();
+    cost->drains = drainsDMA(op);
     costs.push_back(*cost);
   }
   BlockScheduler scheduler(block, g, liveness, std::move(costs));
@@ -749,8 +781,6 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
 
   std::vector<unsigned> source(g.nodes.size());
   std::iota(source.begin(), source.end(), 0u);
-  std::vector<unsigned> order = scheduler.listSchedule(capacity);
-  SmallVector<Operation *> ops = opsOf(order);
   auto fits = [&](ArrayRef<Operation *> candidate) {
     KindCounts peak = scheduler.peakPressure(candidate);
     for (unsigned k = 0; k < kKinds.size(); ++k)
@@ -758,8 +788,25 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
         return false;
     return true;
   };
-  bool sourceFits = fits(g.nodes), scheduleFits = fits(ops);
-  bool faster = scheduler.makespan(order) < scheduler.makespan(source);
+  std::vector<unsigned> order;
+  SmallVector<Operation *> ops;
+  bool scheduleFits = false;
+  int span = 0;
+  for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
+    std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
+    SmallVector<Operation *> candidateOps = opsOf(candidate);
+    bool candidateFits = fits(candidateOps);
+    int candidateSpan = scheduler.makespan(candidate);
+    if (order.empty() || std::pair(!candidateFits, candidateSpan) <
+                             std::pair(!scheduleFits, span)) {
+      order = std::move(candidate);
+      ops = std::move(candidateOps);
+      scheduleFits = candidateFits;
+      span = candidateSpan;
+    }
+  }
+  bool sourceFits = fits(g.nodes);
+  bool faster = span < scheduler.makespan(source);
   if (sourceFits ? scheduleFits && faster : scheduleFits || faster)
     reorder(block, ops);
   return success();

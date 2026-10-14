@@ -327,7 +327,7 @@ void testRegistry(MLIRContext &context) {
 // A real virtual program lowered in-process: each verification boundary decodes and encodes the artifact once.
 void testVerificationContext(MLIRContext &context) {
   auto fixture = llvm::MemoryBuffer::getFile(ATLAS_GENERATED_FIXTURE);
-  auto module = fixture ? runPipeline(context, (*fixture)->getBuffer(), "lower-atlas-virtual-to-machine,insert-atlas-delays")
+  auto module = fixture ? runPipeline(context, (*fixture)->getBuffer(), "lower-atlas-virtual-to-machine,insert-atlas-dma-waits,insert-atlas-delays")
                         : OwningOpRef<ModuleOp>();
   check(bool(module), "virtual fixture lowers and is timed", diagnostics);
   if (!module)
