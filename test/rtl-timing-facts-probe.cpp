@@ -11,7 +11,6 @@ static const char *resourceName(Res r) {
   return index < sizeof(names) / sizeof(*names) ? names[index] : "invalid";
 }
 
-// Unit enumerator names, in declaration order.
 static const char *unitId(Unit u) {
   static const char *names[] = {"ScalarLoad", "ScalarWriteback", "VloadPath", "VstorePath", "VmemBank",
       "Xlu", "MxuPort", "MxuCompute", "MxuAccRead", "MxuAccWrite", "MxuWeightStream", "MxuAccStream", "Vpu"};

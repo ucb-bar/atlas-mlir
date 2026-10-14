@@ -19,7 +19,6 @@ constexpr llvm::StringLiteral kAtlasSourceMemoryContract = "atlas.virtual_source
 constexpr llvm::StringLiteral kAtlasBufferContract = "atlas.virtual_buffer_contract";
 constexpr llvm::StringLiteral kAtlasTimingState = "atlas.timing_state";
 constexpr llvm::StringLiteral kAtlasTimingProvider = "atlas.timing_provider";
-// Selected RTL timing facts (lib/AtlasRTLSelection.cpp), on any artifact kind.
 constexpr llvm::StringLiteral kAtlasRTLEvidence = "atlas.rtl_evidence";
 // Per-instruction correspondence tags that only generated artifacts carry.
 constexpr llvm::StringLiteral kAtlasTagDMATransfer = "atlas.virtual_dma_transfer";

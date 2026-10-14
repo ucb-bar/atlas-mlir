@@ -218,9 +218,9 @@ public:
         table.reserve(in, reservedFootprint(f, ReservedHolds::MxuPair), cycle);
       }
       slots->reserve(std::move(*command));
-      return {};
+    } else {
+      table.reserve(in, f, cycle);
     }
-    table.reserve(in, f, cycle);
     return {};
   }
   std::string onWait(const Instr &, int cycle) override {
@@ -322,9 +322,7 @@ TimingProvider mlir::atlas::rtlTimingProvider(std::shared_ptr<const RTLEvidence>
   p.redirectWaitsForDelay = false;
   p.concreteEntryContexts = true;
   p.validateScope = validateScope;
-  p.footprint = [evidence](const Instr &in, const RegValues &regs) {
-    return evidence->resolve(in, regs);
-  };
+  p.footprint = [evidence](const Instr &in, const RegValues &regs) { return evidence->resolve(in, regs); };
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     Dependence d = dataDependence(a, fa, b, fb);
     // The LSU reports a VSTORE's source register as read until the VSTORE
@@ -456,9 +454,7 @@ struct SelectAtlasRTLEvidencePass : PassWrapper<SelectAtlasRTLEvidencePass, Oper
 };
 } // namespace
 
-void mlir::atlas::registerSelectAtlasRTLEvidencePass() {
-  PassRegistration<SelectAtlasRTLEvidencePass>();
-}
+void mlir::atlas::registerSelectAtlasRTLEvidencePass() { PassRegistration<SelectAtlasRTLEvidencePass>(); }
 
 namespace {
 // Ordering uses the compiler's DMA estimate; selected completion remains unknown.
@@ -544,8 +540,7 @@ void mlir::atlas::estimateRTLGraphDMA(DepGraph &graph) {
     if (isLaunch(graph.nodes[i])) graph.footprints[i].dmaCycles = schedulerDMACycles(graph.footprints[i]);
 }
 
-std::vector<int> mlir::atlas::rtlContentionPriorities(
-    const DepGraph &graph, const std::vector<int> &issued, int bodyCount) {
+std::vector<int> mlir::atlas::rtlContentionPriorities(const DepGraph &graph, const std::vector<int> &issued, int bodyCount) {
   std::vector<int> priority = criticalHeights(graph);
   std::vector<int> units(bodyCount, -1);
   // Remaining occupancy plus the shortest tail bounds completion on a busy

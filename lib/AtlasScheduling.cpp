@@ -322,8 +322,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
         return failure();
       continue;
     }
-    // Footprints that differ between entry contexts would need one order valid
-    // under each, so such a block keeps its source order.
+    // Keep source order when footprints differ between entry contexts.
     DelayInsertion unused;
     if (failed(atlasBlockDelays(*stream, b, *provider, before, unused, tailIdle[b])))
       return failure();
@@ -373,7 +372,7 @@ struct ScheduleAtlasStreamPass
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
   StringRef getDescription() const final {
     return "Reorder each basic block with the list scheduler ported from "
-           "atlas-compiler-experiments under the selected timing provider and " "insert the delays it needs";
+           "atlas-compiler-experiments under the selected timing provider and insert the delays it needs";
   }
 
   void runOnOperation() override {

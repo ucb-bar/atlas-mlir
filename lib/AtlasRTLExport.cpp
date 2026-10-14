@@ -78,8 +78,6 @@ FailureOr<llvm::json::Object> mlir::atlas::exportAtlasRTLTiming(ModuleOp module)
   if (auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
       state && state.getValue() != "timed")
     return module.emitError("RTL timing export requires a timed stream; schedule or insert delays first");
-  // The executable boundary accepts the stream; the trace then comes from the
-  // same verifier under the selected provider.
   SmallVector<uint32_t> words;
   if (failed(verifyAtlasExecutable(module, /*llvmBlock=*/false, words))) return failure();
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module);
@@ -92,9 +90,8 @@ FailureOr<llvm::json::Object> mlir::atlas::exportAtlasRTLTiming(ModuleOp module)
 
   Array instructions, blocks;
   std::vector<uint8_t> encoded;
-  for (uint32_t word : words) {
+  for (uint32_t word : words)
     for (unsigned shift = 0; shift < 32; shift += 8) encoded.push_back(static_cast<uint8_t>(word >> shift));
-  }
   auto hash = llvm::SHA256::hash(encoded);
   const RTLEvidence &evidence = **selected;
   const bool dynamic = evidence.dmaWait();
@@ -135,8 +132,6 @@ FailureOr<llvm::json::Object> mlir::atlas::exportAtlasRTLTiming(ModuleOp module)
         {"successors", integers(stream->succs[b])}, {"successor_issue_offset", nullptr},
         {"entry_state", "idle_engines_no_pending_dma"}};
     if (trace.successorIssue[b] >= 0) blockJSON["successor_issue_offset"] = trace.successorIssue[b];
-    // A block whose footprints differ between entry contexts lists each group:
-    // its entry states (known registers) and its instructions' footprints.
     if (!trace.contexts[b].empty()) {
       Array contexts;
       for (const AtlasContextGroup &context : trace.contexts[b]) {

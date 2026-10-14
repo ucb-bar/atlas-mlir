@@ -30,7 +30,7 @@ std::optional<int> integer(const Object *object, llvm::StringRef key) {
   return static_cast<int>(*value);
 }
 
-// Compiler mnemonic -> facts block, following test/rtl-timing-facts-map.yaml.
+// Mapping follows test/rtl-timing-facts-map.yaml.
 const std::map<std::string, const char *> &vpuBlocks() {
   static const std::map<std::string, const char *> table = {
       {"vadd.bf16", "vpu.add"}, {"vsub.bf16", "vpu.sub"}, {"vmul.bf16", "vpu.mul"},
@@ -72,7 +72,6 @@ const std::map<OpClass, std::vector<RegisterEvent>> &vpuEvents() {
   return table;
 }
 
-// Fills a compiler-structured footprint with one facts block's numbers.
 struct Fill {
   Footprint &f;
   std::string name, error;
@@ -96,8 +95,7 @@ struct Fill {
     }
     return &it->second;
   }
-  // `passes` sweeps over `elements` consecutive elements from `first`, timed by
-  // the group: element i of pass p is touched at first_age + (p*elements+i)*step.
+  // Element i of pass p is touched at first_age + (p*elements+i)*step.
   void access(const char *key, Res res, bool write, int first, int elements, int passes = 1) {
     const OpTimingGroup *g = group(key);
     if (!g) return;
@@ -112,13 +110,11 @@ struct Fill {
   }
   int first(const char *key) { const OpTimingGroup *g = group(key); return g ? g->firstAge : 0; }
   int last(const char *key) { const OpTimingGroup *g = group(key); return g ? g->lastAge : 0; }
-  // A source is retained through its synchronous read response.
-  int readEnd(const char *key) { return last(key) + latency; }
   int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1, bool mergeRelease = true) {
     access(key, Res::MReg, write, reg * 32, registers * 32, passes);
     auto &list = write ? f.mregWrites : f.mregReads;
     for (int i = 0; i < registers; ++i) list.push_back(reg + i);
-    int end = write ? last(key) : readEnd(key);
+    int end = write ? last(key) : last(key) + latency; // Retain the source through its read response.
     int &release = write ? f.writeRelease : f.readRelease;
     release = mergeRelease ? std::max(release, end) : end;
     return end;
@@ -129,9 +125,7 @@ struct Fill {
     return block && block->firstFreeAge ? *block->firstFreeAge - 1 : 0;
   }
   int nextIssue() { return block && block->nextIssueAge ? *block->nextIssueAge : 0; }
-  void bank(int line, const char *key) {
-    f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)});
-  }
+  void bank(int line, const char *key) { f.holds.push_back({Unit::VmemBank, line / kLinesPerBank, first(key), last(key)}); }
   void hold(std::initializer_list<Unit> units, int from, int to) {
     if (from <= to) for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
@@ -156,7 +150,6 @@ struct Fill {
   }
 };
 
-// MXU command -> facts block operation (mxu<unit>.<operation>).
 const std::map<OpClass, const char *> &mxuBlocks() {
   static const std::map<OpClass, const char *> table = {
       {OpClass::WeightPush, "push_weight"}, {OpClass::AccPushFp8, "push_acc_fp8"},
@@ -191,16 +184,13 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     if (write) f.writeRelease = std::max(f.writeRelease, fill.last(key));
     track(key, fill.last(key));
   };
-  auto pair = [&](int reg) {
-    if (reg & 1) fill.fail("BF16 operands must name even register pairs");
-  };
   if (in.imm != 0) fill.fail("unsupported MXU encoding");
   const bool weight = op.opClass == OpClass::WeightPush;
   const bool paired = op.opClass == OpClass::AccPushBf16 || op.opClass == OpClass::PopBf16;
   if (weight || op.opClass == OpClass::AccPushFp8 || op.opClass == OpClass::AccPushBf16) {
     if (in.rs2 != 0) fill.fail("unsupported MXU encoding");
     if (paired) {
-      pair(in.rs1);
+      if (in.rs1 & 1) fill.fail("BF16 operands must name even register pairs");
       mregRows("mreg_read0", in.rs1, false);
     }
     mregRows("mreg_read1", in.rs1 + (paired ? 1 : 0), false);
@@ -210,9 +200,8 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
     slotRows("acc_store", Res::Acc, in.rs2, false);
     if (paired) {
       if (in.rs1 != 0) fill.fail("unsupported MXU encoding");
-      pair(in.rd);
+      if (in.rd & 1) fill.fail("BF16 operands must name even register pairs");
     } else {
-      // The scale register is read into the command at issue.
       if (in.rs1 < 0 || in.rs1 > 31) fill.fail("scale register out of range");
       f.accesses.push_back({Res::EReg, false, in.rs1, 1, 0, 1});
     }
@@ -237,9 +226,8 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, OpTimingBloc
   return fill.done(busy);
 }
 
-// The JSON document at `path`, whose bytes must hash to `expectedSha256`.
 llvm::Expected<llvm::json::Value> readPinned(llvm::StringRef path, llvm::StringRef expectedSha256,
-                                             const std::string &what) {
+                                           const std::string &what) {
   if (!hashSyntax(expectedSha256)) return factsError(what + " SHA-256 is required");
   auto buffer = llvm::MemoryBuffer::getFile(path);
   if (!buffer) return factsError("cannot read " + path.str());
@@ -259,8 +247,7 @@ llvm::Expected<RTLEvidence> mlir::atlas::timing::loadRTLTimingFacts(
   auto parsed = readPinned(path, expectedSha256, "facts");
   if (!parsed) return parsed.takeError();
   const Object *root = parsed->getAsObject();
-  if (!root || root->getString("schema") != "merlin.op_timing.v1")
-    return factsError("expected schema merlin.op_timing.v1");
+  if (!root || root->getString("schema") != "merlin.op_timing.v1") return factsError("expected schema merlin.op_timing.v1");
   const Object *hardware = root->getObject("hw_ir");
   auto hardwareSha = hardware ? hardware->getString("sha256") : std::nullopt;
   if (!hardwareSha || !hashSyntax(*hardwareSha)) return factsError("missing hw_ir.sha256");
@@ -362,8 +349,7 @@ llvm::Error RTLEvidence::selectPairFacts(llvm::StringRef path, llvm::StringRef e
     }
     result->pairs[{first->str(), second->str()}].push_back(std::move(fact));
   }
-  // An engine's commands are live until next_issue_age when its blocks have
-  // one (pairfacts.py), else through their last event age.
+  // Match pairfacts.py's live window: next_issue_age when present, else last_event_age.
   auto windowOf = [&](llvm::StringRef engine) -> std::optional<std::string> {
     std::optional<std::string> found;
     for (const auto &[name, b] : blocks)
@@ -458,8 +444,6 @@ llvm::json::Object RTLEvidence::applicability() const {
     Object capacity, windows;
     for (const auto &[engine, live] : pairs->capacity) capacity[engine] = live;
     for (const auto &[engine, window] : pairs->window) windows[engine] = window;
-    // An MXU with pair facts admits commands on itself where a fact covers the
-    // gap (lib/AtlasRTLSelection.cpp); the other keeps its busy rule.
     Array pipelined;
     for (const char *unit : {"mxu0", "mxu1"}) if (pairs->capacity.count(unit)) pipelined.push_back(unit);
     if (!pipelined.empty()) {
@@ -515,7 +499,6 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   };
   if (in.release && op.opClass != OpClass::Csr) return reject("unsupported completion annotation");
 
-  // Scalar ALU operations read their registers and write back at issue.
   if (op.opClass == OpClass::Alu && name != "auipc") {
     if (!xreg(in.rd) || !xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported scalar operands");
     if (hasOperand(op, "x1")) x(in.rs1, false);
@@ -551,8 +534,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
   if (op.engine == Engine::Dma) {
     if (!dma) return reject("DMA requires the dma=wait selection");
     if (op.channel < 0 || op.channel >= 8) return reject("unsupported DMA channel");
-    if (op.opClass == OpClass::DmaWait)
-      return f; // pairing is checked by the stream verifier
+    if (op.opClass == OpClass::DmaWait) return f; // Pairing is checked by the stream verifier.
     if (op.opClass == OpClass::DmaConfig) {
       if (!xreg(in.rs1) || !regs[in.rs1] || *regs[in.rs1] > 31)
         return reject("DMA configuration requires a known 5-bit upper DRAM base");
@@ -572,9 +554,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     x(in.rd, false); x(in.rs1, false); x(in.rs2, false);
     f.accesses.push_back({Res::DmaBase, false, 0, 1, 0, 1});
     f.accesses.push_back({Res::Vmem, load, int(words / 8), int(bytes / 32), 0, 0, false, true});
-    // The DRAM span in 32-byte units of the captured offset; the configured
-    // upper base is not distinguished, so equal offsets under different bases
-    // are treated as one span.
+    // Equal captured DRAM offsets share a span even under different configured upper bases.
     f.accesses.push_back({Res::Dram, !load, int(offset / 32), int(bytes / 32), 0, 0, false, true});
     return f;
   }
@@ -584,8 +564,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     if (!xreg(in.rs1) || !xreg(in.rs2) || (!scale && !xreg(in.rd))) return reject("unsupported scalar memory operands");
     if (!regs[in.rs1]) return reject("unknown scalar base cannot establish bounded address domain");
     const uint32_t address = (*regs[in.rs1] + uint32_t(signExtend(in.imm, 12))) & 0x1FFFFF;
-    if (address % 4 || address + 4 > uint32_t(kVmemBytes))
-      return reject("scalar word access is unaligned or outside VMEM");
+    if (address % 4 || address + 4 > uint32_t(kVmemBytes)) return reject("scalar word access is unaligned or outside VMEM");
     Fill fill(f, store ? "scalar_lsu.store" : scale ? "scalar_lsu.scale_load" : "scalar_lsu.load", blocks);
     const int line = address / kLineBytes;
     x(in.rs1, false);
@@ -622,8 +601,7 @@ Footprint RTLEvidence::resolve(const Instr &in, const RegValues &regs) const {
     fill.access(vmem, Res::Vmem, !load, int(line), 32);
     fill.mreg(rows, in.rd, load, 1, 1, /*mergeRelease=*/false);
     int busy = fill.busyEnd();
-    // VLOAD/VSTORE hold only their own path: bank holds order them, and MREG
-    // ports/releases order their overlap with VPU and XLU.
+    // Bank holds order VLS paths; MREG ports/releases order their overlap with VPU and XLU.
     fill.hold({load ? Unit::VloadPath : Unit::VstorePath}, 0, busy);
     fill.bank(int(line), vmem);
     if (!load) f.writeRelease = fill.last(vmem);

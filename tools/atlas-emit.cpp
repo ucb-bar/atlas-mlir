@@ -28,7 +28,6 @@ int main(int argc, char **argv) {
     else if (arg.starts_with("--") || input) invalid = true;
     else input = argv[i];
   }
-  // The RTL timing export is a timed-only mode of its own.
   if (invalid || !input || (mapJson && programJson) || (timingJson && (mapJson || programJson || allowUntimed))) {
     llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n"
                     "       atlas-emit --rtl-timing-json <flat-mlir-module>\n";
@@ -129,7 +128,6 @@ int main(int argc, char **argv) {
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider)) {
       root["timing_provider"] = provider.getValue().str();
-      // Only the RTL provider's export resolves per-instruction timing.
       if (provider.getValue() == timing::kAtlasRTLTimingProviderId)
         root["timing_scope"] = "issue_spacing_verified_by_timing_provider_over_selected_rtl_facts; see atlas-emit --rtl-timing-json";
     }

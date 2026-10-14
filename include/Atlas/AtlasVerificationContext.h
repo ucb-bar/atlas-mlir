@@ -42,8 +42,7 @@ struct AtlasVerificationContext {
 // After the MLIR verifier and verifyAtlasTimingState, decodes (so encodes) at
 // most once. `generated` first runs the structural stage (DMA pairing,
 // protected intervals, x0-NOP redirect slots); requireStream forces decoding.
-// At an executable boundary a stream without a timing state is timed when it
-// carries selected RTL evidence, which names its provider.
+// At executable boundaries, selected RTL evidence also times streams without a timing state.
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
                               bool requireStream = false, bool executable = false);

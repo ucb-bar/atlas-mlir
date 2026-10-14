@@ -361,8 +361,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
-  // Concrete contexts: a branch with known operands takes one edge, and a
-  // taken branch or JAL executes only its delay slot before the target.
+  // Known branches take one edge; taken branches/JAL execute their delay slot before the target.
   std::vector<std::set<RegValues>> seen(blocks);
   std::deque<std::pair<size_t, RegValues>> pending;
   size_t total = 0;
@@ -419,8 +418,7 @@ std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
     const AtlasStream &s, size_t block, const TimingProvider &provider) {
   if (!provider.concreteEntryContexts || s.contexts.empty() || s.contexts[block].empty())
     return {{{s.entry[block]}, {}}};
-  // Footprints are pure in the instruction and its register reads, so contexts
-  // with equal footprint sequences time identically.
+  // Footprints depend only on the instruction and register reads; equal sequences time identically.
   std::vector<AtlasContextGroup> groups;
   for (const RegValues &entry : s.contexts[block]) {
     std::vector<Footprint> footprints;
@@ -435,8 +433,7 @@ std::vector<AtlasContextGroup> mlir::atlas::atlasBlockContexts(
     };
     auto it = llvm::find_if(groups, same);
     if (it == groups.end()) groups.push_back({{entry}, std::move(footprints)});
-    else
-      it->entries.push_back(entry);
+    else it->entries.push_back(entry);
   }
   return groups;
 }
@@ -446,8 +443,8 @@ void mlir::atlas::guardAtlasBlockDrain(DelayInsertion &delay, const TimingProvid
   if (!next || idle <= 0) return;
   bool halt = next->opClass == OpClass::Halt;
   if (halt || (isControlFlow(*next) && !provider.redirectWaitsForDelay))
-    delay = {idleDelays(idle - 1), true, delay.reason, halt ? "a halt does not wait for a delay"
-                  : "a redirect does not wait for a delay"};
+    delay = {idleDelays(idle - 1), true, delay.reason,
+             halt ? "a halt does not wait for a delay" : "a redirect does not wait for a delay"};
 }
 
 InFlightDiagnostic mlir::atlas::emitAtlasFootprintError(const AtlasStream &s, Operation *op, StringRef error,
@@ -565,13 +562,12 @@ LogicalResult mlir::atlas::checkAtlasStream(
         if (command) pending[op.channel].push_back({i, f});
         applyScalar(in, regs);
       }
-      // Timing is checked one block at a time, so a transfer must complete in
-      // the block that starts it, as verifyAtlasTimedStream requires.
+      // Transfers must complete in their launch block, as verifyAtlasTimedStream requires.
       for (int ch = 0; ch < 8; ++ch)
         if (!pending[ch].empty())
           return s.ops[pending[ch].back().first]->emitOpError(
               "may still be in flight when its block ends; timing requires DMA "
-              "completion before a block boundary, so add atlas.dma_wait in " "this block");
+              "completion before a block boundary, so add atlas.dma_wait in this block");
     }
   }
   return success();
@@ -813,10 +809,11 @@ FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
   if (!requested.empty() && retained && retained.getValue() != requested)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   bool evidence = module->hasAttr(kAtlasRTLEvidence);
-  std::string id = !requested.empty() ? requested.str() : retained         ? retained.getValue().str()
-                   : evidence         ? kAtlasRTLTimingProviderId.str() : kNpuModelTimingProviderId.str();
-  // Selected facts state the stream's timing contract; the model would time it
-  // under rules the evidence does not support.
+  std::string id;
+  if (!requested.empty()) id = requested.str();
+  else if (retained) id = retained.getValue().str();
+  else id = evidence ? kAtlasRTLTimingProviderId.str() : kNpuModelTimingProviderId.str();
+  // Selected evidence excludes the model's timing contract.
   if (evidence && id == kNpuModelTimingProviderId)
     return module.emitOpError("selected RTL evidence excludes the ") << id
            << " timing provider; drop the selection to time with the model";

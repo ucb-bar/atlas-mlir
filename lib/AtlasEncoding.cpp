@@ -355,7 +355,6 @@ LogicalResult mlir::atlas::verifyAtlasArtifact(
   return verifyArtifact(module, llvmBlock, /*executable=*/false, words);
 }
 
-LogicalResult mlir::atlas::verifyAtlasExecutable(
-    ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
+LogicalResult mlir::atlas::verifyAtlasExecutable(ModuleOp module, bool llvmBlock, llvm::SmallVectorImpl<uint32_t> &words) {
   return verifyArtifact(module, llvmBlock, /*executable=*/true, words);
 }

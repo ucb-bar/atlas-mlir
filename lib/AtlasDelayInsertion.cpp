@@ -19,8 +19,7 @@ constexpr int kMaxSearch = 100000;
 constexpr const char *kRedirectGuard = "a redirect does not wait for a delay";
 constexpr const char *kContextReason = "another entry context of this block issues it later";
 
-// Place source order or `order` no earlier than `floor`/`drainFloor`.
-// A nonempty floor identifies an entry context in diagnostics.
+// Respect context issue/drain floors; a nonempty floor adds context diagnostics.
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p, const RegValues &entry, ArrayRef<int> floor, int drainFloor,
                         std::vector<DelayInsertion> &before,
@@ -232,6 +231,10 @@ LogicalResult mlir::atlas::atlasBlockDelays(const AtlasStream &s, size_t block, 
     std::optional<ArrayRef<size_t>> requestedOrder) {
   size_t begin = s.starts[block], end = s.blockEnd(block);
   ArrayRef<size_t> order = requestedOrder.value_or(ArrayRef<size_t>{});
+  auto reset = [&]() {
+    for (size_t i = begin; i < end; ++i) before[i] = {};
+    after = {};
+  };
   if (requestedOrder) {
     if (order.size() != end - begin)
       return s.ops[begin]->emitOpError("delay planning order must contain every block instruction");
@@ -244,25 +247,21 @@ LogicalResult mlir::atlas::atlasBlockDelays(const AtlasStream &s, size_t block, 
     if ((s.endsInHalt(block) && order.back() != end - 1) || (s.endsInBranch(block) &&
          (order[order.size() - 2] != end - 2 || order.back() != end - 1)))
       return s.ops[begin]->emitOpError("delay planning order must preserve the terminator and delay slot");
-    for (size_t i = begin; i < end; ++i) before[i] = {};
-    after = {};
+    reset();
   }
   std::vector<AtlasContextGroup> groups = atlasBlockContexts(s, block, p);
   std::vector<int> cycles;
   int drained = 0;
   if (groups.size() == 1)
     return timeBlock(s, block, p, groups.front().entries.front(), {}, 0, before, after, cycles, drained, tail, order);
-  // Raise each op's issue cycle to the latest any context needs until one
-  // round leaves every context's placement unchanged, so the delays hold
-  // under all of them.
+  // Raise issue/drain floors until every context's placement is unchanged, making delays valid for all.
   std::vector<int> floor(end - begin, 0);
   int drainFloor = 0;
   std::vector<std::pair<int, std::string>> own(end - begin, {0, ""});
   for (int round = 0; round < kMaxContextRounds; ++round) {
     bool stable = true;
     for (const AtlasContextGroup &group : groups) {
-      for (size_t i = begin; i < end; ++i) before[i] = {};
-      after = {};
+      reset();
       if (failed(timeBlock(s, block, p, group.entries.front(), floor, drainFloor, before, after, cycles, drained, tail, order)))
         return failure();
       // A delay keeps the reason of the context that needs the most idle time there on its own.

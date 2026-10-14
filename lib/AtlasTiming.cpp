@@ -700,8 +700,8 @@ static bool contains(const std::vector<int> &v, int x) {
   return std::find(v.begin(), v.end(), x) != v.end();
 }
 
-Dependence mlir::atlas::timing::dataDependence(const Instr &a, const Footprint &fa, const Instr &b,
-                                               const Footprint &fb) {
+Dependence mlir::atlas::timing::dataDependence(
+    const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
   Dependence best;
   auto consider = [&](int d, EdgeKind kind, const std::string &why) {
     if (d > best.distance)

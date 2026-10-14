@@ -25,8 +25,7 @@ struct OpTimingBlock {
   std::optional<int> firstFreeAge, nextIssueAge, readLatency;
 };
 
-// A merlin.op_pairs.v1 record admits stableGap <= gap <= lastGap when
-// the commands' operands satisfy every relation entry.
+// A merlin.op_pairs.v1 record admits stableGap <= gap <= lastGap when operands satisfy every relation entry.
 struct OpPairFact {
   std::map<std::string, std::string> relation;
   int stableGap = 0, lastGap = 0;
@@ -41,25 +40,21 @@ struct RTLPairFacts {
   std::map<std::string, std::string> window;
 };
 
-// SHA-pinned RTL ages fill compiler footprints; unresolved or structurally
-// mismatched blocks are rejected.
+// SHA-pinned RTL ages fill compiler footprints; unresolved or structurally mismatched blocks are rejected.
 class RTLEvidence {
 public:
   // ScalarCore fetches with a 15-bit word index.
   static constexpr unsigned maximumProgramWords() { return 32768; }
   const std::string &factsSha256() const { return sha256; }
   const std::string &hardwareIRSha256() const { return hardwareIR; }
-  // dma=wait: operands captured at launch, synchronous config, queued
-  // transfers completed only at their matching wait, no completion latency.
+  // dma=wait: capture operands at launch; synchronous config; completion at matching wait without a latency bound.
   bool dmaWait() const { return dma; }
 
-  // VLOAD and VSTORE hold their own path; the VPU and XLU exclude each other;
-  // an MXU command holds its own MXU through its last event.
+  // VLOAD and VSTORE hold their own path; the VPU and XLU exclude each other; an MXU command holds its MXU through its last event.
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   llvm::json::Object applicability() const;
 
-  // Loads pair facts pinned by SHA-256; they must describe this hardware IR
-  // and derive from these facts, and name only resolved blocks.
+  // Pair facts must match this hardware IR and timing SHA-256 and name only resolved blocks.
   llvm::Error selectPairFacts(llvm::StringRef path, llvm::StringRef expectedSha256);
   const RTLPairFacts *pairFacts() const { return pairs.get(); }
   // The facts block of a VPU mnemonic, or null.

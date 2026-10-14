@@ -43,8 +43,7 @@ struct AtlasContextGroup {
 // them; otherwise uses the merged entry.
 std::vector<AtlasContextGroup> atlasBlockContexts(
     const AtlasStream &stream, size_t block, const timing::TimingProvider &provider);
-// Emits a footprint error at `op`, noting why concrete contexts were
-// unavailable and, when given, the entry context it arose under.
+// Emits a footprint error with context-limit and optional entry-context notes.
 InFlightDiagnostic emitAtlasFootprintError(const AtlasStream &stream, Operation *op, llvm::StringRef error,
                                            const timing::RegValues *context = nullptr);
 
@@ -59,8 +58,7 @@ struct DelayInsertion {
 void guardAtlasBlockDrain(DelayInsertion &delay, const timing::TimingProvider &provider,
                           int idle, const timing::OpInfo *next);
 
-// The issue cycle and footprint of each stream op under one provider, and
-// each block's earliest successor issue (-1 after a halt), as verified.
+// Verified issue cycles, footprints, and earliest successor issues (-1 after a halt).
 struct AtlasTimedTrace {
   std::vector<timing::Footprint> footprints;
   std::vector<int> cycles;
