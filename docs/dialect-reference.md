@@ -189,10 +189,11 @@ Lowering marks its output `atlas.generated_from_virtual = "resource-contract-v5"
 Contracts derive from live source, checked placements or earlier contracts, never from the lowering's plan.
 
 Generated programs must fit the 2,048-word policy limit, including inserted
-delays. The check applies after timing and at emission as well as during
-untimed lowering. The [virtual program driver](virtual-program-lowering.md)
-retains every stage and its diagnostics; an allocation report's `fits` covers
-untimed lowering, not completion of later timing and encoding stages.
+DMA waits and delays. The check applies after DMA wait insertion, after
+timing and at emission as well as during untimed lowering. The
+[virtual program driver](virtual-program-lowering.md) retains every stage and
+its diagnostics; an allocation report's `fits` covers untimed lowering, not
+completion of later timing and encoding stages.
 
 | Contract and checker | Checks | Out of scope |
 | --- | --- | --- |
@@ -254,7 +255,7 @@ between selected RTL, architecture text, and the inspected model.
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | `atlas-opt` module pass | Check the bounded virtual BF16/FP8 stage's SSA types, CFG state edges, output indexes, and isolation from physical machine operations. It does not assign registers or emit words. |
 | `--schedule-atlas-virtual` | `atlas-opt` module pass | Reorder virtual operations within each block before resource assignment, preserving SSA, handle and memory dependencies, by pressure-aware heuristic cost or a seeded random legal order. |
-| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies and branches; emit DMA launches and sink load staging VLOADs to first use or block end, flushing the oldest unread load before its window is reused; leave explicit DMA waits to `--insert-atlas-dma-waits`; emit typed machine operations with resource contracts and `atlas.timing_state = "untimed"`, without fixed async, scalar-load or helper padding. With `allocation-report=<file>`, also write the allocation plan as JSON, even when it does not fit: per register kind its capacity, peak live values and where, and registers used; each value's registers, MXU unit and slot, or DMA channel and staging window, named as the input prints it; VMEM windows in 4-byte words; the untimed word count; and every error. |
+| `--lower-atlas-virtual-to-machine` | `atlas-opt` module pass | Verify one bounded virtual CFG; assign live BF16 pairs, FP8 registers, and scalar registers; stage input/output tiles and runtime controls; lower MXU and unit-scale pack; resolve BF16/scalar block-argument copies and branches; emit DMA launches and sink load staging VLOADs to first use or block end, flushing the oldest unread load before its window is reused; leave explicit DMA waits to `--insert-atlas-dma-waits`; emit typed machine operations with resource contracts and `atlas.timing_state = "untimed"`, without fixed async, scalar-load or helper padding. With `allocation-report=<file>`, also write the allocation plan as JSON, even when it does not fit: per register kind its capacity, peak live values and where, and registers used; each value's registers, MXU unit and slot, or DMA channel and staging window, named as the input prints it; VMEM windows in 4-byte words; the untimed word count before DMA waits; and every error. |
 | `--insert-atlas-dma-waits` | `atlas-opt` module pass | Complete a stream marked `atlas.dma_waits_pending` by inserting each explicit transfer's wait immediately before a staging-window access or reuse, channel reuse, overlapping DRAM hazard involving a write, helper DMA, PACK, scalar memory, redirect, CSR, halt or branch-target entry. Keep target-entry waits on the fall-through path, update redirects and remove the marker. |
 | `--verify-atlas-generated-schedule` | `atlas-opt` module pass | Run the [generated-artifact checks](#generated-artifact-checks), matching DMA waits, protected transfer intervals, DMA memory conflicts and architectural NOP branch slots; timed streams also recheck actual issue spacing. Emission and LLVM conversion run the same checks. |
 | `--verify-atlas-machine-stream` | `atlas-opt` module pass | Check local verifiers, flat state chain, selected word encoding, delay-slot adjacency, and in-block target confinement. Leave Atlas MLIR unchanged. It reuses encoder checks; it is not an independent hardware proof. |

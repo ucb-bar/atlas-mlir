@@ -1,9 +1,9 @@
 # Virtual program lowering and handoff
 
 `tools/lower_atlas_program.py` runs virtual verification, virtual scheduling,
-register/VMEM/MXU/DMA placement, machine lowering, timing, and instruction
-encoding. It accepts one bounded virtual function with the ABI attributes
-described in the [dialect reference](dialect-reference.md).
+register/VMEM/MXU/DMA placement, machine lowering, DMA wait insertion, timing,
+and instruction encoding. It accepts one bounded virtual function with the ABI
+attributes described in the [dialect reference](dialect-reference.md).
 
 From the repository root, after building:
 
@@ -24,9 +24,9 @@ XLU; `virtual_attention_tile.mlir` expects the transposed key in DRAM.
 | --- | --- |
 | `1-virtual.mlir` | Verified virtual source |
 | `2-scheduled.mlir` | Scheduled virtual source |
-| `3-allocated.mlir` | Allocated, untimed machine IR and source contracts |
+| `3-allocated.mlir` | Allocated, untimed machine IR with DMA waits, and source contracts |
 | `3-allocation.json` | Register pressure and placement, MXU slots, DMA channels, VMEM windows, untimed word count, and lowering diagnostics |
-| `4-timed.mlir` | Checked machine IR with waits and delays |
+| `4-timed.mlir` | Checked machine IR with delays |
 | `5-words.hex` | One encoded instruction word per line |
 | `5-map.json` | Instruction-to-operation map |
 | `5-program.json` | Decoded fields, control flow, and final word count |
@@ -42,9 +42,11 @@ register coloring failed; `peak_live` includes the allocator's requirement
 that results not overwrite operands. Fixed synchronous DMA channels and legacy
 matmul slots are included alongside explicit resource handles.
 
-The report's `fits` describes **untimed lowering**. Timing can still fail, and
-the 2,048-word generated-program policy is checked again after delay insertion
-and at emission. Use successful completion of the entire driver and the final
+The report's `fits` describes **untimed lowering**. Its `untimed_words` count
+precedes `--insert-atlas-dma-waits`, which adds each explicit transfer's
+`DMA.WAIT`. Timing can still fail, and the 2,048-word generated-program policy
+is checked again after DMA wait insertion, after delay insertion and at
+emission. Use successful completion of the entire driver and the final
 `5-program.json` word count for the emitted program's status.
 
 ## Combined attention + MLP status
@@ -52,7 +54,8 @@ and at emission. Use successful completion of the entire driver and the final
 The branch implements Jeremy's virtual-to-machine infrastructure, including
 row sum/max/min, BF16 splats, FP8 transpose, and lowering for every admitted
 unary and binary VPU kind. It includes standalone attention fixtures and the
-artifact driver. PR #15 is already in the branch ancestry.
+artifact driver. PRs #15 and #23 (atomic virtual DMA) are already in the
+branch ancestry.
 
 The upstream combined attention → BF16-to-FP8 conversion → MLP virtual program
 is still a handoff dependency. These fixtures do not establish a PyTorch-derived
