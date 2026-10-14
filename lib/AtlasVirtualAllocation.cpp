@@ -3,6 +3,7 @@
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -20,8 +21,6 @@ constexpr unsigned kLastScalarValue = 26;
 // window the size of a BF16 tile.
 constexpr unsigned kDMAChannels = 8;
 constexpr uint32_t kStagingWindowWords = 512;
-static_assert(kMaxPendingVirtualDMA <= kDMAChannels,
-              "each pending DMA needs its own channel");
 
 // Whether `function` has FP8 values, which keep m0-m31 and move BF16 pairs
 // above them, and a pack, which keeps x10-x17 for its relayout loop.
@@ -193,55 +192,98 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
   return success();
 }
 
-// Each transfer holds a channel and the lowest free staging window from launch
-// to completion; the DMA latches its registers at launch, so all share three.
-// A load prefers the load channel and a store the store channel, else the
-// lowest free channel.
+// Each transfer holds a channel while its DMA may be in flight and a staging
+// window until nothing reads it; the DMA latches its registers at launch, so
+// all share three. Atomic DMA has no completion operation, so placement
+// follows what lowering and insert-atlas-dma-waits do: a DMA completes before
+// a PACK, boundary tile or block end, before a later transfer that may touch
+// the same DRAM bytes while either writes, and before its load's first use. A
+// load keeps its window until that first use, where its staging VLOADs read
+// it, or the block end. A load prefers the load channel and a store the store
+// channel, else the lowest free channel, and the lowest free window. With no
+// channel free, the oldest transfer's DMA completes first; with no window
+// free, the oldest store's, else the oldest load's, whose staging VLOADs
+// lowering then emits before this launch instead of at the tile's first use.
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
                                               unsigned &nextTransfer) {
-  std::array<Value, kDMAChannels> channels{}, windows{};
+  struct InFlight {
+    Operation *op;
+    Value loaded;
+    unsigned channel, window;
+    bool holdsChannel = true, holdsWindow = true;
+  };
+  SmallVector<InFlight, kDMAChannels> inFlight;
+  // The transfer's DMA completes; a load keeps its window for its VLOADs.
+  auto completeDMA = [](InFlight &t) {
+    t.holdsChannel = false;
+    if (!t.loaded)
+      t.holdsWindow = false;
+  };
+  auto release = [&] {
+    llvm::erase_if(inFlight, [](const InFlight &t) { return !t.holdsChannel && !t.holdsWindow; });
+  };
   for (Operation &op : block) {
-    if (isa<VirtualDMAAwaitFP8Op, VirtualDMAAwaitBF16Op, VirtualDMAWaitOp>(
-            op)) {
-      Value transfer = op.getOperand(1);
-      auto channel = llvm::find(channels, transfer);
-      auto window = llvm::find(windows, transfer);
-      if (channel == channels.end() || window == windows.end())
-        return op.emitOpError("completes a DMA transfer that is not in flight");
-      *channel = Value{};
-      *window = Value{};
+    if (op.hasTrait<OpTrait::IsTerminator>()) {
+      inFlight.clear();
       continue;
     }
+    for (Value operand : op.getOperands())
+      for (InFlight &t : inFlight)
+        if (t.loaded && t.loaded == operand)
+          t.holdsChannel = t.holdsWindow = false;
+    if (isa<VirtualPackFP8Op, VirtualInputBF16Op, VirtualInputFP8Op,
+            VirtualOutputBF16Op>(op))
+      for (InFlight &t : inFlight)
+        completeDMA(t);
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+      release();
       continue;
-    unsigned channel =
-        load ? fixedResources.loadChannel : fixedResources.storeChannel;
-    if (channels[channel])
-      channel = llvm::find(channels, Value{}) - channels.begin();
-    auto window = llvm::find(windows, Value{});
-    if (channel == kDMAChannels || window == windows.end())
-      return op.emitOpError("launches a DMA transfer while every channel is "
-                            "in flight");
-    Value transfer = op.getResult(1);
-    channels[channel] = transfer;
-    *window = transfer;
+    }
+    for (InFlight &t : inFlight)
+      if (t.holdsChannel && virtualDMAConflict(t.op, &op))
+        completeDMA(t);
+    release();
+    auto channelHeld = [&](unsigned channel) {
+      return llvm::any_of(inFlight, [&](const InFlight &t) { return t.holdsChannel && t.channel == channel; });
+    };
+    auto windowHeld = [&](unsigned window) {
+      return llvm::any_of(inFlight, [&](const InFlight &t) { return t.holdsWindow && t.window == window; });
+    };
+    unsigned channel = load ? fixedResources.loadChannel : fixedResources.storeChannel;
+    if (channelHeld(channel)) {
+      channel = 0;
+      while (channel < kDMAChannels && channelHeld(channel))
+        ++channel;
+    }
+    if (channel == kDMAChannels) {
+      InFlight &oldest = *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsChannel; });
+      channel = oldest.channel;
+      completeDMA(oldest);
+    }
+    unsigned window = 0;
+    while (window < kDMAChannels && windowHeld(window))
+      ++window;
+    if (window == kDMAChannels) {
+      auto store = llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow && !t.loaded; });
+      InFlight &oldest = store != inFlight.end() ? *store : *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow; });
+      window = oldest.window;
+      oldest.holdsChannel = oldest.holdsWindow = false;
+    }
+    release();
     unsigned halves =
         isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
     uint32_t stagingWord =
-        fixedResources.stagingWord +
-        static_cast<uint32_t>(window - windows.begin()) * kStagingWindowWords;
-    dmaTransfers[transfer] = {channel,
-                              halves,
-                              nextTransfer++,
-                              stagingWord,
-                              fixedResources.dmaBaseReg,
-                              fixedResources.dmaDramReg,
-                              fixedResources.dmaSizeReg};
+        fixedResources.stagingWord + window * kStagingWindowWords;
+    dmaTransfers[op.getResult(0)] = {channel,
+                                     halves,
+                                     nextTransfer++,
+                                     stagingWord,
+                                     fixedResources.dmaBaseReg,
+                                     fixedResources.dmaDramReg,
+                                     fixedResources.dmaSizeReg};
+    inFlight.push_back({&op, load ? op.getResult(1) : Value(), channel, window});
   }
-  if (llvm::any_of(channels, [](Value transfer) { return bool(transfer); }))
-    return block.getTerminator()->emitOpError(
-        "leaves a DMA transfer in flight at the block end");
   return success();
 }
 

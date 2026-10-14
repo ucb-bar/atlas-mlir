@@ -7,11 +7,9 @@ module {
     %source = arith.addi %base, %offset : i32
     %destination = arith.addi %source, %offset : i32
     %size = arith.constant 2048 : i32
-    %io1, %load = "atlas.virtual_dma_load_bf16"(%io0, %source, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-    %io2, %tile = "atlas.virtual_dma_await_bf16"(%io1, %load) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %io1, %tile = "atlas.virtual_dma_load_bf16"(%io0, %source, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
     %result = "atlas.virtual_vpu_unary"(%tile) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
-    %io3, %store = "atlas.virtual_dma_store_bf16"(%io2, %result, %destination, %size) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %io4 = "atlas.virtual_dma_wait"(%io3, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    return %io4 : !atlas.virtual_state
+    %io3 = "atlas.virtual_dma_store_bf16"(%io1, %result, %destination, %size) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+    return %io3 : !atlas.virtual_state
   }
 }

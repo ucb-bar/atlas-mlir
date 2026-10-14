@@ -73,21 +73,21 @@ class VirtualMXUTest(unittest.TestCase):
         self.assertIsNotNone(readout)
         self.assertGreaterEqual(int(readout.group(1)), 32)
         bad_unit = run("atlas-opt", self.source(2),
-                       "--lower-atlas-virtual-to-machine")
+                       "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertNotEqual(bad_unit.returncode, 0)
         self.assertIn("unit must be in [0, 1]", bad_unit.stderr)
         mlp_source = (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()
         nonunit = run(
             "atlas-opt", mlp_source.replace("scale_code = 127 : i32",
                                              "scale_code = 128 : i32"),
-            "--lower-atlas-virtual-to-machine",
+            "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         )
         self.assertNotEqual(nonunit.returncode, 0)
         self.assertIn("unit E8M0 scale code 127 only", nonunit.stderr)
         scratch_overlap = run(
             "atlas-opt", mlp_source.replace("index = 2 : i32",
                                              "index = 64 : i32"),
-            "--lower-atlas-virtual-to-machine",
+            "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         )
         self.assertNotEqual(scratch_overlap.returncode, 0)
         self.assertIn("input indexes below 64", scratch_overlap.stderr)
@@ -97,7 +97,7 @@ class VirtualMXUTest(unittest.TestCase):
         unqualified_add = run(
             "atlas-opt", biased_source.replace('kind = "add"',
                                                'kind = "sub"', 1),
-            "--lower-atlas-virtual-to-machine",
+            "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         )
         self.assertNotEqual(unqualified_add.returncode, 0)
         self.assertIn("binary VPU admission currently requires add",

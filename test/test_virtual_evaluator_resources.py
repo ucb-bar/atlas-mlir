@@ -5,6 +5,8 @@ The two-handle and two-transfer bounds are target-interface admission, not hardw
 
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 import sys
 import unittest
@@ -176,7 +178,6 @@ class VirtualEvaluatorMXUHandleTest(unittest.TestCase):
                     evaluate(parsed, RuntimeInputs(TILES))
 
 
-STORE = "!atlas.virtual_dma_store"
 ADDRESS, DESTINATION = 0x80000000, 0x80002000
 INPUT_BASE, OUTPUT_BASE = 0x90000000, 0x90004000
 BF16 = Tile("bf16", (0x3F80,) * 1024)
@@ -194,29 +195,39 @@ def type_for(format: str) -> str:
     return B if format == "bf16" else F
 
 
-def event(format: str) -> str:
-    return f"!atlas.virtual_dma_load_{format}"
-
-
 def constants(format: str = "bf16", address: int = ADDRESS, size: int | None = None, *, addr: str = "addr", length: str = "size") -> tuple[str, str]:
     return (f"%{addr} = arith.constant {address} : i32",
             f"%{length} = arith.constant {size if size is not None else 2048 if format == 'bf16' else 1024} : i32")
 
 
+# Atomic DMA: a load names its tile `handle`, and a store completes in place.
+# Programs here still mark where a transfer is used as complete: ready() and
+# wait() emit aliases that wrap() resolves, so the completion's state is the
+# incoming state and its tile is the load's tile.
 def load(format: str, before: str, after: str, handle: str, addr: str = "addr", size: str = "size") -> str:
-    return f'%{after}, %{handle} = "atlas.virtual_dma_load_{format}"(%{before}, %{addr}, %{size}) : ({S}, i32, i32) -> ({S}, {event(format)})'
+    return f'%{after}, %{handle} = "atlas.virtual_dma_load_{format}"(%{before}, %{addr}, %{size}) : ({S}, i32, i32) -> ({S}, {type_for(format)})'
 
 
 def ready(format: str, before: str, after: str, handle: str, result: str = "loaded") -> str:
-    return f'%{after}, %{result} = "atlas.virtual_dma_await_{format}"(%{before}, %{handle}) : ({S}, {event(format)}) -> ({S}, {type_for(format)})'
+    return f"// alias %{after} %{before}\n// alias %{result} %{handle}"
 
 
 def store(format: str, before: str, after: str, handle: str, value: str = "x", addr: str = "addr", size: str = "size") -> str:
-    return f'%{after}, %{handle} = "atlas.virtual_dma_store_{format}"(%{before}, %{value}, %{addr}, %{size}) : ({S}, {type_for(format)}, i32, i32) -> ({S}, {STORE})'
+    return f'%{after} = "atlas.virtual_dma_store_{format}"(%{before}, %{value}, %{addr}, %{size}) : ({S}, {type_for(format)}, i32, i32) -> {S}'
 
 
 def wait(before: str, after: str, handle: str) -> str:
-    return f'%{after} = "atlas.virtual_dma_wait"(%{before}, %{handle}) : ({S}, {STORE}) -> {S}'
+    return f"// alias %{after} %{before}"
+
+
+def resolve_aliases(text: str) -> str:
+    aliases = dict(re.findall(r"^// alias (%[\w$.-]+) (%[\w$.-]+)$", text, re.M))
+    text = re.sub(r"^// alias .*\n?", "", text, flags=re.M)
+    def target(name: str) -> str:
+        while name in aliases:
+            name = aliases[name]
+        return name
+    return re.sub(r"%[\w$.-]+", lambda m: target(m[0]), text)
 
 
 def transfer(direction: str, before: str, after: str, handle: str, completed: str, result: str = "loaded") -> tuple[str, str]:
@@ -233,9 +244,9 @@ def input_tile(format: str, before: str = "s0", after: str = "io", value: str = 
 def wrap(*body: str, final: str, flat: bool = False, arguments: str = "", attributes: str = "") -> str:
     operations = "\n".join((f'%s0 = "atlas.virtual_start"() : () -> {S}', *body))
     if flat:
-        return f"module {{\n{operations}\n}}"
+        return resolve_aliases(f"module {{\n{operations}\n}}")
     attrs = f" attributes {{{attributes}}}" if attributes else ""
-    return f"module {{ func.func @dma({arguments}) -> {S}{attrs} {{\n{operations}\nfunc.return %{final} : {S}\n}} }}"
+    return resolve_aliases(f"module {{ func.func @dma({arguments}) -> {S}{attrs} {{\n{operations}\nfunc.return %{final} : {S}\n}} }}")
 
 
 def read_program(format: str = "bf16", address: int = ADDRESS, size: int | None = None, *, flat: bool = False) -> str:
@@ -288,34 +299,9 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
             cases.append((f"control_{operand}", source, RuntimeInputs(controls=(Scalar(32, 1024),), memory=regions())))
         cases.append(("block_argument_address", wrap(*constants(), f"cf.br ^next(%s0, %addr : {S}, i32)", f"^next(%entry: {S}, %passed: i32):",
                                                      load("bf16", "entry", "s1", "h", "passed"), ready("bf16", "s1", "s2", "h"), final="s2"), base))
-        pair = (*constants(), load("bf16", "s0", "s1", "h0"), load("bf16", "s1", "s2", "h1"))
-        cases.append(("third_pending", wrap(*pair, load("bf16", "s2", "s3", "h2"), ready("bf16", "s3", "s4", "h0", "v0"),
-                                            ready("bf16", "s4", "s5", "h1", "v1"), ready("bf16", "s5", "s6", "h2", "v2"), final="s6"), base))
-        old = (*constants(), load("bf16", "s0", "s1", "old"), ready("bf16", "s1", "s2", "old", "first"))
-        cases.append(("repeated_await", wrap(*old, ready("bf16", "s2", "s3", "old", "fork"), final="s3"), base))
-        cases.append(("stale_epoch", wrap(*old, load("bf16", "s2", "s3", "new"), ready("bf16", "s3", "s4", "old", "stale"), ready("bf16", "s4", "s5", "new"), final="s5"), base))
-        cases.append(("repeated_wait", wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "h"), wait("s1", "s2", "h"), wait("s2", "s3", "h"), final="s3"), with_tile))
-        for flat in (False, True):
-            cases.append((f"dropped_load_flat_{flat}", wrap(*constants(), load("bf16", "s0", "s1", "h"), final="s1", flat=flat), base))
-        cases.append(("dropped_store", wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "h"), final="s1"), with_tile))
-        dropped = (*constants(), load("bf16", "s0", "s1", "h"), f"cf.br ^exit(%s1 : {S})", f"^exit(%es: {S}):")
-        cases.append(("captured_across_blocks", wrap(*dropped, ready("bf16", "es", "s2", "h"), final="s2"), base))
-        for malformed in ("bad_address", "dropped"):
-            body = branch("s0", "bad", load("bf16", "bs", "s1", "h"), *((ready("bf16", "s1", "s2", "h"),) if malformed == "bad_address" else ()))
-            source = wrap(*constants(address=0 if malformed == "bad_address" else ADDRESS), *body, final="s2" if malformed == "bad_address" else "s1", arguments="%choose: i1")
-            cases.append((f"untaken_{malformed}", source, choose))
-        for direction in ("load", "store"):
-            for kind in ("input", "output", "pack"):
-                hidden = {"input": input_tile("bf16", "s1", "hidden", "extra", 1), "output": output("s1", "hidden"),
-                          "pack": f'%packed = "atlas.virtual_pack_fp8"(%x) {{scale_code = 127 : i32}} : ({B}) -> {F}'}[kind]
-                before = "s1" if kind == "pack" else "hidden"
-                launch, completion = transfer(direction, "io", "s1", "h", before)
-                source = wrap(input_tile("bf16"), *constants(), launch, hidden, completion, final=f"{before}_done")
-                cases.append((f"{direction}_pending_over_{kind}", source, RuntimeInputs({0: BF16, 1: BF16} if kind == "input" else {0: BF16}, memory=regions())))
-        conflict = wrap(input_tile("bf16"), *constants(), *branch("io", "bad", load("bf16", "bs", "s1", "h0"), store("bf16", "s1", "s2", "h1"),
-                                                                    ready("bf16", "s2", "s3", "h0"), wait("s3", "s4", "h1")), final="s4", arguments="%choose: i1")
-        for choose in (0, 1):  # rejected whether or not the conflicting path executes
-            cases.append((f"conflict_choose_{choose}", conflict, RuntimeInputs({0: BF16}, (Scalar(1, choose),), regions())))
+        # An untaken bad address is still rejected at admission.
+        body = branch("s0", "bad", load("bf16", "bs", "s1", "h"), ready("bf16", "s1", "s2", "h"))
+        cases.append(("untaken_bad_address", wrap(*constants(address=0), *body, final="s2", arguments="%choose: i1"), choose))
         for direction in ("load", "store"):
             launch, completion = transfer(direction, "io", "s1", "h", "s1")
             source = wrap(input_tile("bf16"), *constants(), launch, completion, final="s1_done", arguments="%choose: i1", attributes=mailbox)
@@ -334,18 +320,17 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
             with self.subTest(case=name), self.assertRaises(VirtualInterfaceError):
                 evaluate(parse_program(source), inputs)
 
-    def test_format_mismatches_and_passed_handles_fail_parsing(self) -> None:
+    def test_format_mismatches_and_completion_operations_fail_parsing(self) -> None:
         source = read_program()
-        passed = wrap(*constants(), load("bf16", "s0", "s1", "h"), f"cf.br ^exit(%s1, %h : {S}, {event('bf16')})",
-                      f"^exit(%es: {S}, %passed: {event('bf16')}):", ready("bf16", "es", "s2", "passed"), final="s2")
-        for text in (source.replace(ready("bf16", "s1", "s2", "h"), ready("fp8", "s1", "s2", "h")),
-                     source.replace(ready("bf16", "s1", "s2", "h"), wait("s1", "s2", "h")),
-                     wrap(input_tile("bf16"), *constants(), store("bf16", "io", "s1", "h"), ready("bf16", "s1", "s2", "h"), final="s2"),
-                     wrap(input_tile("bf16"), *constants("fp8"), store("fp8", "io", "s1", "h"), wait("s1", "s2", "h"), final="s2"), passed):
+        # This negative case verifies that the removed completion op is rejected.
+        await_ = f'%s2, %v = "atlas.virtual_dma_await_bf16"(%s1, %h) : ({S}, {B}) -> ({S}, {B})'
+        for text in (source.replace(f"-> ({S}, {B})", f"-> ({S}, {F})"),
+                     wrap(input_tile("bf16"), *constants("fp8"), store("fp8", "io", "s1", "h"), final="s1"),
+                     wrap(*constants(), load("bf16", "s0", "s1", "h"), await_, final="s2")):
             with self.subTest(source=text), self.assertRaises(VirtualInterfaceError):
                 parse_program(text)
 
-    def test_two_pending_transfers_complete_in_either_order(self) -> None:
+    def test_transfers_apply_in_state_order_whatever_order_they_are_used(self) -> None:
         other = MemoryRegion(DESTINATION, b"\x00\x40" * 1024)
         for order in (("h0", "h1"), ("h1", "h0")):
             source = wrap(*constants(), f"%dst = arith.constant {DESTINATION} : i32", load("bf16", "s0", "s1", "h0"), load("bf16", "s1", "s2", "h1", "dst"),
@@ -374,7 +359,7 @@ class VirtualEvaluatorDMAHandleTest(unittest.TestCase):
         self.accepted(wrap(*prefix, ready("bf16", "s2", "s3", "h0", "v0"), load("bf16", "s3", "s4", "h2"),
                            ready("bf16", "s4", "s5", "h2", "v2"), ready("bf16", "s5", "s6", "h1", "v1"), final="s6"))
 
-    def test_other_vpu_and_mxu_work_are_allowed_while_dma_is_pending(self) -> None:
+    def test_other_vpu_and_mxu_work_may_run_between_a_load_and_its_use(self) -> None:
         relu = f'%positive = "atlas.virtual_vpu_unary"(%x) {{kind = "relu"}} : ({B}) -> {B}'
         add = f'%sum = "atlas.virtual_vpu_binary"(%positive, %x) {{kind = "add"}} : ({B}, {B}) -> {B}'
         matmul = f'%product = "atlas.virtual_mxu_matmul"(%w, %w) {{unit = 1 : i32}} : ({F}, {F}) -> {B}'

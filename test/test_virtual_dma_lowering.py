@@ -1,4 +1,4 @@
-"""Logical tile DMA events lower at their launch and completion points."""
+"""Atomic tile DMA lowers to launches; insert-atlas-dma-waits completes them."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import re
 import unittest
 
 from test_virtual_dma import (
-    STATE, constants, copy, dma_load, dma_await, dma_store, dma_wait, tile, wrap,
+    STATE, constants, copy, dma_load, dma_store, tile, wrap,
 )
 from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run
 from test_virtual_mxu_handles import program, load, reset, readout
@@ -44,6 +44,8 @@ def observed(entries: list[dict]) -> list[tuple[dict, dict[int, int]]]:
 
 
 def independent_work() -> str:
+    # The MXU chain runs while the load is in flight; the store of its tile
+    # is the tile's first use, and independent VPU work follows the store.
     pure = (f'    %independent = "atlas.virtual_vpu_unary"(%seed) '
             f'{{kind = "relu"}} : ({tile("bf16")}) -> {tile("bf16")}')
     source = program(
@@ -52,11 +54,10 @@ def independent_work() -> str:
         "    %later_addr = arith.constant -2147481600 : i32",
         "    %later_size = arith.constant 2048 : i32",
         reset("s1", "s2", "acc0"),
-        dma_await("bf16", before="s2", after="s3"),
-        readout("s3", "s4", "product", "acc0"),
-        dma_store("bf16", before="s4", after="s5").replace(
+        readout("s2", "s3", "product", "acc0"),
+        dma_store("bf16", before="s3", after="s4").replace(
             "%addr, %size", "%later_addr, %later_size"),
-        pure, dma_wait(before="s5", after="s6"), final_state="s6",
+        pure, final_state="s4",
     )
     return source.replace("atlas.output_dram_base = 2415923200",
                           "atlas.output_dram_base = 2415927296")
@@ -65,6 +66,35 @@ def independent_work() -> str:
 def replace_operation(line: str, name: str, fields: str) -> str:
     return re.sub(r'"atlas\.[^"]+"(\([^)]*\)) .*? : \(',
                   lambda match: f'"atlas.{name}"{match[1]} {{{fields}}} : (', line)
+
+
+def queued_transfers(loads: int = 1, stores: int | None = None, *, shared_output: bool = False) -> str:
+    # Distinct load spans keep memory hazards separate from window pressure.
+    if stores is None:
+        stores = loads
+    body = [f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', "    %size = arith.constant 1024 : i32"]
+    if shared_output:
+        body.append("    %out = arith.constant -2146435072 : i32")
+    elif loads == stores:
+        body.append("    %delta = arith.constant 1048576 : i32")
+    for index in range(loads):
+        body.append(f"    %in{index} = arith.constant {0x80000000 + index * 1024} : i32")
+    before = "io0"
+    for index in range(loads):
+        after = f"load{index}"
+        body.append(dma_load("fp8", before, after, f"t{index}", f"in{index}"))
+        before = after
+    for index in range(stores):
+        after = f"store{index}"
+        output = "out" if shared_output else f"out{index}"
+        if not shared_output:
+            if loads == stores:
+                body.append(f"    %out{index} = arith.addi %in{index}, %delta : i32")
+            else:
+                body.append(f"    %out{index} = arith.constant {0x80100000 + index * 1024} : i32")
+        body.append(dma_store("fp8", before, after, f"t{index % loads}").replace("%addr, %size", f"%{output}, %size"))
+        before = after
+    return wrap(body, final=before)
 
 
 class VirtualDMALoweringTest(unittest.TestCase):
@@ -82,6 +112,190 @@ class VirtualDMALoweringTest(unittest.TestCase):
         entries = instructions(machine)
         self.assertEqual(tuple(entry["word_u32"] for entry in entries), emitted(machine))
         return machine, entries
+
+    def wait_checked(self, source: str, *schedule: str) -> tuple[str, list[dict]]:
+        result = run("atlas-opt", source, "--verify-atlas-virtual-stream", *schedule,
+                     "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("atlas.dma_waits_pending", result.stdout)
+        machine = result.stdout
+        timed = run("atlas-opt", machine, "--insert-atlas-delays", "--verify-atlas-generated-schedule")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
+        return machine, instructions(machine, allow_untimed=True)
+
+    def assert_wait_before(self, entries: list[dict], index: int, transfer: int) -> None:
+        self.assertGreater(index, 0)
+        wait = entries[index - 1]
+        self.assertEqual(wait["operation"], "atlas.dma_wait")
+        launch = next(entry for entry in entries if entry["operation"] == "atlas.dma"
+                      and entry["fields"].get(MARKER) == transfer)
+        self.assertEqual((wait["fields"][MARKER], wait["fields"]["channel"]), (transfer, launch["fields"]["channel"]))
+
+    def assert_distinct_dma_resources(self, entries: list[dict], first: int, second: int) -> None:
+        resources = {}
+        for entry, registers in observed(entries):
+            fields = entry["fields"]
+            if entry["operation"] == "atlas.dma" and MARKER in fields:
+                resources[fields[MARKER]] = (fields["channel"], registers[fields["reg"]])
+        # These tests must need a DRAM wait even without channel/window reuse.
+        for lhs, rhs in zip(resources[first], resources[second]):
+            self.assertNotEqual(lhs, rhs)
+
+    def test_wait_immediately_precedes_the_loads_first_staging_read(self) -> None:
+        _, entries = self.wait_checked(independent_work())
+        launch = next(i for i, entry in enumerate(entries)
+                      if entry["operation"] == "atlas.dma" and MARKER in entry["fields"])
+        first_read = next(i for i in range(launch + 1, len(entries)) if entries[i]["operation"] == "atlas.vload")
+        self.assertTrue(any(entry["operation"] == "atlas.mxu_matmul" for entry in entries[launch + 1:first_read]))
+        self.assert_wait_before(entries, first_read, entries[launch]["fields"][MARKER])
+
+    def test_wait_before_a_dram_read_after_write(self) -> None:
+        source = wrap([
+            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
+            "    %out = arith.constant -2147479552 : i32",
+            "    %other_out = arith.constant -2147475456 : i32",
+            f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
+            f': ({STATE}) -> ({STATE}, {tile("bf16")})',
+            dma_load("bf16", "input", "loaded"),
+            dma_store("bf16", "loaded", "stored", "seed").replace("%addr, %size", "%out, %size"),
+            # Reading the first load frees window 0; the pending store uses 1.
+            f'    %used = "atlas.virtual_vpu_unary"(%tile) {{kind = "relu"}} '
+            f': ({tile("bf16")}) -> {tile("bf16")}',
+            dma_load("bf16", "stored", "reloaded", "again", "out"),
+            dma_store("bf16", "reloaded", "saved", "used").replace(
+                "%addr, %size", "%other_out, %size"),
+            dma_store("bf16", "saved", "done", "again"),
+        ], final="done")
+        _, entries = self.wait_checked(source)
+        reload = next(i for i, entry in enumerate(entries)
+                      if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 2)
+        self.assert_distinct_dma_resources(entries, 1, 2)
+        self.assert_wait_before(entries, reload, 1)
+
+    def test_wait_before_a_dram_write_after_read(self) -> None:
+        source = wrap([
+            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
+            "    %other = arith.constant -2147479552 : i32",
+            "    %blocked = arith.constant -2147475456 : i32",
+            dma_load("bf16", "io0", "seed_loaded"),
+            # Keep the preferred store channel busy with a disjoint load.
+            dma_load("bf16", "seed_loaded", "blocked_loaded", "blocker", "blocked"),
+            dma_load("bf16", "blocked_loaded", "loaded", "other_tile", "other"),
+            dma_store("bf16", "loaded", "stored").replace("%addr, %size", "%other, %size"),
+            dma_store("bf16", "stored", "saved", "other_tile"),
+            dma_store("bf16", "saved", "done", "blocker"),
+        ], final="done")
+        _, entries = self.wait_checked(source)
+        store = next(i for i, entry in enumerate(entries)
+                     if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 3)
+        self.assert_distinct_dma_resources(entries, 2, 3)
+        self.assert_wait_before(entries, store, 2)
+
+    def test_nine_stores_wait_before_reusing_a_pending_window(self) -> None:
+        _, entries = self.wait_checked(queued_transfers(stores=9))
+        snapshots = observed(entries)
+        launches = [(i, entry["fields"], registers[entry["fields"]["reg"]])
+                    for i, (entry, registers) in enumerate(snapshots)
+                    if entry["operation"] == "atlas.dma"]
+        first, ninth = launches[1], launches[9]
+        self.assertEqual((first[1]["channel"], first[2]), (ninth[1]["channel"], ninth[2]))
+        write = max(i for i in range(ninth[0]) if entries[i]["operation"] == "atlas.vstore")
+        self.assert_wait_before(entries, write, first[1][MARKER])
+        fields = entries[write]["fields"]
+        self.assertEqual(snapshots[write][1][fields["base"]] + fields["offset"] * 8, first[2])
+        # All eight stores can remain in flight until the ninth reuses one.
+        self.assertFalse(any(entry["operation"] == "atlas.dma_wait" for entry in entries[first[0] + 1:launches[8][0]]))
+
+    def test_pack_drains_an_independent_load(self) -> None:
+        source = wrap([
+            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
+            "    %size8 = arith.constant 1024 : i32",
+            "    %out = arith.constant -2146435072 : i32",
+            f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
+            f': ({STATE}) -> ({STATE}, {tile("bf16")})',
+            dma_load("bf16", "input", "loaded"),
+            f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} '
+            f': ({tile("bf16")}) -> {tile("fp8")}',
+            dma_store("fp8", "loaded", "stored", "packed").replace(
+                "%addr, %size", "%out, %size8"),
+            dma_store("bf16", "stored", "done"),
+        ], final="done")
+        _, entries = self.wait_checked(source)
+        pack = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.vpu_pack")
+        self.assert_wait_before(entries, pack, 0)
+        self.assertFalse(any(entry["operation"] == "atlas.vload" for entry in entries[pack - 2:pack]))
+
+    def test_boundary_tiles_drain_pending_transfers(self) -> None:
+        for kind in ("input_fp8", "input_bf16", "output_bf16"):
+            with self.subTest(kind=kind):
+                if kind.startswith("input"):
+                    fmt = kind.removeprefix("input_")
+                    boundary = (f'    %boundary, %hidden = "atlas.virtual_{kind}"(%io2) '
+                                f'{{index = 0 : i32}} : ({STATE}) -> ({STATE}, {tile(fmt)})')
+                    source = copy().replace(dma_store("bf16"), boundary + "\n" + dma_store("bf16", before="boundary"))
+                else:
+                    source = copy().replace("return %io4",
+                        f'    %boundary = "atlas.virtual_output_bf16"(%io4, %tile) '
+                        f'{{index = 0 : i32}} : ({STATE}, {tile("bf16")}) -> {STATE}\n'
+                        "    return %boundary")
+                _, entries = self.wait_checked(source)
+                helper = next(i for i, entry in enumerate(entries)
+                              if entry["operation"] == "atlas.dma" and MARKER not in entry["fields"])
+                self.assert_wait_before(entries, helper, 0 if kind.startswith("input") else 1)
+
+    def test_halt_drains_the_final_store(self) -> None:
+        _, entries = self.wait_checked(copy())
+        halt = next(i for i, entry in enumerate(entries) if entry["fields"].get("atlas.complete"))
+        self.assert_wait_before(entries, halt, 1)
+
+    def test_nine_unread_loads_flush_the_oldest_window_before_reuse(self) -> None:
+        _, entries = self.wait_checked(queued_transfers(9))
+        snapshots = observed(entries)
+        launches = [(i, entry["fields"], registers[entry["fields"]["reg"]])
+                    for i, (entry, registers) in enumerate(snapshots)
+                    if entry["operation"] == "atlas.dma" and entry["fields"]["direction"] == "load"]
+        self.assertEqual(len(launches), 9)
+        first, ninth = launches[0], launches[8]
+        self.assertEqual(first[2], ninth[2])
+        self.assertEqual(first[1]["channel"], ninth[1]["channel"])
+        read = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.vload")
+        self.assertLess(launches[7][0], read)
+        self.assertLess(read, ninth[0])
+        self.assert_wait_before(entries, read, first[1][MARKER])
+        fields = entries[read]["fields"]
+        self.assertEqual(snapshots[read][1][fields["base"]] + fields["offset"] * 8, first[2])
+
+    def test_random_schedules_lower_twelve_loads_without_window_exhaustion(self) -> None:
+        # Share the output address so random scalar hoisting cannot exhaust
+        # the scalar register file before the DMA-window case is exercised.
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                self.wait_checked(queued_transfers(12, shared_output=True),
+                                  f"--schedule-atlas-virtual=random-seed={seed}")
+
+    def test_pending_stream_is_rejected_by_physical_consumers(self) -> None:
+        lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        self.assertIn("atlas.dma_waits_pending", lowered.stdout)
+        for tool, options in (("atlas-opt", ("--insert-atlas-delays",)),
+                              ("atlas-opt", ("--schedule-atlas-stream",)),
+                              ("atlas-emit", ("--allow-untimed",))):
+            with self.subTest(tool=tool, options=options):
+                result = run(tool, lowered.stdout, *options)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("still needs its DMA waits", result.stderr)
+
+    def test_wait_insertion_requires_each_transfers_owned_wait_record(self) -> None:
+        lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        # Delete only the first wait record, leaving the lowered stream intact.
+        changed, removed = re.subn(r'\{[^{}]*kind = "dma_wait"[^{}]*\}, ', "", lowered.stdout, count=1)
+        self.assertEqual(removed, 1)
+        result = run("atlas-opt", changed, "--insert-atlas-dma-waits")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("explicit DMA transfer 0 has no owned DMA.WAIT command", result.stderr)
 
     def test_full_tiles_use_private_staging_and_matching_channels(self) -> None:
         for fmt, halves, size in (("fp8", 1, 1024), ("bf16", 2, 2048)):
@@ -115,28 +329,25 @@ class VirtualDMALoweringTest(unittest.TestCase):
 
     def test_pending_transfers_share_registers_and_take_separate_channels_and_staging(self) -> None:
         # The DMA latches its registers at launch, so the second launch reuses
-        # x4/x7/x9 while the first is in flight. Each completion must still
-        # read its own staging window, whichever transfer completes first.
-        first = ("first", "a", 0, STAGING_WORD)
-        second = ("second", "b", 1, STAGING_WORD + 512)
+        # x4/x7/x9 while the first is in flight. Each tile's VLOADs read its own
+        # staging window, in the order its consumer reads them.
+        first = ("a", 0, STAGING_WORD)
+        second = ("b", 1, STAGING_WORD + 512)
         for completions in ((first, second), (second, first)):
-            with self.subTest(first_completed=completions[0][0]):
-                (handle1, tile1, _, _), (handle2, tile2, _, _) = completions
+            with self.subTest(first_used=completions[0][0]):
+                (lhs, _, _), (rhs, _, _) = completions
                 source = wrap([
                     f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
                     "    %addr = arith.constant -2147483648 : i32",
                     "    %other = arith.constant -2147481600 : i32",
                     "    %out = arith.constant -2147479552 : i32",
                     "    %size = arith.constant 2048 : i32",
-                    dma_load("bf16", "io0", "io1", "first"),
-                    dma_load("bf16", "io1", "io2", "second", "other"),
-                    dma_await("bf16", "io2", "io3", handle1, tile1),
-                    dma_await("bf16", "io3", "io4", handle2, tile2),
-                    f'    %sum = "atlas.virtual_vpu_binary"(%a, %b) {{kind = "add"}} '
+                    dma_load("bf16", "io0", "io1", "a"),
+                    dma_load("bf16", "io1", "io2", "b", "other"),
+                    f'    %sum = "atlas.virtual_vpu_binary"(%{lhs}, %{rhs}) {{kind = "add"}} '
                     f': ({tile("bf16")}, {tile("bf16")}) -> {tile("bf16")}',
-                    dma_store("bf16", "io4", "io5", "sum").replace("%addr", "%out"),
-                    dma_wait("io5", "io6"),
-                ], final="io6")
+                    dma_store("bf16", "io2", "io3", "sum").replace("%addr", "%out"),
+                ], final="io3")
                 _, entries = self.checked(source)
                 configs = [entry["fields"]["base_reg"] for entry in entries
                            if entry["operation"] == "atlas.dma_config"]
@@ -158,9 +369,9 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     (1, (4, 7, 9), STAGING_WORD + 512, 0x80000800),
                     (1, (4, 7, 9), STAGING_WORD, 0x80001000),
                 ])
-                self.assertEqual(waits, [completions[0][2], completions[1][2], 1])
+                self.assertEqual(waits, [completions[0][1], completions[1][1], 1])
                 self.assertEqual(loads, [window + half * 256
-                                         for _, _, _, window in completions for half in (0, 1)])
+                                         for _, _, window in completions for half in (0, 1)])
 
     def test_launch_completion_separation_preserves_mxu_and_scalar_register_reuse(self) -> None:
         _, entries = self.checked(independent_work())
@@ -208,19 +419,22 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                    registers[fields["size"]])
                                   for fields, registers in dma],
                                  [("load", 0, STAGING_WORD, 0x90000000, 1024),
-                                  ("load", 0, STAGING_WORD, 0x90000400, 1024),
+                                  ("load", 1, STAGING_WORD + 512, 0x90000400, 1024),
                                   ("store", 1, STAGING_WORD, 0x90001000, 1024 * halves)])
+                # Both loads are in flight together; the weight, used first,
+                # completes first.
                 waits = [entry["fields"] for entry in entries
                          if entry["operation"] == "atlas.dma_wait"]
                 self.assertEqual([(fields["channel"], fields[MARKER]) for fields in waits],
-                                 [(fields["channel"], fields[MARKER]) for fields, _ in dma])
+                                 [(dma[i][0]["channel"], dma[i][0][MARKER]) for i in (1, 0, 2)])
                 self.assertEqual(len({fields[MARKER] for fields, _ in dma}), 3)
                 flow = [entry["operation"] for entry in entries
                         if entry["operation"] in ("atlas.dma", "atlas.dma_wait", "atlas.vload", "atlas.vstore")
                         or entry["operation"].startswith("atlas.mxu_")]
-                self.assertEqual(flow, ["atlas.dma", "atlas.dma_wait", "atlas.vload"] * 2
-                                 + ["atlas.mxu_push", "atlas.mxu_matmul", "atlas.mxu_matmul",
-                                    "atlas.mxu_pop"] + ["atlas.vstore"] * halves
+                self.assertEqual(flow, ["atlas.dma", "atlas.dma", "atlas.dma_wait", "atlas.vload",
+                                        "atlas.mxu_push", "atlas.dma_wait", "atlas.vload",
+                                        "atlas.mxu_matmul", "atlas.mxu_matmul",
+                                        "atlas.mxu_pop"] + ["atlas.vstore"] * halves
                                  + ["atlas.dma", "atlas.dma_wait"])
                 loads = [entry["fields"] for entry in entries
                          if entry["operation"] == "atlas.vload"]
@@ -229,8 +443,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
                        if entry["operation"].startswith("atlas.mxu_")]
                 self.assertTrue(all(fields["unit"] == unit for fields in mxu))
                 self.assertEqual(mxu[0]["kind"], "weight_fp8")
-                self.assertEqual(mxu[0]["src"], loads[1]["dst"])
-                self.assertEqual([fields["src"] for fields in mxu[1:3]], [loads[0]["dst"]] * 2)
+                self.assertEqual(mxu[0]["src"], loads[0]["dst"])
+                self.assertEqual([fields["src"] for fields in mxu[1:3]], [loads[1]["dst"]] * 2)
                 self.assertEqual([fields["accumulate"] for fields in mxu[1:3]],
                                  [False, True])
                 pop = mxu[-1]
@@ -256,7 +470,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     if entry["operation"] in addresses:
                         fields = entry["fields"]
                         addresses[entry["operation"]].append(registers[fields["base"]] + fields["offset"] * 32)
-                self.assertEqual(addresses["atlas.vload"], [STAGING_WORD] * 2)
+                self.assertEqual(addresses["atlas.vload"], [STAGING_WORD + 512, STAGING_WORD])
                 self.assertEqual(addresses["atlas.vstore"],
                                  [STAGING_WORD + 256 * half for half in range(halves)])
 
@@ -272,19 +486,27 @@ class VirtualDMALoweringTest(unittest.TestCase):
         self.assertEqual(legacy[0][0]["fields"]["size"], 2)
         self.assertEqual(legacy[0][1][2], 1024)
 
-    def test_staging_reuse_starts_after_each_completion(self) -> None:
-        source = copy("fp8").replace(dma_store("fp8"),
-            dma_load("fp8", before="io2", after="next_io", handle="next") + "\n"
-            + dma_await("fp8", before="next_io", after="ready_io", handle="next", result="next_tile") + "\n"
-            + dma_store("fp8", before="ready_io", value="next_tile"))
+    def test_channel_and_staging_reuse_follows_the_earlier_wait(self) -> None:
+        source = copy("fp8").replace("return %io4", "\n".join([
+            dma_load("fp8", before="io4", after="io5", result="next_tile"),
+            dma_store("fp8", before="io5", after="io6", value="next_tile"),
+            "    return %io6"]))
         _, entries = self.checked(source)
-        transfers = [entry for entry in entries if entry["operation"] in ("atlas.dma", "atlas.dma_wait")]
-        self.assertEqual([entry["operation"] for entry in transfers], ["atlas.dma", "atlas.dma_wait"] * 3)
-        ids = [entry["fields"][MARKER] for entry in transfers]
-        self.assertEqual(ids[::2], ids[1::2])
-        self.assertEqual(len(set(ids)), 3)
-        self.assertTrue(all(registers[entry["fields"]["reg"]] == STAGING_WORD
-                            for entry, registers in observed(entries) if entry["operation"] == "atlas.dma"))
+        transfers = {}
+        pending = {}
+        for entry, registers in observed(entries):
+            fields = entry["fields"]
+            if entry["operation"] == "atlas.dma":
+                window = registers[fields["reg"]]
+                for earlier, (channel, staging) in pending.items():
+                    self.assertNotEqual(channel, fields["channel"], (earlier, fields))
+                    self.assertNotEqual(staging, window, (earlier, fields))
+                pending[fields[MARKER]] = (fields["channel"], window)
+                transfers[fields[MARKER]] = fields["direction"]
+            elif entry["operation"] == "atlas.dma_wait":
+                pending.pop(fields[MARKER])
+        self.assertEqual(sorted(transfers.values()), ["load", "load", "store", "store"])
+        self.assertEqual(pending, {})
 
     def test_explicit_loads_and_stores_cannot_overlap_the_control_mailbox(self) -> None:
         for fmt in ("fp8", "bf16"):
@@ -300,7 +522,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 + dma_store(fmt).replace("%addr, %size", "%mailbox_addr, %size"))
             for changed in (load_overlap, store_overlap):
                 with self.subTest(fmt=fmt, store=changed == store_overlap):
-                    result = run("atlas-opt", changed, "--lower-atlas-virtual-to-machine")
+                    result = run("atlas-opt", changed, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertEqual(result.stdout, "")
                     self.assertIn("explicit DMA span overlaps the control mailbox", result.stderr)
@@ -311,35 +533,61 @@ class VirtualDMALoweringTest(unittest.TestCase):
             "    %choose = arith.constant true",
             f"    cf.cond_br %choose, ^left(%io0 : {STATE}), ^right(%io0 : {STATE})",
             f"  ^left(%left_io: {STATE}):",
-            dma_load("bf16", before="left_io", after="left_pending", handle="left_event"),
-            dma_await("bf16", before="left_pending", after="left_ready", handle="left_event", result="left_tile"),
+            dma_load("bf16", before="left_io", after="left_ready", result="left_tile"),
             f"    cf.br ^join(%left_ready, %left_tile : {STATE}, {tile('bf16')})",
             f"  ^right(%right_io: {STATE}):",
-            dma_load("bf16", before="right_io", after="right_pending", handle="right_event"),
-            dma_await("bf16", before="right_pending", after="right_ready", handle="right_event", result="right_tile"),
+            dma_load("bf16", before="right_io", after="right_ready", result="right_tile"),
             f"    cf.br ^join(%right_ready, %right_tile : {STATE}, {tile('bf16')})",
             f"  ^join(%joined_io: {STATE}, %joined_tile: {tile('bf16')}):",
-            dma_store("bf16", before="joined_io", value="joined_tile"), dma_wait(),
+            dma_store("bf16", before="joined_io", value="joined_tile"),
         ])
         loop = wrap([
             f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
             "    %zero = arith.constant 0 : i32", "    %one = arith.constant 1 : i32",
             f"    cf.br ^loop(%io0, %zero : {STATE}, i32)",
             f"  ^loop(%loop_io: {STATE}, %n: i32):",
-            dma_load("bf16", before="loop_io"), dma_await("bf16"),
+            dma_load("bf16", before="loop_io"),
             "    %next = arith.addi %n, %one : i32",
             "    %again = arith.cmpi slt, %next, %one : i32",
             f"    cf.cond_br %again, ^loop(%io2, %next : {STATE}, i32), "
             f"^exit(%io2, %tile : {STATE}, {tile('bf16')})",
             f"  ^exit(%ready: {STATE}, %value: {tile('bf16')}):",
-            dma_store("bf16", before="ready", value="value"), dma_wait(),
+            dma_store("bf16", before="ready", value="value"),
         ])
         for source in (branch, loop):
             with self.subTest(loop=source == loop):
-                machine, entries = self.checked(source)
+                machine, entries = self.wait_checked(source)
                 self.assertTrue(any(entry["operation"] == "atlas.branch" for entry in entries))
                 self.assertTrue(any(entry["operation"] == "atlas.jump" for entry in entries))
                 self.assertIn(MARKER, machine)
+                targets = set()
+                for index, entry in enumerate(entries):
+                    fields = entry["fields"]
+                    if entry["operation"] == "atlas.branch":
+                        targets.add(index + fields["offset_bytes"] // 2)
+                    elif entry["operation"] == "atlas.jump" and fields["kind"] == "jal":
+                        targets.add(index + fields["offset"] // 2)
+                self.assertTrue(targets)
+                if source == loop:
+                    self.assertTrue(any(entry["operation"] == "atlas.jump"
+                                        and entry["fields"]["offset"] < 0 for entry in entries))
+                pending = set()
+                for index, entry in enumerate(entries):
+                    operation, fields = entry["operation"], entry["fields"]
+                    if index in targets or operation in ("atlas.branch", "atlas.jump"):
+                        self.assertFalse(pending, (index, pending))
+                        # Taken edges skip waits, which belong to fall-through.
+                        self.assertNotEqual(operation, "atlas.dma_wait")
+                    if operation == "atlas.dma" and MARKER in fields:
+                        pending.add(fields[MARKER])
+                        if fields["direction"] == "load":
+                            read = next(i for i in range(index + 1, len(entries))
+                                        if entries[i]["operation"] == "atlas.vload")
+                            self.assert_wait_before(entries, read, fields[MARKER])
+                            self.assertNotIn(read - 1, targets)
+                    elif operation == "atlas.dma_wait" and MARKER in fields:
+                        pending.remove(fields[MARKER])
+                self.assertFalse(pending)
 
     def test_generated_pending_intervals_reject_missing_wrong_wait_and_unsafe_work(self) -> None:
         machine, _ = self.checked(independent_work())

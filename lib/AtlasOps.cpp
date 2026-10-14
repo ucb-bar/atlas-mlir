@@ -57,11 +57,8 @@ ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualMXUReadoutFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMALoadFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMALoadBF16Op)
-ATLAS_MACHINE_EFFECTS(VirtualDMAAwaitFP8Op)
-ATLAS_MACHINE_EFFECTS(VirtualDMAAwaitBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreBF16Op)
-ATLAS_MACHINE_EFFECTS(VirtualDMAWaitOp)
 
 void VirtualInputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -170,14 +167,6 @@ LogicalResult VirtualDMALoadBF16Op::verify() {
   return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
 }
 
-LogicalResult VirtualDMAAwaitFP8Op::verify() {
-  return verifyVirtualDMAAttributes(getOperation());
-}
-
-LogicalResult VirtualDMAAwaitBF16Op::verify() {
-  return verifyVirtualDMAAttributes(getOperation());
-}
-
 LogicalResult VirtualDMAStoreFP8Op::verify() {
   return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
 }
@@ -186,9 +175,6 @@ LogicalResult VirtualDMAStoreBF16Op::verify() {
   return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
 }
 
-LogicalResult VirtualDMAWaitOp::verify() {
-  return verifyVirtualDMAAttributes(getOperation());
-}
 
 LogicalResult VirtualInputBF16Op::verify() {
   if (getIndexAttr().getValue().getSExtValue() < 0)

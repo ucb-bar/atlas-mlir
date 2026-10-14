@@ -16,7 +16,7 @@ not a C-callable Atlas function.
 | Area | Current scope |
 | --- | --- |
 | Machine dialect | 26 parameterized operation classes cover the 99 selected RTL decoder rows; verifiers and `atlas-emit` check fields and source-level word encodings. |
-| Virtual dialect | Bounded BF16/FP8 SSA tiles, state, CFG edges, DMA handles, and MXU resource handles; virtual-to-machine lowering assigns the currently supported physical resources. |
+| Virtual dialect | Bounded BF16/FP8 SSA tiles, state, CFG edges, atomic DMA, and MXU resource handles; virtual-to-machine lowering assigns the currently supported physical resources. |
 | LLVM handoff | Per-instruction LLVM call markers are checked and finalized into one ordered inline-assembly word block. |
 | Execution evidence | Bounded instruction programs ran on a selected-source-linked standalone `AtlasCore` ARC model. No integrated SoC or general host runtime result is claimed. |
 
@@ -34,7 +34,8 @@ interaction. All 99 retain full-qualification blockers. The census and
 
 - `--verify-atlas-virtual-stream` checks virtual SSA, state, and CFG edges.
   `--lower-atlas-virtual-to-machine` performs the bounded placement and emits
-  typed machine operations.
+  typed machine operations. `--insert-atlas-dma-waits` then places waits
+  before the first instruction that needs each transfer complete.
 - `--verify-atlas-generated-schedule` checks the generated stream's chosen
   delay and DMA-wait policy. `--verify-atlas-machine-stream` checks the physical
   state chain, encoding, and control targets.

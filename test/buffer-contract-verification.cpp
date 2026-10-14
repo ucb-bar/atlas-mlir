@@ -43,7 +43,7 @@ DictionaryAttr with(DictionaryAttr record, StringRef name, Attribute value) {
   return fields.getDictionary(record.getContext());
 }
 
-OwningOpRef<ModuleOp> lowered(MLIRContext &context) { return runPipeline(context, sourceText, "lower-atlas-virtual-to-machine"); }
+OwningOpRef<ModuleOp> lowered(MLIRContext &context) { return runPipeline(context, sourceText, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits"); }
 Operation *find(ModuleOp module, function_ref<bool(Operation &)> wanted) {
   for (Operation &op : module.getBody()->getOperations())
     if (wanted(op)) return &op;

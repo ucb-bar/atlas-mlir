@@ -70,16 +70,15 @@ def edge(dest: str, values: list[str], types: list[str]) -> str:
     return f"^{dest}({', '.join('%' + v for v in values)} : {', '.join(types)})"
 
 
-def dma_load(state: str, out: str, event: str, addr: str, size: str, fmt: str) -> str:
-    return (f'%{out}, %{event} = "atlas.virtual_dma_load_{fmt}"(%{state}, '
-            f'%{addr}, %{size}) : ({S}, i32, i32) -> ({S}, '
-            f'!atlas.virtual_dma_load_{fmt})')
-
-
-def dma_await(state: str, out: str, value: str, event: str, fmt: str) -> str:
+def dma_load(state: str, out: str, value: str, addr: str, size: str, fmt: str) -> str:
     kind = T if fmt == "bf16" else F
-    return (f'%{out}, %{value} = "atlas.virtual_dma_await_{fmt}"(%{state}, '
-            f'%{event}) : ({S}, !atlas.virtual_dma_load_{fmt}) -> ({S}, {kind})')
+    return (f'%{out}, %{value} = "atlas.virtual_dma_load_{fmt}"(%{state}, '
+            f'%{addr}, %{size}) : ({S}, i32, i32) -> ({S}, {kind})')
+
+
+def dma_store(state: str, out: str, value: str, addr: str, size: str = "size") -> str:
+    return (f'%{out} = "atlas.virtual_dma_store_bf16"(%{state}, %{value}, %{addr}, %{size}) '
+            f': ({S}, {T}, i32, i32) -> {S}')
 
 
 def mxu_chain(state: str, unit: int, weight: str, activation: str, result: str,
@@ -189,8 +188,7 @@ def cfg_cases() -> dict[str, str]:
         "cf.cond_br %more, " + edge("bb2", ["s1", "a", "i"], [S, T, "i32"])
         + ", " + edge("bb3", ["s1", "a"], [S, T]),
         f"^bb2(%s2: {S}, %x: {T}, %j: i32):",
-        dma_load("s2", "l1", "ev", "addr", "size", "bf16"),
-        dma_await("l1", "l2", "y", "ev", "bf16"),
+        dma_load("s2", "l2", "y", "addr", "size", "bf16"),
         unary("r", "x"), unary("q", "r"), add("z", "q", "y"),
         "%j1 = arith.addi %j, %c1 : i32",
         "cf.br " + edge("bb1", ["l2", "z", "j1"], [S, T, "i32"]),
@@ -213,19 +211,15 @@ def cfg_cases() -> dict[str, str]:
     cases["C16 pack beside an explicit DMA"] = function("c16", [
         start(), inp("io0", "io1", "t", 0), const("addr", -1879044096),
         const("size", 1024),
-        dma_load("io1", "l1", "ev", "addr", "size", "fp8"),
-        dma_await("l1", "l2", "x", "ev", "fp8"),
+        dma_load("io1", "l2", "x", "addr", "size", "fp8"),
         f'%p = "atlas.virtual_pack_fp8"(%t) {{scale_code = 127 : i32}} : ({T}) -> {F}',
         *mxu_chain("l2", 0, "p", "x", "h", "m"),
         outp("ms3", "o", "h", 0), f"return %o : {S}"])
     cases["C17 return block with output and explicit store"] = function("c17", [
         start(), inp("io0", "io1", "t", 0), const("addr", -1879035904),
         const("size", 2048), unary("r", "t"), outp("io1", "io2", "r", 0),
-        f'%io3, %st = "atlas.virtual_dma_store_bf16"(%io2, %t, %addr, %size) '
-        f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
-        f'%io4 = "atlas.virtual_dma_wait"(%io3, %st) : ({S}, '
-        f'!atlas.virtual_dma_store) -> {S}',
-        f"return %io4 : {S}"])
+        dma_store("io2", "io3", "t", "addr"),
+        f"return %io3 : {S}"])
     cases["C18 unused function arguments"] = function(
         "c18", [start(), inp("io0", "io1", "t", 0), unary("r", "t"),
                 outp("io1", "io2", "r", 0), f"return %io2 : {S}"],
@@ -349,7 +343,7 @@ def schedule(source: str, *options: str):
 
 
 def lowers(source: str) -> bool:
-    return run("atlas-opt", source, "--lower-atlas-virtual-to-machine").returncode == 0
+    return run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits").returncode == 0
 
 
 class VirtualSchedulingTest(unittest.TestCase):
@@ -372,7 +366,7 @@ class VirtualSchedulingTest(unittest.TestCase):
         if found and found[0]["ops"]:
             self.assertEqual(found[0]["ops"][0], "atlas.virtual_start", name)
         if lowers(source):
-            lowered = run("atlas-opt", out, "--lower-atlas-virtual-to-machine",
+            lowered = run("atlas-opt", out, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
                           "--verify-atlas-generated-schedule")
             self.assertEqual(lowered.returncode, 0, f"{name}: {lowered.stderr}")
             self.assertIn('atlas.timing_state = "untimed"', lowered.stdout)
@@ -403,18 +397,13 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_unverified_input_is_rejected(self) -> None:
         source = function("bad", [
-            start(), const("addr", -1879048192), const("size", 1024),
-            dma_load("io0", "io1", "e1", "addr", "size", "fp8"),
-            dma_load("io1", "io2", "e2", "addr", "size", "fp8"),
-            dma_load("io2", "io3", "e3", "addr", "size", "fp8"),
-            dma_await("io3", "io4", "x", "e1", "fp8"),
-            dma_await("io4", "io5", "y", "e2", "fp8"),
-            dma_await("io5", "io6", "z", "e3", "fp8"),
-            f"return %io6 : {S}"])
+            start(), const("addr", -1879048192), const("size", 1024), const("short", 32),
+            dma_load("io0", "io1", "x", "addr", "size", "fp8"),
+            dma_load("io1", "io2", "y", "addr", "short", "fp8"),
+            f"return %io2 : {S}"])
         result = schedule(source)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must complete a pending DMA before another launch",
-                      result.stderr)
+        self.assertIn("byte length must equal the complete tile size", result.stderr)
 
     def test_random_legal_orders_always_verify(self) -> None:
         sources = {p.name: p.read_text() for p in EXAMPLES.glob("virtual_*.mlir")}
@@ -453,7 +442,7 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_scheduling_recovers_a_block_over_capacity(self) -> None:
         source = virtual_pressure(32)
-        rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+        rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertIn("exceeds 31 physical pairs", rejected.stderr)
         self.assertTrue(lowers(self.scheduled(source)), "scheduled order should allocate")
 
@@ -469,25 +458,15 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
 
     def test_dma_transfers_overlap_and_receive_independent_work(self) -> None:
-        def launch(op: str) -> bool:
-            return "dma_load" in op or "dma_store" in op
-
-        def completion(op: str) -> bool:
-            return "dma_await" in op or op == "atlas.virtual_dma_wait"
-
+        # Every load issues before the first operation that uses any loaded
+        # tile, and the first store issues before the second MXU chain.
         ops = blocks(self.scheduled(OVERLAP.read_text()))[0]["ops"]
-        pending = peak = 0
-        moved = []
-        for op in ops:
-            if launch(op):
-                pending += 1
-                peak = max(peak, pending)
-            elif completion(op):
-                pending -= 1
-            elif pending and ("mxu" in op or "vpu" in op):
-                moved.append(op)
-        self.assertEqual(peak, 2, "the next transfer launches before the current completes")
-        self.assertIn("atlas.virtual_mxu_reset", moved)
+        loads = positions(ops, "dma_load_bf16") + positions(ops, "dma_load_fp8")
+        first_use = min(positions(ops, "mxu_load_weight"))
+        self.assertEqual(len(loads), 4)
+        self.assertLess(max(loads), first_use, ops)
+        [first_store, _] = positions(ops, "dma_store_bf16")
+        self.assertLess(first_store, max(positions(ops, "mxu_reset")), ops)
 
     def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
         # A store and a load are pending and complete load first. The PACK
@@ -496,86 +475,72 @@ class VirtualSchedulingTest(unittest.TestCase):
         source = function("pack", [
             start(), inp("io0", "io1", "t", 0), const("a", -2147483648), const("b", -2147481600),
             const("size", 2048),
-            f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %a, %size) '
-            f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
-            dma_load("io2", "io3", "eb", "b", "size", "bf16"),
-            dma_await("io3", "io4", "tb", "eb", "bf16"),
-            f'%io5 = "atlas.virtual_dma_wait"(%io4, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
+            dma_store("io1", "io2", "t", "a"),
+            dma_load("io2", "io3", "tb", "b", "size", "bf16"),
             f'%p = "atlas.virtual_pack_fp8"(%t) {{scale_code = 127 : i32}} : ({T}) -> {F}',
-            outp("io5", "o", "tb", 0), f"return %o : {S}"])
-        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine")
+            outp("io3", "o", "tb", 0), f"return %o : {S}"])
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timed = run("atlas-opt", lowered.stdout, "--schedule-atlas-stream", "--verify-atlas-timing")
         self.assertEqual(timed.returncode, 0, timed.stderr)
 
-    def test_transfers_that_may_share_dram_never_overlap(self) -> None:
-        # A store to y, then a load of y and a load of z. The load of y waits
-        # for the store; the load of z may run beside either.
+    def test_transfers_that_may_share_dram_keep_their_order(self) -> None:
+        # A store to y, then a load of y and a load of z. The load of y stays
+        # after the store; the load of z may move before it.
         source = function("dram", [
             start(), inp("io0", "io1", "t", 0),
             const("y", -2147481600), const("z", -2147479552), const("size", 2048),
-            f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
-            f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
-            f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
-            dma_load("io3", "io4", "ey", "y", "size", "bf16"),
-            dma_await("io4", "io5", "u", "ey", "bf16"),
-            dma_load("io5", "io6", "ez", "z", "size", "bf16"),
-            dma_await("io6", "io7", "v", "ez", "bf16"),
-            add("w", "u", "v"), outp("io7", "o", "w", 0), f"return %o : {S}"])
+            dma_store("io1", "io2", "t", "y"),
+            dma_load("io2", "io3", "u", "y", "size", "bf16"),
+            dma_load("io3", "io4", "v", "z", "size", "bf16"),
+            add("w", "u", "v"), outp("io4", "o", "w", 0), f"return %o : {S}"])
         role = {name: line_of(source, text) for name, text in (
-            ("store y", "%st ="), ("wait y", "%io3 ="), ("load y", "%ey ="),
-            ("await y", "%u ="), ("load z", "%ez ="))}
-        z_overlaps = False
+            ("store y", "%io2 ="), ("load y", "%u ="), ("load z", "%v ="))}
+        z_moves = False
         for options in ([], *([f"random-seed={seed}"] for seed in range(24))):
             position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
             at = {name: position[line] for name, line in role.items()}
-            self.assertLess(at["wait y"], at["load y"], options)
-            z_overlaps |= at["load z"] < at["wait y"] or at["load z"] < at["await y"]
-        self.assertTrue(z_overlaps, "no order ran the load of z beside another transfer")
+            self.assertLess(at["store y"], at["load y"], options)
+            z_moves |= at["load z"] < at["store y"]
+        self.assertTrue(z_moves, "no order moved the load of z before the store")
 
     def test_computed_dram_addresses_are_as_exact_as_constants(self) -> None:
         # The scheduler proves addresses built by arith.addi as the verifier
         # does: after a store to y, a load of y computed as (y - 2048) + 2048
-        # waits for the store, while a load of z computed as z + 0 may run
-        # beside it.
+        # stays after the store, while a load of z computed as z + 0 may move.
         def store_then_load(base: int, offset: int) -> str:
             return function("computed", [
                 start(), inp("io0", "io1", "t", 0), const("y", -2147481600),
                 const("base", base), const("offset", offset),
                 "%address = arith.addi %base, %offset : i32", const("size", 2048),
-                f'%io2, %st = "atlas.virtual_dma_store_bf16"(%io1, %t, %y, %size) '
-                f': ({S}, {T}, i32, i32) -> ({S}, !atlas.virtual_dma_store)',
-                f'%io3 = "atlas.virtual_dma_wait"(%io2, %st) : ({S}, !atlas.virtual_dma_store) -> {S}',
-                dma_load("io3", "io4", "e", "address", "size", "bf16"),
-                dma_await("io4", "io5", "v", "e", "bf16"),
-                add("w", "t", "v"), outp("io5", "o", "w", 0), f"return %o : {S}"])
+                dma_store("io1", "io2", "t", "y"),
+                dma_load("io2", "io3", "v", "address", "size", "bf16"),
+                add("w", "t", "v"), outp("io3", "o", "w", 0), f"return %o : {S}"])
 
-        def loads_before_the_wait(source: str) -> list[bool]:
-            wait, load = line_of(source, "%io3 ="), line_of(source, "%e =")
+        def loads_before_the_store(source: str) -> list[bool]:
+            store, load = line_of(source, "%io2 ="), line_of(source, "%v =")
             before = []
             for options in ([], *([f"random-seed={seed}"] for seed in range(24))):
                 position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
-                before.append(position[load] < position[wait])
+                before.append(position[load] < position[store])
             return before
 
-        self.assertNotIn(True, loads_before_the_wait(store_then_load(-2147483648, 2048)))
-        self.assertIn(True, loads_before_the_wait(store_then_load(-2147479552, 0)))
+        self.assertNotIn(True, loads_before_the_store(store_then_load(-2147483648, 2048)))
+        self.assertIn(True, loads_before_the_store(store_then_load(-2147479552, 0)))
 
-    def test_loads_of_the_same_dram_may_overlap(self) -> None:
+    def test_loads_of_the_same_dram_may_reorder(self) -> None:
         # Only a store makes overlapping DRAM a hazard.
         source = function("reread", [
             start(), const("y", -2147481600), const("size", 2048),
-            dma_load("io0", "io1", "e1", "y", "size", "bf16"),
-            dma_await("io1", "io2", "u", "e1", "bf16"),
-            dma_load("io2", "io3", "e2", "y", "size", "bf16"),
-            dma_await("io3", "io4", "v", "e2", "bf16"),
-            add("w", "u", "v"), outp("io4", "o", "w", 0), f"return %o : {S}"])
-        first_await, second_load = line_of(source, "%u ="), line_of(source, "%e2 =")
-        overlapped = False
+            dma_load("io0", "io1", "u", "y", "size", "bf16"),
+            dma_load("io1", "io2", "v", "y", "size", "bf16"),
+            add("w", "u", "v"), outp("io2", "o", "w", 0), f"return %o : {S}"])
+        first, second = line_of(source, "%u ="), line_of(source, "%v =")
+        reordered = False
         for options in ([], *([f"random-seed={seed}"] for seed in range(16))):
             position = {line: i for i, line in enumerate(scheduled_lines(source, *options))}
-            overlapped |= position[second_load] < position[first_await]
-        self.assertTrue(overlapped, "no order ran the two loads together")
+            reordered |= position[second] < position[first]
+        self.assertTrue(reordered, "no order moved the second load first")
 
     def test_legacy_matmul_keeps_its_place_among_a_units_chains(self) -> None:
         # The one-op matmul uses fixed slots of its unit, so no explicit MXU
@@ -598,22 +563,21 @@ class VirtualSchedulingTest(unittest.TestCase):
             self.assertTrue(all(position[matmul] < position[line] for line in after), options)
         self.assertTrue(lowers(self.scheduled(source)))
 
-    def test_loop_body_dma_interval_receives_vpu_work(self) -> None:
+    def test_independent_work_goes_between_a_load_and_its_use(self) -> None:
+        # The load's tile is first used by the add; the unary work that does
+        # not need it goes in between, where the DMA wait will be.
         body = blocks(self.scheduled(cfg_cases()["C14 explicit DMA in a loop body"]))[2]["ops"]
         load = body.index("atlas.virtual_dma_load_bf16")
-        await_ = body.index("atlas.virtual_dma_await_bf16")
+        use = body.index("atlas.virtual_vpu_binary")
         self.assertTrue(any(op == "atlas.virtual_vpu_unary"
-                            for op in body[load + 1:await_]), body)
+                            for op in body[load + 1:use]), body)
 
-    def test_pack_never_enters_a_dma_interval(self) -> None:
+    def test_pack_may_follow_a_load_and_still_lower(self) -> None:
         source = cfg_cases()["C16 pack beside an explicit DMA"]
         for seed in [None, *SEEDS]:
             options = [] if seed is None else [f"random-seed={seed}"]
-            ops = blocks(self.scheduled(source, *options))[0]["ops"]
-            [load] = positions(ops, "dma_load_fp8")
-            [await_] = positions(ops, "dma_await_fp8")
-            [pack] = positions(ops, "pack_fp8")
-            self.assertFalse(load < pack < await_, (seed, ops))
+            with self.subTest(seed=seed):
+                self.assertTrue(lowers(self.scheduled(source, *options)))
 
     def test_mxu_slot_dependences_are_exact(self) -> None:
         # Three chains on MXU0. Two weights and two accumulators fit at once,

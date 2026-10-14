@@ -24,7 +24,7 @@ from atlas_virtual_evaluator import (  # noqa: E402
     EvaluationResult, MemoryRegion, RuntimeInputs, Scalar, Tile, compare_results, evaluate, evaluate_tile_operation, operation_name,
     parse_program,
 )
-from test_virtual_dma import copy, dma_await, dma_load, dma_store, dma_wait, wrap  # noqa: E402
+from test_virtual_dma import copy, dma_load, dma_store, wrap  # noqa: E402
 from test_virtual_dma_lowering import MARKER  # noqa: E402
 from test_virtual_evaluator_arithmetic import ADD_CASES, PACK_CASES, relu, repeated, sparse  # noqa: E402
 from test_virtual_evaluator_memory import BASE, Stream  # noqa: E402
@@ -249,18 +249,14 @@ def dma_pending_work() -> str:
         "%out_addr = arith.constant -2147475456 : i32",
         "%copy_addr = arith.constant -2147473408 : i32",
         "%size = arith.constant 2048 : i32",
-        dma_load("bf16", addr="first_addr", handle="first_event"),
-        dma_await("bf16", handle="first_event", result="ready"),
-        dma_load("bf16", before="io2", after="io3", addr="later_addr", handle="later_event"),
+        dma_load("bf16", addr="first_addr", result="ready"),
+        dma_load("bf16", before="io2", after="io3", addr="later_addr", result="later"),
         '%positive = "atlas.virtual_vpu_unary"(%ready) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16',
-        dma_await("bf16", before="io3", after="io4", handle="later_event", result="later"),
         '%sum = "atlas.virtual_vpu_binary"(%positive, %later) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16',
-        dma_store("bf16", before="io4", after="io5", value="sum", handle="first_store").replace("%addr,", "%out_addr,"),
+        dma_store("bf16", before="io3", after="io5", value="sum").replace("%addr,", "%out_addr,"),
         '%copied = "atlas.virtual_vpu_unary"(%sum) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16',
-        dma_wait(before="io5", after="io6", handle="first_store"),
-        dma_store("bf16", before="io6", after="io7", value="copied", handle="last_store").replace("%addr,", "%copy_addr,"),
-        dma_wait(before="io7", after="io8", handle="last_store"),
-    ], final="io8")
+        dma_store("bf16", before="io5", after="io7", value="copied").replace("%addr,", "%copy_addr,"),
+    ], final="io7")
 
 
 def dma_sources() -> dict[str, str]:
@@ -452,15 +448,12 @@ TWO_DMA = wrap([
     "%b_addr = arith.constant -2147481600 : i32",
     "%addr = arith.constant -2147475456 : i32",
     "%size = arith.constant 2048 : i32",
-    dma_load("bf16", addr="a_addr", handle="a_event"),
-    dma_load("bf16", before="io1", after="io2", addr="b_addr", handle="b_event"),
-    dma_await("bf16", before="io2", after="io3", handle="b_event", result="b"),
-    dma_await("bf16", before="io3", after="io4", handle="a_event", result="a"),
+    dma_load("bf16", after="io1", addr="a_addr", result="a"),
+    dma_load("bf16", before="io1", after="io2", addr="b_addr", result="b"),
     '%positive = "atlas.virtual_vpu_unary"(%a) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16',
     '%sum = "atlas.virtual_vpu_binary"(%positive, %b) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16',
-    dma_store("bf16", before="io4", after="io5", value="sum"),
-    dma_wait(before="io5", after="io6"),
-], final="io6")
+    dma_store("bf16", before="io2", after="io4", value="sum"),
+], final="io4")
 
 
 def two_chains_case(phase: int):

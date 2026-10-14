@@ -10,17 +10,16 @@ using namespace atlas_test;
 namespace {
 constexpr StringLiteral state = "!atlas.virtual_state";
 constexpr StringLiteral clobber = "DMA helper write clobbers live scalar value";
-constexpr StringLiteral pendingBase = "pending DMA staging base is not preserved";
 constexpr StringLiteral halfSize = "persistent DMA half-size helper is not preserved";
 using Policy = DMAAwaitBasePolicy;
 using P = DMATransferPlacement;
 
-// One DMA launch and completion between boundary I/O, inside a "loop", before a "join", or on one arm of a "diamond".
-// `%keep` is defined before the launch or, with `keepAfterLaunch`, after it; `keepLive` reads it (or, with
-// `useOperands`, the address and size) after completion.
+// One atomic DMA between boundary I/O, inside a "loop", before a "join", or on one arm of a "diamond". A load's
+// tile is unused, so lowering places its staging VLOADs before the block's terminator. `%keep` is defined before the
+// DMA or, with `keepAfterLaunch`, after it; `keepLive` reads it (or, with `useOperands`, the address and size)
+// after that terminator's block point.
 std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool keepLive = true, StringRef cfg = "", bool useOperands = false) {
   std::string s = state.str(), fmt = bf16 ? "bf16" : "fp8", tile = "!atlas.virtual_" + fmt;
-  std::string event = store ? "!atlas.virtual_dma_store" : "!atlas.virtual_dma_load_" + fmt;
   std::string body = "module { func.func @test() -> " + s + " {\n    %s0 = \"atlas.virtual_start\"() : () -> " + s + "\n";
   body += "    %addr = arith.constant -2147483648 : i32\n    %size = arith.constant " + std::to_string(bf16 ? 2048 : 1024) + " : i32\n";
   std::string keep = "    %keep = arith.constant 7 : i32\n";
@@ -39,12 +38,10 @@ std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool kee
     body += "    %input, %tile = \"atlas.virtual_input_" + fmt + "\"(" + before + ") {index = 0 : i32} : (" + s + ") -> (" + s + ", " + tile + ")\n";
     before = "%input";
   }
-  body += "    %issued, %event = \"atlas.virtual_dma_" + std::string(store ? "store_" : "load_") + fmt + "\"(" + before + (store ? ", %tile" : "");
-  body += ", %addr, %size) : (" + s + (store ? ", " + tile : "") + ", i32, i32) -> (" + s + ", " + event + ")\n";
+  body += std::string(store ? "    %done" : "    %done, %tile") + " = \"atlas.virtual_dma_" + (store ? "store_" : "load_") + fmt + "\"(" + before + (store ? ", %tile" : "");
+  body += ", %addr, %size) : (" + s + (store ? ", " + tile : "") + ", i32, i32) -> " + (store ? s : "(" + s + ", " + tile + ")") + "\n";
   if (keepAfterLaunch)
     body += keep;
-  body += store ? "    %done = \"atlas.virtual_dma_wait\"(%issued, %event)" : "    %done, %tile = \"atlas.virtual_dma_await_" + fmt + "\"(%issued, %event)";
-  body += " : (" + s + ", " + event + ") -> " + (store ? s : "(" + s + ", " + tile + ")") + "\n";
   if (cfg == "join" || cfg == "diamond") {
     body += "    cf.br ^exit(%done : " + s + ")\n";
     if (cfg == "diamond")
@@ -90,7 +87,7 @@ struct Fixture {
           registers.push_back({result, std::exchange(tensor, tensor + 2)});
       }
       if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-        dma = {op->getResult(1), {6, bf16 ? 2u : 1u, 37, 0x2100, 4, 7, 9}};
+        dma = {op->getResult(0), {6, bf16 ? 2u : 1u, 37, 0x2100, 4, 7, 9}};
         transfers.push_back(dma);
       }
     });
@@ -140,10 +137,8 @@ void launchTests(MLIRContext &context, bool bf16, bool store) {
   for (unsigned P::*role : {&P::dramReg, &P::sizeReg, &P::stagingReg}) {
     auto changed = base;
     changed.*role = f.reg(f.keep);
-    // Reverse liveness meets a BF16 load's later await staging write first.
     StringRef phase = role == &P::dramReg   ? "DRAM capture"
                       : role == &P::sizeReg ? "size capture"
-                      : bf16 && !store      ? "await staging materialization"
                                             : "launch staging materialization";
     expect(f, "helper clobbers live-after scalar", changed, false, {clobber, phase, "x12", "live scalar"});
   }
@@ -164,67 +159,48 @@ void launchTests(MLIRContext &context, bool bf16, bool store) {
   }
 }
 
-void awaitTests(MLIRContext &context, bool bf16, bool store) {
-  Fixture live(context, source(bf16, store, true), bf16), dead(context, source(bf16, store, true, false), bf16);
+// A load's staging VLOADs run before the join's terminator, after `%keep` is defined and while it is live into the
+// exit block; a store, which must be in the return block, issues no VLOAD.
+void stagingLoadTests(MLIRContext &context, bool bf16, bool store) {
+  StringRef cfg = store ? "" : "join";
+  Fixture live(context, source(bf16, store, true, true, cfg), bf16), dead(context, source(bf16, store, true, false, cfg), bf16);
   if (!live || !dead)
     return;
-  auto changed = live.dma.placement;
-  changed.stagingReg = live.reg(live.keep);
   for (auto policy : {Policy::Preserved, Policy::Rematerialized}) {
-    bool preserved = policy == Policy::Preserved;
+    auto changed = live.dma.placement;
+    changed.stagingReg = live.reg(live.keep);
     SmallVector<StringRef> fragments;
     if (!store)
-      fragments = !bf16 && preserved ? SmallVector<StringRef>{pendingBase} : SmallVector<StringRef>{clobber, "await staging materialization", "x12"};
-    expect(live, "await staging policy and store wait", changed, store, fragments, policy);
+      fragments = {clobber, "staging VLOAD materialization", "x12"};
+    expect(live, "staging VLOAD write meets a live scalar", changed, store, fragments, policy);
+    changed = dead.dma.placement;
     changed.stagingReg = dead.reg(dead.keep);
-    bool valid = store || !preserved;
-    expect(dead, "dead scalar reuse still preserves an unread staging base", changed, valid, valid ? ArrayRef<StringRef>() : ArrayRef<StringRef>(pendingBase), policy);
+    expect(dead, "staging VLOAD write may reuse a dead scalar", changed, true, {}, policy);
   }
 }
 
-void pendingTests(MLIRContext &context) {
-  for (bool bf16 : {false, true}) {
-    std::string text = source(bf16, false, true, false);
-    Fixture f(context, text, bf16), restored(context, replace(text, "%keep = arith.constant 7", "%keep = arith.constant 8448"), bf16);
-    if (!f || !restored)
-      continue;
-    auto changed = f.dma.placement;
-    changed.stagingReg = f.reg(f.keep);
-    expect(f, "scalar result destroys pending first-half base", changed, false, {pendingBase});
-    expect(f, "rematerialized await permits scalar reuse", changed, true, {}, Policy::Rematerialized);
-    changed = restored.dma.placement;
-    changed.stagingReg = restored.reg(restored.keep);
-    expect(restored, "known scalar restoration preserves pending first-half base", changed, true);
-  }
-
-  // Typed SSA bypasses only the baseline admission limit on pending handles.
+// Two loads share helper registers: each launch and each staging VLOAD sets the registers it reads.
+void sharedHelperTests(MLIRContext &context) {
   Fixture two(context, R"mlir(module { func.func @two() -> !atlas.virtual_state {
   %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
   %addr = arith.constant -2147483648 : i32
   %size = arith.constant 2048 : i32
   %small = arith.constant 1024 : i32
-  %s1, %a = "atlas.virtual_dma_load_bf16"(%s0, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-  %s2, %b = "atlas.virtual_dma_load_fp8"(%s1, %addr, %small) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-  %s3, %x = "atlas.virtual_dma_await_bf16"(%s2, %a) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-  %s4, %y = "atlas.virtual_dma_await_fp8"(%s3, %b) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-  %s5 = "atlas.virtual_output_bf16"(%s4, %x) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+  %s1, %x = "atlas.virtual_dma_load_bf16"(%s0, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+  %s2, %y = "atlas.virtual_dma_load_fp8"(%s1, %addr, %small) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+  %s5 = "atlas.virtual_output_bf16"(%s2, %x) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
   return %s5 : !atlas.virtual_state
 } })mlir", true, false);
   if (!two)
     return;
   SmallVector<VirtualDMAAssignment> base = {{two.transfers[0].transfer, {6, 2, 37, 0x2100, 4, 7, 9}},
                                             {two.transfers[1].transfer, {7, 1, 38, 0x2400, 6, 8, 3}}};
-  expectAssignments(two, "BF16 first-half read precedes own second-half base write", base, true);
+  expectAssignments(two, "loads with separate helpers", base, true);
   for (unsigned P::*role : {&P::dramReg, &P::sizeReg, &P::stagingReg}) {
     auto changed = base;
     changed[1].placement.*role = 4;
-    expectAssignments(two, "other DMA helper destroys retained staging base", changed, false, {pendingBase});
-    expectAssignments(two, "rematerialized awaits allow cross-DMA helper reuse", changed, true, {}, Policy::Rematerialized);
+    expectAssignments(two, "the second load reuses the first load's staging helper", changed, true);
   }
-  auto restored = base;
-  restored[0].placement.stagingWord = 1024;
-  restored[1].placement.sizeReg = 4;
-  expectAssignments(two, "same-value DMA size capture preserves another pending base", restored, true);
 }
 
 void halfSizeTests(MLIRContext &context) {
@@ -241,7 +217,7 @@ void halfSizeTests(MLIRContext &context) {
   // The boundary output moves before the load, so the load follows the last boundary read.
   std::string output = "    %out = \"atlas.virtual_output_bf16\"(%ready, %observable) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state\n";
   std::string text = replace(load, replace(output, "%ready", "%done"), "");
-  text = replace(replace(text, "    %issued,", output + "    %issued,"), "load_bf16\"(%ready", "load_bf16\"(%out");
+  text = replace(replace(text, "    %done, %tile =", output + "    %done, %tile ="), "load_bf16\"(%ready", "load_bf16\"(%out");
   if (Fixture f(context, replace(text, "return %out", "return %done"), true); f) {
     auto changed = f.dma.placement;
     changed.sizeReg = 2;
@@ -249,8 +225,7 @@ void halfSizeTests(MLIRContext &context) {
   }
 
   text = replace(load, "    %out =", "    %small = arith.constant 1024 : i32\n"
-      "    %restore, %second = \"atlas.virtual_dma_load_fp8\"(%done, %addr, %small) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)\n"
-      "    %restored, %unused = \"atlas.virtual_dma_await_fp8\"(%restore, %second) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)\n"
+      "    %restored, %unused = \"atlas.virtual_dma_load_fp8\"(%done, %addr, %small) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)\n"
       "    %out =");
   if (Fixture f(context, replace(text, "output_bf16\"(%done", "output_bf16\"(%restored"), true); f) {
     SmallVector<VirtualDMAAssignment> assignments = {{f.transfers[0].transfer, {6, 2, 37, 0x2100, 4, 7, 2}},
@@ -301,9 +276,8 @@ module { func.func @scalar_swap() -> !atlas.virtual_state {
   %b = arith.constant 9 : i32
   %first = arith.constant true
   %stop = arith.constant false
-  %issued, %event = "atlas.virtual_dma_load_bf16"(%s0, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-  %ready, %tile = "atlas.virtual_dma_await_bf16"(%issued, %event) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-  cf.br ^loop(%ready, %a, %b, %first : !atlas.virtual_state, i32, i32, i1)
+  %issued, %tile = "atlas.virtual_dma_load_bf16"(%s0, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+  cf.br ^loop(%issued, %a, %b, %first : !atlas.virtual_state, i32, i32, i1)
 ^loop(%loop_io: !atlas.virtual_state, %left: i32, %right: i32, %again: i1):
   cf.cond_br %again, ^loop(%loop_io, %right, %left, %stop : !atlas.virtual_state, i32, i32, i1), ^exit(%loop_io : !atlas.virtual_state)
 ^exit(%exit_io: !atlas.virtual_state):
@@ -340,10 +314,11 @@ void cfgTests(MLIRContext &context) {
   expect(through, "launch helper clobbers successor live-through scalar", changed, false, {clobber, "DRAM capture"});
   changed = awaitThrough.dma.placement;
   changed.stagingReg = awaitThrough.reg(awaitThrough.keep);
-  expect(awaitThrough, "BF16 await clobbers successor live-through scalar", changed, false, {clobber, "await staging materialization"});
+  expect(awaitThrough, "BF16 staging VLOAD clobbers successor live-through scalar", changed, false, {clobber, "staging VLOAD materialization"});
   changed = loop.dma.placement;
   changed.stagingReg = loop.reg(loop.addr);
-  expect(loop, "backedge keeps address operand live after launch", changed, false, {clobber, "launch staging materialization", "x10"});
+  // The loaded tile's staging VLOADs, before the loop's branch, meet the address first in reverse liveness.
+  expect(loop, "backedge keeps address operand live after launch", changed, false, {clobber, "staging VLOAD materialization", "x10"});
 }
 } // namespace
 
@@ -351,10 +326,10 @@ void atlas_test::runDMAHelper(MLIRContext &context) {
   for (bool bf16 : {false, true})
     for (bool store : {false, true}) {
       launchTests(context, bf16, store);
-      awaitTests(context, bf16, store);
+      stagingLoadTests(context, bf16, store);
     }
   cfgTests(context);
-  pendingTests(context);
+  sharedHelperTests(context);
   halfSizeTests(context);
   halfSizeCFGTests(context);
   packHelperTests(context);

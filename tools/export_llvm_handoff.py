@@ -70,7 +70,7 @@ def main() -> None:
         raw = source.read_bytes()
         if name == "virtual_fp8_two_layer_mlp":
             machine_text = run([
-                str(atlas / "atlas-opt"), "--lower-atlas-virtual-to-machine",
+                str(atlas / "atlas-opt"), "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
                 "--insert-atlas-delays",
                 str(source),
             ]).rstrip() + "\n"

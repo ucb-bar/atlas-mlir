@@ -40,56 +40,34 @@ class Atlas_VirtualDMAOp<string mnemonic> :
   let hasVerifier = 1;
 }
 
+// Virtual DMA is atomic: a load returns its tile and a store is complete when
+// it returns. insert-atlas-dma-waits places each physical DMA.WAIT after
+// virtual-to-machine lowering launches the transfer.
 def Atlas_VirtualDMALoadFP8Op : Atlas_VirtualDMAOp<"virtual_dma_load_fp8"> {
-  let summary = "Issue an FP8 tile load before staging and channel allocation";
+  let summary = "Load an FP8 tile from DRAM, before staging and channel allocation";
   let arguments = (ins Atlas_VirtualStateType:$state, I32:$dram_byte,
                        I32:$size_bytes);
-  let results = (outs Atlas_VirtualStateType:$next,
-                      Atlas_VirtualDMALoadFP8Type:$transfer);
-}
-
-def Atlas_VirtualDMALoadBF16Op : Atlas_VirtualDMAOp<"virtual_dma_load_bf16"> {
-  let summary = "Issue a BF16 tile load before staging and channel allocation";
-  let arguments = (ins Atlas_VirtualStateType:$state, I32:$dram_byte,
-                       I32:$size_bytes);
-  let results = (outs Atlas_VirtualStateType:$next,
-                      Atlas_VirtualDMALoadBF16Type:$transfer);
-}
-
-def Atlas_VirtualDMAAwaitFP8Op : Atlas_VirtualDMAOp<"virtual_dma_await_fp8"> {
-  let summary = "Complete a pending FP8 load and materialize its tile";
-  let arguments = (ins Atlas_VirtualStateType:$state,
-                       Atlas_VirtualDMALoadFP8Type:$transfer);
   let results = (outs Atlas_VirtualStateType:$next, Atlas_VirtualFP8Type:$value);
 }
 
-def Atlas_VirtualDMAAwaitBF16Op : Atlas_VirtualDMAOp<"virtual_dma_await_bf16"> {
-  let summary = "Complete a pending BF16 load and materialize its tile";
-  let arguments = (ins Atlas_VirtualStateType:$state,
-                       Atlas_VirtualDMALoadBF16Type:$transfer);
+def Atlas_VirtualDMALoadBF16Op : Atlas_VirtualDMAOp<"virtual_dma_load_bf16"> {
+  let summary = "Load a BF16 tile from DRAM, before staging and channel allocation";
+  let arguments = (ins Atlas_VirtualStateType:$state, I32:$dram_byte,
+                       I32:$size_bytes);
   let results = (outs Atlas_VirtualStateType:$next, Atlas_VirtualBF16Type:$value);
 }
 
 def Atlas_VirtualDMAStoreFP8Op : Atlas_VirtualDMAOp<"virtual_dma_store_fp8"> {
-  let summary = "Issue an FP8 tile store before staging and channel allocation";
+  let summary = "Store an FP8 tile to DRAM, before staging and channel allocation";
   let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualFP8Type:$src,
                        I32:$dram_byte, I32:$size_bytes);
-  let results = (outs Atlas_VirtualStateType:$next,
-                      Atlas_VirtualDMAStoreType:$transfer);
+  let results = (outs Atlas_VirtualStateType:$next);
 }
 
 def Atlas_VirtualDMAStoreBF16Op : Atlas_VirtualDMAOp<"virtual_dma_store_bf16"> {
-  let summary = "Issue a BF16 tile store before staging and channel allocation";
+  let summary = "Store a BF16 tile to DRAM, before staging and channel allocation";
   let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualBF16Type:$src,
                        I32:$dram_byte, I32:$size_bytes);
-  let results = (outs Atlas_VirtualStateType:$next,
-                      Atlas_VirtualDMAStoreType:$transfer);
-}
-
-def Atlas_VirtualDMAWaitOp : Atlas_VirtualDMAOp<"virtual_dma_wait"> {
-  let summary = "Wait for completion of a pending tile store";
-  let arguments = (ins Atlas_VirtualStateType:$state,
-                       Atlas_VirtualDMAStoreType:$transfer);
   let results = (outs Atlas_VirtualStateType:$next);
 }
 

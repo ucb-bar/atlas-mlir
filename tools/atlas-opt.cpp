@@ -1,4 +1,5 @@
 #include "Atlas/AtlasDelayInsertion.h"
+#include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasToLLVM.h"
@@ -28,6 +29,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerVerifyAtlasVirtualStreamPass();
   mlir::atlas::registerScheduleAtlasVirtualPass();
   mlir::atlas::registerLowerAtlasVirtualToMachinePass();
+  mlir::atlas::registerInsertAtlasDMAWaitsPass();
   mlir::atlas::registerVerifyAtlasGeneratedSchedulePass();
   mlir::atlas::registerVerifyAtlasTimingPass();
   return mlir::asMainReturnCode(

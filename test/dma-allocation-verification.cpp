@@ -8,8 +8,22 @@ using namespace atlas_test;
 namespace {
 using Assignments = SmallVector<VirtualDMAAssignment>;
 
-// Typed SSA bypasses the compiler's single-pending admission limit.
-struct Fixture : HandleFixture<VirtualDMALoadFP8Type, VirtualDMALoadBF16Type, VirtualDMAStoreType> { using HandleFixture::HandleFixture; };
+// Each DMA operation's state result keys its transfer, in source order.
+struct Fixture {
+  OwningOpRef<ModuleOp> module;
+  func::FuncOp function;
+  SmallVector<Value> handles;
+  Fixture(MLIRContext &context, StringRef text, StringRef name = "fixture is typed SSA")
+      : module(parse(context, text, name)) {
+    if (!module)
+      return;
+    function = firstFunction(*module);
+    function.walk([&](Operation *op) {
+      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+        handles.push_back(op->getResult(0));
+    });
+  }
+};
 
 void expect(Fixture &fixture, StringRef name, const Assignments &assignments, bool valid, ArrayRef<StringRef> fragments = {}) {
   expectVerified(name, valid, fragments, [&] { return verifyAtlasDMAAllocation(fixture.function, assignments); });
@@ -25,24 +39,17 @@ std::string source(StringRef body, StringRef result) {
 }
 
 const std::string mixed = source(R"mlir(
-    %s1, %a = "atlas.virtual_dma_load_fp8"(%s0, %addr, %n8) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s2, %b = "atlas.virtual_dma_load_bf16"(%s1, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-    %s3, %y = "atlas.virtual_dma_await_bf16"(%s2, %b) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %s4, %x = "atlas.virtual_dma_await_fp8"(%s3, %a) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-    %s5, %c = "atlas.virtual_dma_store_bf16"(%s4, %y, %addr, %n16) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s6, %d = "atlas.virtual_dma_store_fp8"(%s5, %x, %addr, %n8) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s7 = "atlas.virtual_dma_wait"(%s6, %d) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    %s8 = "atlas.virtual_dma_wait"(%s7, %c) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-)mlir", "%s8");
+    %s1, %x = "atlas.virtual_dma_load_fp8"(%s0, %addr, %n8) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    %s2, %y = "atlas.virtual_dma_load_bf16"(%s1, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %s5 = "atlas.virtual_dma_store_bf16"(%s2, %y, %addr, %n16) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+    %s6 = "atlas.virtual_dma_store_fp8"(%s5, %x, %addr, %n8) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> !atlas.virtual_state
+)mlir", "%s6");
 
 const std::string partialRelease = source(R"mlir(
-    %s1, %a = "atlas.virtual_dma_load_bf16"(%s0, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-    %s2, %b = "atlas.virtual_dma_load_fp8"(%s1, %addr, %n8) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_fp8)
-    %s3, %x = "atlas.virtual_dma_await_bf16"(%s2, %a) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %s4, %c = "atlas.virtual_dma_load_bf16"(%s3, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-    %s5, %z = "atlas.virtual_dma_await_bf16"(%s4, %c) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %s6, %y = "atlas.virtual_dma_await_fp8"(%s5, %b) : (!atlas.virtual_state, !atlas.virtual_dma_load_fp8) -> (!atlas.virtual_state, !atlas.virtual_fp8)
-)mlir", "%s6");
+    %s1, %x = "atlas.virtual_dma_load_bf16"(%s0, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %s2, %y = "atlas.virtual_dma_load_fp8"(%s1, %addr, %n8) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)
+    %s4, %z = "atlas.virtual_dma_load_bf16"(%s2, %addr, %n16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+)mlir", "%s4");
 
 Assignments mixedAssignments(Fixture &fixture) {
   return {{fixture.handles[0], {7, 1, 17, 0x2000, 1, 2, 3}},
@@ -53,7 +60,7 @@ Assignments mixedAssignments(Fixture &fixture) {
 
 void completenessTests(Fixture &f, Fixture &foreign) {
   auto base = mixedAssignments(f);
-  constexpr StringLiteral untracked = "foreign, stale, or untracked value", notLaunch = "does not refer to a transfer launch handle";
+  constexpr StringLiteral untracked = "foreign, stale, or untracked value", notLaunch = "does not refer to a DMA operation's state result";
   mutated(f, base, "alternative placements and reverse load/store completion", [](Assignments &) {});
   mutated(f, base, "assignment order does not define launch order", [](Assignments &a) { std::reverse(a.begin(), a.end()); });
   mutated(f, base, "missing store assignment", [](Assignments &a) { a.pop_back(); }, {"missing DMA assignment", "assigned transfer"});
@@ -61,8 +68,8 @@ void completenessTests(Fixture &f, Fixture &foreign) {
   mutated(f, base, "null handle", [](Assignments &a) { a[0].transfer = Value(); }, {untracked});
   mutated(f, base, "foreign source handle", [&](Assignments &a) { a[0].transfer = foreign.handles[0]; }, {untracked});
   mutated(f, base, "known non-DMA scalar", [&](Assignments &a) { a[0].transfer = f.function.getBody().front().front().getResult(0); }, {notLaunch});
-  mutated(f, base, "launch state result is not its transfer handle",
-          [&](Assignments &a) { a[0].transfer = f.handles[0].getDefiningOp()->getResult(0); }, {notLaunch});
+  mutated(f, base, "a load's tile is not its transfer key",
+          [&](Assignments &a) { a[0].transfer = f.handles[0].getDefiningOp()->getResult(1); }, {notLaunch});
 }
 
 void geometryTests(Fixture &f) {
@@ -101,50 +108,21 @@ void geometryTests(Fixture &f) {
   placed("duplicate ID after earlier completion", 2, [&](auto &p) { p.id = base[0].placement.id; }, "duplicate DMA transfer id across static launches");
 }
 
-void ownershipTests(Fixture &f, Fixture &released) {
+// Atomic DMA has no pending interval in virtual IR: transfers may share a
+// channel or staging window, and insert-atlas-dma-waits completes the earlier
+// one first. The generated DMA checks verify actual overlap.
+void reuseTests(MLIRContext &context, Fixture &f, Fixture &released) {
   auto base = mixedAssignments(f);
-  constexpr StringLiteral channel = "simultaneously owned DMA channel", staging = "overlapping simultaneously owned DMA staging ranges";
-  mutated(f, base, "live loads share channel", [](Assignments &a) { a[1].placement.channel = a[0].placement.channel; },
-          {channel, "new transfer", "pending transfer", "channel 7"});
-  mutated(f, base, "live stores share channel", [](Assignments &a) { a[3].placement.channel = a[2].placement.channel; }, {channel});
-  mutated(f, base, "partial VMEM overlap despite different helper names", [](Assignments &a) {
-    auto &p = a[1].placement;
-    p.stagingWord = a[0].placement.stagingWord - 256;
-    p.stagingReg = 4;
-    p.dramReg = 5;
-    p.sizeReg = 6;
-  }, {staging, "new transfer", "pending transfer", "VMEM words [7936, 8448)", "VMEM words [8192, 8448)"});
-  mutated(f, base, "FP8 store overlaps BF16 second half",
-          [](Assignments &a) { a[3].placement.stagingWord = a[2].placement.stagingWord + 256; }, {staging});
+  mutated(f, base, "loads may share a channel", [](Assignments &a) { a[1].placement.channel = a[0].placement.channel; });
+  mutated(f, base, "stores may share a staging window",
+          [](Assignments &a) { a[3].placement.stagingWord = a[2].placement.stagingWord + 256; });
   Assignments partial = {{released.handles[0], {5, 2, 1, 0x3100, 4, 7, 9}},
                          {released.handles[1], {1, 1, 2, 0x3300, 4, 7, 9}},
                          {released.handles[2], {5, 2, 3, 0x3100, 4, 7, 9}}};
-  mutated(released, partial, "await releases only its handle; completed resources reused", [](Assignments &) {});
-  mutated(released, partial, "await one does not release other channel",
-          [](Assignments &a) { a[2].placement.channel = a[1].placement.channel; }, {channel});
-  mutated(released, partial, "await one does not release other staging",
-          [](Assignments &a) { a[2].placement.stagingWord = a[1].placement.stagingWord; }, {staging});
-}
-
-// Typed SSA mutations exercise defensive ownership diagnostics beyond the admitted-source precondition.
-void completionTests(MLIRContext &context) {
+  mutated(released, partial, "a later load reuses an earlier load's channel and window", [](Assignments &) {});
   Fixture empty(context, source("", "%s0"), "no DMA fixture");
   if (empty.module)
     expect(empty, "no DMA requires no assignments", {}, true);
-  constexpr StringLiteral pendingAtExit = "ownership remains pending at block exit";
-  std::string finalWait = "    %s8 = \"atlas.virtual_dma_wait\"(%s7, %c) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state\n";
-  std::string repeat = "    %s9 = \"atlas.virtual_dma_wait\"(%s8, %c) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state\n    return %s9";
-  std::string crossing = replace(mixed, "    %s3, %y =", "    cf.br ^next(%s2 : !atlas.virtual_state)\n  ^next(%edge: !atlas.virtual_state):\n    %s3, %y =");
-  const std::tuple<StringRef, std::string, StringRef> cases[] = {
-      {"missing completion at block exit", replace(replace(mixed, finalWait, ""), "return %s8", "return %s7"), pendingAtExit},
-      {"same handle cannot complete twice", replace(mixed, "    return %s8", repeat),
-       "completion requires a pending block-local transfer handle"},
-      {"DMA handle cannot remain pending across a block edge", replace(crossing, "(%s2, %b)", "(%edge, %b)"), pendingAtExit}};
-  for (const auto &[name, text, diagnostic] : cases) {
-    Fixture fixture(context, text, name);
-    if (fixture.module)
-      expect(fixture, name, mixedAssignments(fixture), false, {diagnostic});
-  }
 }
 } // namespace
 
@@ -155,6 +133,5 @@ void atlas_test::runDMAAllocation(MLIRContext &context) {
     return;
   completenessTests(fixture, foreign);
   geometryTests(fixture);
-  ownershipTests(fixture, released);
-  completionTests(context);
+  reuseTests(context, fixture, released);
 }

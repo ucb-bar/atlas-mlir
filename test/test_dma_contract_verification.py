@@ -76,7 +76,8 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
             *constant(15, 1), ("dma_config", "channel = 0 : i32, base_reg = 15 : i32")])))
         for role, field, value in (("staging", "reg", 5), ("DRAM", "dram", 6), ("size", "size", 8)):
             changes.append((role + " register", rewrite_line(machine, load, lambda line: re.sub(rf"\b{field} = \d+ : i32", f"{field} = {value} : i32", line))))
-        changes.append(("channel", replace_line(replace_line(machine, load, "channel = 0", "channel = 1"), load + 1, "channel = 0", "channel = 1")))
+        [wait] = lines_of(machine, "dma_wait", f"{TRANSFER} = 0 : i32")
+        changes.append(("channel", replace_line(replace_line(machine, load, "channel = 0", "channel = 1"), wait, "channel = 0", "channel = 1")))
         changes = [(name, changed, "DMA contract") for name, changed in changes]
         changes += [("unknown DRAM upper word", machine.replace("base_reg = 0 : i32", "base_reg = 15 : i32"), "DMA contract cannot prove captured DRAM upper word"),
                     ("unknown DRAM byte address", machine.replace('dst = 10 : i32, immediate = 524288 : i32, kind = "lui"', 'dst = 10 : i32, immediate = 524288 : i32, kind = "auipc"'),
@@ -181,8 +182,10 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
 
     def test_completion_channel_and_identity_must_match_the_pending_transfer(self) -> None:
         machine = lower(copy())
-        index = launch(machine) + 1
-        self.assertEqual(lines_of(machine, "dma_wait", f"{TRANSFER} = 0 : i32"), [index])
+        # The wait sits before the first staging VLOAD, after its base register setup.
+        [index] = lines_of(machine, "dma_wait", f"{TRANSFER} = 0 : i32")
+        self.assertEqual(lines_of(machine, "vload")[0], index + 1)
+        self.assertGreater(index, launch(machine))
         for old, new, expected in (("channel = 0 : i32", "channel = 1 : i32", "DMA.WAIT has no pending DMA transfer"),
                                    (f"{TRANSFER} = 0 : i32", f"{TRANSFER} = 1 : i32", "DMA.WAIT must match"),
                                    (f", {TRANSFER} = 0 : i32", "", "DMA.WAIT must match")):

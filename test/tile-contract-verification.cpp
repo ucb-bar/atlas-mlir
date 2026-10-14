@@ -21,11 +21,9 @@ constexpr StringLiteral source = R"mlir(module {
     %s1, %x = "atlas.virtual_input_fp8"(%s0) {index = 2 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_fp8)
     %s2, %seed = "atlas.virtual_input_bf16"(%s1) {index = 1 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
     %packed = "atlas.virtual_pack_fp8"(%seed) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8
-    %s3, %pending = "atlas.virtual_dma_load_bf16"(%s2, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_load_bf16)
-    %s4, %loaded = "atlas.virtual_dma_await_bf16"(%s3, %pending) : (!atlas.virtual_state, !atlas.virtual_dma_load_bf16) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %s5, %store = "atlas.virtual_dma_store_bf16"(%s4, %loaded, %dst, %size) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_dma_store)
-    %s6 = "atlas.virtual_dma_wait"(%s5, %store) : (!atlas.virtual_state, !atlas.virtual_dma_store) -> !atlas.virtual_state
-    %s7 = "atlas.virtual_output_bf16"(%s6, %seed) {index = 1 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    %s3, %loaded = "atlas.virtual_dma_load_bf16"(%s2, %addr, %size) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %s5 = "atlas.virtual_dma_store_bf16"(%s3, %loaded, %dst, %size) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+    %s7 = "atlas.virtual_output_bf16"(%s5, %seed) {index = 1 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
     return %s7 : !atlas.virtual_state
   }
 })mlir";
@@ -35,7 +33,7 @@ SmallVector<VirtualDMAAssignment> transfersOf(func::FuncOp function) {
   SmallVector<VirtualDMAAssignment> transfers;
   function.walk([&](Operation *op) {
     if (isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op))
-      transfers.push_back({op->getResult(1), {7, 2, isa<VirtualDMALoadBF16Op>(op) ? 17u : 41u, 0x20000, 9, 7, 4}});
+      transfers.push_back({op->getResult(0), {7, 2, isa<VirtualDMALoadBF16Op>(op) ? 17u : 41u, 0x20000, 9, 7, 4}});
   });
   return transfers;
 }
@@ -51,8 +49,8 @@ struct Expected {
 void testSourceContract(MLIRContext &context, bool multipleBlocks) {
   std::string text = source.str();
   if (multipleBlocks) {
-    text = replace(text, "    %s7", "    cf.br ^next(%s6 : !atlas.virtual_state)\n  ^next(%next_state: !atlas.virtual_state):\n    %s7");
-    text = replace(text, "(%s6, %seed)", "(%next_state, %seed)");
+    text = replace(text, "    %s7", "    cf.br ^next(%s5 : !atlas.virtual_state)\n  ^next(%next_state: !atlas.virtual_state):\n    %s7");
+    text = replace(text, "(%s5, %seed)", "(%next_state, %seed)");
   }
   auto module = parse(context, text, "typed tile source parses");
   if (!module)

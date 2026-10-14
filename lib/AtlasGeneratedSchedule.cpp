@@ -39,6 +39,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(ModuleOp module) {
+  if (module->hasAttr(kAtlasDMAWaitsPending))
+    return module.emitOpError("generated stream still needs its DMA waits; "
+                              "run --insert-atlas-dma-waits first");
   auto ctx = buildAtlasVerificationContext(module, /*generated=*/true);
   return failed(ctx) ? failure() : verifyAtlasGeneratedSchedule(*ctx);
 }
