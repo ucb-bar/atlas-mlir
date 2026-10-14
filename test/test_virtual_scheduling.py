@@ -469,19 +469,14 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertLess(first_store, max(positions(ops, "mxu_reset")), ops)
 
     def test_row_reduce_overlaps_a_transfer_and_lowers(self) -> None:
+        # The first store issues before the second unit's reduction, which
+        # then runs while that store is in flight.
         source = re.sub(r'"atlas.virtual_vpu_unary"\((%h[01]_bias)\) \{kind = "relu"\}',
                         r'"atlas.virtual_vpu_reduce"(\1) {kind = "row_sum"}',
                         OVERLAP.read_text())
         ops = blocks(self.assert_preserves_program(source, "row_sum"))[0]["ops"]
-        pending, overlapped = 0, False
-        for op in ops:
-            if "dma_load" in op or "dma_store" in op:
-                pending += 1
-            elif "dma_await" in op or op == "atlas.virtual_dma_wait":
-                pending -= 1
-            elif op == "atlas.virtual_vpu_reduce":
-                overlapped |= pending > 0
-        self.assertTrue(overlapped, ops)
+        [first_store, _] = positions(ops, "dma_store_bf16")
+        self.assertLess(first_store, max(positions(ops, "vpu_reduce")), ops)
 
     def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
         # A store and a load are pending and complete load first. The PACK

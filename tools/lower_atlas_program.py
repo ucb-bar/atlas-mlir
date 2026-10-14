@@ -5,6 +5,7 @@ The output directory receives:
   1-virtual.mlir    the source, after --verify-atlas-virtual-stream
   2-scheduled.mlir  after --schedule-atlas-virtual
   3-allocated.mlir  untimed machine IR, after --lower-atlas-virtual-to-machine
+                    and --insert-atlas-dma-waits
   3-allocation.json the allocation plan: each value's registers, MXU slot or
                     DMA channel, peak demand against capacity per register
                     kind, the VMEM windows used, whether it fits, and every
@@ -42,7 +43,7 @@ def stages(source: Path, timing: str) -> list[tuple[str, str, Path | str, list[s
          ["--schedule-atlas-virtual", "--verify-atlas-virtual-stream"]),
         ("3-allocated.mlir", "atlas-opt", "2-scheduled.mlir",
          ["--lower-atlas-virtual-to-machine=allocation-report=3-allocation.json",
-          "--verify-atlas-generated-schedule"]),
+          "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule"]),
         ("4-timed.mlir", "atlas-opt", "3-allocated.mlir",
          [f"--{timing}", "--verify-atlas-timing", "--verify-atlas-generated-schedule"]),
         ("5-words.hex", "atlas-emit", "4-timed.mlir", []),
