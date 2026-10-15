@@ -13,9 +13,26 @@ ROOT = Path(__file__).absolute().parent
 SPEC = importlib.util.spec_from_file_location("mxu_trace_driver", ROOT / "run.py")
 DRIVER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DRIVER)
+VECTOR_SPEC = importlib.util.spec_from_file_location("vector_cases", ROOT / "prepare_vector.py")
+VECTOR = importlib.util.module_from_spec(VECTOR_SPEC)
+VECTOR_SPEC.loader.exec_module(VECTOR)
 
 
 class Controls(unittest.TestCase):
+    def test_pack_stream_and_mxu_halves_are_distinct(self):
+        source = [[row * 32 + column for column in range(32)] for row in range(32)]
+        packed = VECTOR.initial_source_rows({"kind": "pack", "source_bf16": source})
+        stream = [(packed[bank, row] >> (16 * lane)) & 65535
+                  for bank in range(2) for row in range(32) for lane in range(16)]
+        self.assertEqual(stream, list(range(1024)))
+        halves = VECTOR.initial_source_rows({"kind": "rescale", "source_bf16": source})
+        wrong_stream = [(halves[bank + 2, row] >> (16 * lane)) & 65535
+                        for bank in range(2) for row in range(32) for lane in range(16)]
+        self.assertNotEqual(wrong_stream, stream)
+        for row in range(32):
+            for column in range(32):
+                self.assertEqual((halves[2 + column // 16, row] >> (16 * (column % 16))) & 65535, source[row][column])
+
     def test_lexical_refusal_precedes_filesystem(self):
         with patch.object(DRIVER.os, "lstat") as probe:
             for value in ("/allowed/HAMMER-copy/x", "/allowed/pre-vLsI/x", "/allowed/../x"):

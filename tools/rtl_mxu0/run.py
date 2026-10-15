@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one source-pinned MXU0 component and replay an existing encoded tile.
+"""Build a source-pinned MXU0 or VPU component and replay authenticated cases.
 
 Only manifest-listed Scala files in three explicit main-source roots are copied.
 This does not elaborate AtlasCore or run an instruction stream, DMA, or an SoC.
@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -75,8 +76,21 @@ def copy_source(source, destination, expected):
 
 
 def version(command, expected, env=None, cwd=None):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True, env=env, cwd=cwd)
-    text = result.stdout + result.stderr
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               env=env, cwd=cwd, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise
+    if process.returncode:
+        raise RuntimeError(f"Tool version command failed: {command}: {stdout + stderr}")
+    text = stdout + stderr
     if expected not in text:
         raise ValueError(f"Unexpected tool version for {command}: {text}")
     return {"command": command, "text": text.strip()}
@@ -160,38 +174,62 @@ def prepare_case(case, out):
 def run(args):
     started = time.monotonic()
     support = safe_path(Path(__file__).absolute().parent)
+    vector = args.vector_from is not None
+    harness = "WorkloadVectorTraceTest.scala" if vector else "WorkloadMxuTraceTest.scala"
+    names = ["run.py", "verilator_wrapper.py", "build.mill", harness]
+    if vector:
+        names.append("prepare_vector.py")
+    support_before = {name: identity(support / name) for name in names}
     for name in ("run.py", "verilator_wrapper.py"):
         ast.parse(safe_path(support / name).read_text())
     out = safe_path(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    receipt = {"status": "preparing", "claim": "MXU0 component RTL only; no full program, DMA or SoC timing",
+    receipt = {"status": "preparing", "claim": ("VPU pack/rescale component RTL only" if vector else "MXU0 component RTL only") + "; no full program, DMA or SoC timing",
+               "engine": "vector" if vector else "mxu0",
                "rtl_revision": RTL_REVISION, "python": sys.version, "command": sys.argv,
                "cwd": str(Path.cwd()), "pid": os.getpid(), "source_closure": []}
     receipt_path = out / "receipt.json"
     write_json(receipt_path, receipt)
     try:
-        if args.cases is not None:
-            receipt["case_manifest"] = identity(args.cases)
-            manifest_cases = json.loads(args.cases.read_text())
-            if manifest_cases["schema_version"] != 1:
-                raise ValueError("Unsupported case manifest schema")
-            cases = manifest_cases["cases"]
+        if vector:
+            if args.cases is not None or args.input is not None or args.oracle is not None or not args.mxu_receipt_sha256:
+                raise ValueError("Vector mode requires only --vector-from and --mxu-receipt-sha256")
+            copy_source(support / "prepare_vector.py", out / "prepare_vector.py", support_before["prepare_vector.py"]["sha256"])
+            spec = importlib.util.spec_from_file_location("frozen_vector_preparation", out / "prepare_vector.py")
+            vector_preparation = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(vector_preparation)
+            prepared, provenance = vector_preparation.prepare(
+                SimpleNamespace(safe_path=safe_path, identity=identity), args.vector_from, args.mxu_receipt_sha256)
+            source_bindings = provenance["source_records"]
+            receipt["vector_cases"] = provenance["cases"]
+            receipt["vector_source_records"] = source_bindings
+            source_bindings.append(identity(out / "prepare_vector.py", support_before["prepare_vector.py"]["sha256"]))
+            write_json(out / "input.json", prepared)
+            receipt["input"] = identity(out / "input.json")
         else:
-            if args.input is None or args.oracle is None:
-                raise ValueError("Provide --cases, or both --input and --oracle")
-            cases = [{"id": "resnet-unit", "input": str(args.input), "oracle": str(args.oracle),
-                      "receipt_sha256": RECEIPT_SHA, "source_npz_sha256": SOURCE_NPZ_SHA,
-                      "controls": True}]
-        if not cases or len(cases) > 8 or len({case["id"] for case in cases}) != len(cases):
-            raise ValueError("Expected one to eight uniquely named cases")
-        prepared, provenance = [], []
-        for case in cases:
-            data, binding = prepare_case(case, out)
-            prepared.append(data)
-            provenance.append(binding)
-        write_json(out / "input.json", {"schema_version": 2, "cases": prepared})
-        receipt["input"] = identity(out / "input.json")
-        receipt["cases"] = provenance
+            if args.cases is not None:
+                receipt["case_manifest"] = identity(args.cases)
+                manifest_cases = json.loads(args.cases.read_text())
+                if manifest_cases["schema_version"] != 1:
+                    raise ValueError("Unsupported case manifest schema")
+                cases = manifest_cases["cases"]
+            else:
+                if args.input is None or args.oracle is None:
+                    raise ValueError("Provide --cases, or both --input and --oracle")
+                cases = [{"id": "resnet-unit", "input": str(args.input), "oracle": str(args.oracle),
+                          "receipt_sha256": RECEIPT_SHA, "source_npz_sha256": SOURCE_NPZ_SHA,
+                          "controls": True}]
+            if not cases or len(cases) > 8 or len({case["id"] for case in cases}) != len(cases):
+                raise ValueError("Expected one to eight uniquely named cases")
+            prepared, provenance = [], []
+            for case in cases:
+                data, binding = prepare_case(case, out)
+                prepared.append(data)
+                provenance.append(binding)
+            write_json(out / "input.json", {"schema_version": 2, "cases": prepared})
+            receipt["input"] = identity(out / "input.json")
+            receipt["cases"] = provenance
+            source_bindings = [record for case in provenance for record in case["source_records"]]
         revision = subprocess.run(["git", "-C", str(args.rtl_root), "-c", "submodule.recurse=false",
                                    "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
         if revision != RTL_REVISION:
@@ -216,13 +254,15 @@ def run(args):
             raise ValueError("A declared main source root was empty")
         receipt["source_counts"] = counts
         for name, destination in (("build.mill", out / "build.mill"),
-                                  ("WorkloadMxuTraceTest.scala", out / "harness/WorkloadMxuTraceTest.scala"),
+                                  (harness, out / "harness" / harness),
                                   ("verilator_wrapper.py", out / "bin/verilator")):
-            source = identity(support / name)
+            source = support_before[name]
             copy_source(support / name, destination, source["sha256"])
             receipt.setdefault("owned_support", []).append(source)
         (out / "bin/verilator").chmod(0o755)
-        receipt["owned_support"].append(identity(__file__))
+        receipt["owned_support"].append(support_before["run.py"])
+        if vector:
+            receipt["owned_support"].append(support_before["prepare_vector.py"])
         receipt["tools"] = {name: identity(value) for name, value in
                             (("mill", args.mill), ("java", args.java), ("verilator", args.verilator),
                              ("firtool", args.firtool))}
@@ -256,7 +296,7 @@ def run(args):
             "java": version([str(args.java), "-version"], 'version "17.'),
             "verilator": version([str(args.verilator), "--version"], "Verilator 5."),
             "firtool": version([str(args.firtool), "--version"], "1.128.0"),
-            "mill": version(["/bin/bash", str(args.mill), "--version"], "0.13.0-M0", env=env, cwd=out),
+            "mill": version(["/bin/bash", str(args.mill), "--no-server", "--version"], "0.13.0-M0", env=env, cwd=out),
             "cxx": version([str(cxx), "--version"], "13.2.0"),
         }
         allowed_cpus = sorted(os.sched_getaffinity(0))[:3]
@@ -264,7 +304,8 @@ def run(args):
             raise ValueError("Three allowed CPUs are required for this build lease")
         os.sched_setaffinity(0, allowed_cpus)
         receipt["cpu_affinity"] = allowed_cpus
-        command = ["/bin/bash", str(args.mill), "--no-server", "-j", "1", "atlas.test.testOnly", "atlas.sota.WorkloadMxuTraceTest"]
+        test_class = "atlas.sota.WorkloadVectorTraceTest" if vector else "atlas.sota.WorkloadMxuTraceTest"
+        command = ["/bin/bash", str(args.mill), "--no-server", "-j", "1", "atlas.test.testOnly", test_class]
         receipt.update(status="building_and_running", build_command=command)
         write_json(receipt_path, receipt)
         with (out / "build.log").open("w") as log:
@@ -287,34 +328,38 @@ def run(args):
         if exit_code:
             raise RuntimeError(f"Mill test failed with exit {exit_code}; see {out / 'build.log'}")
         traces = json.loads((out / "trace.json").read_text())
-        expected_runs = {(case["id"], "normal", repeat) for case in prepared for repeat in range(2)}
-        expected_runs.update((case["id"], name, 0) for case in prepared for name in case["controls"])
-        if {(trace["case_id"], trace["run_kind"], trace["repeat"]) for trace in traces} != expected_runs or len(traces) != len(expected_runs):
-            raise AssertionError("Missing or duplicate initialized RTL cases")
-        for trace in traces:
-            case = next(case for case in prepared if case["id"] == trace["case_id"])
-            declared = case["expected_bf16"] if trace["run_kind"] == "normal" else case["controls"][trace["run_kind"]]
-            if trace["declared_mismatches"] or trace["mreg_write_rows"] != 64 or trace["unique_output_rows"] != 64 or not trace["quiet_after_margin"]:
-                raise AssertionError("RTL output, extent or guard gate failed")
-            if not np.array_equal(np.asarray(trace["actual_bf16"], dtype=np.uint16), np.asarray(declared, dtype=np.uint16)):
-                raise AssertionError("Raw RTL words differ from independently declared arithmetic")
-            if bool(trace["mismatches"]) != (trace["run_kind"] != "normal"):
-                raise AssertionError("Hardware mutation refusal did not witness the expected failure")
+        if vector:
+            execution_summary = vector_preparation.validate(prepared, traces)
+        else:
+            expected_runs = {(case["id"], "normal", repeat) for case in prepared for repeat in range(2)}
+            expected_runs.update((case["id"], name, 0) for case in prepared for name in case["controls"])
+            if {(trace["case_id"], trace["run_kind"], trace["repeat"]) for trace in traces} != expected_runs or len(traces) != len(expected_runs):
+                raise AssertionError("Missing or duplicate initialized RTL cases")
+            for trace in traces:
+                case = next(case for case in prepared if case["id"] == trace["case_id"])
+                declared = case["expected_bf16"] if trace["run_kind"] == "normal" else case["controls"][trace["run_kind"]]
+                if trace["declared_mismatches"] or trace["mreg_write_rows"] != 64 or trace["unique_output_rows"] != 64 or not trace["quiet_after_margin"]:
+                    raise AssertionError("RTL output, extent or guard gate failed")
+                if not np.array_equal(np.asarray(trace["actual_bf16"], dtype=np.uint16), np.asarray(declared, dtype=np.uint16)):
+                    raise AssertionError("Raw RTL words differ from independently declared arithmetic")
+                if bool(trace["mismatches"]) != (trace["run_kind"] != "normal"):
+                    raise AssertionError("Hardware mutation refusal did not witness the expected failure")
+            execution_summary = {"repeats_per_normal_case": 2, "raw_bf16_words_per_run": 1024,
+                                 "hardware_negative_controls": sum(len(case["controls"]) for case in prepared),
+                                 "output_vpu_rescale_executed": False}
         for source in receipt["source_closure"]:
             identity(args.rtl_root / source["relative"], source["sha256"])
             identity(source_root / source["relative"], source["sha256"])
         bindings = receipt["owned_support"] + list(receipt["tools"].values()) + runtimes
-        bindings += [record for case in provenance for record in case["source_records"]]
+        bindings += source_bindings
         bindings += [receipt[key] for key in ("provenance_manifest", "input", "verilator_runtime_header")]
         if "case_manifest" in receipt:
             bindings.append(receipt["case_manifest"])
         for value in bindings:
             identity(value["path"], value["sha256"])
-        receipt.update(status="passed_component_rtl", repeats_per_normal_case=2, raw_bf16_words_per_run=1024,
-                       hardware_negative_controls=sum(len(case["controls"]) for case in prepared),
-                       caller_inputs_and_mreg_guards_preserved=True, source_bookends_verified=True,
-                       full_program_executed=False, dma_executed=False, output_vpu_rescale_executed=False,
-                       trace=identity(out / "trace.json"), input=identity(out / "input.json"))
+        receipt.update(status="passed_component_rtl", caller_inputs_and_mreg_guards_preserved=True,
+                       source_bookends_verified=True, full_program_executed=False, dma_executed=False,
+                       trace=identity(out / "trace.json"), input=identity(out / "input.json"), **execution_summary)
     except BaseException as error:
         receipt.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
         raise
@@ -329,8 +374,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("rtl-root", "provenance", "mill", "java", "verilator", "firtool", "out"):
         parser.add_argument("--" + name, type=safe_path, required=True)
-    for name in ("input", "oracle", "cases"):
+    for name in ("input", "oracle", "cases", "vector-from"):
         parser.add_argument("--" + name, type=safe_path)
+    parser.add_argument("--mxu-receipt-sha256")
     parser.add_argument("--timeout", type=int, default=1800)
     run(parser.parse_args())
 
