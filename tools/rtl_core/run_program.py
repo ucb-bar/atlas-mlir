@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.dont_write_bytecode=True
-HELPER_SHA="80c9ec02d2e6b323cd3c2629750bac934ff02988561ea9c1468ac2f29e694505"
+HELPER_SHA="2b089e369bee6f8d540c588e089b96395d82a18b2ec22edc95983e6a1764b6c4"
 
 
 def module(path,name):

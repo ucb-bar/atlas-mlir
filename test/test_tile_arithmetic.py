@@ -141,6 +141,43 @@ class TileArithmeticTest(unittest.TestCase):
                 load_bundle(args)
             load.assert_not_called()
 
+    def test_path_components_are_refused_before_normalization_or_stat(self):
+        from run_model_tile import safe_path
+        with patch.object(pathlib.Path, "is_symlink", side_effect=AssertionError("metadata access")) as access:
+            for value in ("/unread/../file", "/unread/HaMmEr/../file", "/unread/VlSi/../file"):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    safe_path(value)
+            access.assert_not_called()
+
+    def test_relative_path_rechecks_absolute_components_before_stat(self):
+        from run_model_tile import safe_path
+        for expanded in ("/unread/HaMmEr/file", "/unread/VlSi/file", "/unread/../file"):
+            with self.subTest(expanded=expanded), \
+                    patch.object(pathlib.Path, "absolute", return_value=pathlib.Path(expanded)), \
+                    patch.object(pathlib.Path, "is_symlink", side_effect=AssertionError("metadata access")) as access:
+                with self.assertRaises(ValueError):
+                    safe_path("file")
+                access.assert_not_called()
+
+    def test_archive_metadata_is_admitted_before_input_hash(self):
+        import run_model_tile as runner
+        members = [SimpleNamespace(filename="A.npy", external_attr=0)]
+        bad_members = ([SimpleNamespace(filename=name, external_attr=0)]
+                       for name in ("../A.npy", "/A.npy", "a\\b.npy", "a/HaMmEr/A.npy", "VlSi.npy"))
+        with patch.object(runner, "safe_path", side_effect=pathlib.Path), \
+                patch.object(runner.zipfile, "ZipFile") as archive, \
+                patch.object(pathlib.Path, "read_bytes", return_value=b"archive") as contents:
+            metadata = archive.return_value.__enter__.return_value
+            metadata.infolist.return_value = members
+            self.assertEqual(len(runner.sha256("/not-opened.npz")), 64)
+            contents.reset_mock()
+            for entries in [*bad_members, members * 2,
+                            [SimpleNamespace(filename="A.npy", external_attr=0o120777 << 16)]]:
+                metadata.infolist.return_value = entries
+                with self.subTest(entries=entries), self.assertRaises(ValueError):
+                    runner.input_sources(SimpleNamespace(input="/not-opened.npz", manifest=None))
+            contents.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

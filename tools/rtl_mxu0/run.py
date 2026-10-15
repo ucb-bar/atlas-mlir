@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -47,9 +48,28 @@ def safe_path(value):
     return path
 
 
+def preflight_archive(path):
+    """Admit ZIP member metadata before any archive hash, content read or copy."""
+    path = safe_path(path)
+    if path.suffix.lower() in (".npz", ".jar", ".pth"):
+        with zipfile.ZipFile(path) as archive:
+            names = []
+            for member in archive.infolist():
+                name = member.filename
+                if (not name or name.startswith(("/", "\\")) or "\\" in name or ":" in name
+                        or any(part in ("", ".", "..") or any(bad in part.lower() for bad in ("hammer", "vlsi"))
+                               for part in name.rstrip("/").split("/"))
+                        or stat.S_ISLNK(member.external_attr >> 16)):
+                    raise ValueError("Unadmitted archive member path")
+                names.append(name)
+            if len(names) != len(set(names)):
+                raise ValueError("Duplicate archive members")
+    return path
+
+
 def digest(path):
     result = hashlib.sha256()
-    with safe_path(path).open("rb") as stream:
+    with preflight_archive(path).open("rb") as stream:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             result.update(block)
     return result.hexdigest()

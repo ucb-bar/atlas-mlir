@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import resource
 import struct
+import stat
 import subprocess
 import sys
 import time
@@ -34,9 +35,12 @@ class OutputMismatch(AssertionError):
 
 
 def safe_path(value):
-    path = Path(os.path.abspath(value))
-    if any("hammer" in part.lower() or "vlsi" in part.lower() for part in path.parts):
-        raise ValueError("prohibited path component")
+    path = Path(value)
+    if ".." in path.parts or any("hammer" in part.lower() or "vlsi" in part.lower() for part in path.parts):
+        raise ValueError("prohibited or parent-traversing path component")
+    path = path.absolute()
+    if ".." in path.parts or any("hammer" in part.lower() or "vlsi" in part.lower() for part in path.parts):
+        raise ValueError("prohibited or parent-traversing path component")
     # Refuse symlinks rather than resolve an unreviewed destination indirectly.
     for prefix in (*reversed(path.parents), path):
         if prefix.is_symlink():
@@ -44,8 +48,27 @@ def safe_path(value):
     return path
 
 
+def preflight_archive(path):
+    """Admit ZIP member metadata before any archive hash, content read or copy."""
+    path = safe_path(path)
+    if path.suffix.lower() in (".npz", ".jar", ".pth"):
+        with zipfile.ZipFile(path) as archive:
+            names = []
+            for member in archive.infolist():
+                name = member.filename
+                if (not name or name.startswith(("/", "\\")) or "\\" in name or ":" in name
+                        or any(part in ("", ".", "..") or any(bad in part.lower() for bad in ("hammer", "vlsi"))
+                               for part in name.rstrip("/").split("/"))
+                        or stat.S_ISLNK(member.external_attr >> 16)):
+                    raise ValueError("Unadmitted archive member path")
+                names.append(name)
+            if len(names) != len(set(names)):
+                raise ValueError("Duplicate archive members")
+    return path
+
+
 def sha256(path):
-    return hashlib.sha256(safe_path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(preflight_archive(path).read_bytes()).hexdigest()
 
 
 def write_json(path, value):
@@ -500,7 +523,7 @@ def main():
         receipt["max_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         receipt["artifacts"] = {path.name: sha256(path) for path in out.iterdir()
                                 if not any(s in path.name.lower() for s in ("hammer", "vlsi"))
-                                and path.is_file() and path.name != "receipt.json"}
+                                and safe_path(path).is_file() and path.name != "receipt.json"}
         write_json(out / "receipt.json", receipt)
     print(json.dumps({"status": receipt["status"], "shape": receipt["shape"],
                       "cycles": [run["cycles"] for run in receipt["runs"]], "out": str(out)}))

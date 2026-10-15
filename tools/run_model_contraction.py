@@ -165,7 +165,7 @@ def main():
         receipt["max_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         receipt["artifacts"] = {path.name: sha256(path) for path in out.iterdir()
                                 if not any(s in path.name.lower() for s in ("hammer", "vlsi"))
-                                and path.is_file() and path.name != "receipt.json"}
+                                and safe_path(path).is_file() and path.name != "receipt.json"}
         write_json(out / "receipt.json", receipt)
     print(json.dumps({"status": receipt["status"], "shape": receipt["shape"],
                       "tiles": len(receipt["tiles"]), "model_cycles": receipt["total_model_cycles"]}))

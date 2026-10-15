@@ -1,6 +1,9 @@
 """Fail-closed metadata controls; these do not represent model executions."""
 from pathlib import Path
 import copy
+import ast
+import hashlib
+import json
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -18,7 +21,7 @@ class ReusedEvidenceAdmission(unittest.TestCase):
                 else:
                     self.assertEqual(preparation.control_payload_path(support, Path("/unread")).name, present[0])
 
-    def test_only_two_exact_producer_profiles_are_admitted(self):
+    def test_only_fixed_producer_profiles_are_admitted(self):
         epochs = sorted(preparation.ARITHMETIC_EPOCHS)
         for epoch in epochs:
             code = dict(zip(preparation.PRODUCER_NAMES, epoch))
@@ -84,6 +87,119 @@ class ReusedEvidenceAdmission(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "module/curve/source"):
                     preparation.reused_arithmetic(SimpleNamespace(safe_path=lambda path: path), Path("/unread"), changed, b"", root)
                 access.assert_not_called()
+
+    def receipt(self, epoch, mode="none", shape=(64, 64, 64)):
+        m, k, n = shape
+        code = dict(zip(preparation.PRODUCER_NAMES, epoch))
+        flags = {"none": [], "resident_a_v1": ["--resident-a"],
+                 "resident_b_v1": ["--resident-b"],
+                 "resident_b_pretransposed_v1": ["--resident-b", "--pretranspose-resident-b"]}
+        value = {"code_before": code, "code_after": code.copy(), "command": ["producer.py"] + flags[mode]}
+        if mode != "none":
+            operand = "a" if mode == "resident_a_v1" else "b"
+            value.update(resident_operand_reuse_claim=True, operand_reuse={"mode": mode,
+                         "resident_" + operand + "_bytes": m * k if operand == "a" else k * n,
+                         "resident_" + operand + "_vmem_byte_base": 0x40000})
+        elif epoch == preparation.RELEASE_EPOCH:
+            value.update(resident_operand_reuse_claim=False,
+                         operand_reuse={"mode": "none", "resident_b_bytes": 0, "resident_b_vmem_byte_base": None})
+        return value
+
+    def test_current_release_and_historical_mode_traffic(self):
+        optimized = (preparation.RESIDENT_A_EPOCH, preparation.RESIDENT_B_EPOCH,
+                     preparation.PRETRANSPOSED_B_EPOCH, preparation.RELEASE_EPOCH)
+        baseline = preparation.ARITHMETIC_EPOCHS - set(optimized)
+        self.assertEqual(len(baseline), 2)
+        for epoch in baseline:
+            for claim in (None, False):
+                old = self.receipt(epoch)
+                old['resident_operand_reuse_claim'] = claim
+                self.assertEqual(preparation.requested_traffic(old, 64, 64, 64),
+                                 {"load_bytes": 16384, "store_bytes": 8192})
+        modes = ("none", "resident_a_v1", "resident_b_v1", "resident_b_pretransposed_v1")
+        for mode in modes:
+            expected = 16384 if mode == "none" else 12288
+            self.assertEqual(preparation.requested_traffic(self.receipt(preparation.RELEASE_EPOCH, mode), 64, 64, 64),
+                             {"load_bytes": expected, "store_bytes": 8192})
+        for epoch, qualified in zip(optimized[:3], modes[1:]):
+            for mode in modes:
+                value = self.receipt(epoch, mode)
+                if mode == qualified:
+                    self.assertEqual(preparation.requested_traffic(value, 64, 64, 64)["load_bytes"], 12288)
+                else:
+                    with self.assertRaises(ValueError): preparation.requested_traffic(value, 64, 64, 64)
+        for epoch in baseline:
+            for mode in modes[1:]:
+                with self.assertRaises(ValueError): preparation.requested_traffic(self.receipt(epoch, mode), 64, 64, 64)
+
+    def test_asymmetric_workload_traffic_and_bank_boundaries(self):
+        cases = [((3136, 64, 64), "resident_b_v1", 405504, 401408),
+                 ((3136, 576, 64), "resident_b_pretransposed_v1", 3649536, 401408),
+                 ((3136, 64, 256), "resident_b_v1", 1622016, 1605632),
+                 ((192, 960, 960), "resident_a_v1", 5713920, 368640),
+                 ((192, 960, 320), "resident_a_v1", 2027520, 122880),
+                 ((128, 2048, 2048), "resident_a_v1", 17039360, 524288),
+                 ((128, 2048, 256), "resident_a_v1", 2359296, 65536)]
+        for shape, mode, loads, stores in cases:
+            with self.subTest(shape=shape, mode=mode):
+                self.assertEqual(preparation.requested_traffic(self.receipt(preparation.RELEASE_EPOCH, mode, shape), *shape),
+                                 {"load_bytes": loads, "store_bytes": stores})
+        shape = (32, 1024, 256)
+        preparation.requested_traffic(self.receipt(preparation.RELEASE_EPOCH, "resident_b_v1", shape), *shape)
+        for shape, mode in [((160, 2048, 256), "resident_a_v1"), ((32, 1056, 256), "resident_b_v1"),
+                            ((32, 1056, 256), "resident_b_pretransposed_v1")]:
+            with self.assertRaises(ValueError):
+                preparation.requested_traffic(self.receipt(preparation.RELEASE_EPOCH, mode, shape), *shape)
+
+    def test_reuse_flags_refuse_aliases_duplicates_and_conflicts(self):
+        for mode in ("none", "resident_a_v1", "resident_b_v1", "resident_b_pretransposed_v1"):
+            good = self.receipt(preparation.RELEASE_EPOCH, mode)
+            for extra in ("--resident-a", "--resident-b", "--pretranspose-resident-b", "--resident-a=true",
+                          "--resident-b=false", "--resident-broken", "--pretranspose-resident-b=true"):
+                bad = copy.deepcopy(good); bad['command'].append(extra)
+                with self.subTest(mode=mode, extra=extra), self.assertRaises(ValueError):
+                    preparation.requested_traffic(bad, 64, 64, 64)
+        for command in (None, "--resident-a", ["producer.py", 1]):
+            bad = self.receipt(preparation.RELEASE_EPOCH); bad['command'] = command
+            with self.assertRaises(ValueError): preparation.requested_traffic(bad, 64, 64, 64)
+
+    def test_reuse_markers_and_claims_have_exact_types_and_keys(self):
+        for mode in ("none", "resident_a_v1", "resident_b_v1", "resident_b_pretransposed_v1"):
+            good = self.receipt(preparation.RELEASE_EPOCH, mode)
+            for key, value in (("operand_reuse", None), ("operand_reuse", {}), ("operand_reuse", {"mode": "unknown"}),
+                               ("resident_operand_reuse_claim", 0 if mode == "none" else 1)):
+                bad = copy.deepcopy(good); bad[key] = value
+                with self.assertRaises(ValueError): preparation.requested_traffic(bad, 64, 64, 64)
+            for key in [key for key in good['operand_reuse'] if key.endswith(('bytes', 'byte_base'))]:
+                original = good['operand_reuse'][key]
+                for value in ([0.0, False] if original == 0 else [float(original), True, 0] if original is not None else [0, False]):
+                    bad = copy.deepcopy(good); bad['operand_reuse'][key] = value
+                    with self.assertRaises(ValueError): preparation.requested_traffic(bad, 64, 64, 64)
+            bad = copy.deepcopy(good); bad['operand_reuse']['unknown'] = 1
+            with self.assertRaises(ValueError): preparation.requested_traffic(bad, 64, 64, 64)
+
+    def test_unknown_epoch_or_shape_refuses_before_artifact_copy(self):
+        good = self.receipt(preparation.RELEASE_EPOCH)
+        bad = copy.deepcopy(good); bad['code_before']['run_model_tile.py'] = '0' * 64
+        bad['code_after'] = bad['code_before'].copy()
+        for receipt in (bad, dict(good, code_after={})):
+            with self.assertRaises(ValueError): preparation.requested_traffic(receipt, 64, 64, 64)
+        for shape in ((True, 64, 64), (64.0, 64, 64), (0, 64, 64), (64, 33, 64)):
+            with self.assertRaises(ValueError): preparation.requested_traffic(good, *shape)
+        bad.update(status="passed_model_only", recipe="atlas_mxu0_fp8_tensor_pow2_bf16acc_v1", shape=[64, 64, 64])
+        support = SimpleNamespace(safe_path=Path, identity=mock.Mock(return_value={}), copy_source=mock.Mock())
+        with mock.patch.object(Path, "read_text", return_value=json.dumps(bad)), mock.patch.object(preparation.np, "load") as arrays:
+            with self.assertRaises(ValueError): preparation.prepare(support, Path('/unread'), 'receipt', Path('/oracle'), Path('/out'), False)
+            support.copy_source.assert_not_called(); arrays.assert_not_called()
+
+    def test_current_release_tuple_and_cold_replay_pin_match_sources(self):
+        root = Path(__file__).absolute().parents[1]
+        actual = tuple(hashlib.sha256((root / name).read_bytes()).hexdigest() for name in preparation.PRODUCER_NAMES)
+        self.assertEqual(actual, preparation.RELEASE_EPOCH)
+        tree = ast.parse(Path(__file__).with_name('prepare_cold_tile.py').read_text())
+        replay = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'REPLAY' for target in node.targets))
+        self.assertEqual(replay, hashlib.sha256(Path(preparation.__file__).read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":

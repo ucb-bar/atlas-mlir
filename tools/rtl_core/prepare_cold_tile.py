@@ -9,7 +9,7 @@ import numpy as np
 
 ORACLE = "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0"
 VALIDATOR = "7287428fafe48529dcf801333d58f12d8a2cc2707bdddbe2a58f5ee8109e5034"
-REPLAY = "1a47464fbaa8e6235722b24d952ae2067791b0dbcf5572ec971f4b08d7a2d942"
+REPLAY = "c81cf81b0fa7fe99675b4b59a5bdf0fa202b754d81d437f4e348cd4a860d3c0b"
 _canonical = None
 
 

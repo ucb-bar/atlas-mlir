@@ -5,7 +5,29 @@ from pathlib import Path
 import numpy as np
 
 
+RESIDENT_B_EPOCH = (
+    "2a0e480bf6b419c977486ca7f10fb696dabb0b18cc1739d8d077e5a69aeac8ce",
+    "fc76d7ce7e16aeea90f1c84fc0c250b0489d921fd54b3f3a04c46112961e410d",
+    "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0",
+)
+RESIDENT_A_EPOCH = (
+    "69b3acd8ed2516b8cfa7a7ab0d2973dd6b4c306fdb7bdfe0c8449507654197c2",
+    "fc76d7ce7e16aeea90f1c84fc0c250b0489d921fd54b3f3a04c46112961e410d",
+    "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0",
+)
+PRETRANSPOSED_B_EPOCH = (
+    "b5f417a1e847bd1be6133ccd4b9e89b5e4b5947a7ff1b694e7ca09ae576a6792",
+    "fc76d7ce7e16aeea90f1c84fc0c250b0489d921fd54b3f3a04c46112961e410d",
+    "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0",
+)
+# The release adds source admission; executed historical receipts keep their own epochs.
+RELEASE_EPOCH = (
+    "3589b96dac743fd1f607af9960b606adb8c0c15462a786422ea063091f5b25dd",
+    "ef6d7060e8372062eaa393501ed83d7908ede7f0bd8a8820bcd8f31fc3593498",
+    "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0",
+)
 ARITHMETIC_EPOCHS = {
+    RESIDENT_B_EPOCH, RESIDENT_A_EPOCH, PRETRANSPOSED_B_EPOCH, RELEASE_EPOCH,
     ("06c415e57e331c0260f8072056cab9ca7048510228130aec8c6cd004203d092b",
      "298930b20b85d0d9f1612969c032319396a8cce5e65ebf8ba64b9754f6dd3410",
      "7976cb9496e31fe9fcfa2bcbbaa2a84c9015c5c471b6c5fef71f5ee94aacc8b0"),
@@ -25,6 +47,48 @@ def producer_epoch(original):
     if epoch not in ARITHMETIC_EPOCHS:
         raise ValueError("Unknown or mixed complete-model producer epoch")
     return epoch
+
+
+def requested_traffic(original, m, k, n):
+    """Admit one fixed producer mode and derive its complete-program DMA bytes."""
+    epoch = producer_epoch(original)
+    if any(type(value) is not int or value <= 0 or value % 32 for value in (m, k, n)):
+        raise ValueError("Only complete physical tiles are admitted")
+    command = original.get("command", [])
+    flags = ("--resident-a", "--resident-b", "--pretranspose-resident-b")
+    if (not isinstance(command, list) or not all(isinstance(item, str) for item in command)
+            or any(command.count(flag) > 1 for flag in flags)
+            or any(item.startswith(flags) and item not in flags for item in command)):
+        raise ValueError("Ambiguous resident operand command flags")
+    a, b, pretranspose = (flag in command for flag in flags)
+    if a and b or pretranspose and not b:
+        raise ValueError("Conflicting resident operand flags")
+    if ((epoch == RESIDENT_A_EPOCH and (a, b, pretranspose) != (True, False, False))
+            or (epoch == RESIDENT_B_EPOCH and (a, b, pretranspose) != (False, True, False))
+            or (epoch == PRETRANSPOSED_B_EPOCH and (a, b, pretranspose) != (False, True, True))):
+        raise ValueError("Historical optimized epoch requires its qualified mode")
+    marker = original.get("operand_reuse")
+    claim = original.get("resident_operand_reuse_claim")
+    if epoch not in (RESIDENT_A_EPOCH, RESIDENT_B_EPOCH, PRETRANSPOSED_B_EPOCH, RELEASE_EPOCH):
+        if a or b or pretranspose or marker is not None or claim is not None and claim is not False:
+            raise ValueError("Baseline producer cannot claim operand reuse")
+        loads = 2 * m * k * (n // 32)
+    elif a or b:
+        operand, size = ("a", m * k) if a else ("b", k * n)
+        mode = "resident_a_v1" if a else "resident_b_pretransposed_v1" if pretranspose else "resident_b_v1"
+        size_key, base_key = "resident_" + operand + "_bytes", "resident_" + operand + "_vmem_byte_base"
+        if (claim is not True or marker != {"mode": mode, size_key: size, base_key: 0x40000}
+                or type(marker.get(size_key)) is not int or type(marker.get(base_key)) is not int
+                or size > 256 * 1024):
+            raise ValueError("Resident operand metadata or bank capacity differs")
+        loads = m * k + k * n * (m // 32) if a else m * k * (n // 32) + k * n
+    else:
+        if (epoch != RELEASE_EPOCH or claim is not False
+                or marker != {"mode": "none", "resident_b_bytes": 0, "resident_b_vmem_byte_base": None}
+                or type(marker.get("resident_b_bytes")) is not int):
+            raise ValueError("Release default operand metadata differs")
+        loads = 2 * m * k * (n // 32)
+    return {"load_bytes": loads, "store_bytes": 2 * m * n}
 
 
 def model_payload_path(support, source, artifacts):
@@ -113,6 +177,8 @@ def prepare(support, source, receipt_sha, oracle_path, out, controls, *, reuse_m
     recipe = original["recipe"]
     if recipe not in ("atlas_mxu0_fp8_unit_bf16acc_v1", "atlas_mxu0_fp8_tensor_pow2_bf16acc_v1"):
         raise ValueError("Unsupported source recipe")
+    m,k,n = original["shape"]
+    requested = requested_traffic(original, m, k, n)
     for name in ("initial-dram.bin", "program.bin", "encoded.npz", "expected-bf16-tiles.bin"):
         record = support.identity(source / name, original["artifacts"][name]); records.append(record)
         support.copy_source(record["path"], out / name, record["sha256"])
@@ -123,9 +189,6 @@ def prepare(support, source, receipt_sha, oracle_path, out, controls, *, reuse_m
     records.append(support.identity(out / "oracle.py", oracle["sha256"]))
     spec = importlib.util.spec_from_file_location("raw_program_oracle", out / "oracle.py")
     arithmetic = importlib.util.module_from_spec(spec); spec.loader.exec_module(arithmetic)
-    m,k,n = original["shape"]
-    if any(value <= 0 or value % 32 for value in (m,k,n)):
-        raise ValueError("Only complete physical tiles are admitted")
     with np.load(out / "encoded.npz", allow_pickle=False) as bundle:
         if set(bundle.files) != {"A","B"}:
             raise ValueError("Unexpected encoded operands")
@@ -139,7 +202,6 @@ def prepare(support, source, receipt_sha, oracle_path, out, controls, *, reuse_m
         raise ValueError("Unsupported non-aliasing memory contract")
     initial = (out / "initial-dram.bin").read_bytes()
     expected = (out / "expected-bf16-tiles.bin").read_bytes()
-    requested={"load_bytes":(m//32)*(n//32)*(2*k//32*1024),"store_bytes":m*n*2}
     if len(expected)!=m*n*2 or original["requested_dma"]!=requested:
         raise ValueError("Shape-derived output or DMA traffic differs")
     if initial != inputs+b"\xa5"*256+b"\xcd"*len(expected)+b"\x5a"*256:

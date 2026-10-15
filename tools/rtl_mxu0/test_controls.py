@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import runpy
 import stat
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -61,6 +62,34 @@ class Controls(unittest.TestCase):
         self.assertEqual(execute.call_args.args,
                          ("/allowed/verilator_bin", ["/allowed/verilator_bin", "--build", "-j", "2",
                           "-MAKEFLAGS", "-j 2 CXX=/allowed/cxx LINK=/allowed/cxx AR=/allowed/ar", "file.sv"]))
+
+    def test_archive_metadata_refuses_before_hash_or_copy(self):
+        invalid = [[SimpleNamespace(filename=name, external_attr=0)]
+                   for name in ("../x", "/x", "a\\x", "HaMmEr/x", "a/VLSI/x")]
+        invalid += [[SimpleNamespace(filename="A.npy", external_attr=0)] * 2,
+                    [SimpleNamespace(filename="A.npy", external_attr=stat.S_IFLNK << 16)]]
+        with patch.object(DRIVER, "safe_path", side_effect=Path), \
+                patch.object(DRIVER.zipfile, "ZipFile") as archive, \
+                patch.object(Path, "open", side_effect=AssertionError("content access")) as contents:
+            for members in invalid:
+                archive.return_value.__enter__.return_value.infolist.return_value = members
+                with self.subTest(members=members), self.assertRaises(ValueError):
+                    DRIVER.digest("/not-opened.npz")
+                with self.subTest(copy=members), self.assertRaises(ValueError):
+                    DRIVER.copy_source("/not-opened.npz", Path("/not-created.npz"), "unused")
+            contents.assert_not_called()
+
+    def test_admitted_archive_hashes_after_metadata(self):
+        import hashlib
+        import io
+        events = []
+        member = SimpleNamespace(filename="A.npy", external_attr=0)
+        with patch.object(DRIVER, "safe_path", side_effect=Path), \
+                patch.object(DRIVER.zipfile, "ZipFile") as archive, \
+                patch.object(Path, "open", side_effect=lambda *args: (events.append("content"), io.BytesIO(b"archive"))[1]):
+            archive.return_value.__enter__.return_value.infolist.side_effect = lambda: (events.append("metadata"), [member])[1]
+            self.assertEqual(DRIVER.digest("/not-opened.npz"), hashlib.sha256(b"archive").hexdigest())
+        self.assertEqual(events, ["metadata", "content"])
 
 
 if __name__ == "__main__":

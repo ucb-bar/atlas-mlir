@@ -21,9 +21,8 @@ def module(path, name):
 
 HERE = Path(__file__).absolute().parent
 prepare = module(HERE / "prepare_cold_tile.py", "test_cold_preparer")
-# Supply the already authenticated arithmetic dependency explicitly; never
-# search for a checkout or embed a developer artifact path in this test.
-oracle = Path(os.environ["ATLAS_COLD_TILE_ORACLE"]).absolute()
+# Use the local authenticated oracle; an explicit path can select a frozen copy.
+oracle = Path(os.environ.get("ATLAS_COLD_TILE_ORACLE", HERE.parent / "atlas_tile_arithmetic.py")).absolute()
 if ".." in oracle.parts or any(bad in part.lower() for part in oracle.parts for bad in ("hammer", "vlsi")):
     raise ValueError("Unadmitted arithmetic dependency path")
 current = Path(oracle.anchor)

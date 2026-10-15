@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
-HELPER_SHA = "80c9ec02d2e6b323cd3c2629750bac934ff02988561ea9c1468ac2f29e694505"
+HELPER_SHA = "2b089e369bee6f8d540c588e089b96395d82a18b2ec22edc95983e6a1764b6c4"
 RTL_SHA = "2ae0bef209df6db78c3de18e8f651bb43855cce9"
 ROOT_COUNTS = {"src/main/scala/atlas": 62,
                "dependencies/fpex/src/main/scala": 20,
@@ -51,6 +51,7 @@ def helper(path):
     import stat
     lexical(path)
     path = Path(path).absolute()
+    lexical(path)
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
@@ -65,7 +66,7 @@ def helper(path):
 
 
 def jar_metadata(path, support):
-    path = support.safe_path(path)
+    path = support.preflight_archive(path)
     # ZIP metadata first: never read/hash/copy content of an unadmitted archive.
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
@@ -230,9 +231,9 @@ def run(args):
         cache = support.safe_path(args.maven_root)
         runtime, compiler = [], []
         receipt["runtime_libraries"] = []
-        # The explicit SBT export is metadata only. Exclude every project JAR;
-        # map the known old cache prefix lexically, never follow its symlinks.
-        prefix = "/users/reednicolas/.cache/coursier/v1/https/repo1.maven.org/maven2/"
+        # The SBT export is metadata only. Select libraries under the explicit
+        # Maven root lexically; exclude project JARs and never follow symlinks.
+        prefix = str(cache).rstrip("/") + "/"
         for value in exported:
             lexical(value)
             if not value.startswith(prefix):
