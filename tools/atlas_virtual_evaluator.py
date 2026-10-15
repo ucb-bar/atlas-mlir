@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from itertools import zip_longest
+from itertools import pairwise, zip_longest
 from types import MappingProxyType
 from typing import Literal
 
@@ -95,7 +95,7 @@ def _memory_regions(regions: tuple[MemoryRegion, ...]) -> tuple[MemoryRegion, ..
     regions = tuple(regions)
     _require(all(isinstance(region, MemoryRegion) for region in regions), "memory must contain MemoryRegion snapshots")
     ordered = sorted(regions, key=lambda region: region.address)
-    for left, right in zip(ordered, ordered[1:]):
+    for left, right in pairwise(ordered):
         _require(left.address + len(left.data) <= right.address, "initial/result memory regions must not overlap")
     return regions
 
@@ -242,14 +242,14 @@ def _check_atlas_operation(op: Operation) -> None:
         _require(0 <= _integer_attribute(op, "code") <= 255, f"{name}: scale code must be in 0..255")
     if "kind" in attributes:
         kind = fields["kind"]
-        kinds_by_operation = {"vpu_unary": ("mov", "relu", "exp2", "recip"), "vpu_binary": ("add", "sub", "mul"), "vpu_reduce": ("row_sum", "row_min", "row_max")}
+        kinds_by_operation = {"vpu_unary": ("mov", "relu", "exp", "exp2", "recip"), "vpu_binary": ("add", "sub", "mul"), "vpu_reduce": ("row_sum", "row_min", "row_max")}
         allowed = kinds_by_operation[short]
         if not isinstance(kind, builtin.StringAttr) or kind.data not in allowed:
             raise UnsupportedVirtualMode(f"{name}: supported kinds are {allowed}")
     if short == "vpu_splat":
         _require(0 <= _integer_attribute(op, "bits") <= 65535, f"{name}: bits must be in 0..65535")
-    if short == "pack_fp8" and _integer_attribute(op, "scale_code") != 127:
-        raise UnsupportedVirtualMode(f"{name}: only scale_code 127 is admitted")
+    if short == "pack_fp8" and not 122 <= _integer_attribute(op, "scale_code") <= 128:
+        raise UnsupportedVirtualMode(f"{name}: scale_code must be in the admitted range 122..128")
 
 
 def _check_operation(op: Operation, *, flat: bool) -> None:
@@ -379,6 +379,10 @@ def evaluate_tile_operation(op: Operation, operands: tuple[Tile, ...]) -> Tile:
     kind = _atlas_fields(op)["kind"].data if name != "atlas.virtual_pack_fp8" else "pack_fp8"
     if kind == "mov":
         return operands[0]
+    if kind == "exp":
+        from atlas_mlir_native.exp_lane import vexp_bf16_bits
+
+        return Tile("bf16", tuple(vexp_bf16_bits(code) for code in operands[0].bits))
     torch, RtlNumerics = _numerics("VPU")
     # Reinterpret owned raw bits: floating-point conversion would lose encodings.
     owned = tuple(torch.tensor(tile.bits, dtype=torch.uint16).view(torch.bfloat16).reshape(32, 32) for tile in operands)

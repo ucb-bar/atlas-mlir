@@ -595,9 +595,10 @@ private:
   }
 
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
-    if (pack.getScaleCode() != 127)
+    // Only the E8M0 scale codes observed on the selected RTL are admitted.
+    if (pack.getScaleCode() < 122 || pack.getScaleCode() > 128)
       return pack.emitOpError(
-          "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
+          "virtual-to-machine pack admits observed E8M0 scale codes 122..128 only");
     Location loc = pack.getLoc();
     add("atlas.scalar_load", loc,
         {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
