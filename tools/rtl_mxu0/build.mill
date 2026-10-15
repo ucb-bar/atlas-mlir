@@ -1,0 +1,20 @@
+import mill._
+import mill.scalalib._
+import mill.scalalib.TestModule.ScalaTest
+
+object atlas extends ScalaModule {
+  def scalaVersion = "2.13.16"
+  def scalacOptions = Seq("-deprecation", "-feature", "-unchecked", "-language:reflectiveCalls")
+  def ivyDeps = Agg(ivy"org.chipsalliance::chisel:7.0.0-RC4")
+  def scalacPluginIvyDeps = Agg(ivy"org.chipsalliance:::chisel-plugin:7.0.0-RC4")
+  override def sources = Task.Sources {
+    val root = millSourcePath / os.up / "sources"
+    Seq(PathRef(root / "src/main/scala/atlas"),
+        PathRef(root / "dependencies/fpex/src/main/scala"),
+        PathRef(root / "dependencies/sp26-fp-units/src/main/scala"))
+  }
+  object test extends ScalaTests with ScalaTest {
+    def ivyDeps = super.ivyDeps() ++ Agg(ivy"org.scalatest::scalatest:3.2.19", ivy"com.lihaoyi::ujson:3.3.1")
+    override def sources = Task.Sources(millSourcePath / os.up / os.up / "harness")
+  }
+}
