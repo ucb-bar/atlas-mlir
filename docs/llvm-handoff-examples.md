@@ -5,13 +5,14 @@ produced by this out-of-tree package. They are not generated from PyTorch,
 Linalg, or Merlin's native selector. They do not qualify whole-model MLP or
 attention compilation.
 
-| Example | Intended instruction chain | Atlas words | Numbered stage bundle |
+| Example | Intended instruction chain | Atlas words | Checked-in source |
 | --- | --- | ---: | --- |
-| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [Atlas → LLVM → assembly → ELF](../examples/handoff/mlp_tile/01-atlas-machine.mlir) |
-| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [Atlas → LLVM → assembly → ELF](../examples/handoff/attention_tile/01-atlas-machine.mlir) |
+| [MLP tile](../test/examples/handoff_mlp_tile.mlir) | MXU0, BF16 ReLU, E8M0 pack, VMEM relayout, MXU1 | 102 | [Atlas machine MLIR](../examples/handoff/mlp_tile/01-atlas-machine.mlir) |
+| [Attention tile](../test/examples/handoff_attention_tile.mlir) | QKᵀ, row normalization, E8M0 pack, VMEM relayout, PV | 116 | [Atlas machine MLIR](../examples/handoff/attention_tile/01-atlas-machine.mlir) |
+| [Virtual SSA MLP tile](../test/examples/virtual_fp8_two_layer_mlp.mlir) | Generated MXU0, BF16 ReLU, unit-scale E8M0 pack and relayout, MXU1 | 109 | [Atlas SSA MLIR](../examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir) |
 
-The [examples index](../examples/handoff/README.md) links every numbered
-stage, both linked ELF files, disassemblies, and operation-to-word maps.
+The [examples index](../examples/handoff/README.md) shows how to regenerate
+the LLVM, assembly, ELF, disassembly, and operation-to-word map stages.
 
 Both inputs use fixed 32×32 FP8 tiles and already oriented weights. The MLP
 has no bias; the attention sequence has no mask or causal state. `SELI 127`
@@ -47,7 +48,7 @@ Atlas instruction. For example:
 llvm.call @atlas_emit_mxu_matmul() {atlas.fields = {acc_slot = 0 : i32, accumulate = false, src = 0 : i32, unit = 0 : i32, weight_slot = 0 : i32}, atlas.source_op = "atlas.mxu_matmul", atlas.word = 335544439 : i32, atlas.word_index = 26 : i32} : () -> ()
 ```
 
-The checked-in stage 02 files show the exact calls and values. These calls
+The generated structured LLVM files show the exact calls and values. These calls
 are compiler markers, not runtime functions. The LLVM dialect can carry
 per-instruction fields and annotations without changing LLVM. Before LLVM IR
 translation, `--finalize-atlas-llvm-calls` reconstructs the Atlas stream,
@@ -63,8 +64,8 @@ mlir-translate --mlir-to-llvmir out/mlp.encoded-llvm.mlir > out/mlp.ll
 ```
 
 The final stage has one function and one ordered, side-effecting inline assembly
-operation. The MLP snapshot starts as follows; the full checked-in files retain
-all 102 or 116 words:
+operation. The MLP output starts as follows; the generated files retain all
+102 or 116 words:
 
 ```mlir
 module {
@@ -75,7 +76,7 @@ module {
 }
 ```
 
-The real LLVM MLIR uses the precise word string shown in each snapshot. The
+The generated LLVM MLIR uses the precise emitted word string. The
 pass emits one block so LLVM keeps Atlas branch targets and delay-slot words
 adjacent. It is a void reset-entry program body, not a C-callable Atlas ABI.
 The `.word` stream is not executable on a generic host RISC-V CPU.
@@ -98,10 +99,10 @@ side-effecting inline-assembly operation contains all source words, compares
 the leading object words against `atlas-emit`, and checks that linking did not
 change `.text`. The linked ELF has entry `atlas_program` at zero. It records
 source and tool identity in `manifest.json`. `test/test_handoff_examples.py`
-compares every checked-in stage with fresh output from the pinned toolchain.
-Rebuild `atlas-opt` from this repo before reproducing the bundle. The snapshot
-was generated with unmodified LLVM/MLIR 23.0.0git; the available `ld.lld`
-18.1.3 only linked the LLVM-produced object. Linking does not qualify an
+generates the stages in a fresh temporary directory and checks their contents.
+Rebuild `atlas-opt` from this repo before reproducing the bundle. The reported
+run used unmodified LLVM/MLIR 23.0.0git; the available `ld.lld` 18.1.3 only
+linked the LLVM-produced object. Linking does not qualify an
 Atlas launch ABI, and generic RISC-V disassembly is not a semantic decode of
 Atlas custom operations.
 
@@ -115,7 +116,7 @@ preserved their three inputs and a DRAM guard, and performed 96 DMA reads and
 These are two directed smoke inputs, not a timing qualification or general
 model result. `test/test_handoff_examples.py` reproduces them when the selected
 standalone-core environment is supplied. It additionally extracts `.text`
-from each checked-in linked ELF and reruns one directed panel using those
+from each freshly generated linked ELF and reruns one directed panel using those
 exact LLVM-produced words; both halt and produce the expected 1,024 BF16
 cells.
 
@@ -135,8 +136,8 @@ shapes, a qualified schedule, or an integrated SoC launch.
 
 ## Delay-analysis handoff
 
-The structured LLVM snapshot retains operation names, physical fields, and
-instruction order. The final encoded LLVM snapshot is useful for object
+The structured LLVM stage retains operation names, physical fields, and
+instruction order. The final encoded LLVM stage is useful for object
 generation and exact byte comparison but has lost those roles. A delay
 scheduler can consume the **Atlas machine MLIR** or the structured LLVM-call
 stage with a source-bound timing/effects contract. Changes to an LLVM-call

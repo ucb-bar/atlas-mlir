@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -39,6 +40,9 @@ struct OpInfo {
 };
 
 const OpInfo *findOp(const std::string &name);
+// The BF16 VPU instruction for an atlas.vpu_unary, vpu_binary or vpu_reduce
+// kind, such as "exp2", "max" or "row_sum".
+std::string vpuMnemonic(const std::string &kind);
 bool hasOperand(const OpInfo &op, const std::string &token);
 bool isControlFlow(const OpInfo &op);
 
@@ -112,6 +116,9 @@ struct Footprint {
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
+// Supplied timing rules; the built-in footprintOf provider is the unqualified
+// npu-model rtl-match model, not an independently qualified RTL contract.
+using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
 const char *edgeKindName(EdgeKind k);
@@ -147,9 +154,7 @@ struct DepGraph {
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, 8>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    uint32_t dmaRegs = 0xFFFFFFFE,
                     const IncomingDma *incomingDma = nullptr);
-uint32_t dmaOperandRegisters(const std::vector<Instr> &instrs);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
 

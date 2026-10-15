@@ -1,4 +1,13 @@
 /build/
 /out/
+# Authored stage-zero/one examples are kept; derived handoff stages live in out/.
+/examples/handoff/mlp_tile/0[2-9]-*
+/examples/handoff/attention_tile/0[2-9]-*
+/examples/handoff/virtual_mlp/0[1-9]-*
+/examples/handoff/captured_mlp/0[1-9]-*
+/examples/handoff/*/atlas-*.json
+/examples/handoff/*/atlas-words.txt
+/examples/handoff/*/compiler-manifest.json
+/examples/handoff/*/constants/
 __pycache__/
 *.pyc

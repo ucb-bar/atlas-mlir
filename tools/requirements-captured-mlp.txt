@@ -1,0 +1,5 @@
+# Python compiler-side dependencies used for the bounded captured MLP run.
+# PyTorch and Model2MLIR are capture/evaluation dependencies, not compiler imports.
+xdsl==0.65.0
+numpy==2.4.6
+safetensors==0.7.0

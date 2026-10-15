@@ -6,12 +6,13 @@ include "mlir/IR/OpBase.td"
 def Atlas_Dialect : Dialect {
   let name = "atlas";
   let cppNamespace = "::mlir::atlas";
-  let summary = "Physical Atlas instruction stream with explicit state order";
+  let summary = "Atlas virtual register candidates and physical instruction streams";
   let description = [{
-    Hand-authored machine-stage reference for the selected Atlas RTL. Each operation
-    has one input and output state token so instruction issue order is explicit.
-    Physical tensor registers and slots are encoded as checked integer attributes.
-    This dialect does not claim to prove execution timing or arithmetic equivalence.
+    Hand-authored reference for the selected Atlas RTL. Virtual BF16 VPU
+    candidates carry SSA register values and are not encodable. Machine operations
+    have an explicit physical state chain; physical registers and slots remain
+    checked integer attributes. This dialect does not prove timing or arithmetic
+    equivalence.
   }];
   let useDefaultTypePrinterParser = 1;
   let extraClassDeclaration = [{ void registerTypes(); }];
