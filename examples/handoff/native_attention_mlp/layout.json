@@ -1,0 +1,25 @@
+{
+  "schema": "atlas.reset-entry-layout.v1",
+  "selected_rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "dram_window_base": "0x90000000",
+  "regions": [
+    {
+      "name": "inputs",
+      "kind": "input",
+      "address": "0x90001800",
+      "size_bytes": 11264
+    },
+    {
+      "name": "outputs",
+      "kind": "output",
+      "address": "0x90011800",
+      "size_bytes": 4096
+    },
+    {
+      "name": "output_guard",
+      "kind": "guard",
+      "address": "0x90012800",
+      "size_bytes": 32
+    }
+  ]
+}
