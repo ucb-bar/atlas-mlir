@@ -51,6 +51,16 @@ def run(args):
         for name in ("run_program.py","prepare_program.py"):
             record=bind(own/name)
             support.copy_source(record["path"],out/name,record["sha256"]);bind(out/name,record["sha256"])
+        if args.cpu is not None:
+            expected_probe=bind(own/"probe.py",probe_record["sha256"])
+            record=bind(own/"supervisor.py")
+            support.copy_source(record["path"],out/"supervisor.py",record["sha256"]);bind(out/"supervisor.py",record["sha256"])
+            cpu_guard=module(out/"supervisor.py","frozen_single_cpu_supervisor")
+            guard_sources=cpu_guard.source_records(support)
+            if guard_sources[1]!=expected_probe:
+                raise ValueError("CPU guard imported a probe outside the admitted source root")
+            records.extend(guard_sources)
+            receipt["single_cpu_budget"]={"cpu":args.cpu,"rss_limit_bytes":2*1024**3,"wall_seconds_per_run":600}
         preparation=module(out/"prepare_program.py","frozen_raw_preparation")
         data,inputs=preparation.prepare(support,args.input,args.input_sha256,args.oracle,out,args.controls)
         records.extend(inputs)
@@ -67,7 +77,11 @@ def run(args):
                     command=[executable["path"],case["program"],data["initial"],str(actual),str(trace),str(42+repeat),
                              str(args.max_cycles),str(memory["dram_base"]),str(memory["input_bytes"]),
                              str(memory["output_offset"]),str(memory["output_bytes"]),str(summary)]
-                    execution=probe.bounded(command,out,env,out/(stem+".log"),support)
+                    if args.cpu is None:
+                        execution=probe.bounded(command,out,env,out/(stem+".log"),support)
+                    else:
+                        execution=cpu_guard.bounded(command,out,env,out/(stem+".log"),support,
+                                                    affinity={args.cpu},rss_limit=2*1024**3,wall_seconds=600)
                     item={"id":case["id"],"repeat":repeat,"execution":execution}
                     receipt["runs"].append(item)
                     support.write_json(out/"receipt.json",receipt)
@@ -121,4 +135,5 @@ if __name__=="__main__":
     parser.add_argument("--controls",action="store_true")
     parser.add_argument("--prepare-only",action="store_true")
     parser.add_argument("--max-cycles",type=int,default=100000)
+    parser.add_argument("--cpu",type=int,help="Explicit single CPU for post-build replay; preserves the compile supervisor epoch")
     run(parser.parse_args())
