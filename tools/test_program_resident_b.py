@@ -61,11 +61,12 @@ def schedule(source):
         else:
             assert op in ("vmatpop.bf16.acc.mxu0", "vli.all", "vmul.bf16", "vstore"), op
         if op.startswith("v"):
+            line = re.sub(r"vload m0, 0\(x\d+\)", "vload m0, A", line)
             arithmetic.append(re.sub(r"vload m1, 0\(x\d+\)", "vload m1, B", line))
     raise AssertionError("symbolic schedule did not terminate")
 
 
-def verify(source, m, k, n, output_offset, *, resident_b):
+def verify(source, m, k, n, output_offset, *, resident_b=False, resident_a=False):
     products, stores, loads, arithmetic = schedule(source)
     expected = []
     for row in range(m // 32):
@@ -77,11 +78,18 @@ def verify(source, m, k, n, output_offset, *, resident_b):
     assert products == expected, "ordered operands or accumulator continuation changed"
     assert stores == [(output_offset + i * 2048, 0xa00, 2048) for i in range(m * n // 1024)], "output alias/layout"
     expected_loads = m * k * (n // 32) + k * n if resident_b else 2 * m * k * (n // 32)
+    if resident_a:
+        expected_loads = m * k + k * n * (m // 32)
     assert sum(item[2] for item in loads) == expected_loads
     if resident_b:
         b_loads = [item for item in loads if item[1] >= m * k]
         assert b_loads == [(0x40000 + i, m * k + i, 1024) for i in range(0, k * n, 1024)]
         assert all(address == 0x2000 or 0x40000 <= address < 0x80000 for address, _, _ in loads)
+    if resident_a:
+        a_loads = [item for item in loads if item[1] < m * k]
+        assert a_loads == [(0x40000 + i, i, 1024) for i in range(0, m * k, 1024)]
+        assert a_loads[-1][0] + 1024 == 0x40000 + m * k <= 0x80000
+        assert all(address == 0x2400 or 0x40000 <= address < 0x80000 for address, _, _ in loads)
     return arithmetic
 
 
