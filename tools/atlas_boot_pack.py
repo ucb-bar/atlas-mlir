@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Pack one Atlas reset-entry ELF object for the selected standalone core.
+"""Pack checked Atlas reset-entry instructions for the selected standalone core.
 
-This copies a validated complete .text function into IMEM words. It is not an
-ELF linker/loader, a C-callable ABI, or a proof that registers are initialized.
+The direct route uses atlas-emit output without sending Atlas instructions
+through LLVM. The legacy ELF-object route remains available for comparison.
+Neither route proves that registers are initialized or defines a C-callable ABI.
 """
 
 from __future__ import annotations
@@ -118,6 +119,62 @@ def validate_layout(layout: dict) -> dict:
                      "buffer_alignment_bytes": alignment,
                      "input_pointer_offset_bytes": offsets[0],
                      "output_pointer_offset_bytes": offsets[1]}}
+
+
+def validate_captured_layout(imported: dict, layout: dict,
+                             program_sha256: str) -> int:
+    """Check every imported physical tile fits its packaged DRAM region.
+
+    The compiler and emitter bind the instruction stream to the imported ABI.
+    This check only binds that ABI to the package layout; it does not prove
+    instruction-level memory effects.
+    """
+    if layout["schema"] != "atlas.reset-entry-layout.v1":
+        raise ValueError("captured import requires a direct reset-entry layout")
+    if (imported.get("schema") != "atlas.oot.captured_linalg_import.v1"
+            or imported.get("selected_rtl_revision") != layout["selected_rtl_revision"]
+            or imported.get("program", {}).get("program_sha256") != program_sha256):
+        raise ValueError("captured import identity differs from packaged program or RTL")
+
+    slots = imported.get("input_slots")
+    outputs = imported.get("outputs")
+    if outputs is None:
+        outputs = [imported.get("output")]
+    elif imported.get("output") is not None and outputs != [imported["output"]]:
+        raise ValueError("captured import has conflicting output descriptions")
+    if (not isinstance(slots, list) or not slots or not isinstance(outputs, list)
+            or not outputs or any(not isinstance(row, dict) for row in slots + outputs)):
+        raise ValueError("captured import has malformed physical slots")
+
+    def inside(kind: str, address: int, size: int) -> bool:
+        return any(row["kind"] == kind and row["address"] <= address
+                   and address + size <= row["address"] + row["size_bytes"]
+                   for row in layout["regions"])
+
+    input_base = slots[0].get("dram_address")
+    output_base = outputs[0].get("dram_address")
+    if type(input_base) is not int or type(output_base) is not int:
+        raise ValueError("captured import has noninteger DRAM bases")
+    for index, slot in enumerate(slots):
+        size = slot.get("payload_bytes")
+        reserved = slot.get("reserved_slot_bytes", size)
+        address = slot.get("dram_address")
+        if (type(slot.get("slot")) is not int or slot["slot"] != index
+                or slot.get("source_kind") not in ("input", "param", "generated")
+                or type(size) is not int or size not in (1024, 2048)
+                or type(reserved) is not int or reserved < size or reserved > 2048
+                or type(address) is not int or address != input_base + index * 2048
+                or not inside("input", address, reserved)):
+            raise ValueError(f"captured input slot {index} escapes packaged layout")
+    for index, output in enumerate(outputs):
+        address = output.get("dram_address")
+        if (type(output.get("index")) is not int or output["index"] != index
+                or output.get("payload_bytes") != 2048
+                or output.get("physical_layout") != "bf16_pair_halves"
+                or type(address) is not int or address != output_base + index * 2048
+                or not inside("output", address, 2048)):
+            raise ValueError(f"captured output {index} escapes packaged layout")
+    return len(outputs)
 
 
 def mailbox_descriptor(layout: dict, input_address: int, output_address: int) -> bytes:
@@ -270,18 +327,109 @@ def pack(object_path: pathlib.Path, source_path: pathlib.Path,
     return manifest
 
 
+def pack_direct(source_path: pathlib.Path, atlas_emit: pathlib.Path,
+                layout_path: pathlib.Path, out_dir: pathlib.Path,
+                import_manifest_path: pathlib.Path | None = None) -> dict:
+    """Package the checked physical stream emitted from machine Atlas MLIR."""
+    if out_dir.exists():
+        raise ValueError("output directory already exists; fresh package required")
+    source = source_path.read_bytes()
+    layout = validate_layout(json.loads(layout_path.read_text()))
+    emitted = subprocess.run([str(atlas_emit), str(source_path)],
+                             capture_output=True, text=True, check=True)
+    lines = emitted.stdout.splitlines()
+    if not lines or any(not re.fullmatch(r"[0-9a-fA-F]{8}", line) for line in lines):
+        raise ValueError("atlas-emit did not produce complete 32-bit words")
+    words = tuple(int(line, 16) for line in lines)
+    if (len(words) * 4 > IMEM_SIZE or any(word & 3 != 3 for word in words)
+            or words[-1] != ECALL or ECALL in words[:-1]):
+        raise ValueError("direct program must fit IMEM and end at one ECALL")
+    physical = subprocess.run([str(atlas_emit), "--program-json", str(source_path)],
+                              capture_output=True, text=True, check=True)
+    program = json.loads(physical.stdout)
+    if (program.get("schema") != "atlas.physical_program.v1"
+            or program.get("selected_rtl_revision") != layout["selected_rtl_revision"]
+            or program.get("word_count") != len(words)
+            or [row.get("word_u32") for row in program.get("instructions", [])] != list(words)):
+        raise ValueError("physical program, emitted words, and selected RTL disagree")
+    binary = struct.pack(f"<{len(words)}I", *words)
+    captured_count = None
+    if import_manifest_path is not None:
+        captured_count = validate_captured_layout(
+            json.loads(import_manifest_path.read_text()), layout,
+            hashlib.sha256(binary).hexdigest())
+    call = layout.get("call")
+    if call is None:
+        arguments, returns = [], []
+        scope = "selected standalone AtlasCore direct reset entry"
+    else:
+        arguments = [{"name": "input", "kind": "runtime_dram_pointer",
+                      "mailbox_offset_bytes": call["input_pointer_offset_bytes"],
+                      "region": call["input_region"], "size_bytes": call["tensor_bytes"]}]
+        returns = [{"name": "output", "kind": "runtime_dram_pointer",
+                    "mailbox_offset_bytes": call["output_pointer_offset_bytes"],
+                    "region": call["output_region"], "size_bytes": call["tensor_bytes"]}]
+        scope = "selected standalone AtlasCore direct mailbox reset entry"
+    manifest = {
+        "schema": "atlas.boot-capsule.v1", "scope": scope,
+        "packer_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+        "source_object_sha256": None,
+        "source_mlir_sha256": hashlib.sha256(source).hexdigest(),
+        "emitter_sha256": hashlib.sha256(atlas_emit.read_bytes()).hexdigest(),
+        "program_sha256": hashlib.sha256(binary).hexdigest(),
+        "program_file": "program.bin", "entry_symbol": None,
+        "entry_pc_word": 0, "imem_tl_byte_base": IMEM_BASE,
+        "imem_capacity_bytes": IMEM_SIZE, "program_words": len(words),
+        "start_csr_tl_byte_address": START_CSR, "start_csr_value": 1,
+        "completion": {"kind": "ecall_halt", "ecall_pc_word": len(words) - 1,
+                       "unreachable_llvm_ret_pc_word": None},
+        "arguments": arguments, "returns": returns,
+        "register_initialization_proved": False,
+        "program_mailbox_binding_proved_by_packer": False,
+        "checked_atlas_source_word_match": True,
+        "physical_program_file": "physical-program.json",
+        "dram": layout,
+    }
+    if import_manifest_path is not None:
+        manifest["captured_import_manifest_sha256"] = hashlib.sha256(
+            import_manifest_path.read_bytes()).hexdigest()
+        manifest["captured_output_count"] = captured_count
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = pathlib.Path(tempfile.mkdtemp(prefix=".atlas-boot-", dir=out_dir.parent))
+    try:
+        (temporary / "program.bin").write_bytes(binary)
+        (temporary / "physical-program.json").write_text(
+            json.dumps(program, indent=2, sort_keys=True) + "\n")
+        (temporary / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        temporary.rename(out_dir)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--object", type=pathlib.Path, required=True)
+    parser.add_argument("--object", type=pathlib.Path,
+                        help="legacy ELF object; omit for direct Atlas emission")
     parser.add_argument("--source", type=pathlib.Path, required=True)
     parser.add_argument("--atlas-emit", type=pathlib.Path, required=True)
     parser.add_argument("--layout", type=pathlib.Path, required=True)
+    parser.add_argument("--import-manifest", type=pathlib.Path,
+                        help="checked captured-Linalg physical slots for a direct capsule")
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--llvm-bin", type=pathlib.Path)
     args = parser.parse_args()
     try:
-        result = pack(args.object, args.source, args.atlas_emit, args.layout,
-                      args.out, args.llvm_bin)
+        if args.object is None:
+            result = pack_direct(args.source, args.atlas_emit, args.layout, args.out,
+                                 args.import_manifest)
+        else:
+            if args.import_manifest is not None:
+                raise ValueError("captured import binding requires direct Atlas emission")
+            result = pack(args.object, args.source, args.atlas_emit, args.layout,
+                          args.out, args.llvm_bin)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError,
             subprocess.CalledProcessError) as exc:
         print(json.dumps({"status": "FAIL", "error": str(exc)}), file=sys.stderr)

@@ -1,0 +1,11 @@
+{
+  "schema": "atlas.host-map.v1",
+  "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "soc_config_source": "generators/chipyard/src/main/scala/config/AtlasConfigs.scala::EE290SimConfig",
+  "soc_source_revision": "245f2a9d203be685176cc01e26e28029c5593202",
+  "bitstream_identity": null,
+  "imem_base": 131072,
+  "imem_capacity_bytes": 131072,
+  "csr_base": 262144,
+  "start_csr_offset": 24
+}
