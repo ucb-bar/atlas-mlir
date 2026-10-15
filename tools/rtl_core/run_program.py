@@ -60,10 +60,12 @@ def run(args):
             if guard_sources[1]!=expected_probe:
                 raise ValueError("CPU guard imported a probe outside the admitted source root")
             records.extend(guard_sources)
-            receipt["single_cpu_budget"]={"cpu":args.cpu,"rss_limit_bytes":2*1024**3,"wall_seconds_per_run":600}
+            receipt["single_cpu_budget"]={"cpu":args.cpu,"rss_limit_bytes":2*1024**3,"wall_seconds_per_run":args.run_wall_seconds}
         preparation=module(out/"prepare_program.py","frozen_raw_preparation")
-        data,inputs=preparation.prepare(support,args.input,args.input_sha256,args.oracle,out,args.controls)
+        data,inputs=preparation.prepare(support,args.input,args.input_sha256,args.oracle,out,args.controls,
+                                        reuse_model_arithmetic=args.reuse_model_arithmetic,model_root=args.model_root)
         records.extend(inputs)
+        receipt["arithmetic_evidence"]=data["arithmetic_evidence"]
         support.write_json(out/"input.json",data);bind(out/"input.json")
         if args.prepare_only:
             receipt["status"]="prepared"
@@ -81,7 +83,7 @@ def run(args):
                         execution=probe.bounded(command,out,env,out/(stem+".log"),support)
                     else:
                         execution=cpu_guard.bounded(command,out,env,out/(stem+".log"),support,
-                                                    affinity={args.cpu},rss_limit=2*1024**3,wall_seconds=600)
+                                                    affinity={args.cpu},rss_limit=2*1024**3,wall_seconds=args.run_wall_seconds)
                     item={"id":case["id"],"repeat":repeat,"execution":execution}
                     receipt["runs"].append(item)
                     support.write_json(out/"receipt.json",receipt)
@@ -136,4 +138,12 @@ if __name__=="__main__":
     parser.add_argument("--prepare-only",action="store_true")
     parser.add_argument("--max-cycles",type=int,default=100000)
     parser.add_argument("--cpu",type=int,help="Explicit single CPU for post-build replay; preserves the compile supervisor epoch")
-    run(parser.parse_args())
+    parser.add_argument("--run-wall-seconds",type=int,default=600,help="Per-simulator wall bound for --cpu replay (default: 600)")
+    parser.add_argument("--reuse-model-arithmetic",action="store_true",help="Reuse an authenticated complete-model actual payload; incompatible with controls")
+    parser.add_argument("--model-root",type=Path,help="Explicit source root required for arithmetic reuse bookends")
+    args=parser.parse_args()
+    if args.run_wall_seconds<=0 or (args.run_wall_seconds!=600 and args.cpu is None):
+        parser.error("A positive custom per-run wall bound requires --cpu")
+    if args.reuse_model_arithmetic and (args.controls or args.model_root is None):
+        parser.error("Arithmetic reuse requires --model-root and cannot enable controls")
+    run(args)
