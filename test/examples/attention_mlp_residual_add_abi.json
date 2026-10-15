@@ -1,0 +1,12 @@
+{
+  "fixed_inputs": {
+    "arg0": 3,
+    "arg1": 4,
+    "arg2": 5,
+    "arg3": 6,
+    "arg4": 7,
+    "arg5": 8,
+    "op25r0": 9
+  },
+  "fixed_outputs": [35, 36, 37]
+}

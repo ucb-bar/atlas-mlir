@@ -244,6 +244,25 @@ class AtlasDialectTest(unittest.TestCase):
 
         check_rtl_bitpats(words, cases)
 
+    def test_pack_source_register_uses_all_six_rtl_bits(self) -> None:
+        # ScalarDecoder.scala reads the PACK source from instr[24:19]. A
+        # five-bit encoder aliases m32 to m0 and changes a BF16 pair input.
+        cases = [
+            ("vpu_pack", {"direction": "bf16_to_fp8", "dst": 0, "src": 0, "scale_reg": 3}, "VFP8PACK"),
+            ("vpu_pack", {"direction": "bf16_to_fp8", "dst": 0, "src": 32, "scale_reg": 3}, "VFP8PACK"),
+            ("vpu_pack", {"direction": "bf16_to_fp8", "dst": 0, "src": 62, "scale_reg": 3}, "VFP8PACK"),
+        ]
+        emitted = run(EMIT, program(cases))
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        words = [int(line, 16) for line in emitted.stdout.splitlines()]
+        self.assertEqual(words, [
+            (0x44 << 25) | (3 << 13) | 0x57,
+            (0x44 << 25) | (32 << 19) | (3 << 13) | 0x57,
+            (0x44 << 25) | (62 << 19) | (3 << 13) | 0x57,
+        ])
+        self.assertEqual((words[1] ^ words[0]), 1 << 24)
+        check_rtl_bitpats(words, cases)
+
     def test_all_forty_nine_scalar_patterns(self) -> None:
         cases = scalar_variants()
         self.assertEqual(len(cases), 49)

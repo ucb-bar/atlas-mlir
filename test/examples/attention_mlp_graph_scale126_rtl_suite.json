@@ -1,0 +1,19 @@
+{
+  "schema": "atlas.public_graph_rtl_suite.v1",
+  "scope": "diagnostic_32x32_attention_mlp_scale126_two_outputs",
+  "source_sha256": "27ead5d6846bde9b287d3c1b3312697ca162672e70b290d208e083f2abf3875d",
+  "weights_sha256": "b1a668bafb372807c19b6ed0d1284084c9105db8f44fa3ecd06b78fdf82eb2c5",
+  "policy_sha256": "d3fde0e0c608ef0c360f88c43b0dd1cc9657dee2b28a04e52594ea2106e588af",
+  "cases": [
+    {
+      "name": "exact_scale126_half",
+      "input": {"kind": "uniform", "value": 0.5},
+      "weights": "captured"
+    },
+    {
+      "name": "exact_scale126_one",
+      "input": {"kind": "uniform", "value": 1.0},
+      "weights": "captured"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "atlas.public_graph_rtl_suite.v1",
+  "scope": "diagnostic_32x32_attention_mlp_two_outputs",
+  "source_sha256": "27ead5d6846bde9b287d3c1b3312697ca162672e70b290d208e083f2abf3875d",
+  "weights_sha256": "b1a668bafb372807c19b6ed0d1284084c9105db8f44fa3ecd06b78fdf82eb2c5",
+  "policy_sha256": "8107cad0647cd200c8d73fce79251d75d2c49c1e544ae43568694985bc92975b",
+  "cases": [
+    {
+      "name": "rounded_graph_checkerboard",
+      "input": {"kind": "checkerboard", "values": [0.5, 1.0]},
+      "weights": "captured"
+    },
+    {
+      "name": "rounded_graph_ternary",
+      "input": {"kind": "random_choice", "values": [0.25, 0.5, 1.0], "seed": 9843},
+      "weights": "captured"
+    },
+    {
+      "name": "rounded_graph_fc2_gain",
+      "input": {"kind": "checkerboard", "values": [0.5, 1.0]},
+      "weights": "fc2_gain_1p5"
+    }
+  ]
+}

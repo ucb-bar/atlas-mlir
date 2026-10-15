@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
-from pathlib import Path
 import sys
 import unittest
+from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import (  # noqa: E402
-    EvaluationResult, MemoryRegion, RuntimeInputs, Scalar, Tile, UnsupportedVirtualMode, VirtualInterfaceError, compare_results, evaluate,
-    operation_name, parse_program,
+    EvaluationResult,
+    MemoryRegion,
+    RuntimeInputs,
+    Scalar,
+    Tile,
+    UnsupportedVirtualMode,
+    VirtualInterfaceError,
+    compare_results,
+    evaluate,
+    operation_name,
+    parse_program,
 )
 from test_virtual_evaluator_arithmetic import FP8_INPUTS, INPUTS, TRANSPOSE, relu  # noqa: E402
 
@@ -163,7 +172,7 @@ class VirtualParserInterfaceTest(unittest.TestCase):
             (FLAT.replace("atlas.virtual_vpu_unary", "atlas.virtual_invented"), "unsupported virtual operation"),
             (FLAT.replace('kind = "relu"', 'kind = "sqrt"'), "supported kinds"),
             (FLAT.replace('kind = "add"', 'kind = "div"'), "supported kinds"),
-            (example("virtual_fp8_two_layer_mlp.mlir").replace("scale_code = 127", "scale_code = 128"), "scale_code 127"),
+            (example("virtual_fp8_two_layer_mlp.mlir").replace("scale_code = 127", "scale_code = 121"), "122..128"),
         )
         malformed = (
             (FLAT.replace("index = 0 : i32", "index = 0 : i64", 1), "index : i32"),

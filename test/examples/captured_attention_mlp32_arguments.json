@@ -1,0 +1,51 @@
+{
+  "0": {
+    "weight": "query.weight",
+    "kind": "param",
+    "dtype": "float32",
+    "shape": [
+      32,
+      32
+    ]
+  },
+  "1": {
+    "weight": "key.weight",
+    "kind": "param",
+    "dtype": "float32",
+    "shape": [
+      32,
+      32
+    ]
+  },
+  "2": {
+    "weight": "value.weight",
+    "kind": "param",
+    "dtype": "float32",
+    "shape": [
+      32,
+      32
+    ]
+  },
+  "3": {
+    "weight": "fc1.weight",
+    "kind": "param",
+    "dtype": "float32",
+    "shape": [
+      32,
+      32
+    ]
+  },
+  "4": {
+    "weight": "fc2.weight",
+    "kind": "param",
+    "dtype": "float32",
+    "shape": [
+      32,
+      32
+    ]
+  },
+  "5": {
+    "kind": "input",
+    "name": "tokens"
+  }
+}

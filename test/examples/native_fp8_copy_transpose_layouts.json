@@ -1,0 +1,11 @@
+{
+  "schema": "merlin.physical_boundary_layouts.v1",
+  "source_identity": "244a4160b898152e8bb41b1165f0f9094e9fff59bbac6bcc35def3af92c79718",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21",
+  "physical_extents": {"arg0": 1},
+  "boundary_layouts": {"arg0": "atlas.dram.fp8-e4m3-row-major-32x32-in-2k-slot.v1"},
+  "output_layouts": [
+    "atlas.dram.fp8-e4m3-row-major-32x32-in-2k-slot.v1",
+    "atlas.dram.fp8-e4m3-row-major-32x32-in-2k-slot.v1"
+  ]
+}

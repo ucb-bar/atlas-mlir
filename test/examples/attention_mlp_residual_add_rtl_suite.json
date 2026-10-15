@@ -1,0 +1,19 @@
+{
+  "schema": "atlas.public_graph_rtl_suite.v1",
+  "scope": "diagnostic_32x32_attention_mlp_residual_add_three_outputs",
+  "source_sha256": "4896700fe43d624f9aa125a6b4f3fc597229a6ea5d74e434273406e8cc9ad463",
+  "weights_sha256": "b1a668bafb372807c19b6ed0d1284084c9105db8f44fa3ecd06b78fdf82eb2c5",
+  "policy_sha256": "5503ec21f65c842cebb6893830b3070129974d552aad56109f748cfbac00c12b",
+  "cases": [
+    {
+      "name": "residual_add_half",
+      "input": {"kind": "uniform", "value": 0.5},
+      "weights": "captured"
+    },
+    {
+      "name": "residual_add_one",
+      "input": {"kind": "uniform", "value": 1.0},
+      "weights": "captured"
+    }
+  ]
+}

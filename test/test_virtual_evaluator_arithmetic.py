@@ -8,24 +8,42 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import textwrap
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from atlas_virtual_evaluator import (  # noqa: E402
-    RuntimeInputs, Tile, UnsupportedVirtualMode, VirtualInterfaceError, _mxu_tile, evaluate, evaluate_tile_operation, parse_program,
+    RuntimeInputs,
+    Tile,
+    UnsupportedVirtualMode,
+    VirtualInterfaceError,
+    _mxu_tile,
+    evaluate,
+    evaluate_tile_operation,
+    parse_program,
 )
 from test_virtual_evaluator_resources import (  # noqa: E402
-    A, S, TILES, accumulate, diagonal, kernel, legacy, on_unit, output, read, reset, seed, weight,
+    TILES,
+    A,
+    S,
+    accumulate,
+    diagonal,
+    kernel,
+    legacy,
+    on_unit,
+    output,
+    read,
+    reset,
+    seed,
+    weight,
 )
 from xdsl.dialects import builtin  # noqa: E402
-
 
 INPUTS = '''
   %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
@@ -343,7 +361,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
             with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
                 evaluate_tile_operation(operation(source), operands)
         for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("div")),
-                                         (PACK, "scale_code", builtin.IntegerAttr(128, builtin.i32))):
+                                          (PACK, "scale_code", builtin.IntegerAttr(121, builtin.i32))):
             op = operation(source)
             op.attributes[name] = attribute
             with self.subTest(attribute=attribute), self.assertRaises(UnsupportedVirtualMode):

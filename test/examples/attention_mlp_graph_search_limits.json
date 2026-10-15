@@ -1,0 +1,10 @@
+{
+  "schema": "merlin.native_search_limits.v1",
+  "iterations": 8,
+  "egraph_nodes": 5000,
+  "candidate_nodes": 48,
+  "candidates": 512,
+  "orders_per_candidate": 64,
+  "solver_timeout_ms": 5000,
+  "wall_timeout_s": 120
+}

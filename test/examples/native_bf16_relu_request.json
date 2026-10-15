@@ -1,0 +1,30 @@
+{
+  "schema": "merlin.semantic_kernel.v2",
+  "nodes": [
+    {
+      "id": "x", "op": "input", "inputs": [],
+      "type": {"shape": [32, 32], "dtype": "bf16", "numerical_policy": "raw-bit-pattern"},
+      "attrs": {}, "effect": "input", "index_maps": []
+    },
+    {
+      "id": "y", "op": "relu", "inputs": ["x"],
+      "type": {"shape": [32, 32], "dtype": "bf16", "numerical_policy": "raw-bit-pattern"},
+      "attrs": {
+        "input_domain": "finite-normal-or-zero-bf16",
+        "numeric_semantics": "bf16-sign-clamp-v1"
+      },
+      "effect": "pure",
+      "index_maps": [
+        {"loop_rank": 2, "coefficients": [[1, 0], [0, 1]], "offsets": [0, 0]},
+        {"loop_rank": 2, "coefficients": [[1, 0], [0, 1]], "offsets": [0, 0]}
+      ]
+    }
+  ],
+  "outputs": ["y"],
+  "output_storages": ["external"],
+  "input_storages": {"x": "external"},
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21",
+  "lowering_policy": "diagnostic",
+  "source_identity": "",
+  "constants": []
+}

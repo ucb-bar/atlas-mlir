@@ -1,0 +1,36 @@
+{
+  "schema": "merlin.semantic_kernel.v2",
+  "nodes": [
+    {
+      "id": "scores",
+      "op": "input",
+      "inputs": [],
+      "type": {"shape": [32, 32], "dtype": "bf16", "numerical_policy": "raw-bit-pattern"},
+      "attrs": {"input_domain": "bf16-raw-all-codes-v1"},
+      "effect": "input",
+      "index_maps": []
+    },
+    {
+      "id": "maximum",
+      "op": "row_max_bf16",
+      "inputs": ["scores"],
+      "type": {"shape": [32, 32], "dtype": "bf16", "numerical_policy": "raw-bit-pattern"},
+      "attrs": {
+        "input_domain": "bf16-raw-all-codes-v1",
+        "numeric_semantics": "selected-rtl-bf16-total-order-row-max-v1"
+      },
+      "effect": "pure",
+      "index_maps": [
+        {"loop_rank": 3, "coefficients": [[1, 0, 0], [0, 0, 1]], "offsets": [0, 0]},
+        {"loop_rank": 3, "coefficients": [[1, 0, 0], [0, 1, 0]], "offsets": [0, 0]}
+      ]
+    }
+  ],
+  "outputs": ["maximum"],
+  "output_storages": ["external"],
+  "input_storages": {"scores": "external"},
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21",
+  "lowering_policy": "diagnostic",
+  "source_identity": "",
+  "constants": []
+}
