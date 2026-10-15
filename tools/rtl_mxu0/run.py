@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import resource
+import re
 import signal
 import stat
 import subprocess
@@ -81,6 +82,81 @@ def version(command, expected, env=None, cwd=None):
     return {"command": command, "text": text.strip()}
 
 
+def prepare_case(case, out):
+    """Authenticate an existing model epoch; select its PRE-rescale MXU words."""
+    name = case["id"]
+    if not re.fullmatch(r"[a-z0-9_-]+", name):
+        raise ValueError("Malformed case id")
+    source = safe_path(case["input"])
+    records = [identity(source / "receipt.json", case["receipt_sha256"])]
+    original = json.loads(safe_path(source / "receipt.json").read_text())
+    m, k, n = original["shape"]
+    if (m, n) != (32, 32) or not 0 < k <= 2048 or k % 32:
+        raise ValueError("Expected M=N=32 and a positive K multiple of32, at most2048")
+    if original["status"] != "passed_model_only" or original["source_inputs"]["npz"] != case["source_npz_sha256"]:
+        raise ValueError("Model status or native source binding differs")
+    recipe = original["recipe"]
+    if recipe not in ("atlas_mxu0_fp8_unit_bf16acc_v1", "atlas_mxu0_fp8_tensor_pow2_bf16acc_v1"):
+        raise ValueError("Unsupported MXU recipe")
+    for filename in ("encoded.npz", "result.npz", "expected-bf16-halves.bin", "program.bin", "source-manifest.json"):
+        records.append(identity(source / filename, original["artifacts"][filename]))
+    if json.loads(safe_path(source / "source-manifest.json").read_text())["npz_sha256"] != case["source_npz_sha256"]:
+        raise ValueError("Native source manifest binding differs")
+    oracle = identity(case["oracle"], original["oracle_sha256"])
+    records.append(oracle)
+    destination = safe_path(out / "oracles" / (oracle["sha256"] + ".py"))
+    if destination.exists():
+        records.append(identity(destination, oracle["sha256"]))
+    else:
+        copy_source(oracle["path"], destination, oracle["sha256"])
+        records.append(identity(destination, oracle["sha256"]))
+    spec = importlib.util.spec_from_file_location("arithmetic_" + oracle["sha256"], destination)
+    arithmetic = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(arithmetic)
+    with np.load(safe_path(source / "encoded.npz"), allow_pickle=False) as bundle:
+        if set(bundle.files) != {"A", "B"}:
+            raise ValueError("Unexpected encoded operand keys")
+        a, b = bundle["A"].copy(), bundle["B"].copy()
+    if a.shape != (32, k) or b.shape != (k, 32) or a.dtype != np.uint8 or b.dtype != np.uint8:
+        raise ValueError("Encoded operand shape or dtype differs")
+    def dot(left, right):
+        return np.array([[arithmetic.mxu0_dot(left[row], right[:, col]) for col in range(32)]
+                         for row in range(32)], dtype=np.uint16)
+    expected = dot(a, b)
+    with np.load(safe_path(source / "result.npz"), allow_pickle=False) as bundle:
+        raw_key = "expected_bits" if recipe == "atlas_mxu0_fp8_unit_bf16acc_v1" else "raw_accumulator_bits"
+        if not np.array_equal(bundle[raw_key], expected):
+            raise AssertionError("Saved raw accumulator words differ from the rational oracle")
+        if recipe == "atlas_mxu0_fp8_unit_bf16acc_v1":
+            target = bundle["target_C"]
+            if target.dtype != np.float32 or np.any(target.view(np.uint32) & 65535):
+                raise ValueError("Saved model outputs are not exact BF16 float32 views")
+            if not np.array_equal((target.view(np.uint32) >> 16).astype(np.uint16), expected):
+                raise AssertionError("Saved model execution differs from the independent oracle")
+            if arithmetic.output_halves(expected.tolist()) != safe_path(source / "expected-bf16-halves.bin").read_bytes():
+                raise AssertionError("Raw expected output halves differ")
+    controls = {}
+    if case.get("controls", False):
+        if k < 64:
+            raise ValueError("Reset-accumulator control requires at least two tiles")
+        wrong_b = np.concatenate([b[offset:offset + 32].T for offset in range(0, k, 32)], axis=0)
+        controls["wrong_transpose"] = dot(a, wrong_b)
+        controls["wrong_final_reset"] = dot(a[:, -32:], b[-32:])
+        if any(np.array_equal(value, expected) for value in controls.values()):
+            raise AssertionError("Selected source does not witness a required negative control")
+    data = {"id": name, "recipe": recipe, "A": a.tolist(), "B": b.tolist(),
+            "expected_bf16": expected.tolist(),
+            "controls": {key: value.tolist() for key, value in controls.items()}}
+    provenance = {"id": name, "shape": [m, k, n], "recipe": recipe,
+                  "source_npz_sha256": case["source_npz_sha256"], "source_records": records,
+                  "raw_output_domain": "before any VPU output rescale",
+                  "model_target_words_checked": recipe == "atlas_mxu0_fp8_unit_bf16acc_v1",
+                  "expected_word_sha256": hashlib.sha256(expected.tobytes()).hexdigest(),
+                  "negative_control_witnesses": {key: int(np.count_nonzero(value != expected))
+                                                 for key, value in controls.items()}}
+    return data, provenance
+
+
 def run(args):
     started = time.monotonic()
     support = safe_path(Path(__file__).absolute().parent)
@@ -94,45 +170,28 @@ def run(args):
     receipt_path = out / "receipt.json"
     write_json(receipt_path, receipt)
     try:
-        receipt["model_receipt"] = identity(args.input / "receipt.json", RECEIPT_SHA)
-        original = json.loads(safe_path(args.input / "receipt.json").read_text())
-        if original["source_inputs"]["npz"] != SOURCE_NPZ_SHA or original["shape"] != [32, 64, 32]:
-            raise ValueError("Expected the frozen ResNet M32 K64 N32 source")
-        receipt["source_npz_sha256"] = SOURCE_NPZ_SHA
-        selected_inputs = {}
-        for name in ("encoded.npz", "result.npz", "expected-bf16-halves.bin", "program.bin", "source-manifest.json"):
-            selected_inputs[name] = identity(args.input / name, original["artifacts"][name])
-        if json.loads((args.input / "source-manifest.json").read_text())["npz_sha256"] != SOURCE_NPZ_SHA:
-            raise ValueError("Native source manifest binding differs")
-        receipt["input_artifacts"] = selected_inputs
-        receipt["oracle"] = identity(args.oracle, original["oracle_sha256"])
-        copy_source(args.oracle, out / "oracle.py", original["oracle_sha256"])
-        receipt["oracle_copy"] = identity(out / "oracle.py", original["oracle_sha256"])
-        spec = importlib.util.spec_from_file_location("frozen_tile_arithmetic", out / "oracle.py")
-        arithmetic = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(arithmetic)
-        with np.load(args.input / "encoded.npz", allow_pickle=False) as bundle:
-            if set(bundle.files) != {"A", "B"}:
-                raise ValueError("Unexpected encoded operand keys")
-            a, b = bundle["A"].copy(), bundle["B"].copy()
-        if a.shape != (32, 64) or b.shape != (64, 32) or a.dtype != np.uint8 or b.dtype != np.uint8:
-            raise ValueError("Encoded operand shape or dtype differs")
-        expected = np.array([[arithmetic.mxu0_dot(a[row], b[:, col]) for col in range(32)]
-                             for row in range(32)], dtype=np.uint16)
-        with np.load(args.input / "result.npz", allow_pickle=False) as bundle:
-            if not np.array_equal(bundle["expected_bits"], expected):
-                raise AssertionError("Saved expected words differ from the independent rational oracle")
-            target = bundle["target_C"]
-            if target.dtype != np.float32 or np.any(target.view(np.uint32) & 65535):
-                raise ValueError("Saved model outputs are not exact BF16 float32 views")
-            if not np.array_equal((target.view(np.uint32) >> 16).astype(np.uint16), expected):
-                raise AssertionError("Saved model execution differs from the independent oracle")
-        if arithmetic.output_halves(expected.tolist()) != (args.input / "expected-bf16-halves.bin").read_bytes():
-            raise AssertionError("Raw expected output halves differ")
-        write_json(out / "input.json", {"A": a.tolist(), "B": b.tolist(), "expected_bf16": expected.tolist()})
+        if args.cases is not None:
+            receipt["case_manifest"] = identity(args.cases)
+            manifest_cases = json.loads(args.cases.read_text())
+            if manifest_cases["schema_version"] != 1:
+                raise ValueError("Unsupported case manifest schema")
+            cases = manifest_cases["cases"]
+        else:
+            if args.input is None or args.oracle is None:
+                raise ValueError("Provide --cases, or both --input and --oracle")
+            cases = [{"id": "resnet-unit", "input": str(args.input), "oracle": str(args.oracle),
+                      "receipt_sha256": RECEIPT_SHA, "source_npz_sha256": SOURCE_NPZ_SHA,
+                      "controls": True}]
+        if not cases or len(cases) > 8 or len({case["id"] for case in cases}) != len(cases):
+            raise ValueError("Expected one to eight uniquely named cases")
+        prepared, provenance = [], []
+        for case in cases:
+            data, binding = prepare_case(case, out)
+            prepared.append(data)
+            provenance.append(binding)
+        write_json(out / "input.json", {"schema_version": 2, "cases": prepared})
         receipt["input"] = identity(out / "input.json")
-        receipt["prebuild_oracle"] = {"all_1024_model_words_match": True, "k": 64,
-                                     "expected_word_sha256": hashlib.sha256(expected.tobytes()).hexdigest()}
+        receipt["cases"] = provenance
         revision = subprocess.run(["git", "-C", str(args.rtl_root), "-c", "submodule.recurse=false",
                                    "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
         if revision != RTL_REVISION:
@@ -228,25 +287,33 @@ def run(args):
         if exit_code:
             raise RuntimeError(f"Mill test failed with exit {exit_code}; see {out / 'build.log'}")
         traces = json.loads((out / "trace.json").read_text())
-        if len(traces) != 2:
-            raise AssertionError("Expected two initialized RTL executions")
-        for run in traces:
-            if run["mismatches"] or run["mreg_write_rows"] != 64 or run["unique_output_rows"] != 64 or not run["quiet_after_cycle_410"]:
+        expected_runs = {(case["id"], "normal", repeat) for case in prepared for repeat in range(2)}
+        expected_runs.update((case["id"], name, 0) for case in prepared for name in case["controls"])
+        if {(trace["case_id"], trace["run_kind"], trace["repeat"]) for trace in traces} != expected_runs or len(traces) != len(expected_runs):
+            raise AssertionError("Missing or duplicate initialized RTL cases")
+        for trace in traces:
+            case = next(case for case in prepared if case["id"] == trace["case_id"])
+            declared = case["expected_bf16"] if trace["run_kind"] == "normal" else case["controls"][trace["run_kind"]]
+            if trace["declared_mismatches"] or trace["mreg_write_rows"] != 64 or trace["unique_output_rows"] != 64 or not trace["quiet_after_margin"]:
                 raise AssertionError("RTL output, extent or guard gate failed")
-            if not np.array_equal(np.asarray(run["actual_bf16"], dtype=np.uint16), expected):
-                raise AssertionError("Raw RTL output differs from independent rational oracle")
+            if not np.array_equal(np.asarray(trace["actual_bf16"], dtype=np.uint16), np.asarray(declared, dtype=np.uint16)):
+                raise AssertionError("Raw RTL words differ from independently declared arithmetic")
+            if bool(trace["mismatches"]) != (trace["run_kind"] != "normal"):
+                raise AssertionError("Hardware mutation refusal did not witness the expected failure")
         for source in receipt["source_closure"]:
             identity(args.rtl_root / source["relative"], source["sha256"])
             identity(source_root / source["relative"], source["sha256"])
-        for value in list(selected_inputs.values()) + receipt["owned_support"] + list(receipt["tools"].values()) + runtimes:
+        bindings = receipt["owned_support"] + list(receipt["tools"].values()) + runtimes
+        bindings += [record for case in provenance for record in case["source_records"]]
+        bindings += [receipt[key] for key in ("provenance_manifest", "input", "verilator_runtime_header")]
+        if "case_manifest" in receipt:
+            bindings.append(receipt["case_manifest"])
+        for value in bindings:
             identity(value["path"], value["sha256"])
-        identity(args.oracle, receipt["oracle"]["sha256"])
-        for key in ("model_receipt", "provenance_manifest", "oracle_copy", "input", "verilator_runtime_header"):
-            value = receipt[key]
-            identity(value["path"], value["sha256"])
-        receipt.update(status="passed_component_rtl", repeats=2, raw_bf16_words_per_run=1024,
+        receipt.update(status="passed_component_rtl", repeats_per_normal_case=2, raw_bf16_words_per_run=1024,
+                       hardware_negative_controls=sum(len(case["controls"]) for case in prepared),
                        caller_inputs_and_mreg_guards_preserved=True, source_bookends_verified=True,
-                       full_program_executed=False, dma_executed=False,
+                       full_program_executed=False, dma_executed=False, output_vpu_rescale_executed=False,
                        trace=identity(out / "trace.json"), input=identity(out / "input.json"))
     except BaseException as error:
         receipt.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
@@ -260,8 +327,10 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("rtl-root", "provenance", "input", "oracle", "mill", "java", "verilator", "firtool", "out"):
+    for name in ("rtl-root", "provenance", "mill", "java", "verilator", "firtool", "out"):
         parser.add_argument("--" + name, type=safe_path, required=True)
+    for name in ("input", "oracle", "cases"):
+        parser.add_argument("--" + name, type=safe_path)
     parser.add_argument("--timeout", type=int, default=1800)
     run(parser.parse_args())
 
