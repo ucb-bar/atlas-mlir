@@ -1,0 +1,22 @@
+import mill._
+import mill.scalalib._
+
+object atlas extends ScalaModule {
+  def scalaVersion = "2.13.16"
+  def scalacOptions = Seq("-deprecation", "-feature", "-unchecked", "-language:reflectiveCalls")
+  def ivyDeps = Agg(ivy"org.chipsalliance::chisel:6.7.0")
+  def scalacPluginIvyDeps = Agg(ivy"org.chipsalliance:::chisel-plugin:6.7.0")
+  override def unmanagedClasspath = Task {
+    val root = millSourcePath / os.up / "lib"
+    Agg(PathRef(root / "rocketchip.jar"), PathRef(root / "diplomacy.jar"), PathRef(root / "cde.jar"))
+  }
+  override def sources = Task.Sources {
+    val root = millSourcePath / os.up
+    Seq(PathRef(root / "sources/src/main/scala/atlas"),
+        PathRef(root / "sources/dependencies/fpex/src/main/scala"),
+        PathRef(root / "sources/dependencies/sp26-fp-units/src/main/scala"),
+        PathRef(root / "sources/src/main/scala/diplomatic/memory"),
+        PathRef(root / "sources/src/main/scala/diplomatic/top/AtlasCore.scala"),
+        PathRef(root / "harness"))
+  }
+}
