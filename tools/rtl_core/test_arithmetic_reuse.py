@@ -8,6 +8,16 @@ import prepare_program as preparation
 
 
 class ReusedEvidenceAdmission(unittest.TestCase):
+    def test_control_payload_accepts_each_known_name_and_refuses_ambiguity(self):
+        support = SimpleNamespace(safe_path=lambda path: path)
+        names = ("actual-bf16-tiles-0.bin", "actual-bf16-halves-0.bin")
+        for present in ((), names, (names[0],), (names[1],)):
+            with self.subTest(present=present), mock.patch.object(Path, "exists", lambda path: path.name in present):
+                if len(present) != 1:
+                    with self.assertRaises(ValueError):preparation.control_payload_path(support, Path("/unread"))
+                else:
+                    self.assertEqual(preparation.control_payload_path(support, Path("/unread")).name, present[0])
+
     def test_only_two_exact_producer_profiles_are_admitted(self):
         epochs = sorted(preparation.ARITHMETIC_EPOCHS)
         for epoch in epochs:

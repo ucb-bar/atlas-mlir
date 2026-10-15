@@ -36,6 +36,14 @@ def model_payload_path(support, source, artifacts):
     return present[0]
 
 
+def control_payload_path(support, source):
+    names = ("actual-bf16-tiles-0.bin", "actual-bf16-halves-0.bin")
+    present = [support.safe_path(source / name) for name in names if support.safe_path(source / name).exists()]
+    if len(present) != 1:
+        raise ValueError("Require exactly one known physical control payload filename")
+    return present[0]
+
+
 def reused_arithmetic(support, source, original, expected, model_root):
     """Admit retained complete-model arithmetic evidence without rebuilding dots."""
     import subprocess
@@ -177,7 +185,7 @@ def prepare(support, source, receipt_sha, oracle_path, out, controls, *, reuse_m
             destination=out/(name+".bin")
             support.copy_source(record["path"],destination,record["sha256"])
             records.append(support.identity(destination,record["sha256"]))
-            source_actual=support.identity(directory/"actual-bf16-tiles-0.bin",control["actual_sha256"])
+            source_actual=support.identity(control_payload_path(support,directory),control["actual_sha256"])
             records.append(source_actual)
             predicted = (rebuilt[-2048:]+b"\xcd"*(len(expected)-2048) if name=="aliased_output_tiles"
                          else rebuilt if name=="wrong_oracle" else evaluate(name))
