@@ -1,6 +1,6 @@
 """Bounded tile compilation through Merlin selection and Atlas emission.
 
-This first native vertical slice is diagnostic. Its register assignment is
+This native vertical slice is diagnostic. Its register assignment is
 checked against the OOT lowerer; neither a bitstream nor a cache policy is
 qualified here. MXU0 reset arithmetic has a finite diagnostic domain only.
 """

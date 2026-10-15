@@ -11,3 +11,4 @@
 /examples/handoff/*/constants/
 __pycache__/
 *.pyc
+*.egg-info/

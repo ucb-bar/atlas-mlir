@@ -148,7 +148,7 @@ class GraphMailboxCheckerTest(unittest.TestCase):
             check(**paths)
 
     @unittest.skipUnless(os.environ.get("ATLAS_GRAPH_HANDOFF"),
-                         "select the local two-output handoff archive")
+                         "set ATLAS_GRAPH_HANDOFF to a two-output handoff archive")
     def test_reported_spike_model_mailboxes(self) -> None:
         handoff = Path(os.environ["ATLAS_GRAPH_HANDOFF"])
         for request_id, name in ((1, "checkerboard"), (2, "ternary")):

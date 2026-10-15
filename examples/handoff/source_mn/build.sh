@@ -11,7 +11,7 @@ if [[ -e "$output" ]]; then
   echo "output directory must be fresh: $output" >&2
   exit 2
 fi
-: "${TMPDIR:?set TMPDIR to the task temporary directory}"
+: "${TMPDIR:?set TMPDIR to a scratch directory}"
 source_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 startup_root=$source_root/../captured_attention_mlp
 stage=$(mktemp -d "$TMPDIR/atlas-source-mn-build.XXXXXX")

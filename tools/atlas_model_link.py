@@ -418,7 +418,7 @@ def _check_link_symbols(output: str, selected: list[str], entry: str) -> list[st
 
 
 def _render_entry_adapter(entry: str, abi: dict) -> tuple[str, str]:
-    """Expose the audited appended-result ABI through one counted C call."""
+    """Expose the checked appended-result ABI through one counted C call."""
     if not isinstance(entry, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", entry):
         raise ValueError("model entry has no supported C symbol")
     input_count = abi["source_input_count"]

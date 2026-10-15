@@ -1,4 +1,4 @@
-"""Evaluator-only target semantics for the public captured attention/MLP tile."""
+"""Test-only target semantics for the public captured attention/MLP tile."""
 
 from __future__ import annotations
 

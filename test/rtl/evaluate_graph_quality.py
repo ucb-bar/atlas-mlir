@@ -125,7 +125,7 @@ def evaluate(
     compiled: Path, merlin_root: Path, suite_path: Path, output: Path
 ) -> dict[str, object]:
     if output.exists() or output.resolve().is_relative_to(compiled.resolve()):
-        raise ValueError("quality output must be a fresh evaluator-owned directory")
+        raise ValueError("quality output must be a fresh directory outside the compiled artifact")
     suite = json.loads(suite_path.read_text())
     if suite.get("schema") != "atlas.public_graph_quality_suite.v1" or (
         suite.get("quality_gate") != "none_diagnostic_measurement"

@@ -1,4 +1,4 @@
-"""Check reported Atlas mailbox runs against evaluator-owned inputs and outputs.
+"""Check reported Atlas mailbox runs against independently held inputs and outputs.
 
 The runner reports its bitstream identity. Matching bytes do not attest that
 the selected bitstream executed or that its cache behavior is qualified.
@@ -145,7 +145,7 @@ def check(handoff: Path, receipt_path: Path, cases_path: Path) -> dict:
     return {
         "schema": "atlas.external_mailbox_dump_check.v1",
         "status": failed or "reported_match_unqualified",
-        "scope": "reported repeated mailbox responses and full evaluator-owned f32 outputs",
+        "scope": "reported repeated mailbox responses and full independently held f32 outputs",
         "run_id": receipt["run_id"],
         "elf_sha256": _sha(elf),
         "reported_bitstream_sha256": receipt["bitstream_sha256"],

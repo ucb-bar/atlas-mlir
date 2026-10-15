@@ -1,22 +1,19 @@
-# Native attention and MLP host diagnostic
+# Native attention + MLP host test
 
-This example loads the Merlin-native 32×32 attention → BF16-to-FP8 →
-two-layer MLP image through `runtime/atlas_host.c`. The virtual IR and device
-binary come from the [typed request](../../../test/examples/native_attention_mlp_request.json)
-and the checked ABI and search limits beside it. The Q/K prefix came from
-parsed Linalg; the remaining attention and MLP nodes are typed additions.
-This is a directed tile, not a complete captured-model compilation.
+This example launches the Merlin-native 32×32 attention → BF16-to-FP8 →
+two-layer MLP image through `runtime/atlas_host.c`. The program comes from the
+typed request [`native_attention_mlp_request.json`](../../../test/examples/native_attention_mlp_request.json)
+and the ABI and search limits next to it. The Q/K part came from parsed Linalg;
+the rest was added by hand in the request. It is a directed tile, not a full
+model compile.
 
-The host source writes six FP8 input tiles, loads the emitted Atlas words,
-and checks both BF16 output tiles and a guard over two launches. Its fixed
-inputs and expected values make it a diagnostic test program. The production
-host route must supply model inputs and weights through its invocation ABI.
-When a checked native program also declares a BF16 constant, the host copies
-the generated payload to its selected DRAM address before each launch.
+[`host.c`](host.c) writes six FP8 input tiles and the generated BF16 constant,
+loads the program, launches twice, and checks both BF16 output tiles and a
+guard. Inputs and expected values are fixed in the source.
 
-Build from the repository root with the Atlas support package and Merlin CLI
-installed. Set `ATLAS_OOT_BIN_DIR` to the directory containing `atlas-opt`
-and `atlas-emit`, and use a fresh output directory:
+Build from the repository root with the Atlas support package and the Merlin
+CLI installed. `ATLAS_OOT_BIN_DIR` holds `atlas-opt` and `atlas-emit`. Use a
+fresh output directory:
 
 ```sh
 RUN=out/native-attention-mlp-host/example
@@ -58,15 +55,13 @@ TMPDIR="$RUN/.tmp" clang --target=riscv64-unknown-elf \
   -o "$RUN/shuttle-host.elf"
 ```
 
-The capsule must contain the same `program.bin` as `compiled/`, and
-`atlas_program.h` embeds those exact words. The current source-only host map
-has no bitstream identity. The diagnostic defines above bypass that missing
-identity and assume coherent DRAM; this ELF is not qualified for an FPGA run.
-For that handoff, use the selected SoC's generated address map, measured poll
-bound, and cache-maintenance callback as described in
-[host launch](../../../docs/host-launch.md).
+The capsule's `program.bin` must match `compiled/program.bin`, and
+`atlas_program.h` embeds those words. The two `ATLAS_DIAGNOSTIC_*` defines skip
+the missing bitstream and assume coherent DRAM. For a board build, see
+[host launch](../../../docs/host-launch.md#building-a-board-elf).
 
-The directed program has run on the selected standalone `AtlasCore` with both
-uniform and alternating-feature panels. The built RV64 ELF still needs an
-integrated host/device execution test. The native request's finite-domain
-premises are checked for these panels, not all runtime inputs.
+## Limits
+
+The program has run on the standalone Atlas core with uniform and
+alternating-feature panels. The host ELF has not run on the Shuttle + Atlas SoC.
+The request's finite-input assumptions are checked for those panels only.

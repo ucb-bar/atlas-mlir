@@ -133,7 +133,7 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
 
     val simulator = new SingleBackendSimulator[svsim.verilator.Backend] {
       override val workspacePath = sys.env.getOrElse("ATLAS_CORE_TEST_WORKSPACE",
-        fail("set ATLAS_CORE_TEST_WORKSPACE to a fresh task-owned directory"))
+        fail("set ATLAS_CORE_TEST_WORKSPACE to a fresh scratch directory"))
       override val backend = svsim.verilator.Backend.initializeFromProcessEnvironment()
       override val tag = "default"
       override val commonCompilationSettings = svsim.CommonCompilationSettings()

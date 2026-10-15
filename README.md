@@ -1,122 +1,74 @@
-# Atlas MLIR handwritten implementation
+# Atlas MLIR
 
-Atlas MLIR is an out-of-tree MLIR dialect and lowering path for the selected
-[Atlas RTL revision](docs/source-discrepancies.md). It provides a handwritten
-reference for comparing target dialect generation in Merlin. It does not import
-or invoke ACT.
+Atlas MLIR is an out-of-tree MLIR dialect and compiler for the Atlas NPU. It is
+written by hand as a reference to compare against Merlin-generated target
+dialects, and it targets one pinned RTL revision: `ucb-bar/atlas-npu`
+`0079c0541111197741a231c002e3843fa6f545b2`.
 
-The package has two Atlas stages: virtual SSA values before physical placement,
-and typed machine operations with selected instruction fields. It can lower a
-checked machine stream through the LLVM MLIR dialect to RISC-V object words
-using unmodified LLVM. The resulting function is a reset-entry program body,
-not a C-callable Atlas function.
+It has two Atlas levels:
 
-## What is implemented
+- **Virtual SSA**: BF16/FP8 tile values, state tokens, control flow, atomic DMA,
+  and MXU handles before physical placement.
+- **Machine IR**: one typed operation per Atlas instruction with its encoded
+  fields. All 99 decoder modes of the RTL can be written and encoded.
 
-| Area | Current scope |
-| --- | --- |
-| Machine dialect | 26 parameterized operation classes cover the 99 selected RTL decoder rows; verifiers and `atlas-emit` check fields and source-level word encodings. |
-| Virtual dialect | Bounded BF16/FP8 SSA tiles, state, CFG edges, atomic DMA, and MXU resource handles; virtual-to-machine lowering assigns the currently supported physical resources. |
-| LLVM handoff | Per-instruction LLVM call markers are checked and finalized into one ordered inline-assembly word block. |
-| Execution evidence | Bounded instruction programs ran on a selected-source-linked standalone `AtlasCore` ARC model. No integrated SoC or general host runtime result is claimed. |
+From machine IR, `atlas-emit` writes the 32-bit instruction words directly, or
+the program can go through LLVM (`mlir-translate`, `llc`) as one inline-assembly
+block in a RISC-V object. A RISC-V CPU cannot run those words; a host loads them
+into Atlas and starts it ([host launch](docs/host-launch.md)).
 
-The [mode census](docs/selected-variant-census.md) reports **99/99 represented
-and word-emitted decoder modes, 69/99 with bounded standalone-core semantic
-tests, and 0/99 admitted for a full software target**. These counts concern
-decoder modes, not every field combination, numerical input, or temporal
-interaction. All 99 retain full-qualification blockers. The census and
-[observation index](docs/README.md) carry the evidence and remaining work.
+The repository also ships a Python package (`atlas-mlir-native-support`) that
+plugs Atlas into Merlin's native compiler, and a small C runtime for the host
+side.
 
-## Compiler stages
+## Build
 
-`Atlas virtual SSA` → `Atlas machine IR` → `LLVM call markers` →
-`LLVM inline-assembly block` → `RISC-V object / ELF`
-
-- `--verify-atlas-virtual-stream` checks virtual SSA, state, and CFG edges.
-  `--lower-atlas-virtual-to-machine` performs the bounded placement and emits
-  typed machine operations. `--insert-atlas-dma-waits` then places waits
-  before the first instruction that needs each transfer complete.
-- `--verify-atlas-generated-schedule` checks the generated stream's chosen
-  delay and DMA-wait policy. `--verify-atlas-machine-stream` checks the physical
-  state chain, encoding, and control targets.
-- `--convert-atlas-to-llvm-calls` retains operation fields as LLVM-dialect call
-  markers. `--finalize-atlas-llvm-calls` rechecks them and emits one ordered
-  inline-assembly block. Those markers are compiler IR, not runtime calls.
-- `mlir-translate` and `llc` produce ordinary RISC-V artifacts containing the
-  selected Atlas instruction words. A generic RISC-V CPU cannot execute the
-  custom tensor instructions.
-
-The physical `--insert-atlas-delays` and `--schedule-atlas-stream` passes use a
-ported timing model. They are separate from virtual-to-machine lowering and
-do not establish an RTL-qualified schedule. The
-[dialect reference](docs/dialect-reference.md) lists every operation, pass,
-tool, allocation limit, and pass extension point. The
-[functional-stream format](docs/functional-stream-contract.md) is the separate
-instruction-level input for a functional model.
-
-## Build and test
-
-Use MLIR and LLVM tools from the same installation. The recorded local build
-used LLVM/MLIR 23.0.0git; see [source selection](#source-selection).
+Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
+`a47bddccec30255619bb8c37fa59700e661d4e66`).
 
 ```sh
 cmake -S . -B build -G Ninja \
-  -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir \
-  -DCMAKE_BUILD_TYPE=Release
+  -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
-build/bin/atlas-opt test/examples/mxu.mlir
-build/bin/atlas-emit test/examples/mxu.mlir
+pip install -e .        # optional: Merlin native binding
 ```
 
-CTest runs the portable tests without hardware. Tests that require the selected
-RTL, assembler, or standalone core need their corresponding `ATLAS_RTL_ROOT`,
-`ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
-`ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN` paths. A skip is
-not execution evidence. For a direct Python test run with another build tree,
-set `ATLAS_OOT_BIN_DIR` to its `bin` directory. The source-bound inventory
-check and its required source pins are documented in the
-[mode census](docs/selected-variant-census.md).
+CTest runs the portable tests with no hardware. Tests that run the RTL need
+`ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
+`ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN`; without them they
+skip. To run the Python tests against another build, set `ATLAS_OOT_BIN_DIR` to
+its `bin` directory.
 
-## Examples
+## Quick start
 
-| Example | Starting point | What it shows |
-| --- | --- | --- |
-| [MLP tile](examples/handoff/mlp_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed 32×32 instruction stream through LLVM, assembly, and ELF. |
-| [Attention tile](examples/handoff/attention_tile/01-atlas-machine.mlir) | Atlas machine IR | Fixed attention-like tile stream through the same stages. |
-| [Virtual MLP tile](examples/handoff/virtual_mlp/00-atlas-virtual-ssa.mlir) | Atlas virtual SSA | Placement and lowering before LLVM emission. |
-| [Captured MLP diagnostic](examples/handoff/captured_mlp/00-linalg.mlir) | Parsed Linalg IR | A bounded Linalg-to-ELF route with an explicit FP8/BF16 policy. |
+```sh
+mkdir -p out/quick
+build/bin/atlas-opt --lower-atlas-virtual-to-machine --insert-atlas-dma-waits \
+  --insert-atlas-delays test/examples/virtual_fp8_two_layer_mlp.mlir > out/quick/mlp.atlas.mlir
+build/bin/atlas-emit out/quick/mlp.atlas.mlir                  # hex words
+build/bin/atlas-emit --program-json out/quick/mlp.atlas.mlir   # words with decoded fields
+build/bin/atlas-opt --convert-atlas-to-llvm-calls out/quick/mlp.atlas.mlir |
+  build/bin/atlas-opt --finalize-atlas-llvm-calls -              # LLVM dialect
+```
 
-The [handoff guide](examples/handoff/README.md) gives the exact regeneration
-commands and names every generated Atlas, LLVM, assembly, object, ELF, map, and
-manifest file. Generated outputs belong under `out/` or another invocation
-output directory. The examples are fixed, bounded fixtures; they do not
-establish general MLP or attention model compilation.
+For full end-to-end runs, see the [examples](examples/handoff/README.md): LLVM
+and ELF stages for small tiles, a captured attention + MLP block from Linalg
+to a device program and host ELF, and tiled matmuls launched from a host.
 
-## Source selection
+## Read next
 
-| Role | Revision |
+| Doc | Covers |
 | --- | --- |
-| Selected RTL | `ucb-bar/atlas-npu` `0079c0541111197741a231c002e3843fa6f545b2` |
-| Examined model | local `npu_model-atlas` `5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d` |
-| Recorded LLVM/MLIR build | `a47bddccec30255619bb8c37fa59700e661d4e66` (23.0.0git) |
+| [Dialect reference](docs/dialect-reference.md) | Operations, verifiers, passes, tools, adding a pass. |
+| [Compiler pipeline](docs/compiler-pipeline.md) | Virtual lowering, interpreter, physical program, DMA, LLVM handoff. |
+| [Native Merlin binding](docs/native-merlin-binding.md) | Compiling graphs through Merlin. |
+| [Host launch](docs/host-launch.md) | Host runtime, memory map, mailbox, board builds. |
+| [Hardware status](docs/hardware-status.md) | Which instructions have run on the RTL, and known RTL/model differences. |
 
-The RTL and inspected model disagree on several encodings, arithmetic paths,
-layouts, and control rules. The [source comparison](docs/source-discrepancies.md)
-records those differences. For this selected RTL, the
-[column-reduction compatibility decision](docs/selected-rtl-column-reduction-contract.md)
-uses the executing 64×16 physical layout while retaining the 32×32
-architectural intent as a discrepancy.
+## Limits
 
-## Limits and documentation
-
-This is a handwritten comparison implementation, not a clean-room oracle or a
-Merlin-generated compiler.
-Selected-core results are bounded diagnostics. Full numerical, timing,
-physical-effect, legality, and integrated execution evidence is still needed
-for a complete target compiler. This repository has no general instruction
-selector, whole-model compiler, or C-callable Atlas function ABI.
-
-Start with the [documentation index](docs/README.md) for the dialect,
-pass-development guidance, examples, source decisions, execution observations,
-and launch limitations.
+This is not a general model compiler. It handles static 32×32 tiles and the
+graphs listed in the binding doc, with FP8/BF16 precision policies that change
+results relative to f32. Programs have run on a standalone Atlas core built
+from the pinned RTL, not on an integrated Shuttle + Atlas SoC or an FPGA.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Execute one audited model lowering with a fake Atlas device on the host.
+# Execute one checked model lowering with a fake Atlas device on the host.
 # The fake device checks the image and data path, not Atlas arithmetic.
 set -euo pipefail
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make a source-weight, evaluator-owned fixture for the parsed Atlas graph."""
+"""Make an independent source-weight fixture for the parsed Atlas graph."""
 
 from __future__ import annotations
 

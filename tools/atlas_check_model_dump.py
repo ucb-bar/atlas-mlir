@@ -1,4 +1,4 @@
-"""Check a returned Atlas model dump against an evaluator-owned output file.
+"""Check a returned Atlas model dump against an independently held output file.
 
 The runner reports where it ran the ELF. This tool checks bytes and identities;
 it cannot attest that the runner used the reported bitstream.
@@ -65,7 +65,7 @@ def check(handoff: Path, receipt_path: Path, status_path: Path,
     different = sum(a != b for a, b in zip(outputs, expected, strict=True))
     result = {
         "schema": "atlas.external_model_dump_check.v1",
-        "scope": "reported external dump compared with evaluator-owned two-panel f32 output",
+        "scope": "reported external dump compared with independently held two-panel f32 output",
         "status": (
             "execution_failure" if code != 1 else
             "numerical_mismatch" if different else
