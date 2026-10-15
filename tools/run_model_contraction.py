@@ -13,8 +13,8 @@ import struct
 import sys
 import time
 
-from atlas_tile_arithmetic import cache_statistics, mxu0_dot, output_halves
-from run_model_tile import (RECIPE, assembly, check_bindings, configure_model,
+from atlas_tile_arithmetic import cache_statistics, mxu0_dot, output_halves, rescale_bf16
+from run_model_tile import (RECIPES, assembly, check_bindings, configure_model,
                             encode_operands, execute_negative_controls, execute_tile,
                             input_sources, load_bundle, metrics, model_binding,
                             safe_path, sha256, validate_arrays, write_json)
@@ -41,12 +41,13 @@ def run(args, out, receipt):
     a, b, native = validate_arrays(arrays, manifest.get("source_dtype"), matrix=True)
     np.savez(out / "source.npz", **arrays)
     write_json(out / "source-manifest.json", manifest)
-    encoded, converted, conversions = encode_operands(arrays)
+    encoded, converted, conversions = encode_operands(arrays, args.recipe)
+    rescale_exponent = sum(item["scale_exponent"] for item in conversions.values())
     np.savez(out / "encoded.npz", **encoded)
     k_tiles = a.shape[1] // 32
     input_size, guard_size = 2 * k_tiles * 1024, 256
     output_offset = input_size + guard_size
-    source = assembly(k_tiles, output_offset)
+    source = assembly(k_tiles, output_offset, rescale_exponent if args.recipe == "tensor-pow2" else None)
     program = assemble(io.StringIO(source))
     words = program.assemble()
     if len(words) > 32768 or words[-1] != 0x73:
@@ -55,8 +56,10 @@ def run(args, out, receipt):
     (out / "program.bin").write_bytes(b"".join(struct.pack("<I", word) for word in words))
     (out / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
     requested = {"load_bytes": input_size, "store_bytes": 2048}
-    receipt.update({"recipe": RECIPE, "shape": [a.shape[0], a.shape[1], b.shape[1]],
+    receipt.update({"recipe": RECIPES[args.recipe], "shape": [a.shape[0], a.shape[1], b.shape[1]],
                     "source_inputs": input_before, "conversion": conversions,
+                    "output_rescale_exponent": rescale_exponent,
+                    "output_rescale_execution": "VLI_ALL_and_VMUL_BF16" if args.recipe == "tensor-pow2" else "none",
                     "native_fidelity_claim": False, "raw_image_execution_claim": False,
                     "model_input": "new_assembler_decoded_instruction_objects",
                     "invocations": "serialized_fresh_core_instances_one_python_process",
@@ -71,6 +74,7 @@ def run(args, out, receipt):
                               "backend": "curve", "curve": "ee290sim_vcs_probe.json",
                               "curve_sha256": model_before["curve_sha256"]}, "tiles": []})
     expected_global = np.zeros(native.shape, dtype=np.uint16)
+    raw_accumulators = np.zeros(native.shape, dtype=np.uint16)
     actual_global = np.zeros(native.shape, dtype=np.uint16)
     for row in range(0, a.shape[0], 32):
         for column in range(0, b.shape[1], 32):
@@ -79,7 +83,9 @@ def run(args, out, receipt):
             destination.mkdir()
             tile_a = encoded["A"][row:row + 32]
             tile_b = encoded["B"][:, column:column + 32]
-            expected = [[mxu0_dot(tile_a[r], tile_b[:, c]) for c in range(32)] for r in range(32)]
+            raw_expected = [[mxu0_dot(tile_a[r], tile_b[:, c]) for c in range(32)] for r in range(32)]
+            expected = ([[rescale_bf16(bits, rescale_exponent) for bits in values] for values in raw_expected]
+                        if args.recipe == "tensor-pow2" else raw_expected)
             expected_bytes = output_halves(expected)
             (destination / "expected-bf16-halves.bin").write_bytes(expected_bytes)
             payload = b"".join(tile_a[:, k * 32:(k + 1) * 32].tobytes() for k in range(k_tiles))
@@ -92,6 +98,7 @@ def run(args, out, receipt):
             halves = np.frombuffer(actual_bytes, dtype="<u2").reshape(2, 32, 16)
             actual_global[row:row + 32, column:column + 32] = np.concatenate((halves[0], halves[1]), axis=1)
             expected_global[row:row + 32, column:column + 32] = expected
+            raw_accumulators[row:row + 32, column:column + 32] = raw_expected
             tile_receipt = {"row_range": [row, row + 32], "column_range": [column, column + 32],
                             "k_range": [0, a.shape[1]], "execution": result,
                             "initial_dram_sha256": sha256(destination / "initial-dram.bin"),
@@ -108,7 +115,8 @@ def run(args, out, receipt):
     if not np.array_equal(actual_global, expected_global):
         raise AssertionError("assembled global output disagrees with independent full contraction")
     target = (actual_global.astype(np.uint32) << 16).view(np.float32)
-    np.savez(out / "result.npz", target_C=target, actual_bits=actual_global, expected_bits=expected_global)
+    np.savez(out / "result.npz", target_C=target, actual_bits=actual_global,
+             expected_bits=expected_global, raw_accumulator_bits=raw_accumulators)
     receipt["diagnostic_errors"] = {"target_vs_native_C": metrics(target, native),
                                     "bf16_operands_float64_matmul_vs_native_C": metrics(
                                         converted["A"].astype(np.float64) @ converted["B"].astype(np.float64), native)}
@@ -127,6 +135,7 @@ def main():
     parser.add_argument("--manifest")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--negative-controls", action="store_true")
+    parser.add_argument("--recipe", choices=tuple(RECIPES), default="unit")
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-cycles", type=int, default=500000)
     args = parser.parse_args()
@@ -138,6 +147,7 @@ def main():
     receipt = {"status": "failed", "claim": "Atlas model only; no hardware or native-quality verdict",
                "command": sys.argv, "cwd": os.getcwd(), "python": sys.executable,
                "pid": os.getpid(), "started_utc": datetime.now(timezone.utc).isoformat(),
+               "cpu_affinity": sorted(os.sched_getaffinity(0)),
                "python_version": platform.python_version(), "code_before": code_sources(),
                "environment": {key: os.environ.get(key) for key in
                                ("PYTHONPATH", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}}

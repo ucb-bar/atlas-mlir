@@ -65,13 +65,16 @@ def f32_to_bf16_bits(value):
     return result
 
 
-def pack_bf16_unit(bits):
-    """Independent unit-scale VPU FP8Pack rule, including flushed +zero.
+def pack_bf16(bits, scale_code=127):
+    """Independent VPU FP8Pack rule, including flushed +zero.
 
     Round the normalized significand to three fraction bits, then flush values
     whose rounded exponent is below -6. This is not IEEE gradual underflow.
     """
-    magnitude = abs(bf16_value(bits))
+    if not 0 <= scale_code <= 255:
+        raise ValueError("E8M0 code must fit eight bits")
+    exponent_shift = min(127, max(-128, scale_code - 127))
+    magnitude = abs(bf16_value(bits)) / power2(exponent_shift)
     if not magnitude or (bits >> 7) & 255 == 0:
         return 0
     sign = 128 if bits & 0x8000 else 0
@@ -85,6 +88,34 @@ def pack_bf16_unit(bits):
     if exponent > 8 or (exponent == 8 and significand >= 15):
         return sign | 0x7E
     return sign | ((exponent + 7) << 3) | (significand - 8)
+
+
+def pack_bf16_unit(bits):
+    return pack_bf16(bits, 127)
+
+
+def tensor_scale_exponent(values):
+    """Smallest admitted power-of-two scale keeping tensor max at most 448."""
+    maximum = max(abs(bf16_value(int(bits))) for bits in values)
+    if not maximum:
+        return 0
+    ratio = maximum / 448
+    lower = floor_log2(ratio)
+    exponent = lower + int(power2(lower) < ratio)
+    if not -126 <= exponent <= 127:
+        raise ValueError("tensor scale outside admitted finite E8M0 domain")
+    return exponent
+
+
+def rescale_bf16(bits, exponent):
+    if not -126 <= exponent <= 127:
+        raise ValueError("VPU rescale factor must be normal finite BF16")
+    if bits & 0x7FFF == 0:
+        return bits
+    exact = bf16_value(bits) * power2(exponent)
+    if abs(exact) > bf16_value(0x7F7F):
+        raise ValueError("VPU output rescale overflows finite BF16")
+    return bf16_round(exact)
 
 
 @lru_cache(maxsize=256)

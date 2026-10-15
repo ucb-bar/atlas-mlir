@@ -12,7 +12,8 @@ from fractions import Fraction
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 from atlas_tile_arithmetic import (bf16_round, f32_to_bf16_bits, mxu0_dot,
-                                   output_halves, pack_bf16_unit)
+                                   output_halves, pack_bf16_unit, pack_bf16,
+                                   rescale_bf16, tensor_scale_exponent)
 
 
 class TileArithmeticTest(unittest.TestCase):
@@ -82,6 +83,20 @@ class TileArithmeticTest(unittest.TestCase):
                 patch("run_model_tile.subprocess.run", return_value=SimpleNamespace(returncode=1)):
             with self.assertRaisesRegex(ValueError, "tracked source"):
                 model_binding(pathlib.Path("/tmp"))
+
+    def test_tensor_scale_and_explicit_output_rescale(self):
+        self.assertEqual(tensor_scale_exponent([f32_to_bf16_bits(448)]), 0)
+        self.assertEqual(tensor_scale_exponent([f32_to_bf16_bits(224)]), -1)
+        self.assertEqual(tensor_scale_exponent([0, 0x8000]), 0)
+        self.assertEqual(pack_bf16(f32_to_bf16_bits(224), 126), 0x7E)
+        self.assertEqual(pack_bf16(f32_to_bf16_bits(-224), 126), 0xFE)
+        self.assertEqual(rescale_bf16(0x4000, -1), 0x3F80)
+        self.assertEqual(rescale_bf16(0x8000, -16), 0x8000)
+        self.assertEqual(rescale_bf16(0, -16), 0)
+        with self.assertRaisesRegex(ValueError, "factor"):
+            rescale_bf16(0x4000, -127)
+        with self.assertRaisesRegex(ValueError, "overflows"):
+            rescale_bf16(0x7F7F, 1)
 
 
 if __name__ == "__main__":

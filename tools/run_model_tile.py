@@ -19,10 +19,12 @@ import time
 import zipfile
 
 from atlas_tile_arithmetic import (bf16_value, f32_to_bf16_bits, mxu0_dot,
-                                   output_halves, pack_bf16_unit)
+                                   output_halves, pack_bf16, rescale_bf16,
+                                   tensor_scale_exponent)
 
 MODEL_PIN = "9e6313bddecb8ba936206eb347f5cd4e5335282c"
 RECIPE = "atlas_mxu0_fp8_unit_bf16acc_v1"
+RECIPES = {"unit": RECIPE, "tensor-pow2": "atlas_mxu0_fp8_tensor_pow2_bf16acc_v1"}
 
 
 class OutputMismatch(AssertionError):
@@ -112,7 +114,7 @@ def load_bundle(args):
     return arrays, manifest
 
 
-def assembly(k_tiles, output_offset):
+def assembly(k_tiles, output_offset, rescale_exponent=None):
     # VMEM word bases: byte addresses 0x2000, 0x2400, 0x2800/0x2c00.
     lines = ["li x1, 0x800", "li x2, 0x900", "li x3, 0xa00",
              "li x5, 1024", "li x7, " + str(output_offset), "li x8, 2048",
@@ -124,7 +126,14 @@ def assembly(k_tiles, output_offset):
                   "vtrpose.xlu m1, m1", "delay 66", "vmatpush.weight.mxu0 w0, m1", "delay 32",
                   ("vmatmul.mxu0" if tile == 0 else "vmatmul.acc.mxu0") + " acc0, m0, w0",
                   "delay 96"]
-    lines += ["vmatpop.bf16.acc.mxu0 m2, acc0", "delay 34", "vstore m2, 0(x3)",
+    lines += ["vmatpop.bf16.acc.mxu0 m2, acc0", "delay 34"]
+    if rescale_exponent is not None:
+        if not -126 <= rescale_exponent <= 127:
+            raise ValueError("VPU rescale factor must be normal finite BF16")
+        factor_bits = (rescale_exponent + 127) << 7
+        lines += [f"vli.all m4, {factor_bits}", "delay 66",
+                  "vmul.bf16 m2, m2, m4", "delay 66"]
+    lines += ["vstore m2, 0(x3)",
               "delay 34", "li x9, 0xb00", "vstore m3, 0(x9)", "delay 34",
               "dma.store x7, x3, x8, ch0", "dma.wait ch0", "nop", "ecall"]
     return "\n".join(lines) + "\n"
@@ -308,10 +317,12 @@ def execute_negative_controls(source, initial, expected_bytes, output_offset,
     return results
 
 
-def encode_operands(arrays):
+def encode_operands(arrays, recipe="unit"):
     import numpy as np
     import torch
     from npu_model.configs.numerics import RtlNumerics
+    if recipe not in RECIPES:
+        raise ValueError("unsupported target arithmetic recipe")
     encoded, converted = {}, {}
     conversion_stats = {}
     for key in ("A", "B"):
@@ -320,15 +331,19 @@ def encode_operands(arrays):
         tensor = torch.from_numpy(bf16.copy()).view(torch.bfloat16)
         if not torch.equal(torch.from_numpy(value.copy()).to(torch.bfloat16).view(torch.uint16), tensor.view(torch.uint16)):
             raise AssertionError("independent BF16 cast differs from selected host cast")
-        independently_packed = np.array([pack_bf16_unit(int(v)) for v in bf16.flat], dtype=np.uint8).reshape(value.shape)
-        packed = RtlNumerics.to_fp8(tensor, 127).view(torch.uint8).numpy().copy()
+        exponent = 0 if recipe == "unit" else tensor_scale_exponent(bf16.flat)
+        scale_code = 127 + exponent
+        independently_packed = np.array([pack_bf16(int(v), scale_code) for v in bf16.flat], dtype=np.uint8).reshape(value.shape)
+        packed = RtlNumerics.to_fp8(tensor, scale_code).view(torch.uint8).numpy().copy()
         if not np.array_equal(independently_packed, packed):
             raise AssertionError("independent FP8 encoding disagrees with selected model")
         converted[key] = (bf16.astype(np.uint32) << 16).view(np.float32)
         encoded[key] = packed
-        conversion_stats[key] = {"bf16_cast": metrics(converted[key], value),
+        conversion_stats[key] = {"scale_exponent": exponent, "scale_code": scale_code,
+                                  "bf16_cast": metrics(converted[key], value),
                                   "flushed_nonzero": int(np.sum((converted[key] != 0) & ((packed & 127) == 0))),
                                   "source_abs_gt448": int(np.sum(np.abs(converted[key]) > 448)),
+                                  "scaled_abs_gt448": int(np.sum(np.abs(np.ldexp(converted[key].astype(np.float64), -exponent)) > 448)),
                                   "encoded_max_magnitude": int(np.sum((packed & 127) == 0x7E))}
     return encoded, converted, conversion_stats
 
@@ -366,12 +381,15 @@ def run(args, out, receipt):
     write_json(out / "source-manifest.json", manifest)
     source_files = ({"npz": sha256(args.input), "manifest": sha256(args.manifest)}
                     if not args.smoke else {"npz": sha256(out / "source.npz")})
-    encoded, converted, conversion_stats = encode_operands(arrays)
+    encoded, converted, conversion_stats = encode_operands(arrays, args.recipe)
+    rescale_exponent = sum(item["scale_exponent"] for item in conversion_stats.values())
     np.savez(out / "encoded.npz", **encoded)
-    expected = [[mxu0_dot(encoded["A"][row], encoded["B"][:, col])
+    raw_expected = [[mxu0_dot(encoded["A"][row], encoded["B"][:, col])
                  for col in range(32)] for row in range(32)]
+    expected = ([[rescale_bf16(bits, rescale_exponent) for bits in row] for row in raw_expected]
+                if args.recipe == "tensor-pow2" else raw_expected)
     expected_bytes = output_halves(expected)
-    controls = mutation_witnesses(encoded, expected)
+    controls = mutation_witnesses(encoded, raw_expected)
     if args.smoke and len(controls) != 2:
         raise AssertionError("smoke must distinguish transpose and accumulator-reset errors")
     (out / "expected-bf16-halves.bin").write_bytes(expected_bytes)
@@ -382,7 +400,7 @@ def run(args, out, receipt):
                             for tile in range(k_tiles))
     output_offset = len(input_bytes) + 32
     initial = input_bytes + b"\xA5" * 32 + b"\xCD" * 2048 + b"\x5A" * 32
-    source = assembly(k_tiles, output_offset)
+    source = assembly(k_tiles, output_offset, rescale_exponent if args.recipe == "tensor-pow2" else None)
     (out / "program.S").write_text(source)
     program = input_to_program(io.StringIO(source))
     words = program.assemble()
@@ -392,12 +410,17 @@ def run(args, out, receipt):
     (out / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
     (out / "initial-dram.bin").write_bytes(initial)
     requested = {"load_bytes": 2 * k_tiles * 1024, "store_bytes": 2048}
-    receipt.update({"recipe": RECIPE, "source_inputs": source_files, "shape": [32, a.shape[1], 32],
-                    "input_scale_code": 127, "input_converter": "VPU_FP8Pack_unit",
+    receipt.update({"recipe": RECIPES[args.recipe], "source_inputs": source_files, "shape": [32, a.shape[1], 32],
+                    "input_scale_code": 127 if args.recipe == "unit" else None,
+                    "input_scale_codes": {key: value["scale_code"] for key, value in conversion_stats.items()},
+                    "input_converter": "VPU_FP8Pack_" + args.recipe,
+                    "output_rescale_exponent": rescale_exponent,
+                    "output_rescale_execution": "VLI_ALL_and_VMUL_BF16" if args.recipe == "tensor-pow2" else "none",
                     "native_fidelity_claim": False, "model_input": "new_assembler_decoded_instruction_objects",
                     "raw_image_execution_claim": False, "instruction_words": len(words),
                     "requested_dma": requested, "conversion": conversion_stats,
                     "independent_mutation_witnesses": controls,
+                    "independent_mutation_witnesses_domain": "raw_MXU0_accumulator_before_rescale",
                     "memory": {"dram_base": 1 << 32, "input_bytes": len(input_bytes),
                                "output_offset": output_offset, "guard_bytes_each": 32,
                                "total_dram_bytes": len(initial), "vmem_staging_bytes": 4096},
@@ -418,7 +441,8 @@ def run(args, out, receipt):
     native_from_bf16 = converted["A"].astype(np.float64) @ converted["B"].astype(np.float64)
     receipt["diagnostic_errors"] = {"target_vs_native_C": metrics(target, native),
                                     "bf16_operands_float64_matmul_vs_native_C": metrics(native_from_bf16, native)}
-    np.savez(out / "result.npz", target_C=target, expected_bits=np.array(expected, dtype=np.uint16))
+    np.savez(out / "result.npz", target_C=target, expected_bits=np.array(expected, dtype=np.uint16),
+             raw_accumulator_bits=np.array(raw_expected, dtype=np.uint16))
     check_bindings(args, model_root, receipt, model_before, input_before)
     receipt["status"] = "passed_model_only"
 
@@ -430,6 +454,7 @@ def main():
     parser.add_argument("--manifest")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--negative-controls", action="store_true")
+    parser.add_argument("--recipe", choices=tuple(RECIPES), default="unit")
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-cycles", type=int, default=500000)
     parser.add_argument("--repeats", type=int, choices=(1, 2), default=2)
@@ -442,9 +467,10 @@ def main():
     receipt = {"status": "failed", "claim": "Atlas model only; no hardware or native-quality verdict",
                "command": sys.argv, "cwd": os.getcwd(), "python": sys.executable,
                "pid": os.getpid(), "started_utc": datetime.now(timezone.utc).isoformat(),
+               "cpu_affinity": sorted(os.sched_getaffinity(0)),
                "environment": {key: os.environ.get(key) for key in
                                ("PYTHONPATH", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")},
-               "python_version": platform.python_version(), "recipe": RECIPE,
+               "python_version": platform.python_version(), "recipe": RECIPES[args.recipe],
                "runner_sha256": sha256(__file__),
                "oracle_sha256": sha256(Path(__file__).with_name("atlas_tile_arithmetic.py"))}
     try:
