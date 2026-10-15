@@ -20,7 +20,10 @@ from run_model_tile import (OutputMismatch, RECIPES, check_bindings, configure_m
                             validate_arrays, write_json)
 
 
-def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False):
+def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False,
+             pretranspose_resident_b=False):
+    if pretranspose_resident_b and not resident_b:
+        raise ValueError("--pretranspose-resident-b requires --resident-b")
     # Keep B in bank 1; bank 0 retains the existing A/output staging windows.
     if resident_b and k * n > 256 * 1024:
         raise ValueError("resident B must fit one 256-KiB VMEM bank")
@@ -33,8 +36,12 @@ def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False)
         # DMA/VLOAD VMEM operands count four-byte words; DRAM operands count bytes.
         lines += ["add x19, x2, x0", "add x20, x15, x0", f"li x21, {k * n // 1024}",
                   f"li x18, {stride // 4}", "resident_b_loop:",
-                  "dma.load x19, x20, x5, ch0", "dma.wait ch0",
-                  "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
+                  "dma.load x19, x20, x5, ch0", "dma.wait ch0"]
+        if pretranspose_resident_b:
+            # Cache the raw byte transpose in the same bank-1 tile, in-program.
+            lines += ["vload m1, 0(x19)", "delay 34", "vtrpose.xlu m1, m1", "delay 66",
+                      "vstore m1, 0(x19)", "delay 34"]
+        lines += ["addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
                   "beq x21, x0, resident_b_done", "nop", "jal x0, resident_b_loop", "nop",
                   "resident_b_done:"]
     lines += ["rows_loop:", "add x11, " + ("x2" if resident_b else "x15") + ", x0", "add x14, x17, x0",
@@ -43,8 +50,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False)
         lines += ["dma.load x1, x4, x5, ch0", "dma.wait ch0"]
         if not resident_b:
             lines += ["dma.load x2, x6, x5, ch0", "dma.wait ch0"]
-        lines += ["vload m0, 0(x1)", "delay 34", "vload m1, 0(" + ("x6" if resident_b else "x2") + ")", "delay 34",
-                  "vtrpose.xlu m1, m1", "delay 66", "vmatpush.weight.mxu0 w0, m1", "delay 32",
+        lines += ["vload m0, 0(x1)", "delay 34", "vload m1, 0(" + ("x6" if resident_b else "x2") + ")", "delay 34"]
+        if not pretranspose_resident_b:
+            lines += ["vtrpose.xlu m1, m1", "delay 66"]
+        lines += ["vmatpush.weight.mxu0 w0, m1", "delay 32",
                   ("vmatmul.mxu0" if tile == 0 else "vmatmul.acc.mxu0") + " acc0, m0, w0",
                   "delay 96", "addi x4, x4, 1024", "addi x6, x6, " + ("256" if resident_b else "1024")]
     lines += ["vmatpop.bf16.acc.mxu0 m2, acc0", "delay 34"]
@@ -111,6 +120,9 @@ def negative_controls(source, initial, expected, offset, requested, out, max_cyc
 
 
 def run(args, out, receipt):
+    pretranspose_resident_b = getattr(args, "pretranspose_resident_b", False)
+    if pretranspose_resident_b and not args.resident_b:
+        raise ValueError("--pretranspose-resident-b requires --resident-b")
     import numpy as np
     preflight_bundle(args)
     model_root = safe_path(args.model_root)
@@ -151,7 +163,7 @@ def run(args, out, receipt):
     offset = len(inputs) + 256
     initial = inputs + b"\xA5" * 256 + b"\xCD" * len(expected_bytes) + b"\x5A" * 256
     source = assembly(m, k, n, offset, exponent if args.recipe == "tensor-pow2" else None,
-                      resident_b=args.resident_b)
+                      resident_b=args.resident_b, pretranspose_resident_b=pretranspose_resident_b)
     (out / "program.S").write_text(source)
     program = assemble(io.StringIO(source))
     words = program.assemble()
@@ -173,7 +185,8 @@ def run(args, out, receipt):
                    timing_boundary="one_fetch_to_ECALL_instruction_program_excluding_host_conversion_packing_and_loading",
                    invocations="one_reset_core_per_repeat_all_tiles_in_one_instruction_program",
                    resident_operand_reuse_claim=args.resident_b,
-                   operand_reuse={"mode": "resident_b_v1" if args.resident_b else "none",
+                   operand_reuse={"mode": ("resident_b_pretransposed_v1" if pretranspose_resident_b else
+                                           "resident_b_v1" if args.resident_b else "none"),
                                   "resident_b_bytes": k * n if args.resident_b else 0,
                                   "resident_b_vmem_byte_base": 0x40000 if args.resident_b else None},
                    raw_image_execution_claim=False, native_fidelity_claim=False,
@@ -208,11 +221,15 @@ def main():
     parser.add_argument("--negative-controls", action="store_true")
     parser.add_argument("--resident-b", action="store_true",
                         help="load packed B once into one 256-KiB VMEM bank; refuse larger tensors")
+    parser.add_argument("--pretranspose-resident-b", action="store_true",
+                        help="transpose each resident B tile once in-program; requires --resident-b")
     parser.add_argument("--recipe", choices=tuple(RECIPES), default="unit")
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-cycles", type=int)
     parser.add_argument("--repeats", type=int, choices=(1, 2), default=2)
     args = parser.parse_args()
+    if args.pretranspose_resident_b and not args.resident_b:
+        parser.error("--pretranspose-resident-b requires --resident-b")
     out = safe_path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
