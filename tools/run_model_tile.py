@@ -268,9 +268,9 @@ def execute_tile(program, initial, expected_bytes, output_offset, requested,
         if any(exu.has_in_flight for exu in core.exus) or any(state.check_flag(ch) for ch in range(8)):
             raise AssertionError("ECALL observed before engines/DMA drained")
         actual = bytes(state.read_dram(program.dram_base, len(initial)).tolist())
-        actual_output = actual[output_offset:output_offset + 2048]
+        actual_output = actual[output_offset:output_offset + len(expected_bytes)]
         (out / f"actual-bf16-halves-{repeat}.bin").write_bytes(actual_output)
-        if actual[:output_offset] != initial[:output_offset] or actual[output_offset + 2048:] != initial[output_offset + 2048:]:
+        if actual[:output_offset] != initial[:output_offset] or actual[output_offset + len(expected_bytes):] != initial[output_offset + len(expected_bytes):]:
             raise AssertionError("input or DRAM guard changed")
         if any(events[key] != size for key, size in requested.items()):
             raise AssertionError("observed DMA traffic differs from requested transfers")
