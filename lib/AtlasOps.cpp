@@ -267,6 +267,17 @@ LogicalResult VirtualVPUBinaryOp::verify() {
   return success();
 }
 
+LogicalResult VirtualVPUReduceOp::verify() {
+  StringRef kind = getKind();
+  if (kind != "row_max" && kind != "row_min" && kind != "row_sum")
+    return emitOpError("unknown virtual reduce VPU kind");
+  return success();
+}
+
+LogicalResult VirtualVPUSplatOp::verify() {
+  return inRange(getOperation(), "bits (raw BF16)", getBits(), 0, 65535);
+}
+
 LogicalResult VLoadOp::verify() {
   if (getFormat() != "raw")
     return emitOpError("format must be raw; one instruction moves 1024 bytes");

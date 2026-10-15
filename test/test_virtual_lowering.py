@@ -232,13 +232,10 @@ class VirtualLoweringTest(unittest.TestCase):
                        '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('interference exceeds 31 physical pairs', rejected.stderr)
-        unqualified = virtual_chain(1).replace('kind = "relu"',
-                                                'kind = "exp"')
-        rejected = run('atlas-opt', unqualified,
-                       '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn('admission currently requires mov or relu',
-                      rejected.stderr)
+        exp2 = lower(virtual_chain(1).replace('kind = "relu"',
+                                              'kind = "exp2"'))
+        self.assertIn('kind = "exp2"', exp2)
+        emitted(exp2)
 
     def test_bad_abi_and_modified_schedule_fail(self) -> None:
         source = (EXAMPLES / "virtual_bf16_loop_program.mlir").read_text()

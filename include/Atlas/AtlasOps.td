@@ -182,6 +182,26 @@ def Atlas_VirtualVPUBinaryOp : Atlas_Op<"virtual_vpu_binary", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualVPUReduceOp : Atlas_Op<"virtual_vpu_reduce", [Pure]> {
+  let summary = "BF16 VPU row reduction: each row's result fills that row";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, StrAttr:$kind);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualVPUSplatOp : Atlas_Op<"virtual_vpu_splat", [Pure]> {
+  let summary = "BF16 tile with every element set to the same raw BF16 bits";
+  let arguments = (ins I32Attr:$bits);
+  let results = (outs Atlas_VirtualBF16Type:$dst);
+  let hasVerifier = 1;
+}
+
+def Atlas_VirtualXLUTransposeOp : Atlas_Op<"virtual_xlu_transpose", [Pure]> {
+  let summary = "FP8 tile transposed on the XLU: element (j, i) is source (i, j)";
+  let arguments = (ins Atlas_VirtualFP8Type:$src);
+  let results = (outs Atlas_VirtualFP8Type:$dst);
+}
+
 def Atlas_VirtualOutputBF16Op :
     Atlas_Op<"virtual_output_bf16",
              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {

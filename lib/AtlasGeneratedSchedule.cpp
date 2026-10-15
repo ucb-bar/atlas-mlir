@@ -17,7 +17,8 @@ using namespace mlir::atlas;
 bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
   if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
-          VLoadOp, VStoreOp, ALURegOp, ALUImmOp, UpperOp>(op))
+          VPUReduceOp, VLIOp, XLUTransposeOp, VLoadOp, VStoreOp, ALURegOp,
+          ALUImmOp, UpperOp>(op))
     return true;
   if (auto load = dyn_cast<ScalarLoadOp>(op))
     return load.getKind() == "seli";
@@ -28,6 +29,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     const AtlasVerificationContext &ctx) {
   assert(ctx.generated && "generated checks require the structural stage");
   ModuleOp module = ctx.module;
+  if (ctx.words.size() > kAtlasGeneratedWordLimit)
+    return module.emitOpError("generated program exceeds the ")
+           << kAtlasGeneratedWordLimit << "-word policy limit ("
+           << ctx.words.size() << " words, including inserted delays)";
   if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)) ||
       failed(verifyAtlasGeneratedDMAMemory(ctx)) || failed(verifyAtlasGeneratedDMAContract(ctx)) ||
       failed(verifyAtlasGeneratedMXUContract(ctx)) || failed(verifyAtlasGeneratedTileContract(ctx)) ||

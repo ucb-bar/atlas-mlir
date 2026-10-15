@@ -40,6 +40,9 @@ struct OpInfo {
 };
 
 const OpInfo *findOp(const std::string &name);
+// The BF16 VPU instruction for an atlas.vpu_unary, vpu_binary or vpu_reduce
+// kind, such as "exp2", "max" or "row_sum".
+std::string vpuMnemonic(const std::string &kind);
 bool hasOperand(const OpInfo &op, const std::string &token);
 bool isControlFlow(const OpInfo &op);
 

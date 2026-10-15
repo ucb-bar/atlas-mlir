@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -104,6 +105,25 @@ class VirtualEvaluatorDmaTest(unittest.TestCase):
         alternate = RuntimeInputs(memory=(guarded, MemoryRegion(BASE, payload[::-1])))
         self.assertEqual(evaluate(program, alternate).memory[0].data, b"L" * 32 + payload[::-1] + b"R" * 31)
         self.assertEqual(evaluate(program, runtime).memory, expected)
+
+    def test_fp8_dma_transpose_store_preserves_raw_bytes_and_guards_without_numerics(self):
+        rows = tuple(bytes((row * 37 + col * 11) & 255 for col in range(32)) for row in range(32))
+        payload = b"".join(rows)
+        expected = bytes(value for column in zip(*rows) for value in column)
+        stream = Stream()
+        loaded = stream.await_(stream.load(BASE, "fp8"), "fp8")
+        transposed = stream.fresh()
+        fp8 = tile_type("fp8")
+        stream.lines.append(f'{transposed} = "atlas.virtual_xlu_transpose"({loaded}) : ({fp8}) -> {fp8}')
+        stream.wait(stream.store(transposed, BASE + 0x2000, "fp8"))
+        source = MemoryRegion(BASE - 3, b"src" + payload + b"tail")
+        destination = MemoryRegion(BASE + 0x2000 - 7, b"before!" + b"?" * 1024 + b"after")
+        runtime = RuntimeInputs(memory=(destination, source))
+        with patch("atlas_virtual_evaluator._numerics", side_effect=AssertionError("transpose needs no numerics")):
+            result = evaluate(stream.program(), runtime)
+        self.assertEqual(dict(result.outputs), {})
+        self.assertEqual(result.memory, (MemoryRegion(destination.address, b"before!" + expected + b"after"), source))
+        self.assertEqual(runtime.memory, (destination, source))
 
     def test_bf16_load_and_store_independently_check_half_pair_layout_and_raw_bits(self):
         bits = tuple((row * 2039 + col * 137) & 0xFFFF for row in range(32) for col in range(32))

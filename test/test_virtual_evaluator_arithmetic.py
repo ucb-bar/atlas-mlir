@@ -14,6 +14,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -34,7 +35,14 @@ INPUTS = '''
 MOV = '%m = "atlas.virtual_vpu_unary"(%a) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
 RELU = MOV.replace('kind = "mov"', 'kind = "relu"')
 ADD = '%sum = "atlas.virtual_vpu_binary"(%a, %b) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16'
+SUB = ADD.replace('kind = "add"', 'kind = "sub"')
+MUL = ADD.replace('kind = "add"', 'kind = "mul"')
+EXP2 = MOV.replace('kind = "mov"', 'kind = "exp2"')
+RECIP = MOV.replace('kind = "mov"', 'kind = "recip"')
 PACK = '%packed = "atlas.virtual_pack_fp8"(%a) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
+
+FP8_INPUTS = INPUTS.replace("input_bf16", "input_fp8").replace("virtual_bf16", "virtual_fp8")
+TRANSPOSE = '%transposed = "atlas.virtual_xlu_transpose"(%a) : (!atlas.virtual_fp8) -> !atlas.virtual_fp8'
 
 # FP32 nearest-even plus BF16 chopping, gradual underflow, signed zeros and canonical NaNs.
 ADD_CASES = (
@@ -46,6 +54,50 @@ ADD_CASES = (
     (0x0000, 0x8000, 0x0000), (0x3F80, 0xBF80, 0x0000),
     (0x7F7F, 0x7F7F, 0x7F80), (0xFF7F, 0xFF7F, 0xFF80),
     (0x7F80, 0xFF80, 0x7FC0), (0xFFA1, 0x3F80, 0x7FC0),
+)
+# SUB uses FP32 arithmetic and BF16 chopping.
+SUB_CASES = (
+    (0x3E80, 0x3EC0, 0xBE00), (0x3E8F, 0x3ECF, 0xBE00),
+    (0x3F80, 0x3B40, 0x3F7F), (0xBF80, 0x3BC0, 0xBF80),
+    (0x3F80, 0xBBC0, 0x3F80), (0x3F80, 0xBC40, 0x3F81),
+    (0x0081, 0x0080, 0x0001), (0x0080, 0x0081, 0x8001),
+    (0x007F, 0x8001, 0x0080), (0x0001, 0x0001, 0x0000),
+    (0x8000, 0x0000, 0x8000), (0x8000, 0x8000, 0x0000),
+    (0x7F7F, 0xFF7F, 0x7F80), (0xFF7F, 0x7F7F, 0xFF80),
+    (0x7F80, 0x7F80, 0x7FC0), (0xFFA1, 0x3F80, 0x7FC0),
+)
+# MUL uses BF16 nearest-even rounding, including subnormals.
+MUL_CASES = (
+    (0x3E80, 0x3EC0, 0x3DC0), (0x3E81, 0x3EC1, 0x3DC3),
+    (0x3E82, 0x3EC2, 0x3DC5), (0x3E8F, 0x3ECF, 0x3DE7),
+    (0x3F81, 0x3F81, 0x3F82), (0x3F81, 0x3FC0, 0x3FC2),
+    (0x3F83, 0x3FC0, 0x3FC4), (0xBF81, 0x3FC0, 0xBFC2),
+    (0x3FC0, 0x3FC0, 0x4010), (0x0080, 0x3F00, 0x0040),
+    (0x0080, 0x3F7F, 0x0080), (0x0001, 0x3F00, 0x0000),
+    (0x0003, 0x3F00, 0x0002), (0x0005, 0x3F00, 0x0002),
+    (0x8001, 0x3F00, 0x8000), (0x8003, 0x3F00, 0x8002),
+    (0x8000, 0xBF80, 0x0000), (0x0000, 0xBF80, 0x8000),
+    (0x7F7F, 0x4000, 0x7F80), (0xFF7F, 0x4000, 0xFF80),
+    (0x7F80, 0x0000, 0x7FC0), (0xFFC1, 0x3F80, 0x7FC0),
+)
+# Captured VPU bits: npu-model@0c4a1f9, tests/rtl/vector_traces.json, bank 4/row 0.
+# SHA256: 05fccec50691381c3cf1f3c693f71e2b976bc501879e100af2492c6eabdeed17.
+FRACTIONAL_INPUTS = tuple(range(0x3E80, 0x3E90))
+EXP2_FRACTIONAL = (0x3F98, 0x3F98, 0x3F99, 0x3F99, 0x3F99, 0x3F99, 0x3F99, 0x3F9A,
+                   0x3F9A, 0x3F9A, 0x3F9A, 0x3F9B, 0x3F9B, 0x3F9B, 0x3F9B, 0x3F9B)
+RECIP_FRACTIONAL = (0x4080, 0x407E, 0x407C, 0x407A, 0x4078, 0x4076, 0x4074, 0x4072,
+                    0x4070, 0x406F, 0x406D, 0x406B, 0x406A, 0x4068, 0x4066, 0x4065)
+EXP2_CASES = tuple(zip(FRACTIONAL_INPUTS, EXP2_FRACTIONAL)) + (
+    (0x0000, 0x3F80), (0x8000, 0x3F80), (0x3F80, 0x4000),
+    (0xBF80, 0x3F00), (0x4000, 0x4080), (0xC000, 0x3E80),
+)
+# RcpLUT corners, including exponent wrap: diagnostics/characterize_vpu_recip.py.
+RECIP_CASES = tuple(zip(FRACTIONAL_INPUTS, RECIP_FRACTIONAL)) + (
+    (0x0000, 0x7F80), (0x8000, 0xFF80), (0x0001, 0x7F80), (0x8001, 0xFF80),
+    (0x007F, 0x7F80), (0x807F, 0xFF80), (0x7F80, 0x0000), (0xFF80, 0x8000),
+    (0x7FC1, 0x0000), (0xFFA1, 0x8000), (0x3F80, 0x3F80), (0xBF80, 0xBF80),
+    (0x4000, 0x3F00), (0xC000, 0xBF00), (0x0080, 0x7E80), (0x7F00, 0x0000),
+    (0x7F7F, 0x7F80), (0xFF7F, 0xFF80),
 )
 # Source-derived unit-scale FP8Pack expectations: even/odd RNE ties, exponent carry, flush around the
 # minimum normal, saturation and specials. Rounded 480 is 0x7e here, unlike the MXU converter's 0x7f.
@@ -63,12 +115,162 @@ def operation(source: str):
     return parse_program("module {" + INPUTS + source + "}").operations[-1]
 
 
+def transpose_operation():
+    return parse_program("module {" + FP8_INPUTS + TRANSPOSE + "}").operations[-1]
+
+
 def repeated(values, format="bf16") -> Tile:
     return Tile(format, tuple(values[i % len(values)] for i in range(1024)))
 
 
 def relu(tile: Tile) -> Tile:
     return Tile("bf16", tuple(0 if bits & 0x8000 else bits for bits in tile.bits))
+
+
+SPLAT = '%splat = "atlas.virtual_vpu_splat"() {bits = 0 : i32} : () -> !atlas.virtual_bf16'
+REDUCE = '%reduced = "atlas.virtual_vpu_reduce"(%a) {kind = "row_sum"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
+# Each row is padded with +0. Expected sum/min/max are independent raw literals.
+REDUCTION_CASES = (
+    ((0x3F80,) * 32, 0x4200, 0x3F80, 0x3F80),
+    ((0x4000,) * 32, 0x4280, 0x4000, 0x4000),
+    # Final BF16 rounding retains two half-ULP terms; BF16 intermediate rounding loses them.
+    ((0x3F80, 0x3B80, 0x3B80), 0x3F81, 0x0000, 0x3F80),
+    # Halfway sums select the even BF16 mantissa, rounding down or up as needed.
+    ((0x3F80, 0x3B80), 0x3F80, 0x0000, 0x3F80),
+    ((0x3F81, 0x3B80), 0x3F82, 0x0000, 0x3F81),
+    # Final BF16 RNE rounds up here; BF16 bit chopping would retain 0x3F80.
+    ((0x3F80,) + (0,) * 15 + (0x3BC0,), 0x3F81, 0x0000, 0x3F80),
+    ((0xBF80, 0xC000, 0x4040), 0x0000, 0xC000, 0x4040),
+    # Adjacent FP32 pairs lose both ones: tree=0, sequential=1, exact=2.
+    ((0x4C00, 0x3F80, 0xCC00, 0x3F80), 0x0000, 0xCC00, 0x4C00),
+    ((0x0000, 0x8000), 0x0000, 0x8000, 0x0000),
+    ((0x8000,) * 32, 0x8000, 0x8000, 0x8000),
+    ((0x7FC1, 0x3F80), 0x7FC0, 0x0000, 0x7FC1),
+    ((0xFFC1, 0xBF80), 0x7FC0, 0xFFC1, 0x0000),
+    ((0x7F80, 0xFF80), 0x7FC0, 0xFF80, 0x7F80),
+    ((0x0001, 0x0001), 0x0002, 0x0000, 0x0001),
+)
+
+
+def row_reduction_fixture():
+    rows = tuple(REDUCTION_CASES[row % len(REDUCTION_CASES)] for row in range(32))
+    tile = Tile("bf16", tuple(bits for values, *_ in rows for bits in values + (0,) * (32 - len(values))))
+    expected = {
+        kind: Tile("bf16", tuple(case[index] for case in rows for _ in range(32)))
+        for index, kind in enumerate(("row_sum", "row_min", "row_max"), 1)
+    }
+    return tile, expected
+
+
+class VirtualEvaluatorTransposeTest(unittest.TestCase):
+    def test_transpose_preserves_all_raw_fp8_codes_without_numerics(self) -> None:
+        rows = tuple(tuple((row * 37 + col * 11) & 255 for col in range(32)) for row in range(32))
+        source = Tile("fp8", tuple(bits for row in rows for bits in row))
+        self.assertEqual(set(source.bits), set(range(256)))
+        expected = Tile("fp8", tuple(bits for column in zip(*rows) for bits in column))
+        original = source.bits
+        with patch("atlas_virtual_evaluator._numerics", side_effect=AssertionError("transpose needs no numerics")):
+            transposed = evaluate_tile_operation(transpose_operation(), (source,))
+            self.assertEqual(transposed, expected)
+            self.assertEqual(evaluate_tile_operation(transpose_operation(), (transposed,)), source)
+        self.assertEqual(source.bits, original)
+        self.assertIsNot(transposed, source)
+
+    def test_transpose_moves_asymmetric_special_bytes_across_halves_and_edges(self) -> None:
+        bits = [0x38] * 1024
+        placements = ((0, 31, 0x80), (31, 0, 0x00), (15, 16, 0x7F), (16, 15, 0xFF),
+                      (1, 30, 0x01), (30, 1, 0x81), (7, 23, 0x7E), (23, 7, 0xFE))
+        for row, col, value in placements:
+            bits[row * 32 + col] = value
+        result = evaluate_tile_operation(transpose_operation(), (Tile("fp8", tuple(bits)),))
+        targets = ((31, 0, 0x80), (0, 31, 0x00), (16, 15, 0x7F), (15, 16, 0xFF),
+                   (30, 1, 0x01), (1, 30, 0x81), (23, 7, 0x7E), (7, 23, 0xFE))
+        for row, col, value in targets:
+            with self.subTest(row=row, col=col):
+                self.assertEqual(result.bits[row * 32 + col], value)
+        self.assertEqual(sum(value != 0x38 for value in result.bits), len(targets))
+
+    def test_transpose_helper_checks_runtime_operands_and_revalidates_operation(self) -> None:
+        fp8, bf16 = repeated((0x7F,), "fp8"), repeated((0,))
+        for operands in ((), (fp8, fp8), (bf16,), [fp8], (None,), None):
+            with self.subTest(operands=operands), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(transpose_operation(), operands)
+        for mutation in ("kind", "property", "operands", "input_type", "result_type"):
+            op = transpose_operation()
+            if mutation == "kind":
+                op.attributes["kind"] = builtin.StringAttr("mov")
+            elif mutation == "property":
+                op.properties["invented"] = builtin.IntegerAttr(0, builtin.i32)
+            elif mutation == "operands":
+                op.operands = ()
+            elif mutation == "input_type":
+                op.operands[0]._type = operation(MOV).operands[0].type
+            else:
+                op.results[0]._type = operation(MOV).results[0].type
+            with self.subTest(mutation=mutation), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(op, (fp8,))
+
+
+class VirtualEvaluatorReductionTest(unittest.TestCase):
+    def test_splat_preserves_raw_bf16_encodings(self) -> None:
+        for bits in (0x0000, 0x8000, 0x0001, 0x3F80, 0x7F80, 0x7F81, 0x7FC1, 0xFFFF):
+            source = SPLAT.replace("bits = 0", f"bits = {bits}")
+            with self.subTest(bits=hex(bits)), patch("atlas_virtual_evaluator._numerics", side_effect=AssertionError("splat needs no numerics")):
+                self.assertEqual(evaluate_tile_operation(operation(source), ()), repeated((bits,)))
+
+    def test_reductions_round_and_broadcast_rows(self) -> None:
+        tile, expected = row_reduction_fixture()
+        for kind, wanted in expected.items():
+            source = REDUCE.replace('"row_sum"', f'"{kind}"')
+            with self.subTest(kind=kind):
+                self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), wanted)
+
+    def test_reductions_preserve_all_32_row_identities(self) -> None:
+        # Rows contain 1, 2, 4, ...; each 0x80 step increments the BF16 exponent.
+        codes = tuple(0x3F80 + (row << 7) for row in range(32))
+        tile = Tile("bf16", tuple(code for code in codes for _ in range(32)))
+        # Summing 32 equal powers of two increments the exponent by five.
+        for kind, offset in (("row_sum", 0x0280), ("row_min", 0), ("row_max", 0)):
+            wanted = Tile("bf16", tuple(code + offset for code in codes for _ in range(32)))
+            with self.subTest(kind=kind):
+                self.assertEqual(evaluate_tile_operation(operation(REDUCE.replace("row_sum", kind)), (tile,)), wanted)
+
+    def test_full_evaluation_publishes_reductions_and_raw_splats(self) -> None:
+        tile, reductions = row_reduction_fixture()
+        operations = [
+            REDUCE.replace("%reduced", f"%{kind}").replace('"row_sum"', f'"{kind}"')
+            for kind in reductions
+        ]
+        values = list(reductions.items())
+        for name, bits in (("negative_zero", 0x8000), ("nan_payload", 0x7FC1)):
+            operations.append(SPLAT.replace("%splat", f"%{name}").replace("bits = 0", f"bits = {bits}"))
+            values.append((name, repeated((bits,))))
+        states = ("s2",) + tuple(f"out{index}" for index in range(len(values)))
+        operations.extend(
+            output(states[index], states[index + 1], name, index)
+            for index, (name, _) in enumerate(values)
+        )
+        for canonical in (False, True):
+            body = operations if not canonical else [text.replace(" {", " <{").replace("} :", "}> :") for text in operations]
+            source = "module {" + INPUTS + "\n".join(body) + "\n}"
+            with self.subTest(canonical=canonical):
+                result = evaluate(parse_program(source), RuntimeInputs({0: tile, 1: repeated((0,))}))
+                self.assertEqual(dict(result.outputs), {index: wanted for index, (_, wanted) in enumerate(values)})
+
+    def test_helper_checks_operands_and_revalidates_fields(self) -> None:
+        tile, fp8 = repeated((0,)), repeated((0,), "fp8")
+        for source, operands in ((SPLAT, (tile,)), (SPLAT, []), (REDUCE, ()), (REDUCE, (tile, tile)), (REDUCE, (fp8,))):
+            with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
+                evaluate_tile_operation(operation(source), operands)
+        for bits in (-1, 65536):
+            op = operation(SPLAT)
+            op.attributes["bits"] = builtin.IntegerAttr(bits, builtin.i32)
+            with self.subTest(bits=bits), self.assertRaisesRegex(VirtualInterfaceError, "bits must be in"):
+                evaluate_tile_operation(op, ())
+        op = operation(REDUCE)
+        op.attributes["kind"] = builtin.StringAttr("col_sum")
+        with self.assertRaises(UnsupportedVirtualMode):
+            evaluate_tile_operation(op, (tile,))
 
 
 class VirtualEvaluatorVpuTest(unittest.TestCase):
@@ -83,6 +285,39 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
     def test_add_matches_independent_raw_bit_literals(self) -> None:
         left, right, expected = (repeated([case[i] for case in ADD_CASES]) for i in range(3))
         self.assertEqual(evaluate_tile_operation(operation(ADD), (left, right)), expected)
+
+    def test_sub_and_mul_match_independent_rounding_and_special_literals(self) -> None:
+        for source, cases in ((SUB, SUB_CASES), (MUL, MUL_CASES)):
+            left, right, expected = (repeated([case[i] for case in cases]) for i in range(3))
+            with self.subTest(source=source):
+                self.assertEqual(evaluate_tile_operation(operation(source), (left, right)), expected)
+
+    def test_exp2_and_recip_match_independent_bounded_literals(self) -> None:
+        for source, cases in ((EXP2, EXP2_CASES), (RECIP, RECIP_CASES)):
+            tile, expected = (repeated([case[i] for case in cases]) for i in range(2))
+            with self.subTest(source=source):
+                self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), expected)
+
+    def test_attention_helpers_revalidate_operand_arity_and_format(self) -> None:
+        tile, fp8 = repeated((0,)), repeated((0,), "fp8")
+        for source, arity in ((SUB, 2), (MUL, 2), (EXP2, 1), (RECIP, 1)):
+            for operands in ((tile,) * (arity - 1), (tile,) * (arity + 1), (fp8,) * arity):
+                with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
+                    evaluate_tile_operation(operation(source), operands)
+            op = operation(source)
+            op.operands = ()
+            with self.subTest(source=source), self.assertRaisesRegex(VirtualInterfaceError, "signature"):
+                evaluate_tile_operation(op, (tile,) * arity)
+
+    def test_integer_unary_tables_do_not_require_the_host_arithmetic_probe(self) -> None:
+        from npu_model.configs.numerics import RtlNumerics
+
+        # Unary tables bypass the host arithmetic probe.
+        with patch.object(RtlNumerics, "add", side_effect=AssertionError("integer tables need no FP probe")):
+            for source, cases in ((EXP2, EXP2_CASES), (RECIP, RECIP_CASES)):
+                tile, expected = (repeated([case[i] for case in cases]) for i in range(2))
+                with self.subTest(source=source):
+                    self.assertEqual(evaluate_tile_operation(operation(source), (tile,)), expected)
 
     def test_pack_literals_and_asymmetric_logical_row_major_layout(self) -> None:
         cases = PACK_CASES + ((0x7FC1, 0x00), (0xFFC1, 0x00))
@@ -107,7 +342,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                                  (MOV, (None,)), (MOV, [tile]), (MOV, None)):
             with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
                 evaluate_tile_operation(operation(source), operands)
-        for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("mul")),
+        for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("div")),
                                          (PACK, "scale_code", builtin.IntegerAttr(128, builtin.i32))):
             op = operation(source)
             op.attributes[name] = attribute
@@ -135,36 +370,40 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
         with self.assertRaises(VirtualInterfaceError):
             evaluate_tile_operation(None, (tile,))
 
-    def run_isolated(self, script: str) -> None:
+    def run_isolated(self, script: str, source: str = ADD) -> None:
         prelude = f'''
             import sys
             sys.path.insert(0, "tools")
             from atlas_virtual_evaluator import Tile, UnsupportedVirtualMode, evaluate_tile_operation, parse_program
-            op = parse_program({"module {" + INPUTS + ADD + "}"!r}).operations[-1]
+            op = parse_program({"module {" + INPUTS + source + "}"!r}).operations[-1]
             tile = Tile("bf16", (0x3f80,) * 1024)
+            operands = (tile,) * len(op.operands)
         '''
         child = subprocess.run([sys.executable, "-c", textwrap.dedent(prelude) + textwrap.dedent(script)], cwd=ROOT, capture_output=True, text=True, timeout=60)
         if child.returncode == 77:
             self.skipTest("host cannot select the required floating-point mode")
         self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
 
-    def test_add_rejects_host_flush_to_zero_in_an_isolated_process(self) -> None:
-        self.run_isolated('''
+    def test_fp32_operations_reject_host_flush_to_zero_in_an_isolated_process(self) -> None:
+        script = '''
             import torch
             if not torch.set_flush_denormal(True):
                 sys.exit(77)
             try:
-                evaluate_tile_operation(op, (tile, tile))
+                evaluate_tile_operation(op, operands)
             except UnsupportedVirtualMode:
                 sys.exit(0)
-            raise AssertionError("normal add accepted a host that flushes subnormals")
-        ''')
+            raise AssertionError("operation accepted a host that flushes subnormals")
+        '''
+        for source in (ADD, SUB, MUL, REDUCE):
+            with self.subTest(source=source):
+                self.run_isolated(script, source)
 
-    def test_add_rejects_directed_rounding_in_an_isolated_process(self) -> None:
+    def test_fp32_operations_reject_directed_rounding_in_an_isolated_process(self) -> None:
         if platform.machine() not in ("x86_64", "AMD64", "i386", "i686") or platform.libc_ver()[0] != "glibc":
             self.skipTest("requires the verified x86 glibc fenv ABI")
         # FE_DOWNWARD/UPWARD/TOWARDZERO verified in /usr/include/bits/fenv.h.
-        self.run_isolated('''
+        script = '''
             import ctypes
             try:
                 setround = ctypes.CDLL(None).fesetround
@@ -172,16 +411,19 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
                 sys.exit(77)
             setround.argtypes = (ctypes.c_int,)
             setround.restype = ctypes.c_int
-            evaluate_tile_operation(op, (tile, tile))
+            evaluate_tile_operation(op, operands)
             for mode in (0x400, 0x800, 0xC00):
                 if setround(mode) != 0:
                     sys.exit(77)
                 try:
-                    evaluate_tile_operation(op, (tile, tile))
+                    evaluate_tile_operation(op, operands)
                 except UnsupportedVirtualMode:
                     continue
-                raise AssertionError(f"normal add accepted directed rounding mode {mode:#x}")
-        ''')
+                raise AssertionError(f"operation accepted directed rounding mode {mode:#x}")
+        '''
+        for source in (ADD, SUB, MUL, REDUCE):
+            with self.subTest(source=source):
+                self.run_isolated(script, source)
 
 
 ZERO8, ZERO16 = Tile("fp8", (0,) * 1024), Tile("bf16", (0,) * 1024)

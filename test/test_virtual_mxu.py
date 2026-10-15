@@ -94,14 +94,10 @@ class VirtualMXUTest(unittest.TestCase):
         biased_source = (
             EXAMPLES / "virtual_fp8_two_layer_mlp_bias.mlir"
         ).read_text()
-        unqualified_add = run(
-            "atlas-opt", biased_source.replace('kind = "add"',
-                                               'kind = "sub"', 1),
-            "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
-        )
-        self.assertNotEqual(unqualified_add.returncode, 0)
-        self.assertIn("binary VPU admission currently requires add",
-                      unqualified_add.stderr)
+        subtracted = lower(biased_source.replace('kind = "add"',
+                                                 'kind = "sub"', 1))
+        self.assertIn('kind = "sub"', subtracted)
+        emitted(subtracted)
         changed = shorten_delay(machine)
         self.assertNotEqual(changed, machine)
         rejected = run("atlas-emit", changed)

@@ -93,7 +93,9 @@ Effects effectsOf(Operation *op) {
     e.writes = bit(kUnit0 + matmul.getUnit());
   else if (!isDMA(op) &&
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
-                VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualScaleConstantOp,
+                VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
+                VirtualVPUSplatOp, VirtualXLUTransposeOp,
+                VirtualScaleConstantOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
@@ -295,7 +297,7 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
 
 // The functional units an operation can occupy. Each MXU pushes weights
 // through its own stream, beside its array.
-enum class Unit { Scalar, Lsu, Vpu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
+enum class Unit { Scalar, Lsu, Vpu, Xlu, Dma, Mxu0, Mxu1, Weights0, Weights1 };
 constexpr unsigned kUnits = static_cast<unsigned>(Unit::Weights1) + 1;
 
 // What an operation costs: it holds one functional unit for `busy` cycles,
@@ -374,11 +376,8 @@ Cost onMxu(StringRef name, unsigned unit) {
   return {unit ? Unit::Mxu1 : Unit::Mxu0, t.interval, t.latency};
 }
 
-// Elementwise kinds share one footprint, so a kind the timing model does not
-// name costs as a move.
-Cost onVpu(StringRef kind) {
-  std::string name = kind == "mov" ? "vmov" : ("v" + kind + ".bf16").str();
-  MachineTiming t = timingOf(timing::findOp(name) ? name : "vmov");
+Cost onVpu(const std::string &name) {
+  MachineTiming t = timingOf(name);
   return {Unit::Vpu, t.interval, t.latency};
 }
 
@@ -446,10 +445,15 @@ Cost costOf(Operation *op) {
                         onMxu("vmatmul", unit).latency +
                         onMxu("vmatpop.bf16.acc", unit).latency);
   }
-  if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op))
-    return onVpu(unary.getKind());
-  if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op))
-    return onVpu(binary.getKind());
+  if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp>(op))
+    return onVpu(
+        timing::vpuMnemonic(op->getAttrOfType<StringAttr>("kind").str()));
+  if (isa<VirtualVPUSplatOp>(op))
+    return onVpu("vli.all");
+  if (isa<VirtualXLUTransposeOp>(op)) {
+    MachineTiming t = timingOf("vtrpose.xlu");
+    return {Unit::Xlu, t.interval, t.latency};
+  }
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM one word at a time in a
     // scalar loop.

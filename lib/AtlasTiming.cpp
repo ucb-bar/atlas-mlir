@@ -103,6 +103,21 @@ const OpInfo *mlir::atlas::timing::findOp(const std::string &name) {
   return it == byName.end() ? nullptr : it->second;
 }
 
+std::string mlir::atlas::timing::vpuMnemonic(const std::string &kind) {
+  if (kind == "mov")
+    return "vmov";
+  if (kind == "min")
+    return "vminimum.bf16";
+  if (kind == "max")
+    return "vmaximum.bf16";
+  // row_max -> vredmax.row.bf16, col_sum -> vredsum.bf16.
+  if (kind.rfind("row_", 0) == 0)
+    return "vred" + kind.substr(4) + ".row.bf16";
+  if (kind.rfind("col_", 0) == 0)
+    return "vred" + kind.substr(4) + ".bf16";
+  return "v" + kind + ".bf16";
+}
+
 bool mlir::atlas::timing::isControlFlow(const OpInfo &op) {
   return op.opClass == OpClass::Branch || op.opClass == OpClass::Jump;
 }
@@ -612,8 +627,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     // VMEM contents remain owned by the transfer until its matching wait.
     bool load = op.opClass == OpClass::DmaLoad;
     int vmemReg = load ? in.rd : in.rs1;
-    // Unlike npu_model, which counts bytes, AtlasCore.scala takes the DMA VMEM
-    // address in words, as for VLS bases.
+    // AtlasCore.scala takes the DMA VMEM address in words, as for VLS bases.
     auto addr = reg(regs, vmemReg);
     if (addr)
       *addr *= 4;
