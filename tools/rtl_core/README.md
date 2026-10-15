@@ -1,0 +1,13 @@
+# Current AtlasCore raw-program checks
+
+The accepted route materializes 129 SHA-checked RTL sources, uses pinned real TileLink dependency JARs with unknown source build epochs, and compiles/emits with Scala 2.13.16, Chisel 6.7.0 and firtool 1.62.1. This differs from the component experiments' Chisel 7.0.0-RC4 tuple. The Mill recipe is retained but was unused by the accepted direct compiler route.
+
+`run_program.py` authenticates retained producer images, rebuilds their physical arithmetic independently, loads raw instruction words through IMEM, and replays physical DMA/CSR traces. The next-cycle FIFO memory responder establishes functional evidence. Its cycles do not qualify platform performance. Completion requires committed ECALL status 5, public exported engines idle and 32 quiet cycles; VPU busy is absent from the public debug interface.
+
+`probe.py` pins the local component helper by SHA. Build and execution receipts record the release source identities; historical artifact copies keep their original bytes. The compile guard requires CPUs 0–2. Post-build `--cpu` replay uses `supervisor.py` with explicit affinity and resource caps, including Python preparation and physical trace validation.
+
+Replay streams event lines and keeps the last 32 public states, cumulative traffic counters and outstanding FIFO transactions. `--run-wall-seconds` changes the per-simulator bound only for explicit `--cpu` replay; its default remains 600 seconds. `--reuse-model-arithmetic --model-root PATH` admits a passed complete-model actual payload for the fixed historical or current release producer tuple, after rechecking native input, producer, imported model source and curve bookends. It refuses controls and ambiguous old/new actual filenames, and labels its arithmetic as reused evidence. The default rebuilds Fraction arithmetic independently.
+
+The raw route admits two historical baseline tuples, the measured resident-A, resident-B and pretransposed-B tuples, and the exact current release tuple. Historical optimized tuples require their qualified mode. Fresh release receipts admit default, `--resident-a`, `--resident-b`, or `--resident-b --pretranspose-resident-b`, with exact command/metadata agreement, one 256-KiB resident bank and independently derived DMA counts. Release source admission preserves the arithmetic and programs; it does not relabel historical execution receipts as new runs.
+
+The tools require the pinned model revision and its registered assembler syntax; historical assembler APIs are unsupported. DMA counters cover DRAM transfers; VMEM traffic and engine occupancy are separate quantities. Native quality and platform timing remain outside these checks.
