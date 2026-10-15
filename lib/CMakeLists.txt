@@ -8,6 +8,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasTiming.cpp
   AtlasTimingProvider.cpp
   AtlasStream.cpp
+  AtlasPackLoop.cpp
   AtlasDelayInsertion.cpp
   AtlasDMAWaitInsertion.cpp
   AtlasScheduling.cpp

@@ -213,6 +213,17 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
+const AtlasPackLoop *AtlasStream::packLoop(size_t block) const {
+  auto loop = llvm::partition_point(packLoops, [&](const AtlasPackLoop &l) { return l.block < block; });
+  return loop != packLoops.end() && loop->block == block ? &*loop : nullptr;
+}
+
+bool AtlasStream::dmaMayCross(size_t block) const {
+  if (block + 1 >= starts.size())
+    return false;
+  return packLoop(block) || (fallsThrough(block) && packLoop(block + 1));
+}
+
 static std::atomic<unsigned> decodeCount{0};
 
 unsigned mlir::atlas::atlasStreamDecodeCount() { return decodeCount; }
@@ -345,6 +356,19 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
+  // A loop's back-edge target and the instruction after its delay slot are
+  // leaders, and nothing between them can be, so each loop fills one block.
+  for (AtlasPackLoop loop : findAtlasPackLoops(ops)) {
+    loop.block = blockAt[loop.begin];
+    assert(s.blockEnd(loop.block) == loop.end() && "a PACK loop fills one block");
+    if (loop.block > 0 && s.fallsThrough(loop.block - 1)) {
+      loop.entry = entry[loop.block - 1];
+      for (size_t i = starts[loop.block - 1]; i < loop.begin; ++i)
+        applyScalar(instrs[i], loop.entry);
+    }
+    loop.access = proveAtlasPackLoopAccess(s, loop);
+    s.packLoops.push_back(std::move(loop));
+  }
   return s;
 }
 

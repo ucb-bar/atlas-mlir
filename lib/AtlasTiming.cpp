@@ -351,14 +351,6 @@ std::optional<long long> reg(const RegValues &regs, int r) {
   return static_cast<long long>(*regs[r]);
 }
 
-// ScalarCore keeps only the VMEM bits of a scalar byte address.
-std::optional<long long> scalarAddress(const Instr &in, const RegValues &regs) {
-  auto base = reg(regs, in.rs1);
-  if (!base)
-    return std::nullopt;
-  return (*base + signExtend(in.imm, 12)) & 0x1FFFFF;
-}
-
 // VLS bases are word addresses; the immediate counts 32 words and the LSU
 // drops the three low word bits to get a 32-byte line.
 std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
@@ -385,6 +377,15 @@ void scalarRegs(Builder &b, const Instr &in) {
 }
 
 } // namespace
+
+// ScalarCore keeps only the VMEM bits of a scalar byte address.
+std::optional<long long> mlir::atlas::timing::scalarAddress(const Instr &in,
+                                                           const RegValues &regs) {
+  auto base = reg(regs, in.rs1);
+  if (!base)
+    return std::nullopt;
+  return (*base + signExtend(in.imm, 12)) & 0x1FFFFF;
+}
 
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                            const RegValues &regs) {

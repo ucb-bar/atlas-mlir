@@ -1,6 +1,7 @@
 #ifndef ATLAS_STREAM_H
 #define ATLAS_STREAM_H
 
+#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasTimingProvider.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
@@ -20,11 +21,19 @@ struct AtlasStream {
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
   std::vector<timing::RegValues> entry;
+  // PACK relayout loops (AtlasPackLoop.h), in order, each filling one block.
+  std::vector<AtlasPackLoop> packLoops;
 
   size_t blockEnd(size_t block) const;
   bool endsInBranch(size_t block) const;
   bool endsInHalt(size_t block) const;
   bool fallsThrough(size_t block) const;
+  // The PACK loop that fills `block`, else null.
+  const AtlasPackLoop *packLoop(size_t block) const;
+  // Whether explicit DMA may still be in flight from `block` into the next
+  // block: only into a PACK loop or out of one, which neither launches nor
+  // completes a transfer and has no other entry.
+  bool dmaMayCross(size_t block) const;
 };
 
 struct DelayInsertion {
