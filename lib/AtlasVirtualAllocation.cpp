@@ -216,8 +216,9 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
 // window until nothing reads it; the DMA latches its registers at launch, so
 // all share three. Atomic DMA has no completion operation, so placement
 // follows what lowering and insert-atlas-dma-waits do: a DMA completes before
-// a PACK, boundary tile or block end, before a later transfer that may touch
-// the same DRAM bytes while either writes, and before its load's first use. A
+// a boundary tile or block end, before a later transfer that may touch the
+// same DRAM bytes while either writes, and before its load's first use; it
+// stays in flight across a PACK, whose relayout touches only its scratch. A
 // load keeps its window until that first use, where its staging VLOADs read
 // it, or the block end. A load prefers the load channel and a store the store
 // channel, else the lowest free channel, and the lowest free window. With no
@@ -251,8 +252,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       for (InFlight &t : inFlight)
         if (t.loaded && t.loaded == operand)
           t.holdsChannel = t.holdsWindow = false;
-    if (isa<VirtualPackFP8Op, VirtualInputBF16Op, VirtualInputFP8Op,
-            VirtualOutputBF16Op>(op))
+    if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op))
       for (InFlight &t : inFlight)
         completeDMA(t);
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
