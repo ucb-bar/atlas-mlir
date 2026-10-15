@@ -98,6 +98,49 @@ class TileArithmeticTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overflows"):
             rescale_bf16(0x7F7F, 1)
 
+    def test_archive_names_are_flat_unique_and_explicit(self):
+        from run_model_tile import validate_archive_members
+        required = [SimpleNamespace(filename=name, file_size=0)
+                    for name in ("A.npy", "B.npy", "native_C.npy")]
+        validate_archive_members(required)
+        validate_archive_members(required + [SimpleNamespace(filename="A_bf16.npy", file_size=1)])
+        for name in ("A.npy", "other.npy", "../A.npy", "folder/A.npy", "folder/", "A"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "unique flat"):
+                validate_archive_members(required + [SimpleNamespace(filename=name, file_size=1)])
+        with self.assertRaises(ValueError):
+            validate_archive_members(required[:-1])
+
+    def test_archive_size_limit_uses_metadata_without_allocation(self):
+        from run_model_tile import validate_archive_members
+        members = [SimpleNamespace(filename=name, file_size=0)
+                   for name in ("A.npy", "B.npy", "native_C.npy")]
+        members[0].file_size = 32 * 1024 * 1024
+        validate_archive_members(members)
+        members[0].file_size += 1
+        with self.assertRaisesRegex(ValueError, "uncompressed size"):
+            validate_archive_members(members)
+        members[0].file_size = -1
+        with self.assertRaisesRegex(ValueError, "uncompressed size"):
+            validate_archive_members(members)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "loader control requires NumPy")
+    def test_bad_archive_is_refused_before_numpy_load(self):
+        from run_model_tile import load_bundle
+        members = [SimpleNamespace(filename=name, file_size=0)
+                   for name in ("A.npy", "B.npy", "native_C.npy", "../A.npy")]
+        args = SimpleNamespace(smoke=False, input="/tmp/not-loaded-input.npz",
+                               manifest="/tmp/not-loaded-manifest.json")
+        manifest = '{"schema_version":1,"source":{"id":"test"},"site":{"id":"test"},"npz_sha256":"hash"}'
+        with patch("run_model_tile.safe_path", side_effect=pathlib.Path), \
+                patch.object(pathlib.Path, "read_text", return_value=manifest), \
+                patch("run_model_tile.sha256", return_value="hash"), \
+                patch("run_model_tile.zipfile.ZipFile") as archive, \
+                patch("numpy.load", side_effect=AssertionError("member load")) as load:
+            archive.return_value.__enter__.return_value.infolist.return_value = members
+            with self.assertRaisesRegex(ValueError, "unique flat"):
+                load_bundle(args)
+            load.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

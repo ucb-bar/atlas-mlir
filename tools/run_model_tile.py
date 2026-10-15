@@ -82,6 +82,18 @@ def validate_arrays(arrays, source_dtype, *, matrix=False):
     return a, b, native
 
 
+def validate_archive_members(members):
+    required = {"A.npy", "B.npy", "native_C.npy"}
+    optional = {"A_bf16.npy", "B_bf16.npy", "native_C_bf16.npy"}
+    names = [member.filename for member in members]
+    if (len(names) != len(set(names)) or not required <= set(names) or
+            set(names) - required - optional):
+        raise ValueError("NPZ requires unique flat A/B/native_C.npy and only optional *_bf16.npy members")
+    if any(member.file_size < 0 for member in members) or sum(
+            member.file_size for member in members) > 32 * 1024 * 1024:
+        raise ValueError("NPZ exceeds bounded uncompressed size")
+
+
 def load_bundle(args):
     import numpy as np
     if args.smoke:
@@ -107,8 +119,7 @@ def load_bundle(args):
     if manifest.get("npz_sha256") != sha256(path):
         raise ValueError("NPZ hash disagrees with manifest")
     with zipfile.ZipFile(path) as archive:
-        if sum(member.file_size for member in archive.infolist()) > 16 * 1024 * 1024:
-            raise ValueError("NPZ exceeds bounded uncompressed size")
+        validate_archive_members(archive.infolist())
     with np.load(path, allow_pickle=False) as bundle:
         arrays = {key: bundle[key].copy() for key in bundle.files}
     return arrays, manifest
