@@ -11,6 +11,7 @@ constexpr llvm::StringLiteral kAtlasModelEvidence = "atlas.model_evidence";
 
 namespace timing {
 constexpr llvm::StringLiteral kNpuModelObservedTimingProviderId = "npu-model";
+class ModelOverlapFacts;
 
 struct ModelTimingGroup {
   int firstAge = 0, lastAge = 0, count = 0, step = 1;
@@ -28,6 +29,10 @@ public:
   const std::string &factsSha256() const { return sha256; }
   const std::map<std::string, std::string> &modelProvenance() const { return provenance; }
   bool dmaWait() const { return dma; }
+  const ModelTimingBlock *block(llvm::StringRef name) const {
+    auto found = blocks.find(name.str());
+    return found == blocks.end() ? nullptr : &found->second;
+  }
 
 private:
   std::map<std::string, ModelTimingBlock> blocks;
@@ -41,7 +46,8 @@ llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef bytes, ll
                                                        bool dmaWait = false);
 llvm::Expected<ModelTimingFacts> loadModelTimingFacts(llvm::StringRef path, llvm::StringRef expectedSha256,
                                                       bool dmaWait = false);
-TimingProvider modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts);
+TimingProvider modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts,
+                                  std::shared_ptr<const ModelOverlapFacts> overlap = {}, bool chains = false);
 TimingRuleResult<TimingProvider> modelTimingProviderFactory(ModuleOp module);
 } // namespace timing
 

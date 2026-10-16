@@ -1,4 +1,5 @@
 #include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelPairs.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/MLIRContext.h"
@@ -98,6 +99,9 @@ llvm::json::Object fixture() {
   operations.push_back(block("mxu0.pop_acc_bf16", "mxu0", 40,
                              llvm::json::Object{{"acc_store", group(1, 32)}, {"mreg_write0", group(3, 32)},
                               {"mreg_write1", group(3, 32)}, {"data_busy", group(0, 36)}}));
+  operations.push_back(block("mxu0.matmul", "mxu0", 95,
+                             llvm::json::Object{{"mreg_read0", group(0, 32)}, {"acc_write", group(32, 32)},
+                                                {"compute_busy", group(0, 95)}}));
   return llvm::json::Object{{"schema", "atlas.model_timing.v1"}, {"age_convention", "issue_edge_zero"},
           {"model", llvm::json::Object{{"revision", std::string(40, '1')}, {"source_sha256", std::string(64, '2')},
                                        {"configuration_sha256", hash(configuration)},
@@ -123,6 +127,225 @@ void rejected(llvm::json::Object object, llvm::StringRef why) {
   check(!parsed, why);
   if (!parsed) llvm::consumeError(parsed.takeError());
 }
+
+llvm::json::Object overlapSource(llvm::StringRef pointer) {
+  return llvm::json::Object{{"json_pointer", pointer.str()}, {"sha256", std::string(64, '8')},
+                            {"proof_sha256", std::string(64, '9')}};
+}
+llvm::json::Object overlapFixture(const ModelTimingFacts &facts) {
+  llvm::json::Object pair{{"first", "vpu.mov"}, {"second", "vpu.mov"},
+                          {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}}},
+                          {"swept", llvm::json::Array{1, 73}}, {"min_gap", 1}, {"first_completion_age", 72},
+                          {"negative", llvm::json::Object{{"gap", 0}, {"result", "inexpressible"}}},
+                          {"source_record", overlapSource("/pairs/0")},
+                          {"verilator", llvm::json::Object{{"confirmed", true}}}};
+  llvm::json::Array sequences;
+  for (auto [gap, length] : {std::pair<int, int>{10, 3}, {32, 3}, {40, 3}, {72, 3}, {32, 4}}) {
+    llvm::json::Array matrix, operations, gaps;
+    for (int i = 0; i < length; ++i) {
+      operations.push_back("vpu.mov");
+      if (i) gaps.push_back(gap);
+      for (int j = i + 1; j < length; ++j)
+        matrix.push_back(llvm::json::Object{{"first_index", i}, {"second_index", j},
+                                           {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}}}});
+    }
+    sequences.push_back(llvm::json::Object{
+        {"operations", std::move(operations)},
+        {"gaps", std::move(gaps)}, {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}}},
+        {"all_pair_relations", std::move(matrix)}, {"relation_scope", "adjacent"}, {"result", "accepted"},
+        {"in_flight_count", std::min(length, (72 + gap - 1) / gap)}, {"witness_only", true},
+        {"no_stable_suffix_claim", true},
+        {"source_record", overlapSource("/chains/" + std::to_string(gap * 10 + length))},
+        {"verilator", llvm::json::Object{{"confirmed", true}}}});
+  }
+  llvm::json::Array pairs{std::move(pair)};
+  pairs.push_back(llvm::json::Object{
+      {"first", "mxu0.push_weight"}, {"second", "mxu0.matmul"},
+      {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}, {"weight_slot", "other"}}},
+      {"swept", llvm::json::Array{1, 40}}, {"min_gap", 1}, {"first_live_window_end", 40},
+      {"negative", llvm::json::Object{{"gap", 0}, {"result", "inexpressible"}}},
+      {"source_record", overlapSource("/pairs/1")}, {"verilator", llvm::json::Object{{"confirmed", true}}}});
+  pairs.push_back(llvm::json::Object{
+      {"first", "mxu0.matmul"}, {"second", "mxu0.pop_acc_bf16"},
+      {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}, {"accumulator", "same"}}},
+      {"swept", llvm::json::Array{1, 95}}, {"min_gap", 64}, {"first_live_window_end", 95},
+      {"negative", llvm::json::Object{{"gap", 63}, {"result", "conflict"},
+                                      {"error", llvm::json::Object{{"message", "synthetic MXU busy"}}}}},
+      {"source_record", overlapSource("/pairs/2")}, {"verilator", llvm::json::Object{{"confirmed", true}}}});
+  auto perOp = fixture();
+  return llvm::json::Object{
+      {"schema", "atlas.model_pairs.v1"}, {"age_convention", "issue_edge_zero"},
+      {"projection", llvm::json::Object{{"version", 1}, {"policy", "confirmed-exact-base-relations-v1"},
+                                       {"master_sha256", std::string(64, 'a')},
+                                       {"master_path", "synthetic-master.json"},
+                                       {"validation_sha256", std::string(64, 'b')},
+                                       {"validation_path", "synthetic-validation.json"},
+                                       {"per_op_sha256", facts.factsSha256()},
+                                       {"projector_sha256", std::string(64, 'c')},
+                                       {"counts", llvm::json::Object{}}, {"excluded_reasons", llvm::json::Object{}}}},
+      {"model", std::move(*perOp.get("model"))}, {"pairs", std::move(pairs)},
+      {"chains", std::move(sequences)}};
+}
+void testOverlap(const std::shared_ptr<const ModelTimingFacts> &facts) {
+  std::string bytes = encode(overlapFixture(*facts));
+  auto parsed = parseModelOverlapFacts(bytes, hash(bytes), *facts);
+  check(bool(parsed), "synthetic compact overlap facts load");
+  if (!parsed) { llvm::errs() << llvm::toString(parsed.takeError()) << '\n'; return; }
+  auto overlap = std::make_shared<ModelOverlapFacts>(std::move(*parsed));
+  auto replaced = parseModelOverlapFacts(bytes, std::string(64, '0'), *facts);
+  check(!replaced, "compact content replacement fails the selected hash pin");
+  if (!replaced) llvm::consumeError(replaced.takeError());
+  auto pairs = modelTimingProvider(facts, overlap), chains = modelTimingProvider(facts, overlap, true);
+  Instr a{findOp("vmov"), 4, 0, 0}, b{findOp("vmov"), 12, 8, 0}, c{findOp("vmov"), 20, 16, 0};
+  auto fa = facts->resolve(a, unknownRegs()), fb = facts->resolve(b, unknownRegs()), fc = facts->resolve(c, unknownRegs());
+  auto state = pairs.createReservations();
+  check(state.value->reserve(a, fa, 0).empty() && state.value->conflict(b, fb, 1).value.empty(),
+        "exact confirmed pair admits two live operations");
+  check(state.value->reserve(b, fb, 10).empty() && !state.value->conflict(c, fc, 20).value.empty(),
+        "pairs alone cannot admit a third live operation");
+  state = chains.createReservations();
+  check(state.value->reserve(a, fa, 0).empty() && state.value->reserve(c, fc, 20).empty(),
+        "out-of-order placement begins with an exact pair");
+  check(!state.value->conflict(b, fb, 11).value.empty() && state.value->conflict(b, fb, 10).value.empty(),
+        "pure insertion rechecks the complete future chain vector");
+  check(state.value->reserve(b, fb, 10).empty(), "exact chain permits chronological insertion");
+  Instr fourth{findOp("vmov"), 28, 24, 0};
+  check(!state.value->conflict(fourth, facts->resolve(fourth, unknownRegs()), 30).value.empty(),
+        "a triple witness does not create universal capacity");
+  for (int gap : {40, 72}) {
+    state = pairs.createReservations();
+    check(state.value->reserve(a, fa, 0).empty() && state.value->reserve(b, fb, gap).empty() &&
+              state.value->conflict(c, fc, 2 * gap).value.empty(),
+          "a retired historical command does not require a chain when only two remain live");
+  }
+  state = pairs.createReservations();
+  Instr weight{findOp("vmatpush.weight.mxu0"), 0, 2, 0};
+  Instr compute{findOp("vmatmul.mxu0"), 0, 4, 1};
+  Instr pop{findOp("vmatpop.bf16.acc.mxu0"), 8, 0, 0};
+  auto fw = facts->resolve(weight, unknownRegs()), fm = facts->resolve(compute, unknownRegs());
+  check(state.value->reserve(weight, fw, 0).empty() && state.value->reserve(compute, fm, 39).empty() &&
+            state.value->conflict(pop, facts->resolve(pop, unknownRegs()), 103).value.empty(),
+        "retired weight push plus live compute and pop needs only the exact compute/pop pair");
+  Instr overwrite{findOp("vmatpush.weight.mxu0"), 1, 12, 0};
+  check(pairs.dependence(compute, fm, overwrite, facts->resolve(overwrite, unknownRegs())).value.distance == 92,
+        "pair facts preserve the conservative sparse weight lifetime");
+  state = chains.createReservations();
+  check(state.value->reserve(a, fa, 0).empty() && state.value->reserve(b, fb, 32).empty() &&
+            state.value->reserve(c, fc, 64).empty() &&
+            state.value->conflict(fourth, facts->resolve(fourth, unknownRegs()), 96).value.empty(),
+        "four-command history with post-progress count three matches its exact witness");
+  state = chains.createReservations();
+  check(state.value->reserve(a, fa, 0).empty() && state.value->onWait({findOp("dma.wait.ch0")}, 1).empty() &&
+            !state.value->conflict(b, fb, 10).value.empty() && state.value->conflict(b, fb, 73).value.empty(),
+        "runtime wait invalidates prior waivers while preserving drained fallback");
+  auto reject = [&](llvm::json::Object object, llvm::StringRef why) {
+    std::string modified = encode(std::move(object));
+    auto value = parseModelOverlapFacts(modified, hash(modified), *facts);
+    check(!value, why);
+    if (!value) llvm::consumeError(value.takeError());
+  };
+  auto load = [&](llvm::json::Object object) -> std::shared_ptr<ModelOverlapFacts> {
+    std::string modified = encode(std::move(object));
+    auto value = parseModelOverlapFacts(modified, hash(modified), *facts);
+    check(bool(value), "supported pair window and bounds load");
+    if (!value) { llvm::consumeError(value.takeError()); return {}; }
+    return std::make_shared<ModelOverlapFacts>(std::move(*value));
+  };
+  for (bool nested : {false, true}) {
+    auto alternative = overlapFixture(*facts);
+    auto *pair = (*alternative.getArray("pairs"))[0].getAsObject();
+    pair->erase("first_completion_age");
+    if (nested)
+      (*pair)["live_window"] = llvm::json::Object{{"first_completion_age", 72}, {"high_includes_idle_boundary", true}};
+    else (*pair)["first_live_window_end"] = 73;
+    check(bool(load(std::move(alternative))), "all three live-window representations normalize identically");
+  }
+  auto bounded = overlapFixture(*facts);
+  auto *pair = (*bounded.getArray("pairs"))[0].getAsObject();
+  (*pair)["min_gap"] = 5;
+  (*pair)["swept"] = llvm::json::Array{1, 100};
+  (*pair)["negative"] = llvm::json::Object{{"gap", 4}, {"result", "conflict"},
+                                          {"error", llvm::json::Object{{"message", "synthetic engine busy"}}}};
+  auto domain = load(std::move(bounded));
+  if (domain) {
+    std::vector<ModelOverlapCommand> commands{
+        {"vpu.mov", Engine::Vpu, {0, 1, 4, 5}, {}, {}, 0, 73},
+        {"vpu.mov", Engine::Vpu, {8, 9, 12, 13}, {}, {}, 4, 73}};
+    check(!domain->admits(commands, false), "one-short pair gap remains blocked");
+    for (int gap : {5, 73, 100}) {
+      commands[1].issue = gap;
+      check(domain->admits(commands, false), "inclusive pair minimum and extended high endpoint admit");
+    }
+    commands[1].issue = 101;
+    check(!domain->admits(commands, false), "pair domain is not extrapolated beyond its high endpoint");
+  }
+  auto aliased = overlapFixture(*facts);
+  (*aliased.getArray("pairs"))[0].getAsObject()->operator[]("relation") =
+      llvm::json::Object{{"mreg_banks", "0~0,1~1"}};
+  auto aliasFacts = load(std::move(aliased));
+  if (aliasFacts) {
+    auto aliasProvider = modelTimingProvider(facts, aliasFacts);
+    state = aliasProvider.createReservations();
+    Instr alias{findOp("vmov"), 12, 32, 0};
+    check(state.value->reserve(a, fa, 0).empty() &&
+              !state.value->conflict(alias, facts->resolve(alias, unknownRegs()), 1).value.empty(),
+          "an exact confirmed physical-alias pair still cannot bypass MREG ports");
+  }
+  auto dependent = overlapFixture(*facts);
+  (*dependent.getArray("pairs"))[0].getAsObject()->operator[]("relation") =
+      llvm::json::Object{{"mreg_banks", "2=0,3=1"}};
+  auto dataFacts = load(std::move(dependent));
+  if (dataFacts) {
+    auto dataProvider = modelTimingProvider(facts, dataFacts);
+    Instr use{findOp("vmov"), 12, 4, 0};
+    check(dataProvider.dependence(a, fa, use, facts->resolve(use, unknownRegs())).value.distance == 73,
+          "confirmed pair admission does not weaken observed data-release dependencies");
+  }
+  auto missingPair = overlapFixture(*facts);
+  auto *matrix = (*missingPair.getArray("chains"))[0].getAsObject()->getArray("all_pair_relations");
+  (*matrix)[1].getAsObject()->operator[]("relation") = llvm::json::Object{{"mreg_banks", "0=0,1=1"}};
+  auto incomplete = load(std::move(missingPair));
+  if (incomplete) {
+    std::vector<ModelOverlapCommand> commands{
+        {"vpu.mov", Engine::Vpu, {0, 1, 4, 5}, {}, {}, 0, 73},
+        {"vpu.mov", Engine::Vpu, {8, 9, 12, 13}, {}, {}, 10, 73},
+        {"vpu.mov", Engine::Vpu, {0, 1, 20, 21}, {}, {}, 20, 73}};
+    check(!incomplete->admits(commands, true), "chain requires a covered exact nonadjacent pair too");
+  }
+  auto object = overlapFixture(*facts);
+  (*object.getArray("pairs"))[0].getAsObject()->getObject("relation")->operator[]("vmem_bank") = "same";
+  reject(std::move(object), "unsupported relation excludes the complete selected fact");
+  object = overlapFixture(*facts);
+  (*object.getArray("pairs"))[0].getAsObject()->getObject("verilator")->operator[]("confirmed") = "true";
+  reject(std::move(object), "string confirmation cannot admit overlap");
+  object = overlapFixture(*facts);
+  object.getObject("projection")->operator[]("per_op_sha256") = std::string(64, '0');
+  reject(std::move(object), "overlap facts must bind exact selected operation facts");
+  object = overlapFixture(*facts);
+  (*object.getArray("pairs"))[0].getAsObject()->operator[]("first_live_window_end") = 73;
+  reject(std::move(object), "ambiguous pair live windows reject");
+  object = overlapFixture(*facts);
+  (*object.getArray("chains"))[0].getAsObject()->getArray("all_pair_relations")->pop_back();
+  reject(std::move(object), "nonadjacent chain relations cannot be omitted");
+  object = overlapFixture(*facts);
+  (*object.getArray("chains"))[0].getAsObject()->operator[]("in_flight_count") = 2;
+  reject(std::move(object), "chain count must equal exact post-progress peak");
+  object = overlapFixture(*facts);
+  (*object.getArray("chains"))[0].getAsObject()->operator[]("in_flight_scope") = "universal capacity 3";
+  reject(std::move(object), "unknown semantic scope cannot broaden an exact witness");
+  object = overlapFixture(*facts);
+  object.getObject("projection")->operator[]("policy") = "unconfirmed-allowed";
+  reject(std::move(object), "unreviewed projection policy rejects");
+  object = overlapFixture(*facts);
+  (*object.getArray("chains"))[0].getAsObject()->operator[]("issue_ages") = "0,10,20";
+  reject(std::move(object), "malformed optional semantic ages reject");
+  object = overlapFixture(*facts);
+  (*object.getArray("pairs"))[0].getAsObject()->getObject("verilator")->operator[]("scope") = "qualified protocol";
+  reject(std::move(object), "unsupported qualified proof protocol rejects");
+  object = overlapFixture(*facts);
+  (*object.getArray("pairs"))[0].getAsObject()->operator[]("previous_swept") = "1,73";
+  reject(std::move(object), "malformed retained pair sweep rejects");
+}
 } // namespace
 
 int main() {
@@ -134,6 +357,7 @@ int main() {
     return 1;
   }
   auto facts = std::make_shared<ModelTimingFacts>(std::move(*loaded));
+  testOverlap(facts);
   auto provider = modelTimingProvider(facts);
   Instr move{findOp("vmov"), 4, 0, 0};
   Footprint first = provider.footprint(move, unknownRegs());
