@@ -71,7 +71,7 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
     auto staging = d ? contractI32(d, "staging_word") : std::nullopt;
     auto dram = d ? contractI32(d, "dram_byte") : std::nullopt;
     auto size = d ? contractI32(d, "size_bytes") : std::nullopt;
-    if (!id || !channel || !staging || !dram || !size)
+    if (!id || *id == llvm::DenseMapInfo<int32_t>::getEmptyKey() || !channel || !staging || !dram || !size)
       return module.emitOpError("DMA wait insertion cannot read a DMA contract record");
     Transfer t;
     t.id = *id;
@@ -106,8 +106,11 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
     auto block = d ? contractI32(d, "block") : std::nullopt;
     if (!id || !block)
       return module.emitOpError("DMA wait insertion cannot read a CFG contract operation");
-    for (int32_t command : contractI32Array(d, "tile_commands"))
+    for (int32_t command : contractI32Array(d, "tile_commands")) {
+      if (command < 0 || command >= int32_t(tiles.size()))
+        return module.emitOpError("DMA wait insertion cannot read a CFG tile command");
       owners[command] = {*id, *block};
+    }
   }
   for (auto &[id, t] : transfers) {
     auto owner = owners.find(t.waitCommand);
@@ -120,15 +123,20 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
 }
 
 FailureOr<llvm::DenseMap<int32_t, TileRecord>> readTiles(ModuleOp module) {
+  auto tiles = cast<ArrayAttr>(module->getAttr(kAtlasTileContract));
   llvm::DenseMap<int32_t, TileRecord> records;
-  for (Attribute attr : cast<ArrayAttr>(module->getAttr(kAtlasTileContract))) {
-    auto d = cast<DictionaryAttr>(attr);
+  for (Attribute attr : tiles) {
+    auto d = dyn_cast<DictionaryAttr>(attr);
+    if (!d)
+      return module.emitOpError("DMA wait insertion cannot read a tile contract record");
     auto id = contractI32(d, "id"), vmem = contractI32(d, "vmem_byte"),
          bytes = contractI32(d, "bytes"), transfer = contractI32(d, "transfer");
-    if (!id || !vmem || !bytes || !transfer)
+    auto kind = d.getAs<StringAttr>("kind");
+    if (!id || *id < 0 || *id >= int32_t(tiles.size()) || !vmem || !bytes || !transfer || !kind)
       return module.emitOpError("DMA wait insertion cannot read a tile contract record");
     uint64_t begin = uint32_t(*vmem);
-    records[*id] = {contractString(d, "kind"), {begin, begin + uint32_t(*bytes)}, *transfer};
+    if (!records.try_emplace(*id, TileRecord{kind.getValue(), {begin, begin + uint32_t(*bytes)}, *transfer}).second)
+      return module.emitOpError("DMA wait insertion requires unique tile contract ids");
   }
   return records;
 }

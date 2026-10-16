@@ -301,8 +301,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
     def test_wait_insertion_requires_each_transfers_owned_wait_record(self) -> None:
         lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
-        # Delete only the first wait record, leaving the lowered stream intact.
-        changed, removed = re.subn(r'\{[^{}]*kind = "dma_wait"[^{}]*\}, ', "", lowered.stdout, count=1)
+        # Change only the first wait record's kind, leaving the lowered stream intact.
+        changed, removed = re.subn(r'kind = "dma_wait"', 'kind = "vload"', lowered.stdout, count=1)
         self.assertEqual(removed, 1)
         result = run("atlas-opt", changed, "--insert-atlas-dma-waits")
         self.assertNotEqual(result.returncode, 0, result.stdout)
