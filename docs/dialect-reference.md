@@ -190,10 +190,14 @@ Pairs require an exact ordered operation/relation match at a covered gap. Three
 pre-issue-live commands additionally require the exact complete chain history,
 gaps, pairwise relations and post-progress count, with every live pair covered;
 retired history alone does not require a chain. No capacity or prefix/suffix
-extrapolation is allowed. Current support is limited to base
-MREG/accumulator/weight relations within existing engine groups; qualified
-scalar/address and mixed full-Core protocols remain excluded. Data, ports,
-VMEM, conservative weight lifetimes and DMA guards remain enforced; waits
+extrapolation is allowed. Current support includes base MREG/accumulator/weight
+relations and qualified scalar relations in recognized PACK loops. Scalar
+admission requires immutable proofs of aligned LW/SW addresses for all 32
+iterations, exact register roles and complete confirmed pair/chain relations;
+unknown contexts stay conservative. An exact confirmed weight-push-to-matmul
+witness can replace the synthetic weight RAW bound; uncovered weight dependencies
+and mixed full-Core protocols remain conservative. Data, ports, VMEM and DMA
+guards remain enforced; waits
 invalidate earlier overlap eligibility.
 
 ## Machine operations

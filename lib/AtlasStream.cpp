@@ -362,6 +362,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
+  s.timingContexts.resize(instrs.size());
   // A loop's back-edge target and the instruction after its delay slot are
   // leaders, and nothing between them can be, so each loop fills one block.
   for (const AtlasPackLoop &loop : findAtlasPackLoops(ops)) {
@@ -374,6 +375,8 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
         applyScalar(instrs[i], facts.entry);
     }
     facts.access = proveAtlasPackLoopAccess(s, loop, facts.entry);
+    auto contexts = proveAtlasPackLoopTimingContexts(s, loop, facts.entry);
+    std::copy(contexts.begin(), contexts.end(), s.timingContexts.begin() + loop.begin);
     s.packLoops.push_back(loop);
     s.packLoopFacts.push_back(std::move(facts));
   }
@@ -676,7 +679,8 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
         return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
       for (const Issued &prior : issued) {
-        auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
+        auto rule = provider.dependenceFor(s.instrs[prior.index], prior.footprint,
+                                           s.timingContexts[prior.index], in, f, s.timingContexts[i]);
         if (!rule.error.empty())
           return s.ops[i]->emitOpError(rule.error);
         const Dependence &d = rule.value;
@@ -686,7 +690,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
           return s.ops[i]->emitOpError("insufficient issue spacing: ") << d.reason
                  << "; requires " << d.distance << ", got " << cycle - prior.cycle;
       }
-      auto conflict = table.conflict(in, f, cycle);
+      auto conflict = table.conflictWithContext(in, f, cycle, s.timingContexts[i]);
       if (!conflict.error.empty())
         return s.ops[i]->emitOpError(conflict.error);
       if (!conflict.value.empty())
@@ -701,7 +705,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       }
       if (isControlFlow(*in.op) && int64_t(cycle) + 2 < drained)
         return s.ops[i]->emitOpError("redirect reaches a successor before fixed-latency work drains");
-      std::string reservationError = table.reserve(in, f, cycle);
+      std::string reservationError = table.reserveWithContext(in, f, cycle, s.timingContexts[i]);
       if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
         reservationError = table.onWait(in, cycle);
       if (!reservationError.empty())

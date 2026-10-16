@@ -5,6 +5,8 @@
 #include "llvm/Support/SHA256.h"
 #include <algorithm>
 #include <climits>
+#include <iterator>
+#include "llvm/Support/raw_ostream.h"
 #include <set>
 
 using namespace mlir::atlas::timing;
@@ -27,8 +29,20 @@ bool keys(const Object &object, std::initializer_list<llvm::StringRef> allowed) 
     if (std::find(allowed.begin(), allowed.end(), llvm::StringRef(key)) == allowed.end()) return false;
   return true;
 }
-bool relation(const Object *object, Relation &out) {
-  if (!object || !keys(*object, {"mreg_banks", "accumulator", "weight_slot"})) return false;
+bool relation(const Object *object, Relation &out, bool qualified) {
+  if (!object) return false;
+  static const std::map<std::string, std::set<std::string>> values = {
+      {"accumulator", {"same", "other"}}, {"weight_slot", {"same", "other"}},
+      {"vmem_bank", {"same", "other"}},
+      {"vmem_window", {"same", "overlap", "disjoint"}},
+      {"vmem_word_window", {"same", "overlap", "disjoint"}},
+      {"first_mnemonic", {"vload", "vstore", "lb", "lbu", "lh", "lhu", "lw", "seld", "sb", "sh", "sw"}},
+      {"second_mnemonic", {"vload", "vstore", "lb", "lbu", "lh", "lhu", "lw", "seld", "sb", "sh", "sw"}},
+      {"scalar_address_alignment", {"word", "explicit_byte_offsets"}},
+      {"first_scalar_byte_offset", {"0", "1", "2", "3"}}, {"second_scalar_byte_offset", {"0", "1", "2", "3"}},
+      {"scalar_registers", {"independent", "same_load_destination", "store_data_equals_load_destination",
+          "first_address_base_equals_second_load_destination", "shared_base_read_only"}},
+      {"scalar_destination_file", {"xrf", "erf"}}, {"scalar_other_registers", {"independent"}}};
   auto banks = object->getString("mreg_banks");
   if (!banks) return false;
   if (*banks != "disjoint") {
@@ -46,8 +60,28 @@ bool relation(const Object *object, Relation &out) {
   }
   for (const auto &[key, value] : *object) {
     auto text = value.getAsString();
-    if (!text || (key != "mreg_banks" && *text != "same" && *text != "other")) return false;
+    if (!text) return false;
+    if (key != "mreg_banks") {
+      auto allowed = values.find(key.str());
+      if ((!qualified && key != "accumulator" && key != "weight_slot") ||
+          allowed == values.end() || !allowed->second.count(text->str())) return false;
+    }
     out[key.str()] = text->str();
+  }
+  auto get = [&](const char *key) { auto it = out.find(key); return it == out.end() ? std::string() : it->second; };
+  std::string mode = get("scalar_registers"), file = get("scalar_destination_file"), others = get("scalar_other_registers");
+  if (mode.empty() && (!file.empty() || !others.empty())) return false;
+  if ((mode == "independent" || mode == "shared_base_read_only") && !file.empty()) return false;
+  if (!mode.empty() && mode != "independent") {
+    if (others != "independent") return false;
+    if (mode != "shared_base_read_only" && (file.empty() || (mode != "same_load_destination" && file != "xrf"))) return false;
+  }
+  bool explicitOffsets = get("scalar_address_alignment") == "explicit_byte_offsets";
+  for (const char *side : {"first", "second"}) {
+    std::string mnemonic = get((std::string(side) + "_mnemonic").c_str());
+    bool offset = out.count(std::string(side) + "_scalar_byte_offset");
+    if (offset && !explicitOffsets) return false;
+    if (explicitOffsets && mnemonic != "vload" && mnemonic != "vstore" && !offset) return false;
   }
   return true;
 }
@@ -68,6 +102,107 @@ Relation actualRelation(const ModelOverlapCommand &first, const ModelOverlapComm
   }
   return result;
 }
+// Match the complete producer relation. Optional qualifiers are predicates;
+// absent qualifiers never acquire invented constraints or resource capacity.
+bool matchesRelation(const Relation &expected, const ModelOverlapCommand &first,
+                     const ModelOverlapCommand &second) {
+  Relation base, extra;
+  for (const auto &[key, value] : expected)
+    (key == "mreg_banks" || key == "accumulator" || key == "weight_slot" ? base : extra)[key] = value;
+  if (base != actualRelation(first, second)) return false;
+  if (extra.empty()) return !llvm::StringRef(first.block).starts_with("scalar") &&
+      !llvm::StringRef(second.block).starts_with("scalar");
+  if (llvm::StringRef(first.block).starts_with("scalar") || llvm::StringRef(second.block).starts_with("scalar"))
+    for (const char *key : {"first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"})
+      if (!extra.count(key)) return false;
+  if (!first.scalarInstruction || !second.scalarInstruction || !first.context || !second.context ||
+      !first.context->matches(*first.scalarInstruction) || !second.context->matches(*second.scalarInstruction) ||
+      !first.context->sameRegion(*second.context)) return false;
+  const Instr &a = *first.scalarInstruction, &b = *second.scalarInstruction;
+  if (!a.op || !b.op) return false;
+  auto memory = [](const Instr &in) {
+    return in.op->opClass == OpClass::ScalarLoad || in.op->opClass == OpClass::ScalarStore ||
+        in.op->opClass == OpClass::ScaleLoad || in.op->opClass == OpClass::VLoad || in.op->opClass == OpClass::VStore;
+  };
+  if (!memory(a) || !memory(b)) return false;
+  auto blockMatches = [](const ModelOverlapCommand &command, const Instr &in) {
+    if (command.block == "scalar_lsu.load") return in.op->opClass == OpClass::ScalarLoad;
+    if (command.block == "scalar_lsu.store") return in.op->opClass == OpClass::ScalarStore;
+    if (command.block == "scalar_lsu.scale_load") return in.op->opClass == OpClass::ScaleLoad;
+    if (command.block == "vlsu.vload") return in.op->opClass == OpClass::VLoad;
+    if (command.block == "vlsu.vstore") return in.op->opClass == OpClass::VStore;
+    return false;
+  };
+  if (!blockMatches(first, a) || !blockMatches(second, b)) return false;
+  using Resource = std::pair<std::string, int>;
+  struct Roles {
+    Resource base;
+    std::optional<Resource> destination, data;
+    std::set<Resource> resources;
+    bool vector = false;
+  };
+  auto roles = [](const Instr &in) {
+    Roles r{{"xrf", in.rs1}, {}, {}, {}, in.op->opClass == OpClass::VLoad || in.op->opClass == OpClass::VStore};
+    r.resources.insert(r.base);
+    if (in.op->opClass == OpClass::ScalarLoad || in.op->opClass == OpClass::ScaleLoad) {
+      r.destination = Resource{in.op->opClass == OpClass::ScaleLoad ? "erf" : "xrf", in.rd};
+      r.resources.insert(*r.destination);
+    }
+    if (in.op->opClass == OpClass::ScalarStore) {
+      r.data = Resource{"xrf", in.rs2}; r.resources.insert(*r.data);
+    }
+    return r;
+  };
+  Roles ra = roles(a), rb = roles(b);
+  auto get = [&](const char *key) { auto it = extra.find(key); return it == extra.end() ? std::string() : it->second; };
+  if ((!get("first_mnemonic").empty() && get("first_mnemonic") != a.op->name) ||
+      (!get("second_mnemonic").empty() && get("second_mnemonic") != b.op->name)) return false;
+  std::set<Resource> common;
+  std::set_intersection(ra.resources.begin(), ra.resources.end(), rb.resources.begin(), rb.resources.end(),
+                        std::inserter(common, common.begin()));
+  std::string mode = get("scalar_registers"), file = get("scalar_destination_file");
+  auto only = [&](const Resource &resource) { return common == std::set<Resource>{resource}; };
+  auto writable = [](const std::optional<Resource> &destination) {
+    return destination && (destination->first != "xrf" || destination->second != 0);
+  };
+  if (mode == "independent") {
+    if (!common.empty()) return false;
+  } else if (mode == "same_load_destination") {
+    if (!writable(ra.destination) || ra.destination != rb.destination || ra.destination->first != file ||
+        !only(*ra.destination) || ra.base == *ra.destination || rb.base == *ra.destination) return false;
+  } else if (mode == "store_data_equals_load_destination") {
+    if (!writable(rb.destination) || rb.destination->first != "xrf" || ra.data != rb.destination ||
+        !only(*rb.destination) || ra.base == *rb.destination || rb.base == *rb.destination) return false;
+  } else if (mode == "first_address_base_equals_second_load_destination") {
+    if (!writable(rb.destination) || rb.destination->first != "xrf" || ra.base != *rb.destination ||
+        rb.base == *rb.destination || ra.data == rb.destination || ra.destination == rb.destination ||
+        !only(*rb.destination)) return false;
+  } else if (mode == "shared_base_read_only") {
+    if (ra.base != rb.base || !only(ra.base) || ra.destination == ra.base || rb.destination == ra.base ||
+        ra.data == ra.base || rb.data == ra.base) return false;
+  } else if (!mode.empty()) return false;
+  const auto &aa = first.context->scalarAddresses(), &ba = second.context->scalarAddresses();
+  for (size_t ordinal = 0; ordinal < aa.size(); ++ordinal) {
+    uint64_t x = aa[ordinal], y = ba[ordinal];
+    uint64_t xs = ra.vector ? x : x & ~uint64_t(3), ys = rb.vector ? y : y & ~uint64_t(3);
+    uint64_t xw = ra.vector ? 1024 : 4, yw = rb.vector ? 1024 : 4;
+    if (x >= kVmemBytes || y >= kVmemBytes || xs + xw > kVmemBytes || ys + yw > kVmemBytes ||
+        xs / kVmemBankBytes != (xs + xw - 1) / kVmemBankBytes ||
+        ys / kVmemBankBytes != (ys + yw - 1) / kVmemBankBytes ||
+        (ra.vector && x % 1024) || (rb.vector && y % 1024)) return false;
+    std::string bank = xs / kVmemBankBytes == ys / kVmemBankBytes ? "same" : "other";
+    std::string window = xs == ys && xw == yw ? "same" : xs < ys + yw && ys < xs + xw ? "overlap" : "disjoint";
+    if ((!get("vmem_bank").empty() && get("vmem_bank") != bank) ||
+        (!get("vmem_window").empty() && get("vmem_window") != window) ||
+        (!get("vmem_word_window").empty() && get("vmem_word_window") != window)) return false;
+    if (mode == "shared_base_read_only" && x != y) return false;
+    if (get("scalar_address_alignment") == "word" && ((!ra.vector && x % 4) || (!rb.vector && y % 4))) return false;
+    if (!get("first_scalar_byte_offset").empty() && (ra.vector || get("first_scalar_byte_offset") != std::to_string(x % 4))) return false;
+    if (!get("second_scalar_byte_offset").empty() && (rb.vector || get("second_scalar_byte_offset") != std::to_string(y % 4))) return false;
+  }
+  return true;
+}
+
 int peak(const std::vector<ModelOverlapCommand> &commands) {
   int result = 0;
   for (const ModelOverlapCommand &edge : commands) {
@@ -80,14 +215,59 @@ int peak(const std::vector<ModelOverlapCommand> &commands) {
   return result;
 }
 bool sameGroup(llvm::StringRef first, llvm::StringRef second) {
-  if (first.starts_with("scalar") || second.starts_with("scalar")) return false;
+  if (first.starts_with("scalar") || second.starts_with("scalar"))
+    return first == "scalar_lsu" && second == "scalar_lsu";
   auto vector = [](llvm::StringRef engine) { return engine == "vpu" || engine == "xlu"; };
   return first == second || (vector(first) && vector(second));
 }
-bool constraints(const Object &record) {
+std::string canonicalJson(const llvm::json::Value &value) {
+  std::string bytes;
+  llvm::raw_string_ostream out(bytes);
+  if (const Object *object = value.getAsObject()) {
+    std::vector<std::string> keys;
+    for (const auto &[key, entry] : *object) keys.push_back(key.str());
+    std::sort(keys.begin(), keys.end());
+    out << '{';
+    bool first = true;
+    for (const std::string &key : keys) {
+      if (!first) out << ',';
+      first = false;
+      out << llvm::json::Value(key) << ':' << canonicalJson(*object->get(key));
+    }
+    out << '}';
+  } else if (const Array *array = value.getAsArray()) {
+    out << '[';
+    bool first = true;
+    for (const auto &entry : *array) {
+      if (!first) out << ',';
+      first = false;
+      out << canonicalJson(entry);
+    }
+    out << ']';
+  } else {
+    out << value;
+  }
+  return bytes;
+}
+
+bool qualifiedConstraint(llvm::StringRef key, const llvm::json::Value &value) {
+  static const std::map<std::string, std::set<std::string>> fingerprints = {
+      {"relation_semantics", {"443b1e8a8e8876b9e67ba87c305b4229807a02b8ad2ad4bd77ac34c55d2fa7cd", "78afcaeef347a00459065cd9d5babb65bb0b044c9c7bf0a34e433b3246585776"}},
+      {"consumer_requirement", {"bb1957d57bed486aad37163da58c543837b4985ad4a438ca74f4636da7efc831"}},
+      {"producer_consumer_requirements", {"fecc7df59282b5d906989925f5b5920b80d7804951f7941e0de634ed9251034c", "485c80a7f25113f657689eba5af2e7e6c90527494a441eb071d5ff2f01731b93", "5a17dff585ecfd25e546e1104e9fc8a511c9e4ae977fb2382b8bd3c92041486a", "8d70091e791eeb60c323ad3a4ef619900b49bfe0d5b02f8cd20412292402479d", "5c315a2a03daaffca9d53df0c2b55a8956a161b340202e1756334f6d4d114695"}},
+  };
+  auto allowed = fingerprints.find(key.str());
+  if (allowed == fingerprints.end()) return false;
+  std::string bytes = canonicalJson(value);
+  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
+      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
+  return allowed->second.count(llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true));
+}
+
+bool constraints(const Object &record, bool qualified) {
   for (const char *name : {"relation_semantics", "capacity_scope", "producer_consumer_requirements",
                            "domain_extension_scope"})
-    if (record.get(name)) return false;
+    if (record.get(name) && (!qualified || !qualifiedConstraint(name, *record.get(name)))) return false;
   static const std::map<std::string, std::set<std::string>> text = {
       {"resource_semantics", {"Accumulator and weight slot local to named MXU. Disjoint MREG footprint."}},
       {"consumer_requirement", {
@@ -110,7 +290,8 @@ bool constraints(const Object &record) {
   for (const auto &[name, allowed] : text)
     if (record.get(name)) {
       auto value = record.getString(name);
-      if (!value || !allowed.count(value->str())) return false;
+      if ((!value || !allowed.count(value->str())) &&
+          (!qualified || !qualifiedConstraint(name, *record.get(name)))) return false;
     }
   if (record.get("producer_relation_summary")) {
     const Object *summary = record.getObject("producer_relation_summary");
@@ -151,7 +332,8 @@ bool source(const Object &record, llvm::StringRef kind) {
                     "negative", "source_mregs", "source_mregs_disjoint", "source_mregs_equality", "accumulator_slots",
                     "accumulator_slots_equality", "weight_slots", "weight_slots_equality", "same_weight_slot",
                     "maximum_live_commands", "maximum_rtl_tracker_occupancy", "all_contributions_preserved",
-                    "current_model", "fragment", "fragment_sha256", "full_memory_checked_bytes", "attempted_dispatch_gap"}))
+                    "current_model", "fragment", "fragment_sha256", "full_memory_checked_bytes", "attempted_dispatch_gap",
+                    "relation", "result_sha256", "same_accumulator"}))
     return false;
   if (proof->get("full_suffix_rtl_swept") && proof->getBoolean("full_suffix_rtl_swept") != false) return false;
   for (const char *name : {"scope", "classification"})
@@ -169,6 +351,13 @@ bool source(const Object &record, llvm::StringRef kind) {
     const Object *original = proof->getObject("source");
     if (!original || !original->getString("path") || !original->getString("sha256") ||
         !hashSyntax(*original->getString("sha256"))) return false;
+  }
+  if (proof->get("relation") && (!record.get("relation") || *proof->get("relation") != *record.get("relation"))) return false;
+  if (proof->get("result_sha256") && (!proof->getString("result_sha256") || !hashSyntax(*proof->getString("result_sha256")))) return false;
+  if (proof->get("same_accumulator")) {
+    const Object *rel = record.getObject("relation");
+    if (!rel || !proof->getBoolean("same_accumulator") ||
+        *proof->getBoolean("same_accumulator") != (rel->getString("accumulator") == "same")) return false;
   }
   return true;
 }
@@ -191,10 +380,9 @@ bool proofGaps(const Object &record, const std::vector<int> &expected) {
 bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const {
   auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) {
     int gap = second.issue - first.issue;
-    Relation matched = actualRelation(first, second);
     for (const Pair &pair : pairs)
-      if (pair.first == first.block && pair.second == second.block && pair.relation == matched &&
-          pair.minimum <= gap && gap <= pair.high) return true;
+      if (pair.first == first.block && pair.second == second.block && pair.minimum <= gap && gap <= pair.high &&
+          matchesRelation(pair.relation, first, second)) return true;
     return false;
   };
   if (commands.size() == 2) return admitsPair(commands[0], commands[1]);
@@ -210,7 +398,7 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
       matched &= chain.operations[i] == commands[i].block;
       if (i) matched &= chain.gaps[i - 1] == commands[i].issue - commands[i - 1].issue;
       for (size_t j = 0; j < i; ++j)
-        matched &= chain.relations.at({int(j), int(i)}) == actualRelation(commands[j], commands[i]);
+        matched &= matchesRelation(chain.relations.at({int(j), int(i)}), commands[j], commands[i]);
     }
     if (matched) return true;
   }
@@ -231,9 +419,11 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
   if (!keys(*root, {"schema", "age_convention", "model", "projection", "pairs", "chains", "provenance",
                     "consumer_rules", "limitations", "per_operation_reference"})) return invalid("unknown root constraint");
   const Object *projection = root->getObject("projection"), *model = root->getObject("model");
-  if (!projection || projection->getInteger("version") != 1 ||
-      projection->getString("policy") != "confirmed-exact-base-relations-v1" || !model)
-    return invalid("requires a version 1 confirmed-only projection");
+  bool qualified = projection && projection->getInteger("version") == 2 &&
+      projection->getString("policy") == "confirmed-exact-scalar-relations-v2";
+  bool base = projection && projection->getInteger("version") == 1 &&
+      projection->getString("policy") == "confirmed-exact-base-relations-v1";
+  if ((!qualified && !base) || !model) return invalid("requires a recognized confirmed-only projection");
   if (!keys(*projection, {"version", "policy", "master_sha256", "master_path", "validation_sha256", "validation_path",
                           "per_op_sha256", "projector_sha256", "counts", "excluded_reasons"}) ||
       !projection->getObject("counts") || !projection->getObject("excluded_reasons"))
@@ -269,8 +459,8 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
     result.provenance[std::string("pairs_") + name] = hash->str();
   }
   result.provenance["pairs_sha256"] = expectedSha256.str();
-  result.provenance["pairs_projection_version"] = "1";
-  result.provenance["pairs_policy"] = "confirmed-exact-base-relations-v1";
+  result.provenance["pairs_projection_version"] = qualified ? "2" : "1";
+  result.provenance["pairs_policy"] = projection->getString("policy")->str();
   const Array *pairs = root->getArray("pairs"), *chains = root->getArray("chains");
   if (!pairs || !chains || (pairs->empty() && chains->empty())) return invalid("empty or missing projected coverage");
   std::set<std::string> sourcePointers;
@@ -281,7 +471,7 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
   for (const auto &value : *pairs) {
     const Object *record = value.getAsObject();
     if (!record || !proof(*record, "pairs")) return invalid("invalid or duplicate confirmed pair proof");
-    if (!constraints(*record)) return invalid("unsupported pair semantic constraint");
+    if (!constraints(*record, qualified)) return invalid("unsupported pair semantic constraint");
     if (!keys(*record, {"source_record", "verilator", "evidence_summary", "first", "second", "relation", "swept",
                         "min_gap", "negative", "live_window", "first_completion_age", "first_live_window_end",
                         "max_in_flight", "domain_extension_scope", "previous_swept", "consumer_requirement",
@@ -290,9 +480,9 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
     auto first = record->getString("first"), second = record->getString("second");
     const auto *a = first ? operations.block(*first) : nullptr;
     const auto *b = second ? operations.block(*second) : nullptr;
-    if (!a || !b || !sameGroup(a->engine, b->engine)) return invalid("unsupported pair operation or group");
+    if (!a || !b || (!sameGroup(a->engine, b->engine) || (!qualified && llvm::StringRef(a->engine).starts_with("scalar")))) return invalid("unsupported pair operation or group");
     ModelOverlapFacts::Pair pair{first->str(), second->str(), {}, 0, 0};
-    if (!relation(record->getObject("relation"), pair.relation)) return invalid("unsupported complete pair relation");
+    if (!relation(record->getObject("relation"), pair.relation, qualified)) return invalid("unsupported complete pair relation");
     const Array *swept = record->getArray("swept");
     auto minimum = record->getInteger("min_gap");
     if (!swept || swept->size() != 2 || (*swept)[0].getAsInteger() != 1 || !minimum ||
@@ -341,7 +531,7 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
     const Object *record = value.getAsObject();
     if (!record || !proof(*record, "chains") || record->getString("result") != "accepted" ||
         record->getString("relation_scope") != "adjacent") return invalid("invalid confirmed chain proof");
-    if (!constraints(*record)) return invalid("unsupported chain semantic constraint");
+    if (!constraints(*record, qualified)) return invalid("unsupported chain semantic constraint");
     if (!keys(*record, {"source_record", "verilator", "evidence_summary", "operations", "gaps", "relation",
                         "all_pair_relations", "relation_scope", "result", "in_flight_count", "witness_only",
                         "no_stable_suffix_claim", "fixed_prefix_gaps", "swept_last_gap", "minimum_last_gap",
@@ -376,7 +566,7 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
     for (size_t i = 0; i < names->size(); ++i) {
       auto name = (*names)[i].getAsString();
       const auto *block = name ? operations.block(*name) : nullptr;
-      if (!block || (i && !sameGroup(group, block->engine)) || llvm::StringRef(block->engine).starts_with("scalar"))
+      if (!block || (i && !sameGroup(group, block->engine)) || (!qualified && llvm::StringRef(block->engine).starts_with("scalar")))
         return invalid("unsupported chain operation or group");
       group = block->engine;
       if (i) {
@@ -442,12 +632,12 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
       Relation matched;
       if (!pair || !keys(*pair, {"first_index", "second_index", "relation"}) || !first || !second || *first < 0 ||
           *first >= *second || uint64_t(*second) >= names->size() ||
-          !relation(pair->getObject("relation"), matched) ||
+          !relation(pair->getObject("relation"), matched, qualified) ||
           !chain.relations.emplace(std::pair<int, int>{int(*first), int(*second)}, std::move(matched)).second)
         return invalid("invalid complete chain relation matrix");
     }
     Relation summary;
-    if (!relation(record->getObject("relation"), summary) || summary != chain.relations.at({0, 1}) ||
+    if (!relation(record->getObject("relation"), summary, qualified) || summary != chain.relations.at({0, 1}) ||
         peak(commands) != *count || !proofGaps(*record, chain.gaps))
       return invalid("inconsistent chain summary, proof gaps or post-progress membership");
     chain.inFlight = int(*count);

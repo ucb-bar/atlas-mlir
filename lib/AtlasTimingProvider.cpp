@@ -27,9 +27,13 @@ private:
 } // namespace
 
 TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
-    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma) {
+    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma,
+    const std::vector<TimingContext> *contexts) {
   std::string missing = validateTimingProvider(p);
   if (!missing.empty()) return {{}, missing};
+  if (contexts && contexts->size() != instrs.size())
+    return {{}, "timing context count differs from instruction count"};
+  auto context = [&](int i) { return contexts ? (*contexts)[i] : TimingContext{}; };
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
@@ -56,7 +60,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   };
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
-      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
+      auto d = p.dependenceFor(g.nodes[a], g.footprints[a], context(a),
+                               g.nodes[b], g.footprints[b], context(b));
       if (!d.error.empty()) return {{}, d.error};
       if (d.value.distance < 0) return {{}, "timing provider returned a negative dependence distance"};
       if (d.value.distance > 0)

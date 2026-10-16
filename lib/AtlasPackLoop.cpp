@@ -151,3 +151,53 @@ mlir::atlas::proveAtlasPackLoopAccess(const AtlasStream &stream, const AtlasPack
     return std::nullopt;
   return access;
 }
+
+namespace mlir::atlas::timing {
+struct AtlasPackLoopTimingProofBuilder {
+  static TimingContext make(const Instr &in, std::shared_ptr<const uint8_t> region,
+                            const std::array<uint32_t, 32> &addresses) {
+    return TimingContext(new InstructionTimingContext(in, std::move(region), addresses));
+  }
+};
+} // namespace mlir::atlas::timing
+
+std::vector<TimingContext> mlir::atlas::proveAtlasPackLoopTimingContexts(
+    const AtlasStream &stream, const AtlasPackLoop &loop, const RegValues &entry) {
+  std::vector<TimingContext> result(loop.end() - loop.begin);
+  std::vector<std::vector<uint32_t>> addresses(result.size());
+  RegValues regs = entry;
+  unsigned iterations = 0;
+  bool known = true;
+  auto step = [&](size_t pc) {
+    if (pc == loop.begin) ++iterations;
+    const Instr &in = stream.instrs[pc];
+    if (in.op->opClass == OpClass::ScalarLoad || in.op->opClass == OpClass::ScalarStore) {
+      if ((in.op->name != "lw" && in.op->name != "sw") ||
+          in.rs1 < 0 || in.rs1 >= 32 || !regs[in.rs1]) {
+        known = false;
+      } else {
+        // Retain low bits before alignment, and reject address truncation/wrap.
+        int64_t raw = int64_t(*regs[in.rs1]) + signExtend(in.imm, 12);
+        uint32_t effective = uint32_t(raw) & 0x1fffff;
+        if (raw < 0 || uint64_t(raw) != effective || effective % 4 ||
+            uint64_t(effective) + 4 > uint64_t(kVmemBytes))
+          known = false;
+        addresses[pc - loop.begin].push_back(effective);
+      }
+    }
+    applyScalar(in, regs);
+    return success();
+  };
+  auto exit = runAtlasPackLoop(stream.ops, loop,
+      [&]() -> const RegValues & { return regs; }, step);
+  if (failed(exit) || *exit != AtlasPackLoopExit::Exited || !known || iterations != 32)
+    return result;
+  auto region = std::make_shared<const uint8_t>(0);
+  for (size_t i = 0; i < addresses.size(); ++i) {
+    if (addresses[i].size() != 32) continue;
+    std::array<uint32_t, 32> cases;
+    std::copy(addresses[i].begin(), addresses[i].end(), cases.begin());
+    result[i] = AtlasPackLoopTimingProofBuilder::make(stream.instrs[loop.begin + i], region, cases);
+  }
+  return result;
+}

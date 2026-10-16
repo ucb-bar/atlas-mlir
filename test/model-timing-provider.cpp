@@ -14,6 +14,8 @@ using namespace mlir;
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
+int testScalarOverlap(llvm::json::Object fixture);
+
 namespace {
 int failures = 0;
 void check(bool passed, llvm::StringRef what) {
@@ -346,6 +348,42 @@ void testOverlap(const std::shared_ptr<const ModelTimingFacts> &facts) {
   (*object.getArray("pairs"))[0].getAsObject()->operator[]("previous_swept") = "1,73";
   reject(std::move(object), "malformed retained pair sweep rejects");
 }
+void testStreamedWeights(const std::shared_ptr<ModelTimingFacts> &facts) {
+  Instr push{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
+  Instr compute{findOp("vmatmul.mxu0"), 0, 2, 0};
+  Footprint first = facts->resolve(push, unknownRegs()), second = facts->resolve(compute, unknownRegs());
+  auto conservative = modelTimingProvider(facts);
+  int original = conservative.dependence(push, first, compute, second).value.distance;
+  check(first.error.empty() && second.error.empty() && original == 35,
+        "unqualified weight dependency retains the whole isolated write window");
+  auto object = overlapFixture(*facts);
+  object["chains"] = llvm::json::Array{};
+  object["pairs"] = llvm::json::Array{llvm::json::Object{
+      {"first", "mxu0.push_weight"}, {"second", "mxu0.matmul"},
+      {"relation", llvm::json::Object{{"mreg_banks", "disjoint"}, {"weight_slot", "same"}}},
+      {"swept", llvm::json::Array{1, 40}}, {"min_gap", 1}, {"first_live_window_end", 40},
+      {"negative", llvm::json::Object{{"gap", 0}, {"result", "inexpressible"}}},
+      {"source_record", overlapSource("/pairs/8")}, {"verilator", llvm::json::Object{{"confirmed", true}}}}};
+  std::string bytes = encode(std::move(object));
+  auto loaded = parseModelOverlapFacts(bytes, hash(bytes), *facts);
+  check(bool(loaded), "exact streamed-weight witness loads");
+  if (!loaded) { llvm::consumeError(loaded.takeError()); return; }
+  auto overlap = std::make_shared<ModelOverlapFacts>(std::move(*loaded));
+  auto qualified = modelTimingProvider(facts, overlap);
+  check(qualified.dependence(push, first, compute, second).value.distance == 1,
+        "exact confirmed weight push-to-matmul witness replaces the synthetic RAW bound");
+  auto reservations = qualified.createReservations();
+  check(reservations.value->reserve(push, first, 0).empty() &&
+            reservations.value->conflict(compute, second, 1).value.empty(),
+        "qualified dependency agrees with exact pair reservation admission");
+  compute.rs1 = 0;
+  check(qualified.dependence(push, first, compute, facts->resolve(compute, unknownRegs())).value.distance == original,
+        "uncovered source alias keeps the conservative weight dependency");
+  compute.rs1 = 2;
+  check(qualified.dependence(compute, second, push, first).value.distance ==
+            conservative.dependence(compute, second, push, first).value.distance,
+        "streamed push-to-compute evidence does not weaken compute-to-push weight lifetime");
+}
 } // namespace
 
 int main() {
@@ -358,6 +396,8 @@ int main() {
   }
   auto facts = std::make_shared<ModelTimingFacts>(std::move(*loaded));
   testOverlap(facts);
+  testStreamedWeights(facts);
+  failures += testScalarOverlap(fixture());
   auto provider = modelTimingProvider(facts);
   Instr move{findOp("vmov"), 4, 0, 0};
   Footprint first = provider.footprint(move, unknownRegs());

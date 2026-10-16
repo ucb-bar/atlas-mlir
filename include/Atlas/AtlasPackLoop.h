@@ -95,6 +95,12 @@ runAtlasPackLoop(llvm::ArrayRef<Operation *> ops, const AtlasPackLoop &loop,
                  llvm::function_ref<const timing::RegValues &()> regs,
                  llvm::function_ref<LogicalResult(size_t pc)> step);
 
+// Contexts for exactly 32 decided iterations. Any unknown/unaligned/wrapping
+// scalar address or unsupported memory operation leaves every context absent.
+std::vector<timing::TimingContext> proveAtlasPackLoopTimingContexts(
+    const AtlasStream &stream, const AtlasPackLoop &loop,
+    const timing::RegValues &entry);
+
 // What `loop` touches in `stream` over all its iterations, run from `entry`;
 // unknown when an address or the exit is.
 std::optional<AtlasVmemAccess> proveAtlasPackLoopAccess(const AtlasStream &stream,
