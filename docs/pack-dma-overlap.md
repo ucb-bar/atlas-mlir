@@ -148,9 +148,9 @@ scheduler now interleaves V's wait and staging VLOAD with the PACK's prologue.
 
 ## Next
 
-- With DMA overlapping PACK, PACK itself bounds shared-weight programs: each
-  still costs about 1,490 cycles. The relayout loop can drop to about 1,200
-  with more temporaries and its loads ahead of its stores, keeping it a loop.
+- With DMA overlapping PACK, PACK itself bounded shared-weight programs at
+  about 1,490 cycles each; [the pipelined relayout loop](pack-relayout-loop.md)
+  brings it to about 1,000.
 - `IncomingDma` footprints for the stream scheduler (above).
 - Admitting transfers across other loops, such as a producer's tile loop,
   can reuse `dmaMayCross` and the loop interpreter.
