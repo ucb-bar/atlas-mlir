@@ -37,8 +37,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     return std::move(result.value);
   };
   auto reserve = [&](TimingReservations &table, const Instr &in,
-                     const Footprint &f, int cycle) {
-    std::string why = table.reserve(in, f, cycle);
+                     const Footprint &f, int cycle, size_t index) {
+    std::string why = table.reserveWithContext(in, f, cycle, s.timingContexts[index]);
     if (why.empty() && in.op->opClass == OpClass::DmaWait)
       why = table.onWait(in, cycle);
     note(why);
@@ -51,7 +51,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       note("timing provider returned no reservation state");
     else
       for (const Issued &x : issued)
-        reserve(*table, instrs[x.index], x.f, x.cycle);
+        reserve(*table, instrs[x.index], x.f, x.cycle, x.index);
     return table;
   };
   std::unique_ptr<TimingReservations> table = replay();
@@ -60,10 +60,11 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
-  auto earliest = [&](const Instr &in, const Footprint &f, int cycle,
+  auto earliest = [&](size_t index, const Instr &in, const Footprint &f, int cycle,
                       std::string &reason) {
     for (const Issued &x : issued) {
-      Dependence d = rule(p.dependence(instrs[x.index], x.f, in, f));
+      Dependence d = rule(p.dependenceFor(instrs[x.index], x.f, s.timingContexts[x.index],
+                                            in, f, s.timingContexts[index]));
       if (d.distance > 0 && x.cycle + d.distance > cycle) {
         cycle = x.cycle + d.distance;
         reason = d.reason + " after " + name(x.index);
@@ -82,7 +83,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (cycle > nextFree)
       before[i] = {idleDelays(cycle - nextFree), false, reason};
     const Instr &in = instrs[i];
-    reserve(*table, in, f, cycle);
+    reserve(*table, in, f, cycle, i);
     issued.push_back({i, f, cycle});
     applyScalar(in, regs);
     int gap = rule(p.issueGap(in));
@@ -110,7 +111,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (!f.error.empty())
       return ops[i]->emitOpError(f.error);
     std::string reason;
-    int cycle = earliest(in, f, nextFree, reason);
+    int cycle = earliest(i, in, f, nextFree, reason);
 
     if (in.op->opClass == OpClass::Halt) {
       // A halt neither drains in-flight work nor waits for a delay, so its
@@ -151,12 +152,12 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         reason = "this block finishes before the branch's successors start";
       }
       auto fits = [&](int c) -> std::string {
-        std::string why = rule(table->conflict(in, f, c));
+        std::string why = rule(table->conflictWithContext(in, f, c, s.timingContexts[i]));
         if (!why.empty())
           return why;
         std::string slotReason;
-        int slotCycle = earliest(slot, sf, c + 1, slotReason);
-        Dependence d = rule(p.dependence(in, f, slot, sf));
+        int slotCycle = earliest(slotIndex, slot, sf, c + 1, slotReason);
+        Dependence d = rule(p.dependenceFor(in, f, s.timingContexts[i], slot, sf, s.timingContexts[slotIndex]));
         if (c + d.distance > slotCycle) {
           slotCycle = c + d.distance;
           slotReason = d.reason + " after " + name(i);
@@ -166,8 +167,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         auto withBranch = replay();
         if (!withBranch)
           return why;
-        note(withBranch->reserve(in, f, c));
-        why = rule(withBranch->conflict(slot, sf, c + 1));
+        note(withBranch->reserveWithContext(in, f, c, s.timingContexts[i]));
+        why = rule(withBranch->conflictWithContext(slot, sf, c + 1, s.timingContexts[slotIndex]));
         return why.empty() ? why : "delay slot: " + why;
       };
       if (failed(search(i, cycle, reason, fits)))
@@ -181,7 +182,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     }
 
     if (failed(search(i, cycle, reason,
-                      [&](int c) { return rule(table->conflict(in, f, c)); })))
+                      [&](int c) { return rule(table->conflictWithContext(in, f, c, s.timingContexts[i])); })))
       return failure();
     place(i, f, cycle, reason);
     if (!fault.empty())

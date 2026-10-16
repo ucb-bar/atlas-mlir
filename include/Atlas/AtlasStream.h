@@ -16,6 +16,7 @@ struct AtlasVerificationContext;
 struct AtlasStream {
   llvm::SmallVector<Operation *> ops;
   std::vector<timing::Instr> instrs;
+  std::vector<timing::TimingContext> timingContexts;
   llvm::DenseMap<Operation *, Operation *> targetOf; // nullptr: stream end
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
@@ -26,6 +27,14 @@ struct AtlasStream {
   bool endsInHalt(size_t block) const;
   bool fallsThrough(size_t block) const;
 };
+
+// Replay a compiler-owned bounded scalar loop from its established true entry.
+// The production caller first validates its block shape and incoming CFG edges.
+std::vector<timing::TimingContext> proveAtlasScalarLoopTimingContexts(
+    const AtlasStream &stream, size_t begin, size_t branch,
+    const timing::RegValues &entry);
+// Populate only optional timing evidence; this does not change CFG/DMA policy.
+void populateAtlasInstructionTimingContexts(AtlasStream &stream);
 
 struct DelayInsertion {
   std::vector<uint32_t> delays;

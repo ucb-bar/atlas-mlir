@@ -624,7 +624,11 @@ bool overlaps(const Access &a, const Access &b) {
       (a.first < b.first + b.count && b.first < a.first + a.count));
 }
 
-Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
+std::optional<ModelOverlapCommand> overlapCommand(const Instr &in, const Footprint &f, int cycle,
+                                                  const ModelTimingFacts &facts);
+
+Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb,
+                              const ModelTimingFacts *facts = nullptr, const ModelOverlapFacts *overlap = nullptr) {
   Dependence best;
   auto consider = [&](int distance, EdgeKind kind, const std::string &reason) {
     if (distance > best.distance) best = {distance, kind, reason};
@@ -636,10 +640,27 @@ Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &
     if ((!aw && !bw) || a.op->channel == b.op->channel || (aw && !bw))
       consider(1, EdgeKind::Order, "DMA launch/wait order");
   }
+  std::optional<int> streamedWeightGap;
+  if (facts && overlap && a.op->opClass == OpClass::WeightPush &&
+      (b.op->opClass == OpClass::MatMul || b.op->opClass == OpClass::MatMulAcc) && a.op->mxu == b.op->mxu) {
+    auto first = overlapCommand(a, fa, 0, *facts), second = overlapCommand(b, fb, 0, *facts);
+    if (first && second)
+      for (int gap = 1; gap <= first->firstFreeAge; ++gap) {
+        second->issue = gap;
+        if (overlap->admits({*first, *second}, false)) {
+          streamedWeightGap = gap;
+          break;
+        }
+      }
+  }
   for (const Access &x : fa.accesses) {
     if (x.atCompletion) continue;
     for (const Access &y : fb.accesses) {
       if (!overlaps(x, y) || (!x.write && !y.write)) continue;
+      if (streamedWeightGap && x.res == Res::Weight && x.write && !y.write) {
+        consider(*streamedWeightGap, EdgeKind::RAW, "confirmed streamed weight dependency");
+        continue;
+      }
       int distance;
       if (x.anywhere || y.anywhere) {
         distance = x.lastAge() - (y.atCompletion ? 0 : y.age) + 1;
@@ -705,13 +726,17 @@ public:
                        std::shared_ptr<const ModelOverlapFacts> overlap, bool chains)
       : facts(std::move(facts)), overlap(std::move(overlap)), chains(chains) {}
   TimingRuleResult<std::string> conflict(const Instr &in, const Footprint &f, int cycle) const override {
+    return conflictWithContext(in, f, cycle, {});
+  }
+  TimingRuleResult<std::string> conflictWithContext(
+      const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const override {
     if (cycle < 0 || cycle > INT_MAX - f.doneAge - 1)
       return {{}, "npu-model reservation exceeds cycle domain"};
     std::vector<Port> ports = requests(f, cycle);
     for (size_t i = 0; i < ports.size(); ++i)
       for (size_t j = 0; j < i; ++j)
         if (portConflict(ports[i], ports[j])) return {{}, "instruction has conflicting MREG port requests"};
-    bool waiver = overlap && admitsInsertion(in, f, cycle);
+    bool waiver = overlap && admitsInsertion(in, f, cycle, context);
     for (const Issued &prior : issued) {
       if (prior.cycle + prior.f.doneAge < cycle || cycle + f.doneAge < prior.cycle) continue;
       if (sameEngine(*in.op, *prior.in.op) && cycle <= prior.cycle + prior.f.doneAge &&
@@ -722,7 +747,9 @@ public:
           if (a.unit == b.unit && a.index == b.index && prior.cycle + a.from <= cycle + b.to &&
               cycle + b.from <= prior.cycle + a.to)
             if (!(waiver && sameEngine(*in.op, *prior.in.op) &&
-                  (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu)))
+                  (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu ||
+                   (a.unit == Unit::ScalarLoad && scalarContext(in, context) &&
+                    scalarContext(prior.in, prior.context)))))
               return {std::string(unitName(a.unit)) + " occupied", {}};
       for (const Port &a : prior.ports)
         for (const Port &b : ports)
@@ -731,10 +758,14 @@ public:
     return {};
   }
   std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
-    auto checked = conflict(in, f, cycle);
+    return reserveWithContext(in, f, cycle, {});
+  }
+  std::string reserveWithContext(const Instr &in, const Footprint &f, int cycle,
+                                 const TimingContext &context) override {
+    auto checked = conflictWithContext(in, f, cycle, context);
     if (!checked.error.empty()) return checked.error;
     if (!checked.value.empty()) return checked.value;
-    issued.push_back({in, f, cycle, requests(f, cycle), true});
+    issued.push_back({in, f, cycle, requests(f, cycle), true, context});
     return {};
   }
   std::string onWait(const Instr &, int cycle) override {
@@ -751,10 +782,22 @@ public:
 
 private:
   struct Port { int bank, reg, row, from, cycle; bool write; };
-  struct Issued { Instr in; Footprint f; int cycle; std::vector<Port> ports; bool eligible; };
-  bool admitsInsertion(const Instr &in, const Footprint &f, int cycle) const {
+  struct Issued {
+    Instr in; Footprint f; int cycle; std::vector<Port> ports; bool eligible;
+    TimingContext context;
+  };
+  static bool scalarContext(const Instr &in, const TimingContext &context) {
+    return context && context->matches(in) &&
+        (in.op->name == "lw" || in.op->name == "sw");
+  }
+  bool admitsInsertion(const Instr &in, const Footprint &f, int cycle,
+                       const TimingContext &context) const {
     auto candidate = overlapCommand(in, f, cycle, *facts);
     if (!candidate) return false;
+    if (scalarContext(in, context)) {
+      candidate->scalarInstruction = in;
+      candidate->context = context;
+    }
     struct Entry { ModelOverlapCommand command; int end; bool eligible, candidate; };
     std::vector<Entry> entries{{*candidate, cycle + f.doneAge, true, true}};
     for (const Issued &prior : issued) {
@@ -763,6 +806,10 @@ private:
       if (!command) {
         if (prior.cycle <= cycle + f.doneAge && cycle <= prior.cycle + prior.f.doneAge) return false;
         continue;
+      }
+      if (scalarContext(prior.in, prior.context)) {
+        command->scalarInstruction = prior.in;
+        command->context = prior.context;
       }
       entries.push_back({*command, prior.cycle + prior.f.doneAge, prior.eligible, false});
     }
@@ -917,8 +964,25 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   };
   provider.validateScope = modelScope;
   provider.footprint = [facts](const Instr &in, const RegValues &regs) { return facts->resolve(in, regs); };
-  provider.dependence = [](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
-    return TimingRuleResult<Dependence>{observedDependence(a, fa, b, fb), {}};
+  provider.dependence = [facts, overlap](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
+    return TimingRuleResult<Dependence>{observedDependence(a, fa, b, fb, facts.get(), overlap.get()), {}};
+  };
+  provider.contextualDependence = [base = provider.dependence](
+      const Instr &a, const Footprint &fa, const TimingContext &ca,
+      const Instr &b, const Footprint &fb, const TimingContext &cb) {
+    bool disjoint = ca && cb && ca->matches(a) && cb->matches(b) && ca->sameRegion(*cb);
+    if (disjoint) {
+      const auto &aa = ca->scalarAddresses(), &bb = cb->scalarAddresses();
+      for (size_t row = 0; row < aa.size(); ++row)
+        disjoint &= uint64_t(aa[row]) + 4 <= bb[row] || uint64_t(bb[row]) + 4 <= aa[row];
+    }
+    if (!disjoint) return base(a, fa, b, fb);
+    // Exact byte disjointness removes only the line-granularity VMEM alias.
+    // All decoded register, release, ordering and port obligations survive.
+    Footprint precise = fa;
+    precise.accesses.erase(std::remove_if(precise.accesses.begin(), precise.accesses.end(),
+        [](const Access &access) { return access.res == Res::Vmem; }), precise.accesses.end());
+    return base(a, precise, b, fb);
   };
   provider.dmaConflict = [](const Footprint &dma, const Footprint &other) {
     DMACompletionConflict result;

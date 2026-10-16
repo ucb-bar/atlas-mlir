@@ -73,9 +73,9 @@ class ModelPairProjectionTest(unittest.TestCase):
             self.select(record)
 
     def test_unknown_relation_or_operation_and_cross_group_exclude_whole_fact(self):
-        for change, reason in (({"relation": dict(RELATION, vmem_bank="other")}, "unsupported_relation"),
+        for change, reason in (({"relation": dict(RELATION, unknown_bank="other")}, "unsupported_relation"),
                                ({"second": "mxu1.matmul"}, "cross_group"),
-                               ({"second": "scalar_lsu.load"}, "unsupported_operation"),
+                               ({"second": "scalar_lsu.load"}, "cross_group"),
                                ({"second": "unknown"}, "unsupported_operation"),
                                ({"unreviewed_constraint": True}, "unsupported_record_field"),
                                ({"evidence_tier": "full_core_exact_witness_v1"}, "unsupported_protocol")):
@@ -83,6 +83,96 @@ class ModelPairProjectionTest(unittest.TestCase):
             record.update(change)
             with self.subTest(change=change):
                 self.assertEqual(self.select(record), (None, reason))
+
+    def scalar_pair(self, **qualifiers):
+        relation = dict(mreg_banks="disjoint", first_mnemonic="lw", second_mnemonic="sw",
+                        scalar_address_alignment="word", scalar_registers="independent",
+                        vmem_bank="same", vmem_window="disjoint")
+        relation.update(qualifiers)
+        return dict(first="scalar_lsu.load", second="scalar_lsu.store", relation=relation,
+                    swept=[1, 4], min_gap=1, first_completion_age=3,
+                    negative={"gap": 0, "result": "inexpressible"}, verilator={"confirmed": True})
+
+    def test_scalar_projection_preserves_every_qualifier_and_legacy_policy_excludes(self):
+        blocks = dict(BLOCKS, **{"scalar_lsu.store": {"first_free_age": 2}})
+        record = self.scalar_pair()
+        selected, reason = pairs.select_record(record, "pairs", 3498, blocks)
+        self.assertIsNone(reason)
+        self.assertEqual(selected["relation"], record["relation"])
+        self.assertEqual(pairs.select_record(record, "pairs", 3498, blocks, False), (None, "unsupported_operation"))
+        for key in ("first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"):
+            changed = deepcopy(record)
+            del changed["relation"][key]
+            with self.subTest(key=key):
+                self.assertEqual(pairs.select_record(changed, "pairs", 0, blocks), (None, "unsupported_relation"))
+
+    def test_complete_scalar_role_vocabulary_and_joint_qualifiers(self):
+        for mode in pairs.RELATION_VALUES["scalar_registers"]:
+            relation = self.scalar_pair()["relation"]
+            relation["scalar_registers"] = mode
+            if mode != "independent":
+                relation["scalar_other_registers"] = "independent"
+            if mode not in {"independent", "shared_base_read_only"}:
+                relation["scalar_destination_file"] = "xrf"
+            with self.subTest(mode=mode):
+                pairs.validate_relation(relation)
+                if mode not in {"independent", "shared_base_read_only"}:
+                    relation["scalar_destination_file"] = "erf"
+                    if mode == "same_load_destination":
+                        pairs.validate_relation(relation)
+                    else:
+                        with self.assertRaises(ValueError):
+                            pairs.validate_relation(relation)
+        for change in ({"scalar_registers": "unknown"}, {"scalar_destination_file": "xrf"},
+                       {"scalar_other_registers": "aliased"}, {"vmem_bank": "unknown"},
+                       {"scalar_address_alignment": "byte"}, {"first_scalar_byte_offset": "1"}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                pairs.validate_relation(dict(self.scalar_pair()["relation"], **change))
+
+    def test_explicit_byte_offsets_are_mandatory_and_exact(self):
+        relation = self.scalar_pair(scalar_address_alignment="explicit_byte_offsets",
+                                    first_scalar_byte_offset="1", second_scalar_byte_offset="3")["relation"]
+        relation["vmem_word_window"] = relation.pop("vmem_window")
+        pairs.validate_relation(relation)
+        for key in ("first_scalar_byte_offset", "second_scalar_byte_offset"):
+            missing = dict(relation)
+            del missing[key]
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                pairs.validate_relation(missing)
+        with self.assertRaises(ValueError):
+            pairs.validate_relation(dict(relation, first_scalar_byte_offset="4"))
+
+    def test_original_streaming_weight_proof_semantics_are_preserved_and_checked(self):
+        record = pair()
+        record["verilator"]["relation"] = deepcopy(record["relation"])
+        record["verilator"]["result_sha256"] = "a" * 64
+        record["verilator"]["same_accumulator"] = False
+        selected, reason = self.select(record)
+        self.assertIsNone(reason)
+        for key in ("relation", "result_sha256", "same_accumulator"):
+            self.assertEqual(selected["verilator"][key], record["verilator"][key])
+        for key, value in (("relation", {"mreg_banks": "disjoint"}), ("result_sha256", "invalid"),
+                           ("same_accumulator", True), ("same_accumulator", "false")):
+            changed = deepcopy(record)
+            changed["verilator"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.select(changed)
+
+    def test_unknown_proof_protocol_is_never_discarded(self):
+        for key, value in (("protocol", "unreviewed"), ("review_protocol", {}), ("new_qualification", True)):
+            record = pair()
+            record["verilator"][key] = value
+            with self.subTest(key=key):
+                self.assertEqual(self.select(record), (None, "unsupported_protocol"))
+
+    def test_qualified_metadata_requires_complete_known_value(self):
+        # Pin comparison checks the entire value, including every qualifier text.
+        text = "Reject unless every extra relation key is explicitly enforced; never discard constraints."
+        record = self.scalar_pair()
+        record["consumer_requirement"] = text
+        self.assertTrue(pairs.constraints_supported(record))
+        record["consumer_requirement"] += " except addresses"
+        self.assertFalse(pairs.constraints_supported(record))
 
     def test_model_only_and_nonboolean_confirmations_never_admit(self):
         for proof in (None, {}, {"confirmed": False}):

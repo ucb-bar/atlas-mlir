@@ -21,6 +21,20 @@ PER_OP_SHA256 = "cc95c8663c567afe01b1d4600390719d778ca5bd0e74e7310313c1ecbb66930
 MODEL_REVISION = "9e6313bddecb8ba936206eb347f5cd4e5335282c"
 CONFIGURATION_SHA256 = "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a"
 BASE_KEYS = {"mreg_banks", "accumulator", "weight_slot"}
+RELATION_VALUES = {
+    "vmem_bank": {"same", "other"},
+    "vmem_window": {"same", "overlap", "disjoint"},
+    "vmem_word_window": {"same", "overlap", "disjoint"},
+    "first_mnemonic": {"vload", "vstore", "lb", "lbu", "lh", "lhu", "lw", "seld", "sb", "sh", "sw"},
+    "second_mnemonic": {"vload", "vstore", "lb", "lbu", "lh", "lhu", "lw", "seld", "sb", "sh", "sw"},
+    "scalar_address_alignment": {"word", "explicit_byte_offsets"},
+    "first_scalar_byte_offset": {"0", "1", "2", "3"},
+    "second_scalar_byte_offset": {"0", "1", "2", "3"},
+    "scalar_registers": {"independent", "same_load_destination", "store_data_equals_load_destination",
+                         "first_address_base_equals_second_load_destination", "shared_base_read_only"},
+    "scalar_destination_file": {"xrf", "erf"}, "scalar_other_registers": {"independent"},
+}
+RELATION_KEYS = BASE_KEYS | set(RELATION_VALUES)
 PAIR_FIELDS = set("""first second relation swept min_gap negative live_window first_completion_age
 first_live_window_end max_in_flight domain_extension_scope previous_swept consumer_requirement
 producer_consumer_requirements relation_semantics resource_semantics operand_order""".split())
@@ -50,10 +64,13 @@ run negative_run result measured_gap negative_gap negative_kind negative_scope c
 operations gaps negative source_mregs source_mregs_disjoint source_mregs_equality accumulator_slots
 accumulator_slots_equality weight_slots weight_slots_equality same_weight_slot maximum_live_commands
 maximum_rtl_tracker_occupancy all_contributions_preserved current_model fragment fragment_sha256
-full_memory_checked_bytes attempted_dispatch_gap""".split())
+full_memory_checked_bytes attempted_dispatch_gap relation result_sha256 same_accumulator""".split())
+PROOF_EVIDENCE_FIELDS = {"evidence_pins", "independent_review_cache", "negative_confirmation",
+                         "oracle_revision", "receipt_review", "additional_confirmations"}
 
 
-POLICY = "confirmed-exact-base-relations-v1"
+POLICY = "confirmed-exact-scalar-relations-v2"
+BASE_POLICY = "confirmed-exact-base-relations-v1"
 TEXT_CONSTRAINTS = {
     "dependency": {"first destination feeds second source; first result remains in distinct storage"},
     "oracle_description": {"sequential architectural oracle plus prefix-initialized second singleton event/data union"},
@@ -76,17 +93,22 @@ TEXT_CONSTRAINTS = {
 }
 
 
-def constraints_supported(record):
+# Canonical complete values reviewed against the immutable 13f21cbc checkpoint.
+# A matching inner descriptor hash alone does not authorize new semantic text.
+QUALIFIED_CONSTRAINT_HASHES = {'relation_semantics': {'443b1e8a8e8876b9e67ba87c305b4229807a02b8ad2ad4bd77ac34c55d2fa7cd', '78afcaeef347a00459065cd9d5babb65bb0b044c9c7bf0a34e433b3246585776'}, 'consumer_requirement': {'bb1957d57bed486aad37163da58c543837b4985ad4a438ca74f4636da7efc831'}, 'producer_consumer_requirements': {'fecc7df59282b5d906989925f5b5920b80d7804951f7941e0de634ed9251034c', '5c315a2a03daaffca9d53df0c2b55a8956a161b340202e1756334f6d4d114695', '485c80a7f25113f657689eba5af2e7e6c90527494a441eb071d5ff2f01731b93', '5a17dff585ecfd25e546e1104e9fc8a511c9e4ae977fb2382b8bd3c92041486a', '8d70091e791eeb60c323ad3a4ef619900b49bfe0d5b02f8cd20412292402479d'}}
+
+def constraints_supported(record, qualified=True):
     if "publishable" in record and record["publishable"] is not True:
         return False
     if "unit_model_only" in record and type(record["unit_model_only"]) is not bool:
         return False
     for key in ("relation_semantics", "capacity_scope", "producer_consumer_requirements", "domain_extension_scope"):
-        if key in record:
+        if key in record and (not qualified or sha256(canonical(record[key])) not in QUALIFIED_CONSTRAINT_HASHES.get(key, set())):
             return False
     for key, allowed in TEXT_CONSTRAINTS.items():
         if key in record and (not isinstance(record[key], str) or record[key] not in allowed):
-            return False
+            if not qualified or sha256(canonical(record[key])) not in QUALIFIED_CONSTRAINT_HASHES.get(key, set()):
+                return False
     if "producer_relation_summary" in record:
         summary = record["producer_relation_summary"]
         if not isinstance(summary, dict) or not set(summary) <= BASE_KEYS:
@@ -229,6 +251,8 @@ def group(name):
         return "mxu0"
     if name.startswith("mxu1."):
         return "mxu1"
+    if name.startswith("scalar_lsu.") or name == "scalar.seld":
+        return "scalar_lsu"
     if name.startswith("vlsu."):
         return "lsu"
     return None
@@ -241,14 +265,35 @@ def relations(record, kind):
 
 
 def validate_relation(relation):
-    if not isinstance(relation, dict) or not set(relation) <= BASE_KEYS or "mreg_banks" not in relation:
+    if not isinstance(relation, dict) or not set(relation) <= RELATION_KEYS or "mreg_banks" not in relation:
         raise ValueError("unsupported or missing relation constraint")
     for key, value in relation.items():
         if key == "mreg_banks":
             if value != "disjoint" and (not isinstance(value, str) or not re.fullmatch(r"\d+[=~]\d+(,\d+[=~]\d+)*", value)):
                 raise ValueError("invalid MREG relation")
-        elif value not in {"same", "other"}:
-            raise ValueError("invalid accumulator/weight relation")
+        elif not isinstance(value, str) or value not in RELATION_VALUES.get(key, {"same", "other"}):
+            raise ValueError("invalid relation qualifier")
+    mode = relation.get("scalar_registers")
+    if mode is None:
+        if set(relation) & {"scalar_destination_file", "scalar_other_registers"}:
+            raise ValueError("scalar roles lack a joint register mode")
+    elif mode == "independent":
+        if "scalar_destination_file" in relation:
+            raise ValueError("independent roles cannot specify a destination alias")
+    else:
+        if relation.get("scalar_other_registers") != "independent":
+            raise ValueError("scalar alias must constrain other registers")
+        if mode == "shared_base_read_only":
+            if "scalar_destination_file" in relation:
+                raise ValueError("shared read-only base has no destination alias")
+        elif relation.get("scalar_destination_file") not in ({"xrf", "erf"} if mode == "same_load_destination" else {"xrf"}):
+            raise ValueError("scalar alias has an invalid destination file")
+    if relation.get("scalar_address_alignment") == "explicit_byte_offsets":
+        for side in ("first", "second"):
+            if relation.get(side + "_mnemonic") not in {"vload", "vstore"} and side + "_scalar_byte_offset" not in relation:
+                raise ValueError("explicit alignment lacks scalar byte offset")
+    elif any(key.endswith("scalar_byte_offset") for key in relation):
+        raise ValueError("scalar byte offsets require explicit alignment")
 
 
 def boundary(record):
@@ -337,7 +382,7 @@ def validate_chain(record, blocks):
             raise ValueError("uniform chain axis differs from exact vector")
 
 
-def select_record(record, kind, index, blocks):
+def select_record(record, kind, index, blocks, qualified=True):
     if not isinstance(record, dict):
         raise ValueError("invalid producer record")
     proof = record.get("verilator")
@@ -345,16 +390,30 @@ def select_record(record, kind, index, blocks):
         return None, "unconfirmed"
     if proof["confirmed"] is not True:
         raise ValueError("confirmation must be literal boolean true")
-    if "evidence_tier" in record or any("qualified" in str(proof.get(key, "")) for key in ("scope", "classification")):
+    if ("evidence_tier" in record or set(proof) - PROOF_FIELDS - PROOF_EVIDENCE_FIELDS or
+            any("qualified" in str(proof.get(key, "")) for key in ("scope", "classification"))):
         return None, "unsupported_protocol"
+    if "relation" in proof and proof["relation"] != record.get("relation"):
+        raise ValueError("proof relation differs from complete record relation")
+    if "result_sha256" in proof and (not isinstance(proof["result_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", proof["result_sha256"])):
+        raise ValueError("invalid original result SHA-256")
+    if "same_accumulator" in proof and (type(proof["same_accumulator"]) is not bool or
+            (record.get("relation", {}).get("accumulator") == "same") != proof["same_accumulator"]):
+        raise ValueError("proof accumulator alias differs from record")
     names = [record.get("first"), record.get("second")] if kind == "pairs" else record.get("operations")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) or n not in blocks or group(n) is None for n in names):
         return None, "unsupported_operation"
+    if not qualified and any(group(name) == "scalar_lsu" for name in names):
+        return None, "unsupported_operation"
     if len({group(name) for name in names}) != 1:
         return None, "cross_group"
-    if any(not isinstance(rel, dict) or not set(rel) <= BASE_KEYS for rel in relations(record, kind)):
+    if any(not isinstance(rel, dict) or not set(rel) <= (RELATION_KEYS if qualified else BASE_KEYS) for rel in relations(record, kind)):
         return None, "unsupported_relation"
-    if not constraints_supported(record):
+    if group(names[0]) == "scalar_lsu":
+        required = {"first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"}
+        if any(not required <= set(rel) for rel in relations(record, kind)):
+            return None, "unsupported_relation"
+    if not constraints_supported(record, qualified):
         return None, "unsupported_constraint_value"
     fields = PAIR_FIELDS if kind == "pairs" else CHAIN_FIELDS
     if set(record) - fields - EVIDENCE_FIELDS - {"verilator", "adjacent_relations"}:
@@ -390,13 +449,18 @@ def covered_chain(record, pair_index, blocks):
     return True
 
 
-def project(master, validation, per_op, output):
+def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=None, validation_sha256=None):
+    master_pin = master_sha256 or MASTER_SHA256
+    validation_pin = validation_sha256 or VALIDATION_SHA256
+    if policy not in {POLICY, BASE_POLICY}:
+        raise ValueError("unsupported projection policy")
+    qualified = policy == POLICY
     master, validation, per_op, output = map(safe_path, (master, validation, per_op, output))
     source_sha = sha256(Path(__file__).read_bytes())
     if output.exists():
         raise ValueError("output directory must be new")
-    validation_value = read_pinned(validation, VALIDATION_SHA256)
-    if validation_value.get("passed") is not True or validation_value.get("facts_sha256") != MASTER_SHA256:
+    validation_value = read_pinned(validation, validation_pin)
+    if validation_value.get("passed") is not True or validation_value.get("facts_sha256") != master_pin:
         raise ValueError("validation does not bind the selected master")
     operations = read_pinned(per_op, PER_OP_SHA256)
     if operations.get("schema") != "atlas.model_timing.v1" or operations.get("validation", {}).get("passed") is not True:
@@ -414,12 +478,12 @@ def project(master, validation, per_op, output):
                     result[key] = value
                 continue
             seen[key] += 1
-            selected, reason = select_record(value, key, index, blocks)
+            selected, reason = select_record(value, key, index, blocks, qualified)
             if selected is None:
                 excluded[key + ":" + reason] += 1
             else:
                 result[key].append(selected)
-        if reader.digest.hexdigest() != MASTER_SHA256:
+        if reader.digest.hexdigest() != master_pin:
             raise ValueError("master SHA-256 mismatch")
     pair_index = {}
     for pair in result["pairs"]:
@@ -442,8 +506,8 @@ def project(master, validation, per_op, output):
         raise ValueError("projector source changed during export")
     if any(seen[key] != validation_value.get(key) for key in ("pairs", "chains")):
         raise ValueError("validation counts do not match master")
-    result["projection"] = dict(version=1, policy=POLICY, master_sha256=MASTER_SHA256, master_path=str(master.absolute()),
-                                validation_sha256=VALIDATION_SHA256, validation_path=str(validation.absolute()),
+    result["projection"] = dict(version=2 if qualified else 1, policy=policy, master_sha256=master_pin, master_path=str(master.absolute()),
+                                validation_sha256=validation_pin, validation_path=str(validation.absolute()),
                                 per_op_sha256=PER_OP_SHA256, projector_sha256=source_sha,
                                 counts=dict(source_pairs=seen["pairs"], source_chains=seen["chains"],
                                             pairs=len(result["pairs"]), chains=len(result["chains"])),
@@ -454,7 +518,7 @@ def project(master, validation, per_op, output):
     receipt = dict(schema="atlas.model_pairs_projection_receipt.v1", passed=True,
                    facts_sha256=sha256(artifact.read_bytes()), projection=result["projection"],
                    generated_utc=datetime.now(timezone.utc).isoformat(), bytes=artifact.stat().st_size,
-                   scope="Confirmed sealed producer records, base relations and existing serialization groups only; no new model/RTL execution.")
+                   scope="Confirmed sealed producer records, exact base/scalar relations and existing serialization groups only; no new model/RTL execution.")
     (output / "receipt.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
     return receipt
 
@@ -463,8 +527,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("master", "validation", "per-op", "output"):
         parser.add_argument("--" + key, type=Path, required=True)
+    parser.add_argument("--policy", choices=(POLICY, BASE_POLICY), default=POLICY)
+    parser.add_argument("--master-sha256")
+    parser.add_argument("--validation-sha256")
     args = parser.parse_args()
-    print(json.dumps(project(args.master, args.validation, args.per_op, args.output), sort_keys=True))
+    print(json.dumps(project(args.master, args.validation, args.per_op, args.output, policy=args.policy,
+                             master_sha256=args.master_sha256, validation_sha256=args.validation_sha256), sort_keys=True))
     return 0
 
 

@@ -8,7 +8,7 @@ int main(int argc, char **argv) {
       {"dma-allocation", runDMAAllocation}, {"dma-helper", runDMAHelper},
       {"mxu-allocation", runMXUAllocation}, {"mxu-contract", runMXUContract},
       {"source-memory-contract", runSourceMemoryContract}, {"tile-contract", runTileContract},
-      {"timing-provider", runTimingProvider}};
+      {"timing-provider", runTimingProvider}, {"scalar-timing-context", runScalarTimingContext}};
   const auto *selected = llvm::find_if(suites, [&](const auto &suite) { return argc == 2 && suite.first == argv[1]; });
   if (selected == std::end(suites)) {
     llvm::errs() << "usage: " << argv[0] << " <suite>; suites:";

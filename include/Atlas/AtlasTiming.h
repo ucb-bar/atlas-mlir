@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,27 @@ struct Instr {
   long long imm = 0;
   bool release = false;
 };
+
+// Compiler-owned proof from a decided 32-iteration PACK replay. Each address
+// is the unrounded effective byte address at the same iteration ordinal.
+class InstructionTimingContext {
+public:
+  bool matches(const Instr &in) const;
+  bool sameRegion(const InstructionTimingContext &other) const {
+    return region == other.region;
+  }
+  const std::array<uint32_t, 32> &scalarAddresses() const { return addresses; }
+
+private:
+  InstructionTimingContext(Instr instruction, std::shared_ptr<const uint8_t> region,
+                           std::array<uint32_t, 32> addresses)
+      : instruction(instruction), region(std::move(region)), addresses(addresses) {}
+  Instr instruction;
+  std::shared_ptr<const uint8_t> region;
+  std::array<uint32_t, 32> addresses;
+  friend struct AtlasPackLoopTimingProofBuilder;
+};
+using TimingContext = std::shared_ptr<const InstructionTimingContext>;
 
 long long signExtend(long long value, int bits);
 int naturalGap(const Instr &in);
