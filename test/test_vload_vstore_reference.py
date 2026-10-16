@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,16 +28,11 @@ class VLoadVStoreReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_vls_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted()
         self.assertEqual(len(emitted), 29)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[8], assembler.VLOAD(4, 6, 0))
-        self.assertEqual(emitted[13], assembler.VSTORE(4, 8, 0))
+        self.assertEqual(emitted[8], assembler.word("vload m4, 0(x6)"))
+        self.assertEqual(emitted[13], assembler.word("vstore m4, 0(x8)"))
         self.assertEqual(_object_words(SOURCE), emitted)
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 import unittest
+
+import atlas_assembler as assembler
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -116,11 +117,6 @@ class ScalarALUReferenceTest(unittest.TestCase):
         assembler_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not assembler_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for the selected assembler")
-        assembler_file = pathlib.Path(assembler_root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("atlas_selected_assembler", assembler_file)
-        assert spec is not None and spec.loader is not None
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             source_path = directory / "program.mlir"

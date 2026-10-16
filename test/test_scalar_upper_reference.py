@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_scalar_alu_reference import MASK, _emitted, _object_words
 
 
@@ -37,12 +37,6 @@ class ScalarUpperReferenceTest(unittest.TestCase):
         assembler_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not assembler_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "atlas_selected_assembler", pathlib.Path(assembler_root) / "assembler.py",
-        )
-        assert spec is not None and spec.loader is not None
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             path = directory / "upper.mlir"

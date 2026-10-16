@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import random
@@ -11,6 +10,7 @@ import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_numerics import dot, fp8, round_bf16
 from test_mxu_reference import PAIR_SOURCE, _object_words
 
@@ -66,17 +66,12 @@ class MXU1ReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_mxu1_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted()
         self.assertEqual(len(emitted), 42)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[18], assembler.VMATPUSH_W_MXU1(0, 4))
-        self.assertEqual(emitted[20], assembler.VMATMUL_MXU1(0, 0, 0))
-        self.assertEqual(emitted[22], assembler.VMATPOP_BF16_MXU1(2, 0))
+        self.assertEqual(emitted[18], assembler.word("vmatpush.weight.mxu1 w0, m4"))
+        self.assertEqual(emitted[20], assembler.word("vmatmul.mxu1 acc0, m0, w0"))
+        self.assertEqual(emitted[22], assembler.word("vmatpop.bf16.acc.mxu1 m2, acc0"))
         self.assertEqual(_object_words(SOURCE), emitted)
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)

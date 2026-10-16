@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import pathlib
@@ -10,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import atlas_assembler as assembler
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -31,15 +32,8 @@ def _assembler():
     root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
     if not root:
         raise unittest.SkipTest("set ATLAS_ASSEMBLER_ROOT for selected public assembler")
-    path = pathlib.Path(root) / "assembler.py"
-    if not path.is_file():
-        raise AssertionError(f"missing selected assembler: {path}")
-    spec = importlib.util.spec_from_file_location("atlas_dma_reference_assembler", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     assembly = (pathlib.Path(root) / "assembly/dma_loopback.S").read_text()
-    return module, assembly
+    return assembler, assembly
 
 
 def _object_words() -> tuple[int, ...]:
@@ -100,7 +94,7 @@ class DMAReferenceTest(unittest.TestCase):
         self.assertNotIn("io.dmaTL.d.bits.size", dma)
 
         assembler, assembly = _assembler()
-        parsed = assembler._parse_inline_golden(assembly, 32)
+        parsed = assembler.inline_golden(assembly, 32)
         assert parsed is not None
         base, preload_addrs, preload_words, check_addrs, check_words = parsed
         self.assertEqual(base, 0x90000000)

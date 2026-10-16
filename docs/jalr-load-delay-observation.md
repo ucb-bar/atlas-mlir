@@ -51,11 +51,12 @@ reference. The JALR inventory row remains unadmitted and the D gate remains
 blocked.
 
 Focused reproducer, with the existing CMake build and selected source paths
-provided by the caller:
+provided by the caller. Prepare the [assembler environment](../README.md#build-and-test)
+separately from the selected RTL:
 
 ```sh
 ATLAS_OOT_BIN_DIR="$build_dir/bin" \
-ATLAS_ASSEMBLER_ROOT="$atlas_rtl/baremetal" \
+ATLAS_ASSEMBLER_ROOT="$atlas_assembler_root" \
 ATLAS_RTL_ROOT="$atlas_rtl" \
 ATLAS_ARC_MODEL="$arc_model" ATLAS_ARC_STATE="$arc_state" \
 ATLAS_MODELIR_ROOT="$modelir_root" \

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,9 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "test"))
+import atlas_assembler as assembler
+
 ASSEMBLY = ROOT / "test/examples/vpu_recip_pair.S"
 PANEL_CODES = 1024
 TOTAL_CODES = 1 << 16
@@ -87,13 +89,11 @@ def selected_rtl_recip_bits(raw: int) -> int:
 
 
 def _assembler_words(assembler_path: Path) -> tuple[int, ...]:
-    spec = importlib.util.spec_from_file_location("atlas_selected_recip_assembler", assembler_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("selected Atlas assembler cannot be loaded")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    words = tuple(module.assemble(ASSEMBLY.read_text()))
-    if len(words) != 36 or words[17] != module.VRECIP_BF16(4, 0):
+    if assembler_path.name != "atlas_asm.py":
+        raise ValueError("--assembler must select baremetal/atlas_asm.py")
+    words = tuple(assembler.assemble(ASSEMBLY.read_text(), root=assembler_path.parent))
+    expected = assembler.word("vrecip.bf16 m4, m0", root=assembler_path.parent)
+    if len(words) != 36 or words[17] != expected:
         raise AssertionError("transcribed VRECIP stream changed")
     return words
 
@@ -205,7 +205,8 @@ def main() -> None:
     parser.add_argument("--arc-model", required=True, type=Path)
     parser.add_argument("--arc-state", required=True, type=Path)
     parser.add_argument("--modelir", required=True, type=Path)
-    parser.add_argument("--assembler", required=True, type=Path)
+    parser.add_argument("--assembler", required=True, type=Path,
+                        help="path to selected baremetal/atlas_asm.py")
     parser.add_argument("--rtl-root", required=True, type=Path)
     parser.add_argument("--arithmetic-root", required=True, type=Path)
     parser.add_argument("--first-panel", type=int, default=0)

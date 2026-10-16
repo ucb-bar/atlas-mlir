@@ -1,43 +1,43 @@
 # Independent selected-assembler transcription of mxu1_pair.mlir.
 ADDI x28, x0, 1
 ADDI x5, x0, 0
-DMA.CONFIG x5, 0
+dma.config x5, ch0
 ADDI x2, x0, 1024
 ADDI x6, x0, 0
 LUI x1, 0x90000
-DMA.LOAD x6, x1, x2, 0
-DMA.WAIT 0
+dma.load x6, x1, x2, ch0
+dma.wait ch0
 ADDI x6, x0, 0
-VLOAD 4, x6, 0
+vload m4, 0(x6)
 ADDI x7, x0, 256
 LUI x1, 0x90000
 ADDI x1, x1, 1024
-DMA.LOAD x7, x1, x2, 0
-DMA.WAIT 0
+dma.load x7, x1, x2, ch0
+dma.wait ch0
 ADDI x7, x0, 256
-VLOAD 0, x7, 0
+vload m0, 0(x7)
 DELAY 33
-VMATPUSH.W.MXU1 0, 4
+vmatpush.weight.mxu1 w0, m4
 DELAY 31
-VMATMUL.MXU1 0, 0, 0
+vmatmul.mxu1 acc0, m0, w0
 DELAY 95
-VMATPOP.BF16.MXU1 2, 0
+vmatpop.bf16.acc.mxu1 m2, acc0
 DELAY 31
 ADDI x8, x0, 512
-VSTORE 2, x8, 0
+vstore m2, 0(x8)
 DELAY 33
 ADDI x8, x0, 512
 LUI x3, 0x90001
 ADDI x3, x3, -2048
-DMA.STORE x3, x8, x2, 1
-DMA.WAIT 1
+dma.store x3, x8, x2, ch1
+dma.wait ch1
 ADDI x8, x0, 768
-VSTORE 3, x8, 0
+vstore m3, 0(x8)
 DELAY 33
 ADDI x8, x0, 768
 LUI x3, 0x90001
-DMA.STORE x3, x8, x2, 1
-DMA.WAIT 1
+dma.store x3, x8, x2, ch1
+dma.wait ch1
 ADDI x1, x0, 1
 CSRRW x0, 0xC10, x1
 ECALL
