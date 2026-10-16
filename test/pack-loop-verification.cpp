@@ -67,29 +67,29 @@ void decoded(MLIRContext &context, StringRef pipeline) {
   if (!module)
     return;
   SmallVector<Operation *> ops = opsOf(*module);
-  std::vector<AtlasPackLoop> loops = findAtlasPackLoops(ops);
+  std::vector<AtlasLoop> loops = findAtlasLoops(ops);
   check(loops.size() == 1, "one PACK relayout loop");
   if (loops.size() != 1)
     return;
-  const AtlasPackLoop &loop = loops[0];
-  check(backEdge(ops[loop.branch]) && copyLoad(ops[loop.begin]) && contractTag(ops[loop.branch], kAtlasTagCFGSource) == loop.source,
+  const AtlasLoop &loop = loops[0];
+  check(backEdge(ops[loop.branch]) && copyLoad(ops[loop.begin]) && isAtlasPackRelayoutLoop(ops, loop),
         "the loop runs from the first copy load to its own helper back-edge");
-  check(findAtlasPackLoopAt(loops, loop.begin) == &loop && findAtlasPackLoopAt(loops, loop.end() - 1) == &loop &&
-            !findAtlasPackLoopAt(loops, loop.begin - 1) && !findAtlasPackLoopAt(loops, loop.end()),
+  check(findAtlasLoopAt(loops, loop.begin) == &loop && findAtlasLoopAt(loops, loop.end() - 1) == &loop &&
+            !findAtlasLoopAt(loops, loop.begin - 1) && !findAtlasLoopAt(loops, loop.end()),
         "the loop holds its delay slot and nothing outside it");
 
   auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(stream) && stream->packLoops.size() == 1, "the decoded stream records the loop");
-  if (failed(stream) || stream->packLoops.size() != 1)
+  check(succeeded(stream) && stream->loops.size() == 1, "the decoded stream records the loop");
+  if (failed(stream) || stream->loops.size() != 1)
     return;
-  const AtlasPackLoop &decoded = stream->packLoops[0];
+  const AtlasLoop &decoded = stream->loops[0];
   size_t block = llvm::find(stream->starts, loop.begin) - stream->starts.begin();
   check(block < stream->starts.size() && stream->blockEnd(block) == loop.end() &&
-            stream->packLoop(block) == &decoded && decoded.branch == loop.branch,
+            stream->loop(block) == &decoded && decoded.branch == loop.branch,
         "the loop fills one block");
   for (size_t b = 0; b + 1 < stream->starts.size(); ++b)
     check(stream->dmaMayCross(b) == (b + 1 == block || b == block), "DMA may cross only into and out of the loop");
-  const AtlasPackLoopFacts &facts = stream->factsOf(decoded);
+  const AtlasLoopFacts &facts = stream->factsOf(decoded);
   uint64_t raw = uint64_t(fixed().packWord) * 4, relayout = uint64_t(fixed().packRelayoutWord) * 4;
   check(facts.entry[fixed().packRowReg] == 0u && facts.entry[fixed().packRowsReg] == 32u,
         "the loop is entered with its row counter and limit");
@@ -119,7 +119,10 @@ void refused(MLIRContext &context) {
     if (!module)
       return;
     mutate(*module);
-    check(findAtlasPackLoops(opsOf(*module)).empty(), "not a PACK loop: " + name.str());
+    auto ops = opsOf(*module);
+    auto loops = findAtlasLoops(ops);
+    check(loops.empty() || !isAtlasPackRelayoutLoop(ops, loops.front()),
+          "not a PACK loop: " + name.str());
   }
 
   // A loop the run cannot decide is still a loop, with unknown access.
@@ -132,7 +135,7 @@ void refused(MLIRContext &context) {
   };
   setI32(first(*module, limit), "src", fixed().scalarTemporary);
   auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(stream) && stream->packLoops.size() == 1 && !stream->factsOf(stream->packLoops[0]).access,
+  check(succeeded(stream) && stream->loops.size() == 1 && !stream->factsOf(stream->loops[0]).access,
         "an unknown row limit leaves the loop's access unknown");
 }
 } // namespace

@@ -268,3 +268,11 @@ Editing words inside the final inline-assembly string skips every check.
   representable inputs, not every FP8/BF16 encoding.
 - Results on the RTL standalone core are diagnostic. Nothing here has run on
   an integrated SoC or FPGA.
+
+### DMA across loops
+
+The shared [scalar-loop analysis](loop-dma-analysis.md) lets explicit DMA stay
+in flight through single-block scalar loops with provable independent memory
+accesses. Discovery uses control flow and instruction effects rather than PACK
+helper annotations. Unknown or unsupported loops require conservative waits.
+PACK retains its separate provenance and exact-layout contract checks.

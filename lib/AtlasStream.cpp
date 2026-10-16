@@ -213,21 +213,21 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
-const AtlasPackLoop *AtlasStream::packLoop(size_t block) const {
-  const AtlasPackLoop *loop = findAtlasPackLoopAt(packLoops, starts[block]);
+const AtlasLoop *AtlasStream::loop(size_t block) const {
+  const AtlasLoop *loop = findAtlasLoopAt(loops, starts[block]);
   return loop && loop->begin == starts[block] ? loop : nullptr;
 }
 
-const AtlasPackLoopFacts &AtlasStream::factsOf(const AtlasPackLoop &loop) const {
-  assert(&loop >= packLoops.data() && &loop < packLoops.data() + packLoops.size() &&
+const AtlasLoopFacts &AtlasStream::factsOf(const AtlasLoop &loop) const {
+  assert(&loop >= loops.data() && &loop < loops.data() + loops.size() &&
          "facts exist for this stream's own loops");
-  return packLoopFacts[&loop - packLoops.data()];
+  return loopFacts[&loop - loops.data()];
 }
 
 bool AtlasStream::dmaMayCross(size_t block) const {
   if (block + 1 >= starts.size())
     return false;
-  return packLoop(block) || (fallsThrough(block) && packLoop(block + 1));
+  return loop(block) || (fallsThrough(block) && loop(block + 1));
 }
 
 static std::atomic<unsigned> decodeCount{0};
@@ -364,18 +364,18 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
 
   // A loop's back-edge target and the instruction after its delay slot are
   // leaders, and nothing between them can be, so each loop fills one block.
-  for (const AtlasPackLoop &loop : findAtlasPackLoops(ops)) {
+  for (const AtlasLoop &loop : findAtlasLoops(ops)) {
     size_t block = blockAt[loop.begin];
-    assert(s.blockEnd(block) == loop.end() && "a PACK loop fills one block");
-    AtlasPackLoopFacts facts;
+    assert(s.blockEnd(block) == loop.end() && "an analyzed loop fills one block");
+    AtlasLoopFacts facts;
     if (block > 0 && s.fallsThrough(block - 1)) {
       facts.entry = entry[block - 1];
       for (size_t i = starts[block - 1]; i < loop.begin; ++i)
         applyScalar(instrs[i], facts.entry);
     }
-    facts.access = proveAtlasPackLoopAccess(s, loop, facts.entry);
-    s.packLoops.push_back(loop);
-    s.packLoopFacts.push_back(std::move(facts));
+    facts.access = proveAtlasLoopAccess(s, loop, facts.entry);
+    s.loops.push_back(loop);
+    s.loopFacts.push_back(std::move(facts));
   }
   return s;
 }
@@ -441,8 +441,8 @@ LogicalResult mlir::atlas::checkAtlasStream(
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
-  // Transfers stay in flight across a block boundary only into and out of a
-  // PACK loop (AtlasStream::dmaMayCross), so a block starts with the
+  // Transfers stay in flight across a block boundary only into and out of an
+  // analyzed loop (AtlasStream::dmaMayCross), so a block starts with the
   // transfers the block before it ended with.
   std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
   auto anyPending = [&] { return llvm::any_of(pending, [](const auto &p) { return !p.empty(); }); };
@@ -463,13 +463,13 @@ LogicalResult mlir::atlas::checkAtlasStream(
   };
   for (size_t b = 0; b < s.starts.size(); ++b) {
     RegValues regs = s.entry[b];
-    // A PACK loop's addresses change with each iteration, so its instructions
+    // An analyzed loop's addresses change with each iteration, so its instructions
     // meet the pending transfers as it runs from the registers it is entered
     // with, not once with the registers its block joins.
-    const AtlasPackLoop *loop = s.packLoop(b);
+    const AtlasLoop *loop = s.loop(b);
     if (loop && anyPending()) {
       RegValues iteration = s.factsOf(*loop).entry;
-      auto exit = runAtlasPackLoop(
+      auto exit = runAtlasLoop(
           s.ops, *loop, [&]() -> const RegValues & { return iteration; },
           [&](size_t i) -> LogicalResult {
             Footprint f = provider.footprint(s.instrs[i], iteration);
@@ -480,9 +480,9 @@ LogicalResult mlir::atlas::checkAtlasStream(
           });
       if (failed(exit))
         return failure();
-      if (*exit != AtlasPackLoopExit::Exited)
+      if (*exit != AtlasLoopExit::Exited)
         return s.ops[loop->branch]->emitOpError(
-            "PACK loop beside a pending DMA transfer has no decidable exit");
+            "analyzed loop beside a pending DMA transfer has no decidable exit");
     }
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
@@ -655,7 +655,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
   if (failed(checkAtlasStream(s, provider)))
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
-  // As in checkAtlasStream, DMA stays in flight only into and out of a PACK loop.
+  // As in checkAtlasStream, DMA stays in flight only into and out of an analyzed loop.
   std::array<Operation *, 8> pendingDMA{};
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];

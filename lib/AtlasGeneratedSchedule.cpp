@@ -15,7 +15,7 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 bool mlir::atlas::canOverlapAtlasGeneratedDMA(ArrayRef<Operation *> ops,
-                                              ArrayRef<AtlasPackLoop> loops, size_t pc) {
+                                              ArrayRef<AtlasLoop> loops, size_t pc) {
   Operation *op = ops[pc];
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
   if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
@@ -24,7 +24,7 @@ bool mlir::atlas::canOverlapAtlasGeneratedDMA(ArrayRef<Operation *> ops,
     return true;
   if (auto load = dyn_cast<ScalarLoadOp>(op); load && load.getKind() == "seli")
     return true;
-  return findAtlasPackLoopAt(loops, pc) != nullptr;
+  return findAtlasLoopAt(loops, pc) != nullptr;
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(

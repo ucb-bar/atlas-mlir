@@ -23,7 +23,7 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
     if (!isa<StartOp>(op))
       ops.push_back(&op);
   // The only loops an interval may hold (canOverlapAtlasGeneratedDMA).
-  std::vector<AtlasPackLoop> loops = findAtlasPackLoops(ops);
+  std::vector<AtlasLoop> loops = findAtlasLoops(ops);
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;
@@ -70,9 +70,9 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
         return op->emitOpError(
             "generated explicit DMA intervals forbid unproven JALR targets");
       std::optional<int64_t> distance = atlasRedirectDistance(op);
-      // A PACK loop's back-edge stays inside every interval that holds the
+      // An analyzed loop's back-edge stays inside every interval that holds the
       // loop: intervals start and end at DMA instructions, which no loop holds.
-      const AtlasPackLoop *loop = findAtlasPackLoopAt(loops, currentPC);
+      const AtlasLoop *loop = findAtlasLoopAt(loops, currentPC);
       if (!distance || (loop && loop->branch == currentPC))
         continue;
       int64_t target = int64_t(currentPC) + *distance;

@@ -58,7 +58,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         for (int previous : outside)
           edge(previous, i);
         outside.clear();
-      } else if (!canOverlapAtlasGeneratedDMA(s.ops, s.packLoops, begin + i)) {
+      } else if (!canOverlapAtlasGeneratedDMA(s.ops, s.loops, begin + i)) {
         for (int wait : waits)
           edge(wait, i);
         outside.push_back(i);

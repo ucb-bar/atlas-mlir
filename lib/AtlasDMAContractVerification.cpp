@@ -221,14 +221,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
   assert(ctx.stream && "a DMA stream is decoded");
   const AtlasStream &s = *ctx.stream;
   const auto &bases = ctx.dmaUpperEntry;
-  // Transfers stay in flight across a block boundary only into and out of a
-  // PACK loop (AtlasStream::dmaMayCross), so this block's pending transfers
+  // Transfers stay in flight across a block boundary only into and out of an
+  // analyzed loop (AtlasStream::dmaMayCross), so this block's pending transfers
   // are the ones the block before it ended with.
   std::vector<Transfer> pending;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];
-    if (const AtlasPackLoop *loop = s.packLoop(block)) {
+    if (const AtlasLoop *loop = s.loop(block)) {
       const std::optional<AtlasVmemAccess> &touched = s.factsOf(*loop).access;
       // Its addresses change with each iteration, so what it touches over all
       // of them stands for each of its instructions; unknown, it may be
