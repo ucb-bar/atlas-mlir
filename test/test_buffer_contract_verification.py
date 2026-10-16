@@ -6,7 +6,7 @@ import re
 import unittest
 
 from test_source_memory_contract import source_operations
-from test_virtual_lowering import lower
+from test_virtual_lowering import lower, run
 from verification_support import (
     assert_boundaries, contract_text, handoff_chain, insert_after, line_index, moved, operations, records, remove_line, reorder,
     replace_contract, rewrite_line,
@@ -158,6 +158,13 @@ def wrong_scale(machine: str) -> str:
                         lambda line: line.replace("offset = 127 : i32", "offset = 126 : i32"))
 
 
+def relayout_row(machine: str) -> list[str]:
+    """The issued operations of PACK's relayout loop, from its back-edge target through its delay slot."""
+    ops = operations(machine)
+    branch = next(i for i, line in enumerate(ops) if '"atlas.branch"' in line and 'cfg_helper = "pack"' in line)
+    return ops[branch + int(re.search(r"offset_bytes = (-?\d+)", ops[branch])[1]) // 2:branch + 2]
+
+
 def copy_layout(machine: str) -> str:
     return replace_contract(machine, "buffer", contract_text(machine, "buffer").replace('layout = "pack"', 'layout = "copy"'))
 
@@ -174,6 +181,22 @@ class BufferContractVerificationTest(unittest.TestCase):
                 self.assertIn(contract_text(untimed, "buffer"), stages["structured"])
         elsewhere = stray_store(lower(STRAIGHT, timed=False)).replace("immediate = 64 : i32", "immediate = 300 : i32", 1)
         assert_boundaries(self, elsewhere)
+
+    def test_relayout_stores_follow_the_next_copy_load(self) -> None:
+        # Each store issues behind the next copy's load, while the load path is
+        # still busy, so in a timed row only the last store waits on its load.
+        untimed = lower(STRAIGHT, timed=False)
+        copies = [re.search(r'kind = "(lw|sw)"', line)[1] for line in relayout_row(untimed) if 'kind = "lw"' in line or 'kind = "sw"' in line]
+        self.assertEqual(copies, ["lw"] + ["lw", "sw"] * 7 + ["sw"])
+        for timing in ("--insert-atlas-delays", "--schedule-atlas-stream"):
+            with self.subTest(timing=timing):
+                timed = run("atlas-opt", untimed, timing)
+                self.assertEqual(timed.returncode, 0, timed.stderr)
+                row = relayout_row(timed.stdout)
+                waits = [line for line in row if re.search(r"RAW on x1[67] after atlas.scalar_load", line)]
+                cycles = sum(int(re.search(r"cycles = (\d+)", line)[1]) + 1 if '"atlas.delay"' in line else 1 for line in row)
+                self.assertLessEqual(len(waits), 1, row)
+                self.assertLessEqual(cycles, 29, row)
 
     def test_contract_records_every_dma_store_capture(self) -> None:
         machine = lower(STRAIGHT, timed=False)

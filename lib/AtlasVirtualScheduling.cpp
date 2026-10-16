@@ -451,14 +451,16 @@ Cost costOf(Operation *op) {
     return {Unit::Xlu, t.interval, t.latency};
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM one word at a time in a
-    // scalar loop.
-    int words = registersOf(true) * kRegisterBytes / 4;
-    return blocking(Unit::Lsu,
-                    timingOf("vpack.bf16.fp8").latency + vstore.latency +
-                        words * (timingOf("lw").latency +
-                                 timingOf("sw").latency) +
-                        vload.latency);
+    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
+    // words a row (lowerPack). Each store hides behind the next word's load,
+    // so a row takes a load per load-path interval, then the last word's load
+    // and store, the destination step, and the back-edge with its delay slot.
+    static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
+    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 3;
+    int rows = registersOf(true) * kRegisterBytes / 4 / rowWords;
+    int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
+    return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
+                                   vstore.latency + rows * row + vload.latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
   return {Unit::Scalar, 1, timingOf("addi").latency};
