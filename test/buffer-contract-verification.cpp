@@ -15,6 +15,7 @@ constexpr StringLiteral capture = "buffer contract: DMA store captures a word it
 constexpr StringLiteral interleave = "buffer contract: PACK relayout word differs from the selected row interleave";
 constexpr StringLiteral stale = "buffer contract: PACK relayout word is not a copy of its current raw conversion store";
 constexpr StringLiteral inconsistent = "buffer contract has malformed or inconsistent source records";
+constexpr StringLiteral loopShape = "buffer contract: PACK helper branch does not close a PACK relayout loop";
 constexpr StringLiteral sourceText = R"mlir(module {
   func.func @buffer(%flag: i1, %count: i32) -> !atlas.virtual_state attributes {
     atlas.input_dram_base = 2415919104 : i64, atlas.output_dram_base = 2415923200 : i64,
@@ -112,7 +113,8 @@ void pack(MLIRContext &context) {
       {"inverted exit copies one row", stale, [&](ModuleOp m) { find(m, backedge)->setAttr("kind", StringAttr::get(&context, "bge")); }},
       {"unknown row limit is undecidable", "buffer contract: PACK copy loop branch depends on an unknown register", [&](ModuleOp m) { set(find(m, limit), "src", f.scalarTemporary); }},
       {"shifted source word breaks the interleave", interleave, [&](ModuleOp m) { set(find(m, copyLoad), "offset", 4); }},
-      {"forward helper branch is not a counted copy", "buffer contract: PACK copy loop must be one block closed by its own backedge", [&](ModuleOp m) { set(find(m, backedge), "offset_bytes", 4); }},
+      {"forward helper branch is not a counted copy", loopShape, [&](ModuleOp m) { set(find(m, backedge), "offset_bytes", 4); }},
+      {"a copy loop body instruction of another source operation", loopShape, [&](ModuleOp m) { Operation *l = find(m, copyLoad); set(l, kAtlasTagCFGSource, i32(l, kAtlasTagCFGSource) + 1); }},
       {"interior backedge skips the first load on later rows", interleave, [&](ModuleOp m) { Operation *b = find(m, backedge); set(b, "offset_bytes", i32(b, "offset_bytes") + 2); }},
       {"retained scale code is checked against the conversion", "buffer contract: PACK conversion scale register does not hold its source scale code", [&](ModuleOp m) {
          auto contract = m->getAttrOfType<DictionaryAttr>(kAtlasBufferContract);
