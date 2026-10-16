@@ -52,13 +52,16 @@ replaces "PACK drains DMA" everywhere:
   stream with a JALR has none. Such a loop launches and completes no DMA and has
   no other entry, so the transfers in flight when it starts stay in flight
   through every iteration and when it exits.
-- **Decoded facts.** `readAtlasStream` records each loop in
-  `AtlasStream::packLoops` with its block, the registers it is entered with (the
-  exit of the block that falls into it) and `access`, the VMEM it reads and
-  writes over all iterations, proved by running it (`proveAtlasPackLoopAccess`)
-  with the timing model's own scalar address rule. `AtlasStream::dmaMayCross`
-  says whether explicit DMA may be in flight from one block into the next:
-  only into or out of a PACK loop.
+- **Decoded facts.** `readAtlasStream` keeps each loop's shape in
+  `AtlasStream::packLoops` and what it proved about it in
+  `AtlasPackLoopFacts` (`AtlasStream::factsOf`): the registers the loop is
+  entered with (the exit of the block that falls into it) and `access`, the
+  VMEM it reads and writes over all iterations, proved by running it
+  (`proveAtlasPackLoopAccess`) with the timing model's own scalar access rule
+  (`timing::scalarAccess`). A loop found on the flat op list has a shape and
+  no facts, so nothing can mistake "not computed" for "proved unknown".
+  `AtlasStream::dmaMayCross` says whether explicit DMA may be in flight from
+  one block into the next: only into or out of a PACK loop.
 - **One loop interpreter**, `runAtlasPackLoop`, serves the access proof, the
   timing check and the buffer contract, which used to carry its own copy.
 

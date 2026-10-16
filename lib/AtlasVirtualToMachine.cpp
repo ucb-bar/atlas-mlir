@@ -629,6 +629,8 @@ private:
     // load has landed, and the next load reuses the temporary it just read.
     // The row counter advances in the first load's busy cycles, and each
     // pointer once its last word is copied.
+    static_assert(kPackRelayoutRowWords == 8,
+                  "the copy loop moves two halves of four words a row");
     auto copyLoad = [&](unsigned copy) {
       add("atlas.scalar_load", loc,
           {{"kind", str("lw")}, {"dst", i32(fixed().packTemporaryRegs[copy % 2])},

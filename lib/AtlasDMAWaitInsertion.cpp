@@ -194,10 +194,12 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     // A PACK loop's only other entry is its own back-edge, so transfers stay
     // in flight through it unless it touches their staging windows.
     const AtlasPackLoop *loop = findAtlasPackLoopAt(loops, pc);
-    if (loop && loop->begin == pc)
-      complete(pc, [&](const Transfer &t) { return !loop->access || meets(*loop->access, t); });
-    else if (target[pc])
+    if (loop && loop->begin == pc) {
+      const std::optional<AtlasVmemAccess> &touched = stream->factsOf(*loop).access;
+      complete(pc, [&](const Transfer &t) { return !touched || meets(*touched, t); });
+    } else if (target[pc]) {
       complete(pc, all);
+    }
     if (auto dma = dyn_cast<DMAOp>(op)) {
       auto id = contractTag(op, kAtlasTagDMATransfer);
       if (!id) {

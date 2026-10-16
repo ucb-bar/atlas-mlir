@@ -82,13 +82,14 @@ void decoded(MLIRContext &context, StringRef pipeline) {
   check(succeeded(stream) && stream->packLoops.size() == 1, "the decoded stream records the loop");
   if (failed(stream) || stream->packLoops.size() != 1)
     return;
-  const AtlasPackLoop &facts = stream->packLoops[0];
-  check(stream->starts[facts.block] == loop.begin && stream->blockEnd(facts.block) == loop.end() &&
-            stream->packLoop(facts.block) == &facts,
+  const AtlasPackLoop &decoded = stream->packLoops[0];
+  size_t block = llvm::find(stream->starts, loop.begin) - stream->starts.begin();
+  check(block < stream->starts.size() && stream->blockEnd(block) == loop.end() &&
+            stream->packLoop(block) == &decoded && decoded.branch == loop.branch,
         "the loop fills one block");
-  for (size_t block = 0; block + 1 < stream->starts.size(); ++block)
-    check(stream->dmaMayCross(block) == (block + 1 == facts.block || block == facts.block),
-          "DMA may cross only into and out of the loop");
+  for (size_t b = 0; b + 1 < stream->starts.size(); ++b)
+    check(stream->dmaMayCross(b) == (b + 1 == block || b == block), "DMA may cross only into and out of the loop");
+  const AtlasPackLoopFacts &facts = stream->factsOf(decoded);
   uint64_t raw = uint64_t(fixed().packWord) * 4, relayout = uint64_t(fixed().packRelayoutWord) * 4;
   check(facts.entry[fixed().packRowReg] == 0u && facts.entry[fixed().packRowsReg] == 32u,
         "the loop is entered with its row counter and limit");
@@ -131,7 +132,7 @@ void refused(MLIRContext &context) {
   };
   setI32(first(*module, limit), "src", fixed().scalarTemporary);
   auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(stream) && stream->packLoops.size() == 1 && !stream->packLoops[0].access,
+  check(succeeded(stream) && stream->packLoops.size() == 1 && !stream->factsOf(stream->packLoops[0]).access,
         "an unknown row limit leaves the loop's access unknown");
 }
 } // namespace

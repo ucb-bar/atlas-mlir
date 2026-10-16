@@ -31,7 +31,8 @@ struct DMATransferPlacement {
 };
 
 // A PACK relayout row is 32 FP8 bytes: two 16-byte halves of four words,
-// which lowerPack copies one word at a time.
+// which lowerPack copies one word at a time. It is fixed by the selected PACK
+// layout, not a parameter: lowerPack's loop is written for exactly this row.
 constexpr unsigned kPackRelayoutRowWords = 8;
 
 struct FixedResourcePlacement {
