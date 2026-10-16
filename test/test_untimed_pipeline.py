@@ -128,8 +128,9 @@ class UntimedPipelineTest(unittest.TestCase):
         legacy = program([addi(1, 0, 0), HALT])
         for timing, source in (("--insert-atlas-delays", untimed), ("--schedule-atlas-stream", untimed), ("--verify-atlas-timing", legacy)):
             with self.subTest(timing=timing):
-                for provider in ("unknown-policy", "npu-model", "circt-rtl"):
+                for provider in ("unknown-policy", "circt-rtl"):
                     self.rejected(source, f"{timing}=provider={provider}", diagnostic=f"unknown Atlas timing provider: {provider}")
+                self.rejected(source, f"{timing}=provider=npu-model", diagnostic="atlas.model_evidence")
                 self.rejected(source, f"{timing}=provider=atlas.vls.conservative.v1", diagnostic="footprint-only coverage cannot borrow model rules")
                 self.rejected(timed, f"{timing}=provider=another-policy", diagnostic="supplied timing policy disagrees with retained provider identity")
 

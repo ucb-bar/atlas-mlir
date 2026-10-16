@@ -147,15 +147,36 @@ transfers ([DMA across PACK](pack-dma-overlap.md)).
 
 Scheduling and timing passes take `provider=<id>` (default: the module's
 `atlas.timing_provider`, else `builtin`) from a registry that
-holds only the built-in default ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
+holds the built-in default and the selected model provider ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
 The selected provider supplies virtual machine-operation costs, physical
 dependence distances, issue gaps, reservations, DMA conflicts and verification.
 Unknown ids, missing rules and disagreement with retained provider metadata fail.
 The old `npu-model-rtl-match-v1` ID remains an alias for `builtin`; newly timed
-MLIR and program JSON record `builtin`. Future providers `npu-model` (observed
-model facts) and `circt-rtl` (RTL/CIRCT extraction) are currently unavailable.
+MLIR and program JSON record `builtin`. `npu-model` consumes isolated model
+observations; `circt-rtl` (RTL/CIRCT extraction) remains unavailable.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
+
+`--select-atlas-model-evidence="op-timing=<file> op-timing-sha256=<sha256>
+dma=wait"` pins `atlas.model_timing.v1` facts and their
+model/configuration/exporter/input identity in `atlas.model_evidence`. Select
+it before timing, then explicitly pass `provider=npu-model` to virtual
+scheduling and either physical scheduling or delay insertion; selection alone
+leaves the default unchanged. Verification, emission and LLVM handoff retain
+the selection. Replacing selected facts or selecting onto an already timed
+artifact fails rather than preserve a stale timing claim.
+
+The model exporter requires the pinned unmodified model and hook-reference
+facts, compares all 49 operation blocks on two inputs, and checks
+observer-on/off architectural/control traces before emitting facts. Model
+timing keeps engine windows serialized through isolated completion; this
+establishes no pair/chain overlap or RTL qualification. Missing operations,
+unsupported operands/configurations and hash mismatches fail. Scratchpad
+response latency one and conservative weight-slot lifetimes are explicit
+assumptions. DMA requires known captured operands, explicit upper-base
+configuration and matching waits; no fixed completion latency is claimed.
+Virtual costs use provider-specific legal representative operands, while the
+built-in provider keeps its existing probes.
 
 ## Machine operations
 

@@ -5,6 +5,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
+#include <utility>
 
 namespace mlir::atlas {
 struct AtlasStream;
@@ -50,6 +51,9 @@ struct TimingProvider {
   std::function<TimingRuleResult<int>(const Instr &)> issueGap;
   std::function<TimingRuleResult<std::unique_ptr<TimingReservations>>()>
       createReservations;
+  // Optional legal virtual-cost operands; absent preserves legacy probes.
+  std::function<TimingRuleResult<std::pair<Instr, Instr>>(const OpInfo &)>
+      costProbes;
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);

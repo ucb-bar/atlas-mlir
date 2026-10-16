@@ -1,4 +1,5 @@
 #include "Atlas/AtlasTimingProvider.h"
+#include "Atlas/AtlasModelTiming.h"
 #include "llvm/ADT/StringMap.h"
 #include <limits>
 #include <mutex>
@@ -150,6 +151,14 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   default:
     break;
   }
+  if (p.costProbes) {
+    auto probes = p.costProbes(*op);
+    if (!probes.error.empty()) return error(probes.error);
+    if (probes.value.first.op != op || probes.value.second.op != op)
+      return error("virtual cost probes must name the requested operation");
+    first = probes.value.first;
+    second = probes.value.second;
+  }
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());
   for (const Footprint *f : {&a, &b}) {
@@ -237,6 +246,7 @@ Registry &registry() {
     r->factories[kBuiltinTimingProviderId] = [](mlir::ModuleOp) {
       return TimingRuleResult<TimingProvider>{builtinTimingProvider(), {}};
     };
+    r->factories[kNpuModelObservedTimingProviderId] = modelTimingProviderFactory;
     return r;
   }();
   return *table;
