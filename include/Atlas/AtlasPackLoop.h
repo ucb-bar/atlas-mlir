@@ -44,21 +44,23 @@ struct AtlasVmemAccess {
   AtlasVmemRange reads, writes;
 };
 
+// Where a loop sits in the flat stream.
 struct AtlasPackLoop {
   size_t begin = 0;    // the first instruction, which the back-edge targets
   size_t branch = 0;   // the back-edge; its delay slot ends the loop
   int32_t source = -1; // the PACK's atlas.virtual_cfg_source
 
-  // Set by readAtlasStream. The loop fills `block`, and is entered with
-  // `entry`, the exit registers of the block that falls into it. `access`
-  // covers every iteration, run from `entry`; it is unknown when that run
-  // cannot decide an address or the loop's exit.
-  size_t block = 0;
-  timing::RegValues entry = timing::unknownRegs();
-  std::optional<AtlasVmemAccess> access;
-
   size_t end() const { return branch + 2; }
   bool contains(size_t pc) const { return begin <= pc && pc < end(); }
+};
+
+// What decoding proves about a loop (AtlasStream::factsOf): the registers it
+// is entered with, the exit of the block that falls into it, and what it
+// touches over all its iterations, run from them. `access` is unknown when
+// that run cannot decide an address or the loop's exit.
+struct AtlasPackLoopFacts {
+  timing::RegValues entry = timing::unknownRegs();
+  std::optional<AtlasVmemAccess> access;
 };
 
 // The instruction-word distance of a branch or JAL: ScalarCore applies the
@@ -93,10 +95,11 @@ runAtlasPackLoop(llvm::ArrayRef<Operation *> ops, const AtlasPackLoop &loop,
                  llvm::function_ref<const timing::RegValues &()> regs,
                  llvm::function_ref<LogicalResult(size_t pc)> step);
 
-// What `loop` touches in `stream` over all its iterations, run from its entry
-// registers; unknown when an address or the exit is.
+// What `loop` touches in `stream` over all its iterations, run from `entry`;
+// unknown when an address or the exit is.
 std::optional<AtlasVmemAccess> proveAtlasPackLoopAccess(const AtlasStream &stream,
-                                                        const AtlasPackLoop &loop);
+                                                        const AtlasPackLoop &loop,
+                                                        const timing::RegValues &entry);
 
 } // namespace mlir::atlas
 

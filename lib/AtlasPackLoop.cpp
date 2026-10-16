@@ -47,10 +47,6 @@ bool isBodyInstruction(Operation *op, int32_t source) {
   return isa<ScalarStoreOp, ALUImmOp, ALURegOp, UpperOp>(op);
 }
 
-unsigned scalarWidth(const Instr &in) {
-  StringRef name = in.op->name;
-  return name == "lw" || name == "sw" ? 4 : name.starts_with("lh") || name == "sh" ? 2 : 1;
-}
 } // namespace
 
 std::vector<AtlasPackLoop> mlir::atlas::findAtlasPackLoops(ArrayRef<Operation *> ops) {
@@ -129,21 +125,22 @@ mlir::atlas::runAtlasPackLoop(ArrayRef<Operation *> ops, const AtlasPackLoop &lo
 }
 
 std::optional<AtlasVmemAccess>
-mlir::atlas::proveAtlasPackLoopAccess(const AtlasStream &stream, const AtlasPackLoop &loop) {
-  RegValues regs = loop.entry;
+mlir::atlas::proveAtlasPackLoopAccess(const AtlasStream &stream, const AtlasPackLoop &loop,
+                                      const RegValues &entry) {
+  RegValues regs = entry;
   AtlasVmemAccess access;
   bool known = true;
   auto step = [&](size_t pc) {
     const Instr &in = stream.instrs[pc];
     OpClass kind = in.op->opClass;
     if (kind == OpClass::ScalarLoad || kind == OpClass::ScalarStore) {
-      std::optional<long long> address = scalarAddress(in, regs);
+      ScalarAccess touched = scalarAccess(in, regs);
       // ScalarCore slices the address to VMEM, so one past it may alias anything.
-      if (!address || *address + scalarWidth(in) > kVmemBytes)
+      if (!touched.first || *touched.first + touched.bytes > kVmemBytes)
         known = false;
       else
-        (kind == OpClass::ScalarStore ? access.writes : access.reads)
-            .cover({uint64_t(*address), uint64_t(*address) + scalarWidth(in)});
+        (touched.write ? access.writes : access.reads)
+            .cover({uint64_t(*touched.first), uint64_t(*touched.first + touched.bytes)});
     }
     applyScalar(in, regs);
     return success();

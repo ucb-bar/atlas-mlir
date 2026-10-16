@@ -229,14 +229,15 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
     RegValues regs = s.entry[block];
     auto base = bases[block];
     if (const AtlasPackLoop *loop = s.packLoop(block)) {
+      const std::optional<AtlasVmemAccess> &touched = s.factsOf(*loop).access;
       // Its addresses change with each iteration, so what it touches over all
       // of them stands for each of its instructions; unknown, it may be
       // anywhere.
       llvm::SmallVector<Span, 2> accesses;
-      if (!loop->access) {
+      if (!touched) {
         accesses = {{std::nullopt, std::nullopt, false}, {std::nullopt, std::nullopt, true}};
       } else {
-        for (auto [range, write] : {std::pair{loop->access->reads, false}, std::pair{loop->access->writes, true}})
+        for (auto [range, write] : {std::pair{touched->reads, false}, std::pair{touched->writes, true}})
           if (!range.empty())
             accesses.push_back({range.begin, uint32_t(range.end - range.begin), write});
       }

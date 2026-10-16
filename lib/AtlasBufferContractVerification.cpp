@@ -195,7 +195,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     const AtlasPackLoop *loop = s.packLoop(block);
     const Pack *p = packOf(branch);
     if (!loop || !p)
-      return branch->emitOpError("buffer contract: PACK copy loop must be one block closed by its own backedge");
+      return branch->emitOpError("buffer contract: PACK helper branch does not close a PACK relayout loop (one block of that PACK's scalar copy, closed by its own backedge)");
     helpers[block] = {loop, p};
   }
 

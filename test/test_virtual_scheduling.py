@@ -13,6 +13,7 @@ import unittest
 
 from test_virtual_lowering import virtual_pressure
 from test_virtual_ssa import BIN, ROOT, run
+from verification_support import insert_after
 
 
 EXAMPLES = ROOT / "test/examples"
@@ -499,6 +500,31 @@ class VirtualSchedulingTest(unittest.TestCase):
             waits = [i for i, line in enumerate(lines) if '"atlas.dma_wait"' in line and "atlas.virtual_dma_transfer" in line]
             self.assertEqual(len(waits), 2)
             self.assertTrue(all(wait > back_edge for wait in waits), machine)
+
+    def test_stream_scheduling_keeps_every_wait_before_scalar_memory(self) -> None:
+        # A store and a load are pending and complete load first, then the
+        # store before the output's helper DMA. A scalar load placed after both
+        # waits may not overlap either transfer, so stream scheduling keeps it
+        # after each wait, not only the last.
+        source = function("drain", [
+            start(), inp("io0", "io1", "x", 0), const("a", -2147483648), const("b", -2147481600),
+            const("size", 2048),
+            dma_store("io1", "io2", "x", "a"),
+            dma_load("io2", "io3", "tb", "b", "size", "bf16"),
+            outp("io3", "o", "tb", 0), f"return %o : {S}"])
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        transfer = "atlas.virtual_dma_transfer"
+        waits = [i for i, line in enumerate(lowered.stdout.splitlines()) if '"atlas.dma_wait"' in line and transfer in line]
+        probe = insert_after(lowered.stdout, waits[-1], [
+            ("scalar_load", 'kind = "lw", dst = 27 : i32, base = 0 : i32, offset = 0 : i32')])
+        timed = run("atlas-opt", probe, "--schedule-atlas-stream", "--verify-atlas-timing")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
+        lines = timed.stdout.splitlines()
+        timed_waits = [i for i, line in enumerate(lines) if '"atlas.dma_wait"' in line and transfer in line]
+        [load] = [i for i, line in enumerate(lines) if '"atlas.scalar_load"' in line and "dst = 27 : i32" in line]
+        self.assertEqual(len(timed_waits), 2)
+        self.assertGreater(load, max(timed_waits), timed.stdout)
 
     def test_loads_move_ahead_of_independent_packs(self) -> None:
         # Two PACKs in a chain, each followed by the load of the next MXU

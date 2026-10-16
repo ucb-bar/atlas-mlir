@@ -351,6 +351,14 @@ std::optional<long long> reg(const RegValues &regs, int r) {
   return static_cast<long long>(*regs[r]);
 }
 
+// ScalarCore keeps only the VMEM bits of a scalar byte address.
+std::optional<long long> scalarAddress(const Instr &in, const RegValues &regs) {
+  auto base = reg(regs, in.rs1);
+  if (!base)
+    return std::nullopt;
+  return (*base + signExtend(in.imm, 12)) & 0x1FFFFF;
+}
+
 // VLS bases are word addresses; the immediate counts 32 words and the LSU
 // drops the three low word bits to get a 32-byte line.
 std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
@@ -378,13 +386,13 @@ void scalarRegs(Builder &b, const Instr &in) {
 
 } // namespace
 
-// ScalarCore keeps only the VMEM bits of a scalar byte address.
-std::optional<long long> mlir::atlas::timing::scalarAddress(const Instr &in,
-                                                           const RegValues &regs) {
-  auto base = reg(regs, in.rs1);
-  if (!base)
-    return std::nullopt;
-  return (*base + signExtend(in.imm, 12)) & 0x1FFFFF;
+ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues &regs) {
+  bool store = in.op->opClass == OpClass::ScalarStore;
+  int bytes = !store ? 4 : in.op->name == "sb" ? 1 : in.op->name == "sh" ? 2 : 4;
+  std::optional<long long> first;
+  if (auto address = scalarAddress(in, regs))
+    first = *address & ~static_cast<long long>(bytes - 1);
+  return {first, bytes, store};
 }
 
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
@@ -417,29 +425,24 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
 
   case OpClass::ScalarLoad:
   case OpClass::ScaleLoad: {
-    auto addr = scalarAddress(in, regs);
+    ScalarAccess access = scalarAccess(in, regs);
     b.x(in.rs1, false, 0);
-    b.vmem(addr ? std::optional<long long>(*addr & ~3LL) : std::nullopt, 4,
-           false, 1, 1);
+    b.vmem(access.first, access.bytes, false, 1, 1);
     if (op.opClass == OpClass::ScaleLoad)
       b.e(in.rd, true, 3);
     else
       b.x(in.rd, true, 3);
     b.hold(Unit::ScalarLoad, 0, 0, 2);
     b.hold(Unit::ScalarWriteback, 0, 3, 3);
-    b.bankHold(addr, 1, 1);
+    b.bankHold(access.first, 1, 1);
     break;
   }
   case OpClass::ScalarStore: {
-    auto addr = scalarAddress(in, regs);
-    int size = in.op->name == "sb" ? 1 : in.op->name == "sh" ? 2 : 4;
+    ScalarAccess access = scalarAccess(in, regs);
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);
-    std::optional<long long> first;
-    if (addr)
-      first = *addr & ~static_cast<long long>(size - 1);
-    b.vmem(first, size, true, 1, 1);
-    b.bankHold(addr, 1, 1);
+    b.vmem(access.first, access.bytes, true, 1, 1);
+    b.bankHold(access.first, 1, 1);
     break;
   }
   case OpClass::VLoad:

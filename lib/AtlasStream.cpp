@@ -214,8 +214,14 @@ bool AtlasStream::fallsThrough(size_t block) const {
 }
 
 const AtlasPackLoop *AtlasStream::packLoop(size_t block) const {
-  auto loop = llvm::partition_point(packLoops, [&](const AtlasPackLoop &l) { return l.block < block; });
-  return loop != packLoops.end() && loop->block == block ? &*loop : nullptr;
+  const AtlasPackLoop *loop = findAtlasPackLoopAt(packLoops, starts[block]);
+  return loop && loop->begin == starts[block] ? loop : nullptr;
+}
+
+const AtlasPackLoopFacts &AtlasStream::factsOf(const AtlasPackLoop &loop) const {
+  assert(&loop >= packLoops.data() && &loop < packLoops.data() + packLoops.size() &&
+         "facts exist for this stream's own loops");
+  return packLoopFacts[&loop - packLoops.data()];
 }
 
 bool AtlasStream::dmaMayCross(size_t block) const {
@@ -358,16 +364,18 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
 
   // A loop's back-edge target and the instruction after its delay slot are
   // leaders, and nothing between them can be, so each loop fills one block.
-  for (AtlasPackLoop loop : findAtlasPackLoops(ops)) {
-    loop.block = blockAt[loop.begin];
-    assert(s.blockEnd(loop.block) == loop.end() && "a PACK loop fills one block");
-    if (loop.block > 0 && s.fallsThrough(loop.block - 1)) {
-      loop.entry = entry[loop.block - 1];
-      for (size_t i = starts[loop.block - 1]; i < loop.begin; ++i)
-        applyScalar(instrs[i], loop.entry);
+  for (const AtlasPackLoop &loop : findAtlasPackLoops(ops)) {
+    size_t block = blockAt[loop.begin];
+    assert(s.blockEnd(block) == loop.end() && "a PACK loop fills one block");
+    AtlasPackLoopFacts facts;
+    if (block > 0 && s.fallsThrough(block - 1)) {
+      facts.entry = entry[block - 1];
+      for (size_t i = starts[block - 1]; i < loop.begin; ++i)
+        applyScalar(instrs[i], facts.entry);
     }
-    loop.access = proveAtlasPackLoopAccess(s, loop);
-    s.packLoops.push_back(std::move(loop));
+    facts.access = proveAtlasPackLoopAccess(s, loop, facts.entry);
+    s.packLoops.push_back(loop);
+    s.packLoopFacts.push_back(std::move(facts));
   }
   return s;
 }
@@ -460,7 +468,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
     // with, not once with the registers its block joins.
     const AtlasPackLoop *loop = s.packLoop(b);
     if (loop && anyPending()) {
-      RegValues iteration = loop->entry;
+      RegValues iteration = s.factsOf(*loop).entry;
       auto exit = runAtlasPackLoop(
           s.ops, *loop, [&]() -> const RegValues & { return iteration; },
           [&](size_t i) -> LogicalResult {

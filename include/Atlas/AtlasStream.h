@@ -21,8 +21,10 @@ struct AtlasStream {
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
   std::vector<timing::RegValues> entry;
-  // PACK relayout loops (AtlasPackLoop.h), in order, each filling one block.
+  // PACK relayout loops (AtlasPackLoop.h), in order, each filling one block,
+  // and what decoding proved about each, at the same index.
   std::vector<AtlasPackLoop> packLoops;
+  std::vector<AtlasPackLoopFacts> packLoopFacts;
 
   size_t blockEnd(size_t block) const;
   bool endsInBranch(size_t block) const;
@@ -30,6 +32,8 @@ struct AtlasStream {
   bool fallsThrough(size_t block) const;
   // The PACK loop that fills `block`, else null.
   const AtlasPackLoop *packLoop(size_t block) const;
+  // What decoding proved about one of `packLoops`.
+  const AtlasPackLoopFacts &factsOf(const AtlasPackLoop &loop) const;
   // Whether explicit DMA may still be in flight from `block` into the next
   // block: only into a PACK loop or out of one, which neither launches nor
   // completes a transfer and has no other entry.

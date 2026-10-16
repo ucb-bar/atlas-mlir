@@ -60,8 +60,15 @@ using RegValues = std::array<std::optional<uint32_t>, 32>;
 RegValues unknownRegs();
 std::optional<uint32_t> aluResult(const Instr &in, const RegValues &regs);
 void applyScalar(const Instr &in, RegValues &regs);
-// The VMEM byte a scalar load or store addresses, when its base is known.
-std::optional<long long> scalarAddress(const Instr &in, const RegValues &regs);
+// The VMEM bytes a scalar load or store touches: a load reads its whole
+// aligned word, a store writes its naturally aligned bytes. `first` is known
+// only when the base register is.
+struct ScalarAccess {
+  std::optional<long long> first;
+  int bytes;
+  bool write;
+};
+ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
 const int kVmemBytes = 1536 * 1024;
 const int kVmemBankBytes = 256 * 1024;
