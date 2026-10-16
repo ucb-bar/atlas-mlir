@@ -6,6 +6,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include <algorithm>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -31,6 +32,10 @@ bool provenFinite(Value value, llvm::DenseMap<Value, bool> &facts) {
   return finite;
 }
 
+struct PackConstants {
+  Value low, high, scale;
+};
+
 struct LowerAtlasGuardedPackPass
     : PassWrapper<LowerAtlasGuardedPackPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerAtlasGuardedPackPass)
@@ -39,7 +44,7 @@ struct LowerAtlasGuardedPackPass
       : PassWrapper(other) {}
   StringRef getArgument() const final { return "lower-atlas-guarded-pack"; }
   StringRef getDescription() const final {
-    return "Opt in to exact finite, unit-scale BF16 PACK via MXU copy/pop";
+    return "Opt in to exact finite BF16 PACK via MXU copy/pop";
   }
   Option<unsigned> unit{*this, "unit", llvm::cl::desc("Conversion MXU (0 or 1)"),
                         llvm::cl::init(0)};
@@ -60,7 +65,7 @@ struct LowerAtlasGuardedPackPass
       llvm::DenseMap<Value, bool> facts;
       for (Block &block : function.getBody()) {
         Value state;
-        Value low, high, scale;
+        llvm::DenseMap<unsigned, PackConstants> constants;
         unsigned liveAcc = 0;
         for (Operation &op : llvm::make_early_inc_range(block)) {
           // Existing resource handles remain authoritative. A conversion
@@ -76,7 +81,7 @@ struct LowerAtlasGuardedPackPass
               isa<VirtualStateType>(op.getResult(0).getType()))
             state = op.getResult(0);
           auto pack = dyn_cast<VirtualPackFP8Op>(op);
-          if (!pack || pack.getScaleCode() != 127 || !state ||
+          if (!pack || !state ||
               liveAcc >= kVirtualMXUSlots ||
               (!pack.getFiniteSrcAttr() && !provenFinite(pack.getSrc(), facts)))
             continue;
@@ -92,24 +97,34 @@ struct LowerAtlasGuardedPackPass
           };
           Type bf16 = VirtualBF16Type::get(module.getContext());
           Type token = VirtualStateType::get(module.getContext());
-          if (!low) {
-            low = create("atlas.virtual_vpu_splat", {}, {bf16},
-                         {builder.getNamedAttr("bits", builder.getI32IntegerAttr(0xc3e0))})->getResult(0);
-            high = create("atlas.virtual_vpu_splat", {}, {bf16},
-                          {builder.getNamedAttr("bits", builder.getI32IntegerAttr(0x43e0))})->getResult(0);
-            scale = create("atlas.virtual_scale_constant", {},
-                           {VirtualScaleType::get(module.getContext())},
-                           {builder.getNamedAttr("code", builder.getI32IntegerAttr(127))})->getResult(0);
+          unsigned code = pack.getScaleCode();
+          auto &values = constants[code];
+          if (!values.scale) {
+            if (code <= 246) {
+              unsigned cap = ((code + 8) << 7) | 96;
+              values.low = create("atlas.virtual_vpu_splat", {}, {bf16},
+                                  {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap | 0x8000))})->getResult(0);
+              values.high = create("atlas.virtual_vpu_splat", {}, {bf16},
+                                   {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap))})->getResult(0);
+            }
+            // The retained signed shift saturates at code 254 (255 aliases it).
+            unsigned inverse = 254 - std::min(code, 254u);
+            values.scale = create("atlas.virtual_scale_constant", {},
+                                  {VirtualScaleType::get(module.getContext())},
+                                  {builder.getNamedAttr("code", builder.getI32IntegerAttr(inverse))})->getResult(0);
           }
-          Value clamped = create("atlas.virtual_vpu_binary", {pack.getSrc(), low}, {bf16},
-                                 {builder.getNamedAttr("kind", builder.getStringAttr("max"))})->getResult(0);
-          clamped = create("atlas.virtual_vpu_binary", {clamped, high}, {bf16},
-                           {builder.getNamedAttr("kind", builder.getStringAttr("min"))})->getResult(0);
+          Value clamped = pack.getSrc();
+          if (code <= 246) {
+            clamped = create("atlas.virtual_vpu_binary", {clamped, values.low}, {bf16},
+                             {builder.getNamedAttr("kind", builder.getStringAttr("max"))})->getResult(0);
+            clamped = create("atlas.virtual_vpu_binary", {clamped, values.high}, {bf16},
+                             {builder.getNamedAttr("kind", builder.getStringAttr("min"))})->getResult(0);
+          }
           Operation *load = create("atlas.virtual_mxu_load_acc_bf16", {state, clamped},
                                    {token, VirtualMXUAccType::get(module.getContext(), unit)},
                                    {builder.getNamedAttr("unit", builder.getI32IntegerAttr(unit))});
           Operation *pop = create("atlas.virtual_mxu_readout_fp8",
-                                  {load->getResult(0), load->getResult(1), scale},
+                                  {load->getResult(0), load->getResult(1), values.scale},
                                   {token, pack.getResult().getType()});
           state.replaceAllUsesExcept(pop->getResult(0), load);
           state = pop->getResult(0);

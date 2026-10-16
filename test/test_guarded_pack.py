@@ -50,18 +50,39 @@ class GuardedPackTests(unittest.TestCase):
         # Output still uses the original producer, not the clamped temporary.
         self.assertIn('"atlas.virtual_output_bf16"', text)
 
-    def test_unknown_and_wrong_scale_fallback(self):
-        for text in (source(UNKNOWN), source(scale=126), source(scale=128, contract=", finite_src")):
-            with self.subTest(text=text):
-                lowered = self.lower(text)
+    def test_unknown_source_fallback_at_scale_boundaries(self):
+        for scale in (0, 126, 127, 128, 246, 247, 254, 255):
+            with self.subTest(scale=scale):
+                lowered = self.lower(source(UNKNOWN, scale=scale))
                 self.assertIn('"atlas.virtual_pack_fp8"', lowered)
                 self.assertNotIn('"atlas.virtual_mxu_load_acc_bf16"', lowered)
 
+    def test_all_scale_constants_and_clamp_boundaries(self):
+        for scale in range(256):
+            with self.subTest(scale=scale):
+                text = self.lower(source(UNKNOWN, scale=scale, contract=", finite_src"))
+                self.assertNotIn('"atlas.virtual_pack_fp8"', text)
+                self.assertIn(f'code = {254 - min(scale, 254)} : i32', text)
+                if scale <= 246:
+                    cap = ((scale + 8) << 7) | 96
+                    self.assertIn(f'bits = {cap} : i32', text)
+                    self.assertIn(f'bits = {cap | 0x8000} : i32', text)
+                    self.assertEqual(text.count('"atlas.virtual_vpu_binary"'), 2)
+                else:
+                    self.assertNotIn('"atlas.virtual_vpu_splat"', text)
+                    self.assertNotIn('"atlas.virtual_vpu_binary"', text)
+
+    def test_scale_code_range_is_verified(self):
+        for scale in (-1, 256):
+            result = run(OPT, source(scale=scale), '--lower-atlas-guarded-pack')
+            self.assertNotEqual(result.returncode, 0)
+
     def test_nan_inf_and_overflow_capable_fallback(self):
-        for bits in (0x7fc0, 0xffc0, 0x7f80, 0xff80):
-            with self.subTest(bits=bits):
-                producer = f'%x = "atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> !atlas.virtual_bf16'
-                self.assertIn('"atlas.virtual_pack_fp8"', self.lower(source(producer)))
+        for scale in (0, 127, 246, 247, 254, 255):
+            for bits in (0x7fc0, 0xffc0, 0x7f80, 0xff80):
+                with self.subTest(bits=bits, scale=scale):
+                    producer = f'%x = "atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> !atlas.virtual_bf16'
+                    self.assertIn('"atlas.virtual_pack_fp8"', self.lower(source(producer, scale=scale)))
         producer = '''%a = "atlas.virtual_vpu_splat"() {bits = 32639 : i32} : () -> !atlas.virtual_bf16
     %x = "atlas.virtual_vpu_binary"(%a, %a) {kind = "mul"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16'''
         self.assertIn('"atlas.virtual_pack_fp8"', self.lower(source(producer)))
@@ -86,6 +107,21 @@ class GuardedPackTests(unittest.TestCase):
         self.assertEqual(lowered.count('bits = 17376 : i32'), 1)
         self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 2)
 
+    def test_mixed_scales_have_independent_constants(self):
+        text = source(UNKNOWN, scale=0, contract=", finite_src")
+        packs = '\n'.join(f'    %q{index} = "atlas.virtual_pack_fp8"(%x) {{finite_src, scale_code = {scale} : i32}} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
+                          for index, scale in enumerate((246, 247, 254, 255, 0, 246)))
+        lowered = self.lower(text.replace('    %u =', packs + '\n    %u ='))
+        self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 7)
+        for scale in (0, 246):
+            cap = ((scale + 8) << 7) | 96
+            self.assertEqual(lowered.count(f'bits = {cap} : i32'), 1)
+            self.assertEqual(lowered.count(f'bits = {cap | 0x8000} : i32'), 1)
+        self.assertEqual(lowered.count('"atlas.virtual_vpu_binary"'), 8)
+        for inverse in (254, 8, 7):
+            self.assertEqual(lowered.count(f'code = {inverse} : i32'), 1)
+        self.assertEqual(lowered.count('code = 0 : i32'), 2)
+
     def test_live_accumulator_slots_fallback(self):
         text = source(contract=", finite_src")
         text = text.replace('    %p =', '''    %as, %aa = "atlas.virtual_mxu_load_acc_bf16"(%t, %x) {unit = 1 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> (!atlas.virtual_state, !atlas.virtual_mxu_acc<1>)
@@ -94,7 +130,11 @@ class GuardedPackTests(unittest.TestCase):
         text = text.replace('    %u =', '''    %cs, %cv = "atlas.virtual_mxu_readout_bf16"(%bs, %aa) : (!atlas.virtual_state, !atlas.virtual_mxu_acc<1>) -> (!atlas.virtual_state, !atlas.virtual_bf16)
     %ds, %dv = "atlas.virtual_mxu_readout_bf16"(%cs, %ba) : (!atlas.virtual_state, !atlas.virtual_mxu_acc<1>) -> (!atlas.virtual_state, !atlas.virtual_bf16)
     %u =''').replace('"atlas.virtual_output_bf16"(%t,', '"atlas.virtual_output_bf16"(%ds,')
-        self.assertIn('"atlas.virtual_pack_fp8"', self.lower(text.replace('unit = 1', 'unit = 0').replace('virtual_mxu_acc<1>', 'virtual_mxu_acc<0>')))
+        for scale in (0, 127, 246, 247, 254, 255):
+            with self.subTest(scale=scale):
+                candidate = text.replace('scale_code = 127', f'scale_code = {scale}')
+                candidate = candidate.replace('unit = 1', 'unit = 0').replace('virtual_mxu_acc<1>', 'virtual_mxu_acc<0>')
+                self.assertIn('"atlas.virtual_pack_fp8"', self.lower(candidate))
 
     def test_engine_option(self):
         result = run(OPT, source(), '--lower-atlas-guarded-pack=unit=1')
@@ -133,6 +173,23 @@ class GuardedPackTests(unittest.TestCase):
                                   "--insert-atlas-delays", "--verify-atlas-generated-schedule")
                 emitted = run(EMIT, text)
                 self.assertEqual(emitted.returncode, 0, emitted.stderr)
+
+    def test_scale_boundaries_reach_existing_machine_verifiers(self):
+        for scale in (0, 246, 247, 254, 255):
+            for unit in (0, 1):
+                result = run(OPT, source(UNKNOWN, scale=scale, contract=", finite_src"),
+                             f'--lower-atlas-guarded-pack=unit={unit}',
+                             '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits',
+                             '--insert-atlas-delays', '--verify-atlas-generated-schedule')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                emitted = run(EMIT, result.stdout)
+                self.assertEqual(emitted.returncode, 0, emitted.stderr)
+
+    def test_retained_pack_can_still_fail_native_scale_admission(self):
+        result = run(OPT, source(UNKNOWN, scale=0), '--lower-atlas-guarded-pack',
+                     '--lower-atlas-virtual-to-machine')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('scale codes 122..128 only', result.stderr)
 
 
 if __name__ == "__main__":
