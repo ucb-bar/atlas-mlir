@@ -54,21 +54,28 @@ struct TimingProvider {
 
 std::string validateTimingProvider(const TimingProvider &provider);
 // Provider graph; absent incoming DMA facts retain broad post-wait guards.
-TimingRuleResult<DepGraph> buildTimingGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                                            const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
+TimingRuleResult<DepGraph> buildTimingGraph(
+    const std::vector<Instr> &instrs, const RegValues &entry,
+    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
 
-struct MachineOpTiming { int latency, interval; };
+struct MachineOpTiming {
+  int latency, interval;
+};
 // Cost probes retain representative operands and unknown bases; they are not verified instructions.
-FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider, const std::string &name, Operation *at);
+FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
+                                        const std::string &name, Operation *at);
 
-constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
-// Explicit adapter for existing unqualified npu-model rtl-match rules.
+constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
+constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1"; // Legacy ID.
+llvm::StringRef canonicalTimingProviderId(llvm::StringRef id);
+// Built-in rules ported from npu_model's rtl-match mode.
+TimingProvider builtinTimingProvider();
+// Legacy C++ entry point.
 TimingProvider npuModelTimingProvider();
-// Builds the provider for one, possibly null, module whose attributes may carry
-// evidence; the returned id must equal the registered id.
+// Module-scoped factory; its returned ID must match the canonical registered ID.
 using TimingProviderFactory =
     std::function<TimingRuleResult<TimingProvider>(mlir::ModuleOp module)>;
-// Adds `id` to the process-wide registry, which is seeded with the npu-model
+// Adds `id` to the process-wide registry, which is seeded with the built-in
 // provider. Returns an error for an empty, duplicate or null registration.
 std::string registerAtlasTimingProvider(const std::string &id,
                                         TimingProviderFactory factory);

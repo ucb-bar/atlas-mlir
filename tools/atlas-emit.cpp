@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
-      root["timing_provider"] = provider.getValue().str();
+      root["timing_provider"] = timing::canonicalTimingProviderId(provider.getValue()).str();
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }

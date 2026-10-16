@@ -221,7 +221,7 @@ struct InsertAtlasDelaysPass
   InsertAtlasDelaysPass() = default;
   InsertAtlasDelaysPass(const InsertAtlasDelaysPass &other) : PassWrapper(other) {}
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
 
   StringRef getArgument() const final { return "insert-atlas-delays"; }

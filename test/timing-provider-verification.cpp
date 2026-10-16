@@ -269,7 +269,11 @@ StringRef retainedProvider(ModuleOp module) {
 
 void testRegistry(MLIRContext &context) {
   auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}}; };
-  check(!registerAtlasTimingProvider(kNpuModelTimingProviderId.str(), complete).empty(), "duplicate registration fails");
+  auto builtin = lookupTimingProvider("builtin"), legacy = lookupTimingProvider(kNpuModelTimingProviderId.str());
+  check(builtin.error.empty() && legacy.error.empty() && builtin.value.id == "builtin" && legacy.value.id == "builtin",
+        "built-in and legacy names resolve to the canonical identity");
+  check(!registerAtlasTimingProvider("builtin", complete).empty(), "duplicate registration fails");
+  check(!registerAtlasTimingProvider(kNpuModelTimingProviderId.str(), complete).empty(), "alias registration collides");
   check(!registerAtlasTimingProvider("", complete).empty(), "empty registration id fails");
   check(!registerAtlasTimingProvider("synthetic-null-factory", {}).empty(), "null factory fails");
   check(registerAtlasTimingProvider("synthetic-renamed-policy", complete).empty() &&
@@ -293,7 +297,7 @@ void testRegistry(MLIRContext &context) {
   check(byModel && byStrict, "delay insertion accepts each registered provider", diagnostics);
   if (!byModel || !byStrict)
     return;
-  check(retainedProvider(*byModel) == kNpuModelTimingProviderId && retainedProvider(*byStrict) == kStrict,
+  check(retainedProvider(*byModel) == kBuiltinTimingProviderId && retainedProvider(*byStrict) == kStrict,
         "delay insertion stamps the provider it used");
   check(delayCycles(*byStrict) > delayCycles(*byModel), "stricter selected spacing emits longer delays");
   check(succeeded(verifyAtlasTiming(*byStrict)), "registry dispatch verifies the strict result", diagnostics);
@@ -328,11 +332,30 @@ void testRegistry(MLIRContext &context) {
   check(lookupTimingProvider("atlas.vls.conservative.v1", *byModel).error.empty(), "module-scoped factory reads its module");
 }
 
+void testProviderAliases(MLIRContext &context) {
+  for (StringRef retained : {StringRef("builtin"), StringRef(kNpuModelTimingProviderId)}) {
+    auto module = runPipeline(context, kCopy, "insert-atlas-delays{provider=builtin}");
+    check(bool(module), "alias fixture is timed", diagnostics);
+    if (!module)
+      return;
+    (*module)->setAttr(kAtlasTimingProvider, StringAttr::get(&context, retained));
+    for (StringRef requested : {StringRef("builtin"), StringRef(kNpuModelTimingProviderId)}) {
+      auto selected = selectAtlasTimingProvider(*module, requested);
+      check(succeeded(selected) && selected->id == "builtin", "aliases agree with retained identity", diagnostics);
+      auto provider = builtinTimingProvider();
+      provider.id = requested.str();
+      check(succeeded(verifyAtlasTiming(*module, provider)), "explicit provider aliases verify", diagnostics);
+      check(retainedProvider(*module) == retained, "selection and verification preserve input metadata");
+    }
+  }
+}
+
 void testProviderGraph(MLIRContext &context) {
   auto module = parseSourceString<ModuleOp>(kCopy, &context);
   auto stream = module ? readAtlasStream(*module) : FailureOr<AtlasStream>(failure());
   check(succeeded(stream), "graph fixture decodes");
-  if (failed(stream)) return;
+  if (failed(stream))
+    return;
   auto graph = buildTimingGraph(stream->instrs, unknownRegs(), npuModelTimingProvider());
   auto original = timing::buildGraph(stream->instrs, unknownRegs());
   bool same = graph.error.empty() && graph.value.in == original.in &&
@@ -348,7 +371,8 @@ void testProviderGraph(MLIRContext &context) {
   auto p = toy();
   p.footprint = [](const Instr &in, const RegValues &) {
     Footprint f;
-    if (in.op->opClass == OpClass::VLoad) f.accesses.push_back({Res::Vmem, false, in.rd == 4 ? 0 : 128, 32, 0, 1});
+    if (in.op->opClass == OpClass::VLoad)
+      f.accesses.push_back({Res::Vmem, false, in.rd == 4 ? 0 : 128, 32, 0, 1});
     return f;
   };
   p.dmaConflict = npuModelTimingProvider().dmaConflict;
@@ -384,7 +408,9 @@ public:
   std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
     return atWait ? ToyReservations::reserve(in, f, cycle) : "missing reserve rule";
   }
-  std::string onWait(const Instr &, int) override { return "missing wait rule"; }
+  std::string onWait(const Instr &, int) override {
+    return "missing wait rule";
+  }
 private:
   bool atWait;
 };
@@ -449,7 +475,8 @@ void testVirtualCosts(MLIRContext &context) {
   } })mlir";
   auto module = parseSourceString<ModuleOp>(source, &context);
   check(bool(module), "virtual cost fixture parses");
-  if (!module) return;
+  if (!module)
+    return;
   auto p = toy();
   p.footprint = [](const Instr &, const RegValues &) { Footprint f; f.doneAge = 12; return f; };
   p.issueGap = [](const Instr &) { return TimingRuleResult<int>{7, {}}; };
@@ -482,8 +509,10 @@ void testVirtualCosts(MLIRContext &context) {
   auto footprint = p.footprint;
   p.footprint = [=](const Instr &in, const RegValues &regs) {
     Footprint f = footprint(in, regs);
-    if (in.op->name == "vmov") f.doneAge = 199;
-    if (in.op->name == "vrelu.bf16") f.doneAge = 0;
+    if (in.op->name == "vmov")
+      f.doneAge = 199;
+    if (in.op->name == "vrelu.bf16")
+      f.doneAge = 0;
     return f;
   };
   check(registerAtlasTimingProvider(p.id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; }).empty(),
@@ -493,7 +522,10 @@ void testVirtualCosts(MLIRContext &context) {
   auto selected = runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-virtual-costs}");
   auto firstUnary = [](ModuleOp m) {
     std::string kind;
-    m.walk([&](VirtualVPUUnaryOp op) { if (kind.empty()) kind = op.getKind().str(); });
+    m.walk([&](VirtualVPUUnaryOp op) {
+      if (kind.empty())
+        kind = op.getKind().str();
+    });
     return kind;
   };
   check(builtin && selected && firstUnary(*builtin) == "relu" && firstUnary(*selected) == "mov",
@@ -502,13 +534,14 @@ void testVirtualCosts(MLIRContext &context) {
   auto implicit = runPipeline(context, retained, "schedule-atlas-virtual");
   check(implicit && firstUnary(*implicit) == "mov", "virtual costs honor the retained provider", diagnostics);
   diagnostics.clear();
-  check(!runPipeline(context, retained, "schedule-atlas-virtual{provider=npu-model-rtl-match-v1}") &&
+  check(!runPipeline(context, retained, "schedule-atlas-virtual{provider=builtin}") &&
             diagnosed("disagrees with retained provider identity"),
         "virtual scheduling rejects conflicting explicit and retained providers", diagnostics);
   p.id = "synthetic-missing-virtual-cost";
   p.footprint = [=](const Instr &in, const RegValues &regs) {
     Footprint f = footprint(in, regs);
-    if (in.op->name == "vmov") f.error = "uncovered virtual mov";
+    if (in.op->name == "vmov")
+      f.error = "uncovered virtual mov";
     return f;
   };
   registerAtlasTimingProvider(p.id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; });
@@ -556,6 +589,7 @@ void atlas_test::runTimingProvider(MLIRContext &context) {
   testBoundedScope(context);
   testRetainedProvider(context);
   testRegistry(context);
+  testProviderAliases(context);
   testProviderGraph(context);
   testSchedulerReservations(context);
   testVirtualCosts(context);
