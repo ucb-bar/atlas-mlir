@@ -1,15 +1,15 @@
-# Plan: let explicit DMA stay in flight across PACK
+# Explicit DMA in flight across PACK
 
 Branch: `perf/attention-mlp-bottlenecks`, from `handwritten-implementation` at
-`aea28c5` (PRs #23 and #17 merged). Status: plan, not implemented.
+`aea28c5` (PRs #23 and #17 merged). Status: implemented.
 
 ## Goal
 
-Today every explicit DMA transfer completes before a PACK starts, and none
-starts until the PACK ends. A PACK lowers to `vpu_pack`, a VSTORE, a 32-row
+Every explicit DMA transfer used to complete before a PACK started, and none
+started until the PACK ended. A PACK lowers to `vpu_pack`, a VSTORE, a 32-row
 scalar relayout loop and a VLOAD, about 1,490 cycles with the DMA engine idle.
-In the combined attention + MLP tile, three PACKs per tile and five FP8 loads
-plus one BF16 store run strictly one after the other:
+In the combined attention + MLP tile (three PACKs, five FP8 loads and one BF16
+store per tile) DMA and PACK ran strictly one after the other:
 
 | Program (npu_model main, `9e6313b`) | Cycles | DMA busy | DMA and PACK overlap | DMA + PACK |
 |---|---|---|---|---|
@@ -17,21 +17,8 @@ plus one BF16 store run strictly one after the other:
 | attention + MLP, 4 independent tiles | 39,405 | 53.4% | 29 cycles | 99% of cycles |
 | attention + MLP, 4 tiles, shared K/V/W0/W1 | 30,654 | 38.7% | 17 cycles | 98% of cycles |
 
-The virtual scheduler is already within about 3% of the DMA + PACK bound, so
-no ordering change helps until PACK stops draining DMA. A throwaway experiment
-that lifted the drain everywhere, with verification bypassed, gave the same
-output bytes and:
-
-| Program | Before | After | Speedup | DMA busy after |
-|---|---|---|---|---|
-| 1 tile | 10,136 | 8,643 | 1.17x | 60.4% |
-| 2 independent tiles | 19,772 | 15,119 | 1.31x | 68.7% |
-| 4 independent tiles | 39,405 | 27,182 | 1.45x | 76.5% |
-| 4 tiles, shared weights | 30,654 | 23,723 | 1.29x | 49.6% |
-
-Those are upper bounds for this change. This plan does it with proofs: every
-checker that rejects the overlap today accepts it for PACK, and only for PACK,
-when it can show the PACK cannot touch any pending transfer's VMEM.
+The virtual scheduler was within about 3% of that DMA + PACK bound, so no
+ordering change could help until PACK stopped draining DMA.
 
 ## Why the overlap is safe
 
@@ -45,193 +32,125 @@ when it can show the PACK cannot touch any pending transfer's VMEM.
   `packWord * 4` (0x20000, 1 KiB) and the relayout loop's `lw` from there and
   `sw` to `packRelayoutWord * 4` (0x20400, 1 KiB), read back by one VLOAD.
   Explicit staging windows are 8 x 2 KiB from byte `stagingWord * 4`
-  (0x80000-0x83FFF). The ranges are disjoint.
-- They are also in different 256 KiB VMEM banks (bank 0 against bank 2). In
+  (0x80000-0x83FFF). The checkers prove this per program rather than assume
+  it (below).
+- The ranges are in different 256 KiB VMEM banks (bank 0 against bank 2). In
   npu_model's port of VMEM.scala an LSU access denies the DMA only on the same
-  bank, so the relayout does not even slow the transfer.
+  bank, so the relayout does not slow the transfer. Nicolas should confirm the
+  bank behaviour against RTL.
 
-Nicolas should confirm the last two points against RTL before Phase 4 turns
-the overlap on.
+## Design
 
-## Where the drain is enforced today
+One concept, the **PACK relayout loop** ([`AtlasPackLoop.h`](../include/Atlas/AtlasPackLoop.h)),
+replaces "PACK drains DMA" everywhere:
 
-| Stage | File | Rule |
-|---|---|---|
-| Generated interval policy | `AtlasGeneratedSchedule.cpp` (`canOverlapAtlasGeneratedDMA`), `AtlasVerificationContext.cpp` (`verifyGeneratedStructure`) | While DMA is pending, only scalar ALU, delays, MXU, VPU unary/binary/reduce, VLI, XLU, VLOAD, VSTORE and SELI may issue. `vpu_pack`, `lw`, `sw` and branches are "unexpected instruction while DMA is pending". A redirect target may not enter a pending interval. |
-| DMA memory | `AtlasDMAContractVerification.cpp` (`verifyAtlasGeneratedDMAMemory`) | Walks one block at a time: "DMA memory transfer crosses a basic-block boundary". The relayout loop is its own block. |
-| Timing | `AtlasStream.cpp` (`checkAtlasStream`, `verifyAtlasTimedStream`) | Timing is checked block by block, so a transfer must complete in the block that starts it. |
-| Wait insertion | `AtlasDMAWaitInsertion.cpp` | Completes every transfer before an instruction outside the interval policy, and at every branch target. Rejects any pending transfer at a delay slot. |
-| Virtual scheduler | `AtlasVirtualScheduling.cpp` (`drainsDMA`) | Models PACK as waiting for every queued transfer. |
-| Allocation | `AtlasVirtualAllocation.cpp` (`placeDMA`) | Completes every transfer at a PACK, freeing its channel and, for a store, its window. |
+- **Recognition** (`findAtlasPackLoops`) works on the flat instruction list, so
+  the structural verifier can use it before decoding. A loop's back-edge is a
+  `"pack"` helper branch to an earlier instruction with the exact NOP in its
+  delay slot; everything from its target to the branch is that PACK's scalar
+  loads, stores and ALU work, or a delay; no other redirect lands in it; and a
+  stream with a JALR has none. Such a loop launches and completes no DMA and has
+  no other entry, so the transfers in flight when it starts stay in flight
+  through every iteration and when it exits.
+- **Decoded facts.** `readAtlasStream` records each loop in
+  `AtlasStream::packLoops` with its block, the registers it is entered with (the
+  exit of the block that falls into it) and `access`, the VMEM it reads and
+  writes over all iterations, proved by running it (`proveAtlasPackLoopAccess`)
+  with the timing model's own scalar address rule. `AtlasStream::dmaMayCross`
+  says whether explicit DMA may be in flight from one block into the next:
+  only into or out of a PACK loop.
+- **One loop interpreter**, `runAtlasPackLoop`, serves the access proof, the
+  timing check and the buffer contract, which used to carry its own copy.
 
-The stream scheduler (`AtlasScheduling.cpp`) uses the same interval policy
-to order instructions after earlier waits. Its dependence graph already
-handles a wait for a transfer launched in an earlier block (`IncomingDma` in
-`AtlasTiming.cpp`), though nothing passes it the incoming footprints yet.
+The stages then ask those two questions instead of assuming a transfer ends in
+its block:
 
-## Approach: admit a PACK region, nothing broader
+| Stage | Change |
+|---|---|
+| Interval policy (`canOverlapAtlasGeneratedDMA`, now PC-aware) | Admits `vpu_pack` and every instruction of a PACK loop beside a pending transfer. |
+| Structural verifier (`verifyGeneratedStructure`) | Uses that policy; a PACK loop's back-edge may land inside the intervals that hold the loop, which they always hold whole since intervals start and end at DMA instructions. |
+| DMA memory (`verifyAtlasGeneratedDMAMemory`) | Carries pending transfers across `dmaMayCross` boundaries and compares each PACK loop's proved access with every pending staging span; an unknown access fails as "cannot prove DMA memory disjointness". |
+| Timing input check (`checkAtlasStream`) | Carries pending footprints the same way; inside a PACK loop it runs the loop and checks each instruction, with that iteration's registers, through the provider's own footprint and DMA conflict rules. |
+| Timed verification (`verifyAtlasTimedStream`) | Carries pending transfers across `dmaMayCross` boundaries. |
+| `--insert-atlas-dma-waits` | Decodes the stream for its loops; at a loop's first instruction it completes only the transfers whose staging the loop touches, never at its header otherwise; it rejects a completion that would land in a delay slot, not any pending transfer there. |
+| Stream scheduler | Uses the PC-aware policy for its generated-DMA ordering edges. |
+| Allocation (`placeDMA`) | A PACK no longer completes transfers; channels and windows stay held across it. |
+| Virtual scheduler | `drainsDMA` is gone: only boundary tiles (`isImplicitMemory`) drain, so loads move ahead of PACKs. |
+| Lowering | No change: PACK's helper tags and fixed scratch already give the recognizer what it needs. |
 
-Lowering already tags every instruction it emits for a PACK with
-`atlas.virtual_cfg_helper = "pack"` and the PACK's `atlas.virtual_cfg_source`.
-The buffer contract already recognizes the relayout as one block closed by its
-own helper back-edge. It runs that loop from known entry registers (at most
-256 iterations) and proves every `sw` lands inside the relayout scratch.
+Everything else stays rejected as before: scalar memory and branches outside a
+PACK loop, a loop whose VMEM meets a pending staging window or cannot be
+proved, a loop holding a DMA instruction or entered from elsewhere, and
+boundary-tile helper DMA, which still drains.
 
-A **PACK region** is the run of instructions tagged with one PACK's source,
-from its SELI through its relayout VLOAD, plus any `atlas.delay` the timing
-pass places among them. It is admitted beside pending explicit DMA when:
+### Differences from the plan
 
-1. **Shape.** It contains exactly one copy loop of the shape the buffer
-   contract recognizes. It contains no DMA launch, wait or config, no other
-   redirect, no JALR, CSR or halt. The loop's back-edge and target both lie
-   inside the region, and nothing outside the region targets it.
-2. **Memory.** Its VSTORE and VLOAD tile records and every `lw`/`sw` address,
-   proved by the buffer contract's loop execution, lie inside the PACK's two
-   scratch spans. Both spans are disjoint from every pending transfer's
-   staging span.
-3. **Intervals.** Every pending interval that reaches the region contains all
-   of it. A transfer is never launched or completed inside a PACK region.
-
-Anything else stays rejected as today: scalar memory and branches outside a
-PACK region, a PACK whose scratch overlaps a pending staging window, a branch
-into the loop from outside, a DMA inside the loop, and boundary-tile helper
-DMA, which still drains.
-
-One shared recognizer, `findAtlasPackRegions(const AtlasStream &)` in a new
-`AtlasPackRegion.{h,cpp}`, returns each region's PC range, loop block,
-source PACK and scratch spans. Every stage below calls it, so the checkers
-and the passes cannot drift apart.
-
-## Changes by stage
-
-### Verification (Nicolas reviews)
-
-- **Interval policy** (`verifyGeneratedStructure`, `canOverlapAtlasGeneratedDMA`):
-  admit `VPUPackOp` outright (register-only). Admit `lw`, `sw`, the helper
-  branch and its delay slot when they lie inside a PACK region. Narrow "redirect
-  target enters a pending DMA interval" to allow a target whose redirect lies
-  in the same PACK region, inside the same intervals. Reject a redirect that
-  leaves an interval.
-- **DMA memory** (`verifyAtlasGeneratedDMAMemory`): replace the per-block walk
-  with a forward walk that carries pending transfers across fallthrough edges
-  into and out of a PACK copy loop. The loop starts and completes nothing, so
-  the pending set at its entry is the one at its exit. At a region, compare
-  its two scratch spans with every pending staging span, as VLOAD and VSTORE
-  are compared today. Any other block boundary with a pending transfer is
-  still an error.
-- **Buffer contract** (`AtlasBufferContractVerification.cpp`): add the
-  missing bound on the copy loop's `lw` addresses: each must lie in the raw
-  or relayout scratch span. Stores are already bounded. This is what makes
-  the memory rule's span comparison cover every access the region makes.
-- **Timing** (`checkAtlasStream`, `verifyAtlasTimedStream`): carry each pending
-  transfer's completion footprint (its VMEM span and channel) into the
-  successor blocks inside a PACK region. Check every instruction there against
-  it with the provider's existing `dmaConflict`, as instructions in the
-  launching block are checked now. Reservation tables stay per block: DMA
-  completion is never timed by delays, only by `dma.wait`.
-
-### Passes
-
-- **`--insert-atlas-dma-waits`**: treat PACK-region instructions as admitted.
-  At the copy loop's header, complete nothing. Change the delay-slot rule to
-  reject only a completion that would land in a delay slot, not any pending
-  transfer.
-- **Stream scheduler** (`AtlasScheduling.cpp`): use the shared admission rule
-  for its generated-DMA ordering edges. Pass `IncomingDma` footprints into
-  `buildGraph` for the blocks after a PACK region, so a wait whose transfer
-  started before the region constrains only the accesses that conflict with it.
-- **Virtual scheduler**: `drainsDMA` keeps only boundary tiles. The PACK cost
-  and the load lookahead are unchanged; with the drain gone, the lookahead
-  search can place a load before a PACK whose result is used after it.
-- **Allocation** (`placeDMA`): a PACK no longer completes transfers. Channels
-  and windows stay held across it, so 8 channels and 8 windows cover more
-  transfers at once. The existing eviction rules (oldest channel, oldest store
-  window, else oldest load with its VLOADs flushed) are unchanged.
-- **Lowering**: no change. Tags and scratch placement already give the
-  recognizer what it needs. The register-allocation checker
-  (`collectStagingLoads`) already models staging VLOADs at first use, which
-  may now come after a PACK.
+- The plan had the buffer contract bound the copy loop's `lw` addresses, so
+  the DMA memory check could compare the PACK's scratch tiles. Instead the
+  decoded stream proves what each loop actually touches, and the DMA memory and
+  timing checks compare that directly, so no checker depends on another's
+  lemma.
+- Checkers and wait insertion landed together: they share one admission rule,
+  and splitting them would have needed a temporary half rule.
+- The stream scheduler does not yet receive `IncomingDma` footprints for
+  transfers launched before a PACK loop. A wait for such a transfer orders
+  every later VMEM access after it, which is conservative and correct.
 
 ## Tests
 
-Update, since they assert the drain:
+- `pack-loop` C++ suite: recognition of the lowered loop, before and after
+  timing; the facts the decoded stream adds (block, entry registers, 1 KiB
+  raw-scratch reads and relayout writes, `dmaMayCross`); and each refusal
+  (untagged or foreign body instruction, forward branch, non-NOP delay slot,
+  scale load, second entry), plus an undecidable loop's unknown access.
+- `test_dma_contract_verification.py::PackOverlapVerificationTest`: a load
+  pending across a PACK is accepted at every boundary and by both timing
+  passes; rejected when the relayout writes or reads the pending window, when
+  its row limit is unknown, when a wait sits in its body and when a branch
+  enters it.
+- `test_virtual_dma_lowering.py::test_pack_leaves_an_independent_load_in_flight`
+  and `test_virtual_scheduling.py::test_transfers_stay_pending_across_a_pack_through_stream_scheduling`
+  replace the two tests that asserted the drain.
+- `test_virtual_scheduling.py::test_loads_move_ahead_of_independent_packs`
+  fails on the previous scheduler and passes now.
 
-- `test_virtual_dma_lowering.py::test_pack_drains_an_independent_load` becomes
-  "a PACK leaves an independent load in flight": the wait comes after the
-  relayout VLOAD, before the load's first use.
-- `test_virtual_scheduling.py::test_stream_scheduling_keeps_every_wait_before_a_pack`
-  becomes a check that both transfers may stay pending across the PACK and
-  still schedule and verify.
-- `test_dma_contract_verification.py::test_pending_configuration_memory_and_control_restrictions_remain`
-  keeps its cases (a `lw`, a branch and a config outside a PACK region stay
-  rejected) and gains PACK-region cases.
+## Results
 
-Add, each against a lowered stream with a load pending across a PACK:
+Each program lowered through `tools/lower_atlas_program.py` (every verifier,
+`--timing schedule-atlas-stream`) with main (`aea28c5`) and with this branch,
+then simulated with the same random inputs on the pinned npu_model
+(`0c4a1f9`) and on npu_model main (`9e6313b`, beat-level DMA calibrated
+against VCS). Output bytes match main for every program on both models.
 
-- Accepted by every checker, timed by both timing passes, and identical
-  across `--schedule-atlas-virtual=random-seed=N` orders.
-- Rejected:
-  - a relayout `sw` base moved into the pending staging window (buffer
-    contract);
-  - a `lw` moved there (new load bound);
-  - a fixed placement whose pack scratch overlaps a staging window (DMA memory);
-  - a branch from outside into the copy loop (interval policy);
-  - a DMA launch or wait inserted inside the loop;
-  - a VLOAD of the pending window inside the region (timing and DMA memory);
-  - a completion forced into the loop's delay slot.
-- C++ verification tests for the recognizer: a copy loop with one extra
-  instruction, a second loop, or a missing helper tag is not a PACK region.
+Combined attention + MLP, npu_model main:
 
-## Validation
+| Program | Main | Branch | Speedup | DMA busy, main → branch |
+|---|---|---|---|---|
+| 1 tile | 10,136 | 8,610 | 1.18x | 52.5% → 60.8% |
+| 2 independent tiles | 19,772 | 15,119 | 1.31x | 53.4% → 68.7% |
+| 4 independent tiles | 39,405 | 27,182 | 1.45x | 53.4% → 76.5% |
+| 2 tiles, shared weights | 16,964 | 13,745 | 1.23x | 44.2% → 54.0% |
+| 4 tiles, shared weights | 30,654 | 23,690 | 1.29x | 38.7% → 49.8% |
 
-1. Full ctest (`ATLAS_LLVM_BIN`, `ATLAS_LLD` wrapper), 104 skips as on main.
-2. npu_model equivalence: every example main lowers, plus the combined
-   attention + MLP programs (1, 2, 4 tiles, independent and shared weights),
-   simulated on both the pinned npu_model and npu_model main with the same
-   random inputs. Output bytes must match current main, and cycle counts must
-   not regress anywhere.
-3. Report cycles and DMA busy for the combined programs against the table
-   above. The target is the experiment's numbers, 1.17x to 1.45x. Anything
-   short of that points at a rule that is still too strict.
+These equal the upper bound measured earlier by lifting the drain with
+verification bypassed. On the pinned npu_model the same programs gain 1.12x
+to 1.40x.
 
-## Phases (one commit each, everything passing after each)
+Two-layer MLP tiles with explicit DMA, npu_model main: 1.07x (1 tile) to
+1.30x (6 tiles) with per-tile weights, reaching 99.9% DMA busy; 1.07x to 1.28x
+with shared weights.
 
-1. **Recognizer and checkers.** `AtlasPackRegion`, the interval policy, DMA
-   memory walk, buffer contract load bound and timing carry. Tested with
-   hand-edited streams that move a wait past a PACK. The compiler still emits
-   the drain, so nothing it produces changes.
-2. **Wait insertion and stream scheduler.** The admission rule, the loop
-   header and delay-slot changes, `IncomingDma`. Where the virtual order
-   already leaves a transfer pending at a PACK (a load before a PACK, used
-   after it), its wait now moves past the PACK; update the drain tests here.
-   Allocation still assumes the transfer completes at the PACK, which only
-   makes it reuse that channel or window sooner; the wait inserter then
-   completes the transfer before the reuse, so the stream stays correct.
-3. **Allocation.** `placeDMA` keeps channels and windows held across PACK,
-   so more transfers can be in flight at once.
-4. **Virtual scheduler.** `drainsDMA` drops PACK; loads now move ahead of
-   PACKs. Run the equivalence and cycle measurements.
-5. **Docs.** `dialect-reference.md` and `virtual-program-lowering.md` describe
-   the PACK region rule; this file records the measured results.
+Examples: programs without a PACK, or whose transfers already completed before
+it, compile exactly as on main. `virtual_fp8_two_layer_mlp(_bias)` gain about
+1%. `virtual_attention_tile` gains 0.6% on npu_model main and loses 0.8% (35
+cycles) on the pinned model: its virtual schedule is unchanged, and the stream
+scheduler now interleaves V's wait and staging VLOAD with the PACK's prologue.
 
-## Risks and open questions
+## Next
 
-- **RTL confirmation** of PACK-only scratch access and per-bank LSU/DMA
-  arbitration (Nicolas), before Phase 4.
-- **Timing across blocks.** Carrying footprints is new to the timing checkers.
-  Phase 1 keeps it to PACK regions; general cross-block DMA (producer tile
-  loops) is a separate change that can reuse it.
-- **Pending stores.** A DMA store reads its staging window beat by beat until
-  it completes. The PACK must write nothing there, which the span check covers
-  for writes as well as reads.
-- **Window pressure.** Holding windows across PACK may exhaust the 8 staging
-  windows sooner. The allocator then flushes the oldest load's VLOADs early,
-  which is correct but may cost some overlap. The cycle measurements will show
-  whether that happens in the combined programs.
-
-## Not in this change
-
-- Making the relayout loop faster (temporaries, load/store order). That is
-  the next item, and it keeps the loop a loop.
-- Admitting transfers across other loops, such as a producer's tile loop.
-- Overlapping boundary-tile helper DMA.
+- With DMA overlapping PACK, PACK itself bounds shared-weight programs: each
+  still costs about 1,490 cycles. The relayout loop can drop to about 1,200
+  with more temporaries and its loads ahead of its stores, keeping it a loop.
+- `IncomingDma` footprints for the stream scheduler (above).
+- Admitting transfers across other loops, such as a producer's tile loop,
+  can reuse `dmaMayCross` and the loop interpreter.
