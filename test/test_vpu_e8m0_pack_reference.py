@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import struct
@@ -12,6 +11,7 @@ import tempfile
 import unittest
 from fractions import Fraction
 
+import atlas_assembler as assembler
 from test_mxu_numerics import bf16, fp8, round_bf16
 from test_mxu_reference import _object_words
 
@@ -95,17 +95,12 @@ class VpuE8M0PackReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_e8m0_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _emitted()
         self.assertEqual(len(words), 65)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(words[17], assembler.SELI(3, 128))
-        self.assertEqual(words[18], assembler.VFP8PACK(2, 0, 3))
-        self.assertEqual(words[20], assembler.VFP8UNPACK(4, 2, 3))
+        self.assertEqual(words[17], assembler.word("seli e3, 128"))
+        self.assertEqual(words[18], assembler.word("vpack.bf16.fp8 m2, m0, e3"))
+        self.assertEqual(words[20], assembler.word("vunpack.fp8.bf16 m4, m2, e3"))
         self.assertEqual(_object_words(SOURCE), words)
         with tempfile.TemporaryDirectory() as temporary:
             changed = pathlib.Path(temporary) / "scale126.mlir"
@@ -113,7 +108,7 @@ class VpuE8M0PackReferenceTest(unittest.TestCase):
             self.assertNotEqual(mutated, SOURCE.read_text())
             changed.write_text(mutated)
             scaled_words = _emitted(changed)
-            self.assertEqual(scaled_words[17], assembler.SELI(3, 126))
+            self.assertEqual(scaled_words[17], assembler.word("seli e3, 126"))
             self.assertEqual(scaled_words[:17] + scaled_words[18:], words[:17] + words[18:])
             self.assertEqual(_object_words(changed), scaled_words)
         parsed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],

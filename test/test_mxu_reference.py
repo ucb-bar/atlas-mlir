@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import struct
@@ -10,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import atlas_assembler as assembler
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -59,11 +60,6 @@ class MXUReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        selected = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_atlas_mxu_assembler", selected)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         reference = assembler.assemble((pathlib.Path(root) / ASSEMBLY).read_text())
         emitted = _emitted()
         self.assertEqual(len(emitted), 35)

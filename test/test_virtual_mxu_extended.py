@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
-from pathlib import Path
 import unittest
 
+import atlas_assembler as assembler
 from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run, shorten_delay
 from test_virtual_mxu_handles import STATE, FP8, BF16, acc, load, accumulate, readout
 from test_virtual_mxu_lowering import instructions
@@ -321,25 +320,21 @@ class VirtualMXUExtendedTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location("selected_extended_mxu_assembler",
-                                                     Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for unit in (0, 1):
             for fmt in ("fp8", "bf16"):
                 for entry in instructions(lower(seeded_chain(unit, fmt))):
                     fields, op = entry["fields"], entry["operation"]
                     if op == "atlas.mxu_push" and fields["kind"].startswith("acc_"):
-                        name = "VMATPUSH_AFP8" if fields["kind"] == "acc_fp8" else "VMATPUSH_ABF16"
-                        args = (fields["slot"], fields["src"])
+                        seed_format = "fp8" if fields["kind"] == "acc_fp8" else "bf16"
+                        text = (f'vmatpush.acc.{seed_format}.mxu{unit} '
+                                f'acc{fields["slot"]}, m{fields["src"]}')
                     elif op == "atlas.mxu_pop" and fields["format"] == "fp8":
-                        name, args = "VMATPOP_FP8", (fields["dst"], fields["scale_reg"], fields["slot"])
+                        text = (f'vmatpop.fp8.acc.mxu{unit} m{fields["dst"]}, '
+                                f'acc{fields["slot"]}, e{fields["scale_reg"]}')
                     else:
                         continue
-                    with self.subTest(unit=unit, seed=fmt, operation=name):
-                        self.assertEqual(entry["word_u32"],
-                                         getattr(assembler, f"{name}_MXU{unit}")(*args))
+                    with self.subTest(unit=unit, seed=fmt, operation=op):
+                        self.assertEqual(entry["word_u32"], assembler.word(text))
 
 
 if __name__ == "__main__":

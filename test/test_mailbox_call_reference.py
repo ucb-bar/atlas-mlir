@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_elf_entry_reference import _entry_words
 from test_vpu_relu_reference import _emitted
 from test_vpu_square_reference import _panel
@@ -84,11 +85,6 @@ class MailboxCallReferenceTest(unittest.TestCase):
             self.skipTest("set ATLAS_ASSEMBLER_ROOT")
         if not os.environ.get("ATLAS_LLVM_BIN"):
             self.skipTest("set ATLAS_LLVM_BIN")
-        path = pathlib.Path(selected_root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_mailbox_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted(SOURCE)
         self.assertEqual(len(emitted), 39)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))

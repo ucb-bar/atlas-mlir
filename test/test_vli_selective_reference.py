@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import struct
@@ -11,6 +10,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_vpu_relu_reference import _emitted, _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,9 +30,9 @@ def _source(mode: str, dst: int, code: int) -> str:
 
 def _assembly(mode: str, dst: int, code: int) -> str:
     text = ASSEMBLY.read_text()
-    old = "VLI.ROW 4, 0x4000"
+    old = "vli.row m4, 0x4000"
     assert text.count(old) == 1
-    return text.replace(old, f"VLI.{mode.upper()} {dst}, 0x{code:04X}")
+    return text.replace(old, f"vli.{mode} m{dst}, 0x{code:04X}")
 
 
 def _expected(mode: str, code: int, noise: bytes) -> bytes:
@@ -81,11 +81,6 @@ class VliSelectiveReferenceTest(unittest.TestCase):
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for independent selected assembler")
-        path = pathlib.Path(selected_root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_vli_selective_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for mode, dst in CASES:
             for code in CODES:
                 with self.subTest(mode=mode, code=f"0x{code:04x}"):
@@ -96,8 +91,7 @@ class VliSelectiveReferenceTest(unittest.TestCase):
                         self.assertEqual(len(emitted), 36)
                         self.assertEqual(emitted, tuple(assembler.assemble(
                             _assembly(mode, dst, code))))
-                        self.assertEqual(emitted[17], getattr(assembler, f"VLI_{mode.upper()}")(
-                            dst, code))
+                        self.assertEqual(emitted[17], assembler.word(f"vli.{mode} m{dst}, {code}"))
                         self.assertEqual(_object_words(source), emitted)
                         lowered = subprocess.run(
                             [str(BIN / "atlas-opt"), "--convert-atlas-to-llvm", str(source)],
