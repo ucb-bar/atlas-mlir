@@ -399,6 +399,11 @@ int main() {
   testStreamedWeights(facts);
   failures += testScalarOverlap(fixture());
   auto provider = modelTimingProvider(facts);
+  RegValues dmaRegs = unknownRegs();
+  dmaRegs[1] = 0x20000 / 4; dmaRegs[2] = 0; dmaRegs[3] = 1024;
+  Footprint dma = provider.footprint({findOp("dma.load.ch0"), 1, 2, 3}, dmaRegs);
+  check(dma.error.empty() && dma.dmaCycles == 516 && dma.doneAge == 0,
+        "DMA duration guides scheduling while completion still requires a wait");
   Instr move{findOp("vmov"), 4, 0, 0};
   Footprint first = provider.footprint(move, unknownRegs());
   check(first.error.empty() && first.doneAge == 72, "latency comes from synthetic observations");

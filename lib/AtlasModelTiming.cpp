@@ -496,6 +496,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
         offset % 32 || offset + bytes > (uint64_t(1) << 32))
       return reject("DMA transfer is unaligned, out of range, oversized, or crosses a bank/address boundary");
     x(in.rd, false); x(in.rs1, false); x(in.rs2, false);
+    f.dmaCycles = dmaTransferCycles(bytes);
     f.accesses.push_back({Res::DmaBase, false, 0, 1, 0, 1});
     f.accesses.push_back({Res::Vmem, load, int(words / 8), int(bytes / 32), 0, 0, false, true});
     return f;
