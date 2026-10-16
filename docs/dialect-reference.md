@@ -135,6 +135,16 @@ Generated programs must fit 2,048 words after DMA waits and delays.
 | `atlas.virtual_source_memory_contract` ([memory](../include/Atlas/AtlasSourceMemoryEffectContract.h)) | Overlapping source DRAM effects complete before a later write-involving one |
 | `atlas.virtual_buffer_contract` ([buffer](../include/Atlas/AtlasBufferContractVerification.h)) | Each VMEM reader sees its writer's words, including the PACK relayout (as the lowering models it, not taken from the RTL); each PACK scale register holds its code |
 
+An explicit transfer is pending from its launch to its wait. In between, only
+work that moves no memory a transfer could own may issue, plus whole PACK
+relayout loops ([`AtlasPackLoop.h`](../include/Atlas/AtlasPackLoop.h)): one
+block closed by its own helper back-edge, holding only that PACK's scalar copy,
+entered only by falling into it. Decoding runs each loop from its entry
+registers to find the VMEM it touches; the DMA memory and timing checks compare
+that with every pending transfer. A transfer may stay pending across a block
+boundary only into or out of such a loop, so a PACK does not complete earlier
+transfers ([DMA across PACK](pack-dma-overlap.md)).
+
 Timing passes take `provider=<id>` (default: the module's
 `atlas.timing_provider`, else `npu-model-rtl-match-v1`) from a registry that
 holds only that default ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
@@ -184,7 +194,7 @@ numerical policy, or availability across the stream.
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before allocation by a pressure- and latency-aware list schedule, keeping SSA, handle, and memory order. `random-seed=N` picks a random legal order. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass. `allocation-report=<file>` writes the plan as JSON, even on failure. |
-| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, PACK, scalar memory, redirect, CSR, halt, branch target). |
+| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside a PACK relayout loop, a PACK loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. |
 | `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and delay-slot NOPs; on timed streams also recheck issue spacing. |
 | `--verify-atlas-machine-stream` | pass | Check field verifiers, the flat state chain, encoding, delay slots, and in-block targets. |
 | `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |

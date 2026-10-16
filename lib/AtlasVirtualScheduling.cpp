@@ -59,16 +59,12 @@ bool isDMA(Operation *op) {
              VirtualDMAStoreBF16Op>(op);
 }
 
-// Boundary tiles move memory through helper DMA, so explicit DMA keeps its
-// source order around them.
+// Boundary tiles move memory through helper DMA, beside which the generated
+// stream admits no explicit transfer: explicit DMA keeps its source order
+// around them, and insert-atlas-dma-waits completes every transfer before one.
+// A PACK is no such barrier; transfers stay in flight across its relayout.
 bool isImplicitMemory(Operation *op) {
   return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op);
-}
-
-// Operations that insert-atlas-dma-waits completes every transfer before: the
-// generated stream admits no transfer beside a PACK or a helper DMA.
-bool drainsDMA(Operation *op) {
-  return isImplicitMemory(op) || isa<VirtualPackFP8Op>(op);
 }
 
 // An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
@@ -312,7 +308,7 @@ struct Cost {
   // the engine; its transfer (`busy` cycles) queues behind earlier ones after
   // `frontend` staging cycles, and `latency` counts from the transfer start.
   bool queuedDMA = false;
-  // Every explicit transfer completes first (drainsDMA).
+  // Every explicit transfer completes first (isImplicitMemory).
   bool drains = false;
 };
 
@@ -455,14 +451,16 @@ Cost costOf(Operation *op) {
     return {Unit::Xlu, t.interval, t.latency};
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM one word at a time in a
-    // scalar loop.
-    int words = registersOf(true) * kRegisterBytes / 4;
-    return blocking(Unit::Lsu,
-                    timingOf("vpack.bf16.fp8").latency + vstore.latency +
-                        words * (timingOf("lw").latency +
-                                 timingOf("sw").latency) +
-                        vload.latency);
+    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
+    // words a row (lowerPack). Each store hides behind the next word's load,
+    // so a row takes a load per load-path interval, then the last word's load
+    // and store, the destination step, and the back-edge with its delay slot.
+    static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
+    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 3;
+    int rows = registersOf(true) * kRegisterBytes / 4 / rowWords;
+    int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
+    return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
+                                   vstore.latency + rows * row + vload.latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
   return {Unit::Scalar, 1, timingOf("addi").latency};
@@ -635,7 +633,7 @@ public:
     unsigned n = g.nodes.size();
     for (Operation *op : g.nodes) {
       Cost cost = costOf(op);
-      cost.drains = drainsDMA(op);
+      cost.drains = isImplicitMemory(op);
       costs.push_back(cost);
     }
     // The longest path from each node to the block's end, counting its own
@@ -672,8 +670,8 @@ public:
   // longest path to the block's end; then the earliest in source order.
   // A load starts as soon as the frontend is free, so with `lookahead` loaded
   // tiles awaiting their first use, another load waits while anything else
-  // is ready: a PACK or boundary tile must not drain transfers whose users
-  // all come after it.
+  // is ready: a boundary tile must not drain transfers whose users all come
+  // after it, and each holds a staging window until its first use.
   std::vector<unsigned> listSchedule(const KindCounts &capacity,
                                      unsigned lookahead) const {
     Pressure pressure(block, g.nodes, liveness);

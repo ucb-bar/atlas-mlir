@@ -81,6 +81,7 @@ add_llvm_executable(atlas-verification-test
   dma-helper-verification.cpp
   mxu-allocation-verification.cpp
   mxu-contract-verification.cpp
+  pack-loop-verification.cpp
   source-memory-effect-contract.cpp
   tile-contract-verification.cpp
   timing-provider-verification.cpp
@@ -93,6 +94,6 @@ target_link_libraries(atlas-verification-test PRIVATE
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-test)
 foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocation mxu-contract
-    source-memory-contract tile-contract timing-provider)
+    pack-loop source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()

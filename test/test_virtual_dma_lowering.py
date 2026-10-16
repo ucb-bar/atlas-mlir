@@ -97,6 +97,22 @@ def queued_transfers(loads: int = 1, stores: int | None = None, *, shared_output
     return wrap(body, final=before)
 
 
+def pack_beside_load() -> str:
+    """A BF16 load, then a PACK of an unrelated tile, then the load's use."""
+    return wrap([
+        f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
+        "    %size8 = arith.constant 1024 : i32",
+        "    %out = arith.constant -2146435072 : i32",
+        f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
+        f': ({STATE}) -> ({STATE}, {tile("bf16")})',
+        dma_load("bf16", "input", "loaded"),
+        f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} '
+        f': ({tile("bf16")}) -> {tile("fp8")}',
+        dma_store("fp8", "loaded", "stored", "packed").replace("%addr, %size", "%out, %size8"),
+        dma_store("bf16", "stored", "done"),
+    ], final="done")
+
+
 class VirtualDMALoweringTest(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
@@ -206,24 +222,20 @@ class VirtualDMALoweringTest(unittest.TestCase):
         # All eight stores can remain in flight until the ninth reuses one.
         self.assertFalse(any(entry["operation"] == "atlas.dma_wait" for entry in entries[first[0] + 1:launches[8][0]]))
 
-    def test_pack_drains_an_independent_load(self) -> None:
-        source = wrap([
-            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
-            "    %size8 = arith.constant 1024 : i32",
-            "    %out = arith.constant -2146435072 : i32",
-            f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
-            f': ({STATE}) -> ({STATE}, {tile("bf16")})',
-            dma_load("bf16", "input", "loaded"),
-            f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} '
-            f': ({tile("bf16")}) -> {tile("fp8")}',
-            dma_store("fp8", "loaded", "stored", "packed").replace(
-                "%addr, %size", "%out, %size8"),
-            dma_store("bf16", "stored", "done"),
-        ], final="done")
-        _, entries = self.wait_checked(source)
-        pack = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.vpu_pack")
-        self.assert_wait_before(entries, pack, 0)
-        self.assertFalse(any(entry["operation"] == "atlas.vload" for entry in entries[pack - 2:pack]))
+    def test_pack_leaves_an_independent_load_in_flight(self) -> None:
+        # The PACK's relayout loop touches only its own scratch, so the load
+        # stays pending through all of the PACK and completes just before the
+        # first staging VLOAD of its tile.
+        _, entries = self.wait_checked(pack_beside_load())
+        launch = next(i for i, entry in enumerate(entries)
+                      if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 0)
+        [wait] = [i for i, entry in enumerate(entries)
+                  if entry["operation"] == "atlas.dma_wait" and entry["fields"].get(MARKER) == 0]
+        pack = [i for i, entry in enumerate(entries) if entry["fields"].get("atlas.virtual_cfg_helper") == "pack"]
+        self.assertLess(launch, pack[0])
+        self.assertLess(pack[-1], wait)
+        self.assertEqual(entries[wait + 1]["operation"], "atlas.vload")
+        self.assert_wait_before(entries, wait + 1, 0)
 
     def test_boundary_tiles_drain_pending_transfers(self) -> None:
         for kind in ("input_fp8", "input_bf16", "output_bf16"):

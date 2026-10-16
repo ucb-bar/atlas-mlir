@@ -478,10 +478,10 @@ class VirtualSchedulingTest(unittest.TestCase):
         [first_store, _] = positions(ops, "dma_store_bf16")
         self.assertLess(first_store, max(positions(ops, "vpu_reduce")), ops)
 
-    def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
-        # A store and a load are pending and complete load first. The PACK
-        # after both, which no transfer may overlap, stays after each wait,
-        # not only the last.
+    def test_transfers_stay_pending_across_a_pack_through_stream_scheduling(self) -> None:
+        # A store and a load are pending, then a PACK of another tile. Its
+        # relayout touches only its scratch, so both transfers stay in flight
+        # through the PACK's loop, before and after stream scheduling.
         source = function("pack", [
             start(), inp("io0", "io1", "t", 0), const("a", -2147483648), const("b", -2147481600),
             const("size", 2048),
@@ -493,6 +493,31 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timed = run("atlas-opt", lowered.stdout, "--schedule-atlas-stream", "--verify-atlas-timing")
         self.assertEqual(timed.returncode, 0, timed.stderr)
+        for machine in (lowered.stdout, timed.stdout):
+            lines = machine.splitlines()
+            back_edge = next(i for i, line in enumerate(lines) if '"atlas.branch"' in line and 'cfg_helper = "pack"' in line)
+            waits = [i for i, line in enumerate(lines) if '"atlas.dma_wait"' in line and "atlas.virtual_dma_transfer" in line]
+            self.assertEqual(len(waits), 2)
+            self.assertTrue(all(wait > back_edge for wait in waits), machine)
+
+    def test_loads_move_ahead_of_independent_packs(self) -> None:
+        # Two PACKs in a chain, each followed by the load of the next MXU
+        # weight. PACK no longer drains DMA, so both loads issue first and
+        # transfer during the first relayout.
+        source = function("ahead", [
+            start(), inp("io0", "io1", "x", 0), const("a", -2147483648), const("b", -2147482624),
+            const("size", 1024),
+            f'%p1 = "atlas.virtual_pack_fp8"(%x) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            dma_load("io1", "io2", "w1", "a", "size", "fp8"),
+            *mxu_chain("io2", 0, "w1", "p1", "h1", "m"),
+            f'%p2 = "atlas.virtual_pack_fp8"(%h1) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            dma_load("ms3", "io3", "w2", "b", "size", "fp8"),
+            *mxu_chain("io3", 1, "w2", "p2", "h2", "n"),
+            outp("ns3", "o", "h2", 0), f"return %o : {S}"])
+        scheduled = self.scheduled(source)
+        ops = blocks(scheduled)[0]["ops"]
+        self.assertLess(max(positions(ops, "dma_load_fp8")), min(positions(ops, "pack_fp8")), ops)
+        self.assertTrue(lowers(scheduled))
 
     def test_transfers_that_may_share_dram_keep_their_order(self) -> None:
         # A store to y, then a load of y and a load of z. The load of y stays

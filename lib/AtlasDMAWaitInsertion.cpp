@@ -8,9 +8,11 @@
 //     side writes;
 //   - a helper DMA (boundary tile or mailbox), or any instruction the
 //     generated interval policy does not admit beside a pending transfer
-//     (canOverlapAtlasGeneratedDMA): PACK, scalar memory, redirects, CSR,
-//     the halt;
-//   - entry to a branch target, so the wait stays on the fall-through path.
+//     (canOverlapAtlasGeneratedDMA): scalar memory outside a PACK relayout
+//     loop, redirects, CSR, the halt;
+//   - a PACK relayout loop whose VMEM meets its staging window;
+//   - entry to any other branch target, so the wait stays on the fall-through
+//     path.
 // The wait goes immediately before that instruction. Timing passes may still
 // move it earlier within its block.
 
@@ -20,6 +22,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
@@ -132,13 +135,17 @@ FailureOr<llvm::DenseMap<int32_t, TileRecord>> readTiles(ModuleOp module) {
 
 // The instruction-word distance a redirect encodes, and its attribute name.
 std::optional<std::pair<int64_t, StringRef>> redirect(Operation *op) {
-  if (auto branch = dyn_cast<BranchOp>(op))
-    return std::pair{branch.getOffsetBytesAttr().getValue().getSExtValue() / 2,
-                     StringRef("offset_bytes")};
-  if (auto jump = dyn_cast<JumpOp>(op); jump && jump.getKind() == "jal")
-    return std::pair{jump.getOffsetAttr().getValue().getSExtValue() / 2,
-                     StringRef("offset")};
-  return std::nullopt;
+  std::optional<int64_t> distance = atlasRedirectDistance(op);
+  if (!distance)
+    return std::nullopt;
+  return std::pair{*distance, StringRef(isa<BranchOp>(op) ? "offset_bytes" : "offset")};
+}
+
+// Whether a PACK loop touching `access` meets transfer `t`, which writes its
+// staging window if it loads and reads it if it stores.
+bool meets(const AtlasVmemAccess &access, const Transfer &t) {
+  AtlasVmemRange staging{t.staging.begin, t.staging.end};
+  return access.writes.overlaps(staging) || (!t.store && access.reads.overlaps(staging));
 }
 } // namespace
 
@@ -152,10 +159,12 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   if (failed(tiles))
     return failure();
 
-  SmallVector<Operation *> ops;
-  for (Operation &op : module.getBody()->getOperations())
-    if (!isa<StartOp>(op))
-      ops.push_back(&op);
+  // The decoded stream finds each PACK relayout loop and the VMEM it touches.
+  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  if (failed(stream))
+    return failure();
+  ArrayRef<Operation *> ops = stream->ops;
+  ArrayRef<AtlasPackLoop> loops = stream->packLoops;
   size_t n = ops.size();
   std::vector<bool> target(n, false);
   for (size_t pc = 0; pc < n; ++pc)
@@ -182,9 +191,12 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   auto all = [](const Transfer &) { return true; };
   for (size_t pc = 0; pc < n; ++pc) {
     Operation *op = ops[pc];
-    if (pc > 0 && redirect(ops[pc - 1]) && !pending.empty())
-      return op->emitOpError("a delay slot cannot hold a DMA completion");
-    if (target[pc])
+    // A PACK loop's only other entry is its own back-edge, so transfers stay
+    // in flight through it unless it touches their staging windows.
+    const AtlasPackLoop *loop = findAtlasPackLoopAt(loops, pc);
+    if (loop && loop->begin == pc)
+      complete(pc, [&](const Transfer &t) { return !loop->access || meets(*loop->access, t); });
+    else if (target[pc])
       complete(pc, all);
     if (auto dma = dyn_cast<DMAOp>(op)) {
       auto id = contractTag(op, kAtlasTagDMATransfer);
@@ -213,12 +225,15 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     } else if (isa<DMAWaitOp>(op)) {
       if (auto id = contractTag(op, kAtlasTagDMATransfer))
         llvm::erase(pending, *id);
-    } else if (!canOverlapAtlasGeneratedDMA(op)) {
+    } else if (!canOverlapAtlasGeneratedDMA(ops, loops, pc)) {
       complete(pc, all);
     }
   }
   if (!pending.empty())
     return module.emitOpError("generated stream ends with a DMA transfer in flight");
+  for (size_t pc = 1; pc < n; ++pc)
+    if (redirect(ops[pc - 1]) && !waitsBefore[pc].empty())
+      return ops[pc]->emitOpError("a delay slot cannot hold a DMA completion");
 
   // Each original instruction's new index; a redirect still reaches its
   // original target, after the waits placed on the fall-through path.

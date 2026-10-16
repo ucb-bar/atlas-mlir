@@ -17,9 +17,6 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-// Bounds the checker's execution of a copy loop; the relayout takes 32 rows.
-constexpr unsigned kCopyIterationBound = 256;
-
 struct Tile { StringRef kind; uint32_t vmem, bytes; std::vector<int32_t> after; };
 // `command` observes `bytes` at `vmem`: word i is word `word + i` of `writer`,
 // or for a PACK relayout the raw word packWord(i).
@@ -121,18 +118,6 @@ bool merge(State &to, const State &from) {
   }
   return changed;
 }
-
-std::optional<bool> taken(BranchOp branch, const RegValues &x) {
-  auto lhs = x[branch.getLhs()], rhs = x[branch.getRhs()];
-  if (!lhs || !rhs) return std::nullopt;
-  StringRef kind = branch.getKind();
-  if (kind == "beq") return *lhs == *rhs;
-  if (kind == "bne") return *lhs != *rhs;
-  if (kind == "blt") return int32_t(*lhs) < int32_t(*rhs);
-  if (kind == "bge") return int32_t(*lhs) >= int32_t(*rhs);
-  if (kind == "bltu") return *lhs < *rhs;
-  return *lhs >= *rhs;
-}
 } // namespace
 
 FailureOr<DictionaryAttr> mlir::atlas::buildAtlasBufferContract(
@@ -199,17 +184,19 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
       applyAtlasScaleRegister(s.instrs[pc], scale);
     }
   }
-  // PACK's helper branch closes a one-block counted copy loop, which the walk
-  // executes from its entry registers instead of joining at its backedge.
-  std::map<size_t, const Pack *> helpers;
+  // PACK's helper branch closes its relayout loop (AtlasPackLoop.h), which the
+  // walk executes from its entry registers instead of joining at its backedge.
+  struct Helper { const AtlasPackLoop *loop; const Pack *pack; };
+  std::map<size_t, Helper> helpers;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!s.endsInBranch(block)) continue;
     Operation *branch = s.ops[s.blockEnd(block) - 2];
     if (!isa<BranchOp>(branch) || !branch->hasAttr(kAtlasTagCFGHelper)) continue;
+    const AtlasPackLoop *loop = s.packLoop(block);
     const Pack *p = packOf(branch);
-    if (!p || s.targetOf.lookup(branch) != s.ops[s.starts[block]])
+    if (!loop || !p)
       return branch->emitOpError("buffer contract: PACK copy loop must be one block closed by its own backedge");
-    helpers[block] = p;
+    helpers[block] = {loop, p};
   }
 
   auto check = [&](Operation *op, const Read &r, const State &state) -> LogicalResult {
@@ -275,28 +262,21 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     return success();
   };
   // Without a decidable exit the copy's effect is unknown: nothing survives it.
-  auto copyLoop = [&](size_t block, const Pack &p, State &state, bool diagnose) -> LogicalResult {
-    size_t end = s.blockEnd(block);
-    auto branch = cast<BranchOp>(s.ops[end - 2]);
-    for (unsigned iteration = 0; iteration < kCopyIterationBound; ++iteration) {
-      std::optional<bool> again;
-      for (size_t pc = s.starts[block]; pc < end; ++pc) {
-        if (pc == end - 2) again = taken(branch, state.x);
-        if (failed(step(pc, state, diagnose, &p))) return failure();
-      }
-      if (!again) {
-        if (diagnose) return branch.emitOpError("buffer contract: PACK copy loop branch depends on an unknown register");
-        state = State();
-        return success();
-      }
-      if (!*again) return success();
-    }
-    if (diagnose) return branch.emitOpError("buffer contract: PACK copy loop does not exit within ") << kCopyIterationBound << " iterations";
+  auto copyLoop = [&](const Helper &helper, State &state, bool diagnose) -> LogicalResult {
+    auto exit = runAtlasPackLoop(s.ops, *helper.loop, [&]() -> const RegValues & { return state.x; },
+                                 [&](size_t pc) { return step(pc, state, diagnose, helper.pack); });
+    if (failed(exit)) return failure();
+    if (*exit == AtlasPackLoopExit::Exited) return success();
+    Operation *branch = s.ops[helper.loop->branch];
+    if (diagnose && *exit == AtlasPackLoopExit::UnknownBranch)
+      return branch->emitOpError("buffer contract: PACK copy loop branch depends on an unknown register");
+    if (diagnose)
+      return branch->emitOpError("buffer contract: PACK copy loop does not exit within ") << kAtlasPackLoopIterationBound << " iterations";
     state = State();
     return success();
   };
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
-    if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(block, *helper->second, state, diagnose);
+    if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(helper->second, state, diagnose);
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc)
       if (failed(step(pc, state, diagnose, nullptr))) return failure();
     return success();

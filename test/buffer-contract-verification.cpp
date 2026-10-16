@@ -126,13 +126,19 @@ void pack(MLIRContext &context) {
     c.corrupt(*module);
     check(rejects(*module, c.diagnostic), c.name, diagnostics);
   }
-  // Independent LW/SW pairs may issue in any order that keeps each pair's data dependence.
+  // A copy's store may issue anywhere between its load and the next load of its temporary: moving each
+  // store up to its own load, the serial order lowering used to emit, keeps the interleave.
   auto module = lowered(context);
   if (!module) return;
-  std::vector<Operation *> loads;
-  for (Operation &op : module->getBody()->getOperations()) if (copyLoad(op)) loads.push_back(&op);
-  for (size_t n = 2; n < loads.size(); n += 2) moveBefore(loads[n], loads[n - 1]);
-  check(accepts(*module), "reordered independent copy pairs keep the interleave", diagnostics);
+  auto copyStore = [](Operation &op) { return isa<ScalarStoreOp>(op) && helper(op); };
+  std::vector<Operation *> loads, stores;
+  for (Operation &op : module->getBody()->getOperations()) {
+    if (copyLoad(op)) loads.push_back(&op);
+    if (copyStore(op)) stores.push_back(&op);
+  }
+  check(loads.size() == 8 && stores.size() == 8, "one row of eight copies");
+  for (size_t n = 0; n + 1 < loads.size() && n < stores.size(); ++n) moveBefore(stores[n], loads[n + 1]);
+  check(accepts(*module), "each store moved up to its own load keeps the interleave", diagnostics);
 }
 
 struct Stream : IssuedStream {

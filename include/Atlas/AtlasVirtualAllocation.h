@@ -30,6 +30,10 @@ struct DMATransferPlacement {
   unsigned sizeReg;
 };
 
+// A PACK relayout row is 32 FP8 bytes: two 16-byte halves of four words,
+// which lowerPack copies one word at a time.
+constexpr unsigned kPackRelayoutRowWords = 8;
+
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;

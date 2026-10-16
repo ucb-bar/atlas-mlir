@@ -623,28 +623,40 @@ private:
     materializeScalar(fixed().packRowsReg, 32, loc);
     unsigned loop = newLabel();
     mark(loop);
-    for (unsigned word = 0; word < 4; ++word) {
-      for (unsigned half = 0; half < 2; ++half) {
-        unsigned source = fixed().packSourceRegs[half];
-        unsigned temp = fixed().packTemporaryRegs[half];
-        add("atlas.scalar_load", loc,
-            {{"kind", str("lw")}, {"dst", i32(temp)},
-             {"base", i32(source)}, {"offset", i32(4 * word)}});
-        add("atlas.scalar_store", loc,
-            {{"kind", str("sw")}, {"src", i32(temp)},
-             {"base", i32(fixed().packDestinationReg)},
-             {"offset", i32(4 * word + 16 * half)}});
-      }
-    }
-    for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
-                         fixed().packDestinationReg})
+    // A row copies eight words: copy i moves word i / 2 of half i % 2, from
+    // that half's source to the row at 16 * half + 4 * word, through
+    // temporary i % 2. Each store follows the next copy's load instead of its
+    // own: it issues while the scalar load path is still busy, after its own
+    // load has landed, and the next load reuses the temporary it just read.
+    // The row counter advances in the first load's busy cycles, and each
+    // pointer once its last word is copied.
+    auto copyLoad = [&](unsigned copy) {
+      add("atlas.scalar_load", loc,
+          {{"kind", str("lw")}, {"dst", i32(fixed().packTemporaryRegs[copy % 2])},
+           {"base", i32(fixed().packSourceRegs[copy % 2])},
+           {"offset", i32(4 * (copy / 2))}});
+    };
+    auto copyStore = [&](unsigned copy) {
+      add("atlas.scalar_store", loc,
+          {{"kind", str("sw")}, {"src", i32(fixed().packTemporaryRegs[copy % 2])},
+           {"base", i32(fixed().packDestinationReg)},
+           {"offset", i32(4 * (copy / 2) + 16 * (copy % 2))}});
+    };
+    auto advance = [&](unsigned reg, int32_t step) {
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
-           {"immediate", i32(reg == fixed().packDestinationReg ? 32 : 16)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(fixed().packRowReg)},
-         {"src", i32(fixed().packRowReg)},
-         {"immediate", i32(1)}});
+           {"immediate", i32(step)}});
+    };
+    copyLoad(0);
+    advance(fixed().packRowReg, 1);
+    for (unsigned copy = 1; copy < kPackRelayoutRowWords; ++copy) {
+      copyLoad(copy);
+      copyStore(copy - 1);
+      if (copy >= kPackRelayoutRowWords - 2)
+        advance(fixed().packSourceRegs[copy % 2], 16);
+    }
+    copyStore(kPackRelayoutRowWords - 1);
+    advance(fixed().packDestinationReg, 32);
     add("atlas.branch", loc,
         {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
          {"rhs", i32(fixed().packRowsReg)}},
