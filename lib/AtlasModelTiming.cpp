@@ -599,13 +599,14 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
       } else if (!mreg(reg)) fill.fail("register operand out of range");
       fill.mreg(event.key, reg, event.write, event.registers, event.passes);
     }
-    std::map<int, int> banks;
-    for (const std::vector<int> *group : {&f.mregReads, &f.mregWrites})
+    for (const std::vector<int> *group : {&f.mregReads, &f.mregWrites}) {
+      std::map<int, int> banks;
       for (int reg : *group)
         if (auto [at, inserted] = banks.emplace(reg & 31, reg); !inserted)
           fill.fail("VPU register operands must occupy distinct physical banks (register mod 32): m" +
                     std::to_string(at->second) + " and m" + std::to_string(reg) + " share bank " +
                     std::to_string(reg & 31));
+    }
     int busy = fill.busyEnd();
     fill.vpu(busy);
     return fill.done(busy);
@@ -678,7 +679,7 @@ public:
     std::vector<Port> ports = requests(f, cycle);
     for (size_t i = 0; i < ports.size(); ++i)
       for (size_t j = 0; j < i; ++j)
-        if (portConflict(ports[i], ports[j])) return {"instruction requires the same MREG port twice", {}};
+        if (portConflict(ports[i], ports[j])) return {{}, "instruction has conflicting MREG port requests"};
     for (const Issued &prior : issued) {
       if (prior.cycle + prior.f.doneAge < cycle || cycle + f.doneAge < prior.cycle) continue;
       if (sameEngine(*in.op, *prior.in.op) && cycle <= prior.cycle + prior.f.doneAge &&

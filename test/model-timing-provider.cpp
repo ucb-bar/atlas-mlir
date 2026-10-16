@@ -85,6 +85,11 @@ llvm::json::Object fixture() {
   auto decodedConfiguration = llvm::cantFail(llvm::json::parse(configuration));
   llvm::json::Array operations;
   operations.push_back(block("vpu.mov", "vpu", 73, llvm::json::Object{{"read0", group(1, 64)}, {"write0", group(9, 64)}}));
+  operations.push_back(block("vpu.add", "vpu", 73,
+                             llvm::json::Object{{"read0", group(1, 64)}, {"read1", group(1, 64)},
+                                                {"write0", group(9, 64)}}));
+  operations.push_back(block("vpu.fp8pack", "vpu", 66,
+                             llvm::json::Object{{"read0", group(0, 64)}, {"write0", group(3, 32, 2)}}));
   operations.push_back(block("vlsu.vload", "vlsu", 40,
                              llvm::json::Object{{"vmem_read", group(1, 32)}, {"mreg_write", group(3, 32)}}));
   operations.push_back(block("mxu0.push_weight", "mxu0", 40,
@@ -136,7 +141,24 @@ int main() {
   check(!provider.footprint({findOp("vrelu.bf16"), 4, 0, 0}, unknownRegs()).error.empty(),
         "missing operation coverage has no builtin fallback");
   check(!provider.footprint({findOp("vmov"), 3, 0, 0}, unknownRegs()).error.empty(), "odd BF16 pair rejects");
-  check(!provider.footprint({findOp("vmov"), 32, 0, 0}, unknownRegs()).error.empty(), "aliased MREG banks reject");
+  check(provider.footprint({findOp("vmov"), 32, 0, 0}, unknownRegs()).error.empty(),
+        "read and write may use different logical registers in the same physical bank");
+  check(!provider.footprint({findOp("vadd.bf16"), 4, 0, 32}, unknownRegs()).error.empty(),
+        "two read operands cannot share a physical bank");
+  Instr pack{findOp("vpack.bf16.fp8"), 1, 0, 32};
+  Footprint packed = provider.footprint(pack, unknownRegs());
+  auto packReservations = provider.createReservations();
+  auto packConflict = packReservations.value->conflict(pack, packed, 0);
+  check(packed.error.empty() && packed.doneAge == 65 && packConflict.error.empty() && packConflict.value.empty(),
+        "PACK m1 from m32/m33 uses separate read/write rows in bank 1");
+  Instr collidingPack{findOp("vpack.bf16.fp8"), 33, 0, 32};
+  Footprint colliding = provider.footprint(collidingPack, unknownRegs());
+  check(colliding.error.empty() && !packReservations.value->conflict(collidingPack, colliding, 0).error.empty(),
+        "PACK same logical source/destination row collision still rejects");
+  Footprint duplicateWrite = packed;
+  duplicateWrite.accesses.push_back({Res::MReg, true, 33 * 32, 1, 3, 0});
+  check(!packReservations.value->conflict(pack, duplicateWrite, 0).error.empty(),
+        "two writes cannot use the same physical bank on one edge");
   check(!provider.footprint({findOp("fence")}, unknownRegs()).error.empty(), "unmapped operation rejects");
   Footprint unknown = provider.footprint({findOp("vload"), 6, 2, 0}, unknownRegs());
   check(unknown.error.empty() && unknown.doneAge == 39 && unknown.holds.size() == size_t(kVmemBanks + 1),
