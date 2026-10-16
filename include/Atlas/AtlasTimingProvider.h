@@ -53,6 +53,14 @@ struct TimingProvider {
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
+// Provider graph; absent incoming DMA facts retain broad post-wait guards.
+TimingRuleResult<DepGraph> buildTimingGraph(const std::vector<Instr> &instrs, const RegValues &entry,
+                                            const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
+
+struct MachineOpTiming { int latency, interval; };
+// Cost probes retain representative operands and unknown bases; they are not verified instructions.
+FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider, const std::string &name, Operation *at);
+
 constexpr llvm::StringLiteral kNpuModelTimingProviderId = "npu-model-rtl-match-v1";
 // Explicit adapter for existing unqualified npu-model rtl-match rules.
 TimingProvider npuModelTimingProvider();
