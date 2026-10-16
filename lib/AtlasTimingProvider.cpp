@@ -58,7 +58,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
       auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
       if (!d.error.empty()) return {{}, d.error};
       if (d.value.distance < 0) return {{}, "timing provider returned a negative dependence distance"};
-      if (d.value.distance > 0) add(a, b, d.value.distance, d.value.kind, d.value.reason);
+      if (d.value.distance > 0)
+        add(a, b, d.value.distance, d.value.kind, d.value.reason);
     }
   auto isLaunch = [&](int i) {
     OpClass c = g.nodes[i].op->opClass;
@@ -66,16 +67,20 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   };
   // A matching wait establishes DMA completion.
   for (int d = 0; d < n; d++) {
-    if (!isLaunch(d)) continue;
+    if (!isLaunch(d))
+      continue;
     const OpInfo &op = *g.nodes[d].op;
     int wait = -1;
     for (int k = d + 1; k < n && wait < 0; k++)
-      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel) wait = k;
+      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel)
+        wait = k;
     for (int k = d + 1; k < n; k++) {
-      if (k == wait) continue;
+      if (k == wait)
+        continue;
       auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
       if (!conflict.error.empty()) return {{}, conflict.error};
-      if (!conflict.value.conflict) continue;
+      if (!conflict.value.conflict)
+        continue;
       if (wait >= 0 && wait < k)
         add(wait, k, 1, conflict.value.kind,
             std::string(edgeKindName(conflict.value.kind)) + " with " + op.name + " (done once the wait issues)");
@@ -86,11 +91,14 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   // Use precise incoming DMA facts when supplied.
   for (int w = 0; w < n; w++) {
     const OpInfo &op = *g.nodes[w].op;
-    if (op.opClass != OpClass::DmaWait) continue;
+    if (op.opClass != OpClass::DmaWait)
+      continue;
     bool local = false;
     for (int d = 0; d < w; d++)
-      if (isLaunch(d) && g.nodes[d].op->channel == op.channel) local = true;
-    if (local) continue;
+      if (isLaunch(d) && g.nodes[d].op->channel == op.channel)
+        local = true;
+    if (local)
+      continue;
     for (int k = w + 1; k < n; k++) {
       bool guarded = isLaunch(k);
       if (incomingDma) {
@@ -102,9 +110,11 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
         }
       } else {
         for (const Access &a : g.footprints[k].accesses)
-          if (a.res == Res::Vmem) guarded = true;
+          if (a.res == Res::Vmem)
+            guarded = true;
       }
-      if (guarded) add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
+      if (guarded)
+        add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
     }
   }
   g.in.assign(n, {});
@@ -116,8 +126,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   return {std::move(g), {}};
 }
 
-mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(const TimingProvider &p, const std::string &name,
-                                                                      mlir::Operation *at) {
+mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
+    const TimingProvider &p, const std::string &name, mlir::Operation *at) {
   auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
     return at->emitOpError("virtual cost of ") << name << ": " << why;
   };
@@ -162,7 +172,8 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(const Timi
   for (int interval = gap.value; interval <= kMaximumInterval; ++interval) {
     auto conflict = table.value->conflict(second, b, interval);
     if (!conflict.error.empty()) return error(conflict.error);
-    if (conflict.value.empty()) return MachineOpTiming{a.doneAge + 1, interval};
+    if (conflict.value.empty())
+      return MachineOpTiming{a.doneAge + 1, interval};
   }
   return error("same-unit issue interval exceeds bounded timing search");
 }
@@ -179,9 +190,15 @@ std::string mlir::atlas::timing::validateTimingProvider(
   return {};
 }
 
-TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
+llvm::StringRef mlir::atlas::timing::canonicalTimingProviderId(llvm::StringRef id) {
+  if (id == kNpuModelTimingProviderId)
+    return kBuiltinTimingProviderId;
+  return id;
+}
+
+TimingProvider mlir::atlas::timing::builtinTimingProvider() {
   TimingProvider p;
-  p.id = kNpuModelTimingProviderId.str();
+  p.id = kBuiltinTimingProviderId.str();
   p.validateScope = [](const mlir::atlas::AtlasStream &) { return std::string{}; };
   p.footprint = footprintOf;
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b,
@@ -204,6 +221,10 @@ TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
   return p;
 }
 
+TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
+  return builtinTimingProvider();
+}
+
 namespace {
 struct Registry {
   std::mutex mutex;
@@ -213,8 +234,8 @@ struct Registry {
 Registry &registry() {
   static Registry *table = [] {
     auto *r = new Registry;
-    r->factories[kNpuModelTimingProviderId] = [](mlir::ModuleOp) {
-      return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}};
+    r->factories[kBuiltinTimingProviderId] = [](mlir::ModuleOp) {
+      return TimingRuleResult<TimingProvider>{builtinTimingProvider(), {}};
     };
     return r;
   }();
@@ -233,18 +254,19 @@ std::string mlir::atlas::timing::registerAtlasTimingProvider(
   if (!factory) return "timing provider registration requires a factory: " + id;
   Registry &r = registry();
   std::lock_guard<std::mutex> lock(r.mutex);
-  if (!r.factories.try_emplace(id, std::move(factory)).second)
+  if (!r.factories.try_emplace(canonicalTimingProviderId(id), std::move(factory)).second)
     return "timing provider is already registered: " + id;
   return {};
 }
 
 TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
     const std::string &id, mlir::ModuleOp module) {
+  llvm::StringRef canonical = canonicalTimingProviderId(id);
   TimingProviderFactory factory;
   {
     Registry &r = registry();
     std::lock_guard<std::mutex> lock(r.mutex);
-    auto found = r.factories.find(id);
+    auto found = r.factories.find(canonical);
     if (found != r.factories.end())
       factory = found->second;
   }
@@ -256,7 +278,8 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
   auto result = factory(module);
   if (!result.error.empty())
     return {{}, result.error};
-  if (result.value.id != id)
+  result.value.id = canonicalTimingProviderId(result.value.id).str();
+  if (result.value.id != canonical)
     return {{}, "timing provider factory for " + id + " returned policy " + result.value.id};
   std::string missing = validateTimingProvider(result.value);
   if (!missing.empty())

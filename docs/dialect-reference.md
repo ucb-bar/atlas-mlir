@@ -146,11 +146,14 @@ boundary only into or out of such a loop, so a PACK does not complete earlier
 transfers ([DMA across PACK](pack-dma-overlap.md)).
 
 Scheduling and timing passes take `provider=<id>` (default: the module's
-`atlas.timing_provider`, else `npu-model-rtl-match-v1`) from a registry that
+`atlas.timing_provider`, else `builtin`) from a registry that
 holds only the built-in default ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
 The selected provider supplies virtual machine-operation costs, physical
 dependence distances, issue gaps, reservations, DMA conflicts and verification.
 Unknown ids, missing rules and disagreement with retained provider metadata fail.
+The old `npu-model-rtl-match-v1` ID remains an alias for `builtin`; newly timed
+MLIR and program JSON record `builtin`. Future providers `npu-model` (observed
+model facts) and `circt-rtl` (RTL/CIRCT extraction) are currently unavailable.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 

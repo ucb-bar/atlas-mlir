@@ -322,25 +322,32 @@ constexpr unsigned kMaxQueuedDMA = 8;
 int registersOf(bool fp8) { return fp8 ? 1 : 2; }
 constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 
-FailureOr<Cost> checkedCost(Operation *at, Unit unit, int64_t busy, int64_t latency, int64_t frontend = 1,
+FailureOr<Cost> checkedCost(Operation *at, Unit unit, int64_t busy,
+                            int64_t latency, int64_t frontend = 1,
                             bool queuedDMA = false) {
   for (int64_t value : {busy, latency, frontend})
     if (value < 0 || value > std::numeric_limits<int>::max())
       return at->emitOpError("virtual cost exceeds nonnegative cycle domain");
-  Cost cost{unit, static_cast<int>(busy), static_cast<int>(latency), static_cast<int>(frontend)};
+  Cost cost{unit, static_cast<int>(busy), static_cast<int>(latency),
+            static_cast<int>(frontend)};
   cost.queuedDMA = queuedDMA;
   return cost;
 }
 
-FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at, const timing::TimingProvider &provider) {
-  auto t = timing::machineTimingOf(provider, (name + ".mxu" + Twine(unit)).str(), at);
-  if (failed(t)) return failure();
+FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at,
+                     const timing::TimingProvider &provider) {
+  auto t = timing::machineTimingOf(provider,
+                                   (name + ".mxu" + Twine(unit)).str(), at);
+  if (failed(t))
+    return failure();
   return checkedCost(at, unit ? Unit::Mxu1 : Unit::Mxu0, t->interval, t->latency);
 }
 
-FailureOr<Cost> onVpu(const std::string &name, Operation *at, const timing::TimingProvider &provider) {
+FailureOr<Cost> onVpu(const std::string &name, Operation *at,
+                     const timing::TimingProvider &provider) {
   auto t = timing::machineTimingOf(provider, name, at);
-  if (failed(t)) return failure();
+  if (failed(t))
+    return failure();
   return checkedCost(at, Unit::Vpu, t->interval, t->latency);
 }
 
@@ -357,13 +364,17 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op)) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
-    if (failed(vload)) return failure();
-    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) * (int64_t(transfer) + vload->latency));
+    if (failed(vload))
+      return failure();
+    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) *
+                                       (int64_t(transfer) + vload->latency));
   }
   if (isa<VirtualOutputBF16Op>(op)) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
-    if (failed(vstore)) return failure();
-    return blocking(op, Unit::Dma, registersOf(false) * (int64_t(vstore->latency) + transfer));
+    if (failed(vstore))
+      return failure();
+    return blocking(op, Unit::Dma,
+                    registersOf(false) * (int64_t(vstore->latency) + transfer));
   }
   // An atomic load's tile is ready once its transfer lands and its VLOADs
   // (one per register) finish. A consumer cannot start before then, so the
@@ -371,7 +382,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   // pack or store user, where insert-atlas-dma-waits will put the DMA.WAIT.
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
-    if (failed(vload)) return failure();
+    if (failed(vload))
+      return failure();
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
     int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
     int64_t loaded = int64_t(registers - 1) * vload->interval + vload->latency;
@@ -379,7 +391,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   }
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
-    if (failed(vstore)) return failure();
+    if (failed(vstore))
+      return failure();
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int64_t staged = int64_t(registers - 1) * vstore->interval + vstore->latency;
@@ -389,7 +402,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());
     FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op, provider);
-    if (failed(push)) return failure();
+    if (failed(push))
+      return failure();
     push->unit = unit ? Unit::Weights1 : Unit::Weights0;
     return push;
   }
@@ -409,19 +423,27 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
     FailureOr<Cost> push = onMxu("vmatpush.weight", unit, op, provider);
-    if (failed(push)) return failure();
+    if (failed(push))
+      return failure();
     FailureOr<Cost> multiply = onMxu("vmatmul", unit, op, provider);
-    if (failed(multiply)) return failure();
+    if (failed(multiply))
+      return failure();
     FailureOr<Cost> pop = onMxu("vmatpop.bf16.acc", unit, op, provider);
-    if (failed(pop)) return failure();
-    return blocking(op, unit ? Unit::Mxu1 : Unit::Mxu0, int64_t(push->latency) + multiply->latency + pop->latency);
+    if (failed(pop))
+      return failure();
+    return blocking(op, unit ? Unit::Mxu1 : Unit::Mxu0,
+                    int64_t(push->latency) + multiply->latency + pop->latency);
   }
   if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp>(op))
-    return onVpu(timing::vpuMnemonic(op->getAttrOfType<StringAttr>("kind").str()), op, provider);
-  if (isa<VirtualVPUSplatOp>(op)) return onVpu("vli.all", op, provider);
+    return onVpu(
+        timing::vpuMnemonic(op->getAttrOfType<StringAttr>("kind").str()), op,
+        provider);
+  if (isa<VirtualVPUSplatOp>(op))
+    return onVpu("vli.all", op, provider);
   if (isa<VirtualXLUTransposeOp>(op)) {
     auto t = timing::machineTimingOf(provider, "vtrpose.xlu", op);
-    if (failed(t)) return failure();
+    if (failed(t))
+      return failure();
     return checkedCost(op, Unit::Xlu, t->interval, t->latency);
   }
   if (isa<VirtualPackFP8Op>(op)) {
@@ -430,23 +452,32 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // so a row takes a load per load-path interval, then the last word's load
     // and store, the destination step, and the back-edge with its delay slot.
     auto pack = timing::machineTimingOf(provider, "vpack.bf16.fp8", op);
-    if (failed(pack)) return failure();
+    if (failed(pack))
+      return failure();
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
-    if (failed(vstore)) return failure();
+    if (failed(vstore))
+      return failure();
     auto lw = timing::machineTimingOf(provider, "lw", op);
-    if (failed(lw)) return failure();
+    if (failed(lw))
+      return failure();
     auto sw = timing::machineTimingOf(provider, "sw", op);
-    if (failed(sw)) return failure();
+    if (failed(sw))
+      return failure();
     auto vload = timing::machineTimingOf(provider, "vload", op);
-    if (failed(vload)) return failure();
+    if (failed(vload))
+      return failure();
     constexpr int rowWords = kPackRelayoutRowWords, rowControl = 3;
     int rows = registersOf(true) * kRegisterBytes / 4 / rowWords;
-    int64_t row = int64_t(rowWords - 1) * lw->interval + lw->latency + sw->latency + rowControl;
-    return blocking(op, Unit::Lsu, int64_t(pack->latency) + vstore->latency + rows * row + vload->latency);
+    int64_t row = int64_t(rowWords - 1) * lw->interval + lw->latency +
+                  sw->latency + rowControl;
+    return blocking(op, Unit::Lsu,
+                    int64_t(pack->latency) + vstore->latency + rows * row +
+                        vload->latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
   auto scalar = timing::machineTimingOf(provider, "addi", op);
-  if (failed(scalar)) return failure();
+  if (failed(scalar))
+    return failure();
   return checkedCost(op, Unit::Scalar, 1, scalar->latency);
 }
 
@@ -612,7 +643,8 @@ private:
 
 class BlockScheduler {
 public:
-  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness, std::vector<Cost> nodeCosts)
+  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
+                 std::vector<Cost> nodeCosts)
       : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)) {
     unsigned n = g.nodes.size();
     // The longest path from each node to the block's end, counting its own
@@ -763,8 +795,11 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
 // source order does not, or when it is faster without giving up a fit the
 // source order has. The schedule is the fastest fitting list schedule over a
 // few load lookaheads. A random order is taken as it is.
-LogicalResult scheduleBlock(Block &block, unsigned index, const Liveness &liveness, const KindCounts &capacity,
-                            std::optional<unsigned> randomSeed, const timing::TimingProvider &provider) {
+LogicalResult scheduleBlock(Block &block, unsigned index,
+                            const Liveness &liveness,
+                            const KindCounts &capacity,
+                            std::optional<unsigned> randomSeed,
+                            const timing::TimingProvider &provider) {
   FailureOr<BlockGraph> graph = buildGraph(block);
   if (failed(graph))
     return failure();
@@ -773,7 +808,8 @@ LogicalResult scheduleBlock(Block &block, unsigned index, const Liveness &livene
   int64_t cycleBound = 0;
   for (Operation *op : g.nodes) {
     FailureOr<Cost> cost = costOf(op, provider);
-    if (failed(cost)) return failure();
+    if (failed(cost))
+      return failure();
     // Bound heights and cycle arithmetic by conservatively serializing all cost fields.
     cycleBound += int64_t(cost->busy) + cost->latency + cost->frontend;
     if (cycleBound > std::numeric_limits<int>::max())
@@ -858,16 +894,19 @@ struct ScheduleAtlasVirtualPass
                      "testing; negative disables"),
       llvm::cl::init(-1)};
 
-  Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained "
-                                              "atlas.timing_provider, else npu-model-rtl-match-v1)"), llvm::cl::init("")};
+  Option<std::string> provider{
+      *this, "provider",
+      llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
+      llvm::cl::init("")};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
-    FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
-    if (failed(selected)) return signalPassFailure();
+    FailureOr<timing::TimingProvider> selected =
+        selectAtlasTimingProvider(module, provider.getValue());
+    if (failed(selected))
+      return signalPassFailure();
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
@@ -894,7 +933,9 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, *selected))) return signalPassFailure();
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed,
+                                 *selected)))
+          return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
     // is a dependence the graph is missing.
