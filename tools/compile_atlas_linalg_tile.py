@@ -808,7 +808,11 @@ def compile_program(virtual: str, output: Path, atlas: Path,
                     llvm: Path | None = None, linker: Path | None = None) -> dict[str, Any]:
     atlas_opt = str(atlas / "atlas-opt")
     atlas_emit = str(atlas / "atlas-emit")
-    machine = run([atlas_opt, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits", "--insert-atlas-delays", "-"],
+    machine = run([atlas_opt, "--verify-atlas-virtual-stream",
+                   "--lower-atlas-virtual-inputs-to-dma",
+                   "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
+                   "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
+                   "--schedule-atlas-stream", "--verify-atlas-timing", "-"],
                   input_text=virtual).rstrip() + "\n"
     require("atlas.generated_from_virtual" in machine,
             "virtual lowerer did not mark the generated physical stream")

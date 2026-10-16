@@ -19,6 +19,19 @@ Hardware facts refer to the pinned RTL (`ucb-bar/atlas-npu`
 | 6. Emit | words, word map, program JSON | `atlas-emit`, `--map-json`, `--program-json` |
 | 7. LLVM | one inline-asm word block | `--convert-atlas-to-llvm-calls`, `--finalize-atlas-llvm-calls`, `mlir-translate`, `llc`, `ld.lld` |
 
+### Exposing input DMA
+
+`--lower-atlas-virtual-inputs-to-dma` replaces boundary `virtual_input_fp8`
+and `virtual_input_bf16` operations with explicit virtual DMA loads before
+`--schedule-atlas-virtual`. It resolves each address as
+`atlas.input_dram_base + index * 2048`, loads 1024 bytes for FP8 or 2048 for
+BF16, and preserves the physical tile layout and state chain. It checks the
+original input/output DRAM windows before removing the input indices.
+The existing scheduler may then reorder independent loads and overlap their
+transfers with PACK; allocation and wait insertion assign staging windows,
+channels, and waits. Boundary output operations retain their existing behavior.
+The captured Linalg shell build enables this pass by default.
+
 ### Driver
 
 [`tools/lower_atlas_program.py`](../tools/lower_atlas_program.py) runs steps 1
