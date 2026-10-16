@@ -27,6 +27,7 @@ uv pip install --python /path/to/venv/bin/python --no-deps -e .
 | Variable | Meaning |
 | --- | --- |
 | `ATLAS_OOT_BIN_DIR` | Directory with `atlas-opt` and `atlas-emit`. Default `<target-source>/build/bin`. |
+| `ATLAS_NATIVE_PIPELINE` | `mandatory` (default) or `optimized`. `optimized` ships a rescheduled program that only the compiler verifiers and encoding checks have examined; the native semantic checks ran on the mandatory lowering of the same virtual program, saved beside it as `mandatory-qualification-*`. |
 | `MERLIN_NATIVE_ROOT` | Merlin checkout, for tests. Native tests skip without it. |
 | `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT` | AtlasCore simulator for opt-in core tests. |
 
@@ -247,8 +248,9 @@ launch tables, and MLIR C-interface callbacks for a lowered host model
 
 ## Test status
 
-Unit tests need Merlin and the built tools, no simulator. `npu_model` runs need
-a DMA word-index fix to the model ([hardware-status.md](hardware-status.md)).
+Unit tests need Merlin and the built tools, no simulator. Compiled attention+MLP
+programs were checked with unmodified `npu_model` main
+`9e6313bddecb8ba936206eb347f5cd4e5335282c` and `numerics="rtl"`.
 "RTL core" is a standalone AtlasCore with a test-side TileLink DRAM responder.
 
 | Example | Unit tests | npu_model | RTL core | FPGA / SoC |

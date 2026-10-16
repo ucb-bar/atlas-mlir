@@ -77,10 +77,12 @@ The example hosts call this hook when built with `-DATLAS_PLATFORM_CACHE_SYNC=1`
 
 ## Graph mailbox
 
-`host_graph_mailbox.c` turns the host ELF into a small server. It loads the
-Atlas program once, then waits for requests in a static `atlas_graph_mailbox`
-(64-byte aligned). The build writes the mailbox address and offsets to
-`host/handoff-status.json`. All fields are little-endian.
+`host_graph_mailbox.c` initializes the host and graph binding once, then waits
+for requests in a static `atlas_graph_mailbox` (64-byte aligned). Each graph
+invocation converts the f32 inputs, reloads the program into IMEM, stages inputs
+and constants, starts Atlas, waits for ECALL, then reads and decodes outputs.
+The build writes the mailbox address and offsets to `host/handoff-status.json`.
+All fields are little-endian.
 
 | Offset | Size | Field | Written by |
 | --- | --- | --- | --- |
@@ -115,7 +117,7 @@ Protocol:
 | `0xffffffff` | Request in progress. |
 | `0x0001SSRR` | Tile failure: `SS` = `atlas_model_tile_status`, `RR` = `atlas_host_result`. Host stops at WFI. |
 | `0x0002000R` | `atlas_host_init` failed with result `R`. Host stops. |
-| `0x00030000` | Graph binding (program load) failed. Host stops. |
+| `0x00030000` | Graph binding setup failed. Host stops. |
 | `0x00040000` | A guard word changed during the request. |
 
 The host spins on the mailbox; there is no interrupt. A reused request ID is
