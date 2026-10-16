@@ -147,6 +147,29 @@ BF16_BINARY_MODES = {
 TILE_BYTES = 2048
 DRAM_BASE = 0x90000000
 DRAM_SLOTS = 128
+NATIVE_PIPELINES = {
+    "mandatory": (
+        "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
+        "--insert-atlas-delays",
+    ),
+    "optimized": (
+        "--verify-atlas-virtual-stream", "--lower-atlas-virtual-inputs-to-dma",
+        "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
+        "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
+        "--verify-atlas-machine-stream", "--schedule-atlas-stream",
+        "--verify-atlas-timing", "--verify-atlas-generated-schedule",
+    ),
+}
+NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-stream")
+
+
+def _native_pipeline() -> str:
+    pipeline = os.environ.get("ATLAS_NATIVE_PIPELINE", "mandatory")
+    if pipeline not in NATIVE_PIPELINES:
+        raise NativeCompilationError(
+            "unsupported_semantics", "ATLAS_NATIVE_PIPELINE must be mandatory or optimized"
+        )
+    return pipeline
 
 
 def _scaled_pack_code(node) -> int | None:
@@ -184,6 +207,8 @@ class _MaterializedCandidate:
     input_address: int
     output_address: int
     realized_allocation: AllocationResult | None = None
+    qualification_machine: str | None = None
+    qualification_program: dict | None = None
 
 
 def _bf16_tile_request(request: KernelRequest) -> bool:
@@ -1374,14 +1399,17 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
 
 
 def _pack_relayout_effects() -> list[tuple]:
-    effects: list[tuple] = []
-    for word in range(4):
-        for half in range(2):
-            source = 131072 + half * 512 + word * 4
-            destination = 132096 + half * 16 + word * 4
-            temporary = 16 + half
-            effects.extend((("lw", temporary, source), ("sw", temporary, destination)))
-    effects.append(("blt", 13, 14, 1, 32, -56))
+    """Current selected scalar copy: two live temporaries overlap load/store."""
+    def load(copy: int) -> tuple:
+        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 2) * 4)
+
+    def store(copy: int) -> tuple:
+        return ("sw", 16 + copy % 2, 132096 + (copy % 2) * 16 + (copy // 2) * 4)
+
+    effects = [load(0)]
+    for copy in range(1, 8):
+        effects.extend((load(copy), store(copy - 1)))
+    effects.extend((store(7), ("blt", 13, 14, 1, 32, -54)))
     return effects
 
 
@@ -1427,7 +1455,7 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
                       and row["fields"].get("kind") == "lw")
     # ScalarCore's PC is word-indexed. The RISC-V B immediate encodes halfword
     # units, so the selected emitter uses two, not four, per instruction word.
-    if branch - first_load != 28 or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch) or (
+    if branch - first_load != 27 or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch) or (
         branch + 1 >= len(rows) or rows[branch + 1]["operation"] != "atlas.alu_imm"
         or any(rows[branch + 1]["fields"].get(key) != value for key, value in
                {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
@@ -1439,7 +1467,7 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
     immediate = immediate - 8192 if immediate & 4096 else immediate
     if (branch_word & 0x7f, (branch_word >> 12) & 7,
         (branch_word >> 15) & 31, (branch_word >> 20) & 31,
-        immediate) != (0x63, 4, 13, 14, -56):
+        immediate) != (0x63, 4, 13, 14, -54):
         raise NativeCompilationError("unqualified_target", "pack loop word has a wrong branch target")
     # Require 32 iterations, 16-byte advancement in each source half and
     # 32-byte advancement in the destination. The one-iteration effects above
@@ -1451,8 +1479,8 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
                 if row["operation"] == "atlas.alu_imm"]
     if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
         for row in advances] != [
-            ("addi", 10, 10, 16), ("addi", 11, 11, 16),
-            ("addi", 12, 12, 32), ("addi", 13, 13, 1),
+            ("addi", 13, 13, 1), ("addi", 10, 10, 16),
+            ("addi", 11, 11, 16), ("addi", 12, 12, 32),
         ]:
         raise NativeCompilationError("unqualified_target", "pack loop does not advance every row")
     cycle = 0
@@ -2383,28 +2411,28 @@ def _check_interlayer_pack_words(program: dict, pack_registers: tuple[tuple[int,
             word & 0x7f) != (0x44, source_pair, 3, destination, 0x57):
             raise NativeCompilationError("unqualified_target", "interlayer pack word changed")
     for branch in branches:
-        first_load = branch - 28
+        first_load = branch - 27
         if (first_load < 0 or rows[first_load]["operation"] != "atlas.scalar_load"
                 or rows[first_load]["fields"].get("kind") != "lw"
                 or branch + 1 >= len(rows)
                 or rows[branch + 1]["operation"] != "atlas.alu_imm"
                 or any(rows[branch + 1]["fields"].get(key) != value for key, value in
                        {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
-                or rows[branch]["fields"].get("offset_bytes") != -56):
+                or rows[branch]["fields"].get("offset_bytes") != -54):
             raise NativeCompilationError("unqualified_target", "interlayer pack loop changed")
         word = rows[branch]["word_u32"]
         immediate = (((word >> 31) & 1) << 12) | (((word >> 7) & 1) << 11) | (
             ((word >> 25) & 0x3f) << 5) | (((word >> 8) & 0xf) << 1)
         immediate = immediate - 8192 if immediate & 4096 else immediate
         if (word & 0x7f, (word >> 12) & 7, (word >> 15) & 31,
-            (word >> 20) & 31, immediate) != (0x63, 4, 13, 14, -56):
+            (word >> 20) & 31, immediate) != (0x63, 4, 13, 14, -54):
             raise NativeCompilationError("unqualified_target", "interlayer pack branch word changed")
         advances = [row["fields"] for row in rows[first_load:branch]
                     if row["operation"] == "atlas.alu_imm"]
         if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
             for row in advances] != [
-                ("addi", 10, 10, 16), ("addi", 11, 11, 16),
-                ("addi", 12, 12, 32), ("addi", 13, 13, 1),
+                ("addi", 13, 13, 1), ("addi", 10, 10, 16),
+                ("addi", 11, 11, 16), ("addi", 12, 12, 32),
         ]:
             raise NativeCompilationError("unqualified_target", "interlayer pack row increments changed")
 
@@ -3060,6 +3088,7 @@ class AtlasNativeBinding:
         destination: Path,
         limits: SearchLimits,
     ) -> dict[str, object]:
+        pipeline = _native_pipeline()
         if request.lowering_policy != "diagnostic":
             raise NativeCompilationError(
                 "unqualified_target", "selected FPGA bitstream and host coherence are not qualified"
@@ -3424,10 +3453,8 @@ class AtlasNativeBinding:
                 pack_scale_code=pack_scale_code,
                 pack_scale_codes=pack_scale_codes,
             )
-            machine = _run([str(atlas_opt), "--lower-atlas-virtual-to-machine",
-                            "--insert-atlas-dma-waits", "--insert-atlas-delays", "-"], input_text=virtual)
-            _run([str(atlas_opt), "--verify-atlas-generated-schedule",
-                  "--verify-atlas-machine-stream", "-"], input_text=machine)
+            machine = _run([str(atlas_opt), *NATIVE_PIPELINES["mandatory"], "-"], input_text=virtual)
+            _run([str(atlas_opt), *NATIVE_CHECKS, "-"], input_text=machine)
             program = json.loads(_run([str(atlas_emit), "--program-json", "-"], input_text=machine))
             if program.get("selected_rtl_revision") != RTL_REVISION:
                 raise NativeCompilationError("unqualified_target", "emitter has a different selected RTL")
@@ -3516,6 +3543,16 @@ class AtlasNativeBinding:
                                  output_address=output_address, activation=source_reg,
                                  weight=weight_reg, pair=pair,
                                  relu_pair=relu_pair if mxu_relu else None)
+            qualification_machine = qualification_program = None
+            if pipeline == "optimized":
+                # Semantic checks above qualify this virtual DAG's mandatory
+                # realization; generated checks qualify optimized scheduling.
+                qualification_machine, qualification_program = machine, program
+                machine = _run([str(atlas_opt), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
+                _run([str(atlas_opt), *NATIVE_CHECKS, "-"], input_text=machine)
+                program = json.loads(_run([str(atlas_emit), "--program-json", "-"], input_text=machine))
+                if program.get("selected_rtl_revision") != RTL_REVISION:
+                    raise NativeCompilationError("unqualified_target", "optimized emitter has a different selected RTL")
             instructions = program["instructions"]
             words = [row["word_u32"] for row in instructions]
             if not words or words[-1] != 0x73 or 0x73 in words[:-1] or len(words) * 4 > 0x20000:
@@ -3531,6 +3568,8 @@ class AtlasNativeBinding:
                 program=program, words=words, tool_hashes=tool_hashes,
                 input_address=input_address, output_address=output_address,
                 realized_allocation=realized_allocation,
+                qualification_machine=qualification_machine,
+                qualification_program=qualification_program,
             )
 
         def accept_candidate(selected: SearchResult) -> tuple[bool, str] | MaterializationDecision:
@@ -3775,6 +3814,7 @@ class AtlasNativeBinding:
             "order": list(selected.allocation.order),
             "issue_times": [list(item) for item in selected.allocation.issue_times],
             "schedule_scope": "native_candidate_virtual",
+            "physical_assignment_scope": "mandatory_qualification",
             "candidate_attempts": selected.candidate_attempts,
             "ordering_attempts": selected.ordering_attempts,
             "rejected_materialization": selected.rejected_materialization,
@@ -3804,9 +3844,19 @@ class AtlasNativeBinding:
             for name in ("native-selection.json", "atlas-virtual.mlir", "atlas-machine.mlir",
                          "physical-program.json")
         }
+        if materialized.qualification_machine is not None:
+            for name, payload in (
+                ("mandatory-qualification-machine.mlir", materialized.qualification_machine),
+                ("mandatory-qualification-program.json",
+                 json.dumps(materialized.qualification_program, sort_keys=True, indent=2) + "\n"),
+            ):
+                (destination / name).write_text(payload)
+                stage_artifacts[name] = _sha256((destination / name).read_bytes())
         stage_artifacts.update({row["path"]: row["sha256"] for row in constant_rows})
         manifest: dict[str, object] = {
             "schema": "atlas.native_tile_compilation.v6",
+            "lowering_pipeline": pipeline,
+            "semantic_qualification_pipeline": "mandatory",
             "artifact_kind": "program", "engine": "merlin_native",
             "qualification_scope": "diagnostic_only",
             "compile_mode": "diagnostic",
@@ -3820,6 +3870,7 @@ class AtlasNativeBinding:
             "ordering_attempts": selected.ordering_attempts,
             "rejected_materialization": selected.rejected_materialization,
             "selected_registers": selected_registers,
+            "selected_registers_scope": "mandatory_qualification",
             "binary_sha256": _sha256(binary),
             "execution_plan_sha256": _sha256(plan_bytes),
             "virtual_sha256": _sha256(virtual.encode()),

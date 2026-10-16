@@ -168,6 +168,19 @@ class NativeBindingTest(unittest.TestCase):
             self.binding.profile().target_identity, lowering_policy="diagnostic",
         )
 
+    def test_native_optimized_pipeline_compiles_and_tracks_qualification(self) -> None:
+        from merlin.semantic_compiler.search import SearchLimits
+
+        with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized"):
+            manifest = self.compile_verified(
+                self.request(), fixed_inputs={"x": 3}, fixed_outputs=(35,),
+                destination=self.work / "optimized", limits=SearchLimits(),
+            )
+        self.assertEqual(manifest["lowering_pipeline"], "optimized")
+        self.assertEqual(manifest["selected_registers_scope"], "mandatory_qualification")
+        self.assertIn("mandatory-qualification-machine.mlir", manifest["stage_artifacts"])
+        self.assertIn("mandatory-qualification-program.json", manifest["stage_artifacts"])
+
     def test_native_bf16_mul_selects_checks_and_emits(self) -> None:
         from atlas_mlir_native.binding import check_bf16_tile_stream
         from atlas_mlir_native.reference import evaluate_bf16_mul
@@ -1468,7 +1481,7 @@ class NativeBindingTest(unittest.TestCase):
                               output_address=0x90011800, scale_code=code)
             self.assertEqual(audit_program(
                 load_inventory(), program, (destination / "program.bin").read_bytes()
-            )["word_count"], 76)
+            )["word_count"], 75)
             plan = json.loads((destination / "execution_plan.json").read_text())
             self.assertEqual((plan["operation"], plan["numerical_policy"], plan["pack_scale_code"]),
                              ("bf16_to_fp8_scaled_pack", SCALED_PACK_POLICY, code))
@@ -1602,7 +1615,7 @@ class NativeBindingTest(unittest.TestCase):
             destination=destination, limits=SearchLimits(),
         )
         program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 76)
+        self.assertEqual(program["word_count"], 75)
         self.assertEqual(sum(row["operation"] == "atlas.vpu_pack" for row in program["instructions"]), 1)
         self.assertEqual(manifest["selected_registers"], [32, 33, 0])
         self.assertEqual(json.loads((destination / "execution_plan.json").read_text())[
