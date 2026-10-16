@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasModelTiming.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasToLLVM.h"
 #include "Atlas/AtlasStreamVerification.h"
@@ -32,6 +33,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerInsertAtlasDMAWaitsPass();
   mlir::atlas::registerVerifyAtlasGeneratedSchedulePass();
   mlir::atlas::registerVerifyAtlasTimingPass();
+  mlir::atlas::registerSelectAtlasModelEvidencePass();
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Atlas dialect verifier\n", registry));
 }

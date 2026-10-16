@@ -118,6 +118,18 @@ int main(int argc, char **argv) {
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
       root["timing_provider"] = timing::canonicalTimingProviderId(provider.getValue()).str();
+    if (auto selected = (*module)->getAttrOfType<DictionaryAttr>("atlas.model_evidence")) {
+      llvm::json::Object evidence;
+      for (NamedAttribute entry : selected) {
+        auto value = dyn_cast<StringAttr>(entry.getValue());
+        if (!value) {
+          module->emitError("atlas.model_evidence values must be strings");
+          return 1;
+        }
+        evidence[entry.getName().str()] = value.getValue().str();
+      }
+      root["model_evidence"] = std::move(evidence);
+    }
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }
