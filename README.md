@@ -62,6 +62,7 @@ to a device program and host ELF, and tiled matmuls launched from a host.
 | --- | --- |
 | [Dialect reference](docs/dialect-reference.md) | Operations, verifiers, passes, tools, adding a pass. |
 | [Compiler pipeline](docs/compiler-pipeline.md) | Virtual lowering, interpreter, physical program, DMA, LLVM handoff. |
+| [Guarded PACK proposal](docs/guarded-pack.md) | Opt-in unit-scale conversion with explicit finite-source contracts and safe fallback. |
 | [Native Merlin binding](docs/native-merlin-binding.md) | Compiling graphs through Merlin. |
 | [Host launch](docs/host-launch.md) | Host runtime, memory map, mailbox, board builds. |
 | [Hardware status](docs/hardware-status.md) | Which instructions have run on the RTL, and known RTL/model differences. |

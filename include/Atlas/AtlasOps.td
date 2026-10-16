@@ -162,7 +162,15 @@ def Atlas_VirtualMXUReadoutFP8Op :
 
 def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8", [Pure]> {
   let summary = "Convert a logical BF16 tile to a logical FP8 MXU operand tile";
-  let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
+  let description = [{
+    Optional `finite_src` is a caller precondition: every lane of this exact
+    SSA source must be finite on every invocation. It does not check runtime
+    values and must not be inferred from sample inputs. Without that promise,
+    the operation accepts all BF16 encodings, including NaNs. The guarded PACK
+    lowering may exploit the promise only when explicitly requested.
+  }];
+  let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code,
+                       OptionalAttr<UnitAttr>:$finite_src);
   let results = (outs Atlas_VirtualFP8Type:$result);
   let hasVerifier = 1;
 }
