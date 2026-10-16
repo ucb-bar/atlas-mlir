@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,18 +18,6 @@ ASSEMBLY = ROOT / "test/examples/fence_scalar.S"
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
 
 
-def _assembler():
-    root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
-    if not root:
-        raise unittest.SkipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-    spec = importlib.util.spec_from_file_location(
-        "selected_fence_assembler", pathlib.Path(root) / "assembler.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _words() -> tuple[int, ...]:
     return tuple(int(line, 16) for line in subprocess.check_output(
         [str(BIN / "atlas-emit"), str(SOURCE)], text=True).splitlines())
@@ -37,12 +25,13 @@ def _words() -> tuple[int, ...]:
 
 class FenceReferenceTest(unittest.TestCase):
     def test_typed_words_match_selected_assembler_and_llvm_object(self) -> None:
-        assembler = _assembler()
+        if not os.environ.get("ATLAS_ASSEMBLER_ROOT"):
+            self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
         words = _words()
         self.assertEqual(len(words), 6)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
         self.assertEqual(words, _object_words(SOURCE))
-        self.assertEqual(words[2], assembler.FENCE())
+        self.assertEqual(words[2], assembler.word("fence"))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  text=True, capture_output=True, check=True)
         reparsed = subprocess.run([str(BIN / "atlas-opt"), "-"],
@@ -66,7 +55,6 @@ class FenceReferenceTest(unittest.TestCase):
         for name in ("scalar/pc_ctrl/io_s1_pc", "scalar/s1_fire",
                      "scalar/delayCounter", "csrfile/reg_dbg0", "csrfile/reg_dbg1"):
             self.assertIn(f'"name": "{name}"', state.read_text())
-        assembler = _assembler()
         words = _object_words(SOURCE)
         guards = ((0x90000000, b"\xA5" * 32),
                   (0x90000400, b"\x5A" * 32))
@@ -85,8 +73,8 @@ class FenceReferenceTest(unittest.TestCase):
             cosim_atlas.CosimCore = SelectedCore
             try:
                 observed: dict[str, tuple[int, list[tuple[int, ...]]]] = {}
-                for name, opcode in (("fence", assembler.FENCE()),
-                                     ("nop", assembler.NOP())):
+                for name, opcode in (("fence", assembler.word("fence")),
+                                     ("nop", assembler.word("nop"))):
                     with self.subTest(name=name):
                         program = list(words)
                         program[2] = opcode

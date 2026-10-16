@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import pathlib
@@ -11,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import atlas_assembler as assembler
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -70,14 +71,7 @@ class BranchReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for the independent assembler")
-        assembler = pathlib.Path(root) / "assembler.py"
-        self.assertTrue(assembler.is_file())
-        spec = importlib.util.spec_from_file_location("atlas_reference_assembler", assembler)
-        self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        self.assertEqual(tuple(module.assemble(ASSEMBLY.read_text())), _emitted())
+        self.assertEqual(tuple(assembler.assemble(ASSEMBLY.read_text())), _emitted())
 
     def test_riscv_object_program_words_match_independent_emitter(self) -> None:
         self.assertEqual(_object_words(), _emitted())

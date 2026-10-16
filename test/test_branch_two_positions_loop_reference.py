@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import pathlib
@@ -11,6 +10,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,16 +30,11 @@ class BranchTwoPositionsLoopReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_loop_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _emitted()
         self.assertEqual(len(words), 14)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(words[2], assembler.BEQ(0, 0, 3))
-        self.assertEqual(words[10], assembler.BLT(12, 14, -1))
+        self.assertEqual(words[2], assembler.word("beq x0, x0, 3"))
+        self.assertEqual(words[10], assembler.word("blt x12, x14, -1"))
         self.assertEqual(_object_words(SOURCE), words)
         parsed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                 text=True, capture_output=True, check=True)

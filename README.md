@@ -40,6 +40,24 @@ CTest runs the portable tests with no hardware. Tests that run the RTL need
 skip. To run the Python tests against another build, set `ATLAS_OOT_BIN_DIR` to
 its `bin` directory.
 
+`ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
+The shared test helper runs canonical npu_model assembly in a Python 3.14
+subprocess; CTest keeps its own Python interpreter and test dependencies.
+Initialize Atlas's `npu-model` submodule and install `uv`, then prepare its
+locked dependencies outside the source tree:
+
+```sh
+export ATLAS_ASSEMBLER_ROOT=/path/to/atlas-npu/baremetal
+export NPU_MODEL_DIR=/path/to/atlas-npu/npu-model
+export UV_PROJECT_ENVIRONMENT="$PWD/out/assembler-venv"
+uv sync --locked --no-install-project --project "$NPU_MODEL_DIR" --python 3.14
+ctest --test-dir build --output-on-failure
+```
+
+`NPU_MODEL_DIR` defaults to Atlas's sibling `npu-model` directory and must
+match its gitlink. A selected but missing tool or dependency fails the test.
+These assembler revisions are separate from the recorded RTL/model evidence.
+
 ## Quick start
 
 ```sh

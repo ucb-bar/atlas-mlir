@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import struct
@@ -11,6 +10,7 @@ import sys
 import unittest
 from fractions import Fraction
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -109,16 +109,11 @@ class VpuAddReferenceTest(unittest.TestCase):
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_vadd_assembler", pathlib.Path(selected_root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = tuple(int(line, 16) for line in subprocess.check_output(
             [str(BIN / "atlas-emit"), str(SOURCE)], text=True).splitlines())
         self.assertEqual(len(emitted), 49)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[31], assembler.VADD_BF16(4, 0, 2))
+        self.assertEqual(emitted[31], assembler.word("vadd.bf16 m4, m0, m2"))
         self.assertEqual(emitted, _object_words(SOURCE))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)

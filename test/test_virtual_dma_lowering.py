@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import importlib.util
 from itertools import product
 import os
-from pathlib import Path
 import re
 import unittest
 
+import atlas_assembler as assembler
 from test_virtual_dma import (
     STATE, constants, copy, dma_load, dma_store, tile, wrap,
 )
@@ -702,29 +701,28 @@ class VirtualDMALoweringTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location("selected_virtual_dma_assembler", Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for fmt in ("fp8", "bf16"):
             for entry in instructions(lower(copy(fmt))):
                 operation, fields = entry["operation"], entry["fields"]
                 if operation == "atlas.dma":
                     if fields["direction"] == "load":
-                        name, args = "DMA_LOAD", (fields["reg"], fields["dram"], fields["size"], fields["channel"])
+                        text = (f'dma.load x{fields["reg"]}, x{fields["dram"]}, '
+                                f'x{fields["size"]}, ch{fields["channel"]}')
                     else:
-                        name, args = "DMA_STORE", (fields["dram"], fields["reg"], fields["size"], fields["channel"])
+                        text = (f'dma.store x{fields["dram"]}, x{fields["reg"]}, '
+                                f'x{fields["size"]}, ch{fields["channel"]}')
                 elif operation == "atlas.dma_wait":
-                    name, args = "DMA_WAIT", (fields["channel"],)
+                    text = f'dma.wait ch{fields["channel"]}'
                 elif operation == "atlas.dma_config":
-                    name, args = "DMA_CONFIG", (fields["base_reg"], fields["channel"])
+                    text = f'dma.config x{fields["base_reg"]}, ch{fields["channel"]}'
                 elif operation in ("atlas.vload", "atlas.vstore"):
-                    name = "VLOAD" if operation == "atlas.vload" else "VSTORE"
-                    args = (fields["dst" if operation == "atlas.vload" else "src"], fields["base"], fields["offset"])
+                    register = fields["dst" if operation == "atlas.vload" else "src"]
+                    mnemonic = "vload" if operation == "atlas.vload" else "vstore"
+                    text = f'{mnemonic} m{register}, {fields["offset"]}(x{fields["base"]})'
                 else:
                     continue
-                with self.subTest(fmt=fmt, operation=name):
-                    self.assertEqual(entry["word_u32"], getattr(assembler, name)(*args))
+                with self.subTest(fmt=fmt, operation=operation):
+                    self.assertEqual(entry["word_u32"], assembler.word(text))
 
 
 if __name__ == "__main__":

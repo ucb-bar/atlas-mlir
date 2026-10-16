@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import random
@@ -12,6 +11,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_numerics import bf16, fp8, round_bf16
 from test_mxu_reference import _object_words
 
@@ -71,16 +71,11 @@ class MXU1ContinuationReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_mxu1_k2_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _emitted()
         self.assertEqual(len(words), 57)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(words[19], assembler.VMATMUL_MXU1(0, 0, 0))
-        self.assertEqual(words[37], assembler.VMATMUL_ACC_MXU1(0, 2, 0))
+        self.assertEqual(words[19], assembler.word("vmatmul.mxu1 acc0, m0, w0"))
+        self.assertEqual(words[37], assembler.word("vmatmul.acc.mxu1 acc0, m2, w0"))
         self.assertEqual(_object_words(SOURCE), words)
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)

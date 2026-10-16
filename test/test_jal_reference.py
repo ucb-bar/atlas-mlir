@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,16 +28,11 @@ class JALReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_jal_assembler", pathlib.Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _emitted()
         self.assertEqual(len(words), 8)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
         self.assertEqual(words, _object_words(SOURCE))
-        self.assertEqual(words[1], assembler.JAL(10, 4))
+        self.assertEqual(words[1], assembler.word("jal x10, 4"))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  text=True, capture_output=True, check=True)
         reparsed = subprocess.run([str(BIN / "atlas-opt"), "-"],
@@ -76,7 +71,7 @@ class JALReferenceTest(unittest.TestCase):
                 "ATLAS_LLVM_BIN", "ATLAS_RTL_ROOT", "ATLAS_ASSEMBLER_ROOT")
         if not all(os.environ.get(key) for key in keys):
             self.skipTest("set selected-source-linked ARC, LLVM, ModeLIR, RTL and assembler paths")
-        model, state, modelir, _, rtl, assembler_root = (
+        model, state, modelir, _, rtl, _ = (
             pathlib.Path(os.environ[key]).resolve(strict=True) for key in keys)
         self.assertEqual(subprocess.check_output(
             ["git", "-C", str(rtl), "rev-parse", "HEAD"], text=True).strip(), RTL_REVISION)
@@ -86,11 +81,6 @@ class JALReferenceTest(unittest.TestCase):
         self.assertIn("val link_value = s1_pc + 1.U", scalar)
         self.assertIn("val delay_slot_pending", pc)
         self.assertIn("scalar/regfile/regs_10", state.read_text())
-        spec = importlib.util.spec_from_file_location(
-            "selected_jal_assembler_runtime", assembler_root / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _object_words(SOURCE)
         guards = ((0x90000000, b"\xA5" * 32),
                   (0x90000400, b"\x5A" * 32))
@@ -111,7 +101,7 @@ class JALReferenceTest(unittest.TestCase):
                 for displacement_words, expected_marker in ((4, 3), (2, 6)):
                     with self.subTest(displacement_words=displacement_words):
                         program = list(words)
-                        program[1] = assembler.JAL(10, displacement_words)
+                        program[1] = assembler.word(f"jal x10, {displacement_words}")
                         observed: dict[str, int] = {}
 
                         def on_cycle(core: SelectedCore) -> None:
