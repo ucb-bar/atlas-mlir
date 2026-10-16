@@ -198,12 +198,12 @@ class CapturedAttentionMLPImportTest(unittest.TestCase):
                                         "--program-json").stdout)["instructions"]
         scaled_words = json.loads(run("atlas-emit", machine,
                                       "--program-json").stdout)["instructions"]
-        self.assertEqual(len(scaled_words), 408)
+        self.assertEqual(len(scaled_words), 402)
         self.assertEqual([index for index, (before, after) in enumerate(
             zip(baseline_words, scaled_words, strict=True))
-            if before["word_u32"] != after["word_u32"]], [268, 331])
+            if before["word_u32"] != after["word_u32"]], [264, 326])
         self.assertEqual([scaled_words[index]["fields"]["offset"]
-                          for index in (268, 331)], [122, 122])
+                          for index in (264, 326)], [122, 122])
         from safetensors.numpy import load_file
 
         weights = load_file(EXAMPLES / "captured_attention_mlp32_weights.safetensors")
