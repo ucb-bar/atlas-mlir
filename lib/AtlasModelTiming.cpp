@@ -1,4 +1,5 @@
 #include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelPairs.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
@@ -671,8 +672,38 @@ bool sameEngine(const OpInfo &a, const OpInfo &b) {
   return a.engine == b.engine || (vector(a.engine) && vector(b.engine));
 }
 
+std::optional<ModelOverlapCommand> overlapCommand(const Instr &in, const Footprint &f, int cycle,
+                                                  const ModelTimingFacts &facts) {
+  std::string name = mxuBlockName(*in.op);
+  if (auto found = vpuBlocks().find(in.op->name); found != vpuBlocks().end()) name = found->second;
+  if (in.op->opClass == OpClass::Transpose) name = "xlu.transpose";
+  if (in.op->opClass == OpClass::VLoad) name = "vlsu.vload";
+  if (in.op->opClass == OpClass::VStore) name = "vlsu.vstore";
+  if (in.op->name == "lw") name = "scalar_lsu.load";
+  if (in.op->name == "sw") name = "scalar_lsu.store";
+  if (in.op->name == "seld") name = "scalar_lsu.scale_load";
+  const ModelTimingBlock *block = facts.block(name);
+  if (!block) return std::nullopt;
+  ModelOverlapCommand command{name, in.op->engine, f.mregReads, {}, {}, cycle, block->firstFreeAge};
+  command.registers.insert(command.registers.end(), f.mregWrites.begin(), f.mregWrites.end());
+  if (in.op->mxu >= 0) {
+    switch (in.op->opClass) {
+    case OpClass::WeightPush: command.weightSlot = in.rd; break;
+    case OpClass::AccPushFp8:
+    case OpClass::AccPushBf16: command.accumulator = in.rd; break;
+    case OpClass::PopFp8:
+    case OpClass::PopBf16: command.accumulator = in.rs2; break;
+    default: command.accumulator = in.rd; command.weightSlot = in.rs2; break;
+    }
+  }
+  return command;
+}
+
 class ObservedReservations final : public TimingReservations {
 public:
+  ObservedReservations(std::shared_ptr<const ModelTimingFacts> facts,
+                       std::shared_ptr<const ModelOverlapFacts> overlap, bool chains)
+      : facts(std::move(facts)), overlap(std::move(overlap)), chains(chains) {}
   TimingRuleResult<std::string> conflict(const Instr &in, const Footprint &f, int cycle) const override {
     if (cycle < 0 || cycle > INT_MAX - f.doneAge - 1)
       return {{}, "npu-model reservation exceeds cycle domain"};
@@ -680,16 +711,19 @@ public:
     for (size_t i = 0; i < ports.size(); ++i)
       for (size_t j = 0; j < i; ++j)
         if (portConflict(ports[i], ports[j])) return {{}, "instruction has conflicting MREG port requests"};
+    bool waiver = overlap && admitsInsertion(in, f, cycle);
     for (const Issued &prior : issued) {
       if (prior.cycle + prior.f.doneAge < cycle || cycle + f.doneAge < prior.cycle) continue;
       if (sameEngine(*in.op, *prior.in.op) && cycle <= prior.cycle + prior.f.doneAge &&
-          prior.cycle <= cycle + f.doneAge)
+          prior.cycle <= cycle + f.doneAge && !waiver)
         return {"npu-model isolated engine window remains live", {}};
       for (const Hold &a : prior.f.holds)
         for (const Hold &b : f.holds)
           if (a.unit == b.unit && a.index == b.index && prior.cycle + a.from <= cycle + b.to &&
               cycle + b.from <= prior.cycle + a.to)
-            return {std::string(unitName(a.unit)) + " occupied", {}};
+            if (!(waiver && sameEngine(*in.op, *prior.in.op) &&
+                  (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu)))
+              return {std::string(unitName(a.unit)) + " occupied", {}};
       for (const Port &a : prior.ports)
         for (const Port &b : ports)
           if (portConflict(a, b)) return {"observed MREG port occupied", {}};
@@ -700,12 +734,13 @@ public:
     auto checked = conflict(in, f, cycle);
     if (!checked.error.empty()) return checked.error;
     if (!checked.value.empty()) return checked.value;
-    issued.push_back({in, f, cycle, requests(f, cycle)});
+    issued.push_back({in, f, cycle, requests(f, cycle), true});
     return {};
   }
   std::string onWait(const Instr &, int cycle) override {
     // The wait may stall indefinitely, so future events extend back to its issue.
     for (Issued &prior : issued) {
+      prior.eligible = false;
       for (Hold &hold : prior.f.holds)
         if (prior.cycle + hold.from > cycle) hold.from = cycle - prior.cycle;
       for (Port &port : prior.ports)
@@ -716,7 +751,55 @@ public:
 
 private:
   struct Port { int bank, reg, row, from, cycle; bool write; };
-  struct Issued { Instr in; Footprint f; int cycle; std::vector<Port> ports; };
+  struct Issued { Instr in; Footprint f; int cycle; std::vector<Port> ports; bool eligible; };
+  bool admitsInsertion(const Instr &in, const Footprint &f, int cycle) const {
+    auto candidate = overlapCommand(in, f, cycle, *facts);
+    if (!candidate) return false;
+    struct Entry { ModelOverlapCommand command; int end; bool eligible, candidate; };
+    std::vector<Entry> entries{{*candidate, cycle + f.doneAge, true, true}};
+    for (const Issued &prior : issued) {
+      if (!sameEngine(*in.op, *prior.in.op)) continue;
+      auto command = overlapCommand(prior.in, prior.f, prior.cycle, *facts);
+      if (!command) {
+        if (prior.cycle <= cycle + f.doneAge && cycle <= prior.cycle + prior.f.doneAge) return false;
+        continue;
+      }
+      entries.push_back({*command, prior.cycle + prior.f.doneAge, prior.eligible, false});
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
+      return a.command.issue < b.command.issue;
+    });
+    // Retain completed commands until the entire overlap epoch drains.
+    std::vector<Entry> affected;
+    int end = -1;
+    bool containsCandidate = false;
+    for (const Entry &entry : entries) {
+      if (entry.command.issue > end) {
+        if (containsCandidate) break;
+        affected.clear();
+      }
+      affected.push_back(entry);
+      containsCandidate |= entry.candidate;
+      end = std::max(end, entry.end);
+    }
+    std::vector<ModelOverlapCommand> epoch;
+    std::vector<const Entry *> history;
+    bool eligible = true;
+    // Recheck every prefix, including commands placed after the candidate.
+    for (const Entry &entry : affected) {
+      if (!epoch.empty() && epoch.back().issue == entry.command.issue) return false;
+      std::vector<const Entry *> live;
+      for (const Entry *prior : history)
+        if (prior->end >= entry.command.issue) live.push_back(prior);
+      epoch.push_back(entry.command);
+      eligible &= entry.eligible;
+      if (live.size() == 1 && (!entry.eligible || !live[0]->eligible ||
+                              !overlap->admits({live[0]->command, entry.command}, false))) return false;
+      if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains))) return false;
+      history.push_back(&entry);
+    }
+    return true;
+  }
   static std::vector<Port> requests(const Footprint &f, int cycle) {
     std::vector<Port> ports;
     for (const Access &a : f.accesses)
@@ -732,6 +815,9 @@ private:
         (a.write == b.write || (a.reg == b.reg && a.row == b.row));
   }
   std::vector<Issued> issued;
+  std::shared_ptr<const ModelTimingFacts> facts;
+  std::shared_ptr<const ModelOverlapFacts> overlap;
+  bool chains;
 };
 
 std::string modelScope(const AtlasStream &stream) {
@@ -778,7 +864,8 @@ std::string modelScope(const AtlasStream &stream) {
 }
 } // namespace
 
-TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts) {
+TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts,
+                                                      std::shared_ptr<const ModelOverlapFacts> overlap, bool chains) {
   TimingProvider provider;
   provider.id = kNpuModelObservedTimingProviderId.str();
   provider.costProbes = [](const OpInfo &op) {
@@ -850,8 +937,9 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   };
   // DELAY encoding and issue-edge scalar/control/DMA captures are architectural rules.
   provider.issueGap = [](const Instr &in) { return TimingRuleResult<int>{naturalGap(in), {}}; };
-  provider.createReservations = [] {
-    return TimingRuleResult<std::unique_ptr<TimingReservations>>{std::make_unique<ObservedReservations>(), {}};
+  provider.createReservations = [facts, overlap, chains] {
+    return TimingRuleResult<std::unique_ptr<TimingReservations>>{
+        std::make_unique<ObservedReservations>(facts, overlap, chains), {}};
   };
   return provider;
 }
@@ -872,7 +960,23 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory
     auto retained = selection.getAs<StringAttr>(key);
     if (!retained || retained.getValue() != value) return {{}, "model evidence provenance mismatch: " + key};
   }
-  return {modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*facts))), {}};
+  std::shared_ptr<const ModelOverlapFacts> overlap;
+  auto pairs = selection.getAs<StringAttr>("pairs"), pairsHash = selection.getAs<StringAttr>("pairs_sha256");
+  auto chains = selection.getAs<StringAttr>("chains");
+  if ((selection.get("pairs") && !pairs) || (selection.get("pairs_sha256") && !pairsHash) ||
+      (selection.get("chains") && (!chains || (chains.getValue() != "true" && chains.getValue() != "false"))) ||
+      bool(pairs) != bool(pairsHash) || (chains && !pairs)) return {{}, "incomplete model overlap selection"};
+  if (pairs) {
+    auto loaded = loadModelOverlapFacts(pairs.getValue(), pairsHash.getValue(), *facts);
+    if (!loaded) return {{}, llvm::toString(loaded.takeError())};
+    for (const auto &[key, value] : loaded->metadata()) {
+      auto retained = selection.getAs<StringAttr>(key);
+      if (!retained || retained.getValue() != value) return {{}, "model overlap provenance mismatch: " + key};
+    }
+    overlap = std::make_shared<ModelOverlapFacts>(std::move(*loaded));
+  }
+  return {modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*facts)), overlap,
+                              chains && chains.getValue() == "true"), {}};
 }
 
 namespace {
@@ -883,6 +987,9 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
   Option<std::string> opTiming{*this, "op-timing", llvm::cl::desc("Observed atlas.model_timing.v1 facts")};
   Option<std::string> opTimingHash{*this, "op-timing-sha256", llvm::cl::desc("Expected facts SHA-256")};
   Option<std::string> dmaPolicy{*this, "dma", llvm::cl::desc("Optional DMA completion policy: wait")};
+  Option<std::string> pairsPath{*this, "pairs", llvm::cl::desc("Optional confirmed compact atlas.model_pairs.v1 facts")};
+  Option<std::string> pairsHash{*this, "pairs-sha256", llvm::cl::desc("Expected compact overlap facts SHA-256")};
+  Option<bool> chains{*this, "chains", llvm::cl::desc("Enable exact confirmed chain witnesses"), llvm::cl::init(false)};
   StringRef getArgument() const final { return "select-atlas-model-evidence"; }
   StringRef getDescription() const final { return "Pin model observations; timing passes select provider=npu-model"; }
   void runOnOperation() override {
@@ -895,6 +1002,14 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     if (!dmaPolicy.empty() && dmaPolicy != "wait") return fail("only dma=wait is supported");
     auto facts = loadModelTimingFacts(opTiming, opTimingHash, dmaPolicy == "wait");
     if (!facts) return fail(llvm::toString(facts.takeError()));
+    if (pairsPath.empty() != pairsHash.empty() || (chains && pairsPath.empty()))
+      return fail("pairs and pairs-sha256 are required together; chains requires pairs");
+    std::shared_ptr<const ModelOverlapFacts> overlap;
+    if (!pairsPath.empty()) {
+      auto loaded = loadModelOverlapFacts(pairsPath, pairsHash, *facts);
+      if (!loaded) return fail(llvm::toString(loaded.takeError()));
+      overlap = std::make_shared<ModelOverlapFacts>(std::move(*loaded));
+    }
     Builder builder(module.getContext());
     NamedAttrList selection;
     selection.set("provider", builder.getStringAttr(kNpuModelObservedTimingProviderId));
@@ -902,6 +1017,11 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     selection.set("op_timing_sha256", builder.getStringAttr(opTimingHash));
     if (facts->dmaWait()) selection.set("dma", builder.getStringAttr("wait"));
     for (const auto &[key, value] : facts->modelProvenance()) selection.set(key, builder.getStringAttr(value));
+    if (overlap) {
+      selection.set("pairs", builder.getStringAttr(pairsPath));
+      selection.set("chains", builder.getStringAttr(chains ? "true" : "false"));
+      for (const auto &[key, value] : overlap->metadata()) selection.set(key, builder.getStringAttr(value));
+    }
     module->setAttr(kAtlasModelEvidence, selection.getDictionary(module.getContext()));
   }
 };
