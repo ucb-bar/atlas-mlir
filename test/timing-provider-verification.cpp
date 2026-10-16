@@ -3,9 +3,12 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVirtualScheduling.h"
 #include "VerificationTestSupport.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <functional>
+#include <limits>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -35,7 +38,7 @@ bool accepts(MLIRContext &context, ArrayRef<OperationSpec> specs, const TimingPr
 }
 
 // Deliberately synthetic policies establish policy isolation, not a claim about any hardware.
-class ToyReservations final : public TimingReservations {
+class ToyReservations : public TimingReservations {
 public:
   ToyReservations(int capacity, bool extend, bool missing = false) : capacity(capacity), extend(extend), missing(missing) {}
   TimingRuleResult<std::string> conflict(const Instr &, const Footprint &f, int cycle) const override {
@@ -299,10 +302,14 @@ void testRegistry(MLIRContext &context) {
   check(succeeded(modelStream) && failed(verifyAtlasTimedStream(*modelStream, strictProvider({}).value)) && diagnosed("insufficient issue spacing"),
         "model spacing fails the strict provider's verification", diagnostics);
 
-  // The list scheduler spaces work with the model graph, so its output must pass the selected provider.
   diagnostics.clear();
-  check(!runPipeline(context, kCopy, "schedule-atlas-stream" + strictOption) && diagnosed("insufficient issue spacing"),
-        "scheduler output is checked under a non-model provider", diagnostics);
+  auto scheduledModel = runPipeline(context, kCopy, "schedule-atlas-stream");
+  auto scheduledStrict = runPipeline(context, kCopy, "schedule-atlas-stream" + strictOption);
+  check(scheduledModel && scheduledStrict, "scheduler places work under both policies", diagnostics);
+  if (scheduledModel && scheduledStrict) {
+    check(delayCycles(*scheduledStrict) > delayCycles(*scheduledModel), "selected dependence changes scheduler delays");
+    check(succeeded(verifyAtlasTiming(*scheduledStrict)), "selected scheduler result verifies", diagnostics);
+  }
   auto reordered = runPipeline(context, kCopy, std::string("schedule-atlas-stream{insert-delays=false provider=") + kStrict +
                                                    "},insert-atlas-delays" + strictOption + ",verify-atlas-timing");
   check(reordered && retainedProvider(*reordered) == kStrict, "reorder then strict delay insertion verifies", diagnostics);
@@ -319,6 +326,205 @@ void testRegistry(MLIRContext &context) {
   check(StringRef(withoutEvidence.error).contains("requires selected evidence"), "module-scoped factory sees no module", withoutEvidence.error);
   (*byModel)->setAttr("atlas.rtl_evidence", UnitAttr::get(&context));
   check(lookupTimingProvider("atlas.vls.conservative.v1", *byModel).error.empty(), "module-scoped factory reads its module");
+}
+
+void testProviderGraph(MLIRContext &context) {
+  auto module = parseSourceString<ModuleOp>(kCopy, &context);
+  auto stream = module ? readAtlasStream(*module) : FailureOr<AtlasStream>(failure());
+  check(succeeded(stream), "graph fixture decodes");
+  if (failed(stream)) return;
+  auto graph = buildTimingGraph(stream->instrs, unknownRegs(), npuModelTimingProvider());
+  auto original = timing::buildGraph(stream->instrs, unknownRegs());
+  bool same = graph.error.empty() && graph.value.in == original.in &&
+              graph.value.out == original.out && graph.value.edges.size() == original.edges.size();
+  if (same)
+    for (auto [a, b] : llvm::zip(graph.value.edges, original.edges))
+      same &= std::tie(a.from, a.to, a.distance, a.kind, a.reason) ==
+              std::tie(b.from, b.to, b.distance, b.kind, b.reason);
+  check(same, "built-in graph preserves edge order, kinds, distances and adjacency");
+
+  std::vector<Instr> nodes = {{findOp("dma.wait.ch0")}, {findOp("vload"), 4},
+                              {findOp("vload"), 8}, {findOp("dma.load.ch0")}, {findOp("dma.load.ch1")}};
+  auto p = toy();
+  p.footprint = [](const Instr &in, const RegValues &) {
+    Footprint f;
+    if (in.op->opClass == OpClass::VLoad) f.accesses.push_back({Res::Vmem, false, in.rd == 4 ? 0 : 128, 32, 0, 1});
+    return f;
+  };
+  p.dmaConflict = npuModelTimingProvider().dmaConflict;
+  IncomingDma incoming;
+  Footprint transfer;
+  transfer.accesses.push_back({Res::Vmem, true, 0, 32, 0, 1, false, true});
+  incoming[0].push_back(transfer);
+  auto precise = buildTimingGraph(nodes, unknownRegs(), p, &incoming);
+  auto broad = buildTimingGraph(nodes, unknownRegs(), p);
+  auto has = [](const TimingRuleResult<DepGraph> &g, int to) {
+    return llvm::any_of(g.value.edges, [&](const Edge &e) { return e.from == 0 && e.to == to; });
+  };
+  check(precise.error.empty() && has(precise, 1) && has(precise, 3) && !has(precise, 2) && !has(precise, 4),
+        "incoming DMA guards only its VMEM window and channel");
+  check(broad.error.empty() && has(broad, 1) && has(broad, 2) && has(broad, 3) && has(broad, 4),
+        "null incoming DMA retains broad barriers");
+  p.dmaConflict = [](const Footprint &, const Footprint &) {
+    return TimingRuleResult<DMACompletionConflict>{{}, "missing incoming DMA rule"};
+  };
+  check(buildTimingGraph(nodes, unknownRegs(), p, &incoming).error == "missing incoming DMA rule",
+        "incoming DMA coverage errors do not become no-conflict rules");
+  p = toy();
+  p.dependence = [](const Instr &, const Footprint &, const Instr &, const Footprint &) {
+    return TimingRuleResult<Dependence>{{}, "missing graph dependence"};
+  };
+  check(buildTimingGraph(nodes, unknownRegs(), p).error == "missing graph dependence",
+        "graph propagates missing dependence coverage");
+}
+
+class FailingReservations final : public ToyReservations {
+public:
+  explicit FailingReservations(bool atWait) : ToyReservations(1, false), atWait(atWait) {}
+  std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
+    return atWait ? ToyReservations::reserve(in, f, cycle) : "missing reserve rule";
+  }
+  std::string onWait(const Instr &, int) override { return "missing wait rule"; }
+private:
+  bool atWait;
+};
+
+void testSchedulerReservations(MLIRContext &context) {
+  auto schedule = [&](const char *id, TimingProvider p, StringRef source = kCopy) {
+    p.id = id;
+    check(registerAtlasTimingProvider(id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; }).empty(),
+          "synthetic scheduler policy registers");
+    diagnostics.clear();
+    return runPipeline(context, source, std::string("schedule-atlas-stream{provider=") + id + "}");
+  };
+  auto one = schedule("synthetic-capacity-one", occupying(1));
+  auto two = schedule("synthetic-capacity-two", occupying(2));
+  check(one && two && delayCycles(*one) > delayCycles(*two),
+        "provider capacity changes physical placement", diagnostics);
+  const char *waiting = R"mlir(module {
+    %s0 = "atlas.start"() : () -> !atlas.state
+    %s1 = "atlas.dma"(%s0) {direction = "load", channel = 0 : i32, reg = 0 : i32, dram = 0 : i32, size = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s2 = "atlas.dma_wait"(%s1) {channel = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.alu_imm"(%s2) {kind = "addi", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s4 = "atlas.trap"(%s3) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+  })mlir";
+  auto afterWait = [](bool extend) {
+    auto p = occupying(1, extend);
+    p.dependence = [](const Instr &a, const Footprint &, const Instr &b, const Footprint &) {
+      Dependence d;
+      if ((a.op->opClass == OpClass::DmaLoad && b.op->opClass == OpClass::DmaWait) ||
+          (a.op->opClass == OpClass::DmaWait && b.op->opClass == OpClass::Alu))
+        d.distance = 1;
+      return TimingRuleResult<Dependence>{d, {}};
+    };
+    return p;
+  };
+  auto plain = schedule("synthetic-wait-plain", afterWait(false), waiting);
+  auto extended = schedule("synthetic-wait-extended", afterWait(true), waiting);
+  check(plain && extended && delayCycles(*extended) > delayCycles(*plain),
+        "provider onWait affects subsequent physical placement", diagnostics);
+  for (bool atWait : {false, true}) {
+    auto p = afterWait(false);
+    p.createReservations = [=] { return Reservations{std::make_unique<FailingReservations>(atWait), {}}; };
+    check(!schedule(atWait ? "synthetic-wait-error" : "synthetic-reserve-error", p, waiting) &&
+              diagnosed(atWait ? "missing wait rule" : "missing reserve rule"),
+          "scheduler propagates reservation and wait errors", diagnostics);
+  }
+  auto p = toy();
+  p.issueGap = [](const Instr &) { return TimingRuleResult<int>{0, {}}; };
+  check(!schedule("synthetic-scheduler-zero-gap", p) && diagnosed("positive cycle domain"),
+        "scheduler rejects nonpositive issue gaps", diagnostics);
+}
+
+void testVirtualCosts(MLIRContext &context) {
+  const char *source = R"mlir(module { func.func @cost() -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %s1, %x = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %a = "atlas.virtual_vpu_unary"(%x) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %b = "atlas.virtual_vpu_unary"(%x) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %c = "atlas.virtual_vpu_unary"(%b) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %sum = "atlas.virtual_vpu_binary"(%a, %c) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %s2 = "atlas.virtual_output_bf16"(%s1, %sum) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    return %s2 : !atlas.virtual_state
+  } })mlir";
+  auto module = parseSourceString<ModuleOp>(source, &context);
+  check(bool(module), "virtual cost fixture parses");
+  if (!module) return;
+  auto p = toy();
+  p.footprint = [](const Instr &, const RegValues &) { Footprint f; f.doneAge = 12; return f; };
+  p.issueGap = [](const Instr &) { return TimingRuleResult<int>{7, {}}; };
+  auto cost = machineTimingOf(p, "vmov", *module);
+  check(succeeded(cost) && cost->latency == 13 && cost->interval == 7,
+        "virtual machine costs use provider latency and issue gap");
+  p.createReservations = [] { return Reservations{}; };
+  check(failed(machineTimingOf(p, "vmov", *module)), "virtual cost rejects missing reservation state");
+  class IsolatedConflict final : public ToyReservations {
+  public:
+    explicit IsolatedConflict(bool missing) : ToyReservations(1, false), missing(missing) {}
+    TimingRuleResult<std::string> conflict(const Instr &in, const Footprint &f, int cycle) const override {
+      if (in.rd == 0 && cycle == 0)
+        return missing ? TimingRuleResult<std::string>{{}, "missing isolated rule"}
+                       : TimingRuleResult<std::string>{"isolated conflict", {}};
+      return ToyReservations::conflict(in, f, cycle);
+    }
+  private:
+    bool missing;
+  };
+  for (bool missing : {false, true}) {
+    p.createReservations = [=] { return Reservations{std::make_unique<IsolatedConflict>(missing), {}}; };
+    diagnostics.clear();
+    check(failed(machineTimingOf(p, "vmov", *module)) &&
+              diagnosed(missing ? "missing isolated rule" : "representative instruction can never issue"),
+          "virtual cost checks the first representative before reservation", diagnostics);
+  }
+  p = npuModelTimingProvider();
+  p.id = "synthetic-virtual-costs";
+  auto footprint = p.footprint;
+  p.footprint = [=](const Instr &in, const RegValues &regs) {
+    Footprint f = footprint(in, regs);
+    if (in.op->name == "vmov") f.doneAge = 199;
+    if (in.op->name == "vrelu.bf16") f.doneAge = 0;
+    return f;
+  };
+  check(registerAtlasTimingProvider(p.id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; }).empty(),
+        "virtual cost policy registers");
+  registerScheduleAtlasVirtualPass();
+  auto builtin = runPipeline(context, source, "schedule-atlas-virtual");
+  auto selected = runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-virtual-costs}");
+  auto firstUnary = [](ModuleOp m) {
+    std::string kind;
+    m.walk([&](VirtualVPUUnaryOp op) { if (kind.empty()) kind = op.getKind().str(); });
+    return kind;
+  };
+  check(builtin && selected && firstUnary(*builtin) == "relu" && firstUnary(*selected) == "mov",
+        "selected virtual costs change the chosen order", diagnostics);
+  std::string retained = replace(source, "module {", "module attributes {atlas.timing_provider = \"synthetic-virtual-costs\"} {");
+  auto implicit = runPipeline(context, retained, "schedule-atlas-virtual");
+  check(implicit && firstUnary(*implicit) == "mov", "virtual costs honor the retained provider", diagnostics);
+  diagnostics.clear();
+  check(!runPipeline(context, retained, "schedule-atlas-virtual{provider=npu-model-rtl-match-v1}") &&
+            diagnosed("disagrees with retained provider identity"),
+        "virtual scheduling rejects conflicting explicit and retained providers", diagnostics);
+  p.id = "synthetic-missing-virtual-cost";
+  p.footprint = [=](const Instr &in, const RegValues &regs) {
+    Footprint f = footprint(in, regs);
+    if (in.op->name == "vmov") f.error = "uncovered virtual mov";
+    return f;
+  };
+  registerAtlasTimingProvider(p.id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; });
+  diagnostics.clear();
+  check(!runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-missing-virtual-cost}") &&
+            diagnosed("uncovered virtual mov"), "virtual scheduling rejects missing cost coverage", diagnostics);
+  p.id = "synthetic-overflow-virtual-cost";
+  p.footprint = [=](const Instr &in, const RegValues &regs) {
+    Footprint f = footprint(in, regs);
+    f.doneAge = std::numeric_limits<int>::max() - 1;
+    return f;
+  };
+  registerAtlasTimingProvider(p.id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; });
+  diagnostics.clear();
+  check(!runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-overflow-virtual-cost}") &&
+            diagnosed("cycle domain"), "virtual composite costs reject overflow", diagnostics);
 }
 
 // A real virtual program lowered in-process: each verification boundary decodes and encodes the artifact once.
@@ -350,5 +556,8 @@ void atlas_test::runTimingProvider(MLIRContext &context) {
   testBoundedScope(context);
   testRetainedProvider(context);
   testRegistry(context);
+  testProviderGraph(context);
+  testSchedulerReservations(context);
+  testVirtualCosts(context);
   testVerificationContext(context);
 }
