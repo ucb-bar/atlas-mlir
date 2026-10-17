@@ -148,6 +148,10 @@ transfers ([DMA across PACK](pack-dma-overlap.md)).
 Timing passes take `provider=<id>` (default: the module's
 `atlas.timing_provider`, else `npu-model-rtl-match-v1`) from a registry that
 holds only that default ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
+The schedulers estimate a DMA transfer with npu_model main's DRAM model
+(`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
+loading or 21.68 storing); no check depends on that estimate, since every
+transfer completes at an explicit `dma.wait`.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 

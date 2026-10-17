@@ -528,8 +528,8 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_loads_move_ahead_of_independent_packs(self) -> None:
         # Two PACKs in a chain, each followed by the load of the next MXU
-        # weight. PACK no longer drains DMA, so both loads issue first and
-        # transfer during the first relayout.
+        # weight. PACK no longer drains DMA, so each load issues ahead of the
+        # PACK before its use and transfers during that relayout.
         source = function("ahead", [
             start(), inp("io0", "io1", "x", 0), const("a", -2147483648), const("b", -2147482624),
             const("size", 1024),
@@ -542,7 +542,8 @@ class VirtualSchedulingTest(unittest.TestCase):
             outp("ns3", "o", "h2", 0), f"return %o : {S}"])
         scheduled = self.scheduled(source)
         ops = blocks(scheduled)[0]["ops"]
-        self.assertLess(max(positions(ops, "dma_load_fp8")), min(positions(ops, "pack_fp8")), ops)
+        for load, pack in zip(positions(ops, "dma_load_fp8"), positions(ops, "pack_fp8"), strict=True):
+            self.assertLess(load, pack, ops)
         self.assertTrue(lowers(scheduled))
 
     def test_transfers_that_may_share_dram_keep_their_order(self) -> None:

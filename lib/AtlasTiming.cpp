@@ -217,11 +217,15 @@ void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
   regs[in.rd] = c == OpClass::Alu ? aluResult(in, regs) : std::nullopt;
 }
 
-int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
-  // 32-bit link, 2 cycles per beat, 2 command words.
-  long long offchip = (bytes + 8 + 3) / 4 * 2;
-  long long vmem = (bytes + 63) / 64;
-  return static_cast<int>(std::max(1LL, std::max(offchip, vmem)));
+int mlir::atlas::timing::dmaTransferCycles(long long bytes, bool store) {
+  // The curves' peak bandwidths at the 500 MHz core clock they were measured
+  // with, and the start of an unloaded transfer; calibrated end to end on
+  // npu_model 337e9f2 (1 KiB: 781 cycles to load, 723 to store).
+  constexpr long long kCoreMHz = 500, kReadPeakMBps = 682, kWritePeakMBps = 738;
+  constexpr long long kStartCycles = 30, kBeatBytes = 32;
+  long long beats = std::max(1LL, (bytes + kBeatBytes - 1) / kBeatBytes);
+  long long peak = store ? kWritePeakMBps : kReadPeakMBps;
+  return static_cast<int>(kStartCycles + (beats * kBeatBytes * kCoreMHz + peak - 1) / peak);
 }
 
 int mlir::atlas::timing::unitCapacity(Unit u, int index) {
@@ -644,7 +648,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.vmem(addr, bytes, load, 0, 0, true);
     if (addr && (*addr % 32 != 0))
       b.f.error = "DMA VMEM address must be 32-byte aligned";
-    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024);
+    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024, !load);
     break;
   }
   case OpClass::DmaConfig: {

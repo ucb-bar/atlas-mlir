@@ -385,22 +385,23 @@ Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
 Cost costOf(Operation *op) {
   static const MachineTiming vload = timingOf("vload");
   static const MachineTiming vstore = timingOf("vstore");
-  static const int transfer = timing::dmaTransferCycles(kRegisterBytes);
+  static const int registerLoad = timing::dmaTransferCycles(kRegisterBytes, false);
+  static const int registerStore = timing::dmaTransferCycles(kRegisterBytes, true);
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
     return blocking(Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) *
-                                   (transfer + vload.latency));
+                                   (registerLoad + vload.latency));
   if (isa<VirtualOutputBF16Op>(op))
     return blocking(Unit::Dma,
-                    registersOf(false) * (vstore.latency + transfer));
+                    registersOf(false) * (vstore.latency + registerStore));
   // An atomic load's tile is ready once its transfer lands and its VLOADs
   // (one per register) finish. A consumer cannot start before then, so the
   // list scheduler puts independent work between the load and its MXU, VPU,
   // pack or store user, where insert-atlas-dma-waits will put the DMA.WAIT.
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
+    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes, false);
     int loaded = (registers - 1) * vload.interval + vload.latency;
     Cost cost{Unit::Dma, cycles, cycles + loaded};
     cost.queuedDMA = true;
@@ -410,7 +411,7 @@ Cost costOf(Operation *op) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int staged = (registers - 1) * vstore.interval + vstore.latency;
-    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes);
+    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes, true);
     Cost cost{Unit::Dma, cycles, cycles, staged + 1};
     cost.queuedDMA = true;
     return cost;
