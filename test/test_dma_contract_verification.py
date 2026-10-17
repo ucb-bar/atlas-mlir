@@ -63,10 +63,10 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         machine = lower(copy())
         lines = machine.splitlines()
         load = launch(machine)
-        address = next(i for i in range(load) if "dst = 7 : i32" in lines[i])
-        size = next(i for i in range(load) if "dst = 9 : i32" in lines[i])
-        staging = last_constant_write(machine, load, 4)
-        mutations = [("DRAM address", address, "immediate = 0", "immediate = 32"), ("byte length", size, "immediate = 0", "immediate = -32"),
+        # Constant DRAM addresses and byte lengths are built in x7 and x9 at each launch.
+        address, size, staging = (last_constant_write(machine, load, reg) for reg in (7, 9, 4))
+        mutations = [("DRAM address", address, lines[address], shift_constant(lines[address], 32)),
+                     ("byte length", size, lines[size], shift_constant(lines[size], 32)),
                      ("staging word", staging, lines[staging], shift_constant(lines[staging], 256)),
                      ("direction", load, 'direction = "load"', 'direction = "store"')]
         changes = [(name, replace_line(machine, index, old, new)) for name, index, old, new in mutations]
@@ -80,7 +80,7 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         changes.append(("channel", replace_line(replace_line(machine, load, "channel = 0", "channel = 1"), wait, "channel = 0", "channel = 1")))
         changes = [(name, changed, "DMA contract") for name, changed in changes]
         changes += [("unknown DRAM upper word", machine.replace("base_reg = 0 : i32", "base_reg = 15 : i32"), "DMA contract cannot prove captured DRAM upper word"),
-                    ("unknown DRAM byte address", machine.replace('dst = 10 : i32, immediate = 524288 : i32, kind = "lui"', 'dst = 10 : i32, immediate = 524288 : i32, kind = "auipc"'),
+                    ("unknown DRAM byte address", machine.replace('dst = 7 : i32, immediate = 524288 : i32, kind = "lui"', 'dst = 7 : i32, immediate = 524288 : i32, kind = "auipc"'),
                      "DMA contract cannot prove captured DRAM byte address")]
         for name, changed, diagnostic in changes:
             with self.subTest(mutation=name):
@@ -149,8 +149,8 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
 
     def test_structured_fields_and_words_cannot_jointly_bypass_contract(self) -> None:
         structured = checked(self, lower(copy()), "--convert-atlas-to-llvm-calls")
-        index = line_index(structured, 'atlas.source_op = "atlas.alu_imm"', "dst = 7 : i32")
-        changed = rewrite_line(structured, index, lambda line: structured_word(line, "immediate = 0", "immediate = 32", 20, 12, 32))
+        index = line_index(structured, 'atlas.source_op = "atlas.alu_imm"', "dst = 9 : i32")
+        changed = rewrite_line(structured, index, lambda line: structured_word(line, "immediate = -2048", "immediate = -2016", 20, 12, -2016 & 4095))
         self.assertEqual(contract_text(changed, "dma"), contract_text(structured, "dma"))
         finalize_rejects(self, changed, "DMA contract")
 

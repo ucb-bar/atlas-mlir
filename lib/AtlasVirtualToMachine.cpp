@@ -213,9 +213,11 @@ public:
 
 private:
   using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
+  // A value with a register; a DMA immediate is built at each launch instead.
   bool cfgTracked(Value v) const {
     Type t = v.getType();
-    return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t);
+    return ((t.isInteger(1) || t.isInteger(32)) && !isVirtualDMAImmediate(v)) ||
+           isa<VirtualBF16Type, VirtualFP8Type>(t);
   }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
@@ -513,8 +515,15 @@ private:
   void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
                  std::optional<unsigned> src, Location loc) {
     const DMATransferPlacement &placement = allocation.dma(transfer);
-    emitCopy(placement.dramReg, scalar(dramByte), false, loc);
-    emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
+    // A command register takes its operand's register, or its immediate.
+    auto capture = [&](unsigned reg, Value operand) {
+      if (isVirtualDMAImmediate(operand))
+        materializeScalar(reg, *constantAddress(operand), loc);
+      else
+        emitCopy(reg, scalar(operand), false, loc);
+    };
+    capture(placement.dramReg, dramByte);
+    capture(placement.sizeReg, sizeBytes);
     materializeScalar(placement.stagingReg, placement.stagingWord, loc);
     if (src) {
       for (unsigned half = 0; half < placement.halves; ++half) {
@@ -835,6 +844,8 @@ private:
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value)
         return constant.emitOpError("only integer control constants lower to Atlas");
+      if (isVirtualDMAImmediate(constant.getResult()))
+        return success(); // each launch builds it (launchDMA)
       materializeScalar(scalar(constant.getResult()),
                         static_cast<uint32_t>(value.getValue().getSExtValue()), loc);
       return success();

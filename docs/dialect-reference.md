@@ -102,6 +102,7 @@ the IR or its order.
 | BF16 tiles, BF16 only | 31 even pairs; pair 62 is the copy temporary |
 | BF16 and FP8 together | FP8 in registers `0..31`, BF16 pairs `32..60`, pair 62 temporary |
 | Scalar controls | `x10..x26`, or `x18..x26` when a pack needs `x10..x17`; `x27` is the copy temporary |
+| DMA immediates | none: an `i32` constant used only as a DMA address or size is built in the launch's command register |
 | Pack scratch | VMEM words `32768..33279`; input indices below 64 |
 | Boundary tiles | VMEM bank 0 stages inputs, bank 1 outputs |
 

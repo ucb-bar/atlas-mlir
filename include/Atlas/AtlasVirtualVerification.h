@@ -14,6 +14,12 @@ constexpr unsigned kVirtualMXUSlots = 2;
 // state order must then be kept.
 bool virtualDMAConflict(Operation *a, Operation *b);
 
+// Whether `value` is an i32 arith.constant used only as the DRAM address or
+// byte count of virtual DMA. Lowering builds it in the transfer's command
+// register at each launch, so it takes no scalar register and is no CFG
+// value; the DMA contract still checks what each launch captures.
+bool isVirtualDMAImmediate(Value value);
+
 // Check a pre-allocation SSA candidate and its CFG/state obligations.
 LogicalResult verifyAtlasVirtualModule(ModuleOp module);
 void registerVerifyAtlasVirtualStreamPass();

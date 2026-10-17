@@ -551,7 +551,10 @@ private:
     return kept.contains(value) || remaining.lookup(value) > 0;
   }
 
+  // A DMA immediate takes no register: each launch builds it.
   static void count(KindCounts &counts, Value value, int delta) {
+    if (isVirtualDMAImmediate(value))
+      return;
     if (std::optional<RegisterKind> kind = kindOf(value.getType()))
       counts[indexOf(*kind)] += delta;
   }

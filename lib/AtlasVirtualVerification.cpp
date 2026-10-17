@@ -428,6 +428,19 @@ void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
 }
 
+bool mlir::atlas::isVirtualDMAImmediate(Value value) {
+  if (!value.getDefiningOp<arith::ConstantOp>() || !value.getType().isInteger(32) ||
+      value.use_empty())
+    return false;
+  // A DMA operation's address and size close its operand list.
+  return llvm::all_of(value.getUses(), [](OpOperand &use) {
+    Operation *user = use.getOwner();
+    return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+               VirtualDMAStoreBF16Op>(user) &&
+           use.getOperandNumber() + 2 >= user->getNumOperands();
+  });
+}
+
 bool mlir::atlas::virtualDMAConflict(Operation *a, Operation *b) {
   DRAMEffect x = dramEffect(a), y = dramEffect(b);
   if (!x.write && !y.write)

@@ -106,7 +106,7 @@ class LowerAtlasProgramTest(unittest.TestCase):
                 self.assertRegex(lines[int(line) - 1].split(" = ")[0],
                                  re.escape(value["value"].split("#")[0]) + r"\b")
             self.assertEqual({value["kind"] for value in report["values"]},
-                             {"bf16", "fp8", "scalar", "mxu_weight", "mxu_acc", "dma"})
+                             {"bf16", "fp8", "dma_immediate", "mxu_weight", "mxu_acc", "dma"})
             self.assertEqual(report["dma"]["peak_in_flight"],
                              1 + max(value["staging_window"] for value in report["values"]
                                      if value["kind"] == "dma"))

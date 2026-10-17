@@ -315,7 +315,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       return isa<VirtualBF16Type>(type);
     if (kind == RegisterKind::FP8)
       return isa<VirtualFP8Type>(type);
-    return type.isInteger(1) || type.isInteger(32);
+    // Lowering builds a DMA immediate at each launch instead.
+    return (type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value);
   };
   SmallVector<Value> values;
   llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
@@ -612,6 +613,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       registersOf(tileRegs, "bf16", 2);
     } else if (isa<VirtualFP8Type>(type)) {
       registersOf(fp8Regs, "fp8", 1);
+    } else if (isVirtualDMAImmediate(value)) {
+      entry["kind"] = "dma_immediate"; // built in the command register at each launch
     } else if (type.isInteger(1) || type.isInteger(32)) {
       registersOf(scalarRegs, "scalar", 1);
     } else if (auto mxu = mxuResources.find(value); mxu != mxuResources.end()) {

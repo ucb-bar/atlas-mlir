@@ -385,7 +385,7 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertEqual(loads, [window + half * 256
                                          for _, _, window in completions for half in (0, 1)])
 
-    def test_launch_completion_separation_preserves_mxu_and_scalar_register_reuse(self) -> None:
+    def test_launch_completion_separation_preserves_mxu_work_and_builds_constant_commands(self) -> None:
         _, entries = self.checked(independent_work())
         launch = next(i for i, entry in enumerate(entries)
                       if entry["operation"] == "atlas.dma" and MARKER in entry["fields"])
@@ -393,13 +393,12 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     if entries[i]["operation"] == "atlas.dma_wait")
         interval = entries[launch + 1:wait]
         self.assertTrue(any(entry["operation"] == "atlas.mxu_matmul" for entry in interval))
+        # The constant address and size are built in x7 and x9 at the launch, so
+        # no scalar register holds them.
         captures = [entry["fields"] for entry in entries[max(0, launch - 5):launch]
-                    if entry["operation"] == "atlas.alu_imm"
-                    and entry["fields"]["dst"] in (7, 9)
-                    and entry["fields"]["src"] != 0]
+                    if entry["fields"].get("dst") in (7, 9)]
         self.assertEqual({fields["dst"] for fields in captures}, {7, 9})
-        sources = {fields["src"] for fields in captures}
-        self.assertTrue(any(entry["fields"].get("dst") in sources for entry in interval))
+        self.assertTrue(all(fields.get("src", fields["dst"]) == fields["dst"] for fields in captures))
         store = next(i for i, entry in enumerate(entries)
                      if entry["operation"] == "atlas.dma"
                      and MARKER in entry["fields"] and entry["fields"]["direction"] == "store")
@@ -606,7 +605,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
         lines = machine.splitlines()
         launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
         wait = next(i for i in range(launch + 1, len(lines)) if '"atlas.dma_wait"' in lines[i])
-        scalar = next(i for i in range(launch + 1, wait) if '"atlas.alu_imm"' in lines[i])
+        scalar = next(i for i in range(launch + 1, wait)
+                      if '"atlas.alu_imm"' in lines[i] or '"atlas.upper"' in lines[i])
         mxu = next(i for i in range(launch + 1, wait) if '"atlas.mxu_matmul"' in lines[i])
         replacements = [
             ("missing wait", wait, replace_operation(lines[wait], "alu_imm", 'dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, kind = "addi"')),

@@ -1,5 +1,6 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
@@ -40,9 +41,15 @@ bool isScalar(Value value) {
   return value.getType().isInteger(1) || value.getType().isInteger(32);
 }
 
+// A value with a register; a DMA immediate is built at each launch instead.
 bool isTracked(Value value) {
-  return isScalar(value) ||
+  return (isScalar(value) && !isVirtualDMAImmediate(value)) ||
          isa<VirtualBF16Type, VirtualFP8Type>(value.getType());
+}
+
+uint32_t immediateOf(Value value) {
+  auto constant = value.getDefiningOp<arith::ConstantOp>();
+  return uint32_t(cast<IntegerAttr>(constant.getValue()).getValue().getZExtValue());
 }
 
 class AllocationVerifier {
@@ -146,6 +153,9 @@ private:
       if (!value || !known.contains(value))
         return function.emitOpError(
             "register assignment refers to a foreign, stale, or untracked value");
+      if (isVirtualDMAImmediate(value))
+        return assignmentError(value, "register assignment claims a DMA immediate, "
+                                      "which each launch builds");
       if (!isTracked(value))
         return assignmentError(value,
                                "register assignment has unsupported value type");
@@ -358,9 +368,12 @@ private:
     if (transfer) {
       const DMATransferPlacement &placement = *dmaPlacements.lookup(transfer);
       // Lowering captures DRAM before size, then materializes staging. A
-      // self-copy emits no write.
-      if (placement.dramReg != registers.lookup(dram)) {
-        if (placement.dramReg == registers.lookup(size) && dram != size) {
+      // self-copy emits no write; an immediate is always built.
+      auto inRegister = [&](Value operand, unsigned reg) {
+        return !isVirtualDMAImmediate(operand) && registers.lookup(operand) == reg;
+      };
+      if (!inRegister(dram, placement.dramReg)) {
+        if (inRegister(size, placement.dramReg) && dram != size) {
           auto diagnostic = op.emitOpError("DMA DRAM helper write clobbers size operand before capture");
           diagnostic << ": writes x" << placement.dramReg;
           noteValue(diagnostic, transfer, "assigned transfer");
@@ -370,7 +383,7 @@ private:
         if (failed(checkHelperWrite(op, transfer, placement.dramReg, live, "DRAM capture")))
           return failure();
       }
-      if (placement.sizeReg != registers.lookup(size) &&
+      if (!inRegister(size, placement.sizeReg) &&
           failed(checkHelperWrite(op, transfer, placement.sizeReg, live, "size capture")))
         return failure();
       return checkHelperWrite(op, transfer, placement.stagingReg, live, "launch staging materialization");
@@ -427,10 +440,14 @@ private:
     auto [transfer, dram, size] = dmaLaunch(op);
     if (transfer) {
       const DMATransferPlacement &p = *dmaPlacements.lookup(transfer);
-      if (p.dramReg != registers.lookup(dram))
-        write(p.dramReg, contents[registers.lookup(dram)]);
-      if (p.sizeReg != registers.lookup(size))
-        write(p.sizeReg, contents[registers.lookup(size)]);
+      auto capture = [&](unsigned reg, Value operand) {
+        if (isVirtualDMAImmediate(operand))
+          write(reg, immediateOf(operand));
+        else if (reg != registers.lookup(operand))
+          write(reg, contents[registers.lookup(operand)]);
+      };
+      capture(p.dramReg, dram);
+      capture(p.sizeReg, size);
       // A BF16 store also writes its second-half base, then restores this one.
       write(p.stagingReg, p.stagingWord);
       return success();
@@ -469,7 +486,10 @@ private:
       write(fixed.inputBaseReg, fixed.packRelayoutWord);
       return success();
     }
-    if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+    if (auto constant = dyn_cast<arith::ConstantOp>(op);
+        constant && isVirtualDMAImmediate(constant.getResult())) {
+      // Built at each launch; it writes no register here.
+    } else if (constant) {
       auto integer = dyn_cast<IntegerAttr>(constant.getValue());
       write(registers.lookup(constant.getResult()), integer
           ? std::optional<uint32_t>(uint32_t(integer.getValue().getSExtValue()))

@@ -5,6 +5,7 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -22,6 +23,13 @@ using namespace mlir;
 using namespace mlir::atlas;
 namespace {
 bool tracked(Type t) { return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t); }
+// A CFG value has a register; a DMA immediate is built at each launch instead.
+bool tracked(Value v) { return tracked(v.getType()) && !isVirtualDMAImmediate(v); }
+// A source operation that issues nothing of its own and so has no record.
+bool issuesNothing(Operation &op) {
+  return isa<VirtualStartOp, VirtualScaleConstantOp>(op) ||
+         (isa<arith::ConstantOp>(op) && isVirtualDMAImmediate(op.getResult(0)));
+}
 bool scalar(Type t) { return t.isInteger(1) || t.isInteger(32); }
 std::string typeName(Type t) { return t.isInteger(1) ? "i1" : t.isInteger(32) ? "i32" : isa<VirtualBF16Type>(t) ? "bf16" : "fp8"; }
 struct ValueRecord {
@@ -122,15 +130,15 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   int32_t nextValue = 0, nextBlock = 0, nextOperation = 0;
   int32_t nextTile = function.getNumArguments() ? kMailboxPreludeCommands + function.getNumArguments() : 0, nextMXU = 0;
   for (auto r : registers) {
-    if (!r.value || !tracked(r.value.getType()) || regs.count(r.value)) return function.emitOpError("CFG contract invalid placement claim");
+    if (!r.value || !tracked(r.value) || regs.count(r.value)) return function.emitOpError("CFG contract invalid placement claim");
     regs[r.value] = r.reg;
   }
   for (Block &block : function.getBody()) {
     blocks[&block] = nextBlock++;
-    for (Value arg : block.getArguments()) if (tracked(arg.getType())) ids[arg] = nextValue++;
+    for (Value arg : block.getArguments()) if (tracked(arg)) ids[arg] = nextValue++;
     for (Operation &op : block) {
       operations[&op] = nextOperation++;
-      for (Value v : op.getResults()) if (tracked(v.getType())) ids[v] = nextValue++;
+      for (Value v : op.getResults()) if (tracked(v)) ids[v] = nextValue++;
     }
   }
   if (regs.size() != ids.size()) return function.emitOpError("CFG contract requires every source scalar and tensor placement");
@@ -148,7 +156,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     if ((scalar(value.getType()) && (reg == 0 || reg >= 32)) || (!scalar(value.getType()) && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
     Operation *op = value.getDefiningOp();
     SmallVector<int32_t> operands;
-    if (op) for (Value v : op->getOperands()) if (tracked(v.getType())) operands.push_back(ids.lookup(v));
+    if (op) for (Value v : op->getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
     SmallVector<NamedAttribute> f = {field("id",i(ids.lookup(value))), field("block",i(blocks.lookup(value.getParentBlock()))), field("reg",i(reg)), field("type",b.getStringAttr(type)), field("def",b.getStringAttr(op ? op->getName().getStringRef() : "argument")), field("operands",b.getDenseI32ArrayAttr(operands))};
     if (auto c = dyn_cast_or_null<arith::ConstantOp>(op)) f.push_back(field("constant",i(uint32_t(cast<IntegerAttr>(c.getValue()).getValue().getSExtValue()))));
     if (auto splat = dyn_cast_or_null<VirtualVPUSplatOp>(op))
@@ -161,15 +169,15 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   for (Block &block : function.getBody()) {
     int32_t id = blocks.lookup(&block);
     BlockRecord &r = summaries[id]; r.id = id; r.condition = -1;
-    for (Value arg : block.getArguments()) if (tracked(arg.getType())) { if (failed(valueRecord(arg))) return failure(); r.args.push_back(ids.lookup(arg)); defs[id].insert(ids.lookup(arg)); }
+    for (Value arg : block.getArguments()) if (tracked(arg)) { if (failed(valueRecord(arg))) return failure(); r.args.push_back(ids.lookup(arg)); defs[id].insert(ids.lookup(arg)); }
     for (Operation &op : block) {
-      for (Value v : op.getOperands()) if (tracked(v.getType()) && !defs[id].count(ids.lookup(v))) uses[id].insert(ids.lookup(v));
-      for (Value v : op.getResults()) if (tracked(v.getType())) { if (failed(valueRecord(v))) return failure(); defs[id].insert(ids.lookup(v)); }
-      if (!op.hasTrait<OpTrait::IsTerminator>() && !isa<VirtualStartOp,VirtualScaleConstantOp>(op)) {
+      for (Value v : op.getOperands()) if (tracked(v) && !defs[id].count(ids.lookup(v))) uses[id].insert(ids.lookup(v));
+      for (Value v : op.getResults()) if (tracked(v)) { if (failed(valueRecord(v))) return failure(); defs[id].insert(ids.lookup(v)); }
+      if (!op.hasTrait<OpTrait::IsTerminator>() && !issuesNothing(op)) {
         r.operations.push_back(operations.lookup(&op));
         SmallVector<int32_t> operands, results;
-        for (Value v : op.getOperands()) if (tracked(v.getType())) operands.push_back(ids.lookup(v));
-        for (Value v : op.getResults()) if (tracked(v.getType())) results.push_back(ids.lookup(v));
+        for (Value v : op.getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
+        for (Value v : op.getResults()) if (tracked(v)) results.push_back(ids.lookup(v));
         // Source format and lifecycle determine command expansion counts;
         // neither planned instructions nor issued tags supply these facts.
         unsigned tileCount = atlasTileExpansion(op.getName().getStringRef()).commands;
@@ -185,7 +193,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     }
     auto edge = [&](Block *dest, ValueRange operands) {
       EdgeRecord e{int32_t(edges.size()), id, blocks.lookup(dest), {}};
-      for (Value v : operands) if (tracked(v.getType())) e.incoming.push_back(ids.lookup(v));
+      for (Value v : operands) if (tracked(v)) e.incoming.push_back(ids.lookup(v));
       r.edges.push_back(e.id); edges.push_back(e);
     };
     if (auto br = dyn_cast<cf::BranchOp>(block.getTerminator())) edge(br.getDest(), br.getDestOperands());
