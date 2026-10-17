@@ -34,7 +34,7 @@ examples/handoff/captured_attention_mlp/build_fixture.sh "$ATLAS_BIN" "$RUN/comp
 examples/handoff/captured_attention_mlp/build_fixture.sh "$ATLAS_BIN" "$RUN/two-results" --two-output
 ```
 
-The compiler converts boundary inputs with `--lower-atlas-virtual-inputs-to-dma`,
+The compiler converts boundary inputs and outputs with `--lower-atlas-virtual-boundary-to-dma`,
 then verifies and schedules virtual SSA before allocation, inserts DMA
 waits, then runs `--schedule-atlas-stream` and verifies timing and the generated
 machine schedule before emission.

@@ -153,7 +153,7 @@ NATIVE_PIPELINES = {
         "--insert-atlas-delays",
     ),
     "optimized": (
-        "--verify-atlas-virtual-stream", "--lower-atlas-virtual-inputs-to-dma",
+        "--verify-atlas-virtual-stream", "--lower-atlas-virtual-boundary-to-dma",
         "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
         "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         "--verify-atlas-machine-stream", "--schedule-atlas-stream",

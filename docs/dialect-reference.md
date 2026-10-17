@@ -196,7 +196,7 @@ numerical policy, or availability across the stream.
 | Name | Kind | What it does |
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
-| `--lower-atlas-virtual-inputs-to-dma` | pass | Convert boundary FP8/BF16 inputs to explicit DMA loads using the input DRAM base and 2-KiB slot stride; run before virtual scheduling to expose prefetching. |
+| `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before allocation by a pressure- and latency-aware list schedule, keeping SSA, handle, and memory order. `random-seed=N` picks a random legal order. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass. `allocation-report=<file>` writes the plan as JSON, even on failure. |
 | `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside a PACK relayout loop, a PACK loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. |

@@ -809,7 +809,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
     atlas_opt = str(atlas / "atlas-opt")
     atlas_emit = str(atlas / "atlas-emit")
     machine = run([atlas_opt, "--verify-atlas-virtual-stream",
-                   "--lower-atlas-virtual-inputs-to-dma",
+                   "--lower-atlas-virtual-boundary-to-dma",
                    "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
                    "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
                    "--schedule-atlas-stream", "--verify-atlas-timing", "-"],
