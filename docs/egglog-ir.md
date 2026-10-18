@@ -8,7 +8,7 @@ The base dialect has no virtual UNPACK operation. Physical `atlas.vpu_pack` with
 
 `Node(op, operands, attrs, type)` is immutable. Operation names retain their `virtual_` prefix; attribute values retain canonical raw MLIR strings, for example `("kind", '"relu"')`, `("bits", "16256 : i32")` and `("finite_src", "unit")`. `node.attribute(name)` decodes those values to Python strings, integers, booleans or `None`. Both generic attributes and MLIR `<{properties}>` syntax parse. Namespaced `atlas.*` diagnostic attributes are preserved as opaque data. The bridge never treats them or `finite_src` as a proven fact or accepted caller contract.
 
-The optional `atlas_egglog_schema` module defines `Value.anchor(id, type)` and `Value.apply(op, attrs_json, type, children)`, with `Inputs.empty()` / `Inputs.cons(head, tail)`. `attrs_json` canonically serializes a sorted list of raw attribute pairs. `to_egglog` / `from_egglog` (also `encode_node` / `decode_node`) translate between these constructors and `Node`. No arithmetic rewrite is enabled by this representation.
+The optional `atlas_egglog_schema` module adapts Merlin's shared `semantic_compiler.egraph_terms` constructors: `Value.anchor(id, type)` and `Value.apply(op, attrs_json, type, children)`, with `Inputs.empty()` / `Inputs.cons(head, tail)`. Add an explicitly selected Merlin checkout containing that module to `PYTHONPATH` alongside these tools. `attrs_json` canonically serializes a sorted list of raw attribute pairs. `to_egglog` / `from_egglog` (also `encode_node` / `decode_node`) translate between these constructors and `Node`. No arithmetic rewrite is enabled by this representation.
 
 ```python
 from atlas_egglog_ir import load_program, egglog_roundtrip

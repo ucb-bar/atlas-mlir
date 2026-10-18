@@ -6,6 +6,7 @@ Adapters own target semantics and exact-output/guard checks. This driver never
 relaxes a numerical contract or substitutes an additive cost for target timing.
 """
 import argparse
+from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -87,7 +88,7 @@ def rank(rows, baseline, target_ids):
             'limit': 'Only this measured shortlist and target grid; no global optimum or FPGA claim.'}
 
 
-def check_measurement(receipt, program_sha):
+def check_measurement(receipt, program_sha, *, metric=None, tier=None):
     checks = receipt.get('correctness', {})
     if (receipt.get('status') == 'CORRECTNESS_DIFFERENCE'
             or any(checks.get(key) is False for key in ('outputs', 'oracle', 'guards'))):
@@ -98,9 +99,81 @@ def check_measurement(receipt, program_sha):
         raise ValueError('Measurement lacks explicit output/oracle/guard qualification')
     if receipt['program_sha256'] != program_sha:
         raise ValueError('Measured binary does not match the compiled candidate')
+    if metric is not None and receipt.get('metric') != metric:
+        raise ValueError('Measurement metric mismatch')
+    if tier is not None and receipt.get('tier') != tier:
+        raise ValueError('Measurement execution tier mismatch')
     cycles = receipt['cycles']
     if not cycles or any(type(value) is not int or value <= 0 for value in cycles):
         raise ValueError('Expected positive integer invocation cycle counts')
+
+
+def check_admission(candidate, *, expected_schema=None):
+    """Authenticate exact-provider declarations, preserving legacy proof schemas."""
+    proof = candidate['proof']
+    if sha(proof['path']) != proof['sha256']:
+        raise ValueError('Admission proof identity changed')
+    if expected_schema is not None and proof.get('schema') != expected_schema:
+        raise ValueError('Required admission schema mismatch')
+    try:
+        declaration = load(proof['path'])
+    except json.JSONDecodeError:
+        if expected_schema is not None or proof.get('schema') is not None:
+            raise ValueError('Required admission declaration is not JSON')
+        return
+    if proof.get('schema') is not None and declaration.get('schema') != proof['schema']:
+        raise ValueError('Admission declaration schema mismatch')
+    if declaration.get('schema') != 'atlas.exact-egglog.v1':
+        return
+    binding = declaration.get('candidate_bindings', {}).get(candidate['id'], {})
+    if binding.get('source_sha256') != candidate['source_sha256']:
+        raise ValueError('Exact provider declaration does not bind emitted candidate')
+    pins = declaration.get('implementation_pins', {})
+    if not pins or any(sha(path) != digest for path, digest in pins.items()):
+        raise ValueError('Exact provider implementation identity changed')
+
+
+def rank_shared(selected, result, manifest):
+    """Apply Merlin's target-generic selector to this driver's qualified receipts."""
+    from merlin.semantic_compiler.rewrite_selection import (
+        CandidateUnavailable, CostEstimate, Measurement, RewriteCandidate, select_measured)
+    metric = manifest['measurement_metric']
+    target_rows = {row['id']: row for row in manifest['targets']}
+    candidate_rows = {row['id']: row for row in selected}
+    candidates = [RewriteCandidate(row['id'], safe(row['source']).read_bytes(), row['proof']['sha256'],
+        tuple(row.get('families', ())), CostEstimate(row['estimated_cost'], (), 0, (), row['proof']['sha256'])) for row in selected]
+
+    def admit(candidate):
+        row = candidate_rows[candidate.id]
+        if candidate.source_sha256 != row['source_sha256']:
+            return False
+        check_admission(row, expected_schema=manifest.get('admission_schema'))
+        return True
+
+    def compiled(candidate):
+        row = result['candidates'][candidate.id]
+        if row['status'] == 'COMPILE_REJECTED':
+            raise CandidateUnavailable('physical compiler/allocator rejected candidate')
+        if row['status'] != 'PASS' or row['source_sha256'] != candidate.source_sha256:
+            raise ValueError('Source-to-binary receipt mismatch')
+        path = safe(row['program'])
+        if sha(path) != row['program_sha256']:
+            raise ValueError('Compiled binary identity changed')
+        return path.read_bytes()
+
+    def measured(candidate, binary, target):
+        row = result['measurements'][candidate.id+'/'+target]
+        expected = target_rows[target]
+        if row.get('target') != expected:
+            raise ValueError('Measurement target identity changed')
+        check_measurement(row, hashlib.sha256(binary).hexdigest(), metric=metric, tier=expected['kind'])
+        checks = row['correctness']
+        return Measurement(row['program_sha256'], target, row['metric'], row['tier'], tuple(row['cycles']),
+                           checks['outputs'], checks['oracle'], checks['guards'])
+
+    return asdict(select_measured(candidates, baseline=manifest['baseline'],
+        targets={key:(metric,row['kind']) for key,row in target_rows.items()},
+        compile_candidate=compiled, measure=measured, admit=admit))
 
 
 def main():
@@ -142,6 +215,9 @@ def main():
 
     def command(template, values, folder):
         poll()
+        for path, expected in manifest.get('tool_pins', {}).items():
+            if sha(path) != expected:
+                raise ValueError('Compilation/measurement tool identity changed')
         argv = [argument.format_map(values) for argument in template]
         started = time.perf_counter()
         process = subprocess.Popen(argv, cwd=folder, env=environment, stdout=subprocess.PIPE,
@@ -171,6 +247,9 @@ def main():
         commands.append({'argv': argv, 'cwd': str(folder), 'returncode': process.returncode,
                          'seconds': time.perf_counter() - started})
         save(out / 'commands.json', commands)
+        for path, expected in manifest.get('tool_pins', {}).items():
+            if sha(path) != expected:
+                raise ValueError('Compilation/measurement tool identity changed during command')
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     try:
@@ -191,9 +270,7 @@ def main():
             name = identifier(candidate['id'])
             if sha(candidate['source']) != candidate['source_sha256']:
                 raise ValueError('Candidate source identity changed')
-            proof = candidate['proof']
-            if sha(proof['path']) != proof['sha256']:
-                raise ValueError('Admission proof identity changed')
+            check_admission(candidate, expected_schema=manifest.get('admission_schema'))
             admitted.append(candidate)
         baseline = manifest['baseline']
         control = next(row for row in admitted if row['id'] == baseline)
@@ -237,7 +314,9 @@ def main():
                 else:
                     measured = load(receipt_path)
                     result['measurements'][name + '/' + target_id] = measured
-                    check_measurement(measured, compiled['program_sha256'])
+                    check_measurement(measured, compiled['program_sha256'],
+                                      metric=manifest.get('measurement_metric'),
+                                      tier=target['kind'] if manifest.get('measurement_metric') else None)
                     if measured.get('target') != target:
                         raise ValueError('Measurement receipt target mismatch')
                     if process.returncode:
@@ -248,6 +327,8 @@ def main():
         targets = [target['id'] for target in manifest['targets']]
         result['ranking'] = rank(costs, baseline, targets)
         result['model_ranking'] = rank(costs, baseline, [t['id'] for t in manifest['targets'] if t['kind'] == 'model'])
+        if manifest.get('shared_selection'):
+            result['shared_selection'] = rank_shared(selected, result, manifest)
         complete = all(len(values) == len(targets) for values in costs.values()) and len(costs) == len(selected)
         result['status'] = 'PASS' if complete else 'INCOMPLETE'
     except CorrectnessDifference as error:
