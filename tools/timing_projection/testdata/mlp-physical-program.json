@@ -1,0 +1,1834 @@
+{
+  "entry_word_index": 0,
+  "instructions": [
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "base_reg": 0,
+        "channel": 0
+      },
+      "operation": "atlas.dma_config",
+      "word_hex": "0000007f",
+      "word_index": 0,
+      "word_u32": 127
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "dst": 7,
+        "immediate": 589824,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900003b7",
+      "word_index": 1,
+      "word_u32": 2415920055
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "dst": 9,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000493",
+      "word_index": 2,
+      "word_u32": 1073742995
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 3,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 3,
+        "atlas.virtual_cfg_source": 3,
+        "atlas.virtual_dma_transfer": 0,
+        "atlas.virtual_tile_command": 0,
+        "channel": 0,
+        "direction": "load",
+        "dram": 7,
+        "reg": 4,
+        "size": 9
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0093827b",
+      "word_index": 4,
+      "word_u32": 9667195
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 7,
+        "immediate": 589825,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900013b7",
+      "word_index": 5,
+      "word_u32": 2415924151
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 6,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 7,
+        "immediate": -2048,
+        "kind": "addi",
+        "src": 7
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "80038393",
+      "word_index": 7,
+      "word_u32": 2147713939
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 9,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000493",
+      "word_index": 8,
+      "word_u32": 1073742995
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 4,
+        "immediate": 512,
+        "kind": "addi",
+        "src": 4
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "20020213",
+      "word_index": 9,
+      "word_u32": 537002515
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 6,
+        "atlas.virtual_cfg_source": 6,
+        "atlas.virtual_dma_transfer": 1,
+        "atlas.virtual_tile_command": 3,
+        "channel": 1,
+        "direction": "load",
+        "dram": 7,
+        "reg": 4,
+        "size": 9
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0093927b",
+      "word_index": 10,
+      "word_u32": 9671291
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 11,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 7,
+        "immediate": 589825,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900013b7",
+      "word_index": 12,
+      "word_u32": 2415924151
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 9,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000493",
+      "word_index": 13,
+      "word_u32": 1073742995
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 4,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 4
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40020213",
+      "word_index": 14,
+      "word_u32": 1073873427
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 9,
+        "atlas.virtual_cfg_source": 9,
+        "atlas.virtual_dma_transfer": 2,
+        "atlas.virtual_tile_command": 6,
+        "channel": 2,
+        "direction": "load",
+        "dram": 7,
+        "reg": 4,
+        "size": 9
+      },
+      "operation": "atlas.dma",
+      "word_hex": "0093a27b",
+      "word_index": 15,
+      "word_u32": 9675387
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 16,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 0,
+        "dst": 3,
+        "kind": "seli",
+        "offset": 127
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "07f07183",
+      "word_index": 17,
+      "word_u32": 133198211
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 8,
+        "immediate": 8,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00008437",
+      "word_index": 18,
+      "word_u32": 33847
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 11,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "000205b7",
+      "word_index": 19,
+      "word_u32": 132535
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 12,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020637",
+      "word_index": 20,
+      "word_u32": 132663
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "dst": 2,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40000113",
+      "word_index": 21,
+      "word_u32": 1073742099
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 10,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020537",
+      "word_index": 22,
+      "word_u32": 132407
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 11,
+        "immediate": 512,
+        "kind": "addi",
+        "src": 11
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "20058593",
+      "word_index": 23,
+      "word_u32": 537232787
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 12,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 12
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40060613",
+      "word_index": 24,
+      "word_u32": 1074136595
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 13,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000693",
+      "word_index": 25,
+      "word_u32": 1683
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 14,
+        "immediate": 32,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "02000713",
+      "word_index": 26,
+      "word_u32": 33556243
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "atlas.virtual_dma_transfer": 0,
+        "atlas.virtual_tile_command": 1,
+        "channel": 0
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200007f",
+      "word_index": 27,
+      "word_u32": 33554559
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 3,
+        "atlas.virtual_tensor_result": 0,
+        "atlas.virtual_tile_command": 2,
+        "base": 4,
+        "dst": 1,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00020087",
+      "word_index": 28,
+      "word_u32": 131207
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 29,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "dst": 4,
+        "immediate": 512,
+        "kind": "addi",
+        "src": 4
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "20020213",
+      "word_index": 30,
+      "word_u32": 537002515
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 30,
+      "fields": {
+        "atlas.reason": "dma.wait issues just before its user",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 30
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01e01067",
+      "word_index": 31,
+      "word_u32": 31461479
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "atlas.virtual_dma_transfer": 1,
+        "atlas.virtual_tile_command": 4,
+        "channel": 1
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 32,
+      "word_u32": 33558655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 6,
+        "atlas.virtual_tensor_result": 1,
+        "atlas.virtual_tile_command": 5,
+        "base": 4,
+        "dst": 2,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00020107",
+      "word_index": 33,
+      "word_u32": 131335
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 33,
+      "fields": {
+        "atlas.reason": "m2 reserved for writing until age 34 after atlas.vload",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 33
+      },
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 34,
+      "word_u32": 34607207
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 10,
+        "atlas.virtual_mxu_command": 0,
+        "kind": "weight_fp8",
+        "slot": 0,
+        "src": 2,
+        "unit": 0
+      },
+      "operation": "atlas.mxu_push",
+      "word_hex": "00004077",
+      "word_index": 35,
+      "word_u32": 16503
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "acc_slot": 0,
+        "accumulate": false,
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 10,
+        "atlas.virtual_mxu_command": 1,
+        "src": 1,
+        "unit": 0,
+        "weight_slot": 0
+      },
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "14002077",
+      "word_index": 36,
+      "word_u32": 335552631
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 62,
+      "fields": {
+        "atlas.reason": "RAW on mxu0.acc0 after atlas.mxu_matmul",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 62
+      },
+      "operation": "atlas.delay",
+      "word_hex": "03e01067",
+      "word_index": 37,
+      "word_u32": 65015911
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 10,
+        "atlas.virtual_cfg_source": 10,
+        "atlas.virtual_mxu_command": 2,
+        "atlas.virtual_tensor_result": 3,
+        "dst": 32,
+        "format": "bf16",
+        "scale_reg": 0,
+        "slot": 0,
+        "unit": 0
+      },
+      "operation": "atlas.mxu_pop",
+      "word_hex": "10001077",
+      "word_index": 38,
+      "word_u32": 268439671
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 31,
+      "fields": {
+        "atlas.reason": "m32 reserved for writing until age 32 after atlas.mxu_pop",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 31
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 39,
+      "word_u32": 32510055
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 11,
+        "atlas.virtual_cfg_source": 11,
+        "atlas.virtual_tensor_result": 4,
+        "dst": 34,
+        "kind": "relu",
+        "src": 32
+      },
+      "operation": "atlas.vpu_unary",
+      "word_hex": "90041157",
+      "word_index": 40,
+      "word_u32": 2416185687
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 64,
+      "fields": {
+        "atlas.reason": "m34 reserved for writing until age 65 after atlas.vpu_unary",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 64
+      },
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 41,
+      "word_u32": 67113063
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "direction": "bf16_to_fp8",
+        "dst": 1,
+        "scale_reg": 3,
+        "src": 34
+      },
+      "operation": "atlas.vpu_pack",
+      "word_hex": "891060d7",
+      "word_index": 42,
+      "word_u32": 2299551959
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 64,
+      "fields": {
+        "atlas.reason": "m1 reserved for writing until age 65 after atlas.vpu_pack",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 64
+      },
+      "operation": "atlas.delay",
+      "word_hex": "04001067",
+      "word_index": 43,
+      "word_u32": 67113063
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "atlas.virtual_tile_command": 9,
+        "base": 8,
+        "format": "raw",
+        "offset": 0,
+        "src": 1
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00042087",
+      "word_index": 44,
+      "word_u32": 270471
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 33,
+      "fields": {
+        "atlas.reason": "this block finishes before the next one starts",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 33
+      },
+      "operation": "atlas.delay",
+      "word_hex": "02101067",
+      "word_index": 45,
+      "word_u32": 34607207
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 0
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00052803",
+      "word_index": 46,
+      "word_u32": 337923
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 13,
+        "immediate": 1,
+        "kind": "addi",
+        "src": 13
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00168693",
+      "word_index": 47,
+      "word_u32": 1476243
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 48,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 0
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0005a883",
+      "word_index": 49,
+      "word_u32": 370819
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 0,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062023",
+      "word_index": 50,
+      "word_u32": 17178659
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 51,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 4
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00452803",
+      "word_index": 52,
+      "word_u32": 4532227
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 16,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162823",
+      "word_index": 53,
+      "word_u32": 18229283
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 54,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 4
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0045a883",
+      "word_index": 55,
+      "word_u32": 4565123
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 4,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062223",
+      "word_index": 56,
+      "word_u32": 17179171
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 57,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 8
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00852803",
+      "word_index": 58,
+      "word_u32": 8726531
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 20,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162a23",
+      "word_index": 59,
+      "word_u32": 18229795
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 60,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 8
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "0085a883",
+      "word_index": 61,
+      "word_u32": 8759427
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 8,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062423",
+      "word_index": 62,
+      "word_u32": 17179683
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "scalar load path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 63,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 10,
+        "dst": 16,
+        "kind": "lw",
+        "offset": 12
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c52803",
+      "word_index": 64,
+      "word_u32": 12920835
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 24,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162c23",
+      "word_index": 65,
+      "word_u32": 18230307
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 10,
+        "immediate": 16,
+        "kind": "addi",
+        "src": 10
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "01050513",
+      "word_index": 66,
+      "word_u32": 17106195
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 11,
+        "dst": 17,
+        "kind": "lw",
+        "offset": 12
+      },
+      "operation": "atlas.scalar_load",
+      "word_hex": "00c5a883",
+      "word_index": 67,
+      "word_u32": 12953731
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 12,
+        "src": 16
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01062623",
+      "word_index": 68,
+      "word_u32": 17180195
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 11,
+        "immediate": 16,
+        "kind": "addi",
+        "src": 11
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "01058593",
+      "word_index": 69,
+      "word_u32": 17139091
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 0,
+      "fields": {
+        "atlas.reason": "RAW on x17 after atlas.scalar_load",
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "cycles": 0
+      },
+      "operation": "atlas.delay",
+      "word_hex": "00001067",
+      "word_index": 70,
+      "word_u32": 4199
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "base": 12,
+        "kind": "sw",
+        "offset": 28,
+        "src": 17
+      },
+      "operation": "atlas.scalar_store",
+      "word_hex": "01162e23",
+      "word_index": 71,
+      "word_u32": 18230819
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 12,
+        "immediate": 32,
+        "kind": "addi",
+        "src": 12
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "02060613",
+      "word_index": 72,
+      "word_u32": 33949203
+    },
+    {
+      "control": {
+        "delay_slot_word_index": 74,
+        "fallthrough_word_index": 75,
+        "kind": "conditional_direct",
+        "target_word_index": 46
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "kind": "blt",
+        "lhs": 13,
+        "offset_bytes": -54,
+        "rhs": 14
+      },
+      "operation": "atlas.branch",
+      "word_hex": "fce6c5e3",
+      "word_index": 73,
+      "word_u32": 4242982371
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "delay_slot_for_word_index": 73,
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 0,
+        "immediate": 0,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00000013",
+      "word_index": 74,
+      "word_u32": 19
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 75,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "dst": 4,
+        "immediate": 1024,
+        "kind": "addi",
+        "src": 4
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "40020213",
+      "word_index": 76,
+      "word_u32": 1073873427
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 6,
+        "immediate": 8,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00008337",
+      "word_index": 77,
+      "word_u32": 33591
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_source": 12,
+        "dst": 6,
+        "immediate": 256,
+        "kind": "addi",
+        "src": 6
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "10030313",
+      "word_index": 78,
+      "word_u32": 268632851
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_helper": "pack",
+        "atlas.virtual_cfg_operation": 12,
+        "atlas.virtual_cfg_source": 12,
+        "atlas.virtual_tensor_result": 5,
+        "atlas.virtual_tile_command": 10,
+        "base": 6,
+        "dst": 1,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00030087",
+      "word_index": 79,
+      "word_u32": 196743
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 9,
+        "immediate": 1,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "000014b7",
+      "word_index": 80,
+      "word_u32": 5303
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 7,
+        "immediate": 589826,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "900023b7",
+      "word_index": 81,
+      "word_u32": 2415928247
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 9,
+        "immediate": -2048,
+        "kind": "addi",
+        "src": 9
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "80048493",
+      "word_index": 82,
+      "word_u32": 2147779731
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "dst": 1,
+        "immediate": 1,
+        "kind": "addi",
+        "src": 0
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "00100093",
+      "word_index": 83,
+      "word_u32": 1048723
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 28,
+      "fields": {
+        "atlas.reason": "dma.wait issues just before its user",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 28
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01c01067",
+      "word_index": 84,
+      "word_u32": 29364327
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "atlas.virtual_dma_transfer": 2,
+        "atlas.virtual_tile_command": 7,
+        "channel": 2
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200207f",
+      "word_index": 85,
+      "word_u32": 33562751
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 9,
+        "atlas.virtual_tensor_result": 2,
+        "atlas.virtual_tile_command": 8,
+        "base": 4,
+        "dst": 0,
+        "format": "raw",
+        "offset": 0
+      },
+      "operation": "atlas.vload",
+      "word_hex": "00020007",
+      "word_index": 86,
+      "word_u32": 131079
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 87,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 32,
+      "fields": {
+        "atlas.reason": "m0 reserved for writing until age 34 after atlas.vload",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 32
+      },
+      "operation": "atlas.delay",
+      "word_hex": "02001067",
+      "word_index": 88,
+      "word_u32": 33558631
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 13,
+        "atlas.virtual_mxu_command": 3,
+        "kind": "weight_fp8",
+        "slot": 0,
+        "src": 0,
+        "unit": 1
+      },
+      "operation": "atlas.mxu_push",
+      "word_hex": "02000077",
+      "word_index": 89,
+      "word_u32": 33554551
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 30,
+      "fields": {
+        "atlas.reason": "MXU1: weight push still active on w0 after atlas.mxu_push",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 30
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01e01067",
+      "word_index": 90,
+      "word_u32": 31461479
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "acc_slot": 0,
+        "accumulate": false,
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 13,
+        "atlas.virtual_mxu_command": 4,
+        "src": 1,
+        "unit": 1,
+        "weight_slot": 0
+      },
+      "operation": "atlas.mxu_matmul",
+      "word_hex": "16002077",
+      "word_index": 91,
+      "word_u32": 369107063
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 30,
+      "fields": {
+        "atlas.reason": "accumulator read 2 busy",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 30
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01e01067",
+      "word_index": 92,
+      "word_u32": 31461479
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 13,
+        "atlas.virtual_cfg_source": 13,
+        "atlas.virtual_mxu_command": 5,
+        "atlas.virtual_tensor_result": 6,
+        "dst": 32,
+        "format": "bf16",
+        "scale_reg": 0,
+        "slot": 0,
+        "unit": 1
+      },
+      "operation": "atlas.mxu_pop",
+      "word_hex": "12001077",
+      "word_index": 93,
+      "word_u32": 301994103
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 31,
+      "fields": {
+        "atlas.reason": "m32 reserved for writing until age 32 after atlas.mxu_pop",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 31
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 94,
+      "word_u32": 32510055
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "atlas.virtual_tile_command": 11,
+        "base": 4,
+        "format": "raw",
+        "offset": 0,
+        "src": 32
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00023007",
+      "word_index": 95,
+      "word_u32": 143367
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 96,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 4,
+        "immediate": 256,
+        "kind": "addi",
+        "src": 4
+      },
+      "operation": "atlas.alu_imm",
+      "word_hex": "10020213",
+      "word_index": 97,
+      "word_u32": 268567059
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 31,
+      "fields": {
+        "atlas.reason": "VSTORE path 0 busy",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 31
+      },
+      "operation": "atlas.delay",
+      "word_hex": "01f01067",
+      "word_index": 98,
+      "word_u32": 32510055
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "atlas.virtual_tile_command": 12,
+        "base": 4,
+        "format": "raw",
+        "offset": 0,
+        "src": 33
+      },
+      "operation": "atlas.vstore",
+      "word_hex": "00023087",
+      "word_index": 99,
+      "word_u32": 143495
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "dst": 4,
+        "immediate": 32,
+        "kind": "lui"
+      },
+      "operation": "atlas.upper",
+      "word_hex": "00020237",
+      "word_index": 100,
+      "word_u32": 131639
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "explicit_delay_cycles": 32,
+      "fields": {
+        "atlas.reason": "RAW on VMEM 0x80400 after atlas.vstore",
+        "atlas.virtual_cfg_block": 0,
+        "cycles": 32
+      },
+      "operation": "atlas.delay",
+      "word_hex": "02001067",
+      "word_index": 101,
+      "word_u32": 33558631
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_operation": 16,
+        "atlas.virtual_cfg_source": 16,
+        "atlas.virtual_dma_transfer": 3,
+        "atlas.virtual_tile_command": 13,
+        "channel": 1,
+        "direction": "store",
+        "dram": 7,
+        "reg": 4,
+        "size": 9
+      },
+      "operation": "atlas.dma",
+      "word_hex": "029213fb",
+      "word_index": 102,
+      "word_u32": 43127803
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "atlas.virtual_cfg_source": 16,
+        "atlas.virtual_dma_transfer": 3,
+        "atlas.virtual_tile_command": 14,
+        "channel": 1
+      },
+      "operation": "atlas.dma_wait",
+      "word_hex": "0200107f",
+      "word_index": 103,
+      "word_u32": 33558655
+    },
+    {
+      "control": {
+        "kind": "sequential"
+      },
+      "fields": {
+        "address": 3088,
+        "atlas.complete": true,
+        "atlas.virtual_cfg_block": 0,
+        "dst": 0,
+        "kind": "rrw",
+        "source": 1
+      },
+      "operation": "atlas.csr",
+      "word_hex": "c1009073",
+      "word_index": 104,
+      "word_u32": 3238039667
+    },
+    {
+      "control": {
+        "kind": "trap"
+      },
+      "fields": {
+        "atlas.virtual_cfg_block": 0,
+        "kind": "ecall"
+      },
+      "operation": "atlas.trap",
+      "word_hex": "00000073",
+      "word_index": 105,
+      "word_u32": 115
+    }
+  ],
+  "pc_unit": "instruction_word",
+  "schema": "atlas.physical_program.v1",
+  "selected_rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "timing_provider": "npu-model-rtl-match-v1",
+  "timing_scope": "explicit_delay_only; other availability unqualified",
+  "timing_state": "timed",
+  "word_count": 106,
+  "word_endianness": "little"
+}
