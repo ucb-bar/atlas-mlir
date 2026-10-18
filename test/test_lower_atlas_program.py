@@ -25,6 +25,21 @@ def drive(source: Path, output: Path, *options: str) -> subprocess.CompletedProc
 
 
 class LowerAtlasProgramTest(unittest.TestCase):
+    def test_spill_stage_is_retained_before_allocation(self) -> None:
+        from test_virtual_spilling import raw_roundtrip
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "copy.mlir"
+            source.write_text(raw_roundtrip())
+            output = Path(directory) / "compiled"
+            result = drive(source, output, "--spill")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"atlas.virtual_spill_bf16"', (output / "2-spilled.mlir").read_text())
+            allocation = json.loads((output / "3-allocation.json").read_text())
+            self.assertTrue(allocation["fits"])
+            self.assertTrue(any(row["use"] == "spill" for row in allocation["vmem"]))
+            self.assertTrue((output / "5-words.hex").read_text().strip())
+
     def test_paths_with_spaces_and_quotes_can_be_replayed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "input 'attention'.mlir"

@@ -2,6 +2,7 @@
 #include "Atlas/AtlasDMAAllocationVerification.h"
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -69,6 +70,10 @@ FixedResourcePlacement selectedResources() {
   resources.dmaBaseReg = 4;
   resources.dmaDramReg = 7;
   resources.dmaSizeReg = 9;
+  // Bank 2: eight DMA staging windows first, then the spill frame. The
+  // boundary windows and PACK scratch use banks 0 and 1.
+  resources.spillWord = resources.stagingWord + kDMAChannels * kStagingWindowWords;
+  resources.spillWindowWords = 65536 - kDMAChannels * kStagingWindowWords;
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;
@@ -680,6 +685,9 @@ llvm::json::Object VirtualAllocationPlan::report() const {
   if (function.getNumArguments())
     windows.push_back({fixedResources.mailboxWord, "control mailbox", 256});
   function.walk([&](Operation *op) {
+    if (isAtlasSpillStore(op))
+      windows.push_back({uint32_t(op->getAttrOfType<IntegerAttr>("slot_word").getInt()),
+                         "spill", atlasSpillWords(op)});
     if (auto input = dyn_cast<VirtualInputBF16Op>(op))
       windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
                          llvm::formatv("input {0}", input.getIndex()), 512});

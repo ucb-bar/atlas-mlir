@@ -1,4 +1,5 @@
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -59,6 +60,15 @@ ATLAS_MACHINE_EFFECTS(VirtualDMALoadFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMALoadBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualSpillBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualSpillFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualReloadBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualReloadFP8Op)
+
+LogicalResult VirtualSpillBF16Op::verify() { return verifyAtlasSpillOperation(*this); }
+LogicalResult VirtualSpillFP8Op::verify() { return verifyAtlasSpillOperation(*this); }
+LogicalResult VirtualReloadBF16Op::verify() { return verifyAtlasSpillOperation(*this); }
+LogicalResult VirtualReloadFP8Op::verify() { return verifyAtlasSpillOperation(*this); }
 
 void VirtualInputBF16Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

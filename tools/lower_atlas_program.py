@@ -4,6 +4,7 @@
 The output directory receives:
   1-virtual.mlir    the source, after --verify-atlas-virtual-stream
   2-scheduled.mlir  after --schedule-atlas-virtual
+  2-spilled.mlir    after --spill-atlas-virtual, when --spill is selected
   3-allocated.mlir  untimed machine IR, after --lower-atlas-virtual-to-machine
                     and --insert-atlas-dma-waits
   3-allocation.json the allocation plan: each value's registers, MXU slot or
@@ -35,9 +36,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def stages(source: Path, timing: str) -> list[tuple[str, str, Path | str, list[str]]]:
+def stages(source: Path, timing: str, spill: bool = False) -> list[tuple[str, str, Path | str, list[str]]]:
     """(artifact, tool, input, options) for each command, in order."""
-    return [
+    result = [
         ("1-virtual.mlir", "atlas-opt", source, ["--verify-atlas-virtual-stream"]),
         ("2-scheduled.mlir", "atlas-opt", "1-virtual.mlir",
          ["--schedule-atlas-virtual", "--verify-atlas-virtual-stream"]),
@@ -50,6 +51,12 @@ def stages(source: Path, timing: str) -> list[tuple[str, str, Path | str, list[s
         ("5-map.json", "atlas-emit", "4-timed.mlir", ["--map-json"]),
         ("5-program.json", "atlas-emit", "4-timed.mlir", ["--program-json"]),
     ]
+    if spill:
+        result.insert(2, ("2-spilled.mlir", "atlas-opt", "2-scheduled.mlir",
+                          ["--spill-atlas-virtual", "--verify-atlas-virtual-stream"]))
+        artifact, tool, _, options = result[3]
+        result[3] = artifact, tool, "2-spilled.mlir", options
+    return result
 
 
 def main() -> int:
@@ -61,6 +68,8 @@ def main() -> int:
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
     parser.add_argument("--timing", choices=("insert-atlas-delays", "schedule-atlas-stream"),
                         default="insert-atlas-delays")
+    parser.add_argument("--spill", action="store_true",
+                        help="recover straight-line FP8/BF16 pressure through VMEM spills")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)
@@ -73,7 +82,7 @@ def main() -> int:
         parser.error(str(error))
 
     commands, log = [], []
-    for artifact, tool, given, options in stages(source, args.timing):
+    for artifact, tool, given, options in stages(source, args.timing, args.spill):
         command = [str(bin_dir / tool), *options, str(output / given)]
         if tool == "atlas-opt":
             # A diagnostic names the failing resource; the operation dump would bury it.

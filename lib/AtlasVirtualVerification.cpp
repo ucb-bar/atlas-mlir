@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -242,6 +243,12 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
         ++outputs;
       continue;
     }
+    if (isAtlasSpillStore(&operation) || isAtlasSpillLoad(&operation)) {
+      if (!state || operation.getOperand(0) != state)
+        return operation.emitOpError("nonlinear virtual state chain");
+      state = operation.getResult(0);
+      continue;
+    }
     if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op,
             VirtualMXULoadAccBF16Op, VirtualMXUResetOp, VirtualMXUAccumulateOp,
             VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(operation)) {
@@ -378,7 +385,7 @@ LogicalResult verifyVirtualFunction(func::FuncOp function) {
     function.emitOpError("virtual CFG contains an unreachable block");
     return failure();
   }
-  return success();
+  return verifyAtlasSpillSlots(function);
 }
 
 struct VerifyAtlasVirtualStreamPass

@@ -3,6 +3,7 @@
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
@@ -122,7 +123,8 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
         // PACK's vector endpoints bracket its scalar relayout. Endpoint
         // ordering alone does not prove that relayout.
         valid = r.transfer == -1 && predecessor.transfer == -1 &&
-                r.reg == predecessor.reg;
+                (r.reg == predecessor.reg ||
+                 (r.vmemByte == predecessor.vmemByte && r.bytes == predecessor.bytes));
       } else if (predecessor.kind == "dma_wait") {
         // Earlier records have already passed their launch-reference check.
         const Record &launch = records[predecessor.after[0]];
@@ -182,6 +184,10 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
       .Case(VirtualDMALoadBF16Op::getOperationName(), {4, 1})
       .Case(VirtualDMAStoreFP8Op::getOperationName(), {3, 1})
       .Case(VirtualDMAStoreBF16Op::getOperationName(), {4, 1})
+      .Case(VirtualSpillBF16Op::getOperationName(), {2, 0})
+      .Case(VirtualReloadBF16Op::getOperationName(), {2, 0})
+      .Case(VirtualSpillFP8Op::getOperationName(), {1, 0})
+      .Case(VirtualReloadFP8Op::getOperationName(), {1, 0})
       .Case(VirtualPackFP8Op::getOperationName(), {2, 0})
       .Default({0, 0});
 }
@@ -261,6 +267,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                      0, 4, -1, -1, {*wait})))
         return function.emitOpError("tile contract has invalid scalar argument placement");
   }
+  llvm::DenseMap<Value, SmallVector<int32_t, 2>> spillStores;
   for (Block &block : function.getBody()) {
     for (Operation &op : block) {
       auto tensorReg = [&](Value value) -> FailureOr<unsigned> {
@@ -343,6 +350,24 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                            (uint64_t(p.stagingWord) + half * 256) * 4,
                            0, 1024, -1, p.id, {*wait})))
               return failure();
+        }
+      } else if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
+        bool store = isAtlasSpillStore(&op);
+        Value saved = store ? op.getResult(1) : op.getOperand(1);
+        Operation *writer = saved.getDefiningOp();
+        auto reg = tensorReg(store ? op.getOperand(1) : op.getResult(1));
+        if (failed(reg)) return failure();
+        uint64_t word = writer->getAttrOfType<IntegerAttr>("slot_word").getInt();
+        unsigned halves = atlasSpillWords(writer) / 256;
+        if (!store && spillStores[saved].size() != halves)
+          return op.emitOpError("reload has no established spill writer");
+        for (unsigned half = 0; half < halves; ++half) {
+          SmallVector<int32_t, 2> after;
+          if (!store) after.push_back(spillStores[saved][half]);
+          auto id = add(store ? "vstore" : "vload", *reg + half,
+                        (word + half * 256) * 4, 0, 1024, -1, -1, after);
+          if (failed(id)) return failure();
+          if (store) spillStores[saved].push_back(*id);
         }
       } else if (auto pack = dyn_cast<VirtualPackFP8Op>(op)) {
         auto reg = tensorReg(pack.getResult());

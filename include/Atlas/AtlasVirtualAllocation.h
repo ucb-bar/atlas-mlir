@@ -57,6 +57,8 @@ struct FixedResourcePlacement {
   unsigned dmaBaseReg;
   unsigned dmaDramReg;
   unsigned dmaSizeReg;
+  uint32_t spillWord;
+  uint32_t spillWindowWords;
   unsigned scaleReg;
   std::array<unsigned, 2> packSourceRegs;
   unsigned packDestinationReg;
@@ -109,6 +111,10 @@ public:
   // each value's placement, MXU slots, DMA channels and the VMEM windows the
   // lowering uses. Values are named as the function prints.
   llvm::json::Object report() const;
+  // Typed feedback for pressure recovery; query after allocate().
+  const RegisterPressure &registerPressure(RegisterKind kind) const {
+    return pressure[static_cast<unsigned>(kind)];
+  }
 
 private:
   LogicalResult colorValues(RegisterKind kind);

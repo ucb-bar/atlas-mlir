@@ -149,12 +149,14 @@ DRAM_BASE = 0x90000000
 DRAM_SLOTS = 128
 NATIVE_PIPELINES = {
     "mandatory": (
+        "--spill-atlas-virtual",
         "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         "--insert-atlas-delays",
     ),
     "optimized": (
         "--verify-atlas-virtual-stream", "--lower-atlas-virtual-boundary-to-dma",
         "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
+        "--spill-atlas-virtual",
         "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         "--verify-atlas-machine-stream", "--schedule-atlas-stream",
         "--verify-atlas-timing", "--verify-atlas-generated-schedule",

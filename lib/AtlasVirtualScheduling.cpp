@@ -6,6 +6,7 @@
 
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -415,6 +416,12 @@ Cost costOf(Operation *op) {
     Cost cost{Unit::Dma, cycles, cycles, staged + 1};
     cost.queuedDMA = true;
     return cost;
+  }
+  if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
+    Operation *writer = isAtlasSpillStore(op) ? op : op->getOperand(1).getDefiningOp();
+    unsigned halves = atlasSpillWords(writer) / 256;
+    auto timing = isAtlasSpillStore(op) ? vstore : vload;
+    return blocking(Unit::Dma, (halves - 1) * timing.interval + timing.latency);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());

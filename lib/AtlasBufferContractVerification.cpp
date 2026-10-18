@@ -2,6 +2,7 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -11,6 +12,8 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <set>
+#include <utility>
 #include <vector>
 
 using namespace mlir;
@@ -43,6 +46,58 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
     d.tiles.push_back(t);
   }
   const auto &tiles = d.tiles;
+  // A raw readback is admitted only for declared spill/reload expansions.
+  // Arbitrary VSTORE -> VLOAD records remain invalid. Keep the writer and
+  // BF16 half identity, rather than accepting any overlapping VMEM range.
+  std::map<int32_t, std::pair<int32_t, unsigned>> spillWriters;
+  std::map<int32_t, unsigned> spillWidths;
+  std::set<int32_t> spillReads;
+  auto fixed = VirtualAllocationPlan().fixed();
+  for (Attribute a : operations) {
+    auto op = dyn_cast<DictionaryAttr>(a);
+    if (!op) return failure();
+    StringRef name = contractString(op, "name");
+    if (name != VirtualSpillBF16Op::getOperationName() &&
+        name != VirtualSpillFP8Op::getOperationName()) continue;
+    auto source = contractI32(op, "id");
+    auto commands = contractI32Array(op, "tile_commands");
+    unsigned halves = name == VirtualSpillBF16Op::getOperationName() ? 2 : 1;
+    if (!source || commands.size() != halves) return failure();
+    uint32_t base = 0;
+    for (unsigned half = 0; half < halves; ++half) {
+      int32_t id = commands[half];
+      if (id < 0 || id >= int32_t(tiles.size())) return failure();
+      const Tile &t = tiles[id];
+      if (!half) base = t.vmem;
+      if (t.kind != "vstore" || t.bytes != 1024 || t.vmem != base + half * 1024 ||
+          base % 1024 || base < fixed.spillWord * 4 ||
+          uint64_t(base) + halves * 1024 > uint64_t(fixed.spillWord + fixed.spillWindowWords) * 4 ||
+          !spillWriters.emplace(id, std::make_pair(*source, half)).second) return failure();
+    }
+    spillWidths[*source] = halves;
+  }
+  for (Attribute a : operations) {
+    auto op = cast<DictionaryAttr>(a);
+    StringRef name = contractString(op, "name");
+    if (name != VirtualReloadBF16Op::getOperationName() &&
+        name != VirtualReloadFP8Op::getOperationName()) continue;
+    auto commands = contractI32Array(op, "tile_commands");
+    unsigned halves = name == VirtualReloadBF16Op::getOperationName() ? 2 : 1;
+    if (commands.size() != halves) return failure();
+    int32_t writer = -1;
+    for (unsigned half = 0; half < halves; ++half) {
+      int32_t id = commands[half];
+      if (id < 0 || id >= int32_t(tiles.size())) return failure();
+      const Tile &t = tiles[id];
+      if (t.kind != "vload" || t.bytes != 1024 || t.after.size() != 1) return failure();
+      auto saved = spillWriters.find(t.after[0]);
+      if (saved == spillWriters.end()) return failure();
+      if (!half) writer = saved->second.first;
+      if (saved->second != std::make_pair(writer, half) || spillWidths[writer] != halves ||
+          t.vmem != tiles[t.after[0]].vmem) return failure();
+      spillReads.insert(id);
+    }
+  }
   for (Attribute a : operations) {
     auto op = dyn_cast<DictionaryAttr>(a);
     if (!op) return failure();
@@ -73,9 +128,9 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
       if (tiles[writer].kind == "dma_wait" && tiles[writer].after.size() == 1) writer = tiles[writer].after[0];
       bool pack = llvm::any_of(d.packs, [&](const Pack &p) { return p.load == id; });
       bool dma = writer != t.after[0] && tiles[writer].kind == "dma_load";
-      // Lowering orders a VLOAD after a VSTORE only inside PACK.
+      // Reloads copy a checked spill store; PACK uses its own relayout map.
       if (pack) d.reads.push_back({id, writer, t.vmem, t.bytes, 0, true});
-      else if (dma && contains(tiles[writer], t)) copy(writer, t);
+      else if ((dma || spillReads.count(id)) && contains(tiles[writer], t)) copy(writer, t);
       else return failure();
     }
   }

@@ -9,6 +9,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -686,6 +687,24 @@ private:
     Location loc = op.getLoc();
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
+    if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
+      bool store = isAtlasSpillStore(&op);
+      Operation *writer = store ? &op : op.getOperand(1).getDefiningOp();
+      uint32_t word = writer->getAttrOfType<IntegerAttr>("slot_word").getInt();
+      unsigned halves = atlasSpillWords(writer) / 256;
+      Value value = store ? op.getOperand(1) : op.getResult(1);
+      unsigned reg = isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value);
+      for (unsigned half = 0; half < halves; ++half) {
+        materializeScalar(fixed().dmaBaseReg, word + half * 256, loc);
+        if (store)
+          add("atlas.vstore", loc, {{"src", i32(reg + half)},
+              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+        else
+          add("atlas.vload", loc, {{"dst", i32(reg + half)},
+              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+      }
+      return success();
+    }
     if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
       launchLoad(op, load.getValue(), fp8(load.getValue()));
       return success();

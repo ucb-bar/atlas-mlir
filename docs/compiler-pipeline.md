@@ -257,7 +257,9 @@ Editing words inside the final inline-assembly string skips every check.
 ## Limits
 
 - One fixed-shape function per module, 32×32 tiles, no general tiling.
-  Lowering fails when it cannot color the live values; there is no spilling.
+  `--spill-atlas-virtual` can split single-block FP8/BF16 lifetimes through
+  reserved VMEM before allocation. CFG, scalar and MXU-state spilling remain
+  unsupported; see [register spilling](register-spilling.md).
 - Pack scale codes `122..128` only; the FP8 readout scale must be a constant.
 - Virtual IR picks the MXU unit and must fit 2 weights and 2 accumulators per
   unit within a block.
