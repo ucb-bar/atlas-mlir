@@ -45,6 +45,13 @@ class TimingCosts:
 
     def estimate(self, program, *, pressure_weight=66):
         nodes=[];costs={'fixed-control':0};last={};types={}
+        # Match the allocator's disjoint banks: mixed FP8 reserves m0..m31
+        # for FP8 and m32..m61 for fifteen BF16 pairs. BF16-only programs
+        # can use thirty-one pairs. Scalar reservations depend on PACK.
+        mixed_fp8=any('!atlas.virtual_fp8' in op.output_types for op in program.operations)
+        has_pack=any(op.op=='virtual_pack_fp8' for op in program.operations)
+        capacities={'bf16-pairs':15 if mixed_fp8 else 31,'fp8-registers':32,
+                    'scalar-values':9 if has_pack else 17,'acc0':2,'acc1':2,'weight0':2,'weight1':2}
         for op in program.operations:
             attrs=dict(op.attrs);pure=op.pure
             # Effects are preserved; count their known unit occupancy where it
@@ -71,13 +78,15 @@ class TimingCosts:
             # buffers through production. Charge the operation on its first
             # result only; state tokens have zero storage demand.
             for index,(name,type_) in enumerate(zip(op.results,op.output_types)):
-                if type_=='!atlas.virtual_bf16':resource=(('matrix-registers',2),)
-                elif type_=='!atlas.virtual_fp8':resource=(('matrix-registers',1),)
+                if type_=='!atlas.virtual_bf16':resource=(('bf16-pairs',1),)
+                elif type_=='!atlas.virtual_fp8':resource=(('fp8-registers',1),)
+                elif type_=='i32':resource=(('scalar-values',1),)
                 elif type_.startswith('!atlas.virtual_mxu_acc<'):resource=((f'acc{type_[-2]}',1),)
                 elif type_.startswith('!atlas.virtual_mxu_weight<'):resource=((f'weight{type_[-2]}',1),)
                 else:resource=()
                 nodes.append(CostNode(name,tag if index==0 else 'fixed-control',deps,resource));last[name]=name;types[name]=type_
         if not nodes:raise ValueError('empty cost program')
         return estimate_dag(nodes,(nodes[-1].id,),operation_costs=costs,
-            pressure_weights={'matrix-registers':pressure_weight,'acc0':pressure_weight,'acc1':pressure_weight,'weight0':pressure_weight,'weight1':pressure_weight},
-            capacities={'matrix-registers':30,'acc0':2,'acc1':2,'weight0':2,'weight1':2},facts_sha256=self.sha256)
+            pressure_weights={'bf16-pairs':2*pressure_weight,'fp8-registers':pressure_weight,
+                              'scalar-values':self.timing['scalar_lsu.load'],'acc0':pressure_weight,'acc1':pressure_weight,'weight0':pressure_weight,'weight1':pressure_weight},
+            capacities=capacities,facts_sha256=self.sha256)
