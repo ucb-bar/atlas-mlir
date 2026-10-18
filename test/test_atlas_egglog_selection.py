@@ -100,6 +100,30 @@ class SelectionReceiptTest(unittest.TestCase):
         for change in ({'metric':'host_ns'},{'tier':'model'}):
             with self.assertRaises(ValueError):check_measurement(row|change,'a'*64,metric='cycles',tier='rtl')
 
+    def test_unary_data_and_qualification_changes_invalidate_admission(self):
+        from unittest.mock import patch
+        import atlas_egglog_unary_tables as unary
+        from explore_atlas_egglog import implementation_pins
+        names=('exp.bin.gz','exp2.bin.gz','rcp.bin.gz','provenance.json','qualification.json')
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for name in names:(root/name).write_bytes((unary.DATA/name).read_bytes())
+            with patch.object(unary,'DATA',root):
+                pins=implementation_pins()
+                self.assertTrue({str(root/name) for name in names} <= pins.keys())
+                self.assertIn(str(Path(unary.__file__).resolve()),pins)
+                proof=root/'proof.json'
+                declaration=dict(schema='atlas.exact-egglog.v1',candidate_bindings={'c':dict(source_sha256='a'*64)},implementation_pins=pins)
+                proof.write_text(json.dumps(declaration))
+                row=dict(id='c',source_sha256='a'*64,proof=dict(path=str(proof),sha256=hashlib.sha256(proof.read_bytes()).hexdigest()))
+                check_admission(row)
+                for name in names:
+                    path=root/name;original=path.read_bytes();path.write_bytes(original+b'changed')
+                    with self.assertRaisesRegex(ValueError,'implementation identity'):check_admission(row)
+                    path.write_bytes(original)
+                (root/names[0]).unlink()
+                with self.assertRaises(FileNotFoundError):implementation_pins()
+
     def test_candidate_and_provider_identity_are_bound(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);provider=root/'provider.py';provider.write_text('original provider')

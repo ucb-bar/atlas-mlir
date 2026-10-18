@@ -28,10 +28,11 @@ from atlas_egglog_cost import TimingCosts
 def digest(raw):return hashlib.sha256(raw).hexdigest()
 
 def implementation_pins():
-    import atlas_egglog_ir, atlas_egglog_schema, atlas_egglog_facts, atlas_egglog_rules, atlas_egglog_pack, atlas_egglog_cost
+    import atlas_egglog_ir, atlas_egglog_schema, atlas_egglog_facts, atlas_egglog_rules, atlas_egglog_pack, atlas_egglog_cost, atlas_egglog_unary_tables
     from merlin.semantic_compiler import egraph_terms, rewrite_selection
-    modules=(atlas_egglog_ir,atlas_egglog_schema,atlas_egglog_facts,atlas_egglog_rules,atlas_egglog_pack,atlas_egglog_cost,egraph_terms,rewrite_selection)
+    modules=(atlas_egglog_ir,atlas_egglog_schema,atlas_egglog_facts,atlas_egglog_rules,atlas_egglog_pack,atlas_egglog_cost,atlas_egglog_unary_tables,egraph_terms,rewrite_selection)
     paths=[Path(inspect.getfile(module)).resolve() for module in modules]+[Path(__file__).resolve()]
+    paths.extend(atlas_egglog_unary_tables.DATA/name for name in ('exp.bin.gz','exp2.bin.gz','rcp.bin.gz','provenance.json','qualification.json'))
     return {str(path):digest(path.read_bytes()) for path in paths}
 
 def search(program, timing, *, attempts=18, limit=8, seed=194):
