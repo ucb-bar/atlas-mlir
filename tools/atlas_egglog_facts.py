@@ -200,12 +200,12 @@ def infer_facts(op: str, operands: Sequence[RealFacts] = (), attrs: Mapping | No
     return RealFacts()
 
 
-def analyze_node(node, *, contracts: Mapping[str, Contract] | None = None, accept_contracts: bool = False, memo: dict | None = None) -> RealFacts:
+def _analyze_node(node, *, contracts: Mapping[str, Contract] | None = None, accept_contracts: bool = False, memo: dict | None = None) -> RealFacts:
     """Analyze encoder Nodes; explicit contracts are identified by node digest."""
     memo = {} if memo is None else memo
     if node in memo:
         return memo[node]
-    facts = infer_facts(node.op, tuple(analyze_node(x, contracts=contracts, accept_contracts=accept_contracts, memo=memo) for x in node.operands), dict(node.attrs))
+    facts = infer_facts(node.op, tuple(_analyze_node(x, contracts=contracts, accept_contracts=accept_contracts, memo=memo) for x in node.operands), dict(node.attrs))
     if node.op.removeprefix("atlas.").removeprefix("virtual_") == "mxu_matmul" and node.type == "!atlas.virtual_bf16" and len(node.operands) == 2 and all(x.type == "!atlas.virtual_fp8" for x in node.operands):
         facts = raw_fp8_reset_facts()
     digest = node_digest(node)
@@ -223,12 +223,52 @@ def analyze_node(node, *, contracts: Mapping[str, Contract] | None = None, accep
     return facts
 
 
+def contract_context(contracts: Mapping[str, Contract] | None, accept_contracts: bool) -> tuple:
+    """Immutable cache context; disabled contracts contribute no premises."""
+    return (bool(accept_contracts), tuple(sorted((contracts or {}).items())) if accept_contracts else ())
+
+
+def analyze_node(node, *, contracts: Mapping[str, Contract] | None = None,
+                 accept_contracts: bool = False, memo: dict | None = None,
+                 program_facts=None, program=None) -> RealFacts:
+    """Analyze a Node with an invocation-owned cache and optional SSA seeds.
+
+    ``memo`` is output-only: prior contents never supply proofs. Reusing an
+    output dictionary across contract modes cannot retain a caller premise.
+    ProgramFacts seeds must have exactly the current contract context.
+    """
+    if program_facts is not None and program_facts.contract_context != contract_context(contracts, accept_contracts):
+        raise ValueError("program facts contract context mismatch")
+    working = {}
+    if program_facts is not None:
+        if program is None or program_facts.program_sha256 != program.sha256:
+            raise ValueError("program facts source identity mismatch")
+        reachable = set()
+        def visit(value):
+            if value not in reachable:
+                reachable.add(value)
+                for child in value.operands:
+                    visit(child)
+        visit(node)
+        allowed = set(program.nodes.values())
+        if any(value.op == "anchor" and value not in allowed for value in reachable):
+            raise ValueError("anchor is not in the current program")
+        working = {value: fact for value, fact in program_facts.nodes.items() if value in reachable}
+    result = _analyze_node(node, contracts=contracts, accept_contracts=accept_contracts, memo=working)
+    if memo is not None:
+        memo.clear()
+        memo.update(working)
+    return result
+
+
 @dataclass(frozen=True)
 class ProgramFacts:
     """SSA and anchor facts; accumulator proof state never enters eclasses."""
     values: Mapping[str, RealFacts]
     nodes: Mapping[object, RealFacts]
     accumulators: Mapping[str, RealFacts]
+    program_sha256: str
+    contract_context: tuple = (False, ())
 
 
 def raw_fp8_reset_facts() -> RealFacts:
@@ -291,4 +331,4 @@ def analyze_program(program, *, contracts: Mapping[str, Contract] | None = None,
                     facts = from_interval(lo, hi, provenance=facts.provenance + (f"caller_contract:{contract.label}:{digest}",))
             values[result] = facts
             nodes[node] = facts
-    return ProgramFacts(values, nodes, accumulators)
+    return ProgramFacts(values, nodes, accumulators, program.sha256, contract_context(contracts, accept_contracts))

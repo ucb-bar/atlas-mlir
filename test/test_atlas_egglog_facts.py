@@ -124,6 +124,38 @@ class FactTests(unittest.TestCase):
                 result=analyze_program(parse_program(head+literal+readout('%s4','%acc')))
                 self.assertEqual(result.values['%y'].interval,constant(bits).interval)
 
+    def test_memo_cannot_reuse_contract_premises(self):
+        from atlas_egglog_ir import Node, parse_program
+        node = Node('anchor',attrs=(('id','%source'),))
+        digest = node_digest(node)
+        contracts = {digest:Contract(digest,(ordered(0),ordered(0x3F80)),'finite')}
+        memo = {}
+        self.assertTrue(analyze_node(node,contracts=contracts,accept_contracts=True,memo=memo).finite)
+        self.assertFalse(analyze_node(node,memo=memo).finite)
+        # Changing a premise recomputes instead of reading a stale node entry.
+        changed = {digest:Contract(digest,(ordered(0x7F80),ordered(0x7F80)),'infinity')}
+        self.assertFalse(analyze_node(node,contracts=changed,accept_contracts=True,memo=memo).finite)
+        text='''module {
+  func.func @context() -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %s1, %source = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    return %s1 : !atlas.virtual_state
+  }
+}
+'''
+        program=parse_program(text)
+        seeds=analyze_program(program,contracts=contracts,accept_contracts=True)
+        self.assertTrue(analyze_node(node,contracts=contracts,accept_contracts=True,program_facts=seeds,program=program).finite)
+        with self.assertRaises(ValueError):
+            analyze_node(node,program_facts=seeds,program=program)
+        with self.assertRaises(ValueError):
+            analyze_node(node,contracts=changed,accept_contracts=True,program_facts=seeds,program=program)
+        other=parse_program(text.replace('@context()', '@different_context()'))
+        with self.assertRaises(ValueError):
+            analyze_node(node,contracts=contracts,accept_contracts=True,program_facts=seeds,program=other)
+        with self.assertRaises(ValueError):
+            analyze_node(node,contracts=contracts,accept_contracts=True,program_facts=seeds)
+
     def test_opt_in_contracts_pinned_to_expression(self):
         from atlas_egglog_ir import Node
         node = Node('anchor',attrs=(('id','%source'),))
