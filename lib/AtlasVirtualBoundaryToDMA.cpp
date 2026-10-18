@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualBoundaryToDMA.h"
+#include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -93,6 +94,7 @@ struct LowerAtlasVirtualBoundaryToDMAPass
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     for (auto function : module.getOps<func::FuncOp>()) {
+      reuseAtlasImmutableWeights(function);
       FailureOr<Boundary> boundary = readBoundary(function);
       if (failed(boundary))
         return signalPassFailure();

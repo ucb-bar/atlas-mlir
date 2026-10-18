@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualToMachine.h"
+#include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
@@ -1093,6 +1094,7 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
     }
+    reuseAtlasImmutableWeights(function);
     VirtualPlanner planner(module, function);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
