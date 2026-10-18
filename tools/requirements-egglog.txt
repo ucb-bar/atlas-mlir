@@ -1,0 +1,2 @@
+# Optional backend for atlas_egglog_ir; parsing/decoding use the standard library.
+egglog==14.0.0
