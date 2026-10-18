@@ -19,7 +19,7 @@ from merlin.semantic_compiler.egraph_terms import saturate, extract, unforest
 from merlin.semantic_compiler.rewrite_selection import RewriteCandidate, shortlist
 from atlas_egglog_ir import load_program, parse_program, pure_roots, decode_program
 from atlas_egglog_schema import Value, encode_node, decode_node
-from atlas_egglog_facts import analyze_program
+from atlas_egglog_facts import analyze_program, node_digest
 from atlas_egglog_rules import EXACT_RULES, register_facts
 from atlas_egglog_pack import RECIPE, pack_rules, recipe, restore_native, choices_from_roots, materialize
 from atlas_egglog_cost import TimingCosts
@@ -39,6 +39,13 @@ def search(program, timing, *, attempts=18, limit=8, seed=194):
     if not 2<=attempts<=64 or not 3<=limit<=64:raise ValueError('bounded attempts/shortlist required')
     started=time.perf_counter();roots=pure_roots(program);facts=analyze_program(program)
     admitted=[op for op in program.operations if op.op=='virtual_pack_fp8' and facts.values[op.operands[0]].finite]
+    # A producer may feed distinct scale/attribute recipes. Perturb those
+    # independently, while preserving the existing seeded preference for a
+    # producer with only one recipe. Identical PACK terms remain hash-consed.
+    recipes_by_source={}
+    for op in admitted:
+        node=program.nodes[op.results[0]]
+        recipes_by_source.setdefault(node_digest(node.operands[0]),set()).add(node.attrs)
     seed_nodes=list(roots.values())
     for op in admitted:
         for unit in (0,1):seed_nodes.append(recipe(program.nodes[op.results[0]],unit).operands[1])
@@ -79,6 +86,8 @@ def search(program, timing, *, attempts=18, limit=8, seed=194):
                 if attempt<2:preferred=attempt
                 else:
                     source_key=json.loads(attrs['source_key'])
+                    if len(recipes_by_source[source_key])>1:
+                        source_key+=':pack_attrs:'+json.loads(attrs['pack_attrs'])
                     preferred=hashlib.sha256((source_key+':'+str(seed+attempt)).encode()).digest()[0]&1
                 return base*1024+int(unit!=preferred)
             extracted,_=extract(result,marginal_cost=marginal)
@@ -101,6 +110,8 @@ def search(program, timing, *, attempts=18, limit=8, seed=194):
     return chosen,dict(proof=proof,certificate_sha256=certificate,details=details,rejected=rejected,
         candidate_pool=len(candidates),distinct_sources=len({c.source_sha256 for c in candidates}),
         selected=[c.id for c in chosen],stats=stats,seconds=time.perf_counter()-started,
+        tie_breaking=dict(scope='Producer plus exact PACK attributes when one producer has multiple recipes; producer-only otherwise.',
+            distinct_recipes_per_producer={key:len(value) for key,value in recipes_by_source.items()}),
         estimate_scope=timing.omitted,attempts=attempts,seed=seed,
         hand_scope='Uniform engine0 and engine1 with full exact clamps, same automatically derived guards; not exhaustive enumeration.')
 
