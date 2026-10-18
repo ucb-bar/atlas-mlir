@@ -21,6 +21,8 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
+The optional [exact rewrite framework](docs/egglog-selection.md) encodes supported straight-line virtual dataflow into egglog, derives reusable guard facts, composes exact rule families and compares physically verified candidates using qualified model/RTL measurements. Merlin supplies the shared e-graph and measured-selection core; Atlas supplies its arithmetic rules, facts, materialization and execution boundary. See the [extension guide](docs/egglog-extension-guide.md) for adding a family or target. Search remains opt-in and retains the native control.
+
 ## Build
 
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
@@ -63,6 +65,9 @@ to a device program and host ELF, and tiled matmuls launched from a host.
 | [Dialect reference](docs/dialect-reference.md) | Operations, verifiers, passes, tools, adding a pass. |
 | [Compiler pipeline](docs/compiler-pipeline.md) | Virtual lowering, interpreter, physical program, DMA, LLVM handoff. |
 | [Guarded PACK proposal](docs/guarded-pack.md) | Opt-in all-scale conversion with explicit finite-source contracts and conservative fallback. |
+| [Exact rewrite framework](docs/egglog-selection.md) | Shared Merlin core, Atlas provider, fair hand comparison, measured selection and evidence boundaries. |
+| [Extending exact rewriting](docs/egglog-extension-guide.md) | Obligations and gates for a new rule family, reusable analysis or target provider. |
+| [Bounded sharing comparison](docs/egglog-materialization-comparison.md) | Equal materialization policies, real allocator fallback and explicit measurement budgets. |
 | [Native Merlin binding](docs/native-merlin-binding.md) | Compiling graphs through Merlin. |
 | [Host launch](docs/host-launch.md) | Host runtime, memory map, mailbox, board builds. |
 | [Hardware status](docs/hardware-status.md) | Which instructions have run on the RTL, and known RTL/model differences. |
