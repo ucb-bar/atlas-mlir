@@ -2,7 +2,7 @@
 
 #include <limits.h>
 
-enum { ATLAS_CSR_STATUS = 0x08, ATLAS_CSR_EXEC_CONTROL = 0x18 };
+enum { ATLAS_CSR_RETIRED = 0x04, ATLAS_CSR_STATUS = 0x08, ATLAS_CSR_EXEC_CONTROL = 0x18 };
 enum { ATLAS_HALTED = 1, ATLAS_HALT_REASON_SHIFT = 1, ATLAS_ECALL = 2 };
 
 uint32_t atlas_host_direct_read32(void *context, uintptr_t address) {
@@ -82,6 +82,8 @@ atlas_host_result atlas_host_start(atlas_host *host,
   host->active_buffer_count = buffer_count;
   host->active = 1;
   host->launch_acknowledged = 0;
+  /* Atlas is halted, so this count holds until the start write takes effect. */
+  host->start_retired = host->mmio.read32(host->mmio.context, host->map.csr_base + ATLAS_CSR_RETIRED);
   host->mmio.write32(host->mmio.context,
                      host->map.csr_base + ATLAS_CSR_EXEC_CONTROL, 1);
   return ATLAS_HOST_OK;
@@ -102,9 +104,12 @@ atlas_host_result atlas_host_poll(atlas_host *host) {
     return ATLAS_HOST_BUSY;
   }
   /* A previous ECALL may remain visible until the start write reaches CSRFile.
-   * That write clears the reason before the selected core begins execution. */
-  if (!host->launch_acknowledged)
+   * Only this launch can move the retired-instruction count, so once it has,
+   * the next status read belongs to this launch, even if it already halted. */
+  if (!host->launch_acknowledged) {
+    host->launch_acknowledged = (host->mmio.read32(host->mmio.context, host->map.csr_base + ATLAS_CSR_RETIRED) != host->start_retired);
     return ATLAS_HOST_BUSY;
+  }
   if (reason != ATLAS_ECALL) {
     host->active = 0;
     host->launch_acknowledged = 0;

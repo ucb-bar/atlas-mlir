@@ -23,6 +23,8 @@ typedef struct {
 
 static uint32_t read32(void *context, uintptr_t address) {
   fake_device *device = context;
+  if (address == CSR + 4)
+    return 0; /* Retired-instruction count, read at each start. */
   assert(address == CSR + 8);
   if (device->starts && device->status_reads++ == 0)
     return 1; /* The start write clears the previous halt reason. */

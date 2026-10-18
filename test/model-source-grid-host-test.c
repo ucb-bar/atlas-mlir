@@ -131,6 +131,7 @@ static int load_rtl_output(fake_device *device) {
 
 static uint32_t read32(void *context, uintptr_t address) {
   fake_device *device = context;
+  if (address == atlas_source_mn_host_map.csr_base + 4u) return 0; /* Retired count. */
   assert(address == atlas_source_mn_host_map.csr_base + 8u);
   if (!device->running || device->polls++ == 0) return 1;
   device->running = 0;

@@ -169,9 +169,9 @@ The virtual scheduler costs a load as a one-cycle launch whose tile is ready
 after the transfer and its VLOADs, so it fills the gap before the first
 consumer with independent work. It models one serial DMA engine and at most 8
 transfers in flight, and orders two DMA ops only when their DRAM ranges
-overlap and one writes. Virtual DMA stays in order with boundary tiles and
-PACK. `--schedule-atlas-virtual=random-seed=N` picks a random legal order for
-soundness tests.
+overlap and one writes. Virtual DMA stays in order with boundary tiles, but
+not with PACK. `--schedule-atlas-virtual=random-seed=N` picks a random legal
+order for soundness tests.
 
 Lowering gives each transfer one of 8 channels and one of 8 2 KiB staging
 windows (lowest free first; if none is free, the oldest transfer completes
@@ -180,8 +180,10 @@ its first use or the block end. A store copies into staging, then launches.
 `--insert-atlas-dma-waits` then adds `atlas.dma_wait` right before the first
 instruction that needs the transfer done: a staging-window access or reuse, a
 launch on the same channel, an overlapping DRAM access where either side
-writes, a helper DMA, PACK, scalar memory, a branch or jump, a CSR access, the
-halt, or entry to a branch target.
+writes, a helper DMA, scalar memory or a branch or jump outside an analyzed
+scalar loop, an analyzed loop that touches its staging window, a CSR access,
+the halt, or entry to any other branch target. Transfers stay in flight through
+PACK ([DMA across loops](#dma-across-loops)).
 
 ## Physical program output
 
@@ -259,8 +261,8 @@ Editing words inside the final inline-assembly string skips every check.
 - Pack scale codes `122..128` only; the FP8 readout scale must be a constant.
 - Virtual IR picks the MXU unit and must fit 2 weights and 2 accumulators per
   unit within a block.
-- A DMA transfer is always completed before a branch, a branch target, a PACK,
-  or the block end, even when overlap would be safe.
+- Outside analyzed scalar loops, a DMA transfer is always completed before a
+  branch, a branch target, or the halt, even when overlap would be safe.
 - Delays come from npu-model's `rtl-match` timing rules, not RTL
   measurements; a delay alone does not prove an MXU result or DMA is ready.
   The hand-written machine examples (`handoff_*_tile.mlir`) use hand-picked

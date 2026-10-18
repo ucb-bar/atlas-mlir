@@ -28,6 +28,7 @@ records them. Its `bitstream_identity` is `null`: no FPGA build has been bound.
 | --- | --- | --- |
 | Atlas IMEM | `0x00020000`, 128 KiB | 32-bit words; program starts at word 0. Must be mapped uncached. |
 | Atlas CSR window | `0x00040000` | Host checks `0x1c` bytes; must be mapped uncached. |
+| Retired-instruction count | CSR + `0x04` | Advances only while Atlas runs; start records it. |
 | Status CSR | CSR + `0x08` | Bit 0 = halted. Bits 2:1 = halt reason (`0` none, `2` ECALL). |
 | Execution control CSR | CSR + `0x18` | Write `1` to start. Clears the halt reason. |
 | Atlas DMA buffers | Fixed per program, below 4 GiB | From the compiled execution plan or capsule layout. Examples use a 1 MiB window at `0x90000000`. |
@@ -54,8 +55,11 @@ program, Atlas not halted, or nothing to poll); `TIMEOUT` (launch still active);
 
 The host may prepare the next tile between start and wait, as long as it
 leaves in-flight buffers alone. After a start, poll accepts an ECALL only after
-it has seen Atlas running or the halt reason cleared, so a stale ECALL from the
-previous launch never counts as completion.
+it has seen Atlas running, the halt reason cleared, or the retired-instruction
+count moved, so a stale ECALL from the previous launch never counts as
+completion, and a launch that finishes before the first poll still completes.
+The program must therefore retire at least one instruction and must not write
+CSR `0xC01`.
 
 ### Cache hook
 
@@ -209,8 +213,6 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
   no Atlas IMEM or CSR ranges and its DRAM ends at `0x90000000`.
 - The memmap checks prove the host can address IMEM, CSRs, and buffers. They do
   not prove Atlas DMA can reach those buffers or that the cache hook is correct.
-- A launch can report `ATLAS_HOST_TIMEOUT` if Atlas finishes before the first
-  status read: poll never sees it running, so it never accepts the ECALL.
 - Dump checkers ([`tools/check_graph_mailbox_dump.py`](../tools/check_graph_mailbox_dump.py),
   [`tools/atlas_check_mailbox_dump.py`](../tools/atlas_check_mailbox_dump.py),
   [`tools/atlas_check_model_dump.py`](../tools/atlas_check_model_dump.py))

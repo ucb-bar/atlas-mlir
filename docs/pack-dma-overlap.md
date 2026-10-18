@@ -41,6 +41,12 @@ ordering change could help until PACK stopped draining DMA.
 
 ## Design
 
+The generic [scalar-loop analysis](loop-dma-analysis.md) later replaced the
+PACK-specific recognition below: `findAtlasLoops`, `AtlasStream::loops`,
+`AtlasLoopFacts`, `proveAtlasLoopAccess` and `runAtlasLoop` in
+[`AtlasLoop.h`](../include/Atlas/AtlasLoop.h) need no PACK helper annotations,
+and `AtlasPackLoop.h` keeps only PACK's provenance check.
+
 One concept, the **PACK relayout loop** ([`AtlasPackLoop.h`](../include/Atlas/AtlasPackLoop.h)),
 replaces "PACK drains DMA" everywhere:
 

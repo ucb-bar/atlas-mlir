@@ -65,10 +65,12 @@ typedef struct {
   int program_loaded;
   int active;
   int launch_acknowledged;
+  uint32_t start_retired;
 } atlas_host;
 
 /* These calls only manage a reset-entry Atlas instruction stream. The stream
- * must initialize its own registers, wait for its DMA writes, and ECALL. */
+ * must initialize its own registers, wait for its DMA writes, and ECALL. It
+ * must retire at least one instruction and must not write CSR 0xC01. */
 atlas_host_result atlas_host_init(atlas_host *host, atlas_host_map map,
                                   atlas_host_mmio mmio, atlas_host_memory memory);
 atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,

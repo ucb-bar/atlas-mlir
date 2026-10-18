@@ -49,6 +49,8 @@ static int input_index(uintptr_t address) {
 
 static uint32_t read32(void *context, uintptr_t address) {
   fake_device *device = context;
+  if (address == CSR + 4)
+    return 0; /* Retired-instruction count, read at each start. */
   assert(address == CSR + 8);
   if (!device->running)
     return 1;

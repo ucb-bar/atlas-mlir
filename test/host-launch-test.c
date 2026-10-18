@@ -18,20 +18,27 @@ typedef struct {
   int halt_reason;
   int cache_fails;
   int stale_ecall_once;
+  int finish_before_poll;
+  uint32_t retired;
 } fake_device;
 
 static uint32_t read32(void *context, uintptr_t address) {
   fake_device *device = context;
+  if (address == CSR + 4)
+    return device->retired;
   assert(address == CSR + 8);
   if (!device->starts)
     return 1;
   ++device->status_reads;
+  if (device->finish_before_poll)
+    return 5; /* Finished before the first poll; only the count moved. */
   if (device->status_reads == 1 && device->stale_ecall_once) {
     device->stale_ecall_once = 0;
     return 5; /* Previous invocation, before this start is acknowledged. */
   }
   if (device->status_reads == 1)
     return 1; /* Stale halt just after the start write. */
+  ++device->retired;
   if (device->status_reads == 2)
     return 0;
   return 1 | ((uint32_t)device->halt_reason << 1);
@@ -43,6 +50,8 @@ static void write32(void *context, uintptr_t address, uint32_t value) {
     assert(value == 1);
     ++device->starts;
     device->status_reads = 0;
+    if (device->finish_before_poll)
+      device->retired += 3; /* Runs to its ECALL before any poll. */
     return;
   }
   assert(address >= IMEM && address < IMEM + sizeof(device->words));
@@ -105,6 +114,14 @@ int main(void) {
   assert(atlas_host_wait(&host, 2) == ATLAS_HOST_OK);
   assert(device.starts == 2 && device.cache_after == 2);
 
+  /* A launch that halts before the first poll is never seen running; its
+   * moved retired-instruction count still identifies its ECALL. */
+  device.finish_before_poll = 1;
+  assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_OK);
+  assert(atlas_host_wait(&host, 2) == ATLAS_HOST_OK);
+  assert(device.cache_after == 3);
+  device.finish_before_poll = 0;
+
   device.cache_fails = 1;
   assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_CACHE_ERROR);
   device.cache_fails = 0;
@@ -114,19 +131,19 @@ int main(void) {
   assert(host.active);
   device.cache_fails = 0;
   assert(atlas_host_poll(&host) == ATLAS_HOST_OK);
-  assert(!host.active && device.cache_after == 4);
+  assert(!host.active && device.cache_after == 5);
 
   device.halt_reason = 1;
   assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_OK);
   assert(atlas_host_wait(&host, 3) == ATLAS_HOST_BAD_HALT);
-  assert(device.cache_after == 4);
+  assert(device.cache_after == 5);
 
   buffers[0].address = UINT32_MAX - 15;
   assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_INVALID);
   buffers[0].address = 0x80002000;
   device.cache_fails = 1;
   assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_CACHE_ERROR);
-  assert(!host.active && device.starts == 4);
+  assert(!host.active && device.starts == 5);
 
   atlas_host_memory unqualified = {0, 0, 0};
   atlas_host_mmio mmio = {read32, write32, &device};

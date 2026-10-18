@@ -1481,7 +1481,7 @@ class NativeBindingTest(unittest.TestCase):
                               output_address=0x90011800, scale_code=code)
             self.assertEqual(audit_program(
                 load_inventory(), program, (destination / "program.bin").read_bytes()
-            )["word_count"], 75)
+            )["word_count"], 73)
             plan = json.loads((destination / "execution_plan.json").read_text())
             self.assertEqual((plan["operation"], plan["numerical_policy"], plan["pack_scale_code"]),
                              ("bf16_to_fp8_scaled_pack", SCALED_PACK_POLICY, code))
@@ -1615,7 +1615,7 @@ class NativeBindingTest(unittest.TestCase):
             destination=destination, limits=SearchLimits(),
         )
         program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 75)
+        self.assertEqual(program["word_count"], 73)
         self.assertEqual(sum(row["operation"] == "atlas.vpu_pack" for row in program["instructions"]), 1)
         self.assertEqual(manifest["selected_registers"], [32, 33, 0])
         self.assertEqual(json.loads((destination / "execution_plan.json").read_text())[
@@ -1688,7 +1688,7 @@ class NativeBindingTest(unittest.TestCase):
         plan = json.loads((destination / "execution_plan.json").read_text())
         self.assertEqual((plan["operation"], plan["numerical_policy"], plan["input_bytes"]),
                          ("bf16_to_fp8_unit_pack", PACK_POLICY, 2048))
-        self.assertEqual(json.loads((destination / "physical-program.json").read_text())["word_count"], 76)
+        self.assertEqual(json.loads((destination / "physical-program.json").read_text())["word_count"], 73)
         nonunit_source = source.replace("merlin.scale_code = 127", "merlin.scale_code = 128").replace(
             "%converted = arith.truncf %value : bf16 to f8E4M3FN",
             "%inverse_scale = arith.constant 5.000000e-01 : bf16\n"
@@ -1748,7 +1748,7 @@ class NativeBindingTest(unittest.TestCase):
         binary = (destination / "program.bin").read_bytes()
         inventory = load_inventory()
         audit = audit_program(inventory, program, binary)
-        self.assertEqual(audit["word_count"], 78)
+        self.assertEqual(audit["word_count"], 75)
         self.assertEqual((audit["modes"]["VRELU"], audit["modes"]["VFP8PACK"]), (1, 1))
         pack_index = next(index for index, row in enumerate(program["instructions"])
                           if row["operation"] == "atlas.vpu_pack")
@@ -5850,7 +5850,7 @@ class NativeBindingTest(unittest.TestCase):
             destination=destination, limits=SearchLimits(),
         )
         program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 97)
+        self.assertEqual(program["word_count"], 96)
         self.assertEqual(sum(row["operation"] == "atlas.mxu_matmul"
                              for row in program["instructions"]), 2)
         self.assertEqual(sum(row["operation"] == "atlas.vpu_pack"
@@ -6017,7 +6017,7 @@ class NativeBindingTest(unittest.TestCase):
             target_source=ROOT, destination=destination, limits=SearchLimits(),
         )
         program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 97)
+        self.assertEqual(program["word_count"], 96)
         self.assertEqual(sum(row["operation"] == "atlas.mxu_matmul"
                              for row in program["instructions"]), 2)
         self.assertIn(("seli", 3, 122), _tile_effects(program))
