@@ -144,6 +144,10 @@ class FactTests(unittest.TestCase):
 }
 '''
         program=parse_program(text)
+        # Standalone lexical contracts cannot be ingested by a Program.
+        with self.assertRaises(ValueError):
+            analyze_program(program,contracts=contracts,accept_contracts=True)
+        contracts={digest:Contract(digest,(ordered(0),ordered(0x3F80)),"finite",program_sha256=program.sha256)}
         seeds=analyze_program(program,contracts=contracts,accept_contracts=True)
         self.assertTrue(analyze_node(node,contracts=contracts,accept_contracts=True,program_facts=seeds,program=program).finite)
         with self.assertRaises(ValueError):
@@ -151,6 +155,9 @@ class FactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             analyze_node(node,contracts=changed,accept_contracts=True,program_facts=seeds,program=program)
         other=parse_program(text.replace('@context()', '@different_context()'))
+        with self.assertRaises(ValueError):
+            analyze_program(other,contracts=contracts,accept_contracts=True)
+        self.assertFalse(analyze_program(other,contracts=contracts).values['%source'].finite)
         with self.assertRaises(ValueError):
             analyze_node(node,contracts=contracts,accept_contracts=True,program_facts=seeds,program=other)
         with self.assertRaises(ValueError):

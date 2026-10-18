@@ -1,7 +1,7 @@
 """Conservative value facts for Atlas raw arithmetic; no scheduling facts.
 
 Intervals use VectorParam's bijective raw BF16 order, NOT IEEE comparisons.
-Unknown operations, loads and accumulator results remain unknown. A caller
+Unknown operations, opaque loads and unproved accumulator results stay unknown. A caller
 contract is a premise and is used only with explicit ``accept_contracts=True``.
 """
 from __future__ import annotations
@@ -141,10 +141,13 @@ class Contract:
     subject_sha256: str
     interval: tuple[int, int]
     label: str
+    program_sha256: str | None = None
 
     def __post_init__(self):
         if not re.fullmatch(r"[0-9a-f]{64}", self.subject_sha256) or not self.label:
             raise ValueError("contract needs a SHA-256 subject and nonempty label")
+        if self.program_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", self.program_sha256):
+            raise ValueError("contract program identity must be SHA-256")
         RealFacts(self.interval)
 
 
@@ -237,6 +240,8 @@ def analyze_node(node, *, contracts: Mapping[str, Contract] | None = None,
     output dictionary across contract modes cannot retain a caller premise.
     ProgramFacts seeds must have exactly the current contract context.
     """
+    if accept_contracts and program is not None and any(contract.program_sha256 != program.sha256 for contract in (contracts or {}).values()):
+        raise ValueError("caller contract program identity mismatch")
     if program_facts is not None and program_facts.contract_context != contract_context(contracts, accept_contracts):
         raise ValueError("program facts contract context mismatch")
     working = {}
@@ -291,6 +296,8 @@ def analyze_program(program, *, contracts: Mapping[str, Contract] | None = None,
     bounds require the fixed 32x32 tile types. Every accumulation deliberately
     kills the accumulator fact, even if all of its operands were finite.
     """
+    if accept_contracts and any(contract.program_sha256 != program.sha256 for contract in (contracts or {}).values()):
+        raise ValueError("caller contract program identity mismatch")
     values, nodes, accumulators = {}, {}, {}
     source_nodes = program.nodes
     for op in program.operations:
