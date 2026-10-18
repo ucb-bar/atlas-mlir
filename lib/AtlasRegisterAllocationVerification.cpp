@@ -1,6 +1,7 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
@@ -43,6 +44,7 @@ bool isScalar(Value value) {
 
 // A value with a register; a DMA immediate is built at each launch instead.
 bool isTracked(Value value) {
+  if (isAtlasMemoryControl(value)) return false;
   return (isScalar(value) && !isVirtualDMAImmediate(value)) ||
          isa<VirtualBF16Type, VirtualFP8Type>(value.getType());
 }
@@ -85,7 +87,7 @@ public:
 
     SmallVector<Value> entryArgs;
     for (BlockArgument arg : function.getArguments())
-      entryArgs.push_back(arg);
+      if (isTracked(arg)) entryArgs.push_back(arg);
     // The mailbox stages every entry argument before executing the body.
     if (failed(checkClique(entryArgs, function.getLoc(),
                            "entry argument staging")))
@@ -203,6 +205,11 @@ private:
           "scalar argument ABI register count does not match entry arguments");
     for (auto indexed : llvm::enumerate(function.getArguments())) {
       Value arg = indexed.value();
+      if (isAtlasMemoryControl(arg)) {
+        if (!arg.use_empty() || scalarArgumentRegs[indexed.index()] != -1)
+          return assignmentError(arg, "invalid memory control argument placement");
+        continue;
+      }
       if (scalarArgumentRegs[indexed.index()] < 0 ||
           unsigned(scalarArgumentRegs[indexed.index()]) != registers.lookup(arg))
         return assignmentError(

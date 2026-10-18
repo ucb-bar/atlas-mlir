@@ -64,6 +64,30 @@ ATLAS_MACHINE_EFFECTS(VirtualSpillBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualSpillFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualReloadBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualReloadFP8Op)
+ATLAS_MACHINE_EFFECTS(VirtualSaveOp)
+ATLAS_MACHINE_EFFECTS(VirtualRestoreOp)
+ATLAS_MACHINE_EFFECTS(VirtualSlotCopyOp)
+ATLAS_MACHINE_EFFECTS(VirtualControlOp)
+
+LogicalResult VirtualControlOp::verify() {
+  auto function = getOperation()->getParentOfType<func::FuncOp>();
+  int64_t index = getIndexAttr().getInt();
+  if (!function || !function->hasAttr("atlas.memory_controls") ||
+      getOperation()->getBlock() != &function.front() || index < 0 ||
+      index >= function.getNumArguments() || function.getArgument(index).getType() != getValue().getType())
+    return emitOpError("control load must name a typed entry argument in the memory control ABI");
+  return success();
+}
+
+void VirtualSlotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(), cast<OpResult>(getSlot()));
+}
+
+LogicalResult VirtualSlotOp::verify() { return verifyAtlasSlotOperation(*this); }
+LogicalResult VirtualSaveOp::verify() { return verifyAtlasSlotOperation(*this); }
+LogicalResult VirtualRestoreOp::verify() { return verifyAtlasSlotOperation(*this); }
+LogicalResult VirtualSlotCopyOp::verify() { return verifyAtlasSlotOperation(*this); }
 
 LogicalResult VirtualSpillBF16Op::verify() { return verifyAtlasSpillOperation(*this); }
 LogicalResult VirtualSpillFP8Op::verify() { return verifyAtlasSpillOperation(*this); }

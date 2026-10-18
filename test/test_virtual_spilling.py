@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -47,11 +47,50 @@ def raw_roundtrip(fp8=False):
             f'%s2, %saved = "atlas.virtual_spill_{suffix}"(%s1, %v) {{slot_word = 135168 : i32}} : ({STATE}, {tile}) -> ({STATE}, {SAVED})',
             f'%s3, %again = "atlas.virtual_reload_{suffix}"(%s2, %saved) : ({STATE}, {SAVED}) -> ({STATE}, {tile})']
     if fp8:
-        body += [f'%addr = arith.constant -1878917120 : i32', '%size = arith.constant 1024 : i32',
+        body += ['%addr = arith.constant -1878917120 : i32', '%size = arith.constant 1024 : i32',
                  f'%s4 = "atlas.virtual_dma_store_fp8"(%s3, %again, %addr, %size) : ({STATE}, {FP8}, i32, i32) -> {STATE}']
     else:
         body += [f'%s4 = "atlas.virtual_output_bf16"(%s3, %again) {{index = 0 : i32}} : ({STATE}, {BF16}) -> {STATE}']
     return wrap([*body, f'return %s4 : {STATE}'])
+
+
+def cfg_pressure(kind="edge", fp8=False, taken=True):
+    """Keep input tiles live across control flow without tile block arguments."""
+    count = 33 if fp8 else 32
+    source = pressure(count, fp8)
+    cut = source.index('%a0 =' if fp8 else f'%s{count+1} =')
+    prefix, outputs = source[:cut], source[cut:]
+    outputs = outputs.replace(f'(%s{count},', '(%incoming,', 1)
+
+    def copies(tag):
+        return '\n'.join(
+            f'%copy_{tag}_{i} = "atlas.virtual_vpu_unary"(%v{i}) {{kind = "mov"}} : ({BF16}) -> {BF16}'
+            for i in range(count))
+
+    if kind == "edge":
+        flow = f'cf.br ^use(%s{count} : {STATE})\n^use(%incoming: {STATE}):\n'
+    elif kind == "diamond":
+        flow = '\n'.join([
+            f'%choose = arith.constant {int(taken)} : i1',
+            f'cf.cond_br %choose, ^left(%s{count} : {STATE}), ^right(%s{count} : {STATE})',
+            f'^left(%left_state: {STATE}):', copies("left"),
+            f'cf.br ^use(%left_state : {STATE})',
+            f'^right(%right_state: {STATE}):', copies("right"),
+            f'cf.br ^use(%right_state : {STATE})',
+            f'^use(%incoming: {STATE}):\n'])
+    elif kind == "loop":
+        flow = '\n'.join([
+            '%zero = arith.constant 0 : i32', '%one = arith.constant 1 : i32',
+            '%limit = arith.constant 3 : i32',
+            f'cf.br ^loop(%s{count}, %zero : {STATE}, i32)',
+            f'^loop(%loop_state: {STATE}, %i: i32):', copies("loop"),
+            '%next = arith.addi %i, %one : i32',
+            '%more = arith.cmpi slt, %next, %limit : i32',
+            f'cf.cond_br %more, ^loop(%loop_state, %next : {STATE}, i32), ^use(%loop_state : {STATE})',
+            f'^use(%incoming: {STATE}):\n'])
+    else:
+        raise ValueError(kind)
+    return prefix + flow + outputs
 
 
 def compile_program(source, spill=True, timing="--insert-atlas-delays"):
@@ -67,24 +106,62 @@ def compile_program(source, spill=True, timing="--insert-atlas-delays"):
     return machine.stdout, json.loads(program.stdout)
 
 
-def execute_copies(program, inputs):
-    """Independent sequential byte transport check, not a timing simulator.
+def execute_copies(program, inputs, visits=None, runtime=None):
+    """Bounded byte/control check, not a numerical or timing simulator.
 
     Treat DMA as complete at issue; generated timing checks separately cover
     hazards. No target compiler packing or allocation helper supplies bytes.
     """
-    x = [0] * 32
-    registers = [bytes(1024) for _ in range(64)]
-    vmem, dram = {}, {}
+    runtime = {} if runtime is None else runtime
+    x = runtime.setdefault('x', [0] * 32)
+    registers = runtime.setdefault('registers', [bytes(1024) for _ in range(64)])
+    vmem, dram = runtime.setdefault('vmem', {}), runtime.setdefault('dram', {})
     for address, data in inputs:
         dram.update((address+i, byte) for i, byte in enumerate(data))
-    for row in program["instructions"]:
+    pc, redirect = 0, None
+    instructions = program["instructions"]
+    for _ in range(100000):
+        row = instructions[pc]
+        if visits is not None:
+            visits[pc] = visits.get(pc, 0) + 1
+        previous, redirect = redirect, None
         op, f = row["operation"], row["fields"]
         if op == "atlas.upper":
             x[f["dst"]] = f["immediate"] << 12
         elif op == "atlas.alu_imm":
-            assert f["kind"] == "addi"
-            x[f["dst"]] = (x[f["src"]] + f["immediate"]) & 0xffffffff
+            source, imm = x[f["src"]], f["immediate"]
+            if f["kind"] == "addi":
+                value = source + imm
+            elif f["kind"] == "xori":
+                value = source ^ imm
+            elif f["kind"] == "andi":
+                value = source & imm
+            elif f["kind"] == "sltiu":
+                value = int(source < (imm & 0xffffffff))
+            else:
+                raise AssertionError(f)
+            x[f["dst"]] = value & 0xffffffff
+        elif op == "atlas.alu_reg":
+            a, b = x[f["lhs"]], x[f["rhs"]]
+            signed = lambda v: v if v < 2**31 else v - 2**32
+            if f["kind"] == "add":
+                value = a + b
+            elif f["kind"] == "xor":
+                value = a ^ b
+            elif f["kind"] == "slt":
+                value = int(signed(a) < signed(b))
+            elif f["kind"] == "sltu":
+                value = int(a < b)
+            else:
+                raise AssertionError(f)
+            x[f["dst"]] = value & 0xffffffff
+        elif op == "atlas.branch":
+            assert f["kind"] == "bne"
+            if x[f["lhs"]] != x[f["rhs"]]:
+                redirect = pc + f["offset_bytes"] // 2
+        elif op == "atlas.jump":
+            assert f["dst"] == 0
+            redirect = pc + f["offset"] // 2
         elif op == "atlas.dma":
             address, external, size = x[f["reg"]]*4, x[f["dram"]], x[f["size"]]
             src, dst, start, end = ((dram, vmem, external, address) if f["direction"] == "load"
@@ -97,10 +174,26 @@ def execute_copies(program, inputs):
         elif op == "atlas.vload":
             address = x[f["base"]]*4 + f["offset"]
             registers[f["dst"]] = bytes(vmem[address+i] for i in range(1024))
+        elif op == "atlas.scalar_store":
+            assert f["kind"] == "sw"
+            address = (x[f["base"]] + f["offset"]) & 0xffffffff
+            vmem.update((address+i, byte) for i, byte in enumerate(x[f["src"]].to_bytes(4, 'little')))
+        elif op == "atlas.scalar_load":
+            assert f["kind"] == "lw"
+            address = (x[f["base"]] + f["offset"]) & 0xffffffff
+            x[f["dst"]] = int.from_bytes(bytes(vmem[address+i] for i in range(4)), 'little')
+        elif op == "atlas.vpu_unary":
+            assert f["kind"] == "mov"
+            registers[f["dst"]:f["dst"]+2] = registers[f["src"]:f["src"]+2]
+        elif op == "atlas.trap":
+            assert f["kind"] == "ecall" and previous is None
+            return dram
         else:
             assert op in {"atlas.delay", "atlas.dma_wait", "atlas.dma_config", "atlas.csr", "atlas.trap"}, op
         x[0] = 0
-    return dram
+        assert previous is None or redirect is None, "control transfer in delay slot"
+        pc = previous if previous is not None else pc + 1
+    raise AssertionError("byte/control execution work limit exceeded")
 
 
 class VirtualSpillingTest(unittest.TestCase):
@@ -127,7 +220,7 @@ class VirtualSpillingTest(unittest.TestCase):
     def test_fp8_pressure_recovers_and_preserves_all_inputs(self):
         source = pressure(33, fp8=True)
         self.assertNotEqual(run(source, "--lower-atlas-virtual-to-machine").returncode, 0)
-        machine, program = compile_program(source)
+        _, program = compile_program(source)
         self.assertIn('"atlas.virtual_spill_fp8"', run(source, "--spill-atlas-virtual").stdout)
         inputs = [(0x90000000+i*2048, bytes((j*19+i*13) % 256 for j in range(1024))) for i in range(33)]
         memory = execute_copies(program, inputs)
@@ -186,20 +279,92 @@ class VirtualSpillingTest(unittest.TestCase):
         for i, (_, data) in enumerate(inputs):
             self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
 
-    def test_cfg_pressure_is_an_explicit_failure(self):
+    def test_cfg_capture_spills_preserve_bytes_across_edges(self):
+        for fp8 in (False, True):
+            with self.subTest(fp8=fp8):
+                source = cfg_pressure(fp8=fp8)
+                self.assertNotEqual(run(source, "--lower-atlas-virtual-to-machine").returncode, 0)
+                first = run(source, "--spill-atlas-virtual")
+                self.assertEqual(first.returncode, 0, first.stderr)
+                self.assertEqual(run(first.stdout, "--spill-atlas-virtual").stdout, first.stdout)
+                _, program = compile_program(first.stdout)
+                size, count = (1024, 33) if fp8 else (2048, 32)
+                inputs = [(0x90000000+i*2048, bytes((j*19+i*13) % 256 for j in range(size))) for i in range(count)]
+                memory = execute_copies(program, inputs)
+                for i, (address, data) in enumerate(inputs):
+                    self.assertEqual(bytes(memory[0x90020000+i*size+j] for j in range(size)), data)
+                    self.assertEqual(bytes(memory[address+j] for j in range(size)), data)
+
+    def test_spills_reload_on_both_diamond_paths_and_loop_iterations(self):
+        for kind, taken in (("diamond", False), ("diamond", True), ("loop", True)):
+            with self.subTest(kind=kind, taken=taken):
+                source = cfg_pressure(kind, taken=taken)
+                self.assertNotEqual(run(source, "--lower-atlas-virtual-to-machine").returncode, 0)
+                spilled = run(source, "--spill-atlas-virtual", "--schedule-atlas-virtual", "--verify-atlas-virtual-stream")
+                self.assertEqual(spilled.returncode, 0, spilled.stderr)
+                _, program = compile_program(spilled.stdout)
+                inputs = [(0x90000000+i*2048, bytes((j*31+i*7) % 256 for j in range(2048))) for i in range(32)]
+                visits = {}
+                memory = execute_copies(program, inputs, visits)
+                if kind == "loop":
+                    self.assertTrue(any(visits.get(pc) == 3 and row['operation'] == 'atlas.vload'
+                                        for pc, row in enumerate(program['instructions'])))
+                for i, (address, data) in enumerate(inputs):
+                    self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
+                    self.assertEqual(bytes(memory[address+j] for j in range(2048)), data)
+
+    def test_spills_do_not_bypass_the_final_program_size_limit(self):
         from test_virtual_scheduling import wide_return_block
 
         result = run(wide_return_block(32), "--spill-atlas-virtual")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("across CFG edges is not supported", result.stderr)
-        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lowered = run(result.stdout, "--lower-atlas-virtual-to-machine")
+        self.assertNotEqual(lowered.returncode, 0)
+        self.assertIn("2048-word policy limit", lowered.stderr)
+        self.assertEqual(lowered.stdout, "")
 
-    def test_scalar_pressure_is_not_relabelled_as_tensor_spilling(self):
+    def test_cfg_spill_writer_layout_and_dominance(self):
+        source = raw_roundtrip()
+        start = source.index('%s2, %saved =')
+        end = source.index('%s3, %again =')
+        store = source[start:end].replace('(%s1,', '(%store_state,')
+        source = (source[:start] + f'cf.br ^save(%s1 : {STATE})\n'
+                  + f'^use(%load_state: {STATE}):\n'
+                  + source[end:].replace('(%s2,', '(%load_state,', 1))
+        source = source.replace('\n}}', '\n' + f'^save(%store_state: {STATE}):\n'
+                                + store + f'cf.br ^use(%s2 : {STATE})\n' + '}}')
+        spilled = run(source, "--spill-atlas-virtual")
+        self.assertEqual(spilled.returncode, 0, spilled.stderr)
+        self.assertLess(spilled.stdout.index('"atlas.virtual_spill_bf16"'),
+                        spilled.stdout.index('"atlas.virtual_reload_bf16"'))
+        self.assertEqual(run(spilled.stdout, "--spill-atlas-virtual").stdout, spilled.stdout)
+        _, program = compile_program(source)
+        data = bytes(range(256))*8
+        memory = execute_copies(program, [(0x90000000, data)])
+        self.assertEqual(bytes(memory[0x90020000+j] for j in range(2048)), data)
+        invalid = source.replace(f'cf.br ^save(%s1 : {STATE})',
+            '%choose = arith.constant 1 : i1\n' +
+            f'cf.cond_br %choose, ^save(%s1 : {STATE}), ^use(%s1 : {STATE})')
+        rejected = run(invalid, "--verify-atlas-virtual-stream")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('dominat', rejected.stderr)
+
+    def test_cfg_slots_cannot_reuse_textually_completed_storage(self):
+        source = raw_roundtrip().replace('%s4 =', '\n'.join([
+            f'cf.br ^use(%s3 : {STATE})', f'^use(%incoming: {STATE}):',
+            f'%s5, %saved2 = "atlas.virtual_spill_bf16"(%incoming, %again) {{slot_word = 135680 : i32}} : ({STATE}, {BF16}) -> ({STATE}, {SAVED})',
+            f'%s6, %again2 = "atlas.virtual_reload_bf16"(%s5, %saved2) : ({STATE}, {SAVED}) -> ({STATE}, {BF16})',
+            '%s4 ='])).replace('(%s3, %again)', '(%s6, %again2)')
+        compile_program(source)
+        rejected = run(source.replace('135680', '135168'), "--verify-atlas-virtual-stream")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('live spill slots overlap', rejected.stderr)
+
+    def test_entry_control_count_uses_the_memory_abi_when_registers_do_not_fit(self):
         source = pressure(1).replace('@test()', '@test(' + ', '.join(f'%arg{i}: i32' for i in range(18)) + ')')
         result = run(source, "--spill-atlas-virtual")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("scalar register spilling is not supported", result.stderr)
-        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("atlas.memory_controls", result.stdout)
 
     def test_spill_slots_cannot_alias_staging_or_escape_the_reserved_frame(self):
         for word in (131072, 135169, 196608):

@@ -11,6 +11,7 @@ struct AtlasVerificationContext;
 // prelude (DMA launch, wait) precedes the per-argument LWs and all of these.
 struct AtlasTileExpansion { unsigned commands, launches; };
 AtlasTileExpansion atlasTileExpansion(llvm::StringRef sourceOp);
+AtlasTileExpansion atlasTileExpansion(Operation *op);
 constexpr int32_t kMailboxPreludeCommands = 2;
 
 // Builds static transfer records from live source, checked placements and the
@@ -20,7 +21,8 @@ FailureOr<ArrayAttr> buildAtlasTileContract(
     llvm::ArrayRef<VirtualRegisterAssignment> tensorRegisters,
     llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments,
     const FixedResourcePlacement &fixed,
-    llvm::ArrayRef<int32_t> scalarArgumentRegs);
+    llvm::ArrayRef<int32_t> scalarArgumentRegs,
+    llvm::ArrayRef<VirtualRegisterAssignment> scalarRegisters = {});
 
 // Checks a generated artifact's VLOAD/VSTORE/DMA/WAIT and mailbox LW commands
 // and their emitted-path predecessors. See docs/dialect-reference.md.

@@ -124,7 +124,9 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   for (RegisterKind kind :
        {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
     fits &= succeeded(colorValues(kind));
-  if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
+  if (function->hasAttr("atlas.memory_controls"))
+    scalarArgumentRegs.assign(function.getNumArguments(), -1);
+  else if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
     for (BlockArgument arg : function.getArguments())
       scalarArgumentRegs.push_back(scalar(arg));
 
@@ -315,6 +317,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) {
+    if (isAtlasMemoryControl(value)) return false;
     Type type = value.getType();
     if (kind == RegisterKind::BF16)
       return isa<VirtualBF16Type>(type);
@@ -420,7 +423,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   if (kind == RegisterKind::Scalar) {
     Set stagedArguments;
     for (BlockArgument arg : function.getArguments())
-      stagedArguments.insert(arg);
+      if (selected(arg)) stagedArguments.insert(arg);
     clique(stagedArguments);
   }
   for (Block &block : function.getBody()) {
@@ -685,6 +688,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
   if (function.getNumArguments())
     windows.push_back({fixedResources.mailboxWord, "control mailbox", 256});
   function.walk([&](Operation *op) {
+    if (auto slot = dyn_cast<VirtualSlotOp>(op))
+      windows.push_back({slot.getSlotWord(), slot.getPurpose().str(), unsigned(slot.getWords())});
     if (isAtlasSpillStore(op))
       windows.push_back({uint32_t(op->getAttrOfType<IntegerAttr>("slot_word").getInt()),
                          "spill", atlasSpillWords(op)});

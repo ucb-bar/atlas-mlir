@@ -26,7 +26,13 @@ struct Tile { StringRef kind; uint32_t vmem, bytes; std::vector<int32_t> after; 
 // or for a PACK relayout the raw word packWord(i).
 struct Read { int32_t command, writer; uint32_t vmem, bytes, word; bool pack; };
 struct Pack { int32_t source, store, load, scale = -1; };
-struct Derived { std::vector<Tile> tiles; std::vector<Read> reads; std::vector<Pack> packs; };
+struct SlotWrite { int32_t writer; uint32_t word; };
+struct Derived {
+  std::vector<Tile> tiles;
+  std::vector<Read> reads;
+  std::vector<Pack> packs;
+  std::map<int32_t, SlotWrite> slotWrites, copyWrites;
+};
 
 // Relayout word 8r+4h+l holds raw word 128h+4r+l, the selected PACK layout as
 // lowerPack describes it; this checks lowering against its own description,
@@ -53,6 +59,77 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
   std::map<int32_t, unsigned> spillWidths;
   std::set<int32_t> spillReads;
   auto fixed = VirtualAllocationPlan().fixed();
+  std::set<int32_t> slotReads;
+  std::map<uint32_t, std::pair<uint32_t, StringRef>> slots;
+  auto values = cfg.getAs<ArrayAttr>("values");
+  auto declareSlot = [&](uint32_t word, uint32_t words, StringRef kind) {
+    unsigned alignment = words == 1 ? 1 : 256;
+    if (word < fixed.spillWord || word % alignment ||
+        uint64_t(word) + words > uint64_t(fixed.spillWord) + fixed.spillWindowWords)
+      return false;
+    for (auto [address, geometry] : slots) {
+      if (address == word) return geometry == std::make_pair(words, kind);
+      if (uint64_t(word) < uint64_t(address) + geometry.first &&
+          uint64_t(address) < uint64_t(word) + words) return false;
+    }
+    slots[word] = {words, kind};
+    return true;
+  };
+  for (Attribute a : operations) {
+    auto op = dyn_cast<DictionaryAttr>(a);
+    if (!op) return failure();
+    StringRef name = contractString(op, "name");
+    bool save = name == "atlas.virtual_save", restore = name == "atlas.virtual_restore",
+         copy = name == "atlas.virtual_slot_copy";
+    if (!save && !restore && !copy) continue;
+    if (!values) return failure();
+    auto word = contractI32(op, "slot_word"), words = contractI32(op, "slot_words");
+    StringRef kind = contractString(op, "slot_kind");
+    if (!word || !words || *words <= 0 ||
+        (kind == "bf16" ? *words != 512 : kind == "fp8" ? *words != 256 :
+         kind == "i1" || kind == "i32" ? *words != 1 : kind != "raw" || *words % 256) ||
+        !declareSlot(*word, *words, kind)) return failure();
+    uint32_t destination = *word;
+    if (copy) {
+      auto other = contractI32(op, "destination_word");
+      if (!other || *other == *word || !declareSlot(*other, *words, kind)) return failure();
+      destination = *other;
+    }
+    auto commands = contractI32Array(op, "tile_commands");
+    bool scalar = *words == 1;
+    unsigned halves = scalar ? 1 : *words / 256;
+    if (commands.size() != halves * (copy ? 2 : 1)) return failure();
+    auto operands = contractI32Array(op, "operands"), results = contractI32Array(op, "results");
+    int32_t reg = scalar ? fixed.scalarTemporary : fixed.tensorTemporary;
+    if (!copy) {
+      auto ids = save ? operands : results;
+      if (ids.size() != 1 || ids[0] < 0 || ids[0] >= int32_t(values.size())) return failure();
+      auto value = dyn_cast<DictionaryAttr>(values[ids[0]]);
+      auto placed = value ? contractI32(value, "reg") : std::nullopt;
+      if (!placed || contractString(value, "type") != kind) return failure();
+      reg = *placed;
+    }
+    for (unsigned half = 0; half < halves; ++half) {
+      for (unsigned step = 0; step < (copy ? 2u : 1u); ++step) {
+        int32_t id = commands[half * (copy ? 2 : 1) + step];
+        if (id < 0 || id >= int32_t(tiles.size())) return failure();
+        bool write = save || (copy && step == 1);
+        uint32_t address = (write ? destination : uint32_t(*word)) + half * 256;
+        const Tile &t = tiles[id];
+        auto record = cast<DictionaryAttr>(records[id]);
+        if (t.kind != (scalar ? (write ? "slot_store" : "slot_load") : (write ? "vstore" : "vload")) ||
+            !t.after.empty() || t.bytes != (scalar ? 4 : 1024) || t.vmem != address * 4 ||
+            contractI32(record, "reg") != reg + (!copy && !scalar ? half : 0)) return failure();
+        if (write) {
+          d.slotWrites[id] = {-int32_t(destination) - 1, half * 256};
+          if (copy) d.copyWrites[id] = {-*word - 1, half * 256};
+        } else {
+          slotReads.insert(id);
+          d.reads.push_back({id, -*word - 1, t.vmem, t.bytes, half * 256, false});
+        }
+      }
+    }
+  }
   for (Attribute a : operations) {
     auto op = dyn_cast<DictionaryAttr>(a);
     if (!op) return failure();
@@ -73,6 +150,9 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
           base % 1024 || base < fixed.spillWord * 4 ||
           uint64_t(base) + halves * 1024 > uint64_t(fixed.spillWord + fixed.spillWindowWords) * 4 ||
           !spillWriters.emplace(id, std::make_pair(*source, half)).second) return failure();
+      for (auto [word, geometry] : slots)
+        if (uint64_t(t.vmem) < uint64_t(word + geometry.first) * 4 &&
+            uint64_t(word) * 4 < uint64_t(t.vmem) + t.bytes) return failure();
     }
     spillWidths[*source] = halves;
   }
@@ -122,7 +202,8 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
         if (tiles[store].kind != "vstore" || !contains(t, tiles[store])) return failure();
         copy(store, tiles[store]);
       }
-    } else if (t.kind == "vload" || t.kind == "mailbox_load") {
+    } else if (t.kind == "vload" || t.kind == "mailbox_load" || t.kind == "slot_load") {
+      if (slotReads.count(id)) continue;
       if (t.after.size() != 1) return failure();
       int32_t writer = t.after[0];
       if (tiles[writer].kind == "dma_wait" && tiles[writer].after.size() == 1) writer = tiles[writer].after[0];
@@ -158,11 +239,14 @@ struct Word {
 struct State {
   RegValues x = unknownRegs();
   std::array<std::optional<Word>, 32> carried{}; // the word a scalar register holds since its LW
+  std::array<std::optional<Word>, 64> tensor{}; // first of 256 consecutive words in a raw register
   std::map<uint32_t, Word> memory;               // by VMEM word index; absent is unproved
 };
 // Must-facts: a word survives a join only when every reaching path agrees.
 bool merge(State &to, const State &from) {
   bool changed = false;
+  for (unsigned r = 0; r < 64; ++r)
+    if (to.tensor[r] && to.tensor[r] != from.tensor[r]) { to.tensor[r].reset(); changed = true; }
   for (unsigned r = 0; r < 32; ++r) {
     if (to.x[r] && to.x[r] != from.x[r]) { to.x[r].reset(); changed = true; }
     if (to.carried[r] && to.carried[r] != from.carried[r]) { to.carried[r].reset(); changed = true; }
@@ -270,8 +354,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     }
     return success();
   };
-  auto write = [](State &state, int32_t writer, const Tile &t) {
-    for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory[t.vmem / 4 + i] = {writer, i};
+  auto write = [](State &state, int32_t writer, const Tile &t, uint32_t first = 0) {
+    for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory[t.vmem / 4 + i] = {writer, first + i};
   };
   auto step = [&](size_t pc, State &state, bool diagnose, const Pack *helper) -> LogicalResult {
     Operation *op = s.ops[pc];
@@ -280,11 +364,34 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
         for (const Read *r : readsOf[*id])
           if (failed(check(op, *r, state))) return failure();
       const Tile &t = tiles[*id];
-      if (t.kind == "vstore") write(state, *id, t);
+      if (auto found = derived->copyWrites.find(*id); found != derived->copyWrites.end()) {
+        auto origin = isa<VStoreOp>(op) ? state.tensor[cast<VStoreOp>(op).getSrc()] : state.carried[cast<ScalarStoreOp>(op).getSrc()];
+        if (diagnose && origin != std::optional<Word>(Word{found->second.writer, found->second.word}))
+          return op->emitOpError("buffer contract: slot copy lost its loaded source bytes");
+      }
+      if (auto found = derived->slotWrites.find(*id); found != derived->slotWrites.end())
+        write(state, found->second.writer, t, found->second.word);
+      else if (t.kind == "vstore") write(state, *id, t);
       // A DMA load's words are indeterminate until its WAIT completes it.
       if (t.kind == "dma_load")
         for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory.erase(t.vmem / 4 + i);
       if (t.kind == "dma_wait" && t.after.size() == 1 && tiles[t.after[0]].kind == "dma_load") write(state, t.after[0], tiles[t.after[0]]);
+    }
+    if (auto load = dyn_cast<VLoadOp>(op)) {
+      auto id = contractTag(op, kAtlasTagTileCommand);
+      state.tensor[load.getDst()].reset();
+      if (id) if (auto found = state.memory.find(tiles[*id].vmem / 4); found != state.memory.end())
+        state.tensor[load.getDst()] = found->second;
+    } else {
+      unsigned reg = 0, width = 0;
+      if (auto p = dyn_cast<VPUUnaryOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<VPUBinaryOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<VPUReduceOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<XLUTransposeOp>(op)) { reg = p.getDst(); width = 1; }
+      if (auto p = dyn_cast<MXUPopOp>(op)) { reg = p.getDst(); width = p.getFormat() == "bf16" ? 2 : 1; }
+      if (auto p = dyn_cast<VPUPackOp>(op)) { reg = p.getDst(); width = p.getDirection() == "fp8_to_bf16" ? 2 : 1; }
+      if (auto p = dyn_cast<VLIOp>(op)) { reg = p.getDst(); width = p.getMode() == "all" || p.getMode() == "row" ? 2 : 1; }
+      for (unsigned half = 0; half < width; ++half) state.tensor[reg + half].reset();
     }
     auto address = [&](unsigned base, IntegerAttr offset) -> std::optional<uint32_t> {
       if (!state.x[base]) return std::nullopt;
@@ -295,7 +402,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
       auto a = address(load.getBase(), load.getOffsetAttr());
       if (a && *a % 4 == 0)
         if (auto found = state.memory.find(*a / 4); found != state.memory.end()) loaded = found->second;
-    } else if (auto store = dyn_cast<ScalarStoreOp>(op)) {
+    } else if (auto store = dyn_cast<ScalarStoreOp>(op);
+               store && !(contractTag(op, kAtlasTagTileCommand) &&
+               derived->slotWrites.count(*contractTag(op, kAtlasTagTileCommand)))) {
       uint32_t width = store.getKind() == "sw" ? 4 : store.getKind() == "sh" ? 2 : 1;
       auto a = address(store.getBase(), store.getOffsetAttr());
       if (helper && diagnose) {

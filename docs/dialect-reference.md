@@ -109,8 +109,10 @@ the IR or its order.
 A register is reused once its value is dead. Results may not overwrite their
 operands. Block arguments become edge copies, and copy cycles go through the
 temporaries. [`--spill-atlas-virtual`](register-spilling.md) can recover
-single-block FP8/BF16 tile pressure through raw VMEM stores/reloads before
-allocation. CFG, scalar and MXU-state spilling are not implemented.
+FP8/BF16 and scalar pressure through raw VMEM saves/reloads before allocation,
+including block arguments and entry controls. Spills and declared scratch share
+VMEM placement; edge-copy cycles use checked temporary slots. MXU-state spilling
+is not implemented.
 
 Lowering calls `VirtualAllocationPlan::verify()` first. Independent checkers
 recompute ownership from the source instead of trusting the allocator:
@@ -201,7 +203,7 @@ numerical policy, or availability across the stream.
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before allocation by a pressure- and latency-aware list schedule, keeping SSA, handle, and memory order. `random-seed=N` picks a random legal order. |
-| `--spill-atlas-virtual` | pass | Recover single-block FP8/BF16 register pressure with checked VMEM slots and raw saves/reloads, then retry the existing allocator. See [register spilling](register-spilling.md) for budgets and limits. |
+| `--spill-atlas-virtual` | pass | Recover tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass. `allocation-report=<file>` writes the plan as JSON, even on failure. |
 | `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. |
 | `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and delay-slot NOPs; on timed streams also recheck issue spacing. |

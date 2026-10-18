@@ -177,10 +177,10 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       }
       state = block.getArgument(0);
       for (BlockArgument arg : block.getArguments().drop_front())
-        if (!isa<VirtualBF16Type>(arg.getType()) &&
+        if (!isa<VirtualBF16Type, VirtualFP8Type>(arg.getType()) &&
             !arg.getType().isInteger(1) && !arg.getType().isInteger(32)) {
           block.getParentOp()->emitOpError(
-              "virtual block arguments must be BF16 tiles or i1/i32 controls");
+              "virtual block arguments must be BF16/FP8 tiles or i1/i32 controls");
           return failure();
         }
     }
@@ -243,7 +243,10 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
         ++outputs;
       continue;
     }
-    if (isAtlasSpillStore(&operation) || isAtlasSpillLoad(&operation)) {
+    if (isa<VirtualSlotOp>(operation))
+      continue;
+    if (isAtlasSpillStore(&operation) || isAtlasSpillLoad(&operation) ||
+        isAtlasSlotAccess(&operation) || isa<VirtualControlOp>(operation)) {
       if (!state || operation.getOperand(0) != state)
         return operation.emitOpError("nonlinear virtual state chain");
       state = operation.getResult(0);
@@ -330,6 +333,14 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
 }
 
 LogicalResult verifyVirtualFunction(func::FuncOp function) {
+  if (function->hasAttr("atlas.memory_controls")) {
+    if (!isa<UnitAttr>(function->getAttr("atlas.memory_controls")) ||
+        !function.getNumArguments() || function.getNumArguments() > 256)
+      return function.emitOpError("memory control ABI requires at most 256 controls");
+    for (Value argument : function.getArguments())
+      if (!argument.use_empty())
+        return function.emitOpError("memory controls must be read through virtual_control");
+  }
   if (function.isExternal() || function.getBody().empty() ||
       function.getFunctionType().getNumResults() != 1 ||
       !isa<VirtualStateType>(function.getFunctionType().getResult(0))) {

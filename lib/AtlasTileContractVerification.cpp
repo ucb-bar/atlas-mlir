@@ -48,7 +48,7 @@ bool validRecord(const Record &r) {
     return r.reg >= 0 && r.reg < 64 && r.bytes == 1024 &&
            r.vmemByte % 1024 == 0 && uint64_t(r.vmemByte) + 1024 <= kVmemBytes &&
            r.vmemByte / kVmemBankBytes == (r.vmemByte + 1023) / kVmemBankBytes;
-  return r.kind == "mailbox_load" && r.reg > 0 && r.reg < 32 &&
+  return (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") && r.reg > 0 && r.reg < 32 &&
          r.transfer == -1 && r.bytes == 4 && r.vmemByte % 4 == 0 &&
          uint64_t(r.vmemByte) + 4 <= kVmemBytes;
 }
@@ -84,6 +84,19 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
 }
 
 LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
+  llvm::DenseSet<int32_t> slotReads;
+  if (auto cfg = module->getAttrOfType<DictionaryAttr>(kAtlasCFGContract))
+    if (auto operations = cfg.getAs<ArrayAttr>("operations"))
+      for (Attribute attr : operations) {
+        auto op = dyn_cast<DictionaryAttr>(attr);
+        if (!op) continue;
+        StringRef name = contractString(op, "name");
+        if (name == "atlas.virtual_restore" || name == "atlas.virtual_slot_copy") {
+          auto commands = contractI32Array(op, "tile_commands");
+          for (unsigned n = 0; n < commands.size(); n += name == "atlas.virtual_slot_copy" ? 2 : 1)
+            slotReads.insert(commands[n]);
+        }
+      }
   auto contains = [](const Record &outer, const Record &inner) {
     return outer.vmemByte <= inner.vmemByte &&
            uint64_t(inner.vmemByte) + inner.bytes <=
@@ -91,7 +104,8 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
   };
   for (const Record &r : records) {
     bool valid = false;
-    if (r.kind == "dma_load" || r.kind == "vstore") {
+    if (r.kind == "dma_load" || r.kind == "vstore" || r.kind == "slot_store" ||
+        ((r.kind == "slot_load" || r.kind == "vload") && slotReads.count(r.id))) {
       valid = r.after.empty();
     } else if (r.kind == "dma_store") {
       valid = r.after.size() == r.bytes / 1024;
@@ -192,10 +206,21 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
       .Default({0, 0});
 }
 
+AtlasTileExpansion mlir::atlas::atlasTileExpansion(Operation *op) {
+  if (isa<VirtualControlOp>(op)) return {1, 0};
+  if (isAtlasSlotAccess(op)) {
+    auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
+    unsigned halves = slot.getWords() == 1 ? 1 : slot.getWords() / 256;
+    return {halves * (isa<VirtualSlotCopyOp>(op) ? 2u : 1u), 0};
+  }
+  return atlasTileExpansion(op->getName().getStringRef());
+}
+
 FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     func::FuncOp function, ArrayRef<VirtualRegisterAssignment> tensorRegisters,
     ArrayRef<VirtualDMAAssignment> dmaAssignments,
-    const FixedResourcePlacement &fixed, ArrayRef<int32_t> scalarArgumentRegs) {
+    const FixedResourcePlacement &fixed, ArrayRef<int32_t> scalarArgumentRegs,
+    ArrayRef<VirtualRegisterAssignment> scalarRegisters) {
   auto sourceDMA = buildAtlasDMAContract(function, dmaAssignments);
   if (failed(sourceDMA))
     return failure();
@@ -208,6 +233,13 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         (isa<VirtualBF16Type>(assignment.value.getType()) && assignment.reg % 2) ||
         !registers.try_emplace(assignment.value, assignment.reg).second)
       return function.emitOpError("tile contract requires unique valid tensor register claims");
+  }
+  for (const auto &assignment : scalarRegisters) {
+    if (!assignment.value || !knownValues.contains(assignment.value) ||
+        (!assignment.value.getType().isInteger(1) && !assignment.value.getType().isInteger(32)) ||
+        !assignment.reg || assignment.reg >= 32 ||
+        !registers.try_emplace(assignment.value, assignment.reg).second)
+      return function.emitOpError("tile contract requires unique valid scalar register claims");
   }
   llvm::DenseMap<Value, const VirtualDMAAssignment *> transfers;
   llvm::DenseMap<uint32_t, DictionaryAttr> dmaRecords;
@@ -262,10 +294,11 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     auto wait = addWait(*launch, fixed.loadChannel, -1);
     if (failed(wait))
       return failure();
-    for (auto [index, reg] : llvm::enumerate(scalarArgumentRegs))
-      if (failed(add("mailbox_load", reg, (uint64_t(fixed.mailboxWord) + index) * 4,
-                     0, 4, -1, -1, {*wait})))
-        return function.emitOpError("tile contract has invalid scalar argument placement");
+    if (!function->hasAttr("atlas.memory_controls"))
+      for (auto [index, reg] : llvm::enumerate(scalarArgumentRegs))
+        if (failed(add("mailbox_load", reg, (uint64_t(fixed.mailboxWord) + index) * 4,
+                       0, 4, -1, -1, {*wait})))
+          return function.emitOpError("tile contract has invalid scalar argument placement");
   }
   llvm::DenseMap<Value, SmallVector<int32_t, 2>> spillStores;
   for (Block &block : function.getBody()) {
@@ -350,6 +383,30 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                            (uint64_t(p.stagingWord) + half * 256) * 4,
                            0, 1024, -1, p.id, {*wait})))
               return failure();
+        }
+      } else if (auto control = dyn_cast<VirtualControlOp>(op)) {
+        auto reg = tensorReg(control.getValue());
+        if (failed(reg) || failed(add("mailbox_load", *reg,
+            (uint64_t(fixed.mailboxWord) + control.getIndex()) * 4,
+            0, 4, -1, -1, {1}))) return failure();
+      } else if (isAtlasSlotAccess(&op)) {
+        auto slot = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
+        bool copy = isa<VirtualSlotCopyOp>(op), save = isa<VirtualSaveOp>(op);
+        auto destination = copy ? op.getOperand(2).getDefiningOp<VirtualSlotOp>() : slot;
+        bool scalar = slot.getWords() == 1;
+        auto reg = copy ? FailureOr<unsigned>(scalar ? fixed.scalarTemporary : fixed.tensorTemporary) :
+            tensorReg(save ? op.getOperand(2) : op.getResult(1));
+        if (failed(reg)) return failure();
+        unsigned halves = scalar ? 1 : slot.getWords() / 256;
+        for (unsigned half = 0; half < halves; ++half) {
+          auto access = [&](bool write, VirtualSlotOp memory) {
+            return add(scalar ? (write ? "slot_store" : "slot_load") : (write ? "vstore" : "vload"),
+                *reg + (!copy && !scalar ? half : 0),
+                (uint64_t(memory.getSlotWord()) + half * 256) * 4, 0,
+                scalar ? 4 : 1024, -1, -1);
+          };
+          if (copy && failed(access(false, slot))) return failure();
+          if (failed(access(copy || save, destination))) return failure();
         }
       } else if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
         bool store = isAtlasSpillStore(&op);
@@ -443,7 +500,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     else if (auto wait = dyn_cast<DMAWaitOp>(op))
       matches = r.kind == "dma_wait" && wait.getChannel() == uint32_t(r.channel);
     else if (auto load = dyn_cast<ScalarLoadOp>(op))
-      matches = r.kind == "mailbox_load" && load.getKind() == "lw" && load.getDst() == uint32_t(r.reg);
+      matches = (r.kind == "mailbox_load" || r.kind == "slot_load") && load.getKind() == "lw" && load.getDst() == uint32_t(r.reg);
+    else if (auto store = dyn_cast<ScalarStoreOp>(op))
+      matches = r.kind == "slot_store" && store.getKind() == "sw" && store.getSrc() == uint32_t(r.reg);
     if (!matches)
       return op.emitOpError("tile contract command kind, format, register, or channel mismatch");
     if (isa<DMAOp, DMAWaitOp>(op)) {
@@ -494,12 +553,12 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
               failed(checkCaptured(op, "tile", "DRAM byte address", regs[dma.getDram()], r.dramByte)) ||
               failed(checkCaptured(op, "tile", "byte length", regs[dma.getSize()], r.bytes)))
             return failure();
-        } else if (r.kind == "mailbox_load") {
-          auto load = cast<ScalarLoadOp>(op);
+        } else if (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") {
+          auto load = dyn_cast<ScalarLoadOp>(op);
+          unsigned base = load ? load.getBase() : cast<ScalarStoreOp>(op).getBase();
+          auto offset = load ? load.getOffsetAttr() : cast<ScalarStoreOp>(op).getOffsetAttr();
           std::optional<uint64_t> address;
-          if (regs[load.getBase()])
-            address = uint32_t(int64_t(*regs[load.getBase()]) +
-                               load.getOffsetAttr().getValue().getSExtValue());
+          if (regs[base]) address = uint32_t(int64_t(*regs[base]) + offset.getValue().getSExtValue());
           if (failed(checkCaptured(op, "tile", "mailbox VMEM byte address", address, r.vmemByte)))
             return failure();
         }

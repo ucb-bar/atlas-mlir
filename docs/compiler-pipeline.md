@@ -257,9 +257,10 @@ Editing words inside the final inline-assembly string skips every check.
 ## Limits
 
 - One fixed-shape function per module, 32×32 tiles, no general tiling.
-  `--spill-atlas-virtual` can split single-block FP8/BF16 lifetimes through
-  reserved VMEM before allocation. CFG, scalar and MXU-state spilling remain
-  unsupported; see [register spilling](register-spilling.md).
+  `--spill-atlas-virtual` handles FP8/BF16 and scalar values, block arguments and
+  entry controls through shared VMEM temporaries. Mutable slots remain reserved
+  for the invocation. Live MXU-state spilling remains unsupported; see
+  [register spilling](register-spilling.md).
 - Pack scale codes `122..128` only; the FP8 readout scale must be a constant.
 - Virtual IR picks the MXU unit and must fit 2 weights and 2 accumulators per
   unit within a block.

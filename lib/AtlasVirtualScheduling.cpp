@@ -92,7 +92,7 @@ Effects effectsOf(Operation *op) {
            !isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
                 VirtualVPUSplatOp, VirtualXLUTransposeOp,
-                VirtualScaleConstantOp,
+                VirtualScaleConstantOp, VirtualSlotOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
@@ -422,6 +422,12 @@ Cost costOf(Operation *op) {
     unsigned halves = atlasSpillWords(writer) / 256;
     auto timing = isAtlasSpillStore(op) ? vstore : vload;
     return blocking(Unit::Dma, (halves - 1) * timing.interval + timing.latency);
+  }
+  if (isAtlasSlotAccess(op)) {
+    auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
+    unsigned words = slot.getWords();
+    unsigned cycles = words == 1 ? 8 : (words / 256) * (vload.latency + vstore.latency);
+    return blocking(Unit::Dma, cycles);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
     unsigned unit = unitOf(load.getWeight().getType());

@@ -50,10 +50,10 @@ def Atlas_VirtualMXUAccType : TypeDef<Atlas_Dialect, "VirtualMXUAcc"> {
   let genVerifyDecl = 1;
 }
 
-// A saved tile in the compiler-owned VMEM frame, not a physical register.
+// A saved value or mutable allocation in VMEM, not a physical register.
 def Atlas_VirtualSpillType : TypeDef<Atlas_Dialect, "VirtualSpill"> {
   let mnemonic = "virtual_spill";
-  let summary = "Identity of one bit-preserving VMEM spill store";
+  let summary = "Identity of a bit-preserving VMEM store or temporary slot";
   let assemblyFormat = "";
 }
 

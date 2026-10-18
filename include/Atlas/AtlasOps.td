@@ -91,6 +91,43 @@ def Atlas_VirtualSpillFP8Op : Atlas_VirtualSpillStore<"virtual_spill_fp8", Atlas
 def Atlas_VirtualReloadBF16Op : Atlas_VirtualSpillLoad<"virtual_reload_bf16", Atlas_VirtualBF16Type>;
 def Atlas_VirtualReloadFP8Op : Atlas_VirtualSpillLoad<"virtual_reload_fp8", Atlas_VirtualFP8Type>;
 
+// Mutable invocation-local storage. Unlike a saved value, this slot may be
+// written by different CFG predecessors. State edges order all accesses.
+def Atlas_VirtualSlotOp : Atlas_Op<"virtual_slot",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins StrAttr:$kind, I32Attr:$words, I32Attr:$slot_word,
+                       StrAttr:$purpose, DefaultValuedAttr<BoolAttr, "false">:$pinned);
+  let results = (outs Atlas_VirtualSpillType:$slot);
+  let hasVerifier = 1;
+}
+def Atlas_SlotValue : AnyTypeOf<[I1, I32, Atlas_VirtualBF16Type, Atlas_VirtualFP8Type]>;
+def Atlas_VirtualControlOp : Atlas_Op<"virtual_control",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, I32Attr:$index);
+  let results = (outs Atlas_VirtualStateType:$next, AnyTypeOf<[I1, I32]>:$value);
+  let hasVerifier = 1;
+}
+def Atlas_VirtualSaveOp : Atlas_Op<"virtual_save",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$slot,
+                       Atlas_SlotValue:$src);
+  let results = (outs Atlas_VirtualStateType:$next);
+  let hasVerifier = 1;
+}
+def Atlas_VirtualRestoreOp : Atlas_Op<"virtual_restore",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$slot);
+  let results = (outs Atlas_VirtualStateType:$next, Atlas_SlotValue:$value);
+  let hasVerifier = 1;
+}
+def Atlas_VirtualSlotCopyOp : Atlas_Op<"virtual_slot_copy",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$src,
+                       Atlas_VirtualSpillType:$dst);
+  let results = (outs Atlas_VirtualStateType:$next);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualScaleConstantOp : Atlas_Op<"virtual_scale_constant", [Pure]> {
   let summary = "Define an immutable E8M0 scale code";
   let arguments = (ins I32Attr:$code);
