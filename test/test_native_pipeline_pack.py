@@ -69,6 +69,18 @@ class NativePipelinePackTest(unittest.TestCase):
             input_text=machine,
         )
 
+    def test_optimized_pipeline_accepts_mxu_pressure(self) -> None:
+        from test_mxu_spilling import mxu_pressure
+
+        machine = self.binding._run(
+            [str(Path(ATLAS_BIN) / "atlas-opt"), *self.binding.NATIVE_PIPELINES["optimized"], "-"],
+            input_text=mxu_pressure(count=5, reset=True),
+        )
+        self.binding._run(
+            [str(Path(ATLAS_BIN) / "atlas-opt"), *self.binding.NATIVE_CHECKS, "-"],
+            input_text=machine,
+        )
+
     def test_pack_copy_preserves_all_32_rows(self) -> None:
         self.check_pack(self.program)
         rows = self.program["instructions"]

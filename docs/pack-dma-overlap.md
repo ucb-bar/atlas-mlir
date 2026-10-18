@@ -36,8 +36,8 @@ ordering change could help until PACK stopped draining DMA.
   it (below).
 - The ranges are in different 256 KiB VMEM banks (bank 0 against bank 2). In
   npu_model's port of VMEM.scala an LSU access denies the DMA only on the same
-  bank, so the relayout does not slow the transfer. Nicolas should confirm the
-  bank behaviour against RTL.
+  bank, so the relayout does not slow the transfer in that model. Bank
+  behaviour still needs confirmation against the selected RTL.
 
 ## Design
 

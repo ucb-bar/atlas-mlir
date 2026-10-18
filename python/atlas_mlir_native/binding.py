@@ -154,6 +154,7 @@ NATIVE_PIPELINES = {
         "--insert-atlas-delays",
     ),
     "optimized": (
+        "--spill-atlas-mxu-state",
         "--verify-atlas-virtual-stream", "--lower-atlas-virtual-boundary-to-dma",
         "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
         "--spill-atlas-virtual",

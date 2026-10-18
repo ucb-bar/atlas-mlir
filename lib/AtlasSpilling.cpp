@@ -425,7 +425,7 @@ struct SpillAtlasVirtualPass
   SpillAtlasVirtualPass(const SpillAtlasVirtualPass &other) : PassWrapper(other) {}
   StringRef getArgument() const final { return "spill-atlas-virtual"; }
   StringRef getDescription() const final {
-    return "Spill tensor and scalar values through shared VMEM temporaries";
+    return "Spill MXU state, tensor and scalar values through shared VMEM temporaries";
   }
   Option<unsigned> maxSpills{*this, "max-spills", llvm::cl::init(256),
       llvm::cl::desc("Bound pressure-driven spill rewrites")};
@@ -434,7 +434,8 @@ struct SpillAtlasVirtualPass
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    if (failed(verifyAtlasVirtualModule(module)))
+    if (failed(verifyAtlasVirtualModule(module, /*allowMXUPressure=*/true,
+                                      /*allowMXUCFG=*/true)))
       return signalPassFailure();
     auto functions = module.getOps<func::FuncOp>();
     if (!llvm::hasSingleElement(functions)) {
@@ -448,14 +449,18 @@ struct SpillAtlasVirtualPass
       function.emitError("spill budget must be aligned and fit the reserved VMEM frame");
       return signalPassFailure();
     }
+    unsigned mxuSpills = 0;
+    if (failed(spillAtlasMXUState(function, maxSpills, mxuSpills)))
+      return signalPassFailure();
     if (!slotsOf(function).empty())
       orderBlocks(function);
-    if (failed(placeSlots(function, limit)))
+    if (failed(placeSlots(function, limit)) ||
+        failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     llvm::DenseSet<Value> saved;
     // FP8 has no register-to-register edge move in this selected lowering.
     // Transport its block arguments through checked raw slots instead.
-    unsigned count = spillBlockArguments(function, RegisterKind::FP8);
+    unsigned count = mxuSpills + spillBlockArguments(function, RegisterKind::FP8);
     if (count > maxSpills || failed(placeSlots(function, limit))) {
       function.emitError("FP8 edge spill work limit or VMEM budget exceeded");
       return signalPassFailure();
@@ -474,6 +479,7 @@ struct SpillAtlasVirtualPass
           return signalPassFailure();
         Builder b(&getContext());
         unsigned peak = 0, stores = 0, loads = 0, copies = 0, rematerialized = 0;
+        unsigned mxuSaves = 0, mxuRestores = 0;
         for (auto slot : slotsOf(function)) {
           peak = std::max(peak, slot.word + slot.words - fixed.spillWord);
         }
@@ -482,8 +488,14 @@ struct SpillAtlasVirtualPass
           loads += isAtlasSpillLoad(op) || isa<VirtualRestoreOp>(op);
           copies += isa<VirtualSlotCopyOp>(op);
           rematerialized += op->hasAttr("atlas.spill_rematerialized");
+          if (auto action = op->getAttrOfType<StringAttr>("atlas.mxu_spill")) {
+            mxuSaves += action.getValue() == "save";
+            mxuRestores += action.getValue() == "restore";
+          }
         });
         module->setAttr("atlas.spill_report", b.getDictionaryAttr({
+            b.getNamedAttr("mxu_acc_saves", b.getI32IntegerAttr(mxuSaves)),
+            b.getNamedAttr("mxu_restores", b.getI32IntegerAttr(mxuRestores)),
             b.getNamedAttr("stores", b.getI32IntegerAttr(stores)),
             b.getNamedAttr("reloads", b.getI32IntegerAttr(loads)),
             b.getNamedAttr("copies", b.getI32IntegerAttr(copies)),
@@ -566,6 +578,10 @@ struct SpillAtlasVirtualPass
 };
 } // namespace
 
+LogicalResult mlir::atlas::placeAtlasSpillSlots(func::FuncOp function, unsigned words) {
+  return placeSlots(function, words);
+}
+
 LogicalResult mlir::atlas::verifyAtlasSpillSlots(func::FuncOp function) {
   bool present = false;
   function.walk([&](Operation *op) {
@@ -633,5 +649,6 @@ LogicalResult mlir::atlas::verifyAtlasSpillSlots(func::FuncOp function) {
 }
 
 void mlir::atlas::registerSpillAtlasVirtualPass() {
+  registerSpillAtlasMXUStatePass();
   PassRegistration<SpillAtlasVirtualPass>();
 }

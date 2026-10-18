@@ -269,7 +269,7 @@ class VirtualMXUHandleTest(unittest.TestCase):
             f"%next_state: {STATE}, %next_weight: {weight(0)}):",
         ).replace('(%next_state, %x, %weight)',
                   '(%next_state, %x, %next_weight)')
-        self.rejected(passed_weight, "virtual block arguments must be BF16 tiles")
+        self.rejected(passed_weight, "virtual block arguments must be BF16/FP8 tiles")
         captured_acc = program(
             load("io2", "s0", "weight"), reset("s0", "s1", "a0"),
             f"    cf.br ^next(%s1 : {STATE})",

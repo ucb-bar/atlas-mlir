@@ -2,6 +2,7 @@
 """Lower one virtual Atlas program through every stage, keeping each artifact.
 
 The output directory receives:
+  0-mxu-spilled.mlir after MXU lifetime splitting, when --spill is selected
   1-virtual.mlir    the source, after --verify-atlas-virtual-stream
   2-scheduled.mlir  after --schedule-atlas-virtual
   2-spilled.mlir    after --spill-atlas-virtual, when --spill is selected
@@ -56,6 +57,9 @@ def stages(source: Path, timing: str, spill: bool = False) -> list[tuple[str, st
                           ["--spill-atlas-virtual", "--verify-atlas-virtual-stream"]))
         artifact, tool, _, options = result[3]
         result[3] = artifact, tool, "2-spilled.mlir", options
+        result[0] = "1-virtual.mlir", "atlas-opt", "0-mxu-spilled.mlir", result[0][3]
+        result.insert(0, ("0-mxu-spilled.mlir", "atlas-opt", source,
+                          ["--spill-atlas-mxu-state"]))
     return result
 
 
@@ -69,7 +73,7 @@ def main() -> int:
     parser.add_argument("--timing", choices=("insert-atlas-delays", "schedule-atlas-stream"),
                         default="insert-atlas-delays")
     parser.add_argument("--spill", action="store_true",
-                        help="recover straight-line FP8/BF16 pressure through VMEM spills")
+                        help="recover MXU, tensor and scalar pressure through VMEM spills")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)

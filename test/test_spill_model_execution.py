@@ -10,6 +10,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_mxu_spilling import (
+    mxu_diamond,
+    mxu_diamond_inputs,
+    mxu_inputs,
+    mxu_loop,
+    mxu_loop_inputs,
+    mxu_pressure,
+)
 from test_spill_resources import (
     block_pressure,
     entry_pressure,
@@ -27,7 +35,7 @@ def model_instruction(row, inventory, isa):
     npu_model executes instruction objects. Decode uses the existing RTL
     inventory, independently of the emitter and its JSON operand annotations.
     """
-    from npu_model.isa import SBType, SType, UJType, UType
+    from npu_model.isa import SBType, SType, UJType, UType, VIType
 
     mode = row['mode_id']
     variant = next(v for v in inventory['variants'] if v['id'] == mode)
@@ -42,6 +50,8 @@ def model_instruction(row, inventory, isa):
         immediate = row['fields']['offset']
     elif issubclass(cls, SType):
         immediate = ((word >> 25) << 5) | ((word >> 7) & 31)
+    elif issubclass(cls, VIType):
+        immediate = word >> 16
     elif issubclass(cls, UType):
         immediate = word >> 12
     else:
@@ -55,6 +65,66 @@ def model_instruction(row, inventory, isa):
 
 @unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL') == '1', 'set ATLAS_RUN_NPU_MODEL=1 with the documented model pin')
 class SpillModelExecutionTest(unittest.TestCase):
+    def test_mxu_spills_restore_before_continuation_on_both_units(self):
+        import torch
+        from npu_model.configs import isa_definition as isa
+        from npu_model.configs.hardware.default import DefaultHardwareConfig
+        from npu_model.logging import LoggerConfig
+        from npu_model.simulation import Simulation
+        from npu_model.software.program import InstantiableProgram
+
+        from tools.check_program_decode import decode_binary
+
+        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
+        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
+                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION)
+        inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
+        torch.set_num_threads(1)
+        with tempfile.TemporaryDirectory(prefix='atlas-mxu-spill-model-') as directory:
+            cases = [(unit, continuation, reset, iterations, None)
+                     for unit in (0, 1)
+                     for continuation, reset, iterations in ((False, False, 0), (True, False, 0),
+                                                             (True, True, 0), (True, False, 1),
+                                                             (True, False, 3))]
+            cases += [(None, True, False, 0, take) for take in (0, 1, 2, 3)]
+            for unit, continuation, reset, iterations, take in cases:
+                with self.subTest(unit=unit, continuation=continuation, reset=reset, iterations=iterations, take=take):
+                    if take is None:
+                        tiles, outputs = mxu_inputs(continuation, reset=reset)
+                        source = mxu_loop(unit, iterations) if iterations else mxu_pressure(unit, continuation=continuation, reset=reset)
+                        if iterations:
+                            tiles, outputs = mxu_loop_inputs(iterations)
+                    else:
+                        source = mxu_diamond()
+                        tiles, outputs = mxu_diamond_inputs(take)
+                    _, emitted = compile_program(source)
+                    binary = b''.join(row['word_u32'].to_bytes(4, 'little') for row in emitted['instructions'])
+                    decoded = decode_binary(inventory, binary)
+                    program = InstantiableProgram([model_instruction(row, inventory, isa) for row in decoded['instructions']])
+                    program.dram_base = 0x90000000
+                    initial = bytearray((i*17+43) % 256 for i in range(0x21900))
+                    for i, tile in enumerate(tiles):
+                        initial[i*2048:i*2048+len(tile)] = tile
+                    if take is not None:
+                        initial[0x10000:0x10400] = take.to_bytes(4, 'little') + bytes(1020)
+                    program.memory_regions = [(0, torch.tensor(list(initial), dtype=torch.uint8))]
+                    config = DefaultHardwareConfig()
+                    config.arch_state_config = dataclasses.replace(config.arch_state_config, numerics='rtl',
+                                                                  randomize_init=True, init_seed=187)
+                    simulation = Simulation(config, LoggerConfig(filename=str(Path(directory) / f'{unit}-{continuation}-{reset}-{iterations}-{take}.json')),
+                                            program, verbose=False)
+                    state = simulation.core.arch_state
+                    try:
+                        state.vmem.fill_(0xcd)
+                        simulation.run(max_cycles=500000)
+                        self.assertTrue(state.halted)
+                        self.assertEqual(simulation.get_stats().runtime_errors, 0)
+                        for i, data in enumerate(outputs):
+                            initial[0x20000+i*2048:0x20800+i*2048] = data
+                        self.assertEqual(bytes(state.read_dram(program.dram_base, len(initial)).tolist()), bytes(initial))
+                    finally:
+                        state.close()
+
     def test_spill_programs_execute_with_preserved_inputs_and_guards(self):
         import torch
         from npu_model.configs import isa_definition as isa

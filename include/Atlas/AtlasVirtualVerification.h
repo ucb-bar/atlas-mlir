@@ -21,7 +21,13 @@ bool virtualDMAConflict(Operation *a, Operation *b);
 bool isVirtualDMAImmediate(Value value);
 
 // Check a pre-allocation SSA candidate and its CFG/state obligations.
-LogicalResult verifyAtlasVirtualModule(ModuleOp module);
+// Spilling may defer only slot-capacity checks. State linearity, current
+// accumulator versions and unit ownership remain mandatory. The optional CFG
+// form requires each live accumulator exactly once on every successor edge;
+// only the MXU spill pass admits it before materializing completed state.
+LogicalResult verifyAtlasVirtualModule(ModuleOp module,
+                                      bool allowMXUPressure = false,
+                                      bool allowMXUCFG = false);
 void registerVerifyAtlasVirtualStreamPass();
 
 } // namespace mlir::atlas

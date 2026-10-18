@@ -105,7 +105,10 @@ binding one by one breaks a backedge that swaps two values. For
 
 MXU handles are identities, not slots. A reset starts a contraction,
 accumulate and readout consume the current accumulator version, readout keeps
-the weight, and handles never cross blocks. Keep virtual and machine IR apart: never read a register number from a virtual value, never
+the weight. Explicit handle block arguments require `--spill-atlas-mxu-state`
+before scheduling or allocation: completed accumulators become BF16 tile
+edges and weights become FP8 tile edges. Lowered handles stay block-local.
+Keep virtual and machine IR apart: never read a register number from a virtual value, never
 use the production pack or allocator to compute expected results, and report
 "unsupported" for a mode whose numerics are unknown.
 
@@ -259,11 +262,12 @@ Editing words inside the final inline-assembly string skips every check.
 - One fixed-shape function per module, 32×32 tiles, no general tiling.
   `--spill-atlas-virtual` handles FP8/BF16 and scalar values, block arguments and
   entry controls through shared VMEM temporaries. Mutable slots remain reserved
-  for the invocation. Live MXU-state spilling remains unsupported; see
+  for the invocation. Completed MXU state can be saved through raw tiles before
+  slot reuse and across explicit CFG edges; normalized handles remain local. See
   [register spilling](register-spilling.md).
 - Pack scale codes `122..128` only; the FP8 readout scale must be a constant.
-- Virtual IR picks the MXU unit and must fit 2 weights and 2 accumulators per
-  unit within a block.
+- Virtual IR picks the MXU unit. After spilling, it must fit two weights and
+  two accumulators per unit within a block.
 - Outside analyzed scalar loops, a DMA transfer is always completed before a
   branch, a branch target, or the halt, even when overlap would be safe.
 - Delays come from npu-model's `rtl-match` timing rules, not RTL
