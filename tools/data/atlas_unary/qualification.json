@@ -1,0 +1,177 @@
+{
+  "status": "PASS",
+  "operations": 3,
+  "encodings_per_operation": 65536,
+  "repeats": 2,
+  "fresh_model_invocations": 12,
+  "fresh_rtl_invocations": 12,
+  "full_dram_bytes_per_invocation": 196736,
+  "vmem_guard_bytes_per_invocation": 1505280,
+  "rtl_binary_sha256": "d594f72d67c0f8076faab1feae0068c96fcd93b7c31323b5b005a0bb3702119c",
+  "scope": "Three actual Atlas BF16 unary opcodes; exact raw outputs including all NaN encodings; full memory guards, repeat and drained completion; no hardware rebuild.",
+  "audit_path": "sessions/oct18/egglog/unary-facts/sweep-audit.json",
+  "audit_sha256": "92a948c1fce3f1ea8a2ca69afacc2173499938c41e2e5d153365c4a8080a7e26",
+  "rows": [
+    {
+      "kind": "exp",
+      "batch": 0,
+      "status": "PASS",
+      "raw_range": [
+        0,
+        32767
+      ],
+      "words": 1057,
+      "receipt_sha256": "4eef746b916c4d423174b540403aeac6f18896c98ba9a2230ccf8da0231a766b",
+      "compile_pins_sha256": "b2f6ccacc9b926c56c389ab4af87efae56383d660cd4320ebf5d2563f132f7de",
+      "program_sha256": "8e45aad4907877520723b0198cc61e1f1dd4e0256f9a4dda3e8345f867d04131",
+      "source_sha256": "1d0b76f16efa9e14e4992b780a5f7094bfca9f4882cc2a194c59ccd8d668eee7",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/exp/0/receipt.json"
+    },
+    {
+      "kind": "exp",
+      "batch": 1,
+      "status": "PASS",
+      "raw_range": [
+        32768,
+        65535
+      ],
+      "words": 1057,
+      "receipt_sha256": "cde29b92bfe1a3d99efdd541e3f57e482c3a9d642c822564ddfc226d59760b71",
+      "compile_pins_sha256": "18ff648b24e0ca0cd4069669a4b9497a467a3ab5b5938cbaa684b42bf1f7f254",
+      "program_sha256": "8e45aad4907877520723b0198cc61e1f1dd4e0256f9a4dda3e8345f867d04131",
+      "source_sha256": "1d0b76f16efa9e14e4992b780a5f7094bfca9f4882cc2a194c59ccd8d668eee7",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/exp/1/receipt.json"
+    },
+    {
+      "kind": "exp2",
+      "batch": 0,
+      "status": "PASS",
+      "raw_range": [
+        0,
+        32767
+      ],
+      "words": 1057,
+      "receipt_sha256": "a4922c86f2eea5b8109e5ffcf389d36b675ebd545d354762cbba2b4e3dfec046",
+      "compile_pins_sha256": "c59a0abc55a2a4a2163e719e3e9a596d5b064173ee62619224a9e7eda44e2f0c",
+      "program_sha256": "f9ac1dfe69c567eb4684207675149fa54ebc0d07b1da59e3416bc8e17a39bbc6",
+      "source_sha256": "d35b98184b22e7cbd3f0fa6841c4aad5c26233f5b9c82ecced88d1211fce6e17",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/exp2/0/receipt.json"
+    },
+    {
+      "kind": "exp2",
+      "batch": 1,
+      "status": "PASS",
+      "raw_range": [
+        32768,
+        65535
+      ],
+      "words": 1057,
+      "receipt_sha256": "d9decf418848cf8affb688f36df56e530efef9b41f48fd29d98bdb31ba8cf46d",
+      "compile_pins_sha256": "ee510aea69060e53acd7d78f956872d86ff927eec8fcc9ff85243f63642a4ae1",
+      "program_sha256": "f9ac1dfe69c567eb4684207675149fa54ebc0d07b1da59e3416bc8e17a39bbc6",
+      "source_sha256": "d35b98184b22e7cbd3f0fa6841c4aad5c26233f5b9c82ecced88d1211fce6e17",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/exp2/1/receipt.json"
+    },
+    {
+      "kind": "recip",
+      "batch": 0,
+      "status": "PASS",
+      "raw_range": [
+        0,
+        32767
+      ],
+      "words": 1057,
+      "receipt_sha256": "ecc08aa5f3c5cdb1e3c06f8a64a04d06345dca8385c6d203369de95370a28f2e",
+      "compile_pins_sha256": "cb72fa996a4a46fb028c67a6c02fc2ac9d95b768553285f49297dca089afc4c8",
+      "program_sha256": "6011bf72ccf91e93f199b343adeaa8149c66a8eb427397ce0e7ce604cee29840",
+      "source_sha256": "f5c2f64f65b79e76916121c4d7693d3498aad6fbfc16e31ca5c900fc9f4a299c",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/recip/0/receipt.json"
+    },
+    {
+      "kind": "recip",
+      "batch": 1,
+      "status": "PASS",
+      "raw_range": [
+        32768,
+        65535
+      ],
+      "words": 1057,
+      "receipt_sha256": "d029c9f5d4d6576dee93694c430de92b07b278a86ba079cc8b7c40b6d94cf800",
+      "compile_pins_sha256": "1713505d18b9da0e9d3d6378949308fa62ee4fa5bfe58b883c65b2daffb93d2c",
+      "program_sha256": "6011bf72ccf91e93f199b343adeaa8149c66a8eb427397ce0e7ce604cee29840",
+      "source_sha256": "f5c2f64f65b79e76916121c4d7693d3498aad6fbfc16e31ca5c900fc9f4a299c",
+      "compiler_sha256": "c916c6317735166db8b88147a3e772cf1410faa5b4b955a850ddb29951b714b6",
+      "emitter_sha256": "96d52331f1321b3cc2770714e1de36c2b6783ecbe554e054d28e774488210abb",
+      "receipt_path": "sessions/oct18/egglog/unary-facts/execution-v2/recip/1/receipt.json"
+    }
+  ],
+  "consumed_pack": {
+    "status": "PASS",
+    "contracts": false,
+    "actual_egglog_recipe_equalities": 6,
+    "operations": [
+      "exp",
+      "exp2",
+      "recip"
+    ],
+    "routes": 3,
+    "fresh_model_invocations": 6,
+    "fresh_rtl_invocations": 6,
+    "audit_path": "sessions/oct18/egglog/unary-facts/pack-audit.json",
+    "audit_sha256": "c3aad21a6ace3746724272943c97cfb4f547239f664a859ba39cf69aaf567cc7",
+    "rows": [
+      {
+        "route": "native",
+        "status": "PASS",
+        "receipt_sha256": "9567d877cfb9b0395356ea4b85b6a1cb6df2444b86b02eef4561c72cc9476a06",
+        "source_sha256": "44604790cc833158527609b6b07cbb9317be288f6b9018ec1187902ecc7fb549",
+        "program_sha256": "68faaa3729ec617cf4870ab2eb07d08d283d6511f62ba2c76401620529081655",
+        "output_bytes_per_invocation": 3072,
+        "implementation_pins": {
+          "atlas_egglog_facts": "1056657010dae8f2ce6103fce645068d8d3cf03c6bc4c61dfebc03d5d3a5c399",
+          "atlas_egglog_unary_tables": "a1572a1658b8db48181d08b0ce090b1916c417b6793dce4cf4b7e57c7dbf3c54",
+          "atlas_egglog_pack": "2d19087047d8da07994a21038e5bbb20a6ba69a636abe452b833e91f28300bc5",
+          "atlas_egglog_rules": "6f009e75438d3c6bdb28d7b898fcde904d113210bd49490974cacb15c2dea882"
+        }
+      },
+      {
+        "route": "mxu0",
+        "status": "PASS",
+        "receipt_sha256": "b2716847831c25d1aa874ecdaf783dac480f31130c9be0c86c9d72dbfd5598f8",
+        "source_sha256": "2e6e8ba3f4a7b07c92b61855f4def63b4e95db474235ebf05b1ac287956a6ed1",
+        "program_sha256": "cfd9f940656dc210352e8c09b3b0edf02f3d08003d0a7b89eb18bdc38b0bbd98",
+        "output_bytes_per_invocation": 3072,
+        "implementation_pins": {
+          "atlas_egglog_facts": "1056657010dae8f2ce6103fce645068d8d3cf03c6bc4c61dfebc03d5d3a5c399",
+          "atlas_egglog_unary_tables": "a1572a1658b8db48181d08b0ce090b1916c417b6793dce4cf4b7e57c7dbf3c54",
+          "atlas_egglog_pack": "2d19087047d8da07994a21038e5bbb20a6ba69a636abe452b833e91f28300bc5",
+          "atlas_egglog_rules": "6f009e75438d3c6bdb28d7b898fcde904d113210bd49490974cacb15c2dea882"
+        }
+      },
+      {
+        "route": "mxu1",
+        "status": "PASS",
+        "receipt_sha256": "9a23ce6faec7337fa269e682c04301d524c7ffb55777bab3e3eaa491d15d6a73",
+        "source_sha256": "237542c14ae07089d4152c230722bf61f6a3e9bf37a1c3ca8bd47b5dbec5e277",
+        "program_sha256": "d1c32d5cd6a3562f0275b0c111f084de587119afe59bde3f10940ddb87fa2af2",
+        "output_bytes_per_invocation": 3072,
+        "implementation_pins": {
+          "atlas_egglog_facts": "1056657010dae8f2ce6103fce645068d8d3cf03c6bc4c61dfebc03d5d3a5c399",
+          "atlas_egglog_unary_tables": "a1572a1658b8db48181d08b0ce090b1916c417b6793dce4cf4b7e57c7dbf3c54",
+          "atlas_egglog_pack": "2d19087047d8da07994a21038e5bbb20a6ba69a636abe452b833e91f28300bc5",
+          "atlas_egglog_rules": "6f009e75438d3c6bdb28d7b898fcde904d113210bd49490974cacb15c2dea882"
+        }
+      }
+    ]
+  }
+}

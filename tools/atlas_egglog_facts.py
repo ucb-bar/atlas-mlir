@@ -168,7 +168,7 @@ def _kind(attrs: Mapping) -> str:
 
 
 def infer_facts(op: str, operands: Sequence[RealFacts] = (), attrs: Mapping | None = None) -> RealFacts:
-    """Only source-inspected transfers; no finite add/mul/exp/reciprocal rule."""
+    """Source-inspected transfers; unary facts require qualified raw domains."""
     attrs = attrs or {}
     op = op.removeprefix("atlas.virtual_").removeprefix("virtual_")
     kind = _kind(attrs)
@@ -178,6 +178,14 @@ def infer_facts(op: str, operands: Sequence[RealFacts] = (), attrs: Mapping | No
         return RealFacts(scale_code=_int(attrs["code"]), provenance=("scale_constant",))
     if op == "vpu_unary" and kind == "mov" and len(operands) == 1:
         return replace(operands[0], provenance=operands[0].provenance + ("mov",))
+    if op == "vpu_unary" and kind in ("exp", "exp2", "recip") and len(operands) == 1:
+        from atlas_egglog_unary_tables import qualified_image
+        source = operands[0]
+        qualified = qualified_image(kind, source.interval)
+        if qualified is not None:
+            (lo, hi), proof = qualified
+            return from_interval(lo, hi, provenance=source.provenance + proof)
+        return RealFacts()
     if op == "vpu_unary" and kind == "relu" and len(operands) == 1 and operands[0].finite:
         src = operands[0]
         lo, hi = src.interval

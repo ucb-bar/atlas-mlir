@@ -1,0 +1,38 @@
+{
+  "sources": {
+    "src/main/scala/atlas/vector/VectorEngine.scala": "356da155a2aa64aee5badb7496df43f80a46e21dcc017824e137cfc179f8270c",
+    "src/main/scala/atlas/vector/laneBoxes/AddSubSumVec.scala": "1a67aa2b9cff085c513ef44a6ff12151c8d19d859d9fd4468f0af25be6430f12",
+    "src/main/scala/atlas/vector/laneBoxes/ColAddVec.scala": "c9a5ba8e05e02bf5b1529362db3689a21a676037b038fecaa4e29f0ede174cb6",
+    "src/main/scala/atlas/vector/laneBoxes/SumRedu.scala": "edcfc7a7ca30d6d51dc697b739fa993172775f432db90b0e8b574b0aa8aab9a5",
+    "src/main/scala/atlas/vector/laneBoxes/MulRec.scala": "210f0b7d17a9081a147a9cdfd41058c65298753fa7897ea84ce78e32826006a4",
+    "src/main/scala/atlas/vector/laneBoxes/ExpLane.scala": "ee2903c92f2fe359f927c993b6885d211ff1b66a7dc0f3841ca2877578d903cb",
+    "src/main/scala/atlas/vector/laneBoxes/Rcp.scala": "6520e13247f3256aa2b1b56a0ee5627ac2eb88296b5dea284cdb8dc265464faf",
+    "src/main/scala/atlas/vector/laneBoxes/VectorParam.scala": "8fe146132fdf75ede72351a5f9791cf64c86a1ef2c44ddb93a659ba416e2c42c",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/common.scala": "21182c1398c92fc2fc1c99d4f9d841ce061844b0e91b1d95b045d3adbcef3e0f",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/Qmn.scala": "d717095d4504896fce8216ac359ec3db2653b89e53c26b4d060f0180fcfe9185",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/vpuLUTs/RcpLUT.scala": "2ab253ddea5fa36de089d6b00b88a65e8ac1de9af755773d78135ef16fd62f18",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/vpuLUTs/LUTParams.scala": "684aac051fe104a04784545bdc2df29b4dfc06734c1309c1aee5ba4242dbbcb5",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/vpuLUTs/ExLUT.scala": "a4c61f023e39a86fc5c894a7a0bd03a666e09daa9886309b6ed470140d6d52ed",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/vpuFUnits/VPUAddRawAddSub.scala": "54c001d7b014fd769a4521918cf5a9e4984e16ad725f2c940060c1bb3358bc85",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/hardfloat/MulRecFN.scala": "073c605468eafca232e273b205e44fe703cc053fada1f8220ee8b76494158bf8",
+    "dependencies/sp26-fp-units/src/main/scala/sp26-fp-units/hardfloat/RoundAnyRawFNToRecFN.scala": "a633bb4f9d9e090dd89441ee92729e3d578b14d4ffa74551e143b0fe5c3b23f1",
+    "npu-model/tests/rtl/scala/vector/NpuModelVectorTraceTest.scala": "cdd6833171e045abc3cc47a6e094049aa5f9829a99fd991a456ddafa6f47f955"
+  },
+  "provenance_sha256": "982eb886c6c0d5a45682943a0eecd3727f1da630be1c883f624b421e6beb9ed7",
+  "qualification": "Matching retained RTL-table source provenance; fresh complete-encoding execution qualification recorded separately.",
+  "table_format": "65536 little-endian uint16 outputs indexed by raw BF16 input",
+  "unary": {
+    "exp": {
+      "compressed_sha256": "c868283c0118ac478b2acd44af4e10d5c02bcd236d73e188e1c7ce33f112e566",
+      "raw_table_sha256": "2a7c2926e33679d733be4da69c15e9bdd790c9399dcefdbfaa4bc5059a34b59c"
+    },
+    "exp2": {
+      "compressed_sha256": "88882a702acaf062782d1d8070cff0e7f188fa14fd9bf0b4bb334eef75eeeba5",
+      "raw_table_sha256": "5e3f0205d1ea7112de5cb0579c6940c01cba4be054aaf3c407325c81911c90c7"
+    },
+    "rcp": {
+      "compressed_sha256": "803a18af1c72a1b6d722b76860d43e3028fd2addaec693b49e76e3957a39e470",
+      "raw_table_sha256": "c61286dc1754fcd6be2cb578042df5162395050ae300f064206863060e2c0109"
+    }
+  }
+}
