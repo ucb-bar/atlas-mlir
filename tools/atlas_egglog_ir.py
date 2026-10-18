@@ -316,7 +316,7 @@ def load_program(path: str | Path) -> Program:
     return parse_program(absolute.read_text())
 
 
-def decode_program(program: Program, extracted: Mapping[str, Node]) -> str:
+def decode_program(program: Program, extracted: Mapping[str, Node], *, prune_dead_pure: bool = False) -> str:
     """Rebuild pure ops from extracted roots, keeping effects and SSA identities.
 
     An extraction supplies exactly one root per original pure result. Unchanged
@@ -324,6 +324,8 @@ def decode_program(program: Program, extracted: Mapping[str, Node]) -> str:
     tree may reference dominating anchor leaves and is materialized near its
     original definition, with fresh SSA names for new subexpressions. This is a
     structural safety check: callers remain responsible for exact equivalence.
+    ``prune_dead_pure=True`` removes pure definitions unreachable from fixed
+    effects after reconstruction. Fixed operations are always retained.
     """
     originals = program.nodes
     pure = {op.results[0]: op for op in program.operations if op.pure}
@@ -403,7 +405,7 @@ def decode_program(program: Program, extracted: Mapping[str, Node]) -> str:
             available[child] = fresh
             return fresh
 
-        if node.op == "anchor":
+        if node.op == "anchor" or (node != originals[name] and node in available):
             aliases[name] = emit(node)
             lines[op.line] = ""
             continue
@@ -416,7 +418,17 @@ def decode_program(program: Program, extracted: Mapping[str, Node]) -> str:
         lines[op.line] = "".join(added) + (substituted(program.lines[op.line]) if unchanged else render(name, node, operands))
     result = "".join(lines)
     try:
-        parse_program(result)
+        decoded = parse_program(result)
+        if prune_dead_pure:
+            live = {operand for op in decoded.operations if not op.pure for operand in op.operands}
+            pruned = list(decoded.lines)
+            for op in reversed(decoded.operations):
+                if op.pure and not any(result in live for result in op.results):
+                    pruned[op.line] = ""
+                else:
+                    live.update(op.operands)
+            result = "".join(pruned)
+            parse_program(result)
     except UnsupportedProgram as error:
         raise IllegalExtraction(f"decoded program failed validation: {error}") from error
     return result

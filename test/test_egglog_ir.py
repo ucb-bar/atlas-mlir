@@ -67,6 +67,36 @@ class EgglogIRTests(unittest.TestCase):
         self.assertNotIn('virtual_vpu_unary', result)
         self.assertIn('virtual_output_bf16"(%t, %x)', result)
 
+    def test_root_alias_to_dominating_pure_operand(self):
+        text = source(SPLAT.replace('%y', '%a') + '\n' + MOV.replace('unary"(%x)', 'unary"(%a)'))
+        program = parse_program(text)
+        roots = pure_roots(program)
+        roots['%y'] = program.nodes['%a']
+        result = decode_program(program, roots)
+        self.assertEqual(result.count('virtual_vpu_splat'), 1)
+        self.assertNotIn('virtual_vpu_unary', result)
+        self.assertIn('virtual_output_bf16"(%t, %a)', result)
+
+    def test_optional_dead_pure_pruning_removes_transitive_dead_dependencies(self):
+        body = SPLAT.replace('%y', '%dead') + '\n' + MOV.replace('%y', '%dead_mov').replace('unary"(%x)', 'unary"(%dead)') + '\n' + MOV
+        program = parse_program(source(body))
+        roots = pure_roots(program)
+        default = decode_program(program, roots)
+        self.assertEqual(default, ''.join(program.lines))
+        pruned = decode_program(program, roots, prune_dead_pure=True)
+        self.assertNotIn('%dead', pruned)
+        self.assertNotIn('virtual_vpu_splat', pruned)
+        self.assertIn('%y =', pruned)
+        self.assertEqual([op.op for op in parse_program(pruned).operations if not op.pure],
+                         [op.op for op in program.operations if not op.pure])
+
+    def test_pruning_keeps_stateful_mxu_and_load_operations(self):
+        program = load_program(ROOT / 'test/examples/virtual_attention_tile.mlir')
+        decoded = parse_program(decode_program(program, pure_roots(program), prune_dead_pure=True))
+        self.assertEqual([op for op in decoded.operations if not op.pure][0].op, 'virtual_start')
+        self.assertEqual([op.op for op in decoded.operations if not op.pure],
+                         [op.op for op in program.operations if not op.pure])
+
     def test_nested_new_dependency_is_materialized_before_use(self):
         program = parse_program(source(MOV))
         zero = Node('virtual_vpu_splat', (), (('bits', '0 : i32'),), BF)
