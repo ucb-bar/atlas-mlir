@@ -1,8 +1,10 @@
 #include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -32,9 +34,15 @@ bool provenFinite(Value value, llvm::DenseMap<Value, bool> &facts) {
   return finite;
 }
 
-struct PackConstants {
-  Value low, high, scale;
-};
+// Use the actual allocator, including fixed reservations and coloring, rather
+// than a live-value estimate. Failed speculative allocation emits no error.
+bool allocates(func::FuncOp function) {
+  ScopedDiagnosticHandler handler(function.getContext(), [](Diagnostic &) {
+    return success();
+  });
+  VirtualAllocationPlan plan;
+  return succeeded(plan.allocate(function)) && succeeded(plan.verify());
+}
 
 struct LowerAtlasGuardedPackPass
     : PassWrapper<LowerAtlasGuardedPackPass, OperationPass<ModuleOp>> {
@@ -62,10 +70,11 @@ struct LowerAtlasGuardedPackPass
       // cannot enter the block without an operation counted below.
       if (!llvm::hasSingleElement(function.getBody()))
         continue;
+      OwningOpRef<func::FuncOp> original(cast<func::FuncOp>(function->clone()));
+      bool changed = false;
       llvm::DenseMap<Value, bool> facts;
       for (Block &block : function.getBody()) {
         Value state;
-        llvm::DenseMap<unsigned, PackConstants> constants;
         unsigned liveAcc = 0;
         for (Operation &op : llvm::make_early_inc_range(block)) {
           // Existing resource handles remain authoritative. A conversion
@@ -98,39 +107,48 @@ struct LowerAtlasGuardedPackPass
           Type bf16 = VirtualBF16Type::get(module.getContext());
           Type token = VirtualStateType::get(module.getContext());
           unsigned code = pack.getScaleCode();
-          auto &values = constants[code];
-          if (!values.scale) {
-            if (code <= 246) {
-              unsigned cap = ((code + 8) << 7) | 96;
-              values.low = create("atlas.virtual_vpu_splat", {}, {bf16},
-                                  {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap | 0x8000))})->getResult(0);
-              values.high = create("atlas.virtual_vpu_splat", {}, {bf16},
-                                   {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap))})->getResult(0);
-            }
-            // The retained signed shift saturates at code 254 (255 aliases it).
-            unsigned inverse = 254 - std::min(code, 254u);
-            values.scale = create("atlas.virtual_scale_constant", {},
-                                  {VirtualScaleType::get(module.getContext())},
-                                  {builder.getNamedAttr("code", builder.getI32IntegerAttr(inverse))})->getResult(0);
+          // Rematerialize bounds at each use. Block-wide sharing extends every
+          // scale's two BF16 tiles across unrelated conversions and can exhaust
+          // the mixed BF16/FP8 register partition.
+          Value low, high, scale;
+          if (code <= 246) {
+            unsigned cap = ((code + 8) << 7) | 96;
+            low = create("atlas.virtual_vpu_splat", {}, {bf16},
+                         {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap | 0x8000))})->getResult(0);
+            high = create("atlas.virtual_vpu_splat", {}, {bf16},
+                          {builder.getNamedAttr("bits", builder.getI32IntegerAttr(cap))})->getResult(0);
           }
+          // The retained signed shift saturates at code 254 (255 aliases it).
+          unsigned inverse = 254 - std::min(code, 254u);
+          scale = create("atlas.virtual_scale_constant", {},
+                         {VirtualScaleType::get(module.getContext())},
+                         {builder.getNamedAttr("code", builder.getI32IntegerAttr(inverse))})->getResult(0);
           Value clamped = pack.getSrc();
           if (code <= 246) {
-            clamped = create("atlas.virtual_vpu_binary", {clamped, values.low}, {bf16},
+            clamped = create("atlas.virtual_vpu_binary", {clamped, low}, {bf16},
                              {builder.getNamedAttr("kind", builder.getStringAttr("max"))})->getResult(0);
-            clamped = create("atlas.virtual_vpu_binary", {clamped, values.high}, {bf16},
+            clamped = create("atlas.virtual_vpu_binary", {clamped, high}, {bf16},
                              {builder.getNamedAttr("kind", builder.getStringAttr("min"))})->getResult(0);
           }
           Operation *load = create("atlas.virtual_mxu_load_acc_bf16", {state, clamped},
                                    {token, VirtualMXUAccType::get(module.getContext(), unit)},
                                    {builder.getNamedAttr("unit", builder.getI32IntegerAttr(unit))});
           Operation *pop = create("atlas.virtual_mxu_readout_fp8",
-                                  {load->getResult(0), load->getResult(1), values.scale},
+                                  {load->getResult(0), load->getResult(1), scale},
                                   {token, pack.getResult().getType()});
           state.replaceAllUsesExcept(pop->getResult(0), load);
           state = pop->getResult(0);
           pack.getResult().replaceAllUsesWith(pop->getResult(1));
           pack.erase();
+          changed = true;
         }
+      }
+      // Keep the native body if this rewrite introduces an allocation failure.
+      // Whole-function rollback preserves all state and SSA uses together. If
+      // neither body allocates, retain the candidate for the usual diagnostic.
+      if (changed && !allocates(function) && allocates(*original)) {
+        function.getBody().takeBody(original->getBody());
+        function.emitRemark("guarded PACK kept native body to preserve allocation");
       }
     }
     if (failed(verifyAtlasVirtualModule(module)))

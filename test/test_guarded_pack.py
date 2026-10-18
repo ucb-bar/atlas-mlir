@@ -1,4 +1,4 @@
-"""Opt-in conversion contracts, proof boundaries and downstream verifiers."""
+"""Opt-in contracts and structure; test_guarded_pack_bytes checks consumed bytes."""
 import unittest
 
 from test_dialect import OPT, EMIT, run
@@ -99,12 +99,12 @@ class GuardedPackTests(unittest.TestCase):
         self.assertEqual(lowered.count('"atlas.virtual_pack_fp8"'), 1)
         self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 1)
 
-    def test_clamp_constants_are_shared_per_block(self):
+    def test_clamp_constants_are_rematerialized_at_each_use(self):
         text = source().replace('    %u =', '''    %q = "atlas.virtual_pack_fp8"(%x) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8
     %u =''')
         lowered = self.lower(text)
-        self.assertEqual(lowered.count('bits = 50144 : i32'), 1)
-        self.assertEqual(lowered.count('bits = 17376 : i32'), 1)
+        self.assertEqual(lowered.count('bits = 50144 : i32'), 2)
+        self.assertEqual(lowered.count('bits = 17376 : i32'), 2)
         self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 2)
 
     def test_mixed_scales_have_independent_constants(self):
@@ -115,12 +115,36 @@ class GuardedPackTests(unittest.TestCase):
         self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 7)
         for scale in (0, 246):
             cap = ((scale + 8) << 7) | 96
-            self.assertEqual(lowered.count(f'bits = {cap} : i32'), 1)
-            self.assertEqual(lowered.count(f'bits = {cap | 0x8000} : i32'), 1)
+            self.assertEqual(lowered.count(f'bits = {cap} : i32'), 2)
+            self.assertEqual(lowered.count(f'bits = {cap | 0x8000} : i32'), 2)
         self.assertEqual(lowered.count('"atlas.virtual_vpu_binary"'), 8)
-        for inverse in (254, 8, 7):
-            self.assertEqual(lowered.count(f'code = {inverse} : i32'), 1)
+        for inverse in (254, 8):
+            self.assertEqual(lowered.count(f'code = {inverse} : i32'), 2)
+        self.assertEqual(lowered.count('code = 7 : i32'), 1)
         self.assertEqual(lowered.count('code = 0 : i32'), 2)
+
+    def test_allocation_failure_keeps_native_body(self):
+        # Fourteen original tiles fit beside the native PACK source, but
+        # conversion needs additional BF16 bounds/intermediates while they live.
+        text = source()
+        tiles = '\n'.join(f'    %v{i} = "atlas.virtual_vpu_splat"() {{bits = {16257+i} : i32}} : () -> !atlas.virtual_bf16' for i in range(14))
+        text = text.replace('    %p =', tiles + '\n    %p =')
+        outputs = []
+        state = '%u'
+        for i in range(14):
+            outputs.append(f'    %o{i} = "atlas.virtual_output_bf16"({state}, %v{i}) {{index = {i+1} : i32}} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state')
+            state = f'%o{i}'
+        text = text.replace('    return %u', '\n'.join(outputs) + f'\n    return {state}')
+        native = run(OPT, text, '--lower-atlas-virtual-to-machine')
+        self.assertEqual(native.returncode, 0, native.stderr)
+        for unit in (0, 1):
+            result = run(OPT, text, f'--lower-atlas-guarded-pack=unit={unit}')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('kept native body to preserve allocation', result.stderr)
+            self.assertIn('"atlas.virtual_pack_fp8"', result.stdout)
+            self.assertNotIn('"atlas.virtual_mxu_load_acc_bf16"', result.stdout)
+            lowered = run(OPT, result.stdout, '--lower-atlas-virtual-to-machine')
+            self.assertEqual(lowered.returncode, 0, lowered.stderr)
 
     def test_live_accumulator_slots_fallback(self):
         text = source(contract=", finite_src")
