@@ -239,13 +239,14 @@ private:
   void transfer(Operation &op, ValueSet &live) {
     if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
       live.insert(branch.getCondition());
-      return;
+    } else if (!isa<cf::BranchOp>(op)) {
+      for (Value result : op.getResults())
+        live.erase(result);
+      addOperands(live, op.getOperands());
     }
-    if (isa<cf::BranchOp>(op))
-      return;
-    for (Value result : op.getResults())
-      live.erase(result);
-    addOperands(live, op.getOperands());
+    // A loaded tile is defined by its staging VLOADs, which run before `op`.
+    for (Value transfer : stagingLoads.lookup(&op))
+      live.erase(transfer.getDefiningOp()->getResult(1));
   }
 
   void computeLiveness() {
@@ -643,8 +644,9 @@ private:
         return failure();
       if (!isa<cf::BranchOp, cf::CondBranchOp>(op)) {
         SmallVector<Value> results, operands;
+        // A loaded tile is defined where it is staged, below.
         for (Value result : op.getResults())
-          if (order.contains(result))
+          if (order.contains(result) && !isVirtualDMALoadedTile(result))
             results.push_back(result);
         for (Value operand : op.getOperands())
           if (order.contains(operand))
@@ -664,11 +666,19 @@ private:
         }
       }
       transfer(op, live);
-      // A sunk staging VLOAD runs before `op`, while its operands are live.
-      for (Value loaded : stagingLoads.lookup(&op))
+      // A sunk staging VLOAD runs before `op`, while its operands are live,
+      // and writes its tile's registers beside every value live there.
+      for (Value loaded : stagingLoads.lookup(&op)) {
         if (failed(checkHelperWrite(op, loaded, dmaPlacements.lookup(loaded)->stagingReg,
                                     live, "staging VLOAD materialization")))
           return failure();
+        Value tile = loaded.getDefiningOp()->getResult(1);
+        if (order.contains(tile))
+          for (Value value : ordered(live))
+            if (failed(checkPair(tile, value, op.getLoc(),
+                                 "staged loaded tile and live values")))
+              return failure();
+      }
       if (failed(checkClique(ordered(live), op.getLoc(), "live values")))
         return failure();
     }

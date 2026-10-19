@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -239,6 +240,37 @@ class VirtualSpillingTest(unittest.TestCase):
         for i, (address, data) in enumerate(inputs):
             self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
             self.assertEqual(bytes(memory[address+j] for j in range(2048)), data)
+
+    def test_a_spilled_loaded_tile_is_saved_after_its_first_use(self):
+        # A loaded tile stays in its staging window until its first use, so a
+        # save at its launch would wait for the transfer there.
+        body = [f'%s0 = "atlas.virtual_start"() : () -> {STATE}',
+                '%a_addr = arith.constant -1879048192 : i32', '%f_addr = arith.constant -1879046144 : i32',
+                '%size = arith.constant 2048 : i32', '%half = arith.constant 1024 : i32',
+                f'%s1, %a = "atlas.virtual_dma_load_bf16"(%s0, %a_addr, %size) : ({STATE}, i32, i32) -> ({STATE}, {BF16})',
+                f'%s2, %f = "atlas.virtual_dma_load_fp8"(%s1, %f_addr, %half) : ({STATE}, i32, i32) -> ({STATE}, {FP8})',
+                f'%u = "atlas.virtual_vpu_unary"(%a) {{kind = "exp"}} : ({BF16}) -> {BF16}']
+        body += [f'%v{i} = "atlas.virtual_vpu_unary"(%u) {{kind = "relu"}} : ({BF16}) -> {BF16}' for i in range(15)]
+        state = "s2"
+        for i, value in enumerate([f"v{i}" for i in range(15)] + ["z"]):
+            if value == "z":
+                body.append(f'%z = "atlas.virtual_vpu_binary"(%a, %u) {{kind = "add"}} : ({BF16}, {BF16}) -> {BF16}')
+            body += [f'%o{i} = arith.constant {0x90010000 + 2048 * i - 2**32} : i32',
+                     f'%t{i} = "atlas.virtual_dma_store_bf16"(%{state}, %{value}, %o{i}, %size) : ({STATE}, {BF16}, i32, i32) -> {STATE}']
+            state = f"t{i}"
+        body.append(f'return %{state} : {STATE}')
+        result = run(wrap(body), '--spill-atlas-virtual')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ops = [line.strip() for line in result.stdout.splitlines() if ' = ' in line]
+        load = next(n for n, line in enumerate(ops) if '"atlas.virtual_dma_load_bf16"' in line)
+        tile = ops[load].split(' = ')[0].split(', ')[1]
+        uses = [n for n, line in enumerate(ops) if n > load and re.search(rf'[(, ]{tile}[,)]', line.split(' = ', 1)[1])]
+        saves = [n for n in uses if '"atlas.virtual_spill_bf16"' in ops[n]]
+        direct = sorted(set(uses) - set(saves))
+        self.assertEqual(len(saves), 1)
+        self.assertTrue(direct and direct[0] < saves[0], "the first use reads the staged tile, then it is saved")
+        lowered = run(result.stdout, '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
 
     def test_no_pressure_does_not_insert_spills(self):
         result = run(pressure(2), "--spill-atlas-virtual")

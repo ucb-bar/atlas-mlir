@@ -20,6 +20,12 @@ bool virtualDMAConflict(Operation *a, Operation *b);
 // value; the DMA contract still checks what each launch captures.
 bool isVirtualDMAImmediate(Value value);
 
+// Whether `value` is the tile a virtual DMA load produces. It stays in its
+// staging window until lowering's staging VLOADs, right before its first use,
+// a later launch given that window, or its block's terminator; its registers
+// are held from there.
+bool isVirtualDMALoadedTile(Value value);
+
 // Check a pre-allocation SSA candidate and its CFG/state obligations.
 // Spilling may defer only slot-capacity checks. State linearity, current
 // accumulator versions and unit ownership remain mandatory. The optional CFG

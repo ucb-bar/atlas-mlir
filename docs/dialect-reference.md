@@ -106,8 +106,10 @@ the IR or its order.
 | Pack scratch | VMEM words `32768..33279`; input indices below 64 |
 | Boundary tiles | VMEM bank 0 stages inputs, bank 1 outputs |
 
-A register is reused once its value is dead. Results may not overwrite their
-operands. Block arguments become edge copies, and copy cycles go through the
+A register is reused once its value is dead. A DMA-loaded tile takes its
+registers where lowering stages it: right before its first use, a later launch
+given its staging window, or its block's terminator. Results may not overwrite
+their operands. Block arguments become edge copies, and copy cycles go through the
 temporaries. [`--spill-atlas-virtual`](register-spilling.md) can recover
 FP8/BF16 and scalar pressure through raw VMEM saves/reloads before allocation,
 including block arguments and entry controls. Spills and declared scratch share

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from itertools import product
+import json
 import os
+from pathlib import Path
 import re
+import tempfile
 import unittest
 
 import atlas_assembler as assembler
@@ -384,6 +387,33 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertEqual(loads, [window + half * 256
                                          for _, _, window in completions for half in (0, 1)])
 
+    def test_a_loaded_tile_takes_registers_at_its_first_use(self) -> None:
+        # With an FP8 value present the registers hold 15 BF16 pairs. `a` and
+        # the 14 tiles derived from it fill them while `b`, launched beside
+        # `a`, waits in its staging window until its tiles are staged at its
+        # first use, after the 14 are stored.
+        from test_virtual_scheduling import S, const, dma_load as launch, dma_store as store, function, start, unary
+        lines = [start(), const("a_addr", -1879048192), const("b_addr", -1879046144),
+                 const("f_addr", -1879044096), const("size", 2048), const("half", 1024),
+                 launch("io0", "io1", "a", "a_addr", "size", "bf16"),
+                 launch("io1", "io2", "b", "b_addr", "size", "bf16"),
+                 launch("io2", "io3", "f", "f_addr", "half", "fp8")]
+        lines += [unary(f"u{i}", "a", "exp") for i in range(14)]
+        state = "io3"
+        for i, value in enumerate([f"u{i}" for i in range(14)] + ["y"]):
+            if value == "y":
+                lines.append(unary("y", "b"))
+            lines += [const(f"o{i}", -1878982656 + 2048 * i), store(state, f"s{i}", value, f"o{i}")]
+            state = f"s{i}"
+        lines.append(f"return %{state} : {S}")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "allocation.json"
+            result = run("atlas-opt", function("prefetch", lines),
+                         f"--lower-atlas-virtual-to-machine=allocation-report={path}",
+                         "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(path.read_text())["registers"]["bf16"]["peak_live"], 15)
+
     def test_launch_completion_separation_preserves_mxu_work_and_builds_constant_commands(self) -> None:
         _, entries = self.checked(independent_work())
         launch = next(i for i, entry in enumerate(entries)
@@ -446,9 +476,10 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                         "atlas.mxu_matmul", "atlas.mxu_matmul",
                                         "atlas.mxu_pop"] + ["atlas.vstore"] * halves
                                  + ["atlas.dma", "atlas.dma_wait"])
+                # The weight's register is free once it is pushed, before the
+                # activation is staged, so the two may share it.
                 loads = [entry["fields"] for entry in entries
                          if entry["operation"] == "atlas.vload"]
-                self.assertNotEqual(loads[0]["dst"], loads[1]["dst"])
                 mxu = [entry["fields"] for entry in entries
                        if entry["operation"].startswith("atlas.mxu_")]
                 self.assertTrue(all(fields["unit"] == unit for fields in mxu))

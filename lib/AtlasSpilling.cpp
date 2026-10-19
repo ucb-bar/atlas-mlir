@@ -394,8 +394,18 @@ void spill(Value value) {
     }
     return;
   }
+  // A loaded tile stays in its staging window until its first use, where its
+  // registers begin (isVirtualDMALoadedTile): save it after that use, which
+  // reads it directly, rather than waiting for its transfer at the launch.
+  Operation *written = value.getDefiningOp();
+  if (isVirtualDMALoadedTile(value) && !consumers.empty() &&
+      consumers.front()->getBlock() == written->getBlock() &&
+      !consumers.front()->hasTrait<OpTrait::IsTerminator>()) {
+    written = consumers.front();
+    consumers.erase(consumers.begin());
+  }
   bool bf16 = isa<VirtualBF16Type>(value.getType());
-  Operation *store = insertMemoryOp(value.getDefiningOp()->getNextNode(),
+  Operation *store = insertMemoryOp(written->getNextNode(),
       bf16 ? "atlas.virtual_spill_bf16" : "atlas.virtual_spill_fp8",
       value, VirtualSpillType::get(value.getContext()), true);
   for (Operation *consumer : consumers) {
@@ -553,10 +563,20 @@ struct SpillAtlasVirtualPass
                  !(fp8 && isa<VirtualFP8Type>(value.getType())) &&
                  !(scalar && (value.getType().isInteger(1) || value.getType().isInteger(32)))))
               continue;
-            unsigned last = order.lookup(&op);
+            // A loaded tile holds registers from its first use in its block.
+            unsigned first = order.lookup(&op);
+            if (isVirtualDMALoadedTile(value)) {
+              unsigned use = ~0u;
+              for (Operation *user : value.getUsers())
+                if (user->getBlock() == op.getBlock())
+                  use = std::min(use, order.lookup(user));
+              if (use != ~0u)
+                first = use;
+            }
+            unsigned last = first;
             for (Operation *user : value.getUsers())
               last = std::max(last, order.lookup(user));
-            unsigned span = last - order.lookup(&op);
+            unsigned span = last - first;
             if (span > longest) {
               longest = span;
               victim = value;

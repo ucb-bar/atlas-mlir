@@ -531,7 +531,8 @@ SmallVector<Value, 4> distinctOperands(Operation *op) {
 
 // Live values of each kind as a block's operations are placed, counted as
 // the allocator's interference graph counts them: an operation's results
-// interfere with its operands. Values beyond `capacity` are spilled.
+// interfere with its operands, and a loaded tile holds registers from its
+// first use, where lowering stages it. Values beyond `capacity` are spilled.
 class Pressure {
 public:
   Pressure(Block &block, ArrayRef<Operation *> nodes, const Liveness &liveness,
@@ -559,18 +560,24 @@ public:
   KindCounts during(Operation *op) const {
     KindCounts counts = live;
     for (Value result : op->getResults())
-      count(counts, result, 1);
+      if (!isVirtualDMALoadedTile(result))
+        count(counts, result, 1);
+    for (Value operand : distinctOperands(op))
+      if (staging.contains(operand))
+        count(counts, operand, 1);
     return counts;
   }
 
   // Live values once `op` has run, if it is placed next.
   KindCounts after(Operation *op) const {
     KindCounts counts = live;
-    for (Value operand : distinctOperands(op))
-      if (remaining.lookup(operand) == 1 && !kept.contains(operand))
-        count(counts, operand, -1);
+    for (Value operand : distinctOperands(op)) {
+      bool dies = remaining.lookup(operand) == 1 && !kept.contains(operand);
+      if (staging.contains(operand) != dies)
+        count(counts, operand, dies ? -1 : 1);
+    }
     for (Value result : op->getResults())
-      if (needed(result))
+      if (needed(result) && !isVirtualDMALoadedTile(result))
         count(counts, result, 1);
     return counts;
   }
@@ -604,11 +611,17 @@ public:
     for (unsigned k = 0; k < kKinds.size(); ++k)
       peak[k] = std::max(peak[k], counts[k]);
     live = after(op);
-    for (Value operand : distinctOperands(op))
+    for (Value operand : distinctOperands(op)) {
       if (remaining.lookup(operand) == 1 && !kept.contains(operand))
         values.erase(operand);
+      else if (staging.contains(operand))
+        values.insert(operand);
+      staging.erase(operand);
+    }
     for (Value result : op->getResults())
-      if (needed(result) && hasRegister(result))
+      if (needed(result) && isVirtualDMALoadedTile(result))
+        staging.insert(result);
+      else if (needed(result) && hasRegister(result))
         values.insert(result);
     for (Value operand : distinctOperands(op))
       --remaining[operand];
@@ -643,8 +656,8 @@ private:
   // Each value's last user, by its index in source order.
   llvm::DenseMap<Value, unsigned> lastUse;
   llvm::DenseSet<Value> kept;
-  // The values `live` counts.
-  llvm::DenseSet<Value> values;
+  // The values `live` counts, and the loaded tiles not yet used.
+  llvm::DenseSet<Value> values, staging;
   KindCounts live{};
   KindCounts peak{};
 };

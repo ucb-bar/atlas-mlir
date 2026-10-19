@@ -120,8 +120,11 @@ private:
   LogicalResult colorValues(RegisterKind kind);
   LogicalResult placeMXU(Block &block);
   LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
+  void stageLoads();
 
   func::FuncOp function;
+  // The loaded tiles whose staging VLOADs run right before each operation.
+  llvm::DenseMap<Operation *, llvm::SmallVector<Value, 2>> stagedBefore;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
   llvm::DenseMap<Value, MXUPlacement> mxuResources;
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;

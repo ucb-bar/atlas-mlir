@@ -177,14 +177,18 @@ transfers in flight, and orders two DMA ops only when their DRAM ranges
 overlap and one writes. Virtual DMA stays in order with boundary tiles, but
 not with PACK. Registers do not limit the order: a value beyond them costs a
 VMEM save and a reload per use, as `--spill-atlas-virtual` inserts them, and
-an order is kept only when its estimated time, spills included, is lowest.
+an order is kept only when its estimated time, spills included, is lowest. A
+loaded tile counts toward them from its first use.
 Run the spill pass after scheduling. `--schedule-atlas-virtual=random-seed=N`
 picks a random legal order for soundness tests.
 
 Lowering gives each transfer one of 8 channels and one of 8 2 KiB staging
 windows (lowest free first; if none is free, the oldest transfer completes
 first), emits the launch at the op, and moves a load's staging VLOADs down to
-its first use or the block end. A store copies into staging, then launches.
+its first use, a later launch given its window, or the block end. Until then
+the tile is in VMEM, so its registers are allocated from there, not from the
+launch: a load issued early holds a staging window but no register. A store
+copies into staging, then launches.
 `--insert-atlas-dma-waits` then adds `atlas.dma_wait` right before the first
 instruction that needs the transfer done: a staging-window access or reuse, a
 launch on the same channel, an overlapping DRAM access where either side

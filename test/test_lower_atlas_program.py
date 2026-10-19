@@ -169,10 +169,11 @@ class LowerAtlasProgramTest(unittest.TestCase):
             dst, src = map(int, fields[0])
             # VTRPOSE_XLU: vs1[18:13], vd[12:7], opcode 0x6b.
             self.assertEqual(words, [(src << 13) | (dst << 7) | 0x6B])
-            # Every load issues before the first MXU use, so Q, K^T and V are
-            # live together; K dies at the transpose.
+            # Every load issues before the first MXU use, but a loaded tile
+            # takes its register where it is first used: at most K and its
+            # transpose, or V and the packed P, are live together.
             report = json.loads((done / "3-allocation.json").read_text())
-            self.assertEqual(report["registers"]["fp8"]["peak_live"], 3)
+            self.assertEqual(report["registers"]["fp8"]["peak_live"], 2)
 
 
 if __name__ == "__main__":

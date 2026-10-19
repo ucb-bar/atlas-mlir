@@ -119,8 +119,14 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   scalarArgumentRegs.clear();
   findReservations(function, mixedFp8, hasPack);
   // Every resource is placed even after one does not fit, so the diagnostics
-  // and report() name each one that does not.
+  // and report() name each one that does not. MXU and DMA state never
+  // crosses a block, so each block places its own. DMA comes first: its
+  // staging windows decide where each loaded tile's register begins.
   bool fits = true;
+  unsigned nextTransfer = 0;
+  for (Block &block : function.getBody())
+    fits &= succeeded(placeDMA(block, nextTransfer));
+  stageLoads();
   for (RegisterKind kind :
        {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
     fits &= succeeded(colorValues(kind));
@@ -129,13 +135,8 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   else if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
     for (BlockArgument arg : function.getArguments())
       scalarArgumentRegs.push_back(scalar(arg));
-
-  // MXU and DMA state never crosses a block, so each block places its own.
-  unsigned nextTransfer = 0;
-  for (Block &block : function.getBody()) {
+  for (Block &block : function.getBody())
     fits &= succeeded(placeMXU(block));
-    fits &= succeeded(placeDMA(block, nextTransfer));
-  }
   return success(fits);
 }
 
@@ -314,6 +315,43 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
   return success();
 }
 
+// A load's tile is in VMEM until its staging VLOADs write its registers,
+// right before its first use in the block, a later launch given its staging
+// window (placeDMA), or the block's terminator: where lowering emits them. Its
+// registers are taken from there, not from the launch.
+void VirtualAllocationPlan::stageLoads() {
+  stagedBefore.clear();
+  for (Block &block : function.getBody()) {
+    SmallVector<Value> pending;
+    auto stage = [&](Operation &op, auto shouldStage) {
+      for (auto it = pending.begin(); it != pending.end();) {
+        if (shouldStage(*it)) {
+          stagedBefore[&op].push_back(*it);
+          it = pending.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    };
+    for (Operation &op : block) {
+      if (op.hasTrait<OpTrait::IsTerminator>()) {
+        stage(op, [](Value) { return true; });
+        continue;
+      }
+      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+              VirtualDMAStoreBF16Op>(op)) {
+        uint32_t window = dmaTransfers.lookup(op.getResult(0)).stagingWord;
+        stage(op, [&](Value tile) {
+          return dmaTransfers.lookup(tile.getDefiningOp()->getResult(0)).stagingWord == window;
+        });
+      }
+      stage(op, [&](Value tile) { return llvm::is_contained(op.getOperands(), tile); });
+      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op))
+        pending.push_back(op.getResult(1));
+    }
+  }
+}
+
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) {
@@ -426,6 +464,19 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       if (selected(arg)) stagedArguments.insert(arg);
     clique(stagedArguments);
   }
+  // Staging VLOADs write a loaded tile's registers right before `op`, while
+  // every value live there is held.
+  auto stage = [&](Set &live, Operation &op) {
+    for (Value tile : stagedBefore.lookup(&op)) {
+      if (!selected(tile))
+        continue;
+      live.insert(tile);
+      note(live, &op);
+      for (Value other : live)
+        interfere(tile, other);
+      live.erase(tile);
+    }
+  };
   for (Block &block : function.getBody()) {
     Set live = liveOut[&block];
     clique(live);
@@ -438,13 +489,17 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
           clique(live);
           note(live, &op);
         }
+        stage(live, op);
         continue;
       }
-      if (isa<cf::BranchOp>(op))
+      if (isa<cf::BranchOp>(op)) {
+        stage(live, op);
         continue;
+      }
       SmallVector<Value> results, operands;
+      // A loaded tile is defined where it is staged.
       for (Value result : op.getResults())
-        if (selected(result))
+        if (selected(result) && !isVirtualDMALoadedTile(result))
           results.push_back(result);
       for (Value operand : op.getOperands())
         if (selected(operand))
@@ -465,6 +520,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       for (Value operand : operands)
         live.insert(operand);
       clique(live);
+      stage(live, op);
     }
     SmallVector<Value> args;
     for (BlockArgument arg : block.getArguments())

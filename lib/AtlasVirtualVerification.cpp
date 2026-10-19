@@ -505,6 +505,12 @@ bool mlir::atlas::isVirtualDMAImmediate(Value value) {
   });
 }
 
+bool mlir::atlas::isVirtualDMALoadedTile(Value value) {
+  auto result = dyn_cast<OpResult>(value);
+  return result && result.getResultNumber() == 1 &&
+         isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(result.getOwner());
+}
+
 bool mlir::atlas::virtualDMAConflict(Operation *a, Operation *b) {
   DRAMEffect x = dramEffect(a), y = dramEffect(b);
   if (!x.write && !y.write)

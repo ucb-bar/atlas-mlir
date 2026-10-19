@@ -44,11 +44,11 @@ Spilling can add operations after virtual scheduling. Final waits and timing
 checks must therefore run on the rewritten machine program. A pre-spill
 schedule is not sufficient evidence that the final program is safe.
 
-The scheduler does not keep blocks within the registers. It estimates each
-value beyond them as one save plus a reload per remaining use of the live
-value used last in source order, which stands in for the longest-lived value
-this pass picks, and keeps the order whose estimated time, spills included, is
-lowest. A scheduled order may therefore need spills the source order did not,
+The scheduler does not keep blocks within the registers. It counts a loaded
+tile from its first use, estimates each value beyond them as one save plus a
+reload per remaining use of the live value used last in source order, which
+stands in for the longest-lived value this pass picks, and keeps the order
+whose estimated time, spills included, is lowest. A scheduled order may therefore need spills the source order did not,
 so step 4 must follow step 3.
 
 The scheduler recognizes spill traffic conservatively through the helpers in
@@ -171,7 +171,10 @@ reduction order.
 ## Pressure recovery and branch edges
 
 On an allocation failure, the pass splits long-lived operation results with
-saves and per-consumer reloads, places the slots, and retries allocation.
+saves and per-consumer reloads, places the slots, and retries allocation. A
+DMA-loaded tile lives from its first use, as allocation counts it: its save
+follows that use, which reads it directly, instead of waiting for the transfer
+at the launch.
 Reload results are not recursively spilled. Proven wrapping-i32 constants are
 rematerialized at their uses; this retains the static address/size proofs
 required by the existing DMA lowering.
