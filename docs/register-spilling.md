@@ -44,6 +44,13 @@ Spilling can add operations after virtual scheduling. Final waits and timing
 checks must therefore run on the rewritten machine program. A pre-spill
 schedule is not sufficient evidence that the final program is safe.
 
+The scheduler does not keep blocks within the registers. It estimates each
+value beyond them as one save plus a reload per remaining use of the live
+value used last in source order, which stands in for the longest-lived value
+this pass picks, and keeps the order whose estimated time, spills included, is
+lowest. A scheduled order may therefore need spills the source order did not,
+so step 4 must follow step 3.
+
 The scheduler recognizes spill traffic conservatively through the helpers in
 `include/Atlas/AtlasSpilling.h`. Slot declarations emit no instructions; saves,
 restores and copies have memory effects and follow the state chain. Scheduling

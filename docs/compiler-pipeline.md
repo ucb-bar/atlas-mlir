@@ -12,7 +12,7 @@ Hardware facts refer to the pinned RTL (`ucb-bar/atlas-npu`
 | Step | Result | Command |
 | --- | --- | --- |
 | 1. Verify | virtual IR | `atlas-opt --verify-atlas-virtual-stream` |
-| 2. Schedule | virtual IR, reordered per block | `--schedule-atlas-virtual` |
+| 2. Schedule | virtual IR, reordered per block | `--schedule-atlas-virtual`, then `--spill-atlas-virtual` |
 | 3. Lower | untimed machine IR | `--lower-atlas-virtual-to-machine` |
 | 4. DMA waits | adds `atlas.dma_wait` | `--insert-atlas-dma-waits`, then `--verify-atlas-generated-schedule` |
 | 5. Timing | adds `atlas.delay` | `--insert-atlas-delays` or `--schedule-atlas-stream`, then `--verify-atlas-timing` |
@@ -45,6 +45,8 @@ python3 tools/lower_atlas_program.py test/examples/virtual_attention_tile.mlir \
 
 The output directory must be new or empty. `--timing schedule-atlas-stream`
 reorders each block before adding delays; the default is `insert-atlas-delays`.
+`--spill` adds the spill passes. Without it, a scheduled order that needs
+spills fails at allocation, and `3-allocation.json` names what does not fit.
 
 | File | Contents |
 | --- | --- |
@@ -173,8 +175,11 @@ after the transfer and its VLOADs, so it fills the gap before the first
 consumer with independent work. It models one serial DMA engine and at most 8
 transfers in flight, and orders two DMA ops only when their DRAM ranges
 overlap and one writes. Virtual DMA stays in order with boundary tiles, but
-not with PACK. `--schedule-atlas-virtual=random-seed=N` picks a random legal
-order for soundness tests.
+not with PACK. Registers do not limit the order: a value beyond them costs a
+VMEM save and a reload per use, as `--spill-atlas-virtual` inserts them, and
+an order is kept only when its estimated time, spills included, is lowest.
+Run the spill pass after scheduling. `--schedule-atlas-virtual=random-seed=N`
+picks a random legal order for soundness tests.
 
 Lowering gives each transfer one of 8 channels and one of 8 2 KiB staging
 windows (lowest free first; if none is free, the oldest transfer completes

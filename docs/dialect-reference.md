@@ -203,7 +203,7 @@ numerical policy, or availability across the stream.
 | --- | --- | --- |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
-| `--schedule-atlas-virtual` | pass | Reorder each virtual block before allocation by a pressure- and latency-aware list schedule, keeping SSA, handle, and memory order. `random-seed=N` picks a random legal order. |
+| `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. |
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass. `allocation-report=<file>` writes the plan as JSON, even on failure. |

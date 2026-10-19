@@ -381,6 +381,18 @@ Cost onVpu(const std::string &name) {
 // Work that holds the frontend from start to finish.
 Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
 
+// A VMEM store or load of `halves` tile registers, back to back, as a spill
+// save or reload issues them.
+int vmemCycles(unsigned halves, bool store) {
+  static const MachineTiming vload = timingOf("vload");
+  static const MachineTiming vstore = timingOf("vstore");
+  const MachineTiming &timing = store ? vstore : vload;
+  return (halves - 1) * timing.interval + timing.latency;
+}
+
+// A scalar slot save or restore.
+constexpr int kScalarSlotCycles = 8;
+
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
 Cost costOf(Operation *op) {
@@ -419,14 +431,12 @@ Cost costOf(Operation *op) {
   }
   if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
     Operation *writer = isAtlasSpillStore(op) ? op : op->getOperand(1).getDefiningOp();
-    unsigned halves = atlasSpillWords(writer) / 256;
-    auto timing = isAtlasSpillStore(op) ? vstore : vload;
-    return blocking(Unit::Dma, (halves - 1) * timing.interval + timing.latency);
+    return blocking(Unit::Dma, vmemCycles(atlasSpillWords(writer) / 256, isAtlasSpillStore(op)));
   }
   if (isAtlasSlotAccess(op)) {
     auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
-    unsigned cycles = words == 1 ? 8 : (words / 256) * (vload.latency + vstore.latency);
+    unsigned cycles = words == 1 ? kScalarSlotCycles : (words / 256) * (vload.latency + vstore.latency);
     return blocking(Unit::Dma, cycles);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
@@ -497,6 +507,20 @@ std::optional<RegisterKind> kindOf(Type type) {
   return std::nullopt;
 }
 
+// What spilling one value of `kind` costs: a save and `reloads` reloads, as
+// costOf charges the operations --spill-atlas-virtual inserts.
+int spillCycles(RegisterKind kind, int reloads) {
+  switch (kind) {
+  case RegisterKind::BF16:
+    return vmemCycles(2, true) + reloads * vmemCycles(2, false);
+  case RegisterKind::FP8:
+    return vmemCycles(1, true) + reloads * vmemCycles(1, false);
+  case RegisterKind::Scalar:
+    return (1 + reloads) * kScalarSlotCycles;
+  }
+  llvm_unreachable("unknown register kind");
+}
+
 SmallVector<Value, 4> distinctOperands(Operation *op) {
   SmallVector<Value, 4> values;
   for (Value operand : op->getOperands())
@@ -507,14 +531,17 @@ SmallVector<Value, 4> distinctOperands(Operation *op) {
 
 // Live values of each kind as a block's operations are placed, counted as
 // the allocator's interference graph counts them: an operation's results
-// interfere with its operands.
+// interfere with its operands. Values beyond `capacity` are spilled.
 class Pressure {
 public:
-  Pressure(Block &block, ArrayRef<Operation *> nodes,
-           const Liveness &liveness) {
-    for (Operation *op : nodes)
-      for (Value operand : distinctOperands(op))
+  Pressure(Block &block, ArrayRef<Operation *> nodes, const Liveness &liveness,
+           const KindCounts &capacity)
+      : capacity(capacity) {
+    for (auto [index, op] : llvm::enumerate(nodes))
+      for (Value operand : distinctOperands(op)) {
         ++remaining[operand];
+        lastUse[operand] = index;
+      }
     // Values the block hands on stay live throughout.
     kept.insert(liveness.getLiveOut(&block).begin(),
                 liveness.getLiveOut(&block).end());
@@ -525,7 +552,7 @@ public:
     entry.insert(block.args_begin(), block.args_end());
     for (Value value : entry)
       if (needed(value))
-        count(live, value, 1);
+        enter(value);
   }
 
   // Live values while `op` runs, if it is placed next.
@@ -548,16 +575,47 @@ public:
     return counts;
   }
 
+  // The spill cycles placing `op` next adds: for each value live while it
+  // runs beyond both the registers and this order's peak so far (whose
+  // spills are already counted), --spill-atlas-virtual saves the
+  // longest-lived value and reloads it before each of its uses. The live
+  // value of that kind used last in source order stands in for it.
+  int spillCost(Operation *op) const {
+    KindCounts counts = during(op);
+    int cycles = 0;
+    for (unsigned k = 0; k < kKinds.size(); ++k) {
+      int spills = counts[k] - std::max(capacity[k], peak[k]);
+      if (spills <= 0)
+        continue;
+      Value victim;
+      for (Value value : values)
+        if (kindOf(value.getType()) == kKinds[k] &&
+            (!victim || lastUse.lookup(value) > lastUse.lookup(victim)))
+          victim = value;
+      int reloads = victim ? std::max(1u, remaining.lookup(victim)) : 1;
+      cycles += spills * spillCycles(kKinds[k], reloads);
+    }
+    return cycles;
+  }
+
   void place(Operation *op) {
+    spilled += spillCost(op);
     KindCounts counts = during(op);
     for (unsigned k = 0; k < kKinds.size(); ++k)
       peak[k] = std::max(peak[k], counts[k]);
     live = after(op);
     for (Value operand : distinctOperands(op))
+      if (remaining.lookup(operand) == 1 && !kept.contains(operand))
+        values.erase(operand);
+    for (Value result : op->getResults())
+      if (needed(result) && hasRegister(result))
+        values.insert(result);
+    for (Value operand : distinctOperands(op))
       --remaining[operand];
   }
 
-  KindCounts peak{};
+  // The spill cycles of the operations placed so far.
+  int spilled = 0;
 
 private:
   bool needed(Value value) const {
@@ -565,16 +623,30 @@ private:
   }
 
   // A DMA immediate takes no register: each launch builds it.
-  static void count(KindCounts &counts, Value value, int delta) {
-    if (isVirtualDMAImmediate(value))
-      return;
-    if (std::optional<RegisterKind> kind = kindOf(value.getType()))
-      counts[indexOf(*kind)] += delta;
+  static bool hasRegister(Value value) {
+    return !isVirtualDMAImmediate(value) && kindOf(value.getType());
   }
 
+  static void count(KindCounts &counts, Value value, int delta) {
+    if (hasRegister(value))
+      counts[indexOf(*kindOf(value.getType()))] += delta;
+  }
+
+  void enter(Value value) {
+    count(live, value, 1);
+    if (hasRegister(value))
+      values.insert(value);
+  }
+
+  KindCounts capacity;
   llvm::DenseMap<Value, unsigned> remaining;
+  // Each value's last user, by its index in source order.
+  llvm::DenseMap<Value, unsigned> lastUse;
   llvm::DenseSet<Value> kept;
+  // The values `live` counts.
+  llvm::DenseSet<Value> values;
   KindCounts live{};
+  KindCounts peak{};
 };
 
 // In-order issue onto functional units: an operation starts once the one
@@ -671,33 +743,28 @@ public:
     return machine.makespan;
   }
 
-  KindCounts peakPressure(ArrayRef<Operation *> order) const {
-    Pressure pressure(block, g.nodes, liveness);
+  // The spill cycles `order` needs (Pressure::spillCost).
+  int spillCost(ArrayRef<Operation *> order, const KindCounts &capacity) const {
+    Pressure pressure(block, g.nodes, liveness, capacity);
     for (Operation *op : order)
       pressure.place(op);
-    return pressure.peak;
+    return pressure.spilled;
   }
 
-  // Of the operations whose dependences are placed, take the one that keeps
-  // the registers in use within `capacity` and leaves one of each kind free,
-  // or overshoots least: every operation defines at most one register value,
-  // so a free register lets the next one run. Then take the one that starts
-  // first; then the one that frees the frontend first, so a blocking
-  // transfer waits for work that can run beside it; then the one with the
-  // longest path to the block's end; then the earliest in source order.
+  // Of the operations whose dependences are placed, take the one that starts
+  // first, counting the spills it adds as delay: a value beyond `capacity`
+  // costs VMEM saves and reloads, worth it only when the alternatives wait
+  // longer (Pressure::spillCost). Then take the one that frees the frontend
+  // first, so a blocking transfer waits for work that can run beside it;
+  // then the one with the longest path to the block's end; then the
+  // earliest in source order.
   // A load starts as soon as the frontend is free, so with `lookahead` loaded
   // tiles awaiting their first use, another load waits while anything else
   // is ready: a boundary tile must not drain transfers whose users all come
   // after it, and each holds a staging window until its first use.
   std::vector<unsigned> listSchedule(const KindCounts &capacity,
                                      unsigned lookahead) const {
-    Pressure pressure(block, g.nodes, liveness);
-    auto over = [&](const KindCounts &counts, int slack) {
-      int total = 0;
-      for (unsigned k = 0; k < kKinds.size(); ++k)
-        total += std::max(0, counts[k] - (capacity[k] - slack));
-      return total;
-    };
+    Pressure pressure(block, g.nodes, liveness, capacity);
     llvm::SmallDenseSet<Value> unused;
     auto isLoad = [](Operation *op) {
       return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
@@ -714,8 +781,7 @@ public:
       auto key = [&](unsigned node) {
         Operation *op = g.nodes[node];
         int start = machine.start(node);
-        return std::tuple(over(pressure.during(op), 0),
-                          over(pressure.after(op), 1), start,
+        return std::tuple(start + pressure.spillCost(op),
                           machine.frontendAfter(node, start), -heights[node],
                           node);
       };
@@ -797,10 +863,10 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
   }
 }
 
-// Reorder one block when the schedule fits the allocator's capacity and the
-// source order does not, or when it is faster without giving up a fit the
-// source order has. The schedule is the fastest fitting list schedule over a
-// few load lookaheads. A random order is taken as it is.
+// Reorder one block when the list schedule is estimated to finish before the
+// source order, spills included: --spill-atlas-virtual recovers pressure
+// beyond the registers, at a cost. The schedule is the best list schedule
+// over a few load lookaheads. A random order is taken as it is.
 LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
@@ -821,49 +887,24 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
     return success();
   }
 
-  std::vector<unsigned> source(g.nodes.size());
-  std::iota(source.begin(), source.end(), 0u);
-  auto fits = [&](ArrayRef<Operation *> candidate) {
-    KindCounts peak = scheduler.peakPressure(candidate);
-    for (unsigned k = 0; k < kKinds.size(); ++k)
-      if (peak[k] > capacity[k])
-        return false;
-    return true;
+  auto cycles = [&](ArrayRef<unsigned> order) {
+    return scheduler.makespan(order) + scheduler.spillCost(opsOf(order), capacity);
   };
   std::vector<unsigned> order;
-  SmallVector<Operation *> ops;
-  bool scheduleFits = false;
-  int span = 0;
+  int best = 0;
   for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
     std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
-    SmallVector<Operation *> candidateOps = opsOf(candidate);
-    bool candidateFits = fits(candidateOps);
-    int candidateSpan = scheduler.makespan(candidate);
-    if (order.empty() || std::pair(!candidateFits, candidateSpan) <
-                             std::pair(!scheduleFits, span)) {
+    int estimate = cycles(candidate);
+    if (order.empty() || estimate < best) {
       order = std::move(candidate);
-      ops = std::move(candidateOps);
-      scheduleFits = candidateFits;
-      span = candidateSpan;
+      best = estimate;
     }
   }
-  bool sourceFits = fits(g.nodes);
-  bool faster = span < scheduler.makespan(source);
-  if (sourceFits ? scheduleFits && faster : scheduleFits || faster)
-    reorder(block, ops);
+  std::vector<unsigned> source(g.nodes.size());
+  std::iota(source.begin(), source.end(), 0u);
+  if (best < cycles(source))
+    reorder(block, opsOf(order));
   return success();
-}
-
-// Whether the register allocator succeeds on `function` as it stands; `why`
-// receives its first error.
-bool allocates(func::FuncOp function, std::string &why) {
-  ScopedDiagnosticHandler handler(function.getContext(), [&](Diagnostic &d) {
-    if (d.getSeverity() == DiagnosticSeverity::Error && why.empty())
-      why = d.str();
-    return success();
-  });
-  VirtualAllocationPlan plan;
-  return succeeded(plan.allocate(function)) && succeeded(plan.verify());
 }
 
 struct ScheduleAtlasVirtualPass
@@ -877,7 +918,7 @@ struct ScheduleAtlasVirtualPass
   StringRef getArgument() const final { return "schedule-atlas-virtual"; }
   StringRef getDescription() const final {
     return "Reorder each virtual Atlas block onto its functional units before "
-           "register allocation";
+           "spilling and register allocation";
   }
 
   Option<int> randomSeed{
@@ -893,22 +934,7 @@ struct ScheduleAtlasVirtualPass
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
-    // Each block's free operations in their current order, to put back.
-    using BlockOrders =
-        SmallVector<std::pair<Block *, SmallVector<Operation *>>>;
-    auto ordersOf = [](func::FuncOp function) {
-      BlockOrders orders;
-      for (Block &block : function.getBody())
-        orders.push_back({&block, freeOperations(block)});
-      return orders;
-    };
-    auto restore = [](const BlockOrders &orders) {
-      for (const auto &[block, ops] : orders)
-        reorder(*block, ops);
-    };
-    SmallVector<std::pair<func::FuncOp, BlockOrders>> sources;
     for (func::FuncOp function : module.getOps<func::FuncOp>()) {
-      sources.push_back({function, ordersOf(function)});
       KindCounts capacity;
       RegisterCapacities capacities = registerCapacities(function);
       for (RegisterKind kind : kKinds)
@@ -925,26 +951,6 @@ struct ScheduleAtlasVirtualPass
       module.emitError("schedule-atlas-virtual produced an order that does "
                        "not verify");
       return signalPassFailure();
-    }
-    if (seed)
-      return;
-    // Scheduling keeps pressure within capacity where it can, but that does
-    // not guarantee the allocator's greedy coloring succeeds. Allocation is
-    // function-wide, so a function whose schedule does not allocate goes back
-    // to its source order when that does.
-    for (auto &[function, source] : sources) {
-      std::string why, ignored;
-      if (allocates(function, why))
-        continue;
-      BlockOrders scheduled = ordersOf(function);
-      restore(source);
-      if (!allocates(function, ignored)) {
-        // Neither order allocates; the lowering reports why.
-        restore(scheduled);
-        continue;
-      }
-      function.emitRemark() << "virtual schedule kept source order for @"
-                            << function.getSymName() << ": " << why;
     }
   }
 };

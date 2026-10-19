@@ -1,9 +1,9 @@
 """schedule-atlas-virtual: pre-allocation list scheduling of virtual Atlas SSA.
 
-The scheduled order verifies, keeps every block's structure, lowers whenever
-the source order does, keeps every SSA and implicit-state dependence, and
-never needs more registers than the allocator has unless the source order
-already did.
+The scheduled order verifies, keeps every block's structure and every SSA and
+implicit-state dependence, and lowers after spilling whenever the source order
+lowers. Values beyond the registers cost estimated spill cycles; they are not
+forbidden.
 """
 
 from __future__ import annotations
@@ -347,6 +347,11 @@ def lowers(source: str) -> bool:
     return run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits").returncode == 0
 
 
+def spilling(source: str) -> list[str]:
+    """--spill-atlas-virtual, which takes a module of one function."""
+    return ["--spill-atlas-virtual"] if source.count("func.func") == 1 else []
+
+
 class VirtualSchedulingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
@@ -367,8 +372,9 @@ class VirtualSchedulingTest(unittest.TestCase):
         if found and found[0]["ops"]:
             self.assertEqual(found[0]["ops"][0], "atlas.virtual_start", name)
         if lowers(source):
-            lowered = run("atlas-opt", out, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
-                          "--verify-atlas-generated-schedule")
+            # A scheduled order may need spills the source order does not.
+            lowered = run("atlas-opt", out, *spilling(out), "--lower-atlas-virtual-to-machine",
+                          "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule")
             self.assertEqual(lowered.returncode, 0, f"{name}: {lowered.stderr}")
             self.assertIn('atlas.timing_state = "untimed"', lowered.stdout)
             self.assertNotIn('"atlas.delay"', lowered.stdout)
@@ -428,35 +434,36 @@ class VirtualSchedulingTest(unittest.TestCase):
                          "the next tile is read while the first is rectified")
         self.assertGreater(positions(ops, "output_bf16")[0], second_input)
 
-    def test_schedule_stays_within_register_capacity(self) -> None:
-        # Reading ahead stops at the allocator's capacity: 31 BF16 pairs, or
-        # 15 with FP8 values present.
+    def test_reading_ahead_past_the_registers_does_not_pay(self) -> None:
+        # Each boundary tile waits for its transfer, so reading further ahead
+        # than the registers hold (31 BF16 pairs, or 15 with FP8 values
+        # present) would add spills and save nothing.
         for count, fp8 in ((30, False), (31, False), (32, False),
                            (14, True), (15, True), (16, True)):
             with self.subTest(count=count, fp8=fp8):
                 source = boundary_tiles(count, fp8)
-                result = schedule(source)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertNotEqual(blocks(result.stdout)[0]["ops"], blocks(source)[0]["ops"])
-                self.assertNotIn("kept source order", result.stderr)
-                self.assertTrue(lowers(result.stdout))
+                scheduled = self.scheduled(source)
+                self.assertNotEqual(blocks(scheduled)[0]["ops"], blocks(source)[0]["ops"])
+                self.assertTrue(lowers(scheduled))
 
-    def test_scheduling_recovers_a_block_over_capacity(self) -> None:
+    def test_scheduling_removes_spills_the_source_order_needs(self) -> None:
+        # Writing each tile before reading the next costs no time here.
         source = virtual_pressure(32)
         rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertIn("exceeds 31 physical pairs", rejected.stderr)
         self.assertTrue(lowers(self.scheduled(source)), "scheduled order should allocate")
 
-    def test_schedule_the_allocator_rejects_keeps_source_order(self) -> None:
-        # Within capacity, the allocator's greedy coloring can still fail on
-        # an order whose source allocated.
-        source = wide_return_block(27, interleaved=True)
-        self.assertTrue(lowers(source))
+    def test_an_order_over_the_registers_is_kept_for_spilling(self) -> None:
+        # Every order holds 32 tiles across the edge, beyond 31 pairs: the
+        # schedule stands and spilling recovers it.
+        source = wide_return_block(32)
         result = schedule(source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("kept source order for @wide: 'func.func' op virtual BF16 "
-                      "interference exceeds 31 physical pairs", result.stderr)
-        self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(lowers(result.stdout))
+        spilled = run("atlas-opt", result.stdout, "--spill-atlas-virtual",
+                      "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+        self.assertEqual(spilled.returncode, 0, spilled.stderr)
 
     def test_dma_transfers_overlap_and_receive_independent_work(self) -> None:
         # Every load issues before the first operation that uses any loaded

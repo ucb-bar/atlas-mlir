@@ -811,6 +811,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
     machine = run([atlas_opt, "--verify-atlas-virtual-stream",
                    "--lower-atlas-virtual-boundary-to-dma",
                    "--schedule-atlas-virtual", "--verify-atlas-virtual-stream",
+                   "--spill-atlas-virtual",
                    "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
                    "--schedule-atlas-stream", "--verify-atlas-timing", "-"],
                   input_text=virtual).rstrip() + "\n"
