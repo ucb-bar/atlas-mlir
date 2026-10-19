@@ -272,6 +272,16 @@ class VirtualSpillingTest(unittest.TestCase):
         lowered = run(result.stdout, '--lower-atlas-virtual-to-machine', '--insert-atlas-dma-waits')
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
 
+    def test_loaded_tiles_staged_for_their_windows_spill(self):
+        # Every load launches before any store, so each launch past the eighth
+        # stages an earlier tile to take its window, long before its one use.
+        source = run(pressure(40), "--lower-atlas-virtual-boundary-to-dma").stdout
+        _, program = compile_program(source)
+        inputs = [(0x90000000+i*2048, bytes((j*19+i*13) % 256 for j in range(2048))) for i in range(40)]
+        memory = execute_copies(program, inputs)
+        for i, (_, data) in enumerate(inputs):
+            self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
+
     def test_no_pressure_does_not_insert_spills(self):
         result = run(pressure(2), "--spill-atlas-virtual")
         self.assertEqual(result.returncode, 0, result.stderr)

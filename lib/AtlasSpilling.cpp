@@ -365,7 +365,7 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
   return arguments.size();
 }
 
-void spill(Value value) {
+void spill(Value value, Operation *staged) {
   SmallVector<Operation *> consumers;
   auto function = value.getDefiningOp()->getParentOfType<func::FuncOp>();
   for (Block &block : function.getBody())
@@ -394,18 +394,20 @@ void spill(Value value) {
     }
     return;
   }
-  // A loaded tile stays in its staging window until its first use, where its
-  // registers begin (isVirtualDMALoadedTile): save it after that use, which
-  // reads it directly, rather than waiting for its transfer at the launch.
-  Operation *written = value.getDefiningOp();
-  if (isVirtualDMALoadedTile(value) && !consumers.empty() &&
-      consumers.front()->getBlock() == written->getBlock() &&
-      !consumers.front()->hasTrait<OpTrait::IsTerminator>()) {
-    written = consumers.front();
-    consumers.erase(consumers.begin());
+  // A loaded tile stays in its staging window until `staged`, where its
+  // registers begin: save it after its first use there, which reads it
+  // directly, or before a later launch that takes its window, rather than
+  // waiting for its transfer at the launch.
+  Operation *saveBefore = value.getDefiningOp()->getNextNode();
+  if (staged && !staged->hasTrait<OpTrait::IsTerminator>()) {
+    saveBefore = staged;
+    if (!consumers.empty() && consumers.front() == staged) {
+      saveBefore = staged->getNextNode();
+      consumers.erase(consumers.begin());
+    }
   }
   bool bf16 = isa<VirtualBF16Type>(value.getType());
-  Operation *store = insertMemoryOp(written->getNextNode(),
+  Operation *store = insertMemoryOp(saveBefore,
       bf16 ? "atlas.virtual_spill_bf16" : "atlas.virtual_spill_fp8",
       value, VirtualSpillType::get(value.getContext()), true);
   for (Operation *consumer : consumers) {
@@ -563,16 +565,10 @@ struct SpillAtlasVirtualPass
                  !(fp8 && isa<VirtualFP8Type>(value.getType())) &&
                  !(scalar && (value.getType().isInteger(1) || value.getType().isInteger(32)))))
               continue;
-            // A loaded tile holds registers from its first use in its block.
+            // A loaded tile holds registers from where it is staged.
             unsigned first = order.lookup(&op);
-            if (isVirtualDMALoadedTile(value)) {
-              unsigned use = ~0u;
-              for (Operation *user : value.getUsers())
-                if (user->getBlock() == op.getBlock())
-                  use = std::min(use, order.lookup(user));
-              if (use != ~0u)
-                first = use;
-            }
+            if (Operation *staged = plan.stagingPoint(value))
+              first = order.lookup(staged);
             unsigned last = first;
             for (Operation *user : value.getUsers())
               last = std::max(last, order.lookup(user));
@@ -589,7 +585,7 @@ struct SpillAtlasVirtualPass
         return signalPassFailure();
       }
       saved.insert(victim);
-      spill(victim);
+      spill(victim, plan.stagingPoint(victim));
       ++count;
       if (failed(placeSlots(function, limit)))
         return signalPassFailure();

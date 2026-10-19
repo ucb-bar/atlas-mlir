@@ -172,9 +172,9 @@ reduction order.
 
 On an allocation failure, the pass splits long-lived operation results with
 saves and per-consumer reloads, places the slots, and retries allocation. A
-DMA-loaded tile lives from its first use, as allocation counts it: its save
-follows that use, which reads it directly, instead of waiting for the transfer
-at the launch.
+DMA-loaded tile lives from where allocation stages it: its save follows its
+first use there, which reads it directly, or precedes a later launch that takes
+its window, instead of waiting for the transfer at the launch.
 Reload results are not recursively spilled. Proven wrapping-i32 constants are
 rematerialized at their uses; this retains the static address/size proofs
 required by the existing DMA lowering.

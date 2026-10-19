@@ -111,6 +111,9 @@ public:
   // each value's placement, MXU slots, DMA channels and the VMEM windows the
   // lowering uses. Values are named as the function prints.
   llvm::json::Object report() const;
+  // The operation before which lowering stages the loaded tile `tile` into
+  // its registers, if any; query after allocate().
+  Operation *stagingPoint(Value tile) const;
   // Typed feedback for pressure recovery; query after allocate().
   const RegisterPressure &registerPressure(RegisterKind kind) const {
     return pressure[static_cast<unsigned>(kind)];

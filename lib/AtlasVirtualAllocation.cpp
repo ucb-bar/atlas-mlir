@@ -352,6 +352,13 @@ void VirtualAllocationPlan::stageLoads() {
   }
 }
 
+Operation *VirtualAllocationPlan::stagingPoint(Value tile) const {
+  for (const auto &[op, tiles] : stagedBefore)
+    if (llvm::is_contained(tiles, tile))
+      return op;
+  return nullptr;
+}
+
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) {
