@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -53,6 +54,7 @@ struct VirtualMXUResources {
   SmallVector<Value, kVirtualMXUSlots> weights[2];
   SmallVector<Value, kVirtualMXUSlots> accumulators[2];
   llvm::DenseMap<Value, unsigned> remainingUses;
+  bool allowPressure = false;
 
   // The resident weights of `unit` that something still uses.
   SmallVector<Value, kVirtualMXUSlots> &liveWeights(unsigned unit) {
@@ -63,7 +65,7 @@ struct VirtualMXUResources {
 
   LogicalResult startAccumulator(Operation &op, unsigned unit, Value acc,
                                  StringRef verb) {
-    if (accumulators[unit].size() == kVirtualMXUSlots)
+    if (!allowPressure && accumulators[unit].size() >= kVirtualMXUSlots)
       return op.emitOpError("cannot ")
              << verb << " a unit with " << kVirtualMXUSlots
              << " live accumulators";
@@ -91,7 +93,7 @@ struct VirtualMXUResources {
       unsigned unit = cast<VirtualMXUWeightType>(weight.getType()).getUnit();
       if (unit > 1)
         return op.emitOpError("MXU unit must be in [0, 1]");
-      if (liveWeights(unit).size() == kVirtualMXUSlots)
+      if (!allowPressure && liveWeights(unit).size() >= kVirtualMXUSlots)
         return op.emitOpError("cannot load a weight on a unit with ")
                << kVirtualMXUSlots << " live weights";
       weights[unit].push_back(weight);
@@ -137,6 +139,24 @@ struct VirtualMXUResources {
                << unit;
     return success();
   }
+
+  LogicalResult verifyEdge(Operation &where, ValueRange operands) {
+    llvm::DenseSet<Value> forwarded;
+    for (Value value : operands) {
+      auto type = dyn_cast<VirtualMXUAccType>(value.getType());
+      if (!type) continue;
+      if (type.getUnit() > 1 ||
+          !llvm::is_contained(accumulators[type.getUnit()], value) ||
+          !forwarded.insert(value).second)
+        return where.emitOpError(
+            "must forward each current MXU accumulator exactly once per edge");
+    }
+    for (auto &unit : accumulators)
+      for (Value value : unit)
+        if (!forwarded.contains(value))
+          return where.emitOpError("cannot drop a live MXU accumulator at a CFG edge");
+    return success();
+  }
 };
 
 // The virtual state is an SSA edge value. Every successor receives the current
@@ -156,9 +176,11 @@ LogicalResult verifySuccessor(Operation &op, Block *dest, ValueRange operands,
 
 LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
                                  unsigned &starts, unsigned &outputs,
-                                 llvm::DenseSet<int64_t> &outputIndices) {
+                                 llvm::DenseSet<int64_t> &outputIndices,
+                                 bool allowMXUPressure, bool allowMXUCFG) {
   Value state;
   VirtualMXUResources mxu;
+  mxu.allowPressure = allowMXUPressure;
   if (cfg) {
     if (entry) {
       for (BlockArgument arg : block.getArguments())
@@ -175,13 +197,27 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
         return failure();
       }
       state = block.getArgument(0);
-      for (BlockArgument arg : block.getArguments().drop_front())
-        if (!isa<VirtualBF16Type>(arg.getType()) &&
+      for (BlockArgument arg : block.getArguments().drop_front()) {
+        if (allowMXUCFG && isa<VirtualMXUWeightType, VirtualMXUAccType>(arg.getType())) {
+          bool accumulator = isa<VirtualMXUAccType>(arg.getType());
+          unsigned unit = accumulator ? cast<VirtualMXUAccType>(arg.getType()).getUnit()
+                                      : cast<VirtualMXUWeightType>(arg.getType()).getUnit();
+          if (unit > 1)
+            return block.getParentOp()->emitOpError("MXU unit must be in [0, 1]");
+          if (accumulator) mxu.accumulators[unit].push_back(arg);
+          else {
+            mxu.weights[unit].push_back(arg);
+            mxu.remainingUses[arg] = std::distance(arg.use_begin(), arg.use_end());
+          }
+          continue;
+        }
+        if (!isa<VirtualBF16Type, VirtualFP8Type>(arg.getType()) &&
             !arg.getType().isInteger(1) && !arg.getType().isInteger(32)) {
           block.getParentOp()->emitOpError(
-              "virtual block arguments must be BF16 tiles or i1/i32 controls");
+              "virtual block arguments must be BF16/FP8 tiles or i1/i32 controls");
           return failure();
         }
+      }
     }
   }
 
@@ -242,6 +278,15 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
         ++outputs;
       continue;
     }
+    if (isa<VirtualSlotOp>(operation))
+      continue;
+    if (isAtlasSpillStore(&operation) || isAtlasSpillLoad(&operation) ||
+        isAtlasSlotAccess(&operation) || isa<VirtualControlOp>(operation)) {
+      if (!state || operation.getOperand(0) != state)
+        return operation.emitOpError("nonlinear virtual state chain");
+      state = operation.getResult(0);
+      continue;
+    }
     if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op,
             VirtualMXULoadAccBF16Op, VirtualMXUResetOp, VirtualMXUAccumulateOp,
             VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(operation)) {
@@ -290,13 +335,21 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
       continue;
     }
     if (cfg) {
-      if (operation.hasTrait<OpTrait::IsTerminator>() &&
+      bool resourceEdge = allowMXUCFG && isa<cf::BranchOp, cf::CondBranchOp>(operation);
+      if (!resourceEdge && operation.hasTrait<OpTrait::IsTerminator>() &&
           failed(mxu.verifyClosed(&operation)))
         return failure();
-      if (auto branch = dyn_cast<cf::BranchOp>(operation))
+      if (auto branch = dyn_cast<cf::BranchOp>(operation)) {
+        if (resourceEdge && failed(mxu.verifyEdge(operation, branch.getDestOperands())))
+          return failure();
         return verifySuccessor(operation, branch.getDest(),
                                branch.getDestOperands(), state);
+      }
       if (auto branch = dyn_cast<cf::CondBranchOp>(operation)) {
+        if (resourceEdge &&
+            (failed(mxu.verifyEdge(operation, branch.getTrueDestOperands())) ||
+             failed(mxu.verifyEdge(operation, branch.getFalseDestOperands()))))
+          return failure();
         if (failed(verifySuccessor(operation, branch.getTrueDest(),
                                    branch.getTrueDestOperands(), state)) ||
             failed(verifySuccessor(operation, branch.getFalseDest(),
@@ -322,7 +375,16 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
   return mxu.verifyClosed(block.getParentOp());
 }
 
-LogicalResult verifyVirtualFunction(func::FuncOp function) {
+LogicalResult verifyVirtualFunction(func::FuncOp function,
+                                  bool allowMXUPressure, bool allowMXUCFG) {
+  if (function->hasAttr("atlas.memory_controls")) {
+    if (!isa<UnitAttr>(function->getAttr("atlas.memory_controls")) ||
+        !function.getNumArguments() || function.getNumArguments() > 256)
+      return function.emitOpError("memory control ABI requires at most 256 controls");
+    for (Value argument : function.getArguments())
+      if (!argument.use_empty())
+        return function.emitOpError("memory controls must be read through virtual_control");
+  }
   if (function.isExternal() || function.getBody().empty() ||
       function.getFunctionType().getNumResults() != 1 ||
       !isa<VirtualStateType>(function.getFunctionType().getResult(0))) {
@@ -336,7 +398,7 @@ LogicalResult verifyVirtualFunction(func::FuncOp function) {
   for (Block &block : function.getBody()) {
     if (failed(verifyVirtualBlock(block, &block == &function.getBody().front(),
                                   /*cfg=*/true, starts, outputs,
-                                  outputIndices)))
+                                  outputIndices, allowMXUPressure, allowMXUCFG)))
       return failure();
     if (isa<func::ReturnOp>(block.getTerminator())) {
       if (returnBlock) {
@@ -378,7 +440,7 @@ LogicalResult verifyVirtualFunction(func::FuncOp function) {
     function.emitOpError("virtual CFG contains an unreachable block");
     return failure();
   }
-  return success();
+  return verifyAtlasSpillSlots(function);
 }
 
 struct VerifyAtlasVirtualStreamPass
@@ -397,7 +459,9 @@ struct VerifyAtlasVirtualStreamPass
 };
 } // namespace
 
-LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
+LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module,
+                                                  bool allowMXUPressure,
+                                                  bool allowMXUCFG) {
   bool hasFunctions = llvm::any_of(module.getBody()->getOperations(),
                                    [](Operation &op) { return isa<func::FuncOp>(op); });
   if (hasFunctions) {
@@ -406,7 +470,7 @@ LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
       if (!function)
         return op.emitOpError(
             "virtual CFG module must contain only func.func operations");
-      if (failed(verifyVirtualFunction(function)))
+      if (failed(verifyVirtualFunction(function, allowMXUPressure, allowMXUCFG)))
         return failure();
     }
     return success();
@@ -416,7 +480,7 @@ LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
   llvm::DenseSet<int64_t> outputIndices;
   if (failed(verifyVirtualBlock(*module.getBody(), /*entry=*/true,
                                 /*cfg=*/false, starts, outputs,
-                                outputIndices)))
+                                outputIndices, allowMXUPressure, allowMXUCFG)))
     return failure();
   if (starts != 1 || outputs == 0)
     return module.emitOpError(
@@ -426,6 +490,25 @@ LogicalResult mlir::atlas::verifyAtlasVirtualModule(ModuleOp module) {
 
 void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
+}
+
+bool mlir::atlas::isVirtualDMAImmediate(Value value) {
+  if (!value.getDefiningOp<arith::ConstantOp>() || !value.getType().isInteger(32) ||
+      value.use_empty())
+    return false;
+  // A DMA operation's address and size close its operand list.
+  return llvm::all_of(value.getUses(), [](OpOperand &use) {
+    Operation *user = use.getOwner();
+    return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+               VirtualDMAStoreBF16Op>(user) &&
+           use.getOperandNumber() + 2 >= user->getNumOperands();
+  });
+}
+
+bool mlir::atlas::isVirtualDMALoadedTile(Value value) {
+  auto result = dyn_cast<OpResult>(value);
+  return result && result.getResultNumber() == 1 &&
+         isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(result.getOwner());
 }
 
 bool mlir::atlas::virtualDMAConflict(Operation *a, Operation *b) {

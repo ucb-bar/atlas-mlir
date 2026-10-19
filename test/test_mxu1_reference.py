@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import random
@@ -11,6 +10,8 @@ import subprocess
 import sys
 import unittest
 
+from mxu1_anchor_source_model import mxu1_reset_lane
+import atlas_assembler as assembler
 from test_mxu_numerics import dot, fp8, round_bf16
 from test_mxu_reference import PAIR_SOURCE, _object_words
 
@@ -20,6 +21,8 @@ SOURCE = ROOT / "test/examples/mxu1_pair.mlir"
 ASSEMBLY = ROOT / "test/examples/mxu1_pair.S"
 ONE = 0x38
 SMALL = 0x18
+HALF = 0x30
+TINY = 0x08
 
 
 def _emitted() -> tuple[int, ...]:
@@ -46,6 +49,47 @@ def _mixed_panel() -> tuple[bytes, bytes]:
             bytes(rng.choice(values) for _ in range(1024)))
 
 
+def _half_panel() -> tuple[bytes, bytes]:
+    weights, acts = bytearray(1024), bytearray(1024)
+    weights[5 * 32 + 7], acts[3 * 32 + 7] = HALF, ONE
+    weights[20 * 32 + 9], acts[31 * 32 + 9] = HALF | 0x80, 0x40
+    return bytes(weights), bytes(acts)
+
+
+def _dense_half_palette() -> tuple[bytes, bytes]:
+    rng = random.Random(0xA71A63)
+    values = (0, 0x30, 0xB0, ONE, ONE | 0x80, 0x40, 0xC0)
+    return (bytes(rng.choice(values) for _ in range(1024)),
+            bytes(rng.choice(values) for _ in range(1024)))
+
+
+def _scaled_pair_palette() -> tuple[bytes, bytes]:
+    """FP8 pairs produced by a 32x activation and inverse-weight scale."""
+    rng = random.Random(0xA71A64)
+    weights = (0, TINY, TINY | 0x80)
+    activations = (0, 0x50, 0xD0, 0x58, 0xD8)
+    return (bytes(rng.choice(weights) for _ in range(1024)),
+            bytes(rng.choice(activations) for _ in range(1024)))
+
+
+def _anchor_span_panel() -> tuple[bytes, bytes]:
+    weights, acts = bytearray(1024), bytearray(1024)
+    weights[0], weights[1] = ONE, ONE | 0x80
+    acts[0] = acts[1] = ONE
+    for k in range(2, 32):
+        weights[k] = acts[k] = TINY
+    return bytes(weights), bytes(acts)
+
+
+def _anchor_truncation_panel() -> tuple[bytes, bytes]:
+    weights, acts = bytearray(1024), bytearray(1024)
+    weights[0], weights[1] = 0x77, 0xF7
+    acts[0] = acts[1] = 0x77
+    for k in range(2, 32):
+        weights[k] = acts[k] = TINY
+    return bytes(weights), bytes(acts)
+
+
 def _expected(weights: bytes, acts: bytes, *, ordered_steps: bool = False) -> bytes:
     cells = []
     for row in range(32):
@@ -66,17 +110,12 @@ class MXU1ReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_mxu1_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted()
         self.assertEqual(len(emitted), 42)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[18], assembler.VMATPUSH_W_MXU1(0, 4))
-        self.assertEqual(emitted[20], assembler.VMATMUL_MXU1(0, 0, 0))
-        self.assertEqual(emitted[22], assembler.VMATPOP_BF16_MXU1(2, 0))
+        self.assertEqual(emitted[18], assembler.word("vmatpush.weight.mxu1 w0, m4"))
+        self.assertEqual(emitted[20], assembler.word("vmatmul.mxu1 acc0, m0, w0"))
+        self.assertEqual(emitted[22], assembler.word("vmatpop.bf16.acc.mxu1 m2, acc0"))
         self.assertEqual(_object_words(SOURCE), emitted)
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)
@@ -110,6 +149,49 @@ class MXU1ReferenceTest(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<H", ordered, 0)[0], 0x3F80)
         self.assertEqual(struct.unpack_from("<H", once, 1024 + 2 * (5 * 16 + 4))[0], 0xBF80)
 
+    def test_candidate_palette_and_anchor_truncation_witnesses(self) -> None:
+        weights, acts = _half_panel()
+        half = _expected(weights, acts)
+        self.assertEqual(struct.unpack_from("<H", half, 2 * (3 * 16 + 5))[0], 0x3F00)
+        self.assertEqual(struct.unpack_from("<H", half, 1024 + 2 * (31 * 16 + 4))[0], 0xBF80)
+        weights, acts = _anchor_span_panel()
+        self.assertEqual(struct.unpack_from("<H", _expected(weights, acts), 0)[0], 0x3BF0)
+        weights, acts = _anchor_truncation_panel()
+        # Exact round-once arithmetic retains these low products. The RTL
+        # anchor shifter may discard them before the large terms cancel.
+        self.assertEqual(struct.unpack_from("<H", _expected(weights, acts), 0)[0], 0x3BF0)
+
+    def test_pending_mxu1_domain_panels_have_independent_expected_values(self) -> None:
+        for build in (_dense_half_palette, _scaled_pair_palette):
+            with self.subTest(panel=build.__name__):
+                weights, acts = build()
+                expected = _expected(weights, acts)
+                self.assertEqual(len(expected), 2048)
+                self.assertGreater(len(set(expected)), 2)
+
+    def test_source_anchor_mirror_exposes_cancellation_limit(self) -> None:
+        for build in (_tie_panel, _dense_half_palette, _scaled_pair_palette):
+            with self.subTest(panel=build.__name__):
+                weights, acts = build()
+                observed, dropped = mxu1_reset_lane(weights[:32], acts[:32])
+                exact = round_bf16(sum((fp8(w) * fp8(a)
+                                        for w, a in zip(weights[:32], acts[:32], strict=True)),
+                                       start=0))
+                self.assertEqual(observed, exact)
+                self.assertEqual(dropped, 0)
+
+        weights, acts = _anchor_truncation_panel()
+        mirrored, dropped = mxu1_reset_lane(weights[:32], acts[:32])
+        self.assertEqual(mirrored, 0)
+        self.assertEqual(dropped, 30)
+        self.assertEqual(struct.unpack_from("<H", _expected(weights, acts), 0)[0], 0x3BF0)
+
+    def test_source_anchor_mirror_refuses_unmodeled_input_classes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "subnormals"):
+            mxu1_reset_lane(bytes([0x01]) * 32, bytes([ONE]) * 32)
+        with self.assertRaisesRegex(ValueError, "NaNs"):
+            mxu1_reset_lane(bytes([0x7F]) * 32, bytes([ONE]) * 32)
+
     def test_selected_core_executes_mxu1_and_distinguishes_mxu0(self) -> None:
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT", "ATLAS_LLVM_BIN")
         if not all(os.environ.get(key) for key in keys):
@@ -138,7 +220,11 @@ class MXU1ReferenceTest(unittest.TestCase):
             cosim_atlas.CosimCore = SelectedCore
             try:
                 cases = (("ones", bytes([ONE]) * 1024, bytes([ONE]) * 1024),
-                         ("tie", *_tie_panel()), ("mixed", *_mixed_panel()))
+                         ("tie", *_tie_panel()), ("mixed", *_mixed_panel()),
+                         ("half", *_half_panel()), ("anchor_span", *_anchor_span_panel()),
+                         ("anchor_truncation", *_anchor_truncation_panel()),
+                         ("dense_half", *_dense_half_palette()),
+                         ("scaled_pair", *_scaled_pair_palette()))
                 for name, weights, acts in cases:
                     for unit in ((1, 0) if name == "tie" else (1,)):
                         with self.subTest(name=name, unit=unit):
@@ -154,6 +240,8 @@ class MXU1ReferenceTest(unittest.TestCase):
                             observed = (result.slave.captured(0x90000800, 1024) +
                                         result.slave.captured(0x90001000, 1024))
                             expected = _expected(weights, acts, ordered_steps=(unit == 0))
+                            if name == "anchor_truncation":
+                                expected = b"\x00\x00" + expected[2:]
                             self.assertTrue(result.halted)
                             self.assertEqual((result.reads, result.writes), (64, 64))
                             self.assertEqual(observed, expected)

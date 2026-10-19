@@ -8,13 +8,13 @@ calculate expected output bits.
 from __future__ import annotations
 
 from fractions import Fraction
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -134,19 +134,12 @@ class MXUArithmeticDiscriminatorTest(unittest.TestCase):
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_mxu_arithmetic_assembler", pathlib.Path(selected_root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for unit, source in SOURCES.items():
             with self.subTest(unit=unit):
                 words = _emitted(source)
                 self.assertEqual(len(words), 42)
                 self.assertEqual(words, _object_words(source))
-                matmul = (assembler.VMATMUL_MXU0 if unit == 0 else
-                          assembler.VMATMUL_MXU1)
-                self.assertEqual(words[20], matmul(0, 0, 0))
+                self.assertEqual(words[20], assembler.word(f"vmatmul.mxu{unit} acc0, m0, w0"))
 
     def test_selected_core_distinguishes_mxu0_mxu1_and_fp16_model(self) -> None:
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT", "ATLAS_LLVM_BIN")

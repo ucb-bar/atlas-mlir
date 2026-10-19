@@ -9,6 +9,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -54,6 +55,10 @@ public:
     allocated = true;
     if (failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
+    for (Block &block : function.getBody())
+      for (Value argument : block.getArguments())
+        if (isa<VirtualFP8Type>(argument.getType()))
+          return function.emitOpError("FP8 edge values require --spill-atlas-virtual");
     int32_t nextValue = 0, nextBlock = 0, nextOperation = 0;
     for (Block &block : function.getBody()) {
       cfgBlocks[&block] = nextBlock++;
@@ -121,8 +126,9 @@ public:
   LogicalResult materialize() {
     SmallVector<VirtualDMAAssignment> dmaAssignments;
     SmallVector<VirtualMXUAssignment> mxuAssignments;
-    SmallVector<VirtualRegisterAssignment> registers, cfgRegisters;
+    SmallVector<VirtualRegisterAssignment> registers, cfgRegisters, scalarRegisters;
     auto recordPlacement = [&](Value value) {
+      if (isAtlasMemoryControl(value)) return;
       Type type = value.getType();
       if (isa<VirtualBF16Type, VirtualFP8Type>(type)) {
         unsigned reg = isa<VirtualBF16Type>(type) ? allocation.tile(value) : allocation.fp8(value);
@@ -130,6 +136,7 @@ public:
         cfgRegisters.push_back({value, reg});
       } else if (cfgTracked(value)) {
         cfgRegisters.push_back({value, allocation.scalar(value)});
+        scalarRegisters.push_back({value, allocation.scalar(value)});
       } else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(type)) {
         mxuAssignments.push_back({value, allocation.mxu(value)});
       }
@@ -149,7 +156,7 @@ public:
     auto cfgContract = buildAtlasCFGContract(function, cfgRegisters);
     auto dmaContract = buildAtlasDMAContract(function, dmaAssignments);
     auto mxuContract = buildAtlasMXUContract(function, registers, mxuAssignments, fixed());
-    auto tileContract = buildAtlasTileContract(function, registers, dmaAssignments, fixed(), allocation.scalarArguments());
+    auto tileContract = buildAtlasTileContract(function, registers, dmaAssignments, fixed(), allocation.scalarArguments(), scalarRegisters);
     if (failed(cfgContract) || failed(dmaContract) || failed(mxuContract) || failed(tileContract))
       return failure();
     auto sourceMemoryContract = buildAtlasSourceMemoryEffectContract(function, *cfgContract, *tileContract);
@@ -187,6 +194,11 @@ public:
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
+    if (function->hasAttr("atlas.memory_controls")) {
+      SmallVector<int32_t> types;
+      for (Type type : function.getArgumentTypes()) types.push_back(cast<IntegerType>(type).getWidth());
+      (*emitted)->setAttr("atlas.control_argument_types", builder.getDenseI32ArrayAttr(types));
+    }
     llvm::SmallVector<uint32_t> words;
     if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words,
                                    /*allowPendingDMAWaits=*/true)))
@@ -213,9 +225,12 @@ public:
 
 private:
   using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
+  // A value with a register; a DMA immediate is built at each launch instead.
   bool cfgTracked(Value v) const {
+    if (isAtlasMemoryControl(v)) return false;
     Type t = v.getType();
-    return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t);
+    return ((t.isInteger(1) || t.isInteger(32)) && !isVirtualDMAImmediate(v)) ||
+           isa<VirtualBF16Type, VirtualFP8Type>(t);
   }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
@@ -393,6 +408,7 @@ private:
          {"dram", i32(fixed().inputDramReg)},
          {"size", i32(fixed().halfSizeReg)}});
     add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
+    if (function->hasAttr("atlas.memory_controls")) return;
     for (auto [index, arg] : llvm::enumerate(function.getArguments())) {
       unsigned reg = scalar(arg);
       add("atlas.scalar_load", loc,
@@ -513,8 +529,15 @@ private:
   void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
                  std::optional<unsigned> src, Location loc) {
     const DMATransferPlacement &placement = allocation.dma(transfer);
-    emitCopy(placement.dramReg, scalar(dramByte), false, loc);
-    emitCopy(placement.sizeReg, scalar(sizeBytes), false, loc);
+    // A command register takes its operand's register, or its immediate.
+    auto capture = [&](unsigned reg, Value operand) {
+      if (isVirtualDMAImmediate(operand))
+        materializeScalar(reg, *constantAddress(operand), loc);
+      else
+        emitCopy(reg, scalar(operand), false, loc);
+    };
+    capture(placement.dramReg, dramByte);
+    capture(placement.sizeReg, sizeBytes);
     materializeScalar(placement.stagingReg, placement.stagingWord, loc);
     if (src) {
       for (unsigned half = 0; half < placement.halves; ++half) {
@@ -595,9 +618,10 @@ private:
   }
 
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
-    if (pack.getScaleCode() != 127)
+    // Only the E8M0 scale codes observed on the selected RTL are admitted.
+    if (pack.getScaleCode() < 122 || pack.getScaleCode() > 128)
       return pack.emitOpError(
-          "virtual-to-machine pack currently admits unit E8M0 scale code 127 only");
+          "virtual-to-machine pack admits observed E8M0 scale codes 122..128 only");
     Location loc = pack.getLoc();
     add("atlas.scalar_load", loc,
         {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
@@ -622,28 +646,42 @@ private:
     materializeScalar(fixed().packRowsReg, 32, loc);
     unsigned loop = newLabel();
     mark(loop);
-    for (unsigned word = 0; word < 4; ++word) {
-      for (unsigned half = 0; half < 2; ++half) {
-        unsigned source = fixed().packSourceRegs[half];
-        unsigned temp = fixed().packTemporaryRegs[half];
-        add("atlas.scalar_load", loc,
-            {{"kind", str("lw")}, {"dst", i32(temp)},
-             {"base", i32(source)}, {"offset", i32(4 * word)}});
-        add("atlas.scalar_store", loc,
-            {{"kind", str("sw")}, {"src", i32(temp)},
-             {"base", i32(fixed().packDestinationReg)},
-             {"offset", i32(4 * word + 16 * half)}});
-      }
-    }
-    for (unsigned reg : {fixed().packSourceRegs[0], fixed().packSourceRegs[1],
-                         fixed().packDestinationReg})
+    // A row copies eight words: copy i moves word i / 2 of half i % 2, from
+    // that half's source to the row at 16 * half + 4 * word, through
+    // temporary i % 2. Each store follows the next copy's load instead of its
+    // own: it issues while the scalar load path is still busy, after its own
+    // load has landed, and the next load reuses the temporary it just read.
+    // The row counter advances in the first load's busy cycles, and each
+    // pointer once its last word is copied.
+    static_assert(kPackRelayoutRowWords == 8,
+                  "the copy loop moves two halves of four words a row");
+    auto copyLoad = [&](unsigned copy) {
+      add("atlas.scalar_load", loc,
+          {{"kind", str("lw")}, {"dst", i32(fixed().packTemporaryRegs[copy % 2])},
+           {"base", i32(fixed().packSourceRegs[copy % 2])},
+           {"offset", i32(4 * (copy / 2))}});
+    };
+    auto copyStore = [&](unsigned copy) {
+      add("atlas.scalar_store", loc,
+          {{"kind", str("sw")}, {"src", i32(fixed().packTemporaryRegs[copy % 2])},
+           {"base", i32(fixed().packDestinationReg)},
+           {"offset", i32(4 * (copy / 2) + 16 * (copy % 2))}});
+    };
+    auto advance = [&](unsigned reg, int32_t step) {
       add("atlas.alu_imm", loc,
           {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
-           {"immediate", i32(reg == fixed().packDestinationReg ? 32 : 16)}});
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(fixed().packRowReg)},
-         {"src", i32(fixed().packRowReg)},
-         {"immediate", i32(1)}});
+           {"immediate", i32(step)}});
+    };
+    copyLoad(0);
+    advance(fixed().packRowReg, 1);
+    for (unsigned copy = 1; copy < kPackRelayoutRowWords; ++copy) {
+      copyLoad(copy);
+      copyStore(copy - 1);
+      if (copy >= kPackRelayoutRowWords - 2)
+        advance(fixed().packSourceRegs[copy % 2], 16);
+    }
+    copyStore(kPackRelayoutRowWords - 1);
+    advance(fixed().packDestinationReg, 32);
     add("atlas.branch", loc,
         {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
          {"rhs", i32(fixed().packRowsReg)}},
@@ -660,8 +698,73 @@ private:
 
   LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
+    if (auto control = dyn_cast<VirtualControlOp>(op)) {
+      unsigned reg = scalar(control.getValue());
+      add("atlas.scalar_load", loc, {{"kind", str("lw")}, {"dst", i32(reg)},
+          {"base", i32(0)}, {"offset", i32(4 * (fixed().mailboxWord + control.getIndex()))}});
+      tagTileCommand();
+      if (control.getValue().getType().isInteger(1))
+        add("atlas.alu_imm", loc, {{"kind", str("andi")}, {"dst", i32(reg)},
+            {"src", i32(reg)}, {"immediate", i32(1)}});
+      return success();
+    }
+    if (auto slot = dyn_cast<VirtualSlotOp>(op)) {
+      if (slot.getSlotWordAttr().getInt() < 0)
+        return op.emitOpError("unallocated VMEM slot; run --spill-atlas-virtual first");
+      return success();
+    }
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
+    if (isAtlasSlotAccess(&op)) {
+      auto source = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
+      bool copy = isa<VirtualSlotCopyOp>(op), save = isa<VirtualSaveOp>(op);
+      auto destination = copy ? op.getOperand(2).getDefiningOp<VirtualSlotOp>() : source;
+      bool scalarValue = source.getWords() == 1;
+      Value value = copy ? Value() : save ? op.getOperand(2) : op.getResult(1);
+      unsigned reg = copy ? (scalarValue ? fixed().scalarTemporary : fixed().tensorTemporary) :
+          scalarValue ? scalar(value) : isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value);
+      auto access = [&](bool write, uint32_t word) {
+        materializeScalar(fixed().dmaBaseReg, scalarValue ? word * 4 : word, loc);
+        if (scalarValue) {
+          add(write ? "atlas.scalar_store" : "atlas.scalar_load", loc,
+              {{"kind", str(write ? "sw" : "lw")}, {write ? "src" : "dst", i32(reg)},
+               {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}});
+          tagTileCommand();
+        } else {
+          add(write ? "atlas.vstore" : "atlas.vload", loc,
+              {{write ? "src" : "dst", i32(reg)}, {"base", i32(fixed().dmaBaseReg)},
+               {"offset", i32(0)}, {"format", str("raw")}});
+        }
+      };
+      for (unsigned half = 0; half < (scalarValue ? 1 : source.getWords() / 256); ++half) {
+        if (copy) {
+          access(false, source.getSlotWord() + half * 256);
+          access(true, destination.getSlotWord() + half * 256);
+        } else {
+          if (!scalarValue) reg = (isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value)) + half;
+          access(save, source.getSlotWord() + half * 256);
+        }
+      }
+      return success();
+    }
+    if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
+      bool store = isAtlasSpillStore(&op);
+      Operation *writer = store ? &op : op.getOperand(1).getDefiningOp();
+      uint32_t word = writer->getAttrOfType<IntegerAttr>("slot_word").getInt();
+      unsigned halves = atlasSpillWords(writer) / 256;
+      Value value = store ? op.getOperand(1) : op.getResult(1);
+      unsigned reg = isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value);
+      for (unsigned half = 0; half < halves; ++half) {
+        materializeScalar(fixed().dmaBaseReg, word + half * 256, loc);
+        if (store)
+          add("atlas.vstore", loc, {{"src", i32(reg + half)},
+              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+        else
+          add("atlas.vload", loc, {{"dst", i32(reg + half)},
+              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+      }
+      return success();
+    }
     if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
       launchLoad(op, load.getValue(), fp8(load.getValue()));
       return success();
@@ -820,6 +923,8 @@ private:
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value)
         return constant.emitOpError("only integer control constants lower to Atlas");
+      if (isVirtualDMAImmediate(constant.getResult()))
+        return success(); // each launch builds it (launchDMA)
       materializeScalar(scalar(constant.getResult()),
                         static_cast<uint32_t>(value.getValue().getSExtValue()), loc);
       return success();

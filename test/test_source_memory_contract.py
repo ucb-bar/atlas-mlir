@@ -21,15 +21,24 @@ def signed(value: int) -> int:
     return value - (1 << 32) if value >= 1 << 31 else value
 
 
-def transfer(index: int, kind: str, address: str) -> str:
+def transfer(index: int, kind: str, address: str, tile: str = "%tile") -> str:
     state, done = f"%s{2 * index + 1}", f"%s{2 * index + 3}"
     if kind == "store":
-        return f'    {done} = "atlas.virtual_dma_store_fp8"({state}, %tile, {address}, %size) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}'
+        return f'    {done} = "atlas.virtual_dma_store_fp8"({state}, {tile}, {address}, %size) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}'
     return f'    {done}, %t{index}_value = "atlas.virtual_dma_load_fp8"({state}, {address}, %size) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)'
 
 
 def program(first: str, second: str, *, second_address: int = X) -> str:
-    """Two completed transfers at X; a final store of the input tile to disjoint Y keeps its register distinct."""
+    """Two completed transfers at X, then stores to disjoint Y: of each loaded tile, of the first loaded tile again
+    if both load, and of the input tile last. A loaded tile takes its register at its first use, so this keeps
+    every tile live beside the others and its register distinct."""
+    lines = [transfer(0, first, "%x"), transfer(1, second, "%y")]
+    loaded = [index for index, kind in enumerate((first, second)) if kind == "load"]
+    for n, index in enumerate(loaded + loaded[:1] if len(loaded) == 2 else loaded):
+        lines += [f"    %w{n} = arith.constant {signed(Y + 1024 * (n + 1))} : i32",
+                  transfer(2 + n, "store", f"%w{n}", f"%t{index}_value")]
+    last = 2 + len(loaded) + (len(loaded) == 2)
+    body = "\n".join(lines + [transfer(last, "store", "%z")])
     return f'''module {{
   func.func @memory() -> {STATE} attributes {{atlas.input_dram_base = 2432696320 : i64, atlas.output_dram_base = 2449473536 : i64}} {{
     %s0 = "atlas.virtual_start"() : () -> {STATE}
@@ -38,10 +47,8 @@ def program(first: str, second: str, *, second_address: int = X) -> str:
     %y = arith.constant {signed(second_address)} : i32
     %z = arith.constant {signed(Y)} : i32
     %size = arith.constant 1024 : i32
-{transfer(0, first, "%x")}
-{transfer(1, second, "%y")}
-{transfer(2, "store", "%z")}
-    return %s7 : {STATE}
+{body}
+    return %s{2 * last + 3} : {STATE}
   }}
 }}
 '''
@@ -69,7 +76,9 @@ LOOP = f'''module {{
     %esize = arith.constant 1024 : i32
     %e1 = "atlas.virtual_dma_store_fp8"(%final, %tile, %ex, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
     %e4, %value = "atlas.virtual_dma_load_fp8"(%e1, %ex, %esize) : ({STATE}, i32, i32) -> ({STATE}, !atlas.virtual_fp8)
-    %e5 = "atlas.virtual_dma_store_fp8"(%e4, %tile, %ez, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
+    %ew = arith.constant {signed(Y + 1024)} : i32
+    %e45 = "atlas.virtual_dma_store_fp8"(%e4, %value, %ew, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
+    %e5 = "atlas.virtual_dma_store_fp8"(%e45, %tile, %ez, %esize) : ({STATE}, !atlas.virtual_fp8, i32, i32) -> {STATE}
     return %e5 : {STATE}
   }}
 }}
@@ -141,7 +150,7 @@ class SourceMemoryContractTest(unittest.TestCase):
         scheduled = run("atlas-opt", untimed, "--schedule-atlas-stream")
         self.assertEqual(scheduled.returncode, 0, scheduled.stderr)
         assert_boundaries(self, scheduled.stdout)
-        first_read, second_read, store, load, _ = transfer_groups(untimed)
+        first_read, second_read, store, load, *_ = transfer_groups(untimed)
         assert_boundaries(self, swap_sources(untimed, first_read, second_read))
         assert_boundaries(self, swap_sources(untimed, store, load), rejects=ORDER)
 

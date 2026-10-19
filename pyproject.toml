@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-mlir-native-support"
+version = "0.1.0"
+description = "Atlas out-of-tree binding for Merlin native compilation"
+requires-python = ">=3.11"
+
+[project.entry-points."merlin.native_target_compilers"]
+atlas = "atlas_mlir_native.binding:AtlasNativeBinding"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

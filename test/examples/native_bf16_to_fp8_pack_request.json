@@ -1,0 +1,90 @@
+{
+  "constants": [],
+  "input_storages": {
+    "x": "external"
+  },
+  "lowering_policy": "diagnostic",
+  "nodes": [
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "x",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-seven-powers-and-zero-v1",
+        "scale_code": 127
+      },
+      "effect": "pure",
+      "id": "y",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "x"
+      ],
+      "op": "pack_fp8",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "fp8-e4m3-unit-e8m0-seven-codes-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    }
+  ],
+  "output_storages": [
+    "external"
+  ],
+  "outputs": [
+    "y"
+  ],
+  "schema": "merlin.semantic_kernel.v2",
+  "source_identity": "",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21"
+}

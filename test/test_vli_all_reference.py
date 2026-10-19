@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_vpu_relu_reference import _emitted, _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -46,15 +46,10 @@ class VliAllReferenceTest(unittest.TestCase):
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for independent selected assembler")
-        path = pathlib.Path(selected_root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_vli_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted(SOURCE)
         self.assertEqual(len(emitted), 36)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[17], assembler.VLI_ALL(4, DEFAULT_IMMEDIATE))
+        self.assertEqual(emitted[17], assembler.word(f"vli.all m4, {DEFAULT_IMMEDIATE}"))
         self.assertEqual(_object_words(SOURCE), emitted)
         parsed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                 text=True, capture_output=True, check=True)

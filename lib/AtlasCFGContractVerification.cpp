@@ -2,9 +2,11 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -22,6 +24,15 @@ using namespace mlir;
 using namespace mlir::atlas;
 namespace {
 bool tracked(Type t) { return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t); }
+// A CFG value has a register; a DMA immediate is built at each launch instead.
+bool tracked(Value v) {
+  return tracked(v.getType()) && !isVirtualDMAImmediate(v) && !isAtlasMemoryControl(v);
+}
+// A source operation that issues nothing of its own and so has no record.
+bool issuesNothing(Operation &op) {
+  return isa<VirtualStartOp, VirtualScaleConstantOp, VirtualSlotOp>(op) ||
+         (isa<arith::ConstantOp>(op) && isVirtualDMAImmediate(op.getResult(0)));
+}
 bool scalar(Type t) { return t.isInteger(1) || t.isInteger(32); }
 std::string typeName(Type t) { return t.isInteger(1) ? "i1" : t.isInteger(32) ? "i32" : isa<VirtualBF16Type>(t) ? "bf16" : "fp8"; }
 struct ValueRecord {
@@ -120,17 +131,18 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   DenseMap<Block *, int32_t> blocks;
   DenseMap<Operation *, int32_t> operations;
   int32_t nextValue = 0, nextBlock = 0, nextOperation = 0;
-  int32_t nextTile = function.getNumArguments() ? kMailboxPreludeCommands + function.getNumArguments() : 0, nextMXU = 0;
+  bool memoryControls = function->hasAttr("atlas.memory_controls");
+  int32_t nextTile = function.getNumArguments() ? kMailboxPreludeCommands + (memoryControls ? 0 : function.getNumArguments()) : 0, nextMXU = 0;
   for (auto r : registers) {
-    if (!r.value || !tracked(r.value.getType()) || regs.count(r.value)) return function.emitOpError("CFG contract invalid placement claim");
+    if (!r.value || !tracked(r.value) || regs.count(r.value)) return function.emitOpError("CFG contract invalid placement claim");
     regs[r.value] = r.reg;
   }
   for (Block &block : function.getBody()) {
     blocks[&block] = nextBlock++;
-    for (Value arg : block.getArguments()) if (tracked(arg.getType())) ids[arg] = nextValue++;
+    for (Value arg : block.getArguments()) if (tracked(arg)) ids[arg] = nextValue++;
     for (Operation &op : block) {
       operations[&op] = nextOperation++;
-      for (Value v : op.getResults()) if (tracked(v.getType())) ids[v] = nextValue++;
+      for (Value v : op.getResults()) if (tracked(v)) ids[v] = nextValue++;
     }
   }
   if (regs.size() != ids.size()) return function.emitOpError("CFG contract requires every source scalar and tensor placement");
@@ -148,9 +160,10 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     if ((scalar(value.getType()) && (reg == 0 || reg >= 32)) || (!scalar(value.getType()) && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
     Operation *op = value.getDefiningOp();
     SmallVector<int32_t> operands;
-    if (op) for (Value v : op->getOperands()) if (tracked(v.getType())) operands.push_back(ids.lookup(v));
+    if (op) for (Value v : op->getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
     SmallVector<NamedAttribute> f = {field("id",i(ids.lookup(value))), field("block",i(blocks.lookup(value.getParentBlock()))), field("reg",i(reg)), field("type",b.getStringAttr(type)), field("def",b.getStringAttr(op ? op->getName().getStringRef() : "argument")), field("operands",b.getDenseI32ArrayAttr(operands))};
     if (auto c = dyn_cast_or_null<arith::ConstantOp>(op)) f.push_back(field("constant",i(uint32_t(cast<IntegerAttr>(c.getValue()).getValue().getSExtValue()))));
+    if (auto control = dyn_cast_or_null<VirtualControlOp>(op)) f.push_back(field("constant", control.getIndexAttr()));
     if (auto splat = dyn_cast_or_null<VirtualVPUSplatOp>(op))
       f.push_back(field("constant", i(splat.getBits())));
     if (auto cmp = dyn_cast_or_null<arith::CmpIOp>(op)) f.push_back(field("predicate",i(int32_t(cmp.getPredicate()))));
@@ -161,18 +174,18 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   for (Block &block : function.getBody()) {
     int32_t id = blocks.lookup(&block);
     BlockRecord &r = summaries[id]; r.id = id; r.condition = -1;
-    for (Value arg : block.getArguments()) if (tracked(arg.getType())) { if (failed(valueRecord(arg))) return failure(); r.args.push_back(ids.lookup(arg)); defs[id].insert(ids.lookup(arg)); }
+    for (Value arg : block.getArguments()) if (tracked(arg)) { if (failed(valueRecord(arg))) return failure(); r.args.push_back(ids.lookup(arg)); defs[id].insert(ids.lookup(arg)); }
     for (Operation &op : block) {
-      for (Value v : op.getOperands()) if (tracked(v.getType()) && !defs[id].count(ids.lookup(v))) uses[id].insert(ids.lookup(v));
-      for (Value v : op.getResults()) if (tracked(v.getType())) { if (failed(valueRecord(v))) return failure(); defs[id].insert(ids.lookup(v)); }
-      if (!op.hasTrait<OpTrait::IsTerminator>() && !isa<VirtualStartOp,VirtualScaleConstantOp>(op)) {
+      for (Value v : op.getOperands()) if (tracked(v) && !defs[id].count(ids.lookup(v))) uses[id].insert(ids.lookup(v));
+      for (Value v : op.getResults()) if (tracked(v)) { if (failed(valueRecord(v))) return failure(); defs[id].insert(ids.lookup(v)); }
+      if (!op.hasTrait<OpTrait::IsTerminator>() && !issuesNothing(op)) {
         r.operations.push_back(operations.lookup(&op));
         SmallVector<int32_t> operands, results;
-        for (Value v : op.getOperands()) if (tracked(v.getType())) operands.push_back(ids.lookup(v));
-        for (Value v : op.getResults()) if (tracked(v.getType())) results.push_back(ids.lookup(v));
+        for (Value v : op.getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
+        for (Value v : op.getResults()) if (tracked(v)) results.push_back(ids.lookup(v));
         // Source format and lifecycle determine command expansion counts;
         // neither planned instructions nor issued tags supply these facts.
-        unsigned tileCount = atlasTileExpansion(op.getName().getStringRef()).commands;
+        unsigned tileCount = atlasTileExpansion(&op).commands;
         unsigned mxuCount = isa<VirtualMXUMatmulOp>(op) ? 3 :
             isa<VirtualMXULoadWeightOp,VirtualMXULoadAccFP8Op,VirtualMXULoadAccBF16Op,
                 VirtualMXUResetOp,VirtualMXUAccumulateOp,VirtualMXUReadoutBF16Op,
@@ -180,12 +193,21 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
         SmallVector<int32_t> tileCommands, mxuCommands;
         for (unsigned n = 0; n < tileCount; ++n) tileCommands.push_back(nextTile++);
         for (unsigned n = 0; n < mxuCount; ++n) mxuCommands.push_back(nextMXU++);
-        operationRecords.push_back(dictionary({field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))}));
+        SmallVector<NamedAttribute> record{field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))};
+        if (isAtlasSlotAccess(&op)) {
+          auto slot = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
+          record.push_back(field("slot_word", slot.getSlotWordAttr()));
+          record.push_back(field("slot_words", slot.getWordsAttr()));
+          record.push_back(field("slot_kind", slot.getKindAttr()));
+          if (auto copy = dyn_cast<VirtualSlotCopyOp>(op))
+            record.push_back(field("destination_word", copy.getDst().getDefiningOp<VirtualSlotOp>().getSlotWordAttr()));
+        }
+        operationRecords.push_back(dictionary(record));
       }
     }
     auto edge = [&](Block *dest, ValueRange operands) {
       EdgeRecord e{int32_t(edges.size()), id, blocks.lookup(dest), {}};
-      for (Value v : operands) if (tracked(v.getType())) e.incoming.push_back(ids.lookup(v));
+      for (Value v : operands) if (tracked(v)) e.incoming.push_back(ids.lookup(v));
       r.edges.push_back(e.id); edges.push_back(e);
     };
     if (auto br = dyn_cast<cf::BranchOp>(block.getTerminator())) edge(br.getDest(), br.getDestOperands());
@@ -209,7 +231,9 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     blockRecords.push_back(dictionary({field("id",i(r.id)), field("condition",i(r.condition)), field("args",b.getDenseI32ArrayAttr(r.args)), field("live_in",b.getDenseI32ArrayAttr(l)), field("operations",b.getDenseI32ArrayAttr(r.operations)), field("edges",b.getDenseI32ArrayAttr(r.edges))}));
   }
   for (auto &e : edges) edgeRecords.push_back(dictionary({field("id",i(e.id)),field("from",i(e.from)),field("to",i(e.to)),field("incoming",b.getDenseI32ArrayAttr(e.incoming))}));
-  return dictionary({field("values",b.getArrayAttr(values)),field("blocks",b.getArrayAttr(blockRecords)),field("edges",b.getArrayAttr(edgeRecords)),field("operations",b.getArrayAttr(operationRecords))});
+  SmallVector<NamedAttribute> records{field("values",b.getArrayAttr(values)),field("blocks",b.getArrayAttr(blockRecords)),field("edges",b.getArrayAttr(edgeRecords)),field("operations",b.getArrayAttr(operationRecords))};
+  if (memoryControls) records.push_back(field("control_count", i(function.getNumArguments())));
+  return dictionary(records);
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
@@ -219,7 +243,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     return failure();
   auto contract = dyn_cast<DictionaryAttr>(module->getAttr(kAtlasCFGContract));
   auto bad = [&]() { return module.emitOpError("CFG contract malformed source records"); };
-  if (!contract || contract.size() != 4) return bad();
+  if (!contract) return bad();
+  auto controlCount = contractI32(contract, "control_count");
+  if (controlCount ? contract.size() != 5 || *controlCount < 1 || *controlCount > 256 : contract.size() != 4) return bad();
   auto vr = contract.getAs<ArrayAttr>("values"), br = contract.getAs<ArrayAttr>("blocks"), er = contract.getAs<ArrayAttr>("edges");
   auto opRecords = contract.getAs<ArrayAttr>("operations");
   if (!vr || !br || !er || !opRecords || br.empty()) return bad();
@@ -234,11 +260,12 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     if (!id || *id != int32_t(values.size()) || !block || *block < 0 || *block >= int32_t(br.size()) || !reg || def.empty() || !d.getAs<DenseI32ArrayAttr>("operands")) return bad();
     if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > 64 || (type == "bf16" && *reg % 2)) return bad();
     ValueRecord r{*id,*block,*reg,type,def,contractString(d,"kind").str(),contractI32Array(d,"operands")};
-    if (def == "arith.constant" || def == "atlas.virtual_vpu_splat") {
+    if (def == "arith.constant" || def == "atlas.virtual_vpu_splat" || def == "atlas.virtual_control") {
       auto n = contractI32(d, "constant");
       if (!n || !r.operands.empty())
         return bad();
       r.constant = uint32_t(*n);
+      if (def == "atlas.virtual_control" && (!controlCount || *n < 0 || *n >= *controlCount)) return bad();
     }
     if (def == "arith.cmpi") { auto p = contractI32(d,"predicate"); if (!p || *p < 0 || *p > 9 || r.operands.size() != 2) return bad(); r.predicate = *p; }
     if (def == "arith.addi" && r.operands.size() != 2) return bad();
@@ -272,7 +299,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   for (auto &b : blocks) for (int32_t e : b.edges) if (e < 0 || e >= int32_t(edges.size()) || edges[e].from != b.id || !ownedEdges.insert(e).second) return bad();
   if (ownedEdges.size() != edges.size()) return bad();
   for (Attribute raw : opRecords) {
-    auto d = dyn_cast<DictionaryAttr>(raw); if (!d || d.size() != 7) return bad();
+    auto d = dyn_cast<DictionaryAttr>(raw); if (!d) return bad();
+    StringRef sourceName = contractString(d,"name");
+    unsigned fields = sourceName == "atlas.virtual_slot_copy" ? 11 :
+        sourceName == "atlas.virtual_save" || sourceName == "atlas.virtual_restore" ? 10 : 7;
+    if (d.size() != fields) return bad();
     auto id = contractI32(d,"id"), owner = contractI32(d,"block");
     if (!id || !expectedOperations.count(*id) || !owner || *owner < 0 || *owner >= int32_t(blocks.size()) || contractString(d,"name").empty() || !d.getAs<DenseI32ArrayAttr>("operands") || !d.getAs<DenseI32ArrayAttr>("results") || !d.getAs<DenseI32ArrayAttr>("tile_commands") || !d.getAs<DenseI32ArrayAttr>("mxu_commands") || !sourceOperations.emplace(*id,d).second) return bad();
     for (StringRef key : {"operands","results"})
@@ -340,7 +371,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (std::find(commands.begin(),commands.end(),*command) == commands.end())
             return op->emitOpError("CFG contract issued command belongs to another source operation");
         } else if (binding.first != kAtlasTagTileCommand || *owner != 0 ||
-                   blocks[0].args.empty() || *command >= int32_t(kMailboxPreludeCommands + blocks[0].args.size())) {
+                   (blocks[0].args.empty() && !controlCount) ||
+                   *command >= int32_t(kMailboxPreludeCommands + blocks[0].args.size())) {
           return op->emitOpError("CFG contract issued command lacks its source operation");
         }
       }
@@ -368,7 +400,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   for (auto &b : blocks) if (starts[b.id] == ops.size() || (b.condition >= 0 && !seenBranches.count(b.id))) return module.emitOpError("CFG contract missing source block or branch site");
   for (auto &v : values) if ((v.def != "argument" || v.block == 0) && !seenResults.count(v.id)) return module.emitOpError("CFG contract missing source result site");
   auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? ctx.pcOf.lookup(t) : ops.size(); };
-  auto matches = [&](State &s, const ValueRecord &v, int32_t expected) { return v.type == "i1" || v.type == "i32" ? same(s.x[v.reg],origin(expected)) : s.tensor[v.reg] == expected && (v.type != "bf16" || s.tensor[v.reg+1] == expected); };
+  auto matches = [&](const State &s, const ValueRecord &v, int32_t expected) { return v.type == "i1" || v.type == "i32" ? same(s.x[v.reg],origin(expected)) : s.tensor[v.reg] == expected && (v.type != "bf16" || s.tensor[v.reg+1] == expected); };
   auto install = [&](State &s, const ValueRecord &v) { if (v.type == "i1" || v.type == "i32") s.x[v.reg] = origin(v.id); else { s.tensor[v.reg] = v.id; if (v.type == "bf16") s.tensor[v.reg+1] = v.id; } };
   for (auto &block : blocks) {
     State initial;
@@ -421,8 +453,13 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           int32_t expected = -1;
           if (name == "atlas.virtual_pack_fp8" && !results.empty()) expected = results[0];
           else if (!operands.empty()) expected = operands[0];
-          if (expected < 0 || store.getSrc() >= 64 || before.tensor[store.getSrc()] != expected) return error("memory store read lost its source tensor origin");
+          if (name != "atlas.virtual_slot_copy" &&
+              (expected < 0 || store.getSrc() >= 64 || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
         }
+        if (auto store = dyn_cast<ScalarStoreOp>(op); store && name == "atlas.virtual_save")
+          if (operands.size() != 1 || values[operands[0]].reg != int32_t(store.getSrc()) ||
+              !matches(before, values[operands[0]], operands[0]))
+            return error("spill store read lost its source scalar origin");
         if (auto pack = dyn_cast<VPUPackOp>(op)) {
           if (operands.empty() || results.empty() || !tensorRead(pack.getSrc(),operands[0])) return error("PACK read lost its source tensor origin");
           // The owned relayout preserves the logical result identity; the
@@ -446,6 +483,20 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (*id >= int32_t(values.size()) || values[*id].def != "argument" || values[*id].block != 0 || load.getKind() != "lw" || load.getDst() != unsigned(values[*id].reg) || contractTag(op,kAtlasTagTileCommand) != kMailboxPreludeCommands + *id) return error("invalid mailbox scalar origin");
           produced = node("mailbox",{}, {},0,*id); s.x[load.getDst()] = produced;
         }
+        if (auto source = contractTag(op,kAtlasTagCFGSource);
+            source && contractString(sourceOperations[*source],"name") == "atlas.virtual_restore") {
+          auto results = contractI32Array(sourceOperations[*source],"results");
+          if (results.size() != 1 || load.getKind() != "lw" ||
+              load.getDst() != unsigned(values[results[0]].reg)) return error("invalid scalar spill reload");
+          produced = node("slot",{}, {},0,results[0]); s.x[load.getDst()] = produced;
+        }
+        if (auto source = contractTag(op,kAtlasTagCFGSource);
+            source && contractString(sourceOperations[*source],"name") == "atlas.virtual_control") {
+          auto results = contractI32Array(sourceOperations[*source],"results");
+          if (results.size() != 1 || load.getKind() != "lw" ||
+              load.getDst() != unsigned(values[results[0]].reg)) return error("invalid memory control load");
+          produced = node("control",{}, {},0,values[results[0]].constant); s.x[load.getDst()] = produced;
+        }
       } else if (auto csr = dyn_cast<CSROp>(op)) { if (csr.getDst()) s.x[csr.getDst()].reset(); }
       else if (auto unary = dyn_cast<VPUUnaryOp>(op)) {
         if (unary.getKind() == "mov") {
@@ -455,6 +506,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       } else if (auto load = dyn_cast<VLoadOp>(op)) {
         if (auto source = contractTag(op,kAtlasTagCFGSource)) {
           auto results = contractI32Array(sourceOperations[*source],"results");
+          if (contractString(sourceOperations[*source],"name") == "atlas.virtual_slot_copy")
+            return success();
           if (results.size() != 1) return error("tensor load has no unique source result");
           auto &v = values[results[0]];
           if (load.getDst() < unsigned(v.reg) || load.getDst() >= unsigned(v.reg + (v.type == "bf16" ? 2 : 1)))
@@ -473,6 +526,11 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         if (v.def == "arith.constant") expected = literal(v.constant);
         else if (v.def == "arith.addi") expected = binary("add",origin(v.operands[0]),origin(v.operands[1]));
         else if (v.def == "arith.cmpi") expected = sourceCompare(v.predicate,origin(v.operands[0]),origin(v.operands[1]));
+        else if (v.def == "atlas.virtual_restore") expected = node("slot",{}, {},0,v.id);
+        else if (v.def == "atlas.virtual_control") {
+          expected = node("control",{}, {},0,v.constant);
+          if (v.type == "i1") expected = binary("and",expected,literal(1));
+        }
         else if (v.def == "argument") { expected = node("mailbox",{}, {},0,v.id); if (v.type == "i1") expected = binary("and",expected,literal(1)); }
         if (!expected || !same(s.x[v.reg],expected)) return error("issued scalar expression differs from source definition");
         install(s,v);

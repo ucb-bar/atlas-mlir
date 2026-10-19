@@ -8,9 +8,11 @@
 //     side writes;
 //   - a helper DMA (boundary tile or mailbox), or any instruction the
 //     generated interval policy does not admit beside a pending transfer
-//     (canOverlapAtlasGeneratedDMA): PACK, scalar memory, redirects, CSR,
-//     the halt;
-//   - entry to a branch target, so the wait stays on the fall-through path.
+//     (canOverlapAtlasGeneratedDMA): scalar memory outside an analyzed
+//     loop, redirects, CSR, the halt;
+//   - an analyzed loop whose VMEM meets its staging window;
+//   - entry to any other branch target, so the wait stays on the fall-through
+//     path.
 // The wait goes immediately before that instruction. Timing passes may still
 // move it earlier within its block.
 
@@ -20,10 +22,12 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -68,7 +72,7 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
     auto staging = d ? contractI32(d, "staging_word") : std::nullopt;
     auto dram = d ? contractI32(d, "dram_byte") : std::nullopt;
     auto size = d ? contractI32(d, "size_bytes") : std::nullopt;
-    if (!id || !channel || !staging || !dram || !size)
+    if (!id || *id < 0 || *id == std::numeric_limits<int32_t>::max() || !channel || !staging || !dram || !size)
       return module.emitOpError("DMA wait insertion cannot read a DMA contract record");
     Transfer t;
     t.id = *id;
@@ -103,8 +107,11 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
     auto block = d ? contractI32(d, "block") : std::nullopt;
     if (!id || !block)
       return module.emitOpError("DMA wait insertion cannot read a CFG contract operation");
-    for (int32_t command : contractI32Array(d, "tile_commands"))
+    for (int32_t command : contractI32Array(d, "tile_commands")) {
+      if (command < 0 || command >= int32_t(tiles.size()))
+        return module.emitOpError("DMA wait insertion cannot read a CFG tile command");
       owners[command] = {*id, *block};
+    }
   }
   for (auto &[id, t] : transfers) {
     auto owner = owners.find(t.waitCommand);
@@ -117,28 +124,37 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
 }
 
 FailureOr<llvm::DenseMap<int32_t, TileRecord>> readTiles(ModuleOp module) {
+  auto tiles = cast<ArrayAttr>(module->getAttr(kAtlasTileContract));
   llvm::DenseMap<int32_t, TileRecord> records;
-  for (Attribute attr : cast<ArrayAttr>(module->getAttr(kAtlasTileContract))) {
-    auto d = cast<DictionaryAttr>(attr);
+  for (Attribute attr : tiles) {
+    auto d = dyn_cast<DictionaryAttr>(attr);
+    if (!d)
+      return module.emitOpError("DMA wait insertion cannot read a tile contract record");
     auto id = contractI32(d, "id"), vmem = contractI32(d, "vmem_byte"),
          bytes = contractI32(d, "bytes"), transfer = contractI32(d, "transfer");
-    if (!id || !vmem || !bytes || !transfer)
+    auto kind = d.getAs<StringAttr>("kind");
+    if (!id || *id < 0 || *id >= int32_t(tiles.size()) || !vmem || !bytes || !transfer || !kind)
       return module.emitOpError("DMA wait insertion cannot read a tile contract record");
     uint64_t begin = uint32_t(*vmem);
-    records[*id] = {contractString(d, "kind"), {begin, begin + uint32_t(*bytes)}, *transfer};
+    if (!records.try_emplace(*id, TileRecord{kind.getValue(), {begin, begin + uint32_t(*bytes)}, *transfer}).second)
+      return module.emitOpError("DMA wait insertion requires unique tile contract ids");
   }
   return records;
 }
 
 // The instruction-word distance a redirect encodes, and its attribute name.
 std::optional<std::pair<int64_t, StringRef>> redirect(Operation *op) {
-  if (auto branch = dyn_cast<BranchOp>(op))
-    return std::pair{branch.getOffsetBytesAttr().getValue().getSExtValue() / 2,
-                     StringRef("offset_bytes")};
-  if (auto jump = dyn_cast<JumpOp>(op); jump && jump.getKind() == "jal")
-    return std::pair{jump.getOffsetAttr().getValue().getSExtValue() / 2,
-                     StringRef("offset")};
-  return std::nullopt;
+  std::optional<int64_t> distance = atlasRedirectDistance(op);
+  if (!distance)
+    return std::nullopt;
+  return std::pair{*distance, StringRef(isa<BranchOp>(op) ? "offset_bytes" : "offset")};
+}
+
+// Whether an analyzed loop touching `access` meets transfer `t`, which writes its
+// staging window if it loads and reads it if it stores.
+bool meets(const AtlasVmemAccess &access, const Transfer &t) {
+  AtlasVmemRange staging{t.staging.begin, t.staging.end};
+  return access.writes.overlaps(staging) || (!t.store && access.reads.overlaps(staging));
 }
 } // namespace
 
@@ -152,10 +168,12 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   if (failed(tiles))
     return failure();
 
-  SmallVector<Operation *> ops;
-  for (Operation &op : module.getBody()->getOperations())
-    if (!isa<StartOp>(op))
-      ops.push_back(&op);
+  // The decoded stream finds each analyzed loop and the VMEM it touches.
+  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  if (failed(stream))
+    return failure();
+  ArrayRef<Operation *> ops = stream->ops;
+  ArrayRef<AtlasLoop> loops = stream->loops;
   size_t n = ops.size();
   std::vector<bool> target(n, false);
   for (size_t pc = 0; pc < n; ++pc)
@@ -182,10 +200,15 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   auto all = [](const Transfer &) { return true; };
   for (size_t pc = 0; pc < n; ++pc) {
     Operation *op = ops[pc];
-    if (pc > 0 && redirect(ops[pc - 1]) && !pending.empty())
-      return op->emitOpError("a delay slot cannot hold a DMA completion");
-    if (target[pc])
+    // An analyzed loop's only other entry is its own back-edge, so transfers stay
+    // in flight through it unless it touches their staging windows.
+    const AtlasLoop *loop = findAtlasLoopAt(loops, pc);
+    if (loop && loop->begin == pc) {
+      const std::optional<AtlasVmemAccess> &touched = stream->factsOf(*loop).access;
+      complete(pc, [&](const Transfer &t) { return !touched || meets(*touched, t); });
+    } else if (target[pc]) {
       complete(pc, all);
+    }
     if (auto dma = dyn_cast<DMAOp>(op)) {
       auto id = contractTag(op, kAtlasTagDMATransfer);
       if (!id) {
@@ -213,12 +236,15 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     } else if (isa<DMAWaitOp>(op)) {
       if (auto id = contractTag(op, kAtlasTagDMATransfer))
         llvm::erase(pending, *id);
-    } else if (!canOverlapAtlasGeneratedDMA(op)) {
+    } else if (!canOverlapAtlasGeneratedDMA(ops, loops, pc)) {
       complete(pc, all);
     }
   }
   if (!pending.empty())
     return module.emitOpError("generated stream ends with a DMA transfer in flight");
+  for (size_t pc = 1; pc < n; ++pc)
+    if (redirect(ops[pc - 1]) && !waitsBefore[pc].empty())
+      return ops[pc]->emitOpError("a delay slot cannot hold a DMA completion");
 
   // Each original instruction's new index; a redirect still reaches its
   // original target, after the waits placed on the fall-through path.

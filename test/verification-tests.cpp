@@ -6,7 +6,7 @@ int main(int argc, char **argv) {
   static const std::pair<llvm::StringRef, Suite> suites[] = {
       {"buffer-contract", runBufferContract}, {"cfg-contract", runCFGContract},
       {"dma-allocation", runDMAAllocation}, {"dma-helper", runDMAHelper},
-      {"mxu-allocation", runMXUAllocation}, {"mxu-contract", runMXUContract},
+      {"mxu-allocation", runMXUAllocation}, {"mxu-contract", runMXUContract}, {"pack-loop", runPackLoop},
       {"source-memory-contract", runSourceMemoryContract}, {"tile-contract", runTileContract},
       {"timing-provider", runTimingProvider}};
   const auto *selected = llvm::find_if(suites, [&](const auto &suite) { return argc == 2 && suite.first == argv[1]; });

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_scalar_alu_reference import MASK, _emitted, _object_words
 
 
@@ -33,26 +33,26 @@ def _program(
         ("alu_imm", {"kind": "addi", "dst": 2, "src": 2, "immediate": low},
          f"ADDI x2, x2, {low}"),
         ("scalar_store", {"kind": "sw", "src": 2, "base": 0, "offset": 0},
-         "SW x2, x0, 0"),
+         "SW x2, 0(x0)"),
         ("upper", {"kind": "lui", "dst": 5, "immediate": 0x5A5A6},
          "LUI x5, 370086"),
         ("alu_imm", {"kind": "addi", "dst": 5, "src": 5, "immediate": -1446},
          "ADDI x5, x5, -1446"),
         ("scalar_store", {"kind": "sw", "src": 5, "base": 0, "offset": 4},
-         "SW x5, x0, 4"),
+         "SW x5, 4(x0)"),
         ("delay", {"cycles": 4}, "DELAY 4"),
         ("scalar_load", {"kind": "lw", "dst": 11, "base": 0, "offset": 0},
-         "LW x11, x0, 0"),
+         "LW x11, 0(x0)"),
         ("delay", {"cycles": 8}, "DELAY 8"),
         ("alu_imm", {"kind": "addi", "dst": 3, "src": 0, "immediate": 0xA5},
          "ADDI x3, x0, 165"),
         ("scalar_store", {"kind": "sb", "src": 3, "base": 0, "offset": 1},
-         "SB x3, x0, 1"),
+         "SB x3, 1(x0)"),
         ("upper", {"kind": "lui", "dst": 4, "immediate": 9}, "LUI x4, 9"),
         ("alu_imm", {"kind": "addi", "dst": 4, "src": 4, "immediate": -1075},
          "ADDI x4, x4, -1075"),
         ("scalar_store", {"kind": "sh", "src": 4, "base": 0, "offset": 2},
-         "SH x4, x0, 2"),
+         "SH x4, 2(x0)"),
         ("delay", {"cycles": 4}, "DELAY 4"),
     ]
     for kind, register, offset in (
@@ -61,7 +61,7 @@ def _program(
     ):
         operations.append((
             "scalar_load", {"kind": kind, "dst": register, "base": 0, "offset": offset},
-            f"{kind.upper()} x{register}, x0, {offset}",
+            f"{kind} x{register}, {offset}(x0)",
         ))
         operations.append(("delay", {"cycles": 8}, "DELAY 8"))
     # On the selected core, ECALL asserts halt_now as soon as it is decoded,
@@ -106,12 +106,6 @@ class ScalarMemoryReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "atlas_selected_scalar_memory_assembler", pathlib.Path(root) / "assembler.py"
-        )
-        assert spec is not None and spec.loader is not None
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         with tempfile.TemporaryDirectory() as temporary:
             directory = pathlib.Path(temporary)
             source_path = directory / "scalar_memory.mlir"

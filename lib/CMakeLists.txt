@@ -8,12 +8,17 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasTiming.cpp
   AtlasTimingProvider.cpp
   AtlasStream.cpp
+  AtlasLoop.cpp
+  AtlasPackLoop.cpp
   AtlasDelayInsertion.cpp
   AtlasDMAWaitInsertion.cpp
   AtlasScheduling.cpp
   AtlasVirtualVerification.cpp
   AtlasVirtualToMachine.cpp
   AtlasVirtualAllocation.cpp
+  AtlasSpilling.cpp
+  AtlasMXUSpilling.cpp
+  AtlasVirtualBoundaryToDMA.cpp
   AtlasVirtualScheduling.cpp
   AtlasRegisterAllocationVerification.cpp
   AtlasDMAAllocationVerification.cpp

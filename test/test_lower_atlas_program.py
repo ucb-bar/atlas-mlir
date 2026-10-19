@@ -25,6 +25,21 @@ def drive(source: Path, output: Path, *options: str) -> subprocess.CompletedProc
 
 
 class LowerAtlasProgramTest(unittest.TestCase):
+    def test_spill_stage_is_retained_before_allocation(self) -> None:
+        from test_virtual_spilling import raw_roundtrip
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "copy.mlir"
+            source.write_text(raw_roundtrip())
+            output = Path(directory) / "compiled"
+            result = drive(source, output, "--spill")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"atlas.virtual_spill_bf16"', (output / "2-spilled.mlir").read_text())
+            allocation = json.loads((output / "3-allocation.json").read_text())
+            self.assertTrue(allocation["fits"])
+            self.assertTrue(any(row["use"] == "spill" for row in allocation["vmem"]))
+            self.assertTrue((output / "5-words.hex").read_text().strip())
+
     def test_paths_with_spaces_and_quotes_can_be_replayed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "input 'attention'.mlir"
@@ -106,7 +121,7 @@ class LowerAtlasProgramTest(unittest.TestCase):
                 self.assertRegex(lines[int(line) - 1].split(" = ")[0],
                                  re.escape(value["value"].split("#")[0]) + r"\b")
             self.assertEqual({value["kind"] for value in report["values"]},
-                             {"bf16", "fp8", "scalar", "mxu_weight", "mxu_acc", "dma"})
+                             {"bf16", "fp8", "dma_immediate", "mxu_weight", "mxu_acc", "dma"})
             self.assertEqual(report["dma"]["peak_in_flight"],
                              1 + max(value["staging_window"] for value in report["values"]
                                      if value["kind"] == "dma"))
@@ -154,10 +169,11 @@ class LowerAtlasProgramTest(unittest.TestCase):
             dst, src = map(int, fields[0])
             # VTRPOSE_XLU: vs1[18:13], vd[12:7], opcode 0x6b.
             self.assertEqual(words, [(src << 13) | (dst << 7) | 0x6B])
-            # Every load issues before the first MXU use, so Q, K^T and V are
-            # live together; K dies at the transpose.
+            # Every load issues before the first MXU use, but a loaded tile
+            # takes its register where it is first used: at most K and its
+            # transpose, or V and the packed P, are live together.
             report = json.loads((done / "3-allocation.json").read_text())
-            self.assertEqual(report["registers"]["fp8"]["peak_live"], 3)
+            self.assertEqual(report["registers"]["fp8"]["peak_live"], 2)
 
 
 if __name__ == "__main__":

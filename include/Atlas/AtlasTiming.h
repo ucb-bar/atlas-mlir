@@ -60,6 +60,15 @@ using RegValues = std::array<std::optional<uint32_t>, 32>;
 RegValues unknownRegs();
 std::optional<uint32_t> aluResult(const Instr &in, const RegValues &regs);
 void applyScalar(const Instr &in, RegValues &regs);
+// The VMEM bytes a scalar load or store touches: a load reads its whole
+// aligned word, a store writes its naturally aligned bytes. `first` is known
+// only when the base register is.
+struct ScalarAccess {
+  std::optional<long long> first;
+  int bytes;
+  bool write;
+};
+ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
 const int kVmemBytes = 1536 * 1024;
 const int kVmemBankBytes = 256 * 1024;
@@ -163,7 +172,12 @@ bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
 int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
-int dmaTransferCycles(long long bytes);
+// Cycles from launching one DMA transfer on an idle engine to its completed
+// wait, by npu_model main's DMA model: the beat-level engine against its
+// default DRAM, the bandwidth-latency curves measured on VCS EE290SimConfig
+// (ee290sim_vcs_probe.json). Beats stream at the curve's peak bandwidth after a
+// fixed start; transfers queued behind one another pay only the beats.
+int dmaTransferCycles(long long bytes, bool store);
 
 class ReservationTable {
 public:

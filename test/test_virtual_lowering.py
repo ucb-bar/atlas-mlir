@@ -162,6 +162,18 @@ class VirtualLoweringTest(unittest.TestCase):
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
         self.assertTrue((BIN / "atlas-emit").is_file(), "build atlas-emit first")
 
+    def test_row_reduction_uses_the_virtual_reduce_op(self) -> None:
+        source = virtual_chain(1).replace('kind = "relu"', 'kind = "row_max"')
+        invalid = run("atlas-opt", source)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("unknown virtual unary VPU kind", invalid.stderr)
+
+        source = source.replace('"atlas.virtual_vpu_unary"', '"atlas.virtual_vpu_reduce"')
+        machine = run("atlas-opt", source, "--lower-atlas-virtual-to-machine",
+                      "--insert-atlas-dma-waits")
+        self.assertEqual(machine.returncode, 0, machine.stderr)
+        self.assertIn('"atlas.vpu_reduce"', machine.stdout)
+
     def test_loop_branch_and_edge_cycle_lower_to_checked_machine_streams(self) -> None:
         for name in ("loop", "branch", "swap_loop"):
             with self.subTest(name=name):

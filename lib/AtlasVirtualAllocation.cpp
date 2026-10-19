@@ -2,6 +2,7 @@
 #include "Atlas/AtlasDMAAllocationVerification.h"
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -69,6 +70,10 @@ FixedResourcePlacement selectedResources() {
   resources.dmaBaseReg = 4;
   resources.dmaDramReg = 7;
   resources.dmaSizeReg = 9;
+  // Bank 2: eight DMA staging windows first, then the spill frame. The
+  // boundary windows and PACK scratch use banks 0 and 1.
+  resources.spillWord = resources.stagingWord + kDMAChannels * kStagingWindowWords;
+  resources.spillWindowWords = 65536 - kDMAChannels * kStagingWindowWords;
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;
@@ -114,21 +119,24 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   scalarArgumentRegs.clear();
   findReservations(function, mixedFp8, hasPack);
   // Every resource is placed even after one does not fit, so the diagnostics
-  // and report() name each one that does not.
+  // and report() name each one that does not. MXU and DMA state never
+  // crosses a block, so each block places its own. DMA comes first: its
+  // staging windows decide where each loaded tile's register begins.
   bool fits = true;
+  unsigned nextTransfer = 0;
+  for (Block &block : function.getBody())
+    fits &= succeeded(placeDMA(block, nextTransfer));
+  stageLoads();
   for (RegisterKind kind :
        {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
     fits &= succeeded(colorValues(kind));
-  if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
+  if (function->hasAttr("atlas.memory_controls"))
+    scalarArgumentRegs.assign(function.getNumArguments(), -1);
+  else if (pressure[static_cast<unsigned>(RegisterKind::Scalar)].used)
     for (BlockArgument arg : function.getArguments())
       scalarArgumentRegs.push_back(scalar(arg));
-
-  // MXU and DMA state never crosses a block, so each block places its own.
-  unsigned nextTransfer = 0;
-  for (Block &block : function.getBody()) {
+  for (Block &block : function.getBody())
     fits &= succeeded(placeMXU(block));
-    fits &= succeeded(placeDMA(block, nextTransfer));
-  }
   return success(fits);
 }
 
@@ -216,8 +224,9 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
 // window until nothing reads it; the DMA latches its registers at launch, so
 // all share three. Atomic DMA has no completion operation, so placement
 // follows what lowering and insert-atlas-dma-waits do: a DMA completes before
-// a PACK, boundary tile or block end, before a later transfer that may touch
-// the same DRAM bytes while either writes, and before its load's first use. A
+// a boundary tile or block end, before a later transfer that may touch the
+// same DRAM bytes while either writes, and before its load's first use; it
+// stays in flight across a PACK, whose relayout touches only its scratch. A
 // load keeps its window until that first use, where its staging VLOADs read
 // it, or the block end. A load prefers the load channel and a store the store
 // channel, else the lowest free channel, and the lowest free window. With no
@@ -251,8 +260,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       for (InFlight &t : inFlight)
         if (t.loaded && t.loaded == operand)
           t.holdsChannel = t.holdsWindow = false;
-    if (isa<VirtualPackFP8Op, VirtualInputBF16Op, VirtualInputFP8Op,
-            VirtualOutputBF16Op>(op))
+    if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op))
       for (InFlight &t : inFlight)
         completeDMA(t);
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
@@ -307,15 +315,61 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
   return success();
 }
 
+// A load's tile is in VMEM until its staging VLOADs write its registers,
+// right before its first use in the block, a later launch given its staging
+// window (placeDMA), or the block's terminator: where lowering emits them. Its
+// registers are taken from there, not from the launch.
+void VirtualAllocationPlan::stageLoads() {
+  stagedBefore.clear();
+  for (Block &block : function.getBody()) {
+    SmallVector<Value> pending;
+    auto stage = [&](Operation &op, auto shouldStage) {
+      for (auto it = pending.begin(); it != pending.end();) {
+        if (shouldStage(*it)) {
+          stagedBefore[&op].push_back(*it);
+          it = pending.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    };
+    for (Operation &op : block) {
+      if (op.hasTrait<OpTrait::IsTerminator>()) {
+        stage(op, [](Value) { return true; });
+        continue;
+      }
+      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
+              VirtualDMAStoreBF16Op>(op)) {
+        uint32_t window = dmaTransfers.lookup(op.getResult(0)).stagingWord;
+        stage(op, [&](Value tile) {
+          return dmaTransfers.lookup(tile.getDefiningOp()->getResult(0)).stagingWord == window;
+        });
+      }
+      stage(op, [&](Value tile) { return llvm::is_contained(op.getOperands(), tile); });
+      if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op))
+        pending.push_back(op.getResult(1));
+    }
+  }
+}
+
+Operation *VirtualAllocationPlan::stagingPoint(Value tile) const {
+  for (const auto &[op, tiles] : stagedBefore)
+    if (llvm::is_contained(tiles, tile))
+      return op;
+  return nullptr;
+}
+
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) {
+    if (isAtlasMemoryControl(value)) return false;
     Type type = value.getType();
     if (kind == RegisterKind::BF16)
       return isa<VirtualBF16Type>(type);
     if (kind == RegisterKind::FP8)
       return isa<VirtualFP8Type>(type);
-    return type.isInteger(1) || type.isInteger(32);
+    // Lowering builds a DMA immediate at each launch instead.
+    return (type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value);
   };
   SmallVector<Value> values;
   llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
@@ -414,9 +468,22 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   if (kind == RegisterKind::Scalar) {
     Set stagedArguments;
     for (BlockArgument arg : function.getArguments())
-      stagedArguments.insert(arg);
+      if (selected(arg)) stagedArguments.insert(arg);
     clique(stagedArguments);
   }
+  // Staging VLOADs write a loaded tile's registers right before `op`, while
+  // every value live there is held.
+  auto stage = [&](Set &live, Operation &op) {
+    for (Value tile : stagedBefore.lookup(&op)) {
+      if (!selected(tile))
+        continue;
+      live.insert(tile);
+      note(live, &op);
+      for (Value other : live)
+        interfere(tile, other);
+      live.erase(tile);
+    }
+  };
   for (Block &block : function.getBody()) {
     Set live = liveOut[&block];
     clique(live);
@@ -429,13 +496,17 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
           clique(live);
           note(live, &op);
         }
+        stage(live, op);
         continue;
       }
-      if (isa<cf::BranchOp>(op))
+      if (isa<cf::BranchOp>(op)) {
+        stage(live, op);
         continue;
+      }
       SmallVector<Value> results, operands;
+      // A loaded tile is defined where it is staged.
       for (Value result : op.getResults())
-        if (selected(result))
+        if (selected(result) && !isVirtualDMALoadedTile(result))
           results.push_back(result);
       for (Value operand : op.getOperands())
         if (selected(operand))
@@ -456,6 +527,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       for (Value operand : operands)
         live.insert(operand);
       clique(live);
+      stage(live, op);
     }
     SmallVector<Value> args;
     for (BlockArgument arg : block.getArguments())
@@ -612,6 +684,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       registersOf(tileRegs, "bf16", 2);
     } else if (isa<VirtualFP8Type>(type)) {
       registersOf(fp8Regs, "fp8", 1);
+    } else if (isVirtualDMAImmediate(value)) {
+      entry["kind"] = "dma_immediate"; // built in the command register at each launch
     } else if (type.isInteger(1) || type.isInteger(32)) {
       registersOf(scalarRegs, "scalar", 1);
     } else if (auto mxu = mxuResources.find(value); mxu != mxuResources.end()) {
@@ -677,6 +751,11 @@ llvm::json::Object VirtualAllocationPlan::report() const {
   if (function.getNumArguments())
     windows.push_back({fixedResources.mailboxWord, "control mailbox", 256});
   function.walk([&](Operation *op) {
+    if (auto slot = dyn_cast<VirtualSlotOp>(op))
+      windows.push_back({slot.getSlotWord(), slot.getPurpose().str(), unsigned(slot.getWords())});
+    if (isAtlasSpillStore(op))
+      windows.push_back({uint32_t(op->getAttrOfType<IntegerAttr>("slot_word").getInt()),
+                         "spill", atlasSpillWords(op)});
     if (auto input = dyn_cast<VirtualInputBF16Op>(op))
       windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
                          llvm::formatv("input {0}", input.getIndex()), 512});

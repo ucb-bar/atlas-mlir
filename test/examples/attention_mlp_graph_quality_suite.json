@@ -1,0 +1,22 @@
+{
+  "schema": "atlas.public_graph_quality_suite.v1",
+  "scope": "diagnostic_32x32_attention_mlp_only",
+  "source_sha256": "27ead5d6846bde9b287d3c1b3312697ca162672e70b290d208e083f2abf3875d",
+  "weights_sha256": "b1a668bafb372807c19b6ed0d1284084c9105db8f44fa3ecd06b78fdf82eb2c5",
+  "policy_sha256": "8107cad0647cd200c8d73fce79251d75d2c49c1e544ae43568694985bc92975b",
+  "model_loader_sha256": "f45eedc21e578e6d521aec27c62be5c6ba7c60bfdf90c7f1458ad9bde860dd6d",
+  "weight_profiles": [
+    {"name": "captured", "column_roll": 0},
+    {"name": "shifted", "column_roll": 3}
+  ],
+  "inputs": [
+    {"name": "half", "kind": "uniform", "value": 0.5},
+    {"name": "one", "kind": "uniform", "value": 1.0},
+    {"name": "striped", "kind": "alternating_columns", "values": [0.5, 1.0]},
+    {"name": "checkerboard", "kind": "checkerboard", "values": [0.5, 1.0]},
+    {"name": "binary_seed_684453", "kind": "random_choice", "values": [0.5, 1.0], "seed": 684453},
+    {"name": "ternary_seed_9843", "kind": "random_choice", "values": [0.25, 0.5, 1.0], "seed": 9843}
+  ],
+  "relative_error_reference_floor": 0.000001,
+  "quality_gate": "none_diagnostic_measurement"
+}

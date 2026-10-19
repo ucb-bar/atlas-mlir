@@ -2,6 +2,7 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "VerificationTestSupport.h"
 
 using namespace mlir;
@@ -69,6 +70,7 @@ struct Fixture : IssuedStream {
     unsigned scalar = 19, tensor = 12, transfer = 0;
     for (Block &body : function.getBody()) {
       auto add = [&](Value v) {
+        if (isVirtualDMAImmediate(v)) return; // built at each launch
         if (v.getType().isInteger(1) || v.getType().isInteger(32)) registers.push_back({v, scalar++});
         else if (isa<VirtualFP8Type>(v.getType())) registers.push_back({v, tensor++});
         else if (isa<VirtualBF16Type>(v.getType())) { registers.push_back({v, tensor}); tensor += 2; }

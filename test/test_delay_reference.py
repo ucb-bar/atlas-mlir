@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -19,18 +19,6 @@ ASSEMBLY = ROOT / "test/examples/delay_timing.S"
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
 
 
-def _assembler():
-    root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
-    if not root:
-        raise unittest.SkipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-    spec = importlib.util.spec_from_file_location(
-        "selected_delay_assembler", pathlib.Path(root) / "assembler.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _words() -> tuple[int, ...]:
     return tuple(int(line, 16) for line in subprocess.check_output(
         [str(BIN / "atlas-emit"), str(SOURCE)], text=True).splitlines())
@@ -38,7 +26,8 @@ def _words() -> tuple[int, ...]:
 
 class DelayReferenceTest(unittest.TestCase):
     def test_typed_words_match_selected_assembler_and_llvm_object(self) -> None:
-        assembler = _assembler()
+        if not os.environ.get("ATLAS_ASSEMBLER_ROOT"):
+            self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
         with tempfile.TemporaryDirectory() as temporary:
             for count in (0, 4):
                 with self.subTest(count=count):
@@ -51,7 +40,7 @@ class DelayReferenceTest(unittest.TestCase):
                     self.assertEqual(len(words), 6)
                     self.assertEqual(words, tuple(assembler.assemble(assembly)))
                     self.assertEqual(words, _object_words(path))
-                    self.assertEqual(words[2], assembler.DELAY_INSN(count))
+                    self.assertEqual(words[2], assembler.word(f"delay {count}"))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  text=True, capture_output=True, check=True)
         reparsed = subprocess.run([str(BIN / "atlas-opt"), "-"],
@@ -90,7 +79,6 @@ class DelayReferenceTest(unittest.TestCase):
         for name in ("scalar/delayCounter", "scalar/pc_ctrl/io_s1_pc",
                      "scalar/s1_fire", "csrfile/reg_dbg0", "csrfile/reg_dbg1"):
             self.assertIn(f'"name": "{name}"', state.read_text())
-        assembler = _assembler()
         words = _object_words(SOURCE)
         guards = ((0x90000000, b"\xA5" * 32),
                   (0x90000400, b"\x5A" * 32))
@@ -112,7 +100,7 @@ class DelayReferenceTest(unittest.TestCase):
                 for count in (0, 4):
                     with self.subTest(count=count):
                         program = list(words)
-                        program[2] = assembler.DELAY_INSN(count)
+                        program[2] = assembler.word(f"delay {count}")
                         trace: list[tuple[int, ...]] = []
 
                         def on_cycle(core: SelectedCore) -> None:

@@ -17,14 +17,18 @@ using P = DMATransferPlacement;
 // One atomic DMA between boundary I/O, inside a "loop", before a "join", or on one arm of a "diamond". A load's
 // tile is unused, so lowering places its staging VLOADs before the block's terminator. `%keep` is defined before the
 // DMA or, with `keepAfterLaunch`, after it; `keepLive` reads it (or, with `useOperands`, the address and size)
-// after that terminator's block point.
-std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool keepLive = true, StringRef cfg = "", bool useOperands = false) {
+// after that terminator's block point. `%held` keeps the address and size in registers unless `immediates`, when they
+// are DMA-only constants that each launch builds.
+std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool keepLive = true, StringRef cfg = "", bool useOperands = false,
+                   bool immediates = false) {
   std::string s = state.str(), fmt = bf16 ? "bf16" : "fp8", tile = "!atlas.virtual_" + fmt;
   std::string body = "module { func.func @test() -> " + s + " {\n    %s0 = \"atlas.virtual_start\"() : () -> " + s + "\n";
   body += "    %addr = arith.constant -2147483648 : i32\n    %size = arith.constant " + std::to_string(bf16 ? 2048 : 1024) + " : i32\n";
   std::string keep = "    %keep = arith.constant 7 : i32\n";
   if (!keepAfterLaunch)
     body += keep;
+  if (!immediates)
+    body += "    %held = arith.addi %addr, %size : i32\n";
   body += "    %ready, %observable = \"atlas.virtual_input_bf16\"(%s0) {index = 1 : i32} : (" + s + ") -> (" + s + ", !atlas.virtual_bf16)\n";
   std::string before = "%ready", final = "%done";
   if (cfg == "loop") {
@@ -59,8 +63,8 @@ std::string source(bool bf16, bool store, bool keepAfterLaunch = false, bool kee
   return body + "    return %out : " + s + "\n} }";
 }
 
-// Unique baseline registers (scalars from x10, so %addr is x10, %size x11 and %keep x12) isolate helper writes from
-// SSA overlap.
+// Unique baseline registers (scalars from x10 in definition order, so %addr is x10, %size x11 and a %keep defined
+// before the DMA x12) isolate helper writes from SSA overlap. A DMA immediate claims none but keeps its number.
 struct Fixture {
   OwningOpRef<ModuleOp> module;
   func::FuncOp function;
@@ -81,21 +85,25 @@ struct Fixture {
     unsigned scalar = 10, tensor = 0;
     function.walk([&](Operation *op) {
       for (Value result : op->getResults()) {
-        if (result.getType().isInteger(1) || result.getType().isInteger(32))
+        if (isVirtualDMAImmediate(result))
+          ++scalar;
+        else if (result.getType().isInteger(1) || result.getType().isInteger(32))
           registers.push_back({result, scalar++});
         else if (isa<VirtualBF16Type, VirtualFP8Type>(result.getType()))
           registers.push_back({result, std::exchange(tensor, tensor + 2)});
       }
       if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+        if (transfers.empty()) {
+          addr = op->getOperand(op->getNumOperands() - 2);
+          size = op->getOperand(op->getNumOperands() - 1);
+        }
         dma = {op->getResult(0), {6, bf16 ? 2u : 1u, 37, 0x2100, 4, 7, 9}};
         transfers.push_back(dma);
       }
+      if (auto constant = dyn_cast<arith::ConstantOp>(op);
+          constant && !keep && constant.getValue() == IntegerAttr::get(IntegerType::get(&context, 32), 7))
+        keep = constant.getResult();
     });
-    addr = registers[0].value;
-    size = registers[1].value;
-    for (auto assignment : registers)
-      if (assignment.value.getType().isInteger(32) && assignment.reg == 12)
-        keep = assignment.value;
   }
   explicit operator bool() const { return bool(module); }
   unsigned reg(Value value) const {
@@ -166,17 +174,43 @@ void stagingLoadTests(MLIRContext &context, bool bf16, bool store) {
   Fixture live(context, source(bf16, store, true, true, cfg), bf16), dead(context, source(bf16, store, true, false, cfg), bf16);
   if (!live || !dead)
     return;
+  std::string keep = "x" + std::to_string(live.reg(live.keep));
   for (auto policy : {Policy::Preserved, Policy::Rematerialized}) {
     auto changed = live.dma.placement;
     changed.stagingReg = live.reg(live.keep);
     SmallVector<StringRef> fragments;
     if (!store)
-      fragments = {clobber, "staging VLOAD materialization", "x12"};
+      fragments = {clobber, "staging VLOAD materialization", keep};
     expect(live, "staging VLOAD write meets a live scalar", changed, store, fragments, policy);
     changed = dead.dma.placement;
     changed.stagingReg = dead.reg(dead.keep);
     expect(dead, "staging VLOAD write may reuse a dead scalar", changed, true, {}, policy);
   }
+}
+
+// A DMA-only address or size is an immediate: each launch builds it in its command register, so it claims no register
+// and its capture always writes, even into a register a live value holds.
+void immediateTests(MLIRContext &context, bool bf16, bool store) {
+  Fixture f(context, source(bf16, store, false, true, "", false, true), bf16);
+  if (!f)
+    return;
+  check(isVirtualDMAImmediate(f.addr) && isVirtualDMAImmediate(f.size), "DMA-only constants are immediates");
+  auto base = f.dma.placement;
+  expect(f, "immediate placement baseline", base, true);
+  f.registers.push_back({f.addr, 13});
+  expect(f, "an immediate cannot claim a register", base, false, {"claims a DMA immediate"});
+  f.registers.pop_back();
+  for (unsigned P::*role : {&P::dramReg, &P::sizeReg}) {
+    auto changed = base;
+    changed.*role = f.reg(f.keep);
+    expect(f, "immediate capture clobbers live-after scalar", changed, false,
+           {clobber, role == &P::dramReg ? "DRAM capture" : "size capture", "x12"});
+  }
+  // The later boundary read sees the size the launch built.
+  auto changed = base;
+  changed.sizeReg = 2;
+  expect(f, "immediate size capture sets persistent half-size content", changed, !bf16,
+         bf16 ? ArrayRef<StringRef>(halfSize) : ArrayRef<StringRef>());
 }
 
 // Two loads share helper registers: each launch and each staging VLOAD sets the registers it reads.
@@ -327,6 +361,7 @@ void atlas_test::runDMAHelper(MLIRContext &context) {
     for (bool store : {false, true}) {
       launchTests(context, bf16, store);
       stagingLoadTests(context, bf16, store);
+      immediateTests(context, bf16, store);
     }
   cfgTests(context);
   sharedHelperTests(context);

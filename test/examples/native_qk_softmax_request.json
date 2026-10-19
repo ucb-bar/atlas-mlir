@@ -1,0 +1,797 @@
+{
+  "constants": [],
+  "input_storages": {
+    "arg0": "external",
+    "arg1": "external",
+    "arg2": "external"
+  },
+  "lowering_policy": "diagnostic",
+  "nodes": [
+    {
+      "attrs": {
+        "input_domain": "finite-normal-e4m3-or-positive-zero"
+      },
+      "effect": "input",
+      "id": "arg0",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "finite-normal-e4m3-or-positive-zero"
+      },
+      "effect": "input",
+      "id": "arg1",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "finite-normal-e4m3-or-positive-zero"
+      },
+      "effect": "input",
+      "id": "arg2",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "op3r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "arg0",
+        "arg1"
+      ],
+      "op": "matmul",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "mxu0-e4m3-ordered-bf16-finite-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "op6r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "arg0",
+        "arg2"
+      ],
+      "op": "matmul",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "mxu0-e4m3-ordered-bf16-finite-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-seven-powers-and-zero-v1",
+        "scale_code": 127
+      },
+      "effect": "pure",
+      "id": "op8r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op3r0"
+      ],
+      "op": "pack_fp8",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "fp8-e4m3-unit-e8m0-seven-codes-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-seven-powers-and-zero-v1",
+        "scale_code": 127
+      },
+      "effect": "pure",
+      "id": "op10r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op6r0"
+      ],
+      "op": "pack_fp8",
+      "type": {
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "fp8-e4m3-unit-e8m0-seven-codes-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "op13r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op8r0",
+        "op10r0"
+      ],
+      "op": "matmul",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "mxu0-e4m3-ordered-bf16-finite-v1",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-raw-all-codes-v1",
+        "numeric_semantics": "selected-rtl-bf16-total-order-row-max-v1"
+      },
+      "effect": "pure",
+      "id": "maximum",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op13r0"
+      ],
+      "op": "row_max_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "finite-normal-exact-fp32-difference-or-zero-v1",
+        "numeric_semantics": "selected-f32-rne-bf16-chop-v1"
+      },
+      "effect": "pure",
+      "id": "centered",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op13r0",
+        "maximum"
+      ],
+      "op": "sub_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-normal-minus80-plus80-or-signed-zero-v1",
+        "numeric_semantics": "selected-rtl-bf16-exp-q9p12-lut-rne-v1"
+      },
+      "effect": "pure",
+      "id": "exponential",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "centered"
+      ],
+      "op": "exp_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-normal-or-positive-zero-fp32-tree-normal-result-v1",
+        "numeric_semantics": "selected-rtl-bf16-row-sum-fp32-rne-tree-bf16-rne-v1"
+      },
+      "effect": "pure",
+      "id": "exp_sum",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "loop_rank": 3,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "exponential"
+      ],
+      "op": "row_sum_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "bf16-positive-normal-1-to-32-v1",
+        "numeric_semantics": "selected-rtl-bf16-rcp-lut-trunc-v1"
+      },
+      "effect": "pure",
+      "id": "inverse",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "exp_sum"
+      ],
+      "op": "recip_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "finite-normal-bf16-product-normal-v1",
+        "numeric_semantics": "bf16-product-rne-v1"
+      },
+      "effect": "pure",
+      "id": "probability",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "exponential",
+        "inverse"
+      ],
+      "op": "mul_bf16",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    }
+  ],
+  "output_storages": [
+    "external"
+  ],
+  "outputs": [
+    "probability"
+  ],
+  "schema": "merlin.semantic_kernel.v2",
+  "source_identity": "",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21"
+}

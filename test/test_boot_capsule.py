@@ -56,6 +56,24 @@ def _pack(obj: pathlib.Path, output: pathlib.Path,
 
 
 class BootCapsuleTest(unittest.TestCase):
+    def test_direct_package_uses_atlas_emitter_without_llvm_object(self) -> None:
+        emitter = BIN / "atlas-emit"
+        if not emitter.is_file():
+            self.skipTest("build atlas-emit")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "capsule"
+            manifest = boot.pack_direct(SOURCE, emitter, LAYOUT, output)
+            program = (output / "program.bin").read_bytes()
+            words = struct.unpack(f"<{len(program) // 4}I", program)
+            physical = json.loads((output / "physical-program.json").read_text())
+            self.assertEqual(words, _emitted(SOURCE))
+            self.assertEqual(manifest["source_object_sha256"], None)
+            self.assertEqual(manifest["completion"]["ecall_pc_word"], len(words) - 1)
+            self.assertEqual(manifest["completion"]["unreachable_llvm_ret_pc_word"], None)
+            self.assertEqual(physical["word_count"], len(words))
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                boot.pack_direct(SOURCE, emitter, LAYOUT, output)
+
     def test_package_binds_checked_ir_object_and_declared_memory(self) -> None:
         if not os.environ.get("ATLAS_LLVM_BIN"):
             self.skipTest("set ATLAS_LLVM_BIN")

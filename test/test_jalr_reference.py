@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,16 +27,11 @@ class JALRReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_jalr_assembler", pathlib.Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         words = _emitted()
         self.assertEqual(len(words), 8)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
         self.assertEqual(words, _object_words(SOURCE))
-        self.assertEqual(words[1], assembler.JALR(10, 1, -1))
+        self.assertEqual(words[1], assembler.word("jalr x10, x1, -1"))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  text=True, capture_output=True, check=True)
         reparsed = subprocess.run([str(BIN / "atlas-opt"), "-"],

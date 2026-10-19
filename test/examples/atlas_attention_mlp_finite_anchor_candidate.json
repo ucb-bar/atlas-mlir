@@ -1,0 +1,42 @@
+{
+  "schema": "atlas.oot.quantized_linalg_policy.v4",
+  "selected_rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+  "source_sha256": "3df4059106e2caa813c550fbea12e610a1ff2562bf16f89a4e4bbebfd3f3908e",
+  "source_dtype": "f32",
+  "operand_encoding": "e4m3_finite_normal_rne_flush_subnormal",
+  "bias_encoding": "bf16_rne",
+  "vpu_add": "selected_f32_sum_bf16_chop",
+  "matmul_regions": {
+    "matmul_0": {
+      "mxu_unit": 0,
+      "activation_pack_scale_code": 127
+    },
+    "matmul_1": {
+      "mxu_unit": 1,
+      "activation_pack_scale_code": 127
+    },
+    "matmul_2": {
+      "mxu_unit": 0,
+      "activation_pack_scale_code": 127
+    },
+    "matmul_3": {
+      "mxu_unit": 1,
+      "activation_pack_scale_code": 127
+    },
+    "matmul_4": {
+      "mxu_unit": 0,
+      "activation_pack_scale_code": 127
+    },
+    "matmul_5": {
+      "mxu_unit": 1,
+      "activation_pack_scale_code": 122
+    },
+    "matmul_6": {
+      "mxu_unit": 0,
+      "activation_pack_scale_code": 122
+    }
+  },
+  "precision_transform": "explicit_diagnostic_candidate",
+  "softmax_realization": "bf16_vpu_exp_recip_mul",
+  "mxu1_reset_arithmetic": "selected-source-anchor-finite-reset-v1"
+}

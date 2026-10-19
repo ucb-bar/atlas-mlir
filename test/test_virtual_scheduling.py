@@ -1,9 +1,9 @@
 """schedule-atlas-virtual: pre-allocation list scheduling of virtual Atlas SSA.
 
-The scheduled order verifies, keeps every block's structure, lowers whenever
-the source order does, keeps every SSA and implicit-state dependence, and
-never needs more registers than the allocator has unless the source order
-already did.
+The scheduled order verifies, keeps every block's structure and every SSA and
+implicit-state dependence, and lowers after spilling whenever the source order
+lowers. Values beyond the registers cost estimated spill cycles; they are not
+forbidden.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import unittest
 
 from test_virtual_lowering import virtual_pressure
 from test_virtual_ssa import BIN, ROOT, run
+from verification_support import insert_after
 
 
 EXAMPLES = ROOT / "test/examples"
@@ -346,6 +347,11 @@ def lowers(source: str) -> bool:
     return run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits").returncode == 0
 
 
+def spilling(source: str) -> list[str]:
+    """--spill-atlas-virtual, which takes a module of one function."""
+    return ["--spill-atlas-virtual"] if source.count("func.func") == 1 else []
+
+
 class VirtualSchedulingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.assertTrue((BIN / "atlas-opt").is_file(), "build atlas-opt first")
@@ -366,8 +372,9 @@ class VirtualSchedulingTest(unittest.TestCase):
         if found and found[0]["ops"]:
             self.assertEqual(found[0]["ops"][0], "atlas.virtual_start", name)
         if lowers(source):
-            lowered = run("atlas-opt", out, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
-                          "--verify-atlas-generated-schedule")
+            # A scheduled order may need spills the source order does not.
+            lowered = run("atlas-opt", out, *spilling(out), "--lower-atlas-virtual-to-machine",
+                          "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule")
             self.assertEqual(lowered.returncode, 0, f"{name}: {lowered.stderr}")
             self.assertIn('atlas.timing_state = "untimed"', lowered.stdout)
             self.assertNotIn('"atlas.delay"', lowered.stdout)
@@ -427,35 +434,36 @@ class VirtualSchedulingTest(unittest.TestCase):
                          "the next tile is read while the first is rectified")
         self.assertGreater(positions(ops, "output_bf16")[0], second_input)
 
-    def test_schedule_stays_within_register_capacity(self) -> None:
-        # Reading ahead stops at the allocator's capacity: 31 BF16 pairs, or
-        # 15 with FP8 values present.
+    def test_reading_ahead_past_the_registers_does_not_pay(self) -> None:
+        # Each boundary tile waits for its transfer, so reading further ahead
+        # than the registers hold (31 BF16 pairs, or 15 with FP8 values
+        # present) would add spills and save nothing.
         for count, fp8 in ((30, False), (31, False), (32, False),
                            (14, True), (15, True), (16, True)):
             with self.subTest(count=count, fp8=fp8):
                 source = boundary_tiles(count, fp8)
-                result = schedule(source)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertNotEqual(blocks(result.stdout)[0]["ops"], blocks(source)[0]["ops"])
-                self.assertNotIn("kept source order", result.stderr)
-                self.assertTrue(lowers(result.stdout))
+                scheduled = self.scheduled(source)
+                self.assertNotEqual(blocks(scheduled)[0]["ops"], blocks(source)[0]["ops"])
+                self.assertTrue(lowers(scheduled))
 
-    def test_scheduling_recovers_a_block_over_capacity(self) -> None:
+    def test_scheduling_removes_spills_the_source_order_needs(self) -> None:
+        # Writing each tile before reading the next costs no time here.
         source = virtual_pressure(32)
         rejected = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
         self.assertIn("exceeds 31 physical pairs", rejected.stderr)
         self.assertTrue(lowers(self.scheduled(source)), "scheduled order should allocate")
 
-    def test_schedule_the_allocator_rejects_keeps_source_order(self) -> None:
-        # Within capacity, the allocator's greedy coloring can still fail on
-        # an order whose source allocated.
-        source = wide_return_block(27, interleaved=True)
-        self.assertTrue(lowers(source))
+    def test_an_order_over_the_registers_is_kept_for_spilling(self) -> None:
+        # Every order holds 32 tiles across the edge, beyond 31 pairs: the
+        # schedule stands and spilling recovers it.
+        source = wide_return_block(32)
         result = schedule(source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("kept source order for @wide: 'func.func' op virtual BF16 "
-                      "interference exceeds 31 physical pairs", result.stderr)
-        self.assertEqual(result.stdout, run("atlas-opt", source).stdout)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(lowers(result.stdout))
+        spilled = run("atlas-opt", result.stdout, "--spill-atlas-virtual",
+                      "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+        self.assertEqual(spilled.returncode, 0, spilled.stderr)
 
     def test_dma_transfers_overlap_and_receive_independent_work(self) -> None:
         # Every load issues before the first operation that uses any loaded
@@ -478,10 +486,10 @@ class VirtualSchedulingTest(unittest.TestCase):
         [first_store, _] = positions(ops, "dma_store_bf16")
         self.assertLess(first_store, max(positions(ops, "vpu_reduce")), ops)
 
-    def test_stream_scheduling_keeps_every_wait_before_a_pack(self) -> None:
-        # A store and a load are pending and complete load first. The PACK
-        # after both, which no transfer may overlap, stays after each wait,
-        # not only the last.
+    def test_transfers_stay_pending_across_a_pack_through_stream_scheduling(self) -> None:
+        # A store and a load are pending, then a PACK of another tile. Its
+        # relayout touches only its scratch, so both transfers stay in flight
+        # through the PACK's loop, before and after stream scheduling.
         source = function("pack", [
             start(), inp("io0", "io1", "t", 0), const("a", -2147483648), const("b", -2147481600),
             const("size", 2048),
@@ -493,6 +501,57 @@ class VirtualSchedulingTest(unittest.TestCase):
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timed = run("atlas-opt", lowered.stdout, "--schedule-atlas-stream", "--verify-atlas-timing")
         self.assertEqual(timed.returncode, 0, timed.stderr)
+        for machine in (lowered.stdout, timed.stdout):
+            lines = machine.splitlines()
+            back_edge = next(i for i, line in enumerate(lines) if '"atlas.branch"' in line and 'cfg_helper = "pack"' in line)
+            waits = [i for i, line in enumerate(lines) if '"atlas.dma_wait"' in line and "atlas.virtual_dma_transfer" in line]
+            self.assertEqual(len(waits), 2)
+            self.assertTrue(all(wait > back_edge for wait in waits), machine)
+
+    def test_stream_scheduling_keeps_every_wait_before_scalar_memory(self) -> None:
+        # A store and a load are pending and complete load first, then the
+        # store before the output's helper DMA. A scalar load placed after both
+        # waits may not overlap either transfer, so stream scheduling keeps it
+        # after each wait, not only the last.
+        source = function("drain", [
+            start(), inp("io0", "io1", "x", 0), const("a", -2147483648), const("b", -2147481600),
+            const("size", 2048),
+            dma_store("io1", "io2", "x", "a"),
+            dma_load("io2", "io3", "tb", "b", "size", "bf16"),
+            outp("io3", "o", "tb", 0), f"return %o : {S}"])
+        lowered = run("atlas-opt", source, "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        transfer = "atlas.virtual_dma_transfer"
+        waits = [i for i, line in enumerate(lowered.stdout.splitlines()) if '"atlas.dma_wait"' in line and transfer in line]
+        probe = insert_after(lowered.stdout, waits[-1], [
+            ("scalar_load", 'kind = "lw", dst = 27 : i32, base = 0 : i32, offset = 0 : i32')])
+        timed = run("atlas-opt", probe, "--schedule-atlas-stream", "--verify-atlas-timing")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
+        lines = timed.stdout.splitlines()
+        timed_waits = [i for i, line in enumerate(lines) if '"atlas.dma_wait"' in line and transfer in line]
+        [load] = [i for i, line in enumerate(lines) if '"atlas.scalar_load"' in line and "dst = 27 : i32" in line]
+        self.assertEqual(len(timed_waits), 2)
+        self.assertGreater(load, max(timed_waits), timed.stdout)
+
+    def test_loads_move_ahead_of_independent_packs(self) -> None:
+        # Two PACKs in a chain, each followed by the load of the next MXU
+        # weight. PACK no longer drains DMA, so each load issues ahead of the
+        # PACK before its use and transfers during that relayout.
+        source = function("ahead", [
+            start(), inp("io0", "io1", "x", 0), const("a", -2147483648), const("b", -2147482624),
+            const("size", 1024),
+            f'%p1 = "atlas.virtual_pack_fp8"(%x) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            dma_load("io1", "io2", "w1", "a", "size", "fp8"),
+            *mxu_chain("io2", 0, "w1", "p1", "h1", "m"),
+            f'%p2 = "atlas.virtual_pack_fp8"(%h1) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            dma_load("ms3", "io3", "w2", "b", "size", "fp8"),
+            *mxu_chain("io3", 1, "w2", "p2", "h2", "n"),
+            outp("ns3", "o", "h2", 0), f"return %o : {S}"])
+        scheduled = self.scheduled(source)
+        ops = blocks(scheduled)[0]["ops"]
+        for load, pack in zip(positions(ops, "dma_load_fp8"), positions(ops, "pack_fp8"), strict=True):
+            self.assertLess(load, pack, ops)
+        self.assertTrue(lowers(scheduled))
 
     def test_transfers_that_may_share_dram_keep_their_order(self) -> None:
         # A store to y, then a load of y and a load of z. The load of y stays

@@ -2,6 +2,8 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVirtualAllocation.h"
+#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
@@ -10,6 +12,8 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <set>
+#include <utility>
 #include <vector>
 
 using namespace mlir;
@@ -17,15 +21,18 @@ using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 namespace {
-// Bounds the checker's execution of a copy loop; the relayout takes 32 rows.
-constexpr unsigned kCopyIterationBound = 256;
-
 struct Tile { StringRef kind; uint32_t vmem, bytes; std::vector<int32_t> after; };
 // `command` observes `bytes` at `vmem`: word i is word `word + i` of `writer`,
 // or for a PACK relayout the raw word packWord(i).
 struct Read { int32_t command, writer; uint32_t vmem, bytes, word; bool pack; };
 struct Pack { int32_t source, store, load, scale = -1; };
-struct Derived { std::vector<Tile> tiles; std::vector<Read> reads; std::vector<Pack> packs; };
+struct SlotWrite { int32_t writer; uint32_t word; };
+struct Derived {
+  std::vector<Tile> tiles;
+  std::vector<Read> reads;
+  std::vector<Pack> packs;
+  std::map<int32_t, SlotWrite> slotWrites, copyWrites;
+};
 
 // Relayout word 8r+4h+l holds raw word 128h+4r+l, the selected PACK layout as
 // lowerPack describes it; this checks lowering against its own description,
@@ -45,6 +52,132 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
     d.tiles.push_back(t);
   }
   const auto &tiles = d.tiles;
+  // A raw readback is admitted only for declared spill/reload expansions.
+  // Arbitrary VSTORE -> VLOAD records remain invalid. Keep the writer and
+  // BF16 half identity, rather than accepting any overlapping VMEM range.
+  std::map<int32_t, std::pair<int32_t, unsigned>> spillWriters;
+  std::map<int32_t, unsigned> spillWidths;
+  std::set<int32_t> spillReads;
+  auto fixed = VirtualAllocationPlan().fixed();
+  std::set<int32_t> slotReads;
+  std::map<uint32_t, std::pair<uint32_t, StringRef>> slots;
+  auto values = cfg.getAs<ArrayAttr>("values");
+  auto declareSlot = [&](uint32_t word, uint32_t words, StringRef kind) {
+    unsigned alignment = words == 1 ? 1 : 256;
+    if (word < fixed.spillWord || word % alignment ||
+        uint64_t(word) + words > uint64_t(fixed.spillWord) + fixed.spillWindowWords)
+      return false;
+    for (auto [address, geometry] : slots) {
+      if (address == word) return geometry == std::make_pair(words, kind);
+      if (uint64_t(word) < uint64_t(address) + geometry.first &&
+          uint64_t(address) < uint64_t(word) + words) return false;
+    }
+    slots[word] = {words, kind};
+    return true;
+  };
+  for (Attribute a : operations) {
+    auto op = dyn_cast<DictionaryAttr>(a);
+    if (!op) return failure();
+    StringRef name = contractString(op, "name");
+    bool save = name == "atlas.virtual_save", restore = name == "atlas.virtual_restore",
+         copy = name == "atlas.virtual_slot_copy";
+    if (!save && !restore && !copy) continue;
+    if (!values) return failure();
+    auto word = contractI32(op, "slot_word"), words = contractI32(op, "slot_words");
+    StringRef kind = contractString(op, "slot_kind");
+    if (!word || !words || *words <= 0 ||
+        (kind == "bf16" ? *words != 512 : kind == "fp8" ? *words != 256 :
+         kind == "i1" || kind == "i32" ? *words != 1 : kind != "raw" || *words % 256) ||
+        !declareSlot(*word, *words, kind)) return failure();
+    uint32_t destination = *word;
+    if (copy) {
+      auto other = contractI32(op, "destination_word");
+      if (!other || *other == *word || !declareSlot(*other, *words, kind)) return failure();
+      destination = *other;
+    }
+    auto commands = contractI32Array(op, "tile_commands");
+    bool scalar = *words == 1;
+    unsigned halves = scalar ? 1 : *words / 256;
+    if (commands.size() != halves * (copy ? 2 : 1)) return failure();
+    auto operands = contractI32Array(op, "operands"), results = contractI32Array(op, "results");
+    int32_t reg = scalar ? fixed.scalarTemporary : fixed.tensorTemporary;
+    if (!copy) {
+      auto ids = save ? operands : results;
+      if (ids.size() != 1 || ids[0] < 0 || ids[0] >= int32_t(values.size())) return failure();
+      auto value = dyn_cast<DictionaryAttr>(values[ids[0]]);
+      auto placed = value ? contractI32(value, "reg") : std::nullopt;
+      if (!placed || contractString(value, "type") != kind) return failure();
+      reg = *placed;
+    }
+    for (unsigned half = 0; half < halves; ++half) {
+      for (unsigned step = 0; step < (copy ? 2u : 1u); ++step) {
+        int32_t id = commands[half * (copy ? 2 : 1) + step];
+        if (id < 0 || id >= int32_t(tiles.size())) return failure();
+        bool write = save || (copy && step == 1);
+        uint32_t address = (write ? destination : uint32_t(*word)) + half * 256;
+        const Tile &t = tiles[id];
+        auto record = cast<DictionaryAttr>(records[id]);
+        if (t.kind != (scalar ? (write ? "slot_store" : "slot_load") : (write ? "vstore" : "vload")) ||
+            !t.after.empty() || t.bytes != (scalar ? 4 : 1024) || t.vmem != address * 4 ||
+            contractI32(record, "reg") != reg + (!copy && !scalar ? half : 0)) return failure();
+        if (write) {
+          d.slotWrites[id] = {-int32_t(destination) - 1, half * 256};
+          if (copy) d.copyWrites[id] = {-*word - 1, half * 256};
+        } else {
+          slotReads.insert(id);
+          d.reads.push_back({id, -*word - 1, t.vmem, t.bytes, half * 256, false});
+        }
+      }
+    }
+  }
+  for (Attribute a : operations) {
+    auto op = dyn_cast<DictionaryAttr>(a);
+    if (!op) return failure();
+    StringRef name = contractString(op, "name");
+    if (name != VirtualSpillBF16Op::getOperationName() &&
+        name != VirtualSpillFP8Op::getOperationName()) continue;
+    auto source = contractI32(op, "id");
+    auto commands = contractI32Array(op, "tile_commands");
+    unsigned halves = name == VirtualSpillBF16Op::getOperationName() ? 2 : 1;
+    if (!source || commands.size() != halves) return failure();
+    uint32_t base = 0;
+    for (unsigned half = 0; half < halves; ++half) {
+      int32_t id = commands[half];
+      if (id < 0 || id >= int32_t(tiles.size())) return failure();
+      const Tile &t = tiles[id];
+      if (!half) base = t.vmem;
+      if (t.kind != "vstore" || t.bytes != 1024 || t.vmem != base + half * 1024 ||
+          base % 1024 || base < fixed.spillWord * 4 ||
+          uint64_t(base) + halves * 1024 > uint64_t(fixed.spillWord + fixed.spillWindowWords) * 4 ||
+          !spillWriters.emplace(id, std::make_pair(*source, half)).second) return failure();
+      for (auto [word, geometry] : slots)
+        if (uint64_t(t.vmem) < uint64_t(word + geometry.first) * 4 &&
+            uint64_t(word) * 4 < uint64_t(t.vmem) + t.bytes) return failure();
+    }
+    spillWidths[*source] = halves;
+  }
+  for (Attribute a : operations) {
+    auto op = cast<DictionaryAttr>(a);
+    StringRef name = contractString(op, "name");
+    if (name != VirtualReloadBF16Op::getOperationName() &&
+        name != VirtualReloadFP8Op::getOperationName()) continue;
+    auto commands = contractI32Array(op, "tile_commands");
+    unsigned halves = name == VirtualReloadBF16Op::getOperationName() ? 2 : 1;
+    if (commands.size() != halves) return failure();
+    int32_t writer = -1;
+    for (unsigned half = 0; half < halves; ++half) {
+      int32_t id = commands[half];
+      if (id < 0 || id >= int32_t(tiles.size())) return failure();
+      const Tile &t = tiles[id];
+      if (t.kind != "vload" || t.bytes != 1024 || t.after.size() != 1) return failure();
+      auto saved = spillWriters.find(t.after[0]);
+      if (saved == spillWriters.end()) return failure();
+      if (!half) writer = saved->second.first;
+      if (saved->second != std::make_pair(writer, half) || spillWidths[writer] != halves ||
+          t.vmem != tiles[t.after[0]].vmem) return failure();
+      spillReads.insert(id);
+    }
+  }
   for (Attribute a : operations) {
     auto op = dyn_cast<DictionaryAttr>(a);
     if (!op) return failure();
@@ -69,15 +202,16 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
         if (tiles[store].kind != "vstore" || !contains(t, tiles[store])) return failure();
         copy(store, tiles[store]);
       }
-    } else if (t.kind == "vload" || t.kind == "mailbox_load") {
+    } else if (t.kind == "vload" || t.kind == "mailbox_load" || t.kind == "slot_load") {
+      if (slotReads.count(id)) continue;
       if (t.after.size() != 1) return failure();
       int32_t writer = t.after[0];
       if (tiles[writer].kind == "dma_wait" && tiles[writer].after.size() == 1) writer = tiles[writer].after[0];
       bool pack = llvm::any_of(d.packs, [&](const Pack &p) { return p.load == id; });
       bool dma = writer != t.after[0] && tiles[writer].kind == "dma_load";
-      // Lowering orders a VLOAD after a VSTORE only inside PACK.
+      // Reloads copy a checked spill store; PACK uses its own relayout map.
       if (pack) d.reads.push_back({id, writer, t.vmem, t.bytes, 0, true});
-      else if (dma && contains(tiles[writer], t)) copy(writer, t);
+      else if ((dma || spillReads.count(id)) && contains(tiles[writer], t)) copy(writer, t);
       else return failure();
     }
   }
@@ -105,11 +239,14 @@ struct Word {
 struct State {
   RegValues x = unknownRegs();
   std::array<std::optional<Word>, 32> carried{}; // the word a scalar register holds since its LW
+  std::array<std::optional<Word>, 64> tensor{}; // first of 256 consecutive words in a raw register
   std::map<uint32_t, Word> memory;               // by VMEM word index; absent is unproved
 };
 // Must-facts: a word survives a join only when every reaching path agrees.
 bool merge(State &to, const State &from) {
   bool changed = false;
+  for (unsigned r = 0; r < 64; ++r)
+    if (to.tensor[r] && to.tensor[r] != from.tensor[r]) { to.tensor[r].reset(); changed = true; }
   for (unsigned r = 0; r < 32; ++r) {
     if (to.x[r] && to.x[r] != from.x[r]) { to.x[r].reset(); changed = true; }
     if (to.carried[r] && to.carried[r] != from.carried[r]) { to.carried[r].reset(); changed = true; }
@@ -120,18 +257,6 @@ bool merge(State &to, const State &from) {
     else ++i;
   }
   return changed;
-}
-
-std::optional<bool> taken(BranchOp branch, const RegValues &x) {
-  auto lhs = x[branch.getLhs()], rhs = x[branch.getRhs()];
-  if (!lhs || !rhs) return std::nullopt;
-  StringRef kind = branch.getKind();
-  if (kind == "beq") return *lhs == *rhs;
-  if (kind == "bne") return *lhs != *rhs;
-  if (kind == "blt") return int32_t(*lhs) < int32_t(*rhs);
-  if (kind == "bge") return int32_t(*lhs) >= int32_t(*rhs);
-  if (kind == "bltu") return *lhs < *rhs;
-  return *lhs >= *rhs;
 }
 } // namespace
 
@@ -199,17 +324,19 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
       applyAtlasScaleRegister(s.instrs[pc], scale);
     }
   }
-  // PACK's helper branch closes a one-block counted copy loop, which the walk
-  // executes from its entry registers instead of joining at its backedge.
-  std::map<size_t, const Pack *> helpers;
+  // PACK's helper branch closes its relayout loop (AtlasLoop.h), which the
+  // walk executes from its entry registers instead of joining at its backedge.
+  struct Helper { const AtlasLoop *loop; const Pack *pack; };
+  std::map<size_t, Helper> helpers;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!s.endsInBranch(block)) continue;
     Operation *branch = s.ops[s.blockEnd(block) - 2];
     if (!isa<BranchOp>(branch) || !branch->hasAttr(kAtlasTagCFGHelper)) continue;
+    const AtlasLoop *loop = s.loop(block);
     const Pack *p = packOf(branch);
-    if (!p || s.targetOf.lookup(branch) != s.ops[s.starts[block]])
-      return branch->emitOpError("buffer contract: PACK copy loop must be one block closed by its own backedge");
-    helpers[block] = p;
+    if (!loop || !p || !isAtlasPackRelayoutLoop(s.ops, *loop))
+      return branch->emitOpError("buffer contract: PACK helper branch does not close a PACK relayout loop (one block of that PACK's scalar copy, closed by its own backedge)");
+    helpers[block] = {loop, p};
   }
 
   auto check = [&](Operation *op, const Read &r, const State &state) -> LogicalResult {
@@ -227,8 +354,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     }
     return success();
   };
-  auto write = [](State &state, int32_t writer, const Tile &t) {
-    for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory[t.vmem / 4 + i] = {writer, i};
+  auto write = [](State &state, int32_t writer, const Tile &t, uint32_t first = 0) {
+    for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory[t.vmem / 4 + i] = {writer, first + i};
   };
   auto step = [&](size_t pc, State &state, bool diagnose, const Pack *helper) -> LogicalResult {
     Operation *op = s.ops[pc];
@@ -237,11 +364,34 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
         for (const Read *r : readsOf[*id])
           if (failed(check(op, *r, state))) return failure();
       const Tile &t = tiles[*id];
-      if (t.kind == "vstore") write(state, *id, t);
+      if (auto found = derived->copyWrites.find(*id); found != derived->copyWrites.end()) {
+        auto origin = isa<VStoreOp>(op) ? state.tensor[cast<VStoreOp>(op).getSrc()] : state.carried[cast<ScalarStoreOp>(op).getSrc()];
+        if (diagnose && origin != std::optional<Word>(Word{found->second.writer, found->second.word}))
+          return op->emitOpError("buffer contract: slot copy lost its loaded source bytes");
+      }
+      if (auto found = derived->slotWrites.find(*id); found != derived->slotWrites.end())
+        write(state, found->second.writer, t, found->second.word);
+      else if (t.kind == "vstore") write(state, *id, t);
       // A DMA load's words are indeterminate until its WAIT completes it.
       if (t.kind == "dma_load")
         for (uint32_t i = 0; i < t.bytes / 4; ++i) state.memory.erase(t.vmem / 4 + i);
       if (t.kind == "dma_wait" && t.after.size() == 1 && tiles[t.after[0]].kind == "dma_load") write(state, t.after[0], tiles[t.after[0]]);
+    }
+    if (auto load = dyn_cast<VLoadOp>(op)) {
+      auto id = contractTag(op, kAtlasTagTileCommand);
+      state.tensor[load.getDst()].reset();
+      if (id) if (auto found = state.memory.find(tiles[*id].vmem / 4); found != state.memory.end())
+        state.tensor[load.getDst()] = found->second;
+    } else {
+      unsigned reg = 0, width = 0;
+      if (auto p = dyn_cast<VPUUnaryOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<VPUBinaryOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<VPUReduceOp>(op)) { reg = p.getDst(); width = 2; }
+      if (auto p = dyn_cast<XLUTransposeOp>(op)) { reg = p.getDst(); width = 1; }
+      if (auto p = dyn_cast<MXUPopOp>(op)) { reg = p.getDst(); width = p.getFormat() == "bf16" ? 2 : 1; }
+      if (auto p = dyn_cast<VPUPackOp>(op)) { reg = p.getDst(); width = p.getDirection() == "fp8_to_bf16" ? 2 : 1; }
+      if (auto p = dyn_cast<VLIOp>(op)) { reg = p.getDst(); width = p.getMode() == "all" || p.getMode() == "row" ? 2 : 1; }
+      for (unsigned half = 0; half < width; ++half) state.tensor[reg + half].reset();
     }
     auto address = [&](unsigned base, IntegerAttr offset) -> std::optional<uint32_t> {
       if (!state.x[base]) return std::nullopt;
@@ -252,7 +402,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
       auto a = address(load.getBase(), load.getOffsetAttr());
       if (a && *a % 4 == 0)
         if (auto found = state.memory.find(*a / 4); found != state.memory.end()) loaded = found->second;
-    } else if (auto store = dyn_cast<ScalarStoreOp>(op)) {
+    } else if (auto store = dyn_cast<ScalarStoreOp>(op);
+               store && !(contractTag(op, kAtlasTagTileCommand) &&
+               derived->slotWrites.count(*contractTag(op, kAtlasTagTileCommand)))) {
       uint32_t width = store.getKind() == "sw" ? 4 : store.getKind() == "sh" ? 2 : 1;
       auto a = address(store.getBase(), store.getOffsetAttr());
       if (helper && diagnose) {
@@ -275,28 +427,21 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     return success();
   };
   // Without a decidable exit the copy's effect is unknown: nothing survives it.
-  auto copyLoop = [&](size_t block, const Pack &p, State &state, bool diagnose) -> LogicalResult {
-    size_t end = s.blockEnd(block);
-    auto branch = cast<BranchOp>(s.ops[end - 2]);
-    for (unsigned iteration = 0; iteration < kCopyIterationBound; ++iteration) {
-      std::optional<bool> again;
-      for (size_t pc = s.starts[block]; pc < end; ++pc) {
-        if (pc == end - 2) again = taken(branch, state.x);
-        if (failed(step(pc, state, diagnose, &p))) return failure();
-      }
-      if (!again) {
-        if (diagnose) return branch.emitOpError("buffer contract: PACK copy loop branch depends on an unknown register");
-        state = State();
-        return success();
-      }
-      if (!*again) return success();
-    }
-    if (diagnose) return branch.emitOpError("buffer contract: PACK copy loop does not exit within ") << kCopyIterationBound << " iterations";
+  auto copyLoop = [&](const Helper &helper, State &state, bool diagnose) -> LogicalResult {
+    auto exit = runAtlasLoop(s.ops, *helper.loop, [&]() -> const RegValues & { return state.x; },
+                                 [&](size_t pc) { return step(pc, state, diagnose, helper.pack); });
+    if (failed(exit)) return failure();
+    if (*exit == AtlasLoopExit::Exited) return success();
+    Operation *branch = s.ops[helper.loop->branch];
+    if (diagnose && *exit == AtlasLoopExit::UnknownBranch)
+      return branch->emitOpError("buffer contract: PACK copy loop branch depends on an unknown register");
+    if (diagnose)
+      return branch->emitOpError("buffer contract: PACK copy loop does not exit within ") << kAtlasLoopIterationBound << " iterations";
     state = State();
     return success();
   };
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
-    if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(block, *helper->second, state, diagnose);
+    if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(helper->second, state, diagnose);
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc)
       if (failed(step(pc, state, diagnose, nullptr))) return failure();
     return success();

@@ -1,6 +1,7 @@
 #ifndef ATLAS_STREAM_H
 #define ATLAS_STREAM_H
 
+#include "Atlas/AtlasLoop.h"
 #include "Atlas/AtlasTimingProvider.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
@@ -20,11 +21,23 @@ struct AtlasStream {
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
   std::vector<timing::RegValues> entry;
+  // Analyzable loops (AtlasLoop.h), in order, each filling one block,
+  // and what decoding proved about each, at the same index.
+  std::vector<AtlasLoop> loops;
+  std::vector<AtlasLoopFacts> loopFacts;
 
   size_t blockEnd(size_t block) const;
   bool endsInBranch(size_t block) const;
   bool endsInHalt(size_t block) const;
   bool fallsThrough(size_t block) const;
+  // The analyzed loop that fills `block`, else null.
+  const AtlasLoop *loop(size_t block) const;
+  // What decoding proved about one of `loops`.
+  const AtlasLoopFacts &factsOf(const AtlasLoop &loop) const;
+  // Whether explicit DMA may still be in flight from `block` into the next
+  // block: only into an analyzed loop or out of one, which neither launches nor
+  // completes a transfer and has no other entry.
+  bool dmaMayCross(size_t block) const;
 };
 
 struct DelayInsertion {

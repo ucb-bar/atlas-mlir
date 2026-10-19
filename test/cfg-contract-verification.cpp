@@ -1,5 +1,6 @@
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "VerificationTestSupport.h"
 #include "mlir/AsmParser/AsmParser.h"
 
@@ -161,7 +162,9 @@ void bindings(MLIRContext &context) {
   unsigned scalarReg = 19, tensorReg = 32;
   auto add = [&](Value v) {
     Type t = v.getType();
-    if (t.isInteger(1) || t.isInteger(32)) {
+    if (isVirtualDMAImmediate(v)) {
+      // Built at each launch; it claims no register.
+    } else if (t.isInteger(1) || t.isInteger(32)) {
       claims.push_back({v, scalarReg++});
     } else if (isa<VirtualBF16Type, VirtualFP8Type>(t)) {
       bool bf16 = isa<VirtualBF16Type>(t);

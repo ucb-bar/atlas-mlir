@@ -84,7 +84,9 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
       // Only the scalar-argument mailbox prelude launches without a source operation.
       auto first = dyn_cast<DictionaryAttr>(blocks[0]);
       auto args = first ? first.getAs<DenseI32ArrayAttr>("args") : DenseI32ArrayAttr{};
-      if (launch != 0 || t.kind != "dma_load" || !args || args.empty()) return failure();
+      auto controls = contractI32(cfg, "control_count");
+      if (launch != 0 || t.kind != "dma_load" || !args ||
+          (args.empty() && (!controls || *controls < 1 || *controls > 256))) return failure();
     }
     int32_t completion = -1;
     for (unsigned id = 0; id < tiles.size(); ++id) {

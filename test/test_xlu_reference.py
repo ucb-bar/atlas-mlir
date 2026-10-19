@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,6 +9,7 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -41,15 +41,10 @@ class XLUReferenceTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        path = pathlib.Path(root) / "assembler.py"
-        spec = importlib.util.spec_from_file_location("selected_xlu_assembler", path)
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted()
         self.assertEqual(len(emitted), 29)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[10], assembler.VTRPOSE_XLU(8, 4))
+        self.assertEqual(emitted[10], assembler.word("vtrpose.xlu m8, m4"))
         self.assertEqual(emitted[10] & (0x3F << 19), 0)  # reserved vs2 field
         self.assertEqual(_object_words(SOURCE), emitted)
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],

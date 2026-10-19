@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from fractions import Fraction
-import importlib.util
 import os
 import pathlib
 import struct
 import subprocess
 import sys
 import unittest
+from fractions import Fraction
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -77,6 +77,15 @@ def _panel(phase: int) -> tuple[bytes, bytes, bytes]:
     return lhs, rhs, expected
 
 
+def _positive_zero_panel() -> tuple[bytes, bytes, bytes]:
+    # ReLU can produce +0. Adding it to a finite normal is exact, and the
+    # final upper-half bit chop must retain the other operand's BF16 code.
+    codes = (0x3F00, 0xBF00, 0x3FC0, 0xBFC0)
+    lhs = b"\x00" * 2048
+    rhs = struct.pack("<1024H", *(codes[index % len(codes)] for index in range(1024)))
+    return lhs, rhs, rhs
+
+
 class VpuAddReferenceTest(unittest.TestCase):
     def test_exact_subset_and_rounding_discriminator(self) -> None:
         self.assertEqual(_decode_normal_bf16(0x3BC0), Fraction(3, 512))
@@ -89,20 +98,22 @@ class VpuAddReferenceTest(unittest.TestCase):
             self.assertNotEqual(expected, lhs)
             self.assertNotEqual(expected, rhs)
 
+    def test_positive_zero_passthrough_panel(self) -> None:
+        lhs, rhs, expected = _positive_zero_panel()
+        self.assertEqual((len(lhs), len(rhs), len(expected)), (2048, 2048, 2048))
+        self.assertEqual(lhs, b"\x00" * 2048)
+        self.assertEqual(expected, rhs)
+        self.assertNotEqual(expected, lhs)
+
     def test_selected_assembler_and_llvm_object_words(self) -> None:
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_vadd_assembler", pathlib.Path(selected_root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = tuple(int(line, 16) for line in subprocess.check_output(
             [str(BIN / "atlas-emit"), str(SOURCE)], text=True).splitlines())
         self.assertEqual(len(emitted), 49)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(emitted[31], assembler.VADD_BF16(4, 0, 2))
+        self.assertEqual(emitted[31], assembler.word("vadd.bf16 m4, m0, m2"))
         self.assertEqual(emitted, _object_words(SOURCE))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  capture_output=True, text=True, check=True)
@@ -156,9 +167,11 @@ class VpuAddReferenceTest(unittest.TestCase):
 
             cosim_atlas.CosimCore = SelectedCore
             try:
-                for phase in (0, 3):
-                    with self.subTest(phase=phase):
-                        lhs, rhs, expected = _panel(phase)
+                for case in (0, 3, "positive-zero"):
+                    with self.subTest(case=case):
+                        lhs, rhs, expected = (
+                            _positive_zero_panel() if case == "positive-zero" else _panel(case)
+                        )
                         result = cosim_atlas.run_program(
                             model, state, _object_words(SOURCE),
                             preload=[(0x90000000, lhs), (0x90000800, rhs),

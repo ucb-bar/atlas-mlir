@@ -221,10 +221,31 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
   assert(ctx.stream && "a DMA stream is decoded");
   const AtlasStream &s = *ctx.stream;
   const auto &bases = ctx.dmaUpperEntry;
+  // Transfers stay in flight across a block boundary only into and out of an
+  // analyzed loop (AtlasStream::dmaMayCross), so this block's pending transfers
+  // are the ones the block before it ended with.
+  std::vector<Transfer> pending;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];
-    std::vector<Transfer> pending;
+    if (const AtlasLoop *loop = s.loop(block)) {
+      const std::optional<AtlasVmemAccess> &touched = s.factsOf(*loop).access;
+      // Its addresses change with each iteration, so what it touches over all
+      // of them stands for each of its instructions; unknown, it may be
+      // anywhere.
+      llvm::SmallVector<Span, 2> accesses;
+      if (!touched) {
+        accesses = {{std::nullopt, std::nullopt, false}, {std::nullopt, std::nullopt, true}};
+      } else {
+        for (auto [range, write] : {std::pair{touched->reads, false}, std::pair{touched->writes, true}})
+          if (!range.empty())
+            accesses.push_back({range.begin, uint32_t(range.end - range.begin), write});
+      }
+      for (const Span &access : accesses)
+        for (Transfer &other : pending)
+          if (failed(compare(s.ops[loop->begin], access, other.vmem, "VMEM", other.launch)))
+            return failure();
+    }
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
       Operation *op = s.ops[i];
       if (auto config = dyn_cast<DMAConfigOp>(op)) {
@@ -287,7 +308,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
       // results conservatively become unknown; SELI leaves scalar regs alone.
       applyScalar(s.instrs[i], regs);
     }
-    if (!pending.empty())
+    if (!pending.empty() && !s.dmaMayCross(block))
       return pending.front().launch.emitOpError(
           "DMA memory transfer crosses a basic-block boundary");
   }

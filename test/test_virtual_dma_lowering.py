@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import importlib.util
 from itertools import product
+import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
+import atlas_assembler as assembler
 from test_virtual_dma import (
     STATE, constants, copy, dma_load, dma_store, tile, wrap,
 )
@@ -95,6 +97,22 @@ def queued_transfers(loads: int = 1, stores: int | None = None, *, shared_output
         body.append(dma_store("fp8", before, after, f"t{index % loads}").replace("%addr, %size", f"%{output}, %size"))
         before = after
     return wrap(body, final=before)
+
+
+def pack_beside_load() -> str:
+    """A BF16 load, then a PACK of an unrelated tile, then the load's use."""
+    return wrap([
+        f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
+        "    %size8 = arith.constant 1024 : i32",
+        "    %out = arith.constant -2146435072 : i32",
+        f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
+        f': ({STATE}) -> ({STATE}, {tile("bf16")})',
+        dma_load("bf16", "input", "loaded"),
+        f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} '
+        f': ({tile("bf16")}) -> {tile("fp8")}',
+        dma_store("fp8", "loaded", "stored", "packed").replace("%addr, %size", "%out, %size8"),
+        dma_store("bf16", "stored", "done"),
+    ], final="done")
 
 
 class VirtualDMALoweringTest(unittest.TestCase):
@@ -206,24 +224,20 @@ class VirtualDMALoweringTest(unittest.TestCase):
         # All eight stores can remain in flight until the ninth reuses one.
         self.assertFalse(any(entry["operation"] == "atlas.dma_wait" for entry in entries[first[0] + 1:launches[8][0]]))
 
-    def test_pack_drains_an_independent_load(self) -> None:
-        source = wrap([
-            f'    %io0 = "atlas.virtual_start"() : () -> {STATE}', *constants("bf16"),
-            "    %size8 = arith.constant 1024 : i32",
-            "    %out = arith.constant -2146435072 : i32",
-            f'    %input, %seed = "atlas.virtual_input_bf16"(%io0) {{index = 0 : i32}} '
-            f': ({STATE}) -> ({STATE}, {tile("bf16")})',
-            dma_load("bf16", "input", "loaded"),
-            f'    %packed = "atlas.virtual_pack_fp8"(%seed) {{scale_code = 127 : i32}} '
-            f': ({tile("bf16")}) -> {tile("fp8")}',
-            dma_store("fp8", "loaded", "stored", "packed").replace(
-                "%addr, %size", "%out, %size8"),
-            dma_store("bf16", "stored", "done"),
-        ], final="done")
-        _, entries = self.wait_checked(source)
-        pack = next(i for i, entry in enumerate(entries) if entry["operation"] == "atlas.vpu_pack")
-        self.assert_wait_before(entries, pack, 0)
-        self.assertFalse(any(entry["operation"] == "atlas.vload" for entry in entries[pack - 2:pack]))
+    def test_pack_leaves_an_independent_load_in_flight(self) -> None:
+        # The PACK's relayout loop touches only its own scratch, so the load
+        # stays pending through all of the PACK and completes just before the
+        # first staging VLOAD of its tile.
+        _, entries = self.wait_checked(pack_beside_load())
+        launch = next(i for i, entry in enumerate(entries)
+                      if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 0)
+        [wait] = [i for i, entry in enumerate(entries)
+                  if entry["operation"] == "atlas.dma_wait" and entry["fields"].get(MARKER) == 0]
+        pack = [i for i, entry in enumerate(entries) if entry["fields"].get("atlas.virtual_cfg_helper") == "pack"]
+        self.assertLess(launch, pack[0])
+        self.assertLess(pack[-1], wait)
+        self.assertEqual(entries[wait + 1]["operation"], "atlas.vload")
+        self.assert_wait_before(entries, wait + 1, 0)
 
     def test_boundary_tiles_drain_pending_transfers(self) -> None:
         for kind in ("input_fp8", "input_bf16", "output_bf16"):
@@ -289,8 +303,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
     def test_wait_insertion_requires_each_transfers_owned_wait_record(self) -> None:
         lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
-        # Delete only the first wait record, leaving the lowered stream intact.
-        changed, removed = re.subn(r'\{[^{}]*kind = "dma_wait"[^{}]*\}, ', "", lowered.stdout, count=1)
+        # Change only the first wait record's kind, leaving the lowered stream intact.
+        changed, removed = re.subn(r'kind = "dma_wait"', 'kind = "vload"', lowered.stdout, count=1)
         self.assertEqual(removed, 1)
         result = run("atlas-opt", changed, "--insert-atlas-dma-waits")
         self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -373,7 +387,34 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertEqual(loads, [window + half * 256
                                          for _, _, window in completions for half in (0, 1)])
 
-    def test_launch_completion_separation_preserves_mxu_and_scalar_register_reuse(self) -> None:
+    def test_a_loaded_tile_takes_registers_at_its_first_use(self) -> None:
+        # With an FP8 value present the registers hold 15 BF16 pairs. `a` and
+        # the 14 tiles derived from it fill them while `b`, launched beside
+        # `a`, waits in its staging window until its tiles are staged at its
+        # first use, after the 14 are stored.
+        from test_virtual_scheduling import S, const, dma_load as launch, dma_store as store, function, start, unary
+        lines = [start(), const("a_addr", -1879048192), const("b_addr", -1879046144),
+                 const("f_addr", -1879044096), const("size", 2048), const("half", 1024),
+                 launch("io0", "io1", "a", "a_addr", "size", "bf16"),
+                 launch("io1", "io2", "b", "b_addr", "size", "bf16"),
+                 launch("io2", "io3", "f", "f_addr", "half", "fp8")]
+        lines += [unary(f"u{i}", "a", "exp") for i in range(14)]
+        state = "io3"
+        for i, value in enumerate([f"u{i}" for i in range(14)] + ["y"]):
+            if value == "y":
+                lines.append(unary("y", "b"))
+            lines += [const(f"o{i}", -1878982656 + 2048 * i), store(state, f"s{i}", value, f"o{i}")]
+            state = f"s{i}"
+        lines.append(f"return %{state} : {S}")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "allocation.json"
+            result = run("atlas-opt", function("prefetch", lines),
+                         f"--lower-atlas-virtual-to-machine=allocation-report={path}",
+                         "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(path.read_text())["registers"]["bf16"]["peak_live"], 15)
+
+    def test_launch_completion_separation_preserves_mxu_work_and_builds_constant_commands(self) -> None:
         _, entries = self.checked(independent_work())
         launch = next(i for i, entry in enumerate(entries)
                       if entry["operation"] == "atlas.dma" and MARKER in entry["fields"])
@@ -381,13 +422,12 @@ class VirtualDMALoweringTest(unittest.TestCase):
                     if entries[i]["operation"] == "atlas.dma_wait")
         interval = entries[launch + 1:wait]
         self.assertTrue(any(entry["operation"] == "atlas.mxu_matmul" for entry in interval))
+        # The constant address and size are built in x7 and x9 at the launch, so
+        # no scalar register holds them.
         captures = [entry["fields"] for entry in entries[max(0, launch - 5):launch]
-                    if entry["operation"] == "atlas.alu_imm"
-                    and entry["fields"]["dst"] in (7, 9)
-                    and entry["fields"]["src"] != 0]
+                    if entry["fields"].get("dst") in (7, 9)]
         self.assertEqual({fields["dst"] for fields in captures}, {7, 9})
-        sources = {fields["src"] for fields in captures}
-        self.assertTrue(any(entry["fields"].get("dst") in sources for entry in interval))
+        self.assertTrue(all(fields.get("src", fields["dst"]) == fields["dst"] for fields in captures))
         store = next(i for i, entry in enumerate(entries)
                      if entry["operation"] == "atlas.dma"
                      and MARKER in entry["fields"] and entry["fields"]["direction"] == "store")
@@ -436,9 +476,10 @@ class VirtualDMALoweringTest(unittest.TestCase):
                                         "atlas.mxu_matmul", "atlas.mxu_matmul",
                                         "atlas.mxu_pop"] + ["atlas.vstore"] * halves
                                  + ["atlas.dma", "atlas.dma_wait"])
+                # The weight's register is free once it is pushed, before the
+                # activation is staged, so the two may share it.
                 loads = [entry["fields"] for entry in entries
                          if entry["operation"] == "atlas.vload"]
-                self.assertNotEqual(loads[0]["dst"], loads[1]["dst"])
                 mxu = [entry["fields"] for entry in entries
                        if entry["operation"].startswith("atlas.mxu_")]
                 self.assertTrue(all(fields["unit"] == unit for fields in mxu))
@@ -594,7 +635,8 @@ class VirtualDMALoweringTest(unittest.TestCase):
         lines = machine.splitlines()
         launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
         wait = next(i for i in range(launch + 1, len(lines)) if '"atlas.dma_wait"' in lines[i])
-        scalar = next(i for i in range(launch + 1, wait) if '"atlas.alu_imm"' in lines[i])
+        scalar = next(i for i in range(launch + 1, wait)
+                      if '"atlas.alu_imm"' in lines[i] or '"atlas.upper"' in lines[i])
         mxu = next(i for i in range(launch + 1, wait) if '"atlas.mxu_matmul"' in lines[i])
         replacements = [
             ("missing wait", wait, replace_operation(lines[wait], "alu_imm", 'dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, kind = "addi"')),
@@ -690,29 +732,28 @@ class VirtualDMALoweringTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location("selected_virtual_dma_assembler", Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for fmt in ("fp8", "bf16"):
             for entry in instructions(lower(copy(fmt))):
                 operation, fields = entry["operation"], entry["fields"]
                 if operation == "atlas.dma":
                     if fields["direction"] == "load":
-                        name, args = "DMA_LOAD", (fields["reg"], fields["dram"], fields["size"], fields["channel"])
+                        text = (f'dma.load x{fields["reg"]}, x{fields["dram"]}, '
+                                f'x{fields["size"]}, ch{fields["channel"]}')
                     else:
-                        name, args = "DMA_STORE", (fields["dram"], fields["reg"], fields["size"], fields["channel"])
+                        text = (f'dma.store x{fields["dram"]}, x{fields["reg"]}, '
+                                f'x{fields["size"]}, ch{fields["channel"]}')
                 elif operation == "atlas.dma_wait":
-                    name, args = "DMA_WAIT", (fields["channel"],)
+                    text = f'dma.wait ch{fields["channel"]}'
                 elif operation == "atlas.dma_config":
-                    name, args = "DMA_CONFIG", (fields["base_reg"], fields["channel"])
+                    text = f'dma.config x{fields["base_reg"]}, ch{fields["channel"]}'
                 elif operation in ("atlas.vload", "atlas.vstore"):
-                    name = "VLOAD" if operation == "atlas.vload" else "VSTORE"
-                    args = (fields["dst" if operation == "atlas.vload" else "src"], fields["base"], fields["offset"])
+                    register = fields["dst" if operation == "atlas.vload" else "src"]
+                    mnemonic = "vload" if operation == "atlas.vload" else "vstore"
+                    text = f'{mnemonic} m{register}, {fields["offset"]}(x{fields["base"]})'
                 else:
                     continue
-                with self.subTest(fmt=fmt, operation=name):
-                    self.assertEqual(entry["word_u32"], getattr(assembler, name)(*args))
+                with self.subTest(fmt=fmt, operation=operation):
+                    self.assertEqual(entry["word_u32"], assembler.word(text))
 
 
 if __name__ == "__main__":

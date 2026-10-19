@@ -213,6 +213,23 @@ bool AtlasStream::fallsThrough(size_t block) const {
          !endsInHalt(block);
 }
 
+const AtlasLoop *AtlasStream::loop(size_t block) const {
+  const AtlasLoop *loop = findAtlasLoopAt(loops, starts[block]);
+  return loop && loop->begin == starts[block] ? loop : nullptr;
+}
+
+const AtlasLoopFacts &AtlasStream::factsOf(const AtlasLoop &loop) const {
+  assert(&loop >= loops.data() && &loop < loops.data() + loops.size() &&
+         "facts exist for this stream's own loops");
+  return loopFacts[&loop - loops.data()];
+}
+
+bool AtlasStream::dmaMayCross(size_t block) const {
+  if (block + 1 >= starts.size())
+    return false;
+  return loop(block) || (fallsThrough(block) && loop(block + 1));
+}
+
 static std::atomic<unsigned> decodeCount{0};
 
 unsigned mlir::atlas::atlasStreamDecodeCount() { return decodeCount; }
@@ -345,6 +362,21 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
+  // A loop's back-edge target and the instruction after its delay slot are
+  // leaders, and nothing between them can be, so each loop fills one block.
+  for (const AtlasLoop &loop : findAtlasLoops(ops)) {
+    size_t block = blockAt[loop.begin];
+    assert(s.blockEnd(block) == loop.end() && "an analyzed loop fills one block");
+    AtlasLoopFacts facts;
+    if (block > 0 && s.fallsThrough(block - 1)) {
+      facts.entry = entry[block - 1];
+      for (size_t i = starts[block - 1]; i < loop.begin; ++i)
+        applyScalar(instrs[i], facts.entry);
+    }
+    facts.access = proveAtlasLoopAccess(s, loop, facts.entry);
+    s.loops.push_back(loop);
+    s.loopFacts.push_back(std::move(facts));
+  }
   return s;
 }
 
@@ -409,9 +441,49 @@ LogicalResult mlir::atlas::checkAtlasStream(
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
+  // Transfers stay in flight across a block boundary only into and out of an
+  // analyzed loop (AtlasStream::dmaMayCross), so a block starts with the
+  // transfers the block before it ended with.
+  std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+  auto anyPending = [&] { return llvm::any_of(pending, [](const auto &p) { return !p.empty(); }); };
+  auto meetsPending = [&](size_t i, const Footprint &f) -> LogicalResult {
+    for (int ch = 0; ch < 8; ++ch)
+      for (const auto &[k, dma] : pending[ch]) {
+        auto conflict = provider.dmaConflict(dma, f);
+        if (!conflict.error.empty())
+          return s.ops[i]->emitOpError(conflict.error);
+        if (conflict.value.conflict)
+          return s.ops[i]->emitOpError()
+                 << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
+                 << " on channel " << ch
+                 << ", which may still be in flight; a delay cannot cover "
+                    "a DMA transfer, so add atlas.dma_wait first";
+      }
+    return success();
+  };
   for (size_t b = 0; b < s.starts.size(); ++b) {
     RegValues regs = s.entry[b];
-    std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+    // An analyzed loop's addresses change with each iteration, so its instructions
+    // meet the pending transfers as it runs from the registers it is entered
+    // with, not once with the registers its block joins.
+    const AtlasLoop *loop = s.loop(b);
+    if (loop && anyPending()) {
+      RegValues iteration = s.factsOf(*loop).entry;
+      auto exit = runAtlasLoop(
+          s.ops, *loop, [&]() -> const RegValues & { return iteration; },
+          [&](size_t i) -> LogicalResult {
+            Footprint f = provider.footprint(s.instrs[i], iteration);
+            applyScalar(s.instrs[i], iteration);
+            if (!f.error.empty())
+              return s.ops[i]->emitOpError(f.error);
+            return meetsPending(i, f);
+          });
+      if (failed(exit))
+        return failure();
+      if (*exit != AtlasLoopExit::Exited)
+        return s.ops[loop->branch]->emitOpError(
+            "analyzed loop beside a pending DMA transfer has no decidable exit");
+    }
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
@@ -428,18 +500,8 @@ LogicalResult mlir::atlas::checkAtlasStream(
         for (int ch = 0; ch < 8; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
-      for (int ch = 0; ch < 8; ++ch)
-        for (const auto &[k, dma] : pending[ch]) {
-          auto conflict = provider.dmaConflict(dma, f);
-          if (!conflict.error.empty())
-            return s.ops[i]->emitOpError(conflict.error);
-          if (conflict.value.conflict)
-            return s.ops[i]->emitOpError()
-                   << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
-                   << " on channel " << ch
-                   << ", which may still be in flight; a delay cannot cover "
-                      "a DMA transfer, so add atlas.dma_wait first";
-        }
+      if (!loop && failed(meetsPending(i, f)))
+        return failure();
       bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
       if (command && !pending[op.channel].empty())
         s.ops[i]->emitWarning()
@@ -459,14 +521,15 @@ LogicalResult mlir::atlas::checkAtlasStream(
         pending[op.channel].push_back({i, f});
       applyScalar(in, regs);
     }
-    // Timing is checked one block at a time, so a transfer must complete in
-    // the block that starts it, as verifyAtlasTimedStream requires.
-    for (int ch = 0; ch < 8; ++ch)
-      if (!pending[ch].empty())
-        return s.ops[pending[ch].back().first]->emitOpError(
-            "may still be in flight when its block ends; timing requires DMA "
-            "completion before a block boundary, so add atlas.dma_wait in "
-            "this block");
+    // Timing is checked one block at a time, so elsewhere a transfer must
+    // complete in the block that starts it, as verifyAtlasTimedStream requires.
+    if (!s.dmaMayCross(b))
+      for (int ch = 0; ch < 8; ++ch)
+        if (!pending[ch].empty())
+          return s.ops[pending[ch].back().first]->emitOpError(
+              "may still be in flight when its block ends; timing requires DMA "
+              "completion before a block boundary, so add atlas.dma_wait in "
+              "this block");
   }
   return success();
 }
@@ -592,6 +655,8 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
   if (failed(checkAtlasStream(s, provider)))
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
+  // As in checkAtlasStream, DMA stays in flight only into and out of an analyzed loop.
+  std::array<Operation *, 8> pendingDMA{};
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto reservations = provider.createReservations();
@@ -601,7 +666,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
     TimingReservations &table = *reservations.value;
     std::vector<Issued> issued;
-    std::array<Operation *, 8> pendingDMA{};
     int cycle = 0;
     int drained = 0;
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
@@ -656,9 +720,10 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
       cycle += gap.value;
     }
-    for (Operation *launch : pendingDMA)
-      if (launch)
-        return launch->emitOpError("timing verification requires DMA completion before a block boundary");
+    if (!s.dmaMayCross(block))
+      for (Operation *launch : pendingDMA)
+        if (launch)
+          return launch->emitOpError("timing verification requires DMA completion before a block boundary");
     if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
       int idle = 0;
       if (s.fallsThrough(block))

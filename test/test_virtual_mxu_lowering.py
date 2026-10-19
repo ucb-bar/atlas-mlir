@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
-from pathlib import Path
 import unittest
 
+import atlas_assembler as assembler
 from test_virtual_lowering import BIN, emitted, lower, object_words, run, shorten_delay
 from test_virtual_mxu_handles import (
     EXAMPLE, STATE, FP8, BF16, acc, load, reset, accumulate, readout,
@@ -307,27 +306,21 @@ class VirtualMXULoweringTest(unittest.TestCase):
         root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_virtual_mxu_assembler", Path(root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         for unit in (0, 1):
             for entry in instructions(lower(continuation(unit, reload_weight=True))):
                 fields = entry["fields"]
                 operation = entry["operation"]
                 if operation == "atlas.mxu_push":
-                    name, args = "VMATPUSH_W", (0, fields["src"])
+                    text = f'vmatpush.weight.mxu{unit} w0, m{fields["src"]}'
                 elif operation == "atlas.mxu_matmul":
-                    name = "VMATMUL_ACC" if fields["accumulate"] else "VMATMUL"
-                    args = (0, fields["src"], 0)
+                    mnemonic = "vmatmul.acc" if fields["accumulate"] else "vmatmul"
+                    text = f'{mnemonic}.mxu{unit} acc0, m{fields["src"]}, w0'
                 elif operation == "atlas.mxu_pop":
-                    name, args = "VMATPOP_BF16", (fields["dst"], 0)
+                    text = f'vmatpop.bf16.acc.mxu{unit} m{fields["dst"]}, acc0'
                 else:
                     continue
-                with self.subTest(unit=unit, operation=name):
-                    expected = getattr(assembler, f"{name}_MXU{unit}")(*args)
-                    self.assertEqual(entry["word_u32"], expected)
+                with self.subTest(unit=unit, operation=operation):
+                    self.assertEqual(entry["word_u32"], assembler.word(text))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import unittest
 
 from test_delay_insertion import program
 from test_virtual_dma import copy
-from test_virtual_dma_lowering import STAGING_WORD
+from test_virtual_dma_lowering import STAGING_WORD, pack_beside_load
 from test_virtual_lowering import lower, run, virtual_chain
 from verification_support import (
     INCOMPLETE, MARKER as VERSION, NOP, STREAM_REWRITES, TRANSFER, UNMARKED, UNSUPPORTED, BoundaryChecks, assert_boundaries,
@@ -63,10 +63,10 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         machine = lower(copy())
         lines = machine.splitlines()
         load = launch(machine)
-        address = next(i for i in range(load) if "dst = 7 : i32" in lines[i])
-        size = next(i for i in range(load) if "dst = 9 : i32" in lines[i])
-        staging = last_constant_write(machine, load, 4)
-        mutations = [("DRAM address", address, "immediate = 0", "immediate = 32"), ("byte length", size, "immediate = 0", "immediate = -32"),
+        # Constant DRAM addresses and byte lengths are built in x7 and x9 at each launch.
+        address, size, staging = (last_constant_write(machine, load, reg) for reg in (7, 9, 4))
+        mutations = [("DRAM address", address, lines[address], shift_constant(lines[address], 32)),
+                     ("byte length", size, lines[size], shift_constant(lines[size], 32)),
                      ("staging word", staging, lines[staging], shift_constant(lines[staging], 256)),
                      ("direction", load, 'direction = "load"', 'direction = "store"')]
         changes = [(name, replace_line(machine, index, old, new)) for name, index, old, new in mutations]
@@ -80,7 +80,7 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         changes.append(("channel", replace_line(replace_line(machine, load, "channel = 0", "channel = 1"), wait, "channel = 0", "channel = 1")))
         changes = [(name, changed, "DMA contract") for name, changed in changes]
         changes += [("unknown DRAM upper word", machine.replace("base_reg = 0 : i32", "base_reg = 15 : i32"), "DMA contract cannot prove captured DRAM upper word"),
-                    ("unknown DRAM byte address", machine.replace('dst = 10 : i32, immediate = 524288 : i32, kind = "lui"', 'dst = 10 : i32, immediate = 524288 : i32, kind = "auipc"'),
+                    ("unknown DRAM byte address", machine.replace('dst = 7 : i32, immediate = 524288 : i32, kind = "lui"', 'dst = 7 : i32, immediate = 524288 : i32, kind = "auipc"'),
                      "DMA contract cannot prove captured DRAM byte address")]
         for name, changed, diagnostic in changes:
             with self.subTest(mutation=name):
@@ -149,8 +149,8 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
 
     def test_structured_fields_and_words_cannot_jointly_bypass_contract(self) -> None:
         structured = checked(self, lower(copy()), "--convert-atlas-to-llvm-calls")
-        index = line_index(structured, 'atlas.source_op = "atlas.alu_imm"', "dst = 7 : i32")
-        changed = rewrite_line(structured, index, lambda line: structured_word(line, "immediate = 0", "immediate = 32", 20, 12, 32))
+        index = line_index(structured, 'atlas.source_op = "atlas.alu_imm"', "dst = 9 : i32")
+        changed = rewrite_line(structured, index, lambda line: structured_word(line, "immediate = -2048", "immediate = -2016", 20, 12, -2016 & 4095))
         self.assertEqual(contract_text(changed, "dma"), contract_text(structured, "dma"))
         finalize_rejects(self, changed, "DMA contract")
 
@@ -208,6 +208,59 @@ class DMAContractVerificationTest(BoundaryChecks, unittest.TestCase):
         self.rejected(remove_line(machine, waits[0]), "another DMA launch while its channel is pending")
         self.rejected("\n".join(machine.splitlines()[:waits[-1]] + ["}"]), "generated DMA has no matching DMA.WAIT")
         self.rejected(insert_after(machine, launches[0], [dma_wait(channel=1, identity=None)]), "DMA.WAIT has no pending DMA transfer")
+
+
+HELPER = 'atlas.virtual_cfg_helper = "pack"'
+BACK_EDGE = lambda line: '"atlas.branch"' in line and HELPER in line
+
+
+def helper_line(machine: str, name: str, *needles: str) -> int:
+    """The first line of the PACK's helper code that runs `name` with every needle."""
+    return lines_of(machine, name, HELPER, *needles)[0]
+
+
+class PackOverlapVerificationTest(BoundaryChecks, unittest.TestCase):
+    """A load stays pending across a PACK only while the PACK's relayout loop misses its staging window."""
+
+    def test_a_load_pending_across_a_pack_is_accepted(self) -> None:
+        for timed in (True, False):
+            with self.subTest(timed=timed):
+                machine = lower(pack_beside_load(), timed=timed)
+                [launch] = lines_of(machine, "dma", f"{TRANSFER} = 0 : i32")
+                [wait] = lines_of(machine, "dma_wait", f"{TRANSFER} = 0 : i32")
+                self.assertLess(launch, helper_line(machine, "vpu_pack"))
+                self.assertGreater(wait, lines_of(machine, "vload", HELPER)[-1])
+                self.accepted(machine)
+                if not timed:
+                    # Both timing passes carry the transfer through the loop
+                    # and verify what they write.
+                    assert_boundaries(self, machine, STREAM_REWRITES)
+
+    def test_the_relayout_loop_must_miss_the_pending_staging_window(self) -> None:
+        machine = lower(pack_beside_load())
+        staging = f"immediate = {STAGING_WORD * 4 >> 12} : i32"
+        conflict, unknown = "DMA memory conflict in VMEM", "cannot prove DMA memory disjointness in VMEM"
+        cases = (("writes", helper_line(machine, "upper", "dst = 12 : i32"), "immediate = 32 : i32", staging, conflict),
+                 ("reads", helper_line(machine, "upper", "dst = 10 : i32"), "immediate = 32 : i32", staging, conflict),
+                 ("has an unknown row limit", helper_line(machine, "alu_imm", "dst = 14 : i32"), "src = 0 : i32", "src = 27 : i32", unknown))
+        for name, index, old, new, diagnostic in cases:
+            with self.subTest(loop=name):
+                self.rejected(replace_line(machine, index, old, new), diagnostic)
+
+    def test_the_relayout_loop_holds_no_transfer_boundary_or_other_entry(self) -> None:
+        machine = lower(pack_beside_load())
+        first = helper_line(machine, "scalar_load", 'kind = "lw"')
+        pending = "unexpected instruction while DMA is pending"
+        # With a wait in its body the loop is no PACK loop, so its scalar
+        # memory may not issue beside the transfer.
+        inside = insert_after(machine, first, [dma_wait(channel=0, identity=0)])
+        inside = rewrite_line(inside, BACK_EDGE, lambda line: re.sub(
+            r"offset_bytes = (-\d+)", lambda m: f"offset_bytes = {int(m[1]) - 2}", line))
+        self.rejected(inside, pending)
+        # Nor is a branch into the body an instruction a pending transfer admits.
+        entry = insert_after(machine, first - 1, [
+            ("branch", 'kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = 6 : i32'), NOP])
+        self.rejected(entry, pending)
 
 
 if __name__ == "__main__":

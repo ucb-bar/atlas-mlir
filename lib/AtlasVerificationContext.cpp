@@ -18,6 +18,12 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
   llvm::SmallVector<AtlasDMAInterval> intervals;
   llvm::DenseMap<unsigned, AtlasDMAInterval> pending; // waitPC not yet known
   std::set<int32_t> launchIDs; // any tag; INT32_MAX is DenseMap's empty key
+  llvm::SmallVector<Operation *> ops;
+  for (Operation &op : module.getBody()->getOperations())
+    if (!isa<StartOp>(op))
+      ops.push_back(&op);
+  // The only loops an interval may hold (canOverlapAtlasGeneratedDMA).
+  std::vector<AtlasLoop> loops = findAtlasLoops(ops);
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;
@@ -49,7 +55,7 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
       transfer->second.waitPC = currentPC;
       intervals.push_back(transfer->second);
       pending.erase(transfer);
-    } else if (!pending.empty() && !canOverlapAtlasGeneratedDMA(&op)) {
+    } else if (!pending.empty() && !canOverlapAtlasGeneratedDMA(ops, loops, currentPC)) {
       return op.emitOpError("unexpected instruction while DMA is pending");
     }
     if (isa<BranchOp, JumpOp>(op) && !isExactAtlasNop(op.getNextNode()))
@@ -59,27 +65,21 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
   if (!pending.empty())
     return pending.begin()->second.launch.emitOpError("generated DMA has no matching DMA.WAIT");
   if (!intervals.empty()) {
-    pc = 0;
-    for (Operation &op : module.getBody()->getOperations()) {
-      if (isa<StartOp>(op))
+    for (auto [currentPC, op] : llvm::enumerate(ops)) {
+      if (auto jump = dyn_cast<JumpOp>(op); jump && jump.getKind() == "jalr")
+        return op->emitOpError(
+            "generated explicit DMA intervals forbid unproven JALR targets");
+      std::optional<int64_t> distance = atlasRedirectDistance(op);
+      // An analyzed loop's back-edge stays inside every interval that holds the
+      // loop: intervals start and end at DMA instructions, which no loop holds.
+      const AtlasLoop *loop = findAtlasLoopAt(loops, currentPC);
+      if (!distance || (loop && loop->branch == currentPC))
         continue;
-      int64_t currentPC = pc++;
-      std::optional<int64_t> target;
-      // Selected Atlas redirects encode twice the instruction-word distance.
-      if (auto branch = dyn_cast<BranchOp>(op))
-        target = currentPC +
-                 branch.getOffsetBytesAttr().getValue().getSExtValue() / 2;
-      else if (auto jump = dyn_cast<JumpOp>(op)) {
-        if (jump.getKind() == "jalr")
-          return op.emitOpError(
-              "generated explicit DMA intervals forbid unproven JALR targets");
-        target = currentPC + jump.getOffsetAttr().getValue().getSExtValue() / 2;
-      }
-      if (target)
-        for (const AtlasDMAInterval &interval : intervals)
-          if (*target > interval.launchPC && *target <= interval.waitPC)
-            return op.emitOpError(
-                "generated redirect target enters a pending DMA interval");
+      int64_t target = int64_t(currentPC) + *distance;
+      for (const AtlasDMAInterval &interval : intervals)
+        if (target > interval.launchPC && target <= interval.waitPC)
+          return op->emitOpError(
+              "generated redirect target enters a pending DMA interval");
     }
   }
   return success();

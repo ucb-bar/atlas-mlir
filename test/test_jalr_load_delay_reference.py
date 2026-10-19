@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -10,22 +9,12 @@ import sys
 import tempfile
 import unittest
 
+import atlas_assembler as assembler
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
 SOURCE = ROOT / "test/examples/jalr_load_delay.mlir"
 ASSEMBLY = ROOT / "test/examples/jalr_load_delay.S"
-
-
-def _assembler():
-    root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
-    if not root:
-        raise unittest.SkipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-    spec = importlib.util.spec_from_file_location(
-        "selected_load_jalr_assembler", pathlib.Path(root) / "assembler.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _words() -> tuple[int, ...]:
@@ -36,12 +25,13 @@ def _words() -> tuple[int, ...]:
 
 class JALRLoadDelayReferenceTest(unittest.TestCase):
     def test_typed_words_and_selected_source_timing(self) -> None:
-        assembler = _assembler()
+        if not os.environ.get("ATLAS_ASSEMBLER_ROOT"):
+            self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
         words = _words()
         self.assertEqual(len(words), 14)
         self.assertEqual(words, tuple(assembler.assemble(ASSEMBLY.read_text())))
-        self.assertEqual(words[5], assembler.DELAY_INSN(8))
-        self.assertEqual(words[6], assembler.JALR(10, 1, 0))
+        self.assertEqual(words[5], assembler.word("delay 8"))
+        self.assertEqual(words[6], assembler.word("jalr x10, x1, 0"))
         printed = subprocess.run([str(BIN / "atlas-opt"), str(SOURCE)],
                                  text=True, capture_output=True, check=True)
         reparsed = subprocess.run([str(BIN / "atlas-opt"), "-"],
@@ -91,7 +81,8 @@ class JALRLoadDelayReferenceTest(unittest.TestCase):
             self.skipTest("set selected-source-linked ARC, ModeLIR, and RTL paths")
         model, state, modelir, _ = (pathlib.Path(os.environ[key]).resolve(strict=True)
                                    for key in keys)
-        assembler = _assembler()
+        if not os.environ.get("ATLAS_ASSEMBLER_ROOT"):
+            self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
         words = _words()
         fence_source = SOURCE.read_text().replace(
             '"atlas.delay"(%s5) {cycles = 8 : i32}',
@@ -105,7 +96,7 @@ class JALRLoadDelayReferenceTest(unittest.TestCase):
         self.assertEqual(fence_words,
                          tuple(assembler.assemble(ASSEMBLY.read_text().replace(
                              "DELAY 8", "FENCE"))))
-        self.assertEqual(fence_words[5], assembler.FENCE())
+        self.assertEqual(fence_words[5], assembler.word("fence"))
         self.assertEqual(fence_words[:5] + fence_words[6:], words[:5] + words[6:])
         guards = ((0x90000000, b"\xA5" * 32),
                   (0x90000400, b"\x5A" * 32))
@@ -124,9 +115,9 @@ class JALRLoadDelayReferenceTest(unittest.TestCase):
             cosim_atlas.CosimCore = SelectedCore
             try:
                 for name, opcode, target, marker in (
-                    ("delay8", assembler.DELAY_INSN(8), 11, 3),
-                    ("delay0", assembler.DELAY_INSN(0), 8, 2),
-                    ("fence", assembler.FENCE(), 8, 2),
+                    ("delay8", assembler.word("delay 8"), 11, 3),
+                    ("delay0", assembler.word("delay 0"), 8, 2),
+                    ("fence", assembler.word("fence"), 8, 2),
                 ):
                     with self.subTest(name=name):
                         program = list(fence_words if name == "fence" else words)

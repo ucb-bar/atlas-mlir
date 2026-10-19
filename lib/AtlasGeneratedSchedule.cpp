@@ -14,15 +14,17 @@
 using namespace mlir;
 using namespace mlir::atlas;
 
-bool mlir::atlas::canOverlapAtlasGeneratedDMA(Operation *op) {
+bool mlir::atlas::canOverlapAtlasGeneratedDMA(ArrayRef<Operation *> ops,
+                                              ArrayRef<AtlasLoop> loops, size_t pc) {
+  Operation *op = ops[pc];
   // ScalarCore captures DMA operands at launch; later scalar writes are safe.
   if (isa<DelayOp, MXUPushOp, MXUMatmulOp, MXUPopOp, VPUUnaryOp, VPUBinaryOp,
-          VPUReduceOp, VLIOp, XLUTransposeOp, VLoadOp, VStoreOp, ALURegOp,
-          ALUImmOp, UpperOp>(op))
+          VPUReduceOp, VPUPackOp, VLIOp, XLUTransposeOp, VLoadOp, VStoreOp,
+          ALURegOp, ALUImmOp, UpperOp>(op))
     return true;
-  if (auto load = dyn_cast<ScalarLoadOp>(op))
-    return load.getKind() == "seli";
-  return false;
+  if (auto load = dyn_cast<ScalarLoadOp>(op); load && load.getKind() == "seli")
+    return true;
+  return findAtlasLoopAt(loops, pc) != nullptr;
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(

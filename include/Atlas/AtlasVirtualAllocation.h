@@ -30,6 +30,11 @@ struct DMATransferPlacement {
   unsigned sizeReg;
 };
 
+// A PACK relayout row is 32 FP8 bytes: two 16-byte halves of four words,
+// which lowerPack copies one word at a time. It is fixed by the selected PACK
+// layout, not a parameter: lowerPack's loop is written for exactly this row.
+constexpr unsigned kPackRelayoutRowWords = 8;
+
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;
@@ -52,6 +57,8 @@ struct FixedResourcePlacement {
   unsigned dmaBaseReg;
   unsigned dmaDramReg;
   unsigned dmaSizeReg;
+  uint32_t spillWord;
+  uint32_t spillWindowWords;
   unsigned scaleReg;
   std::array<unsigned, 2> packSourceRegs;
   unsigned packDestinationReg;
@@ -104,13 +111,23 @@ public:
   // each value's placement, MXU slots, DMA channels and the VMEM windows the
   // lowering uses. Values are named as the function prints.
   llvm::json::Object report() const;
+  // The operation before which lowering stages the loaded tile `tile` into
+  // its registers, if any; query after allocate().
+  Operation *stagingPoint(Value tile) const;
+  // Typed feedback for pressure recovery; query after allocate().
+  const RegisterPressure &registerPressure(RegisterKind kind) const {
+    return pressure[static_cast<unsigned>(kind)];
+  }
 
 private:
   LogicalResult colorValues(RegisterKind kind);
   LogicalResult placeMXU(Block &block);
   LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
+  void stageLoads();
 
   func::FuncOp function;
+  // The loaded tiles whose staging VLOADs run right before each operation.
+  llvm::DenseMap<Operation *, llvm::SmallVector<Value, 2>> stagedBefore;
   llvm::DenseMap<Value, unsigned> tileRegs, fp8Regs, scalarRegs;
   llvm::DenseMap<Value, MXUPlacement> mxuResources;
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;

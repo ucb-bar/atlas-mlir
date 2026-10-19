@@ -217,11 +217,15 @@ void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
   regs[in.rd] = c == OpClass::Alu ? aluResult(in, regs) : std::nullopt;
 }
 
-int mlir::atlas::timing::dmaTransferCycles(long long bytes) {
-  // 32-bit link, 2 cycles per beat, 2 command words.
-  long long offchip = (bytes + 8 + 3) / 4 * 2;
-  long long vmem = (bytes + 63) / 64;
-  return static_cast<int>(std::max(1LL, std::max(offchip, vmem)));
+int mlir::atlas::timing::dmaTransferCycles(long long bytes, bool store) {
+  // The curves' peak bandwidths at the 500 MHz core clock they were measured
+  // with, and the start of an unloaded transfer; calibrated end to end on
+  // npu_model 337e9f2 (1 KiB: 781 cycles to load, 723 to store).
+  constexpr long long kCoreMHz = 500, kReadPeakMBps = 682, kWritePeakMBps = 738;
+  constexpr long long kStartCycles = 30, kBeatBytes = 32;
+  long long beats = std::max(1LL, (bytes + kBeatBytes - 1) / kBeatBytes);
+  long long peak = store ? kWritePeakMBps : kReadPeakMBps;
+  return static_cast<int>(kStartCycles + (beats * kBeatBytes * kCoreMHz + peak - 1) / peak);
 }
 
 int mlir::atlas::timing::unitCapacity(Unit u, int index) {
@@ -386,6 +390,15 @@ void scalarRegs(Builder &b, const Instr &in) {
 
 } // namespace
 
+ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues &regs) {
+  bool store = in.op->opClass == OpClass::ScalarStore;
+  int bytes = !store ? 4 : in.op->name == "sb" ? 1 : in.op->name == "sh" ? 2 : 4;
+  std::optional<long long> first;
+  if (auto address = scalarAddress(in, regs))
+    first = *address & ~static_cast<long long>(bytes - 1);
+  return {first, bytes, store};
+}
+
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                            const RegValues &regs) {
   Builder b;
@@ -416,29 +429,24 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
 
   case OpClass::ScalarLoad:
   case OpClass::ScaleLoad: {
-    auto addr = scalarAddress(in, regs);
+    ScalarAccess access = scalarAccess(in, regs);
     b.x(in.rs1, false, 0);
-    b.vmem(addr ? std::optional<long long>(*addr & ~3LL) : std::nullopt, 4,
-           false, 1, 1);
+    b.vmem(access.first, access.bytes, false, 1, 1);
     if (op.opClass == OpClass::ScaleLoad)
       b.e(in.rd, true, 3);
     else
       b.x(in.rd, true, 3);
     b.hold(Unit::ScalarLoad, 0, 0, 2);
     b.hold(Unit::ScalarWriteback, 0, 3, 3);
-    b.bankHold(addr, 1, 1);
+    b.bankHold(access.first, 1, 1);
     break;
   }
   case OpClass::ScalarStore: {
-    auto addr = scalarAddress(in, regs);
-    int size = in.op->name == "sb" ? 1 : in.op->name == "sh" ? 2 : 4;
+    ScalarAccess access = scalarAccess(in, regs);
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);
-    std::optional<long long> first;
-    if (addr)
-      first = *addr & ~static_cast<long long>(size - 1);
-    b.vmem(first, size, true, 1, 1);
-    b.bankHold(addr, 1, 1);
+    b.vmem(access.first, access.bytes, true, 1, 1);
+    b.bankHold(access.first, 1, 1);
     break;
   }
   case OpClass::VLoad:
@@ -640,7 +648,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.vmem(addr, bytes, load, 0, 0, true);
     if (addr && (*addr % 32 != 0))
       b.f.error = "DMA VMEM address must be 32-byte aligned";
-    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024);
+    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024, !load);
     break;
   }
   case OpClass::DmaConfig: {

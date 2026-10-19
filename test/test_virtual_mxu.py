@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 import json
+import os
 import re
 import shutil
 import struct
@@ -12,8 +11,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
-from test_virtual_lowering import BIN, EXAMPLES, ROOT, emitted, lower, object_words, run, shorten_delay
+from test_virtual_lowering import (
+    BIN,
+    EXAMPLES,
+    ROOT,
+    emitted,
+    lower,
+    object_words,
+    run,
+    shorten_delay,
+)
 
 
 def panel() -> bytes:
@@ -79,11 +88,11 @@ class VirtualMXUTest(unittest.TestCase):
         mlp_source = (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()
         nonunit = run(
             "atlas-opt", mlp_source.replace("scale_code = 127 : i32",
-                                             "scale_code = 128 : i32"),
+                                             "scale_code = 121 : i32"),
             "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         )
         self.assertNotEqual(nonunit.returncode, 0)
-        self.assertIn("unit E8M0 scale code 127 only", nonunit.stderr)
+        self.assertIn("122..128", nonunit.stderr)
         scratch_overlap = run(
             "atlas-opt", mlp_source.replace("index = 2 : i32",
                                              "index = 64 : i32"),
@@ -103,6 +112,37 @@ class VirtualMXUTest(unittest.TestCase):
         rejected = run("atlas-emit", changed)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("timing resource conflict: VLOAD path 0 busy", rejected.stderr)
+
+    def test_nonunit_pack_scale_changes_only_selected_seli_words(self) -> None:
+        mlp_source = (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()
+        baseline = json.loads(run("atlas-emit", lower(mlp_source),
+                                  "--program-json").stdout)["instructions"]
+        for code in (126, 128):
+            with self.subTest(scale_code=code):
+                source = mlp_source.replace("scale_code = 127 : i32",
+                                            f"scale_code = {code} : i32")
+                machine = lower(source)
+                self.assertEqual(run("atlas-opt", machine,
+                                     "--verify-atlas-generated-schedule").returncode, 0)
+                changed = json.loads(run("atlas-emit", machine,
+                                         "--program-json").stdout)["instructions"]
+                self.assertEqual(len(changed), len(baseline))
+                scale_loads = 0
+                for before, after in zip(baseline, changed):
+                    self.assertEqual(before["operation"], after["operation"])
+                    if (before["operation"] == "atlas.scalar_load"
+                            and before["fields"].get("kind") == "seli"
+                            and before["fields"].get("offset") == 127):
+                        self.assertEqual(after["fields"]["offset"], code)
+                        scale_loads += 1
+                    else:
+                        self.assertEqual(after["word_u32"], before["word_u32"])
+                self.assertGreater(scale_loads, 0)
+        invalid_scale = run("atlas-opt", mlp_source.replace(
+            "scale_code = 127 : i32", "scale_code = 256 : i32"),
+            "--lower-atlas-virtual-to-machine")
+        self.assertNotEqual(invalid_scale.returncode, 0)
+        self.assertIn("scale_code must be in [0, 255]", invalid_scale.stderr)
 
     def test_virtual_mlp_handoff_generates_all_stages(self) -> None:
         llvm = os.environ.get("ATLAS_LLVM_BIN")

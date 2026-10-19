@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import pathlib
 import subprocess
 import sys
 import unittest
 
+import atlas_assembler as assembler
 from test_mxu_reference import _object_words
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,11 +27,6 @@ class DMAPointerCaptureTest(unittest.TestCase):
         selected_root = os.environ.get("ATLAS_ASSEMBLER_ROOT")
         if not selected_root:
             self.skipTest("set ATLAS_ASSEMBLER_ROOT for selected assembler")
-        spec = importlib.util.spec_from_file_location(
-            "selected_dma_pointer_assembler", pathlib.Path(selected_root) / "assembler.py")
-        assert spec and spec.loader
-        assembler = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(assembler)
         emitted = _emitted()
         self.assertEqual(len(emitted), 16)
         self.assertEqual(emitted, tuple(assembler.assemble(ASSEMBLY.read_text())))
