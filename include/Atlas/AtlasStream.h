@@ -1,6 +1,8 @@
 #ifndef ATLAS_STREAM_H
 #define ATLAS_STREAM_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "Atlas/AtlasLoop.h"
 #include "Atlas/AtlasTimingProvider.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -79,6 +81,7 @@ LogicalResult verifyAtlasTiming(ModuleOp module);
 // keep their existing scope; requireTimed rejects explicitly untimed streams.
 LogicalResult verifyAtlasTimingState(ModuleOp module, bool requireTimed = false);
 void registerVerifyAtlasTimingPass();
+std::unique_ptr<Pass> createVerifyAtlasTimingPass();
 // DMA_CONFIG updates one shared upper address word, irrespective of channel.
 // Entry values are known only when all reachable incoming CFG edges agree.
 std::vector<std::optional<uint32_t>>

@@ -203,6 +203,9 @@ numerical policy, or availability across the stream.
 
 | Name | Kind | What it does |
 | --- | --- | --- |
+| `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
+| `--atlas-compile-verify`, `-schedule`, `-spill`, `-lower`, `-time` | pipeline | The five stages of `--atlas-compile`, in order, for tools that keep each stage's IR. |
+| `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. |
@@ -221,7 +224,7 @@ numerical policy, or availability across the stream.
 | `atlas-emit` | tool | Print words; `--map-json` word map; `--program-json` [program JSON](compiler-pipeline.md#physical-program-output). Needs timed state for generated programs unless `--allow-untimed`. |
 | `atlas-boot-pack` | tool | Package one reset-entry ELF `.text` with a fixed memory layout and manifest. |
 | `tools/export_llvm_handoff.py` | script | Build the full Atlas → LLVM → ELF bundle for the handoff examples. |
-| `tools/lower_atlas_program.py` | script | Run the virtual-to-words pipeline and keep every stage. |
+| `tools/lower_atlas_program.py` | script | Run the stages of `--atlas-compile` and emission, keeping every stage's artifact. |
 
 Both timing passes use npu-model's `rtl-match` rules, ported from
 atlas-compiler-experiments `3ae2b5d`, with DMA VMEM addresses counted in

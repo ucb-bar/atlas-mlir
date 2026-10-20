@@ -73,3 +73,7 @@ struct VerifyAtlasGeneratedSchedulePass
 void mlir::atlas::registerVerifyAtlasGeneratedSchedulePass() {
   PassRegistration<VerifyAtlasGeneratedSchedulePass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasGeneratedSchedulePass() {
+  return std::make_unique<VerifyAtlasGeneratedSchedulePass>();
+}

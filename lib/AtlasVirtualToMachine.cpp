@@ -1146,3 +1146,10 @@ struct LowerAtlasVirtualToMachinePass
 void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
   PassRegistration<LowerAtlasVirtualToMachinePass>();
 }
+
+std::unique_ptr<Pass>
+mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport) {
+  auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
+  pass->allocationReport = allocationReport.str();
+  return pass;
+}

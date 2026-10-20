@@ -9,13 +9,19 @@ Hardware facts refer to the pinned RTL (`ucb-bar/atlas-npu`
 
 ## Stages
 
-| Step | Result | Command |
+`atlas-opt --atlas-compile` runs steps 1 to 5 as one registered pipeline, with
+every verifier. The native binding's optimized pipeline and the captured Linalg
+build both use it, and `--atlas-compile --dump-pass-pipeline` prints its exact
+passes. It takes one function with explicit `atlas.input_dram_base` and
+`atlas.output_dram_base`.
+
+| Step | Result | Passes in `--atlas-compile` |
 | --- | --- | --- |
-| 1. Verify | virtual IR | `atlas-opt --verify-atlas-virtual-stream` |
-| 2. Schedule | virtual IR, reordered per block | `--schedule-atlas-virtual`, then `--spill-atlas-virtual` |
+| 1. Verify | virtual IR, live MXU handles saved as tiles | `--spill-atlas-mxu-state`, `--verify-atlas-virtual-stream` |
+| 2. Schedule | boundary tiles as explicit DMA, each block reordered, pressure spilled | `--lower-atlas-virtual-boundary-to-dma`, `--schedule-atlas-virtual`, `--spill-atlas-virtual`, each followed by `--verify-atlas-virtual-stream` |
 | 3. Lower | untimed machine IR | `--lower-atlas-virtual-to-machine` |
-| 4. DMA waits | adds `atlas.dma_wait` | `--insert-atlas-dma-waits`, then `--verify-atlas-generated-schedule` |
-| 5. Timing | adds `atlas.delay` | `--insert-atlas-delays` or `--schedule-atlas-stream`, then `--verify-atlas-timing` |
+| 4. DMA waits | adds `atlas.dma_wait` | `--insert-atlas-dma-waits`, `--verify-atlas-machine-stream`, `--verify-atlas-generated-schedule` |
+| 5. Timing | each block reordered, adds `atlas.delay` | `--schedule-atlas-stream`, then `--verify-atlas-machine-stream`, `--verify-atlas-timing`, `--verify-atlas-generated-schedule` |
 | 6. Emit | words, word map, program JSON | `atlas-emit`, `--map-json`, `--program-json` |
 | 7. LLVM | one inline-asm word block | `--convert-atlas-to-llvm-calls`, `--finalize-atlas-llvm-calls`, `mlir-translate`, `llc`, `ld.lld` |
 
@@ -44,24 +50,24 @@ The compiler first applies reuse to a clone and runs the actual allocator and al
 ### Driver
 
 [`tools/lower_atlas_program.py`](../tools/lower_atlas_program.py) runs steps 1
-to 6 and keeps every intermediate file. From the repository root:
+to 6 and keeps every intermediate file: it runs `--atlas-compile` as its five
+registered stages (`--atlas-compile-verify`, `-schedule`, `-spill`, `-lower`,
+`-time`), one command per artifact. From the repository root:
 
 ```sh
 python3 tools/lower_atlas_program.py test/examples/virtual_attention_tile.mlir \
   --atlas-bin-dir build/bin --output-dir out/attention
 ```
 
-The output directory must be new or empty. `--timing schedule-atlas-stream`
-reorders each block before adding delays; the default is `insert-atlas-delays`.
-`--spill` adds the spill passes. Without it, a scheduled order that needs
-spills fails at allocation, and `3-allocation.json` names what does not fit.
+The output directory must be new or empty.
 
 | File | Contents |
 | --- | --- |
-| `1-virtual.mlir`, `2-scheduled.mlir` | Verified and scheduled virtual source |
+| `1-virtual.mlir` | Source after MXU state spilling and verification |
+| `2-scheduled.mlir`, `2-spilled.mlir` | After boundary DMA and scheduling, then after spilling |
 | `3-allocated.mlir` | Untimed machine IR with DMA waits and resource contracts |
 | `3-allocation.json` | Register pressure and placement, MXU slots, DMA channels, VMEM windows, untimed word count, errors |
-| `4-timed.mlir` | Machine IR with delays |
+| `4-timed.mlir` | Stream-scheduled machine IR with delays |
 | `5-words.hex`, `5-map.json`, `5-program.json` | Words, word map, program JSON |
 | `commands.txt`, `log.txt` | Replayable commands and their diagnostics |
 

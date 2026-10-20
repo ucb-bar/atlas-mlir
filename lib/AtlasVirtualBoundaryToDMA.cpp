@@ -116,3 +116,7 @@ struct LowerAtlasVirtualBoundaryToDMAPass
 void mlir::atlas::registerLowerAtlasVirtualBoundaryToDMAPass() {
   PassRegistration<LowerAtlasVirtualBoundaryToDMAPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createLowerAtlasVirtualBoundaryToDMAPass() {
+  return std::make_unique<LowerAtlasVirtualBoundaryToDMAPass>();
+}

@@ -158,9 +158,12 @@ class VirtualMXUTest(unittest.TestCase):
             ], check=True, capture_output=True, text=True)
             manifest = json.loads((output / "manifest.json").read_text())
             name = "virtual_fp8_two_layer_mlp"
+            # The handoff ships what --atlas-compile produces.
+            compiled = run("atlas-opt", (EXAMPLES / f"{name}.mlir").read_text(), "--atlas-compile")
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
             self.assertEqual(manifest["examples"][name]["source_stage"],
                              "virtual_ssa")
-            self.assertEqual(manifest["examples"][name]["word_count"], len(emitted(lower((EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()))))
+            self.assertEqual(manifest["examples"][name]["word_count"], len(emitted(compiled.stdout)))
             self.assertEqual(
                 (output / f"{name}.virtual.mlir").read_bytes(),
                 (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_bytes(),
@@ -170,11 +173,8 @@ class VirtualMXUTest(unittest.TestCase):
                 .read_bytes(),
                 (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_bytes(),
             )
-            self.assertEqual(
-                (output / f"{name}.atlas.mlir").read_text(),
-                lower((EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()).rstrip()
-                + "\n",
-            )
+            self.assertEqual((output / f"{name}.atlas.mlir").read_text(),
+                             compiled.stdout.rstrip() + "\n")
             for suffix in ("llvm-structured.mlir", "llvm.mlir", "ll", "s",
                            "o", "elf", "disasm.txt", "words.txt",
                            "word-map.json", "physical-program.json"):

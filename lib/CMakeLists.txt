@@ -13,6 +13,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasDelayInsertion.cpp
   AtlasDMAWaitInsertion.cpp
   AtlasScheduling.cpp
+  AtlasPipeline.cpp
   AtlasVirtualVerification.cpp
   AtlasImmutableWeightReuse.cpp
   AtlasVirtualToMachine.cpp

@@ -305,3 +305,7 @@ struct InsertAtlasDMAWaitsPass
 void mlir::atlas::registerInsertAtlasDMAWaitsPass() {
   PassRegistration<InsertAtlasDMAWaitsPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass() {
+  return std::make_unique<InsertAtlasDMAWaitsPass>();
+}

@@ -668,3 +668,7 @@ void mlir::atlas::registerSpillAtlasVirtualPass() {
   registerSpillAtlasMXUStatePass();
   PassRegistration<SpillAtlasVirtualPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createSpillAtlasVirtualPass() {
+  return std::make_unique<SpillAtlasVirtualPass>();
+}

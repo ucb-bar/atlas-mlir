@@ -492,6 +492,10 @@ void mlir::atlas::registerVerifyAtlasVirtualStreamPass() {
   PassRegistration<VerifyAtlasVirtualStreamPass>();
 }
 
+std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasVirtualStreamPass() {
+  return std::make_unique<VerifyAtlasVirtualStreamPass>();
+}
+
 bool mlir::atlas::isVirtualDMAImmediate(Value value) {
   if (!value.getDefiningOp<arith::ConstantOp>() || !value.getType().isInteger(32) ||
       value.use_empty())

@@ -311,10 +311,10 @@ class MXUSpillingTest(unittest.TestCase):
             source = root / 'source.mlir'
             source.write_text(mxu_pressure())
             result = subprocess.run([sys.executable, str(ROOT / 'tools/lower_atlas_program.py'),
-                                     str(source), '--spill', '--output-dir', str(root / 'out')],
+                                     str(source), '--output-dir', str(root / 'out')],
                                     text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('atlas.mxu_spill = "save"', (root / 'out/0-mxu-spilled.mlir').read_text())
+            self.assertIn('atlas.mxu_spill = "save"', (root / 'out/1-virtual.mlir').read_text())
             self.assertTrue(json.loads((root / 'out/3-allocation.json').read_text()))
 
 

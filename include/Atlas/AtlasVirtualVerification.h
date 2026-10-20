@@ -1,6 +1,8 @@
 #ifndef ATLAS_VIRTUAL_VERIFICATION_H
 #define ATLAS_VIRTUAL_VERIFICATION_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 
@@ -35,6 +37,7 @@ LogicalResult verifyAtlasVirtualModule(ModuleOp module,
                                       bool allowMXUPressure = false,
                                       bool allowMXUCFG = false);
 void registerVerifyAtlasVirtualStreamPass();
+std::unique_ptr<Pass> createVerifyAtlasVirtualStreamPass();
 
 } // namespace mlir::atlas
 

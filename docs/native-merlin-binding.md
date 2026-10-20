@@ -27,7 +27,7 @@ uv pip install --python /path/to/venv/bin/python --no-deps -e .
 | Variable | Meaning |
 | --- | --- |
 | `ATLAS_OOT_BIN_DIR` | Directory with `atlas-opt` and `atlas-emit`. Default `<target-source>/build/bin`. |
-| `ATLAS_NATIVE_PIPELINE` | `mandatory` (default) or `optimized`. `optimized` ships a rescheduled program that only the compiler verifiers and encoding checks have examined; the native semantic checks ran on the mandatory lowering of the same virtual program, saved beside it as `mandatory-qualification-*`. |
+| `ATLAS_NATIVE_PIPELINE` | `mandatory` (default, `atlas-opt --atlas-compile-unscheduled`) or `optimized` (`atlas-opt --atlas-compile`). `optimized` ships a rescheduled program that only the compiler verifiers and encoding checks have examined; the native semantic checks ran on the mandatory lowering of the same virtual program, saved beside it as `mandatory-qualification-*`. |
 | `MERLIN_NATIVE_ROOT` | Merlin checkout, for tests. Native tests skip without it. |
 | `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT` | AtlasCore simulator for opt-in core tests. |
 

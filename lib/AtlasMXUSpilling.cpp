@@ -305,3 +305,7 @@ LogicalResult mlir::atlas::spillAtlasMXUState(func::FuncOp function,
 void mlir::atlas::registerSpillAtlasMXUStatePass() {
   PassRegistration<SpillAtlasMXUStatePass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createSpillAtlasMXUStatePass() {
+  return std::make_unique<SpillAtlasMXUStatePass>();
+}

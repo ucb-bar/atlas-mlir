@@ -813,3 +813,7 @@ struct VerifyAtlasTimingPass
 void mlir::atlas::registerVerifyAtlasTimingPass() {
   PassRegistration<VerifyAtlasTimingPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasTimingPass() {
+  return std::make_unique<VerifyAtlasTimingPass>();
+}

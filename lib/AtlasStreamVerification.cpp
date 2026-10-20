@@ -26,3 +26,7 @@ struct VerifyAtlasMachineStreamPass
 void mlir::atlas::registerVerifyAtlasMachineStreamPass() {
   PassRegistration<VerifyAtlasMachineStreamPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasMachineStreamPass() {
+  return std::make_unique<VerifyAtlasMachineStreamPass>();
+}

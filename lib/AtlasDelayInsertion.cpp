@@ -242,3 +242,7 @@ struct InsertAtlasDelaysPass
 void mlir::atlas::registerInsertAtlasDelaysPass() {
   PassRegistration<InsertAtlasDelaysPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDelaysPass() {
+  return std::make_unique<InsertAtlasDelaysPass>();
+}

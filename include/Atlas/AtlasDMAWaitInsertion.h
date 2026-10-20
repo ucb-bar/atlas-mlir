@@ -1,6 +1,8 @@
 #ifndef ATLAS_DMA_WAIT_INSERTION_H
 #define ATLAS_DMA_WAIT_INSERTION_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 
@@ -15,6 +17,7 @@ LogicalResult insertAtlasDMAWaits(ModuleOp module);
 
 // Register the DMA wait insertion pass with atlas-opt.
 void registerInsertAtlasDMAWaitsPass();
+std::unique_ptr<Pass> createInsertAtlasDMAWaitsPass();
 
 } // namespace mlir::atlas
 

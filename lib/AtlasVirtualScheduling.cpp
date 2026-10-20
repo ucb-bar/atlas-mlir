@@ -975,3 +975,7 @@ struct ScheduleAtlasVirtualPass
 void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass() {
+  return std::make_unique<ScheduleAtlasVirtualPass>();
+}

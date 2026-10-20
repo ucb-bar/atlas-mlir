@@ -324,3 +324,7 @@ struct ScheduleAtlasStreamPass
 void mlir::atlas::registerScheduleAtlasStreamPass() {
   PassRegistration<ScheduleAtlasStreamPass>();
 }
+
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasStreamPass() {
+  return std::make_unique<ScheduleAtlasStreamPass>();
+}

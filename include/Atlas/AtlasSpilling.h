@@ -1,6 +1,8 @@
 #ifndef ATLAS_SPILLING_H
 #define ATLAS_SPILLING_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Support/LogicalResult.h"
 
@@ -19,7 +21,9 @@ LogicalResult verifyAtlasSpillSlots(func::FuncOp function);
 LogicalResult spillAtlasMXUState(func::FuncOp function, unsigned maxSpills,
                                 unsigned &spills);
 void registerSpillAtlasMXUStatePass();
+std::unique_ptr<Pass> createSpillAtlasMXUStatePass();
 void registerSpillAtlasVirtualPass();
+std::unique_ptr<Pass> createSpillAtlasVirtualPass();
 } // namespace mlir::atlas
 
 #endif

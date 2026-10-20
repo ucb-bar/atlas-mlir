@@ -69,11 +69,7 @@ def main() -> None:
         source = ROOT / "test" / "examples" / f"{name}.mlir"
         raw = source.read_bytes()
         if name == "virtual_fp8_two_layer_mlp":
-            machine_text = run([
-                str(atlas / "atlas-opt"), "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
-                "--insert-atlas-delays",
-                str(source),
-            ]).rstrip() + "\n"
+            machine_text = run([str(atlas / "atlas-opt"), "--atlas-compile", str(source)]).rstrip() + "\n"
             if 'atlas.generated_from_virtual' not in machine_text:
                 raise RuntimeError(f"{name}: virtual lowering lost generated marker")
             (output / f"{name}.virtual.mlir").write_bytes(raw)
