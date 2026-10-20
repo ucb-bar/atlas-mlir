@@ -142,3 +142,13 @@ cheaper PACK cost tips the other way.
   cycles.
 - Removing the relayout altogether, which needs a PACK or XLU layout the MXU
   accepts: a hardware question.
+
+## Guarded MXU conversion
+
+`atlas-opt --lower-atlas-guarded-pack` (or `tools/lower_atlas_program.py --guarded-pack`) avoids PACK and its relayout for proven-finite BF16 sources. Run it before boundary-to-DMA conversion, virtual scheduling and allocation. It clamps to BF16 bounds `±(((s+8)<<7)|96)` for scale codes `s<=246`, copies through an MXU BF16 accumulator, and reads FP8 with inverse scale `254-min(s,254)`; codes 247..255 need no clamp. The result is bit-identical to native PACK for every finite BF16 encoding at every scale. Native fallback still admits only scales 122..128.
+
+The proof lives entirely in `lib/AtlasGuardedPack.cpp`: finite splats, mov/ReLU and min/max of finite operands, fixed 32-term raw FP8 reset contractions (including the legacy matmul operation), and BF16 accumulator copies of proven-finite sources. Atlas's raw E4M3 multiplier interprets all byte encodings as bounded fields; each product is below 2^18, and 32 terms including BF16 rounding remain below 2^25. No input promise, Python value-fact tool or egglog dependency is required. Unknown inputs, special-valued splats, overflow-capable arithmetic and continued accumulations retain PACK; an arbitrary `finite_src` attribute supplies no proof.
+
+Only single-block functions are rewritten after virtual verification. Conversion uses MXU0 by default (`unit=1` selects MXU1), needs a free accumulator slot, and rematerializes clamp bounds at each use. The ordinary spill stage handles register pressure introduced by conversion. Existing state, allocation, machine and timing verifiers check the resulting operations.
+
+This remains opt-in: exactness does not guarantee a speedup when the selected MXU is busy or register pressure changes scheduling/spilling. Use `--spill` for larger programs: the optimized 16-tile MLP needs spilling after this conversion, although its source order allocates. `test_guarded_pack.py` covers proof rejection, both engines, repeated bounds and register-pressure spilling; the numerical regression compares native PACK and the clamped MXU converters across all finite encodings and scales when the model is available.

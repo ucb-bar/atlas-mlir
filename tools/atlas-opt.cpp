@@ -3,6 +3,7 @@
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasPipeline.h"
+#include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasToLLVM.h"
@@ -32,6 +33,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerScheduleAtlasStreamPass();
   mlir::atlas::registerVerifyAtlasVirtualStreamPass();
   mlir::atlas::registerReuseAtlasImmutableWeightsPass();
+  mlir::atlas::registerLowerAtlasGuardedPackPass();
   mlir::atlas::registerLowerAtlasVirtualBoundaryToDMAPass();
   mlir::atlas::registerScheduleAtlasVirtualPass();
   mlir::atlas::registerSpillAtlasVirtualPass();

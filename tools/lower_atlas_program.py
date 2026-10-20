@@ -35,10 +35,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def stages(source: Path) -> list[tuple[str, str, Path | str, list[str]]]:
+def stages(source: Path, guarded_pack: bool = False) -> list[tuple[str, str, Path | str, list[str]]]:
     """(artifact, tool, input, options) for each command, in order."""
     return [
-        ("1-virtual.mlir", "atlas-opt", source, ["--atlas-compile-verify"]),
+        ("1-virtual.mlir", "atlas-opt", source, ["--atlas-compile-verify" + ("=guarded-pack=true" if guarded_pack else "")]),
         ("2-scheduled.mlir", "atlas-opt", "1-virtual.mlir", ["--atlas-compile-schedule"]),
         ("2-spilled.mlir", "atlas-opt", "2-scheduled.mlir", ["--atlas-compile-spill"]),
         ("3-allocated.mlir", "atlas-opt", "2-spilled.mlir",
@@ -57,6 +57,8 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
+    parser.add_argument("--guarded-pack", action="store_true",
+                        help="opt in to bit-exact PACK via MXU0 for proven-finite sources")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)
@@ -69,7 +71,7 @@ def main() -> int:
         parser.error(str(error))
 
     commands, log = [], []
-    for artifact, tool, given, options in stages(source):
+    for artifact, tool, given, options in stages(source, args.guarded_pack):
         command = [str(bin_dir / tool), *options, str(output / given)]
         if tool == "atlas-opt":
             # A diagnostic names the failing resource; the operation dump would bury it.
