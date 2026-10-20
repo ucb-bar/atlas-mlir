@@ -86,6 +86,18 @@ FixedResourcePlacement selectedResources() {
 }
 } // namespace
 
+std::optional<RegisterKind> mlir::atlas::registerKindOf(Value value) {
+  Type type = value.getType();
+  if (isa<VirtualBF16Type>(type))
+    return RegisterKind::BF16;
+  if (isa<VirtualFP8Type>(type))
+    return RegisterKind::FP8;
+  if ((type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value) &&
+      !isAtlasMemoryControl(value))
+    return RegisterKind::Scalar;
+  return std::nullopt;
+}
+
 RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
   bool mixedFp8, hasPack;
   findReservations(function, mixedFp8, hasPack);
@@ -361,16 +373,7 @@ Operation *VirtualAllocationPlan::stagingPoint(Value tile) const {
 
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
-  auto selected = [&](Value value) {
-    if (isAtlasMemoryControl(value)) return false;
-    Type type = value.getType();
-    if (kind == RegisterKind::BF16)
-      return isa<VirtualBF16Type>(type);
-    if (kind == RegisterKind::FP8)
-      return isa<VirtualFP8Type>(type);
-    // Lowering builds a DMA immediate at each launch instead.
-    return (type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value);
-  };
+  auto selected = [&](Value value) { return registerKindOf(value) == kind; };
   SmallVector<Value> values;
   llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
   for (Block &block : function.getBody()) {
@@ -686,7 +689,9 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       registersOf(fp8Regs, "fp8", 1);
     } else if (isVirtualDMAImmediate(value)) {
       entry["kind"] = "dma_immediate"; // built in the command register at each launch
-    } else if (type.isInteger(1) || type.isInteger(32)) {
+    } else if (isAtlasMemoryControl(value)) {
+      entry["kind"] = "memory_control"; // read from the control buffer where used
+    } else if (registerKindOf(value) == RegisterKind::Scalar) {
       registersOf(scalarRegs, "scalar", 1);
     } else if (auto mxu = mxuResources.find(value); mxu != mxuResources.end()) {
       bool weight = isa<VirtualMXUWeightType>(type);

@@ -498,16 +498,6 @@ using KindCounts = std::array<int, kKinds.size()>;
 
 unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
 
-std::optional<RegisterKind> kindOf(Type type) {
-  if (isa<VirtualBF16Type>(type))
-    return RegisterKind::BF16;
-  if (isa<VirtualFP8Type>(type))
-    return RegisterKind::FP8;
-  if (type.isInteger(1) || type.isInteger(32))
-    return RegisterKind::Scalar;
-  return std::nullopt;
-}
-
 // What spilling one value of `kind` costs: a save and `reloads` reloads, as
 // costOf charges the operations --spill-atlas-virtual inserts.
 int spillCycles(RegisterKind kind, int reloads) {
@@ -597,7 +587,7 @@ public:
         continue;
       Value victim;
       for (Value value : values)
-        if (kindOf(value.getType()) == kKinds[k] &&
+        if (registerKindOf(value) == kKinds[k] &&
             (!victim || lastUse.lookup(value) > lastUse.lookup(victim)))
           victim = value;
       int reloads = victim ? std::max(1u, remaining.lookup(victim)) : 1;
@@ -636,14 +626,11 @@ private:
     return kept.contains(value) || remaining.lookup(value) > 0;
   }
 
-  // A DMA immediate takes no register: each launch builds it.
-  static bool hasRegister(Value value) {
-    return !isVirtualDMAImmediate(value) && kindOf(value.getType());
-  }
+  static bool hasRegister(Value value) { return registerKindOf(value).has_value(); }
 
   static void count(KindCounts &counts, Value value, int delta) {
-    if (hasRegister(value))
-      counts[indexOf(*kindOf(value.getType()))] += delta;
+    if (std::optional<RegisterKind> kind = registerKindOf(value))
+      counts[indexOf(*kind)] += delta;
   }
 
   void enter(Value value) {

@@ -288,9 +288,7 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
   for (Block &block : function.getBody()) {
     if (&block == &function.front()) continue;
     for (BlockArgument arg : block.getArguments())
-      if ((kind == RegisterKind::BF16 && isa<VirtualBF16Type>(arg.getType())) ||
-          (kind == RegisterKind::FP8 && isa<VirtualFP8Type>(arg.getType())) ||
-          (kind == RegisterKind::Scalar && (arg.getType().isInteger(1) || arg.getType().isInteger(32))))
+      if (registerKindOf(arg) == kind)
         arguments.push_back(arg);
   }
   if (arguments.empty()) return 0;
@@ -385,7 +383,7 @@ void spill(Value value, Operation *staged) {
     }
     return;
   }
-  if (value.getType().isInteger(1) || value.getType().isInteger(32)) {
+  if (registerKindOf(value) == RegisterKind::Scalar) {
     Value slot = newSlot(function, value.getType(), "spill");
     slotAccess(value.getDefiningOp()->getNextNode(), "atlas.virtual_save", slot, value);
     for (Operation *consumer : consumers) {
@@ -560,10 +558,9 @@ struct SpillAtlasVirtualPass
           if (isAtlasSpillLoad(&op) || isAtlasSpillStore(&op) || isAtlasSlotAccess(&op))
             continue;
           for (Value value : op.getResults()) {
-            if (saved.contains(value) ||
-                (!(bf16 && isa<VirtualBF16Type>(value.getType())) &&
-                 !(fp8 && isa<VirtualFP8Type>(value.getType())) &&
-                 !(scalar && (value.getType().isInteger(1) || value.getType().isInteger(32)))))
+            std::optional<RegisterKind> kind = registerKindOf(value);
+            bool overflowed = kind == RegisterKind::BF16 ? bf16 : kind == RegisterKind::FP8 ? fp8 : scalar;
+            if (saved.contains(value) || !kind || !overflowed)
               continue;
             // A loaded tile holds registers from where it is staged.
             unsigned first = order.lookup(&op);

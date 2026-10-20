@@ -72,6 +72,13 @@ struct FixedResourcePlacement {
 enum class RegisterKind { BF16, FP8, Scalar };
 using RegisterCapacities = std::array<unsigned, 3>;
 
+// The registers `value` takes once allocated: a pair for a BF16 tile, one
+// tensor register for an FP8 tile, one scalar register for an i1/i32 control.
+// None for a DMA immediate, which each launch builds (isVirtualDMAImmediate),
+// a memory-resident entry control (isAtlasMemoryControl), or any other type.
+// A loaded tile takes them from where it is staged (stagingPoint).
+std::optional<RegisterKind> registerKindOf(Value value);
+
 // One RegisterKind's demand in the last allocate(), against its capacity.
 struct RegisterPressure {
   unsigned capacity = 0;

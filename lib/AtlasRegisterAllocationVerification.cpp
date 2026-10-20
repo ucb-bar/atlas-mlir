@@ -39,15 +39,10 @@ DMALaunch dmaLaunch(Operation &op) {
 }
 
 bool isScalar(Value value) {
-  return value.getType().isInteger(1) || value.getType().isInteger(32);
+  return registerKindOf(value) == RegisterKind::Scalar;
 }
 
-// A value with a register; a DMA immediate is built at each launch instead.
-bool isTracked(Value value) {
-  if (isAtlasMemoryControl(value)) return false;
-  return (isScalar(value) && !isVirtualDMAImmediate(value)) ||
-         isa<VirtualBF16Type, VirtualFP8Type>(value.getType());
-}
+bool isTracked(Value value) { return registerKindOf(value).has_value(); }
 
 uint32_t immediateOf(Value value) {
   auto constant = value.getDefiningOp<arith::ConstantOp>();

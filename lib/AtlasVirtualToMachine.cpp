@@ -111,7 +111,7 @@ public:
           planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGOperation), i32(cfgOperations.lookup(&op)));
           for (Value result : op.getResults()) {
             if (!cfgTracked(result) || pendingLoads.count(result)) continue;
-            StringRef name = result.getType().isInteger(1) || result.getType().isInteger(32)
+            StringRef name = registerKindOf(result) == RegisterKind::Scalar
                 ? kAtlasTagScalarResult : kAtlasTagTensorResult;
             planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
           }
@@ -129,16 +129,15 @@ public:
     SmallVector<VirtualMXUAssignment> mxuAssignments;
     SmallVector<VirtualRegisterAssignment> registers, cfgRegisters, scalarRegisters;
     auto recordPlacement = [&](Value value) {
-      if (isAtlasMemoryControl(value)) return;
-      Type type = value.getType();
-      if (isa<VirtualBF16Type, VirtualFP8Type>(type)) {
-        unsigned reg = isa<VirtualBF16Type>(type) ? allocation.tile(value) : allocation.fp8(value);
-        registers.push_back({value, reg});
-        cfgRegisters.push_back({value, reg});
-      } else if (cfgTracked(value)) {
+      std::optional<RegisterKind> kind = registerKindOf(value);
+      if (kind == RegisterKind::Scalar) {
         cfgRegisters.push_back({value, allocation.scalar(value)});
         scalarRegisters.push_back({value, allocation.scalar(value)});
-      } else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(type)) {
+      } else if (kind) {
+        unsigned reg = kind == RegisterKind::BF16 ? allocation.tile(value) : allocation.fp8(value);
+        registers.push_back({value, reg});
+        cfgRegisters.push_back({value, reg});
+      } else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(value.getType())) {
         mxuAssignments.push_back({value, allocation.mxu(value)});
       }
     };
@@ -226,13 +225,7 @@ public:
 
 private:
   using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
-  // A value with a register; a DMA immediate is built at each launch instead.
-  bool cfgTracked(Value v) const {
-    if (isAtlasMemoryControl(v)) return false;
-    Type t = v.getType();
-    return ((t.isInteger(1) || t.isInteger(32)) && !isVirtualDMAImmediate(v)) ||
-           isa<VirtualBF16Type, VirtualFP8Type>(t);
-  }
+  bool cfgTracked(Value v) const { return registerKindOf(v).has_value(); }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
   StringAttr str(StringRef value) { return attrs.getStringAttr(value); }

@@ -6,6 +6,7 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -23,17 +24,13 @@
 using namespace mlir;
 using namespace mlir::atlas;
 namespace {
-bool tracked(Type t) { return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t); }
-// A CFG value has a register; a DMA immediate is built at each launch instead.
-bool tracked(Value v) {
-  return tracked(v.getType()) && !isVirtualDMAImmediate(v) && !isAtlasMemoryControl(v);
-}
+// A CFG value is one that takes a register.
+bool tracked(Value v) { return registerKindOf(v).has_value(); }
 // A source operation that issues nothing of its own and so has no record.
 bool issuesNothing(Operation &op) {
   return isa<VirtualStartOp, VirtualScaleConstantOp, VirtualSlotOp>(op) ||
          (isa<arith::ConstantOp>(op) && isVirtualDMAImmediate(op.getResult(0)));
 }
-bool scalar(Type t) { return t.isInteger(1) || t.isInteger(32); }
 std::string typeName(Type t) { return t.isInteger(1) ? "i1" : t.isInteger(32) ? "i32" : isa<VirtualBF16Type>(t) ? "bf16" : "fp8"; }
 struct ValueRecord {
   int32_t id, block, reg;
@@ -157,7 +154,8 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     if (!regs.count(value)) return function.emitOpError("CFG contract missing source placement");
     std::string type = typeName(value.getType());
     unsigned reg = regs.lookup(value), width = type == "bf16" ? 2 : 1;
-    if ((scalar(value.getType()) && (reg == 0 || reg >= 32)) || (!scalar(value.getType()) && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
+    bool scalar = registerKindOf(value) == RegisterKind::Scalar;
+    if ((scalar && (reg == 0 || reg >= 32)) || (!scalar && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
     Operation *op = value.getDefiningOp();
     SmallVector<int32_t> operands;
     if (op) for (Value v : op->getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
