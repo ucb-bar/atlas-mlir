@@ -182,6 +182,11 @@ public:
     // Explicit DMA launches without waits; insert-atlas-dma-waits adds them.
     if (!dmaAssignments.empty())
       (*emitted)->setAttr(kAtlasDMAWaitsPending, builder.getUnitAttr());
+    // Branches and jumps without delay slots; the timing passes fill them.
+    if (llvm::any_of(planned, [](const PlannedOp &step) {
+          return step.name == "atlas.branch" || step.name == "atlas.jump";
+        }))
+      (*emitted)->setAttr(kAtlasDelaySlotsPending, builder.getUnitAttr());
     (*emitted)->removeAttr(kAtlasTimingProvider);
     (*emitted)->setAttr(kAtlasCFGContract, *cfgContract);
     (*emitted)->setAttr(kAtlasDMAContract, *dmaContract);
@@ -479,9 +484,6 @@ private:
   void jump(unsigned target, Location loc) {
     add("atlas.jump", loc,
         {{"kind", str("jal")}, {"dst", i32(0)}, {"base", i32(0)}}, target);
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
-         {"immediate", i32(0)}});
   }
 
   void inputHalf(unsigned dst, uint64_t index, unsigned half, Location loc) {
@@ -680,9 +682,6 @@ private:
         {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
          {"rhs", i32(fixed().packRowsReg)}},
         loop);
-    add("atlas.alu_imm", loc,
-        {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
-         {"immediate", i32(0)}});
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
     add("atlas.vload", loc,
         {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
@@ -945,9 +944,6 @@ private:
           {{"kind", str("bne")}, {"lhs", i32(scalar(branch.getCondition()))},
            {"rhs", i32(0)}}, trueEdge);
       planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBranch), i32(currentCFGBlock));
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(0)}, {"src", i32(0)},
-           {"immediate", i32(0)}});
       currentCFGEdge = cfgEdges.lookup(op.getBlock())[1];
       edgeCopies(branch.getFalseDest(), branch.getFalseDestOperands(), loc);
       jump(labelFor(branch.getFalseDest()), loc);

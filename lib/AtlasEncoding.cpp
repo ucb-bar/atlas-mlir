@@ -257,6 +257,7 @@ LogicalResult mlir::atlas::encodeAtlasWords(
   llvm::SmallVector<Operation *> encodedOps;
   Value previous;
   bool started = false;
+  bool delaySlots = atlasHasDelaySlots(module);
   bool needsDelaySlot = false;
   for (Operation &op : module.getBody()->getOperations()) {
     if (isa<StartOp>(op)) {
@@ -278,7 +279,7 @@ LogicalResult mlir::atlas::encodeAtlasWords(
       op.emitError("branch or jump in selected RTL delay slot");
       return failure();
     }
-    needsDelaySlot = redirects;
+    needsDelaySlot = delaySlots && redirects;
     auto word = encodeMachineWord(&op);
     if (failed(word)) {
       op.emitError("has no selected RTL encoding");

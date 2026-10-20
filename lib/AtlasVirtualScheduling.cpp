@@ -1,8 +1,8 @@
 // Pre-allocation scheduling of virtual Atlas operations. Each block is list
 // scheduled onto the functional units its operations occupy, keeping every
-// SSA and implicit-state dependence. Costs are rough on purpose: registers,
-// delays, and delay slots do not exist until the virtual-to-machine lowering,
-// and the machine passes after it time the real instructions.
+// SSA and implicit-state dependence. Costs are rough on purpose: registers
+// and delays do not exist until the virtual-to-machine lowering, nor delay
+// slots until the stream scheduler, which times the real instructions.
 
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
@@ -480,9 +480,9 @@ Cost costOf(Operation *op) {
     // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
     // words a row (lowerPack). Each store hides behind the next word's load,
     // so a row takes a load per load-path interval, then the last word's load
-    // and store, the destination step, and the back-edge with its delay slot.
+    // and store, and the back-edge, whose delay slot takes the destination step.
     static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
-    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 3;
+    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 2;
     int rows = registersOf(true) * kRegisterBytes / 4 / rowWords;
     int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
     return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +

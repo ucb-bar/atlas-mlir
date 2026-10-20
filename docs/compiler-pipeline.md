@@ -21,8 +21,8 @@ passes. It takes one function with explicit `atlas.input_dram_base` and
 | 1. Verify | virtual IR, live MXU handles saved as tiles | `--spill-atlas-mxu-state`, `--verify-atlas-virtual-stream` |
 | 2. Schedule | boundary tiles as explicit DMA, each block reordered | `--lower-atlas-virtual-boundary-to-dma`, `--schedule-atlas-virtual`, `--verify-atlas-virtual-stream` |
 | 3. Spill | register pressure recovered through VMEM | `--spill-atlas-virtual`, `--verify-atlas-virtual-stream` |
-| 4. Lower | untimed machine IR | `--lower-atlas-virtual-to-machine` |
-| 5. Time | adds `atlas.dma_wait`, reorders each block, adds `atlas.delay` | `--insert-atlas-dma-waits`, `--verify-atlas-machine-stream`, `--verify-atlas-generated-schedule`, `--schedule-atlas-stream`, then `--verify-atlas-machine-stream`, `--verify-atlas-timing`, `--verify-atlas-generated-schedule` |
+| 4. Lower | untimed machine IR, branches without delay slots | `--lower-atlas-virtual-to-machine` |
+| 5. Time | adds `atlas.dma_wait`, reorders each block, fills delay slots, adds `atlas.delay` | `--insert-atlas-dma-waits`, `--verify-atlas-machine-stream`, `--verify-atlas-generated-schedule`, `--schedule-atlas-stream`, then `--verify-atlas-machine-stream`, `--verify-atlas-timing`, `--verify-atlas-generated-schedule` |
 | 6. Emit | words, word map, program JSON | `atlas-emit`, `--map-json`, `--program-json` |
 | 7. LLVM | one inline-asm word block | `--convert-atlas-to-llvm-calls`, `--finalize-atlas-llvm-calls`, `mlir-translate`, `llc`, `ld.lld` |
 
@@ -238,7 +238,13 @@ trusting the rest.
 The PC counts instruction words, not bytes. A direct branch or JAL targets
 `pc + offset_bytes / 2`; JALR targets a register value plus a word offset.
 Every branch and jump runs one delay-slot word before taking the redirect or
-fall-through.
+fall-through. Lowering emits branches and jumps without it and marks the module
+`atlas.delay_slots_pending`. `--schedule-atlas-stream` moves into each slot the
+block's last-issued single-cycle scalar ALU instruction that nothing after it
+depends on, such as the PACK loop's destination step, and puts a NOP where there
+is none; `--insert-atlas-delays` always puts a NOP. An untimed stream exported
+with `--allow-untimed` before that has no slot words, and a branch falls
+through to the next word.
 
 `--map-json` writes `atlas.machine_word_map.v1`: per word, its byte offset,
 operation, attributes, stall cycles for a delay, direct branch target,

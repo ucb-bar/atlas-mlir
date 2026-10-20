@@ -77,18 +77,27 @@ void run(MLIRContext &context) {
   check(failed(buildAtlasCFGContract(function, assignments)), "duplicate claim fails");
 }
 
+// The slot after an edge's jump runs before the edge: it may write a free
+// register, but not the one the edge's copy just wrote.
 void delaySlot(MLIRContext &context) {
-  auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits");
+  auto module = runPipeline(context, source, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits,insert-atlas-delays");
   check(module && succeeded(verifyAtlasGeneratedCFGContract(*module)), "standalone CFG checker accepts fixture", diagnostics);
   if (!module)
     return;
-  Operation *branch = nullptr;
-  module->walk([&](BranchOp op) { branch = branch ? branch : op; });
-  check(branch, "local delay-slot fixture contains branch");
-  if (!branch)
+  ALUImmOp copy;
+  module->walk([&](ALUImmOp op) {
+    if (!copy && op.getDst() != 0 && op->hasAttr(kAtlasTagCFGEdge))
+      copy = op;
+  });
+  Operation *jump = copy ? copy->getNextNode() : nullptr;
+  check(jump && isa<JumpOp>(jump) && isa<ALUImmOp>(jump->getNextNode()), "local delay-slot fixture copies before a jump");
+  if (!jump || !isa<JumpOp>(jump) || !isa<ALUImmOp>(jump->getNextNode()))
     return;
-  cast<ALUImmOp>(branch->getNextNode())->setAttr("dst", Builder(&context).getI32IntegerAttr(9));
-  check(failed(verifyAtlasGeneratedCFGContract(*module)), "standalone CFG checker rejects semantic delay-slot write");
+  Operation *slot = jump->getNextNode();
+  slot->setAttr("dst", Builder(&context).getI32IntegerAttr(9));
+  check(succeeded(verifyAtlasGeneratedCFGContract(*module)), "standalone CFG checker accepts a free delay-slot write", diagnostics);
+  slot->setAttr("dst", Builder(&context).getI32IntegerAttr(copy.getDst()));
+  check(failed(verifyAtlasGeneratedCFGContract(*module)), "standalone CFG checker rejects a delay slot that overwrites its edge's copy");
 }
 
 // Untagged physical writers go just before the second output half: killing only the first half of a pair would

@@ -25,6 +25,10 @@ constexpr llvm::StringLiteral kAtlasTimingProvider = "atlas.timing_provider";
 // Set by virtual-to-machine lowering, which launches explicit DMA without
 // waits; insert-atlas-dma-waits completes the stream and removes it.
 constexpr llvm::StringLiteral kAtlasDMAWaitsPending = "atlas.dma_waits_pending";
+// Set by virtual-to-machine lowering, which emits each branch and jump without
+// the delay slot the core runs after it; the timing passes fill every slot and
+// remove it.
+constexpr llvm::StringLiteral kAtlasDelaySlotsPending = "atlas.delay_slots_pending";
 // Per-instruction correspondence tags that only generated artifacts carry.
 constexpr llvm::StringLiteral kAtlasTagDMATransfer = "atlas.virtual_dma_transfer";
 constexpr llvm::StringLiteral kAtlasTagMXUCommand = "atlas.virtual_mxu_command";
@@ -38,6 +42,11 @@ constexpr llvm::StringLiteral kAtlasTagCFGHelper = "atlas.virtual_cfg_helper";
 constexpr llvm::StringLiteral kAtlasTagScalarResult = "atlas.virtual_scalar_result";
 constexpr llvm::StringLiteral kAtlasTagTensorResult = "atlas.virtual_tensor_result";
 constexpr llvm::StringLiteral kAtlasTagScalarArgument = "atlas.virtual_scalar_argument";
+
+// Whether each branch and jump in `module` is followed by its delay slot.
+inline bool atlasHasDelaySlots(ModuleOp module) {
+  return !module->hasAttr(kAtlasDelaySlotsPending);
+}
 
 // Module attributes that LLVM finalization carries into its rebuilt stream.
 llvm::ArrayRef<llvm::StringRef> atlasPreservedModuleAttrs();

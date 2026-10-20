@@ -22,7 +22,9 @@ machine op is mixed in.
 **Machine IR** threads a physical `!atlas.state` token: `atlas.start` makes it
 (no word) and every machine op consumes one state and returns the next. The
 encoder requires one flat chain with at least one op and a non-redirecting
-instruction in the delay slot after every branch or jump. Registers and slots
+instruction in the delay slot after every branch or jump, unless the module is
+marked `atlas.delay_slots_pending`, as lowering leaves it until a timing pass
+fills the slots. Registers and slots
 are checked integer attributes, so the encoder sees the chosen numbers.
 
 The machine has 64 tensor registers of 1,024 bytes. A BF16 tile uses an
@@ -211,12 +213,12 @@ numerical policy, or availability across the stream.
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. |
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
-| `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass. `allocation-report=<file>` writes the plan as JSON, even on failure. |
+| `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass, and delay slots to the timing passes (`atlas.delay_slots_pending`). `allocation-report=<file>` writes the plan as JSON, even on failure. |
 | `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. |
-| `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and delay-slot NOPs; on timed streams also recheck issue spacing. |
+| `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and scalar ALU delay slots; on timed streams also recheck issue spacing. |
 | `--verify-atlas-machine-stream` | pass | Check field verifiers, the flat state chain, encoding, delay slots, and in-block targets. |
-| `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |
-| `--schedule-atlas-stream` | pass | Same model, but list-schedule each block first, then add delays. Ops move only within a block; delay slots are not filled. |
+| `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Each pending delay slot gets a NOP. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |
+| `--schedule-atlas-stream` | pass | Same model, but list-schedule each block first, then add delays. Ops move only within a block. A pending delay slot takes the block's last-issued single-cycle scalar ALU op that nothing after it depends on, else a NOP. |
 | `--verify-atlas-timing` | pass | Recheck issue cycles, dependencies, DMA waits, halt, and drained block boundaries for `provider=<id>`. |
 | `--convert-atlas-to-llvm-calls` | pass | One `llvm.call @atlas_emit_*` marker per instruction with fields, word, and index. Must be finalized before translation. |
 | `--finalize-atlas-llvm-calls` | pass | Rebuild and recheck the Atlas stream from the markers, then emit one ordered inline-assembly word block. |

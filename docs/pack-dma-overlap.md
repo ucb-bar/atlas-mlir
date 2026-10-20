@@ -52,8 +52,8 @@ replaces "PACK drains DMA" everywhere:
 
 - **Recognition** (`findAtlasPackLoops`) works on the flat instruction list, so
   the structural verifier can use it before decoding. A loop's back-edge is a
-  `"pack"` helper branch to an earlier instruction with the exact NOP in its
-  delay slot; everything from its target to the branch is that PACK's scalar
+  `"pack"` helper branch to an earlier instruction, whose delay slot, once
+  timing fills it, holds body work or a NOP; everything from its target to the branch is that PACK's scalar
   loads, stores and ALU work, or a delay; no other redirect lands in it; and a
   stream with a JALR has none. Such a loop launches and completes no DMA and has
   no other entry, so the transfers in flight when it starts stay in flight
@@ -110,8 +110,8 @@ boundary-tile helper DMA, which still drains.
 - `pack-loop` C++ suite: recognition of the lowered loop, before and after
   timing; the facts the decoded stream adds (block, entry registers, 1 KiB
   raw-scratch reads and relayout writes, `dmaMayCross`); and each refusal
-  (untagged or foreign body instruction, forward branch, non-NOP delay slot,
-  scale load, second entry), plus an undecidable loop's unknown access.
+  (untagged or foreign body instruction, forward branch, scale load, second
+  entry), plus an undecidable loop's unknown access.
 - `test_dma_contract_verification.py::PackOverlapVerificationTest`: a load
   pending across a PACK is accepted at every boundary and by both timing
   passes; rejected when the relayout writes or reads the pending window, when

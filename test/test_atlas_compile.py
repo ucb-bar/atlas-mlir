@@ -2,6 +2,7 @@
 
 import re
 import unittest
+from itertools import pairwise
 
 from test_virtual_ssa import ROOT, run
 
@@ -43,6 +44,25 @@ class AtlasCompileTest(unittest.TestCase):
                 self.assertEqual(compiled.stdout, spelled.stdout)
                 emitted = run("atlas-emit", compiled.stdout)
                 self.assertEqual(emitted.returncode, 0, emitted.stderr)
+
+    def test_lowering_leaves_delay_slots_for_the_stream_scheduler(self) -> None:
+        # The attention tile's PACK relayout loop closes with a back-edge.
+        stages = ("--atlas-compile-verify", "--atlas-compile-schedule", "--atlas-compile-spill")
+        lowered = run("atlas-opt", PROGRAMS[1].read_text(), *stages, "--atlas-compile-lower")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        timed = run("atlas-opt", lowered.stdout, "--atlas-compile-time")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
+
+        def after_back_edge(text: str) -> str:
+            ops = [line for line in text.splitlines() if re.search(r'= "atlas\.(?!start)', line)]
+            return next(after for line, after in pairwise(ops) if '"atlas.branch"' in line)
+
+        # Lowered, the loop runs straight into the code after it; timed, its
+        # slot holds the destination step, which nothing after it in the row reads.
+        self.assertIn("atlas.delay_slots_pending", lowered.stdout)
+        self.assertNotIn("dst = 0 : i32", after_back_edge(lowered.stdout))
+        self.assertNotIn("atlas.delay_slots_pending", timed.stdout)
+        self.assertRegex(after_back_edge(timed.stdout), r'"atlas\.alu_imm".*immediate = 32 : i32')
 
 
 if __name__ == "__main__":

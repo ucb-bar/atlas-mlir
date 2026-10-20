@@ -93,14 +93,18 @@ class CFGContractVerificationTest(unittest.TestCase):
         self.check(reorder(machine, ops[:first] + groups[1] + groups[4] + groups[3] + groups[2] + ops[last + 1:]),
                    "CFG contract issued command belongs to another source operation")
 
-    def test_redirect_delay_slot_is_a_local_cfg_prerequisite(self) -> None:
-        machine = example("loop")
-        branch = next(n for n, line in enumerate(machine.splitlines()) if '"atlas.branch"' in line)
-        self.assertIn('kind = "addi"', machine.splitlines()[branch + 1])
-        result = run("atlas-opt", rewrite_line(machine, branch + 1, lambda line: line.replace("dst = 0 : i32", "dst = 9 : i32")),
-                     "--verify-atlas-generated-schedule")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("NOP", result.stderr)
+    def test_cfg_contract_runs_the_delay_slot_before_the_edge(self) -> None:
+        machine = example("loop", timed=True)
+        lines = machine.splitlines()
+        copy = next(n for n, line in enumerate(lines)
+                    if '"atlas.alu_imm"' in line and "atlas.virtual_cfg_edge" in line and "dst = 0 : i32" not in line)
+        copied = re.search(r"dst = (\d+) : i32", lines[copy])[1]
+        jump = next(n for n in range(copy, len(lines)) if '"atlas.jump"' in lines[n])
+        self.assertIn("no instruction can fill the delay slot", lines[jump + 1])
+        slot = lambda dst: rewrite_line(machine, jump + 1, lambda line: line.replace("dst = 0 : i32", f"dst = {dst} : i32"))
+        # A slot may write a free register, but not the value its edge carries.
+        self.check(slot(9))
+        self.check(slot(copied), "CFG contract simultaneous source edge copy lost its incoming origin")
 
     def test_structured_llvm_rechecks_source_scalar_corruption(self) -> None:
         structured = run("atlas-opt", example("loop", timed=True), "--convert-atlas-to-llvm-calls")

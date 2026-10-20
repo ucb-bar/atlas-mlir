@@ -1,4 +1,5 @@
 #include "Atlas/AtlasContractAttr.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVirtualAllocation.h"
@@ -67,16 +68,19 @@ void decoded(MLIRContext &context, StringRef pipeline) {
   if (!module)
     return;
   SmallVector<Operation *> ops = opsOf(*module);
-  std::vector<AtlasLoop> loops = findAtlasLoops(ops);
+  bool slots = atlasHasDelaySlots(*module);
+  std::vector<AtlasLoop> loops = findAtlasLoops(ops, slots);
   check(loops.size() == 1, "one PACK relayout loop");
   if (loops.size() != 1)
     return;
   const AtlasLoop &loop = loops[0];
   check(backEdge(ops[loop.branch]) && copyLoad(ops[loop.begin]) && isAtlasPackRelayoutLoop(ops, loop),
         "the loop runs from the first copy load to its own helper back-edge");
+  check(loop.delaySlot == slots && loop.end() == loop.branch + (slots ? 2 : 1),
+        "the loop ends with its delay slot once timing fills it");
   check(findAtlasLoopAt(loops, loop.begin) == &loop && findAtlasLoopAt(loops, loop.end() - 1) == &loop &&
             !findAtlasLoopAt(loops, loop.begin - 1) && !findAtlasLoopAt(loops, loop.end()),
-        "the loop holds its delay slot and nothing outside it");
+        "the loop holds its last instruction and nothing outside it");
 
   auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
   check(succeeded(stream) && stream->loops.size() == 1, "the decoded stream records the loop");
@@ -104,14 +108,12 @@ void refused(MLIRContext &context) {
       {"a copy load without the helper tag", [](ModuleOp m) { first(m, copyLoad)->removeAttr(kAtlasTagCFGHelper); }},
       {"a copy load of another source operation", [](ModuleOp m) { Operation *l = first(m, copyLoad); setI32(l, kAtlasTagCFGSource, i32(l, kAtlasTagCFGSource) + 1); }},
       {"a forward helper branch", [](ModuleOp m) { setI32(first(m, backEdge), "offset_bytes", 4); }},
-      {"a delay slot that writes a register", [](ModuleOp m) { setI32(first(m, backEdge)->getNextNode(), "dst", 5); }},
       {"a scale load in the body", [](ModuleOp m) { first(m, copyLoad)->setAttr("kind", StringAttr::get(m.getContext(), "seld")); }},
       {"a second entry into the body", [](ModuleOp m) {
          // A copy of the back-edge, placed before the loop, jumps forward into it.
          Operation *branch = first(m, backEdge);
          Operation *entry = cloneBefore(branch, first(m, copyLoad));
-         setI32(entry, "offset_bytes", 4);
-         cloneBefore(branch->getNextNode(), entry->getNextNode());
+         setI32(entry, "offset_bytes", 2);
        }},
   };
   for (const auto &[name, mutate] : cases) {
@@ -120,7 +122,7 @@ void refused(MLIRContext &context) {
       return;
     mutate(*module);
     auto ops = opsOf(*module);
-    auto loops = findAtlasLoops(ops);
+    auto loops = findAtlasLoops(ops, atlasHasDelaySlots(*module));
     check(loops.empty() || !isAtlasPackRelayoutLoop(ops, loops.front()),
           "not a PACK loop: " + name.str());
   }
@@ -143,5 +145,6 @@ void refused(MLIRContext &context) {
 void atlas_test::runPackLoop(MLIRContext &context) {
   decoded(context, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits");
   decoded(context, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits,insert-atlas-delays");
+  decoded(context, "lower-atlas-virtual-to-machine,insert-atlas-dma-waits,schedule-atlas-stream");
   refused(context);
 }

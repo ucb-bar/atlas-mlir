@@ -1,7 +1,6 @@
 #include "Atlas/AtlasLoop.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
-#include "Atlas/AtlasVerificationContext.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
 
@@ -40,7 +39,8 @@ bool isBodyInstruction(Operation *op) {
 
 } // namespace
 
-std::vector<AtlasLoop> mlir::atlas::findAtlasLoops(ArrayRef<Operation *> ops) {
+std::vector<AtlasLoop> mlir::atlas::findAtlasLoops(ArrayRef<Operation *> ops,
+                                                   bool delaySlots) {
   SmallVector<std::pair<size_t, int64_t>> redirects; // (redirect, target)
   for (auto [pc, op] : llvm::enumerate(ops)) {
     if (auto jump = dyn_cast<JumpOp>(op); jump && jump.getKind() == "jalr")
@@ -52,13 +52,16 @@ std::vector<AtlasLoop> mlir::atlas::findAtlasLoops(ArrayRef<Operation *> ops) {
   for (auto [pc, target] : redirects) {
     auto branch = dyn_cast<BranchOp>(ops[pc]);
     if (!branch || target < 0 || target >= int64_t(pc) ||
-        pc + 1 >= ops.size() || !isExactAtlasNop(ops[pc + 1]))
+        (delaySlots && pc + 1 >= ops.size()))
       continue;
     AtlasLoop loop;
     loop.begin = size_t(target);
     loop.branch = pc;
-    bool body = llvm::all_of(
-        ops.slice(loop.begin, loop.branch - loop.begin), isBodyInstruction);
+    loop.delaySlot = delaySlots;
+    bool body =
+        llvm::all_of(ops.slice(loop.begin, loop.branch - loop.begin),
+                     isBodyInstruction) &&
+        (!delaySlots || isBodyInstruction(ops[pc + 1]));
     bool otherEntry = llvm::any_of(redirects, [&](auto redirect) {
       return redirect.first != pc && redirect.second >= 0 &&
              loop.contains(size_t(redirect.second));

@@ -14,9 +14,11 @@
 namespace mlir::atlas {
 struct AtlasVerificationContext;
 
-// A flat Atlas stream in basic blocks. A block ending in a
-// branch or jump ends with its delay slot.
+// A flat Atlas stream in basic blocks. A block ending in a branch or jump ends
+// with its delay slot, unless the stream's slots are still pending
+// (kAtlasDelaySlotsPending).
 struct AtlasStream {
+  bool delaySlots = true;
   llvm::SmallVector<Operation *> ops;
   std::vector<timing::Instr> instrs;
   llvm::DenseMap<Operation *, Operation *> targetOf; // nullptr: stream end
@@ -30,6 +32,8 @@ struct AtlasStream {
 
   size_t blockEnd(size_t block) const;
   bool endsInBranch(size_t block) const;
+  // The branch or jump that ends `block`, which endsInBranch.
+  size_t redirectOf(size_t block) const;
   bool endsInHalt(size_t block) const;
   bool fallsThrough(size_t block) const;
   // The analyzed loop that fills `block`, else null.
@@ -139,8 +143,10 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
 // block, holds the delays that end a block falling through or ending the
 // stream: they drain its work, belong to it, and a branch into the next block
 // does not run them. A nonempty `timedBy` stamps the result timed by that
-// atlas.timing_provider, else it is untimed. The module is then re-verified,
-// and `stream` no longer describes it.
+// atlas.timing_provider, else it is untimed. Timing a stream whose delay slots
+// are pending fills them: the op `order` puts after a block's branch or jump
+// is its slot, else a NOP is; untimed, they stay pending. The module is then
+// re-verified, and `stream` no longer describes it.
 LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::ArrayRef<size_t> order,
                                llvm::ArrayRef<DelayInsertion> before,
@@ -148,6 +154,8 @@ LogicalResult writeAtlasStream(ModuleOp module, const AtlasStream &stream,
                                llvm::StringRef timedBy = {});
 std::vector<uint32_t> idleDelays(int idle);
 bool isNop(Operation *op);
+// The `addi x0, x0, 0` that fills a delay slot no instruction can.
+timing::Instr atlasNopInstr();
 
 } // namespace mlir::atlas
 

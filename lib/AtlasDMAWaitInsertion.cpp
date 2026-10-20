@@ -242,7 +242,7 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   }
   if (!pending.empty())
     return module.emitOpError("generated stream ends with a DMA transfer in flight");
-  for (size_t pc = 1; pc < n; ++pc)
+  for (size_t pc = 1; stream->delaySlots && pc < n; ++pc)
     if (redirect(ops[pc - 1]) && !waitsBefore[pc].empty())
       return ops[pc]->emitOpError("a delay slot cannot hold a DMA completion");
 

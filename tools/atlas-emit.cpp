@@ -39,6 +39,8 @@ int main(int argc, char **argv) {
   llvm::SmallVector<uint32_t> words;
   if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
   if (failed(verifyAtlasArtifact(*module, mapJson || programJson, words))) return 1;
+  // An untimed stream may still lack its delay slots.
+  bool slots = atlasHasDelaySlots(*module);
   if (programJson) {
     // This is the physical-stream input boundary for an external functional
     // model. The encoded words remain authoritative; these typed fields and
@@ -68,10 +70,12 @@ int main(int argc, char **argv) {
         int64_t offset = branch.getOffsetBytesAttr().getValue().getSExtValue();
         control["kind"] = "conditional_direct";
         control["target_word_index"] = static_cast<int64_t>(index) + offset / 2;
-        control["fallthrough_word_index"] = static_cast<int64_t>(index) + 2;
-        control["delay_slot_word_index"] = static_cast<int64_t>(index) + 1;
+        control["fallthrough_word_index"] = static_cast<int64_t>(index) + (slots ? 2 : 1);
+        if (slots)
+          control["delay_slot_word_index"] = static_cast<int64_t>(index) + 1;
       } else if (auto jump = dyn_cast<JumpOp>(op)) {
-        control["delay_slot_word_index"] = static_cast<int64_t>(index) + 1;
+        if (slots)
+          control["delay_slot_word_index"] = static_cast<int64_t>(index) + 1;
         if (jump.getKind() == "jal") {
           int64_t offset = jump.getOffsetAttr().getValue().getSExtValue();
           control["kind"] = "jump_direct";
@@ -96,7 +100,7 @@ int main(int argc, char **argv) {
           {"fields", std::move(fields)},
           {"control", std::move(control)},
       };
-      if (previous && isa<BranchOp, JumpOp>(previous))
+      if (slots && previous && isa<BranchOp, JumpOp>(previous))
         entry["delay_slot_for_word_index"] = static_cast<int64_t>(index - 1);
       if (auto delay = dyn_cast<DelayOp>(op))
         entry["explicit_delay_cycles"] = static_cast<int64_t>(delay.getCycles());
@@ -151,7 +155,7 @@ int main(int argc, char **argv) {
       if (auto delay = dyn_cast<DelayOp>(op)) {
         entry["explicit_stall_cycles"] = static_cast<int64_t>(delay.getCycles());
       }
-      if (previous && isa<BranchOp, JumpOp>(previous)) {
+      if (slots && previous && isa<BranchOp, JumpOp>(previous)) {
         entry["delay_slot_for_word_index"] = static_cast<int64_t>(index - 1);
       }
       if (auto branch = dyn_cast<BranchOp>(op)) {

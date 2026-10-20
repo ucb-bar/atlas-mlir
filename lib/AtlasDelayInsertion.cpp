@@ -139,13 +139,15 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
 
     if (isControlFlow(*in.op)) {
       // The slot issues next; the successors start drained two cycles later.
+      // A pending slot is filled with a NOP (writeAtlasStream).
       size_t slotIndex = i + 1;
-      const Instr &slot = instrs[slotIndex];
+      Instr nop = atlasNopInstr();
+      const Instr &slot = s.delaySlots ? instrs[slotIndex] : nop;
       RegValues after = regs;
       applyScalar(in, after);
       Footprint sf = p.footprint(slot, after);
       if (!sf.error.empty())
-        return ops[slotIndex]->emitOpError(sf.error);
+        return ops[s.delaySlots ? slotIndex : i]->emitOpError(sf.error);
       if (drained() - 2 > cycle) {
         cycle = drained() - 2;
         reason = "this block finishes before the branch's successors start";
@@ -173,10 +175,12 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       if (failed(search(i, cycle, reason, fits)))
         return failure();
       place(i, f, cycle, reason);
-      place(slotIndex, sf, cycle + 1, "");
+      if (s.delaySlots)
+        place(slotIndex, sf, cycle + 1, "");
       if (!fault.empty())
         return ops[i]->emitOpError(fault);
-      i = slotIndex;
+      if (s.delaySlots)
+        i = slotIndex;
       continue;
     }
 

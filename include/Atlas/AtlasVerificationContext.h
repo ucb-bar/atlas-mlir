@@ -41,16 +41,22 @@ struct AtlasVerificationContext {
 
 // After the MLIR verifier and verifyAtlasTimingState, decodes (so encodes) at
 // most once. `generated` first runs the structural stage (DMA pairing,
-// protected intervals, x0-NOP redirect slots); requireStream forces decoding.
+// protected intervals, scalar redirect slots); requireStream forces decoding.
 FailureOr<AtlasVerificationContext>
 buildAtlasVerificationContext(ModuleOp module, bool generated,
                               bool requireStream = false);
 
-// The exact `addi x0, x0, 0` that generated redirect delay slots require.
+// The exact `addi x0, x0, 0`.
 inline bool isExactAtlasNop(Operation *op) {
   auto nop = dyn_cast_or_null<ALUImmOp>(op);
   return nop && nop.getKind() == "addi" && nop.getDst() == 0 &&
          nop.getSrc() == 0 && nop.getImmediate() == 0;
+}
+
+// What a generated redirect's delay slot may hold: scalar ALU work, which
+// touches no memory, DMA or unit, or a NOP when nothing else can go there.
+inline bool isAtlasDelaySlotWork(Operation *op) {
+  return isa_and_nonnull<ALUImmOp, ALURegOp>(op);
 }
 
 } // namespace mlir::atlas

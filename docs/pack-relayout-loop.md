@@ -62,16 +62,18 @@ disjoint), so both timing passes keep this order. The loop's registers, trip
 count, branch and instruction count are unchanged; nothing is unrolled or
 duplicated.
 
-A row now takes 29 cycles under both `--insert-atlas-delays` and
-`--schedule-atlas-stream`, against about 43. (An earlier experiment that kept
+A row now takes 29 cycles under `--insert-atlas-delays`, and 28 under
+`--schedule-atlas-stream`, which moves the destination step into the
+back-edge's delay slot, against about 43. (An earlier experiment that kept
 loads ahead of stores with eight temporaries reached about 36, because its
 stores still issued after all eight loads.)
 
 The virtual scheduler's PACK cost (`costOf` in `AtlasVirtualScheduling.cpp`)
 modelled the old serial copy, each word's load latency plus its store latency.
 It now models a row as seven load intervals, then the last word's load and
-store latencies and the row's three control instructions (destination step,
-back-edge, delay slot), which gives the measured 29 cycles.
+store latencies and the row's two control instructions (the back-edge, and
+its delay slot holding the destination step), which gives the measured 28
+cycles.
 `kPackRelayoutRowWords` (`AtlasVirtualAllocation.h`) is the row size both use.
 
 ## What does not change

@@ -330,7 +330,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
   std::map<size_t, Helper> helpers;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!s.endsInBranch(block)) continue;
-    Operation *branch = s.ops[s.blockEnd(block) - 2];
+    Operation *branch = s.ops[s.redirectOf(block)];
     if (!isa<BranchOp>(branch) || !branch->hasAttr(kAtlasTagCFGHelper)) continue;
     const AtlasLoop *loop = s.loop(block);
     const Pack *p = packOf(branch);

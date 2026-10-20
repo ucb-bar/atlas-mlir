@@ -375,8 +375,6 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         }
       }
     }
-    if (isa<BranchOp,JumpOp>(op) && !isExactAtlasNop(pc + 1 < ops.size() ? ops[pc+1] : nullptr))
-      return op->emitOpError("CFG contract redirect requires an exact x0 NOP delay slot");
     if (auto id = contractTag(op,kAtlasTagCFGBranch)) if (!isa<BranchOp>(op) || *id != *owner || blocks[*id].condition < 0 || !seenBranches.insert(*id).second) return op->emitOpError("CFG contract invalid source branch identity");
     if (Attribute h = op->getAttr(kAtlasTagCFGHelper)) {
       auto name = dyn_cast<StringAttr>(h);
@@ -398,6 +396,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   for (auto &b : blocks) if (starts[b.id] == ops.size() || (b.condition >= 0 && !seenBranches.count(b.id))) return module.emitOpError("CFG contract missing source block or branch site");
   for (auto &v : values) if ((v.def != "argument" || v.block == 0) && !seenResults.count(v.id)) return module.emitOpError("CFG contract missing source result site");
   auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? ctx.pcOf.lookup(t) : ops.size(); };
+  // A redirect's fall-through, after its delay slot if the stream has them.
+  size_t width = stream->delaySlots ? 2 : 1;
   auto matches = [&](const State &s, const ValueRecord &v, int32_t expected) { return v.type == "i1" || v.type == "i32" ? same(s.x[v.reg],origin(expected)) : s.tensor[v.reg] == expected && (v.type != "bf16" || s.tensor[v.reg+1] == expected); };
   auto install = [&](State &s, const ValueRecord &v) { if (v.type == "i1" || v.type == "i32") s.x[v.reg] = origin(v.id); else { s.tensor[v.reg] = v.id; if (v.type == "bf16") s.tensor[v.reg+1] = v.id; } };
   for (auto &block : blocks) {
@@ -567,32 +567,46 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       if (auto branch = dyn_cast<BranchOp>(op)) {
         if (contractTag(op,kAtlasTagCFGBranch)) {
           if (block.edges.size() != 2 || branch.getKind() != "bne" || branch.getRhs() != 0 || !same(s.x[branch.getLhs()],origin(block.condition)) || target(op) != edgeStarts[block.edges[0]]) return error("source branch condition, polarity or true target differs");
-          size_t fallthrough = pc + 2; if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
+          size_t fallthrough = pc + width; if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
         } else if (!op->hasAttr(kAtlasTagCFGHelper)) return error("unowned conditional redirect changes source visits");
       }
       if (auto jump = dyn_cast<JumpOp>(op)) {
         auto id = contractTag(op,kAtlasTagCFGEdge); if (!id || jump.getKind() != "jal" || jump.getDst() != 0 || edges[*id].from != block.id || target(op) != starts[edges[*id].to]) return error("source edge target differs or redirect is unowned");
-        if (block.condition >= 0 && s.chosen != *id) return error("source conditional edge does not match branch outcome");
-        for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source operation is skipped before source edge");
-        auto &edge = edges[*id]; auto &dest = blocks[edge.to];
-        for (size_t n = 0; n < edge.incoming.size(); ++n) if (!matches(s,values[dest.args[n]],edge.incoming[n])) return error("simultaneous source edge copy lost its incoming origin");
-        for (int32_t v : dest.live) if (!matches(s,values[v],v)) return error("source edge clobbers a live-through origin");
       }
       if (isa<TrapOp>(op)) { if (!block.edges.empty()) return error("source block exits before its source edge"); for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source return skips an operation"); }
       return success();
     };
+    // A redirect's delay slot runs on each path out of it, and a jump takes
+    // its source edge after the slot.
+    auto step = [&](size_t pc, State &s, bool diagnose) -> LogicalResult {
+      Operation *op = ops[pc];
+      if (failed(transfer(pc,s,diagnose))) return failure();
+      if (width == 2 && isa<BranchOp,JumpOp>(op) && failed(transfer(pc+1,s,diagnose))) return failure();
+      if (!isa<JumpOp>(op)) return success();
+      auto error = [&](StringRef message) -> LogicalResult {
+        if (diagnose) return op->emitOpError("CFG contract ") << message;
+        return failure();
+      };
+      int32_t id = *contractTag(op,kAtlasTagCFGEdge);
+      if (block.condition >= 0 && s.chosen != id) return error("source conditional edge does not match branch outcome");
+      for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source operation is skipped before source edge");
+      auto &edge = edges[id]; auto &dest = blocks[edge.to];
+      for (size_t n = 0; n < edge.incoming.size(); ++n) if (!matches(s,values[dest.args[n]],edge.incoming[n])) return error("simultaneous source edge copy lost its incoming origin");
+      for (int32_t v : dest.live) if (!matches(s,values[v],v)) return error("source edge clobbers a live-through origin");
+      return success();
+    };
     while (!work.empty()) {
       size_t pc = work.front(); work.pop_front(); State s = entries[pc];
-      if (failed(transfer(pc,s,false))) continue;
+      if (failed(step(pc,s,false))) continue;
       Operation *op = ops[pc];
       if (isa<JumpOp,TrapOp>(op)) continue;
       if (isa<BranchOp>(op)) {
         State taken = s, fall = s;
         if (contractTag(op,kAtlasTagCFGBranch)) { taken.chosen = block.edges[0]; fall.chosen = block.edges[1]; }
-        propagate(target(op),taken); propagate(pc+2,fall);
+        propagate(target(op),taken); propagate(pc+width,fall);
       } else propagate(pc+1,s);
     }
-    for (size_t pc = 0; pc < ops.size(); ++pc) if (reached[pc]) { State s = entries[pc]; if (failed(transfer(pc,s,true))) return failure(); }
+    for (size_t pc = 0; pc < ops.size(); ++pc) if (reached[pc]) { State s = entries[pc]; if (failed(step(pc,s,true))) return failure(); }
     if (block.edges.empty()) {
       bool returned = false;
       for (size_t pc = 0; pc < ops.size(); ++pc)

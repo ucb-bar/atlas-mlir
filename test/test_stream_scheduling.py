@@ -102,6 +102,36 @@ class StreamSchedulingTest(unittest.TestCase):
                          ["vload", "alu_imm", "alu_imm", "delay", "branch", "alu_imm", "trap"])
         self.assertEqual(branch_target(ops), 4)
 
+    def test_pending_delay_slot_takes_independent_work_or_a_nop(self) -> None:
+        # As lowering leaves it: the back-edge has no delay slot yet.
+        loop = program([
+            addi(13, 0, 0), addi(14, 0, 3),
+            addi(20, 20, 1), addi(13, 13, 1),
+            ("branch", 'kind = "blt", lhs = 13 : i32, rhs = 14 : i32, offset_bytes = -4 : i32'),
+            ("trap", 'kind = "ecall"'),
+        ]).replace("module {", "module attributes {atlas.delay_slots_pending} {", 1)
+        slot = lambda ops: ops[next(i for i, (op, _, _) in enumerate(ops) if op == "branch") + 1]
+
+        # x20's step feeds nothing after it, so it fills the slot; the branch
+        # reads x13's.
+        filled = run(OPT, loop, "--schedule-atlas-stream")
+        self.assertEqual(filled.returncode, 0, filled.stderr)
+        self.assertNotIn("atlas.delay_slots_pending", filled.stdout)
+        ops = stream(filled.stdout)
+        self.assertIn("dst = 20 : i32", slot(ops)[1])
+        self.assertEqual([op for op, _, _ in ops[branch_target(ops):]], ["alu_imm", "branch", "alu_imm", "trap"])
+        for tool, options in ((OPT, ("--verify-atlas-timing",)), (EMIT, ())):
+            self.assertEqual(run(tool, filled.stdout, *options).returncode, 0)
+
+        nop = run(OPT, loop, "--insert-atlas-delays")
+        self.assertEqual(nop.returncode, 0, nop.stderr)
+        self.assertEqual(slot(stream(nop.stdout))[2], "no instruction can fill the delay slot")
+
+        untimed = run(OPT, loop, "--schedule-atlas-stream=insert-delays=false")
+        self.assertEqual(untimed.returncode, 0, untimed.stderr)
+        self.assertIn("atlas.delay_slots_pending", untimed.stdout)
+        self.assertEqual(slot(stream(untimed.stdout))[0], "trap")
+
     def test_rejects_what_scheduling_cannot_fix(self) -> None:
         dma_then_vload = [
             addi(5, 0, 0), ("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),
