@@ -112,6 +112,22 @@ void VirtualOutputBF16Op::getEffects(
   effects.emplace_back(MemoryEffects::Write::get());
 }
 
+// A legacy matmul uses fixed MXU slots and a PACK fixed VMEM scratch: each
+// must keep its place among other users of that state.
+void VirtualMXUMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void VirtualPackFP8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 static LogicalResult inRange(Operation *op, StringRef name, int64_t value,
                              int64_t first, int64_t last) {
   if (value >= first && value <= last)

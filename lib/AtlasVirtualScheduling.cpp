@@ -69,10 +69,11 @@ bool isImplicitMemory(Operation *op) {
   return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op);
 }
 
-// An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
-// and virtual_pack_fp8 are declared Pure yet have ordering obligations. DMA
-// ordering and slot limits are edges of their own (buildGraph, SlotPool).
-// An operation missing from the table is a full barrier.
+// An explicit table, finer than the ops' declared memory effects: a PACK
+// writes only its scratch and a legacy matmul only its unit, so transfers and
+// other work can move across them. DMA ordering and slot limits are edges of
+// their own (buildGraph, SlotPool). An operation missing from the table is a
+// full barrier.
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
