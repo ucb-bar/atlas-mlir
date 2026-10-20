@@ -5,12 +5,12 @@ The output directory receives:
   1-virtual.mlir    the source after MXU state spilling and verification (--atlas-compile-verify)
   2-scheduled.mlir  after boundary DMA and virtual scheduling (--atlas-compile-schedule)
   2-spilled.mlir    after register spilling (--atlas-compile-spill)
-  3-allocated.mlir  untimed machine IR with DMA waits (--atlas-compile-lower)
+  3-allocated.mlir  untimed machine IR, before DMA waits (--atlas-compile-lower)
   3-allocation.json the allocation plan: each value's registers, MXU slot or
                     DMA channel, peak demand against capacity per register
                     kind, the VMEM windows used, whether it fits, and every
                     error; written even when the program does not fit
-  4-timed.mlir      after stream scheduling (--atlas-compile-time)
+  4-timed.mlir      after DMA waits and stream scheduling (--atlas-compile-time)
   5-words.hex       instruction words, from atlas-emit
   5-map.json        the word-to-operation map, from atlas-emit --map-json
   5-program.json    the decoded program, from atlas-emit --program-json
