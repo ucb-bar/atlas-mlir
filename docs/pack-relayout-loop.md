@@ -145,10 +145,17 @@ cheaper PACK cost tips the other way.
 
 ## Guarded MXU conversion
 
-`atlas-opt --lower-atlas-guarded-pack` (or `tools/lower_atlas_program.py --guarded-pack`) avoids PACK and its relayout for proven-finite BF16 sources. Run it before boundary-to-DMA conversion, virtual scheduling and allocation. It clamps to BF16 bounds `±(((s+8)<<7)|96)` for scale codes `s<=246`, copies through an MXU BF16 accumulator, and reads FP8 with inverse scale `254-min(s,254)`; codes 247..255 need no clamp. The result is bit-identical to native PACK for every finite BF16 encoding at every scale. Native fallback still admits only scales 122..128.
+`atlas-opt --atlas-compile=guarded-pack=true` or
+`tools/lower_atlas_program.py --guarded-pack` opts in to MXU conversion of
+proven-finite BF16 sources, bit-exact with PACK for every finite encoding and
+scale. The registered pipeline runs the conversion before boundary conversion,
+scheduling and allocation, and always recovers register pressure through spilling.
+For pass-level use, run `--lower-atlas-guarded-pack` before these stages.
 
-The proof lives entirely in `lib/AtlasGuardedPack.cpp`: finite splats, mov/ReLU and min/max of finite operands, fixed 32-term raw FP8 reset contractions (including the legacy matmul operation), and BF16 accumulator copies of proven-finite sources. Atlas's raw E4M3 multiplier interprets all byte encodings as bounded fields; each product is below 2^18, and 32 terms including BF16 rounding remain below 2^25. No input promise, Python value-fact tool or egglog dependency is required. Unknown inputs, special-valued splats, overflow-capable arithmetic and continued accumulations retain PACK; an arbitrary `finite_src` attribute supplies no proof.
-
-Only single-block functions are rewritten after virtual verification. Conversion uses MXU0 by default (`unit=1` selects MXU1), needs a free accumulator slot, and rematerializes clamp bounds at each use. The ordinary spill stage handles register pressure introduced by conversion. Existing state, allocation, machine and timing verifiers check the resulting operations.
-
-This remains opt-in: exactness does not guarantee a speedup when the selected MXU is busy or register pressure changes scheduling/spilling. Use `--spill` for larger programs: the optimized 16-tile MLP needs spilling after this conversion, although its source order allocates. `test_guarded_pack.py` covers proof rejection, both engines, repeated bounds and register-pressure spilling; the numerical regression compares native PACK and the clamped MXU converters across all finite encodings and scales when the model is available.
+Finiteness propagates from finite splats and raw FP8 reset contractions through
+mov/ReLU, min/max of finite operands and BF16 accumulator copies. Unknown
+sources, overflow-capable arithmetic and continued accumulations retain PACK.
+It uses MXU0 (`unit=1` selects MXU1) in single-block functions with a free
+accumulator slot. The ordinary spill stage handles register pressure introduced
+by conversion. Native fallback still admits only scales 122..128. Exactness
+does not guarantee a speedup under MXU contention or register pressure.
