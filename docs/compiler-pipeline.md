@@ -33,6 +33,14 @@ one's work; allocation and wait insertion assign staging windows, channels, and
 waits.
 The captured Linalg shell build enables this pass by default.
 
+### Reusing immutable weights
+
+Boundary conversion, virtual scheduling and virtual-to-machine lowering automatically reuse repeated FP8 weight inputs in single-block functions. The `--reuse-atlas-immutable-weights` pass exposes the same transformation for inspecting virtual IR. Eligible values have only matmul weight-operand or typed MXU weight-load uses; activation inputs and persistent MXU handles are unchanged.
+
+Reuse requires the complete original boundary DRAM spans to be valid and every boundary or explicit DMA store in the function to be provably disjoint from the weight's 1,024-byte range. Explicit FP8 DMA loads additionally require direct constant addresses and sizes. Boundary slot indices and explicit DMA addresses have separate reuse identities, preserving the original ABI/index checks. The state chain bypasses each removed load, while its tensor users share the first immutable value. Only newly dead address/size constants belonging to removed DMA loads are erased.
+
+The compiler first applies reuse to a clone and runs the actual allocator and allocation verifiers, accepting it only when the extended register lifetimes fit. Uncertain aliasing, CFG functions and allocation failures retain the source unchanged; inputs without reusable weights retain their emitted words. This optimization reduces DRAM reads across token tiles; MXU weight pushes remain under the existing scheduler. Tests in `test_immutable_weight_reuse.py` cover automatic pipelines, alias refusals, unchanged cases, typed handles, state rewiring and bounded-allocation fallback.
+
 ### Driver
 
 [`tools/lower_atlas_program.py`](../tools/lower_atlas_program.py) runs steps 1

@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasToLLVM.h"
@@ -29,6 +30,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerInsertAtlasDelaysPass();
   mlir::atlas::registerScheduleAtlasStreamPass();
   mlir::atlas::registerVerifyAtlasVirtualStreamPass();
+  mlir::atlas::registerReuseAtlasImmutableWeightsPass();
   mlir::atlas::registerLowerAtlasVirtualBoundaryToDMAPass();
   mlir::atlas::registerScheduleAtlasVirtualPass();
   mlir::atlas::registerSpillAtlasVirtualPass();

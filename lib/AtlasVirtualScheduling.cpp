@@ -5,6 +5,7 @@
 // and the machine passes after it time the real instructions.
 
 #include "Atlas/AtlasVirtualScheduling.h"
+#include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTiming.h"
@@ -948,6 +949,7 @@ struct ScheduleAtlasVirtualPass
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
     for (func::FuncOp function : module.getOps<func::FuncOp>()) {
+      reuseAtlasImmutableWeights(function);
       KindCounts capacity;
       RegisterCapacities capacities = registerCapacities(function);
       for (RegisterKind kind : kKinds)
