@@ -35,6 +35,20 @@ class GraphPrecisionTest(unittest.TestCase):
         sys.path.remove(str(ROOT / "python"))
         sys.path.remove(str(Path(MERLIN) / "src"))
 
+    def assert_shared_source_constants(self, parsed):
+        # The fixture initializes ten tensors, but equal typed splats share
+        # their semantic value. Computations and every source binding remain.
+        self.assertEqual(sum(op in {"linalg.fill", "tensor.splat"}
+                             for op in parsed.source_operations), 10)
+        self.assertEqual(sum(node.effect == "input" for node in parsed.request.nodes), 6)
+        self.assertEqual(sum(node.op == "source_f32_matmul_unqualified"
+                             for node in parsed.request.nodes), 7)
+        constants = [parsed.request.node(item.node_id) for item in parsed.request.constants]
+        self.assertEqual(len(constants), 4)
+        identities = {(node.type, item.encoding, item.data_hex)
+                      for node, item in zip(constants, parsed.request.constants, strict=True)}
+        self.assertEqual(len(identities), len(constants))
+
     def test_all_source_nodes_and_two_outputs_are_accounted(self) -> None:
         from atlas_mlir_native.binding import _mxu_bf16_dag_request
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
@@ -44,7 +58,7 @@ class GraphPrecisionTest(unittest.TestCase):
             self.source, entry="forward", target_identity=result.request.target_identity,
             lowering_policy="diagnostic",
         )
-        self.assertEqual(len(parsed.request.nodes), 38)
+        self.assert_shared_source_constants(parsed)
         self.assertEqual(len(result.request.nodes), 29)
         self.assertEqual({name for name, _ in result.source_to_target},
                          {node.id for node in parsed.request.nodes})
@@ -64,7 +78,7 @@ class GraphPrecisionTest(unittest.TestCase):
             source, entry="forward", target_identity=result.request.target_identity,
             lowering_policy="diagnostic",
         )
-        self.assertEqual(len(parsed.request.nodes), 39)
+        self.assert_shared_source_constants(parsed)
         self.assertEqual(len(result.request.nodes), 30)
         self.assertEqual(result.request.outputs, parsed.request.outputs)
         self.assertEqual(len(result.request.outputs), 3)
