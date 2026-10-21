@@ -1,8 +1,10 @@
 # Compiler pipeline
 
-The compiler takes one fixed-shape virtual Atlas function (SSA tiles, no
-registers, no timing) and produces checked Atlas machine IR, encoded
-instruction words, and an LLVM module that `llc` and `ld.lld` turn into an ELF.
+The compiler takes fixed-shape virtual Atlas IR (SSA tiles, no physical
+registers or timing) and produces checked machine IR and encoded Atlas
+instruction words. The [C/H exporter](baremetal-c-integration.md) embeds those
+words and constants for the platform application to link. The LLVM route is
+also available for assembly inspection; Baremetal-IDE builds the final host ELF.
 Op and pass details are in the [dialect reference](dialect-reference.md).
 Hardware facts refer to the pinned RTL (`ucb-bar/atlas-npu`
 `0079c0541111197741a231c002e3843fa6f545b2`).
@@ -18,6 +20,7 @@ passes. It takes one function with explicit `atlas.input_dram_base` and
 
 | Step | Result | Passes in `--atlas-compile` |
 | --- | --- | --- |
+| Optional composition | one virtual function for explicitly ordered regions | `--compose-atlas-program` |
 | 1. Verify | virtual IR, live MXU handles saved as tiles | `--spill-atlas-mxu-state`, `--verify-atlas-virtual-stream` |
 | 2. Schedule | boundary tiles as explicit DMA, each block reordered | `--lower-atlas-virtual-boundary-to-dma`, `--schedule-atlas-virtual`, `--verify-atlas-virtual-stream` |
 | 3. Spill | register pressure recovered through VMEM | `--spill-atlas-virtual`, `--verify-atlas-virtual-stream` |
@@ -25,6 +28,26 @@ passes. It takes one function with explicit `atlas.input_dram_base` and
 | 5. Time | adds `atlas.dma_wait`, reorders each block, fills delay slots, adds `atlas.delay` | `--insert-atlas-dma-waits`, `--verify-atlas-machine-stream`, `--verify-atlas-generated-schedule`, `--schedule-atlas-stream`, then `--verify-atlas-machine-stream`, `--verify-atlas-timing`, `--verify-atlas-generated-schedule` |
 | 6. Emit | words, word map, program JSON | `atlas-emit`, `--map-json`, `--program-json` |
 | 7. LLVM | one inline-asm word block | `--convert-atlas-to-llvm-calls`, `--finalize-atlas-llvm-calls`, `mlir-translate`, `llc`, `ld.lld` |
+
+Composition runs before scheduling and allocation. Its output ranges must be
+contiguous, indexed local I/O must first be lowered to explicit DMA, and target
+attributes must agree. See [single-program profiling](single-program-profiling.md)
+for the supported interface and tests.
+
+### Device temporaries
+
+An allocated DRAM buffer is not initialized storage. Explicit DMA may read a
+previously written intermediate when the verifier can establish that all
+requested bytes have been written. The source check follows static scalar
+control flow and records initialized byte intervals. A separate generated-code
+check replays retained scalar CFG records bound to the emitted DMA operations.
+Both have fixed work limits and reject unknown runtime paths. Existing wait and
+memory-effect checks still establish transfer completion and ordering.
+
+The resident graph path uses this mechanism to connect selected tile DAGs,
+matrix loops, scaling and pack operations before the normal scheduling and
+allocation passes. The [profiling guide](single-program-profiling.md) describes
+the current layout limits and execution tests.
 
 ### Exposing boundary DMA
 
@@ -76,7 +99,9 @@ The driver stops at the first failure and keeps what it has. The allocation
 report is written even on failure (`used: null` means coloring failed); it
 counts BF16 registers in pairs and VMEM in 4-byte words. Its `fits` and
 `untimed_words` are measured before DMA waits and delays, so use the final
-count in `5-program.json` (limit 2,048 words). Other inputs:
+count in `5-program.json`. Final layout checks the selected 128 KiB physical
+IMEM capacity and any smaller requested code budget after spills, waits, delays
+and branch relaxation; see [instruction memory](instruction-memory.md). Other inputs:
 `virtual_attention_tile_transposed_key.mlir` (Kᵀ on the XLU),
 `virtual_softmax_tile.mlir`, and the
 [captured attention and MLP example](../examples/handoff/captured_attention_mlp/README.md).
@@ -289,7 +314,10 @@ Editing words inside the final inline-assembly string skips every check.
 
 ## Limits
 
-- One fixed-shape function per module, 32×32 tiles, no general tiling.
+- Machine operations describe physical 32×32 tiles. The native source bridge
+  also generates compact M/N/K loops. Resident graph edges currently require
+  tile-aligned matrices and fit one diagnostic DRAM window; general internal
+  tail repacking and DRAM reuse remain unsupported.
   `--spill-atlas-virtual` handles FP8/BF16 and scalar values, block arguments and
   entry controls through shared VMEM temporaries. Mutable slots remain reserved
   for the invocation. Completed MXU state can be saved through raw tiles before

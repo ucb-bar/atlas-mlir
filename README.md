@@ -41,6 +41,20 @@ CTest runs the portable tests with no hardware. Tests that run the RTL need
 skip. To run the Python tests against another build, set `ATLAS_OOT_BIN_DIR` to
 its `bin` directory.
 
+The full native/evaluator suite also needs the selected Merlin source and an
+unpacked `npu_model` source tree with its Python dependencies. In particular,
+the arithmetic checks read `tests/rtl/arithmetic.json`; a model wheel alone
+does not include that reference fixture. Select these before running CTest:
+
+```sh
+export MERLIN_NATIVE_ROOT=/path/to/merlin
+export NPU_MODEL_ROOT=/path/to/npu_model
+export PYTHONPATH="$MERLIN_NATIVE_ROOT/src:$MERLIN_NATIVE_ROOT:$NPU_MODEL_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+These are test dependencies; ordinary compilation does not consume the model
+or its reference results. Hardware and model-execution tests remain opt-in.
+
 `ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
 The shared test helper runs canonical npu_model assembly in a Python 3.14
 subprocess; CTest keeps its own Python interpreter and test dependencies.
@@ -75,6 +89,12 @@ For full end-to-end runs, see the [examples](examples/handoff/README.md): LLVM
 and ELF stages for small tiles, a captured attention + MLP block from Linalg
 to a device program and host ELF, and tiled matmuls launched from a host.
 
+For Baremetal-IDE, start with the [single-image layer examples](examples/handoff/resident_layers/README.md).
+They produce C/H, device binaries, constants and buffer metadata. The platform
+application supplies the driver, startup and linker script, then builds the
+host ELF. The attention export contains program/data declarations; the matrix
+products also provide callable C wrappers.
+
 ## Read next
 
 | Doc | Covers |
@@ -92,3 +112,11 @@ This is not a general model compiler. It handles static 32×32 tiles and the
 graphs listed in the binding doc, with FP8/BF16 precision policies that change
 results relative to f32. Programs have run on a standalone Atlas core built
 from the pinned RTL, not on an integrated Shuttle + Atlas SoC or an FPGA.
+
+## Tensor applications and C integration
+
+The [C integration guide](docs/baremetal-c-integration.md) covers the generated
+C/H pair, parameter capture, platform callbacks and Baremetal-IDE build boundary.
+The [instruction memory guide](docs/instruction-memory.md) describes final size
+checks, long branches and measured reduction unrolling. These paths preserve the
+selected numerical policies; software/model checks do not qualify an FPGA build.

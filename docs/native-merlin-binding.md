@@ -20,6 +20,11 @@ Build `atlas-opt` and `atlas-emit` as in the [root README](../README.md), instal
 Merlin's Python package, then install this package. Its `atlas` entry point is
 what `--support atlas` loads.
 
+The frozen public graph RTL suites retain their precision documents. The
+current v24 catalog adds finite BF16 TANH/CUBE primitives and accepts the v21–v23
+graph policies for unchanged graph arithmetic on the same RTL. Generated
+requests identify v24; historical artifacts and suite hashes stay unchanged.
+
 ```sh
 uv pip install --python /path/to/venv/bin/python --no-deps -e .
 ```
@@ -64,7 +69,8 @@ manifest, and reports `verified_artifacts`.
 | --- | --- |
 | `--linalg FILE --linalg-entry NAME` | Linalg source and the function to compile. |
 | `--request FILE` | Typed request (`merlin.semantic_kernel.v2`/`v4`) instead of Linalg, e.g. `test/examples/native_bf16_relu_request.json` with ABI `{"fixed_inputs":{"x":3},"fixed_outputs":[35]}`. |
-| `--abi FILE` | `fixed_inputs` maps each input (`arg0`, or a tile input like `arg0__k1`) to a DRAM slot; `fixed_outputs` lists output slots in order. Slot *n* < 128 is at `0x90000000 + n·2048`. |
+| `--abi FILE` | `fixed_inputs` maps each input (`arg0`, or a tile input like `arg0__k1`) to a DRAM slot; `fixed_outputs` lists output slots in order. Slot *n* is at `0x90000000 + n·2048`, within the selected I/O window. The default has 128 slots. |
+| `--io-memory-bytes BYTES` | Explicit external-buffer window, aligned to 2,048 bytes. Pass the same value to snapshot generation, compilation, verification and profiling. Default: 262,144 bytes. |
 | `--mode diagnostic`, `--target-source .` | The only accepted mode; this checkout (RTL revision, tool directory). |
 | `--search-limits FILE` | Bigger search budget (`merlin.native_search_limits.v1`). The attention examples need it. |
 | `--ordered-k-tile 32` | Split K into 32-wide MXU0 segments. |
@@ -75,6 +81,22 @@ manifest, and reports `verified_artifacts`.
 
 Failure statuses: `unsupported_semantics` (no rule), `unqualified_target`
 (refused on this target), `resource_limit`, `tool_unavailable`, `compile_error`.
+
+A larger I/O window changes only the external allocation bank. For example,
+`--io-memory-bytes 1048576` selects 512 DRAM slots and produces a different
+snapshot profile hash. On-chip registers, VMEM and IMEM are unchanged. Every
+buffer must fit that window and the current 32-bit host buffer ABI. Program
+manifests record the effective byte size; C export and verification reject a
+different selection. Older artifacts without this field use the original
+256 KiB window. There is no automatic enlargement after allocation failure.
+The chosen range still needs an actual platform mapping and cache handling;
+standalone-core simulation does not qualify the complete FPGA memory map.
+
+BF16 tile graphs use staging when their arithmetic exceeds the register
+geometry or when loads, arithmetic and output stores exceed the default native
+instruction budget. Each stage is selected and checked separately, then the
+stages are composed into one Atlas image. There is no host launch between
+stages. The execution plan records the private staging memory range.
 
 **Typed Linalg** spells out target arithmetic with `merlin.*` policy and
 input-domain attributes (see `test/examples/native_*_linalg.mlir`): copies and
@@ -248,6 +270,245 @@ launch tables, and MLIR C-interface callbacks for a lowered host model
 
 ## Test status
 
+### Finite BF16 TANH
+
+The v23 native catalog describes `tanh_bf16` with
+`bf16-finite-all-codes-v1` inputs and
+`selected-rtl-bf16-tanh-q16-lut-rne-v1` arithmetic. Merlin generates its rule
+and Atlas emits `atlas.virtual_vpu_unary {kind = "tanh"}` through the existing
+pipeline. The supplied semantics truncate the input magnitude to Q16,
+interpolate the selected 32-entry LUT, saturate at magnitude four, and round
+the result to BF16. Small inputs can become signed zero.
+
+The attributed implementation is `tanh_lane.py`; `reference.py` checks the
+typed primitive and its numerical attributes. All 65,280 finite BF16 encodings
+match the TANH RTL table in pinned `npu_model`
+`337e9f249f938a1dff007ddf8a763e5cd4b3aa2b`. Nonfinite encodings are outside
+the admitted domain. The compiler never imports this model table.
+
+A generated 144-byte native program passes two input panels on that model,
+with complete input/output/guard memory checks. The same program passes both
+panels on standalone AtlasCore revision
+`0079c0541111197741a231c002e3843fa6f545b2`, compiled with Verilator and a
+test-side TileLink DRAM responder: 468 core cycles and 128 DMA beats per case.
+All 19 baseline cases and the additional tail-grid check pass in that run.
+This is bounded instruction evidence; it does not qualify the integrated SoC.
+
+Run `test_vpu_tanh_reference.py` with the selected Merlin/tools environment.
+Set `ATLAS_RUN_NPU_MODEL=1` and install the pinned model to include the
+exhaustive table check. This primitive does not admit source f32 tanh or GELU
+automatically; source GELU requires the separate precision selection below.
+
+### Bounded tanh-GELU
+
+Application precision v16 adds the explicit `gelu` selection
+`f32-to-bf16-bounded-tanh-gelu-cube-chop-v1`. It recognizes the checked source
+tanh-GELU expression and its four f32 coefficients. Another coefficient or
+expression is refused. This changes numerical precision; it is not an
+equality rewrite of the f32 model.
+
+The selected tile contains eight VPU operations: cube, multiply by the cubic
+coefficient, add the original input, multiply by the root coefficient, tanh,
+add one, multiply the input by one half, and the final multiply. Coefficients
+are rounded to BF16. Addition uses the selected FP32-RNE/BF16-chop path;
+multiplication uses BF16 RNE. VCUBE chops its normalized 24-bit significand
+product and flushes underflow to signed zero. Three rounded multiplies do not
+have the same semantics.
+
+The generated host conversion admits signed zero and BF16 magnitudes in
+`[2^-32, 2^32]`. In this range the cubic coefficient product stays normal;
+`1 + tanh` is zero or at least `2^-8`, so the final product stays normal or
+zero. All 16,388 admitted codes pass the scalar numerical checker. The finite
+CUBE port in `cube_lane.py` matches all 65,280 finite entries of the pinned
+model's RTL table. Its source is the selected Atlas `VectorParam.scala` and
+`SquareCubeVec.scala`; see the attribution in the module.
+
+Native selection and the existing loop pipeline produce a 320-byte 32×32
+program, or 316-byte tail/rank-3 programs. Two model panels per shape pass
+output, input and guard checks. The same 32×32 image passes two standalone
+Verilator/AtlasCore panels at 1,015 core cycles each, alongside the 19 baseline
+cases. These are bounded kernel results, not full-model or FPGA qualification.
+Generated C/H also passes the pointwise launch test and RV64/lp64d compilation.
+
+Run `test_gelu_precision.py`, `test_native_cube.py` and
+`test_pointwise_loop.py` with the selected tools and `ATLAS_RUN_NPU_MODEL=1`.
+The scalar reference and model are verification dependencies, not compiler or
+deployment fallbacks. Original-model quality must be measured separately.
+
+### SiLU fusion
+
+When both sigmoid and pointwise multiplication are enabled, the application
+adapter can group `x * sigmoid(x)` into one region. Merlin recognizes the
+source pair; another sigmoid user or an independently requested sigmoid output
+prevents fusion. The original source graph remains available for replay.
+
+The target expands the existing BF16 sigmoid steps followed by the existing
+rounded product. The removed BF16-to-f32-to-BF16 conversion is exact over the
+admitted sigmoid outputs. The generated input guard retains the sigmoid's
+domain. This removes an intermediate staging buffer and a launch without
+reassociation or a new approximation policy. Original-model quality remains
+separate from agreement with this selected target arithmetic.
+
+### Broadcast staging under memory pressure
+
+Pointwise lowering first tries full input materialization. If that exceeds the
+selected external window, it can store broadcast tiles once and reuse their
+addresses in nested row/column loops. The generated `execution_plan.json` lists
+each input's actual byte count; inputs need not have the output's packed size.
+The entire operation still uses one image and one launch. C conversion and
+packing preserve the caller's source buffers.
+
+Only lane-wise bodies can use this layout. Reused input values may fill
+unobserved output-tail lanes; the C assembler copies valid logical elements.
+Compilation and C export replay the same tile strides, ranges and program.
+This does not extend the selected address window or admit cross-lane reductions.
+
+Repeated uses of the same source value and index map share one staged buffer and
+DMA load. The selected binary operation consumes that SSA tile twice. Different
+views retain their separate packing and loads. The pinned `VectorEngineTop`
+mirrors equal-bank, equal-row reads; assignment checks allow the same register
+pair only for the same SSA operand. Distinct live values and the result still
+require nonoverlapping pairs.
+
+### BF16 source multiplication
+
+The v21 application policy adds an explicit device admission:
+`"bf16_pointwise": "bf16-bounded-pointwise-rne-v1"`. It accepts source
+`bf16_mul` only with `ieee754-bf16-mul-rne-v1`. The selected VMUL uses the
+same nearest-even product within the checked input domain: signed zero or
+normal BF16 magnitudes from `2^-63` through `2^63`. Nonzero products then
+remain normal and finite. This is conditional source equivalence, with no
+input quantization. It does not admit IEEE BF16 addition through a chopped
+VADD result.
+
+Generated C/H accepts dense, little-endian BF16 code bytes. It validates all
+inputs before loading or launching the program and returns BF16 bytes without
+a float conversion. `SOURCE_INPUT_COUNT`, `SOURCE_INPUT_i_BYTES` and
+`SOURCE_OUTPUT_0_BYTES` describe the logical C interface. Shared operands such
+as `x*x` use one public input; the selected implementation can materialize it
+in two device buffers, and both transfers and workspaces remain accounted for.
+
+`test_bf16_pointwise.py` checks admission and application composition.
+`test_pointwise_loop.py` checks compiled C/H and actual instruction execution
+in the pinned `npu_model`, including tails, rank-three broadcast, shared inputs,
+repeated calls, invalid input codes and guard memory. Model cycles are separate
+from RTL or FPGA timing. The selected target's add/subtract precision and the
+full model's numerical quality remain separate obligations.
+
+### Source float conversions
+
+Application precision v17 permits an explicit `host_float_casts` list containing
+`bf16_to_f32`, `f32_to_bf16`, `f32_to_f64` and `f64_to_f32`. Merlin emits these
+as compiled CPU C with exact source types and rounding. They do not become
+Atlas instructions, and older policies do not select them automatically.
+
+The implementation uses integer bit carriers, preserving signed zero,
+subnormals and infinities independently of the CPU rounding mode. Source NaN
+payload semantics remain unqualified: the entire input is checked before any
+output write, and a NaN returns a domain error. Buffers may be unaligned but
+must not overlap. The emitted C has no reference-evaluator or math-library call.
+
+The same policy may list `identity` in `host_support` for a dense, byte-preserving
+copy. This logical identity does not assert physical storage aliasing or erase
+an allocated view's offset obligations.
+
+Run Merlin's `test_float_casts_c.py` and this repository's application-policy
+tests. Actual captured cast slices also pass independent source-reference and
+guard checks. These are CPU results, not Atlas execution coverage or a complete
+model result. Power, sine and cosine require their own numerical lowering.
+
+Application precision v18 additionally requires `source_constant_math`, using
+Merlin's `positive-power-correct-rne-mpfr-v1` policy. This permits an explicit
+compiler-only numerical change for declared constant positive powers, with
+helper/library pins and bounded rounding evidence. It does not select a runtime
+math implementation or grant framework equivalence. Earlier application policies
+keep their original behavior. See Merlin's `docs/guides/dispatch_c.md` for the
+`merlin-targetgen native-math-build` command and source-preparation replay.
+
+Application precision v19 permits `host_float_arithmetic: ["f64_mul"]`.
+Merlin emits exact binary64 multiplication as integer C, with one final IEEE
+RNE step. It handles subnormals, signed zero and overflow independently of the
+CPU rounding mode. NaNs and zero-times-infinity return a domain error before
+any output write. The compiler must support unsigned 128-bit integers.
+
+This is explicitly selected CPU computation. It emits no Atlas program and
+does not provide fallback for a failed device region. In v19,
+`source_constant_math` is optional; when present, its helper pins and checks
+remain required. A runtime multiplication does not need the MPFR helper.
+
+`host_float_arithmetic` can also explicitly select `bf16_add` and `bf16_sub`.
+These use Merlin's exact integer C implementation with one BF16 RNE step,
+including subnormals, signed zeros and overflow. They consume and produce
+little-endian BF16 bytes. NaNs and invalid infinity cancellation are rejected
+before output writes. They remain CPU regions and do not select Atlas VPU
+addition, whose rounding must be qualified separately. Leaving either name
+out of the policy does not permit a CPU fallback for that operation.
+
+Application precision v20 adds `host_unary_math`, a separately selected
+`merlin.compiled_unary_math.v1` policy. It may select f32/f64 sine and cosine as
+compiled CPU calls to a pinned math archive. Source types and identity indexing
+are checked. The runtime requires an enabled FPU and RNE; non-finite inputs or a
+different rounding mode return an error before output writes. Floating flags
+and errno must be unobserved by the source invocation.
+
+The application interface records actual library symbols and their archive
+hashes in `host_linkage`. The platform links those exact files with RV64GC/lp64d
+and without fast-math, and checks the final link's suppliers. This is CPU work,
+not Atlas execution or fallback. The selected library's agreement with the
+original framework must be measured separately. Compiler-only MPFR bounds are
+used in tests; generated C does not depend on MPFR/GMP or a reference evaluator.
+
+### Wide BF16 row groups
+
+Application compilation selects one softmax row-group body and repeats it with
+a device-side counted loop. Merlin forms the SSA loop; this provider supplies
+the BF16 DMA layout and checks each group's address mapping. All row groups
+share one instruction image and one launch. The C/H interface initializes their
+inputs and constants before launch, then reads every result after completion.
+This avoids separate compilation and CPU launches for otherwise identical rows.
+
+Read-only tiles occupy one contiguous area. Each row group has a private writable
+frame for outputs and staging scratch, retained through completion. The current
+DMA checks accept this conservative layout; scratch reuse between row groups
+requires additional range analysis. Compilation reports a resource limit when
+the complete layout exceeds the explicitly selected I/O window.
+
+Large pure BF16 tile graphs can be split at exact tensor boundaries. Merlin
+orders the regions and allocates staging buffers by lifetime; Atlas selects
+each region and composes their virtual IR into **one program and one launch**.
+The normal memory checker proves initialization on the joined CFG, and the
+final pipeline allocates registers, inserts waits and delays, and checks size.
+This does not launch individual regions from the CPU.
+
+BF16 stream replay follows DRAM addresses through DMA, scratch storage and
+register pairs. Independent input loads may move across unrelated arithmetic.
+Value versions still detect overwritten inputs, incorrect output data and
+premature reuse; timing and DMA overlap checks remain separate.
+
+The public `WideGuardedSoftmaxTest` compiles a 32×1024 masked row group under
+the explicit diagnostic BF16 policy, including positive-zero outputs for
+fully masked rows. `SoftmaxCPackageTest` also covers multiple row groups and
+column tails, C/H export, repeated calls, error handling and final RV64 objects.
+Model checks use revision `337e9f249f938a1dff007ddf8a763e5cd4b3aa2b` and compare
+against independently ordered primitive arithmetic. These checks do not qualify
+full-model accuracy, RTL or FPGA execution.
+
+The C/H exporter includes the staging range in device-buffer ownership and
+cache maintenance. Reserve `*_DEVICE_ARENA_BASE` and `*_DEVICE_ARENA_BYTES`,
+in addition to the separate CPU `*_WORKSPACE_BYTES`. Device reservation includes
+all row groups' inputs, constants, outputs and staging. Its C source builds for
+native C and RV64/lp64d; no host main or ELF is included.
+
+```sh
+MERLIN_NATIVE_ROOT=/path/to/merlin ATLAS_OOT_BIN_DIR=/path/to/atlas-build/bin \
+  ATLAS_RUN_NPU_MODEL=1 TMPDIR=/path/to/task/.tmp \
+  PYTHONPATH="$PWD/python:/path/to/merlin/src:/path/to/merlin:$PWD/test:/path/to/npu-model/source" \
+  python -m unittest test_guarded_softmax.WideGuardedSoftmaxTest -v
+```
+
+The test imports Torch and the selected model. To check the exported Shuttle
+object as well, set `MERLIN_RISCV_GCC` to an RV64 GCC supporting lp64d.
+
 Unit tests need Merlin and the built tools, no simulator. Compiled attention+MLP
 programs were checked with unmodified `npu_model` main
 `9e6313bddecb8ba936206eb347f5cd4e5335282c` and `numerics="rtl"`.
@@ -328,5 +589,5 @@ atlas.scalar.CompiledProgramScalarCoreDiagnosticTest`.
 - Model quality has no target. The 12-case quality suite
   (`test/examples/attention_mlp_graph_quality_suite.json`) has no pass
   threshold; random panels reach about 0.011 maximum absolute error.
-- The exp and reciprocal ports follow `sp26-fp-units` (gitlink `9a0cc09`),
+- The exp, reciprocal and tanh ports follow `sp26-fp-units` (gitlink `9a0cc09`),
   which has no license file.

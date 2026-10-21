@@ -5,6 +5,7 @@ and are rebuilt by the commands in each README.
 
 | Example | Source | What it shows |
 | --- | --- | --- |
+| [Single-image layers](resident_layers/README.md) | Captured Linalg or typed matrix-product request | One Atlas image plus C/H, static data and buffer metadata for Baremetal-IDE. |
 | [MLP tile](mlp_tile/01-atlas-machine.mlir) | Atlas machine MLIR | Hand-written 32×32 instruction stream through LLVM to ELF. |
 | [Attention tile](attention_tile/01-atlas-machine.mlir) | Atlas machine MLIR | Same, for an attention tile. |
 | [Virtual MLP](virtual_mlp/00-atlas-virtual-ssa.mlir) | Atlas virtual SSA | SSA values before physical placement. |
