@@ -31,7 +31,7 @@ def _read_object(path: Path) -> dict:
 
 def _regions(plan: dict) -> list[dict]:
     addresses = plan.get("input_addresses")
-    sizes = plan.get("input_payload_bytes")
+    sizes = plan.get("input_payload_bytes", plan.get("input_buffer_bytes"))
     outputs = plan.get("output_addresses")
     output_bytes = plan.get("output_bytes")
     if (not isinstance(addresses, list) or not addresses or
@@ -55,14 +55,30 @@ def _regions(plan: dict) -> list[dict]:
     return regions
 
 
-def check(compiled: Path, host_map_path: Path, memmap_path: Path,
-          host_elf: Path | None = None) -> tuple[dict, dict]:
+def _compilation_images(compiled):
+    if (compiled / "abi.json").is_file():
+        abi = _read_object(compiled / "abi.json")
+        if (abi.get("schema") != "merlin.c_handoff.v1" or not isinstance(abi.get("files"), dict)
+                or not isinstance(abi.get("programs"), list) or not abi["programs"]):
+            raise ValueError("unsupported C handoff ABI")
+        for name, digest in abi["files"].items():
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or (compiled/path).is_symlink() or _sha((compiled/path).read_bytes()) != digest:
+                raise ValueError("C handoff member identity differs")
+        images = []
+        for image in abi["programs"]:
+            path = image["path"]
+            if abi["files"].get(path) != image["sha256"]:
+                raise ValueError("C handoff image identity differs")
+            program = (compiled/path).read_bytes()
+            if not program or len(program) % 4 or len(program) != image["bytes"] or not isinstance(image["execution"], dict):
+                raise ValueError("C handoff image has no complete execution ABI")
+            images.append((program, image["execution"]))
+        return abi, images
     manifest = _read_object(compiled / "manifest.json")
     plan_bytes = (compiled / "execution_plan.json").read_bytes()
     plan = json.loads(plan_bytes)
     program = (compiled / "program.bin").read_bytes()
-    host_map = _read_object(host_map_path)
-    memmap_bytes = memmap_path.read_bytes()
     if (manifest.get("schema") != "atlas.native_tile_compilation.v6" or
             manifest.get("engine") != "merlin_native" or
             not isinstance(plan, dict) or
@@ -71,6 +87,15 @@ def check(compiled: Path, host_map_path: Path, memmap_path: Path,
             manifest.get("binary_sha256") != _sha(program) or
             not program or len(program) % 4):
         raise ValueError("native graph manifest, plan, or program identity differs")
+    return manifest, [(program, plan)]
+
+
+def check(compiled: Path, host_map_path: Path, memmap_path: Path,
+          host_elf: Path | None = None) -> tuple[dict, dict]:
+    manifest, images = _compilation_images(compiled)
+    program = max((binary for binary, _ in images), key=len)
+    host_map = _read_object(host_map_path)
+    memmap_bytes = memmap_path.read_bytes()
     if (host_map.get("schema") != "atlas.host-map.v1" or
             not isinstance(host_map.get("bitstream_identity"), str) or
             not host_map["bitstream_identity"] or
@@ -94,7 +119,8 @@ def check(compiled: Path, host_map_path: Path, memmap_path: Path,
         raise ValueError("host map disagrees with the compiled image or host CSR layout")
     check_soc_memmap_hash(host_map, memmap_bytes)
     memmap = json.loads(memmap_bytes)
-    regions = _regions(plan)
+    image_regions = [_regions(plan) for _, plan in images]
+    regions = [row for group in image_regions for row in group]
     for constant in manifest.get("constant_inputs", []):
         path = constant.get("path")
         if (not isinstance(path, str) or Path(path).is_absolute() or
@@ -104,7 +130,8 @@ def check(compiled: Path, host_map_path: Path, memmap_path: Path,
                         for row in regions) or
                 _sha((compiled / path).read_bytes()) != constant.get("sha256")):
             raise ValueError("native constant placement or identity differs")
-    mapped = check_soc_memmap(host_map, {"dram": {"regions": regions}}, memmap)
+    mappings = [check_soc_memmap(host_map, {"dram": {"regions": group}}, memmap) for group in image_regions]
+    mapped = mappings[0] if len(mappings) == 1 else {"programs": mappings}
     checked_elf = None
     if host_elf is not None:
         elf = host_elf.read_bytes()
@@ -130,7 +157,8 @@ def check(compiled: Path, host_map_path: Path, memmap_path: Path,
         "soc_source_revision": host_map["soc_source_revision"],
         "soc_memmap_sha256": _sha(memmap_bytes),
         "host_map_sha256": _sha(host_map_path.read_bytes()),
-        "program_sha256": _sha(program),
+        "program_sha256": _sha(program) if len(images) == 1 else None,
+        "program_sha256s": [_sha(binary) for binary, _ in images],
         "mapped_regions": mapped,
         "host_elf": checked_elf,
     }

@@ -35,6 +35,20 @@ def pack_bf16_pair_halves(logical: bytes) -> bytes:
     return bytes(physical)
 
 
+def pack_bf16_matrix(logical: bytes, shape: tuple[int, int]) -> bytes:
+    """Pack a tile-aligned logical BF16 matrix in M/N tile order."""
+    if (len(shape) != 2 or any(type(n) is not int or n <= 0 or n % 32 for n in shape)
+            or type(logical) is not bytes or len(logical) != shape[0] * shape[1] * 2):
+        raise ValueError("BF16 matrix needs complete tile-aligned logical bytes")
+    rows, columns = shape
+    physical = bytearray()
+    for mr in range(0, rows, 32):
+        for nc in range(0, columns, 32):
+            tile = b"".join(logical[((mr+r)*columns+nc)*2:((mr+r)*columns+nc+32)*2] for r in range(32))
+            physical.extend(pack_bf16_pair_halves(tile))
+    return bytes(physical)
+
+
 def unpack_native_bf16_output(plan: Mapping[str, object], physical: bytes,
                               output_index: int = 0) -> bytes:
     """Decode a native output only when its recorded physical layout agrees."""

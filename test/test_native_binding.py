@@ -6273,10 +6273,12 @@ class NativeBindingTest(unittest.TestCase):
                          ("tensor.empty", "linalg.copy", "tensor.empty", "linalg.copy", "func.return"))
         request = translated.request
         destination = self.work / "two-outputs"
+        # First-valid search does not promise minimum work at a larger budget.
+        # One shared load plus two stores is the three-instruction witness.
         manifest = self.compile_verified(
             request, fixed_inputs={"arg0": 3},
             fixed_outputs=(35, 36),
-            destination=destination, limits=SearchLimits(),
+            destination=destination, limits=SearchLimits(candidate_nodes=3),
         )
         self.assertEqual(manifest["selected_registers"], [0, 1])
         plan = json.loads((destination / "execution_plan.json").read_text())

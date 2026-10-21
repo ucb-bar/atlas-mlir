@@ -41,16 +41,6 @@ typedef struct {
 typedef int (*atlas_tile_pack)(const float *source, uint8_t *destination);
 typedef int (*atlas_tile_unpack)(const volatile uint8_t *source,
                                  float *destination);
-typedef int (*atlas_tile_write)(void *context, uintptr_t address,
-                                const uint8_t *source, size_t bytes);
-typedef int (*atlas_tile_read)(void *context, uintptr_t address,
-                               uint8_t *destination, size_t bytes);
-
-typedef struct {
-  atlas_tile_write write;
-  atlas_tile_read read;
-  void *context;
-} atlas_tile_memory_io;
 
 typedef struct {
   atlas_host *host;

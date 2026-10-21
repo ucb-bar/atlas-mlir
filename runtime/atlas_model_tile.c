@@ -102,7 +102,7 @@ atlas_model_tile_status atlas_model_tile_run(atlas_model_tile *binding,
       return ATLAS_MODEL_TILE_MEMORY_ERROR;
   }
 
-  atlas_host_result host_status = atlas_host_load(binding->host, binding->program_words,
+  atlas_host_result host_status = atlas_host_ensure_loaded(binding->host, binding->program_words,
                                                  binding->program_word_count);
   if (device_result)
     *device_result = host_status;

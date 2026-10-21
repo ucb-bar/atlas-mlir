@@ -57,7 +57,8 @@ class NativeMultiResultGuardTest(unittest.TestCase):
             # Present the last result as a later projection of the first
             # instruction, as Merlin does for a shared multi-result bundle.
             owner = next(value.id for value in values if value.kind == "instruction")
-            values[-1] = replace(values[-1], kind="projection", projection_of=owner)
+            values[-1] = replace(values[-1], kind="projection", projection_of=owner,
+                                 value_preserving_copy=False)
             forged = replace(selected, graph=replace(selected.graph, values=tuple(values)))
             decisions.append(accept(forged))
             return select(self, request, accept_materialization=accept, **kwargs)
