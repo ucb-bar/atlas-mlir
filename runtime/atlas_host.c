@@ -33,7 +33,21 @@ atlas_host_result atlas_host_init(atlas_host *host, atlas_host_map map,
   return ATLAS_HOST_OK;
 }
 
-atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,
+atlas_host_result atlas_host_set_clock(atlas_host *host,
+                                      atlas_host_read_clock clock, void *context) {
+  if (!host) return ATLAS_HOST_INVALID;
+  if (host->active) return ATLAS_HOST_BUSY;
+  host->clock = clock;
+  host->clock_context = context;
+  host->timings = (atlas_host_timings){0};
+  return ATLAS_HOST_OK;
+}
+
+static uint64_t clock_now(atlas_host *host) {
+  return host && host->clock ? host->clock(host->clock_context) : 0;
+}
+
+static atlas_host_result load_program(atlas_host *host, const uint32_t *words,
                                   size_t word_count) {
   if (!host)
     return ATLAS_HOST_INVALID;
@@ -41,6 +55,8 @@ atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,
     return ATLAS_HOST_BUSY;
   /* A failed replacement must not leave the previous program launchable. */
   host->program_loaded = 0;
+  host->resident_words = 0;
+  host->resident_word_count = 0;
   if (!words || !word_count ||
       word_count > host->map.imem_capacity_bytes / sizeof(uint32_t))
     return ATLAS_HOST_INVALID;
@@ -51,10 +67,72 @@ atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,
     host->mmio.write32(host->mmio.context, host->map.imem_base + 4 * index,
                        words[index]);
   host->program_loaded = 1;
+  ++host->image_loads;
+  host->imem_words_written += word_count;
   return ATLAS_HOST_OK;
 }
 
-atlas_host_result atlas_host_start(atlas_host *host,
+atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,
+                                  size_t word_count) {
+  uint64_t begin = clock_now(host);
+  atlas_host_result result = load_program(host, words, word_count);
+  if (host && host->clock) host->timings.load_ticks += clock_now(host) - begin;
+  return result;
+}
+
+static int same_words(const uint32_t *lhs, const uint32_t *rhs, size_t count) {
+  for (size_t i = 0; i < count; ++i)
+    if (lhs[i] != rhs[i]) return 0;
+  return 1;
+}
+
+atlas_host_result atlas_host_ensure_loaded(atlas_host *host,
+                                         const uint32_t *words, size_t count) {
+  if (!host)
+    return ATLAS_HOST_INVALID;
+  if (host->active)
+    return ATLAS_HOST_BUSY;
+  if (words && count && count <= host->map.imem_capacity_bytes / sizeof(*words) &&
+      host->program_loaded && host->resident_words &&
+      host->resident_word_count == count &&
+      same_words(host->resident_words, words, count)) {
+    if (!(host->mmio.read32(host->mmio.context,
+                           host->map.csr_base + ATLAS_CSR_STATUS) & ATLAS_HALTED))
+      return ATLAS_HOST_NOT_READY;
+    ++host->image_reuses;
+    return ATLAS_HOST_OK;
+  }
+  atlas_host_result result = atlas_host_load(host, words, count);
+  if (result == ATLAS_HOST_OK) {
+    host->resident_words = words;
+    host->resident_word_count = count;
+  }
+  return result;
+}
+
+atlas_host_result atlas_host_invalidate_program(atlas_host *host) {
+  if (!host)
+    return ATLAS_HOST_INVALID;
+  if (host->active)
+    return ATLAS_HOST_BUSY;
+  host->program_loaded = 0;
+  host->resident_words = 0;
+  host->resident_word_count = 0;
+  return ATLAS_HOST_OK;
+}
+
+atlas_host_result atlas_host_reset_completed(atlas_host *host) {
+  if (!host)
+    return ATLAS_HOST_INVALID;
+  /* This acknowledges the owner's completed reset; it does not reset hardware. */
+  host->active = 0;
+  host->launch_acknowledged = 0;
+  host->active_buffers = 0;
+  host->active_buffer_count = 0;
+  return atlas_host_invalidate_program(host);
+}
+
+static atlas_host_result start_program(atlas_host *host,
                                    const atlas_host_buffer *buffers,
                                    size_t buffer_count) {
   if (!host || (buffer_count && !buffers))
@@ -86,7 +164,17 @@ atlas_host_result atlas_host_start(atlas_host *host,
   host->start_retired = host->mmio.read32(host->mmio.context, host->map.csr_base + ATLAS_CSR_RETIRED);
   host->mmio.write32(host->mmio.context,
                      host->map.csr_base + ATLAS_CSR_EXEC_CONTROL, 1);
+  ++host->launches;
   return ATLAS_HOST_OK;
+}
+
+atlas_host_result atlas_host_start(atlas_host *host,
+                                   const atlas_host_buffer *buffers,
+                                   size_t buffer_count) {
+  uint64_t begin = clock_now(host);
+  atlas_host_result result = start_program(host, buffers, buffer_count);
+  if (host && host->clock) host->timings.start_ticks += clock_now(host) - begin;
+  return result;
 }
 
 atlas_host_result atlas_host_poll(atlas_host *host) {
@@ -130,7 +218,7 @@ atlas_host_result atlas_host_poll(atlas_host *host) {
   return ATLAS_HOST_OK;
 }
 
-atlas_host_result atlas_host_wait(atlas_host *host, size_t max_polls) {
+static atlas_host_result wait_program(atlas_host *host, size_t max_polls) {
   if (!host || !host->active)
     return ATLAS_HOST_NOT_READY;
   for (size_t poll = 0; poll < max_polls; ++poll) {
@@ -139,4 +227,11 @@ atlas_host_result atlas_host_wait(atlas_host *host, size_t max_polls) {
       return result;
   }
   return ATLAS_HOST_TIMEOUT;
+}
+
+atlas_host_result atlas_host_wait(atlas_host *host, size_t max_polls) {
+  uint64_t begin = clock_now(host);
+  atlas_host_result result = wait_program(host, max_polls);
+  if (host && host->clock) host->timings.wait_ticks += clock_now(host) - begin;
+  return result;
 }
