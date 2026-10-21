@@ -27,11 +27,12 @@ Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
 `a47bddccec30255619bb8c37fa59700e661d4e66`).
 
 ```sh
+python -m pip install -e '.[test]'
 cmake -S . -B build -G Ninja \
-  -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release
+  -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="$(command -v python)"
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
-pip install -e .        # optional: Merlin native binding
 ```
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need

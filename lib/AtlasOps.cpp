@@ -113,7 +113,7 @@ void VirtualOutputBF16Op::getEffects(
   effects.emplace_back(MemoryEffects::Write::get());
 }
 
-// A legacy matmul uses fixed MXU slots and a PACK fixed VMEM scratch: each
+// The legacy matmul uses fixed MXU slots and PACK uses fixed VMEM scratch: each
 // must keep its place among other users of that state.
 void VirtualMXUMatmulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

@@ -161,7 +161,7 @@ struct DepGraph {
 };
 
 // Pending transfers per channel at block entry; null keeps broad barriers.
-using IncomingDma = std::array<std::vector<Footprint>, 8>;
+using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
                     const IncomingDma *incomingDma = nullptr);
 // Longest path in cycles from each node until everything after it finishes.

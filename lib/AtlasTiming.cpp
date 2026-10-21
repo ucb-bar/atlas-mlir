@@ -79,7 +79,7 @@ static std::vector<OpInfo> buildTable() {
     add(n, "md i", OpClass::VpuLoadImmSingle, Engine::Vpu);
   add("vtrpose.xlu", "md m1", OpClass::Transpose, Engine::Xlu);
 
-  for (int ch = 0; ch < 8; ch++) {
+  for (int ch = 0; ch < kAtlasDMAChannels; ch++) {
     std::string s = ".ch" + std::to_string(ch);
     add("dma.load" + s, "xd x1 x2", OpClass::DmaLoad, Engine::Dma);
     add("dma.store" + s, "xd x1 x2", OpClass::DmaStore, Engine::Dma);

@@ -460,10 +460,10 @@ LogicalResult mlir::atlas::checkAtlasStream(
   // Transfers stay in flight across a block boundary only into and out of an
   // analyzed loop (AtlasStream::dmaMayCross), so a block starts with the
   // transfers the block before it ended with.
-  std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+  std::array<std::vector<std::pair<size_t, Footprint>>, kAtlasDMAChannels> pending;
   auto anyPending = [&] { return llvm::any_of(pending, [](const auto &p) { return !p.empty(); }); };
   auto meetsPending = [&](size_t i, const Footprint &f) -> LogicalResult {
-    for (int ch = 0; ch < 8; ++ch)
+    for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
       for (const auto &[k, dma] : pending[ch]) {
         auto conflict = provider.dmaConflict(dma, f);
         if (!conflict.error.empty())
@@ -513,7 +513,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
         return s.ops[i]->emitOpError(
             "delay-slot instruction must be single-cycle scalar work");
       if (in.release)
-        for (int ch = 0; ch < 8; ++ch)
+        for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
       if (!loop && failed(meetsPending(i, f)))
@@ -526,7 +526,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
             << " may still be in flight; the timing model needs an "
                "atlas.dma_wait here, which a delay cannot replace";
       if (op.opClass == OpClass::Halt)
-        for (int ch = 0; ch < 8; ++ch)
+        for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError()
                    << "halts while DMA channel " << ch
@@ -540,7 +540,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
     // Timing is checked one block at a time, so elsewhere a transfer must
     // complete in the block that starts it, as verifyAtlasTimedStream requires.
     if (!s.dmaMayCross(b))
-      for (int ch = 0; ch < 8; ++ch)
+      for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
         if (!pending[ch].empty())
           return s.ops[pending[ch].back().first]->emitOpError(
               "may still be in flight when its block ends; timing requires DMA "
@@ -689,7 +689,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
   // As in checkAtlasStream, DMA stays in flight only into and out of an analyzed loop.
-  std::array<Operation *, 8> pendingDMA{};
+  std::array<Operation *, kAtlasDMAChannels> pendingDMA{};
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto reservations = provider.createReservations();

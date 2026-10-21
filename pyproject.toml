@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Atlas out-of-tree binding for Merlin native compilation"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+test = ["pytest", "numpy", "safetensors"]
+
 [project.entry-points."merlin.native_target_compilers"]
 atlas = "atlas_mlir_native.binding:AtlasNativeBinding"
 

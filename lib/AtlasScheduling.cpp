@@ -86,7 +86,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
 
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
-  int channelRelease[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  int channelRelease[kAtlasDMAChannels] = {};
   int dmaQueueEnd = 0;
   auto release = [&](int i) { return channelRelease[nodes[i].op->channel]; };
   auto isWait = [&](int i) {
@@ -208,13 +208,35 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (filler != body.rend()) {
       slot = *filler;
       body.erase(std::next(filler).base());
+      // Keep the chosen order, but reclaim the filler's old issue cycle.
       table = ReservationTable();
       nextFree = 0;
+      earliest.assign(n, 0);
+      why.assign(n, "");
       for (int i : body) {
-        table.reserve(nodes[i], g.footprints[i], issue[i]);
+        cycle = std::max(nextFree, earliest[i]);
+        reason[i] = cycle > nextFree ? why[i] : "";
+        for (;;) {
+          std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
+          if (busy.empty())
+            break;
+          cycle++;
+          reason[i] = busy;
+          if (cycle - nextFree > kMaxIdle)
+            return op(i)->emitOpError("scheduler made no progress");
+        }
+        issue[i] = cycle;
+        table.reserve(nodes[i], g.footprints[i], cycle);
         if (isWait(i))
-          table.extendForWait(issue[i]);
-        nextFree = issue[i] + naturalGap(nodes[i]);
+          table.extendForWait(cycle);
+        for (int e : g.out[i]) {
+          const Edge &ed = g.edges[e];
+          if (cycle + ed.distance > earliest[ed.to]) {
+            earliest[ed.to] = cycle + ed.distance;
+            why[ed.to] = ed.reason + " after " + name(i);
+          }
+        }
+        nextFree = cycle + naturalGap(nodes[i]);
       }
     }
   }

@@ -132,6 +132,33 @@ class StreamSchedulingTest(unittest.TestCase):
         self.assertIn("atlas.delay_slots_pending", untimed.stdout)
         self.assertEqual(slot(stream(untimed.stdout))[0], "trap")
 
+    def test_delay_slot_filler_does_not_leave_its_old_issue_cycle_idle(self) -> None:
+        # The independent LUI issues after x20's step, but cannot fill the slot.
+        loop = program([
+            addi(13, 0, 0), addi(14, 0, 3), addi(20, 0, 0),
+            addi(13, 13, 1), addi(20, 20, 1),
+            ("upper", 'kind = "lui", dst = 21 : i32, immediate = 1 : i32'),
+            ("branch", 'kind = "blt", lhs = 13 : i32, rhs = 14 : i32, offset_bytes = -6 : i32'),
+            ("trap", 'kind = "ecall"'),
+        ]).replace("module {", "module attributes {atlas.delay_slots_pending} {", 1)
+        filled = run(OPT, loop, "--schedule-atlas-stream")
+        self.assertEqual(filled.returncode, 0, filled.stderr)
+        ops = stream(filled.stdout)
+        body = ops[branch_target(ops):]
+        self.assertEqual([op for op, _, _ in body],
+                         ["alu_imm", "upper", "branch", "alu_imm", "trap"])
+        self.assertIn("dst = 13 : i32", body[0][1])
+        self.assertIn("dst = 20 : i32", body[3][1])
+        self.assertEqual(issue_cycles(body), [0, 1, 2, 3, 4])
+        # All work remains, and the slot executes x20's step on both successors.
+        unfilled = run(OPT, loop, "--insert-atlas-delays")
+        self.assertEqual(unfilled.returncode, 0, unfilled.stderr)
+        self.assertEqual(instructions(ops), instructions(stream(unfilled.stdout)))
+        for tool, options in ((OPT, ("--verify-atlas-machine-stream", "--verify-atlas-timing")),
+                              (EMIT, ())):
+            checked = run(tool, filled.stdout, *options)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_rejects_what_scheduling_cannot_fix(self) -> None:
         dma_then_vload = [
             addi(5, 0, 0), ("dma_config", "channel = 0 : i32, base_reg = 5 : i32"),

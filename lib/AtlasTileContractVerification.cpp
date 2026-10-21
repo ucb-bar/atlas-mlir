@@ -40,9 +40,9 @@ bool validRecord(const Record &r) {
     return false;
   if (r.kind == "dma_wait")
     return r.reg == -1 && r.vmemByte == 0 && r.dramByte == 0 &&
-           r.bytes == 0 && r.channel >= 0 && r.channel < 8;
+           r.bytes == 0 && r.channel >= 0 && r.channel < kAtlasDMAChannels;
   if (isDMA(r))
-    return r.reg == -1 && r.channel >= 0 && r.channel < 8 &&
+    return r.reg == -1 && r.channel >= 0 && r.channel < kAtlasDMAChannels &&
            validDMATileGeometry(r.vmemByte, r.dramByte, r.bytes);
   if (r.channel != -1 || r.dramByte != 0)
     return false;
