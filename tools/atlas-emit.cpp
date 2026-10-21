@@ -118,6 +118,19 @@ int main(int argc, char **argv) {
         {"timing_scope", "explicit_delay_only; other availability unqualified"},
         {"instructions", std::move(instructions)},
     };
+    int64_t saves = 0, restores = 0;
+    if (auto cfg = (*module)->getAttrOfType<DictionaryAttr>(kAtlasCFGContract)) {
+      if (auto operations = cfg.getAs<ArrayAttr>("operations"))
+        for (Attribute attr : operations) {
+          auto record = dyn_cast<DictionaryAttr>(attr);
+          auto name = record ? record.getAs<StringAttr>("name") : StringAttr();
+          if (!name) continue;
+          saves += name.getValue() == "atlas.virtual_save" || name.getValue().starts_with("atlas.virtual_spill_");
+          restores += name.getValue() == "atlas.virtual_restore" || name.getValue().starts_with("atlas.virtual_reload_");
+        }
+    }
+    root["spill_stores"] = saves;
+    root["spill_reloads"] = restores;
     if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))

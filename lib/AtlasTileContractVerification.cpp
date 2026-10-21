@@ -29,6 +29,7 @@ struct Record {
   int32_t reg = -1;
   uint32_t vmemByte = 0, dramByte = 0, bytes = 0;
   int32_t channel = -1, transfer = -1;
+  uint32_t dramSpan = 0;
   SmallVector<int32_t, 2> after;
 };
 
@@ -56,17 +57,20 @@ bool validRecord(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  return builder.getDictionaryAttr({
+  SmallVector<NamedAttribute> fields{
       namedI32(builder, "id", r.id), builder.getNamedAttr("kind", builder.getStringAttr(r.kind)),
       namedI32(builder, "reg", r.reg), namedI32(builder, "vmem_byte", r.vmemByte),
       namedI32(builder, "dram_byte", r.dramByte), namedI32(builder, "bytes", r.bytes),
       namedI32(builder, "channel", r.channel), namedI32(builder, "transfer", r.transfer),
-      builder.getNamedAttr("after", builder.getDenseI32ArrayAttr(r.after))});
+      builder.getNamedAttr("after", builder.getDenseI32ArrayAttr(r.after))};
+  if (r.dramSpan) fields.push_back(namedI32(builder,"dram_span_bytes",r.dramSpan));
+  return builder.getDictionaryAttr(fields);
 }
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   auto dictionary = dyn_cast<DictionaryAttr>(attr);
-  if (!dictionary || dictionary.size() != 9)
+  bool dynamic = dictionary && dictionary.get("dram_span_bytes");
+  if (!dictionary || dictionary.size() != (dynamic ? 10u : 9u))
     return module.emitOpError("tile contract record requires exactly the v2 fields");
   Record r;
   if (failed(readI32Fields<int32_t>(module, dictionary, "tile", {
@@ -80,6 +84,10 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
     return module.emitOpError("tile contract requires string kind and dense i32 after fields");
   r.kind = kind.getValue();
   r.after.append(after.asArrayRef().begin(), after.asArrayRef().end());
+  if (dynamic && (failed(readI32Fields<uint32_t>(module,dictionary,"bounded tile",{
+      {"dram_span_bytes",&r.dramSpan}})) || !isDMA(r) || r.transfer < 0 ||
+      r.dramSpan < r.bytes || uint64_t(r.dramByte)+r.dramSpan > (1ULL<<32)))
+    return module.emitOpError("invalid bounded tile address fields");
   if (!validRecord(r))
     return module.emitOpError("tile contract record has invalid v2 fields or geometry");
   return r;
@@ -372,6 +380,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
                           p.channel, p.id, after);
         if (failed(launch))
           return failure();
+        if (auto span = source.getAs<IntegerAttr>("dram_span"))
+          records[*launch].dramSpan = uint32_t(span.getInt());
         // insert-atlas-dma-waits issues the wait; a load's VLOADs follow it.
         auto wait = addWait(*launch, p.channel, p.id);
         if (failed(wait))
@@ -515,6 +525,20 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     }
     tags[&op] = value;
   }
+  if (auto dmas = module->getAttrOfType<ArrayAttr>(kAtlasDMAContract)) {
+    for (const Record &r : records) {
+      if (!isDMA(r) || r.transfer < 0) continue;
+      for (Attribute a : dmas) {
+        auto d = dyn_cast<DictionaryAttr>(a);
+        if (!d || contractI32(d,"id") != r.transfer) continue;
+        auto span = contractI32(d,"dram_span");
+        if ((span || r.dramSpan) && (!span || uint32_t(*span) != r.dramSpan ||
+            uint32_t(contractI32(d,"dram_byte").value_or(0)) != r.dramByte ||
+            uint32_t(contractI32(d,"size_bytes").value_or(0)) != r.bytes))
+          return module.emitOpError("bounded tile interval differs from its DMA source");
+      }
+    }
+  }
   if (seen.count() != records.size())
     return module.emitOpError("tile contract requires exactly one command for every source record");
   if (tags.empty())
@@ -553,7 +577,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
             address = uint64_t(*regs[dma.getReg()]) * 4;
           if (failed(checkCaptured(op, "tile", "DRAM upper word", upper, 0)) ||
               failed(checkCaptured(op, "tile", "DMA VMEM byte address", address, r.vmemByte)) ||
-              failed(checkCaptured(op, "tile", "DRAM byte address", regs[dma.getDram()], r.dramByte)) ||
+              (!r.dramSpan && failed(checkCaptured(op, "tile", "DRAM byte address", regs[dma.getDram()], r.dramByte))) ||
               failed(checkCaptured(op, "tile", "byte length", regs[dma.getSize()], r.bytes)))
             return failure();
         } else if (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") {

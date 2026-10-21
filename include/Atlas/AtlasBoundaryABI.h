@@ -16,6 +16,8 @@ namespace mlir::atlas {
 struct AtlasBoundaryABI {
   uint64_t inputBase = 0, outputBase = 0;
   uint64_t inputSlots = 1, outputSlots = 1;
+  // Compact loops can write a checked byte extent beyond indexed outputs.
+  uint64_t outputBytes = 0;
 
   // Reads both bases, which must be aligned 32-bit addresses in selected
   // DRAM, and the slots the function's boundary tiles use.
@@ -31,7 +33,9 @@ struct AtlasBoundaryABI {
     return outputBase + index * kAtlasBF16TileBytes + half * kAtlasRegisterBytes;
   }
   uint64_t inputEnd() const { return inputAddress(inputSlots); }
-  uint64_t outputEnd() const { return outputAddress(outputSlots); }
+  uint64_t outputEnd() const {
+    return outputBytes ? outputBase + outputBytes : outputAddress(outputSlots);
+  }
 };
 
 // Whether `function` has boundary input or output tiles.

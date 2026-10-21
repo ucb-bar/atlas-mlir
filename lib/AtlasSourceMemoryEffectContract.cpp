@@ -47,6 +47,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
     auto after = d.getAs<DenseI32ArrayAttr>("after");
     if (!id || *id != int32_t(tiles.size()) || !dram || !bytes || !channel || !after) return failure();
     Tile t{contractString(d, "kind"), uint32_t(*dram), uint32_t(*bytes), *channel, {after.asArrayRef().begin(), after.asArrayRef().end()}};
+    if (auto span = contractI32(d,"dram_span_bytes")) t.bytes = uint32_t(*span);
     if ((t.kind == "dma_load" || t.kind == "dma_store" || t.kind == "dma_wait") && (t.channel < 0 || t.channel >= kAtlasDMAChannels)) return failure();
     tiles.push_back(t);
   }

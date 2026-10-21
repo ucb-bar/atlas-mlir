@@ -57,6 +57,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
+    parser.add_argument("--program-size-limit-bytes", type=int, help="smaller device instruction budget")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)
@@ -70,6 +71,9 @@ def main() -> int:
 
     commands, log = [], []
     for artifact, tool, given, options in stages(source):
+        if args.program_size_limit_bytes is not None:
+            options = [option + f" program-size-limit-bytes={args.program_size_limit_bytes}"
+                       if option.startswith("--atlas-compile-lower=") else option for option in options]
         command = [str(bin_dir / tool), *options, str(output / given)]
         if tool == "atlas-opt":
             # A diagnostic names the failing resource; the operation dump would bury it.
