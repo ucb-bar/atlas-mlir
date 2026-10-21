@@ -79,7 +79,11 @@ FailureOr<llvm::DenseMap<int32_t, Transfer>> readTransfers(ModuleOp module) {
     t.channel = unsigned(*channel);
     uint64_t stagingByte = uint64_t(uint32_t(*staging)) * 4, dramByte = uint32_t(*dram);
     t.staging = {stagingByte, stagingByte + uint32_t(*size)};
-    t.dram = {dramByte, dramByte + uint32_t(*size)};
+    auto span = contractI32(d,"dram_span");
+    uint32_t covered = span ? uint32_t(*span) : uint32_t(*size);
+    if (covered < uint32_t(*size) || dramByte + covered > (1ULL<<32))
+      return failure();
+    t.dram = {dramByte, dramByte + covered};
     t.store = contractString(d, "direction") == "store";
     transfers[t.id] = t;
   }

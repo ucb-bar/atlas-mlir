@@ -16,10 +16,20 @@ constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
 constexpr llvm::StringRef kPreserved[] = {
     kAtlasGeneratedMarker, kAtlasDMAContract, kAtlasMXUContract,
     kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract, kAtlasBufferContract,
-    kAtlasTimingState, kAtlasTimingProvider};
+    kAtlasTimingState, kAtlasTimingProvider, kAtlasProgramSizeLimit};
 } // namespace
 
 ArrayRef<StringRef> mlir::atlas::atlasPreservedModuleAttrs() { return kPreserved; }
+
+FailureOr<unsigned> mlir::atlas::atlasProgramWordLimit(Operation *op) {
+  Attribute raw = op->getAttr(kAtlasProgramSizeLimit);
+  if (!raw) return kAtlasGeneratedWordLimit;
+  auto bytes = dyn_cast<IntegerAttr>(raw);
+  if (!bytes || !bytes.getType().isSignlessInteger(64) || bytes.getInt() <= 0 ||
+      bytes.getInt() % 4 || uint64_t(bytes.getInt()) > kAtlasIMEMCapacityBytes)
+    return op->emitOpError("program size limit must be an aligned positive i64 within selected IMEM capacity");
+  return unsigned(bytes.getInt() / 4);
+}
 
 FailureOr<AtlasArtifactKind> mlir::atlas::classifyAtlasGeneratedArtifact(ModuleOp module) {
   Attribute marker = module->getAttr(kAtlasGeneratedMarker);

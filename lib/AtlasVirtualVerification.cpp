@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -407,14 +408,16 @@ LogicalResult verifyVirtualFunction(func::FuncOp function,
     function.emitOpError("virtual CFG requires a return block");
     return failure();
   }
-  // For this first CFG slice, all externally visible outputs live in the
+  if (failed(verifyAtlasOutputBuffer(function))) return failure();
+  bool explicitBuffer = function->hasAttr("atlas.output_dram_bytes");
+  // For the indexed ABI, all externally visible outputs live in the
   // unique return block. Thus every terminating path executes them exactly
   // once. More general path-sensitive boundary effects need a separate proof.
   for (Block &block : function.getBody())
     for (Operation &op : block)
       if (isa<VirtualOutputBF16Op, VirtualDMAStoreFP8Op,
               VirtualDMAStoreBF16Op>(op) &&
-          &block != returnBlock) {
+          &block != returnBlock && !explicitBuffer) {
         op.emitOpError("virtual CFG outputs must be in the return block");
         return failure();
       }

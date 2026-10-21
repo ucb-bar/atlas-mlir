@@ -42,6 +42,13 @@ FailureOr<AtlasBoundaryABI> AtlasBoundaryABI::read(func::FuncOp function,
   AtlasBoundaryABI abi;
   abi.inputBase = uint64_t(in);
   abi.outputBase = uint64_t(out);
+  if (Attribute raw = function->getAttr("atlas.output_dram_bytes")) {
+    auto bytes = dyn_cast<IntegerAttr>(raw);
+    if (!bytes || !bytes.getType().isSignlessInteger(64) ||
+        bytes.getInt() <= 0 || bytes.getInt() % 32)
+      return error("output DRAM extent must be positive 32-byte-aligned i64 bytes");
+    abi.outputBytes = uint64_t(bytes.getInt());
+  }
   function.walk([&](Operation *op) {
     if (isa<VirtualInputFP8Op, VirtualInputBF16Op>(op))
       abi.inputSlots = std::max(abi.inputSlots, slotIndex(op) + 1);

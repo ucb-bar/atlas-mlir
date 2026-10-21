@@ -1,3 +1,4 @@
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -23,6 +24,8 @@ struct Record {
   uint32_t stagingReg, dramReg, sizeReg;
   StringRef direction;
   unsigned launches = 0, waits = 0;
+  std::optional<uint32_t> dramValue;
+  uint32_t dramSpan = 0;
 };
 
 bool validGeometry(const Record &r) {
@@ -37,17 +40,23 @@ bool validGeometry(const Record &r) {
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
-  return builder.getDictionaryAttr({
+  SmallVector<NamedAttribute> fields{
       namedI32(builder, "id", r.id), namedI32(builder, "channel", r.channel),
       builder.getNamedAttr("direction", builder.getStringAttr(r.direction)),
       namedI32(builder, "staging_word", r.stagingWord), namedI32(builder, "dram_byte", r.dramByte),
       namedI32(builder, "size_bytes", r.sizeBytes), namedI32(builder, "staging_reg", r.stagingReg),
-      namedI32(builder, "dram_reg", r.dramReg), namedI32(builder, "size_reg", r.sizeReg)});
+      namedI32(builder, "dram_reg", r.dramReg), namedI32(builder, "size_reg", r.sizeReg)};
+  if (r.dramValue) {
+    fields.push_back(namedI32(builder,"dram_value",*r.dramValue));
+    fields.push_back(namedI32(builder,"dram_span",r.dramSpan));
+  }
+  return builder.getDictionaryAttr(fields);
 }
 
 FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   auto dictionary = dyn_cast<DictionaryAttr>(attr);
-  if (!dictionary || dictionary.size() != 9)
+  bool dynamic = dictionary && (dictionary.get("dram_value") || dictionary.get("dram_span"));
+  if (!dictionary || dictionary.size() != (dynamic ? 11u : 9u))
     return module.emitOpError("DMA contract record requires exactly the v1 fields");
   Record r{};
   if (failed(readI32Fields<uint32_t>(module, dictionary, "DMA", {
@@ -60,6 +69,14 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
   if (!direction)
     return module.emitOpError("DMA contract direction requires a string");
   r.direction = direction.getValue();
+  if (dynamic) {
+    uint32_t id;
+    if (failed(readI32Fields<uint32_t>(module,dictionary,"bounded DMA",{
+        {"dram_value",&id},{"dram_span",&r.dramSpan}})) || id > 0x7fffffff ||
+        r.dramSpan < r.sizeBytes || uint64_t(r.dramByte)+r.dramSpan > (1ULL<<32))
+      return module.emitOpError("invalid bounded DMA address fields");
+    r.dramValue = id;
+  }
   if (!validGeometry(r))
     return module.emitOpError("DMA contract record has invalid v1 geometry or register claims");
   return r;
@@ -77,15 +94,24 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
     bool bf16 = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(source);
     // Proven from source SSA only, never planned commands; additions wrap in RV32.
     auto transfer = virtualDMATransfer(source);
-    auto address = provenI32(transfer->dram->get());
+    Value addressValue = transfer->dram->get();
+    auto address = provenI32AddressSpan(addressValue,source);
     auto size = provenI32(transfer->size->get());
     if (!address || !size)
       return source->emitOpError("DMA contract requires proven wrapping-i32 source address and size");
     const DMATransferPlacement &p = assignment.placement;
-    Record r{p.id, p.channel, p.stagingWord, *address, *size,
+    Record r{p.id, p.channel, p.stagingWord, address->first, *size,
              p.stagingReg, p.dramReg, p.sizeReg, load ? "load" : "store"};
     if (*size != (bf16 ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || !validGeometry(r))
       return source->emitOpError("DMA contract source must describe an aligned complete tile in the supported 32-bit address range");
+    if (!provenI32(addressValue)) {
+      auto id = atlasCFGValueID(addressValue);
+      uint64_t span = uint64_t(address->last)-address->first+*size;
+      if (!id || uint64_t(address->last)+*size > (1ULL<<32) || span > UINT32_MAX)
+        return source->emitOpError("bounded DMA requires an in-range source scalar identity");
+      r.dramValue = *id;
+      r.dramSpan = span;
+    }
     records.push_back(r);
   }
   llvm::sort(records, [](const Record &a, const Record &b) { return a.id < b.id; });
@@ -163,7 +189,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
         // a different command into a silently shortened or shifted transfer.
         if (failed(checkCaptured(op, "DMA", "DRAM upper word", base, 0)) ||
             failed(checkCaptured(op, "DMA", "staging word", regs[r.stagingReg], r.stagingWord)) ||
-            failed(checkCaptured(op, "DMA", "DRAM byte address", regs[r.dramReg], r.dramByte)) ||
+            (!r.dramValue && failed(checkCaptured(op, "DMA", "DRAM byte address", regs[r.dramReg], r.dramByte))) ||
             failed(checkCaptured(op, "DMA", "byte length", regs[r.sizeReg], r.sizeBytes)))
           return failure();
       }

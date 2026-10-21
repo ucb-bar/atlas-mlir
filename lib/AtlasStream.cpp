@@ -1,4 +1,5 @@
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasBranchRelaxation.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
@@ -646,9 +647,11 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       cast<JumpOp>(op).setOffsetAttr(builder.getI32IntegerAttr(offset));
   }
 
-  bool timed = !timedBy.empty();
   if (fillSlots)
     module->removeAttr(kAtlasDelaySlotsPending);
+  if (failed(relaxAtlasBranches(module))) return failure();
+
+  bool timed = !timedBy.empty();
   module->setAttr(kAtlasTimingState, builder.getStringAttr(timed ? "timed" : "untimed"));
   if (timed)
     module->setAttr(kAtlasTimingProvider, builder.getStringAttr(timedBy));
