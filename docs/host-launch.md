@@ -191,11 +191,57 @@ and refuses overlap with Atlas regions. It writes `host/platform-map.c`
 run `atlas-host-embed --soc-memmap MEMMAP --require-bitstream`, then
 `--host-elf ELF --check-only` after linking.
 
+## Shape-independent raw launches
+
+`atlas_host_load_raw(host, words, word_count)` loads a reset-entry stream
+directly, with no tensor shape or graph wrapper. The original program must have
+exactly one ECALL at its end, no EBREAK, no writes to DBG0 or DBG1, and all
+control-flow paths must reach that final ECALL after every engine and DMA
+operation has completed. Loading invalidates the previous program before
+checking a replacement; a failed replacement cannot accidentally launch an old
+image. The loader checks the mailbox/trap restrictions but does not prove
+control flow, DMA reachability or arithmetic scheduling.
+
+The loader replaces the final ECALL in place with `NOP; CSRRS x31, DBG1, x0;
+NOP; CSRRW x0, DBG0, x31; NOP; ECALL`, preserving every original instruction PC
+and adding five words. x31 becomes scratch only after the original kernel's work
+has completed. The leading NOP separates a preceding DELAY from the epilogue and
+the final NOP separates marker publication from ECALL.
+
+Use the normal `atlas_host_start`, `atlas_host_poll` and `atlas_host_wait` calls
+after raw loading. Each successful start clears DBG0 and publishes a fresh
+nonzero invocation sequence in DBG1 before the release fence and START; the
+device alone writes DBG0 while executing. Poll reads DBG0 before status and
+succeeds only when the exact expected sequence accompanies halted ECALL. A short
+invocation may complete before its first poll without being missed, and a stale
+ECALL or previous sequence cannot complete a new launch. Sequences never wrap:
+after UINT32_MAX, start refuses another invocation until the caller establishes
+quiescence and reinitializes the runtime.
+
+Raw buffer descriptors accept complete `uintptr_t` ranges, including 0x100000000
+on RV64; checked inclusive end arithmetic rejects wraparound. This does not
+relocate device instructions or infer DMA high halves. The compiled instructions
+must set the appropriate DMA base and keep each low32 transfer within its
+supported address window. The legacy graph/tile wrappers retain their existing
+shape and address admission rules.
+
+The caller must supply known quiescent hardware at initialization. A prelaunch
+cache synchronization failure issues no START and leaves the host inactive. A
+timeout, post-launch cache synchronization error or raw illegal/EBREAK halt
+retains `host->active`, buffer descriptors and device ownership; load/start
+remain busy. A host STOP or scalar fault does not drain engines. Preserve
+descriptors and all memory until success or externally established quiescence,
+then reinitialize as part of a platform-specific recovery policy. MMIO callbacks
+must perform ordered synchronous accesses; direct baremetal callbacks and the
+runtime publication/acquisition points supply full fences. The runtime is
+single-caller and does not provide a queue or allocator.
+
 ## Tests
 
 | Behaviour | Test |
 | --- | --- |
-| Runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
+| Raw shape/address admission, invocation marker, missed-running pulse, retained fault ownership | [`test/raw-host-test.c`](../test/raw-host-test.c) |
+| Legacy runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
 | Header and memmap checks | [`test/test_host_embed.py`](../test/test_host_embed.py), [`test/test_graph_platform.py`](../test/test_graph_platform.py) |
 | Capsule, LLVM object entry, mailbox pointers with two starts (RTL core) | [`test/test_boot_capsule.py`](../test/test_boot_capsule.py), [`test/test_elf_entry_reference.py`](../test/test_elf_entry_reference.py), [`test/test_mailbox_call_reference.py`](../test/test_mailbox_call_reference.py) |
 | Dump checkers | [`test/test_graph_mailbox_checker.py`](../test/test_graph_mailbox_checker.py), [`test/test_mailbox_dump_check.py`](../test/test_mailbox_dump_check.py), [`test/test_model_dump_check.py`](../test/test_model_dump_check.py) |
@@ -220,3 +266,17 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
   not show which bitstream ran or that the run was fresh.
 - One synchronous caller; one program in IMEM at a time; fixed DMA addresses
   chosen at compile time.
+
+## ResNet host integration
+
+`atlas_resnet_block_run` packs each live activation, checks its fixed scale
+before launch, uses the raw invocation-marker runtime, checks DRAM guards,
+decodes BF16 output and applies FP32 affine/ReLU/residual host work with
+contraction disabled. Its external entry has shape 64×56×56. A failure retains
+live workspace and, for device faults or timeouts, runtime ownership.
+
+For the supported complete-graph build route, see [Complete ResNet50 host
+graph](resnet-full-host.md). The graph builder enables `mstatus.FS`, initializes
+`fcsr` to nearest-even, reserves a 64 KiB stack and checks ELF assets and load
+segments. A linked ELF does not establish host execution, DMA reachability or
+cache coherence on a selected SoC.
