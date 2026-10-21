@@ -131,6 +131,15 @@ in at least four files (`AtlasRegisterAllocationVerification.cpp:474`,
 and `outputSlotAddress(i, half)`, used by the three transforms. The tile
 contract verifier can keep its independent check.
 
+**Status on this branch: done.** `AtlasBoundaryABI` (`AtlasBoundaryABI.h`)
+reads and checks both bases, counts the slots, checks the DRAM spans
+(`verifySpans`) and computes slot addresses. All three transforms use it, with
+one slot rule: each window spans at least one slot, as lowering already
+required. The lowering keeps its own VMEM-window and mailbox checks. The tile
+contract and register checkers keep their independent address arithmetic.
+Output is unchanged on every example; one diagnostic now reads "DRAM boundary
+ABI requires explicit atlas.input_dram_base and atlas.output_dram_base".
+
 ### 1.4 The DMA staging-point rule in three places (Medium)
 
 "A loaded tile's VLOADs go before its first use, before a later launch that
@@ -181,6 +190,15 @@ expansion rather than restating it.
 
 **Fix:** one `AtlasTarget.h` with the selected target's constants. Derive the
 reserved scalar range from `FixedResourcePlacement`.
+
+**Status on this branch: done.** `AtlasTarget.h` defines VMEM size, the DMA
+channel count, tensor register count and size, and BF16 tile size. The
+duplicate definitions are gone, and the bare tile-size literals in `lib/` use
+it. `FixedResourcePlacement` now holds the scalar pool (`firstScalarValue`,
+`lastScalarValue`) and derives the PACK span from its PACK registers, so the
+allocator and the register checker read one definition. The capacity
+diagnostics are built from the computed capacity. Output is unchanged on every
+example.
 
 ### 1.7 Liveness implemented three times (Low)
 
@@ -282,6 +300,15 @@ covers it. **Fix:** use the typed builders (`ScalarLoadOp::create(...)`,
 `arith::ConstantIntOp::create(...)`). For lowering's deferred emission, keep
 `PlannedOp` but give it typed construction callbacks.
 
+**Status on this branch: done.** Lowering creates each machine op with its
+typed builder as it goes (`emit<ScalarLoadOp>(loc, "lw", /*dst=*/...)`) and
+sets branch offsets once labels resolve, so `PlannedOp` is gone, and its MXU
+and tile-command tags come from the op type instead of name comparisons. The
+spill, MXU spill, wait insertion and boundary passes use typed builders, with
+shared `createAtlasSpillStore` and `createAtlasReload`. Only LLVM finalization
+still builds ops by name, because it rebuilds arbitrary ops from markers.
+Output is unchanged on every example.
+
 ### 2.5 Verification repeated on every pass boundary (Medium)
 
 Every virtual pass runs the full `verifyAtlasVirtualModule` on entry and
@@ -323,6 +350,15 @@ Then spill incrementally.
 
 Each silently breaks if an op's operand order changes. **Fix:** compare
 against `getDramByte()`, `getSizeBytes()` and `getWeight()`.
+
+**Status on this branch: done.** Typed accessors replace operand positions:
+`virtualDMATransfer` (a virtual DMA's address, size and tile),
+`virtualMXUReadoutAcc`, `atlasAccessedSlot`, `atlasSlotValue`,
+`atlasSpillSaved` and `atlasSpillTile`. The three sites above, and the same
+pattern in the MXU contract, allocation, scheduler, spilling, tile contract
+and lowering, use them or the ops' named accessors. Only the state chain,
+every stateful op's first operand by convention, is still read by position.
+Output is unchanged on every example.
 
 ### 2.8 Fixed registers aliased without explanation (Low)
 
@@ -420,6 +456,15 @@ fail to import on a clean checkout (`atlas_mlir_native`). Apart from those
 five, the suite passes at `22de8eb`. **Fix:** add
 `python/` to the environment, and register one ctest entry per test module.
 
+**Status on this branch: done.** Each test module is its own ctest test
+(`atlas-python-<module>`), run from `test/` with `python/` prepended to
+`PYTHONPATH`, which fixes the five import errors. The three modules written as
+plain pytest functions run under pytest; under `unittest discover` they had
+never run. Running modules separately exposed one hidden dependency:
+`test_virtual_boundary_to_dma` relied on another module having put `tools/` on
+the path. The suite runs in parallel now, in about 9 seconds instead of 36.
+`ENVIRONMENT_MODIFICATION` needs CMake 3.22, so that is the new minimum.
+
 ### 4.2 A third of the suite skips by default, with no CI (Medium)
 
 231 of 762 Python tests skip, even with `ATLAS_LLVM_BIN` set as ctest
@@ -471,6 +516,8 @@ rather than raw regexes.
 
 `test/examples/handoff_attention_mlp_boot_layout.json` isn't referenced by
 any test, tool, doc or glob.
+
+**Status on this branch: done.** Deleted.
 
 ---
 
