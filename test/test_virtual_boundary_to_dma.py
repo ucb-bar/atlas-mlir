@@ -1,8 +1,11 @@
 """Boundary ABI conversion exposes transfers without changing tile addresses."""
+import sys
 import unittest
 
 from test_virtual_ssa import ROOT, run
 from test_virtual_scheduling import ABI, function, start, inp, outp
+
+sys.path.insert(0, str(ROOT / "tools"))
 
 PASS = "--lower-atlas-virtual-boundary-to-dma"
 INPUT_BASE, OUTPUT_BASE = 0x90000000, 0x90010000
