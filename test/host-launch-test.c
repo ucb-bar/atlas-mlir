@@ -13,6 +13,7 @@ typedef struct {
   uint32_t words[8];
   unsigned status_reads;
   unsigned starts;
+  unsigned imem_writes;
   unsigned cache_before;
   unsigned cache_after;
   int halt_reason;
@@ -57,6 +58,7 @@ static void write32(void *context, uintptr_t address, uint32_t value) {
   assert(address >= IMEM && address < IMEM + sizeof(device->words));
   assert((address & 3) == 0);
   device->words[(address - IMEM) / 4] = value;
+  ++device->imem_writes;
 }
 
 static int cache_sync(void *context, const atlas_host_buffer *buffer,
@@ -77,6 +79,11 @@ static atlas_host setup(fake_device *device) {
   atlas_host_memory memory = {0, cache_sync, device};
   assert(atlas_host_init(&host, map, mmio, memory) == ATLAS_HOST_OK);
   return host;
+}
+
+static uint64_t tick(void *context) {
+  uint64_t *counter = context;
+  return ++*counter;
 }
 
 int main(void) {
@@ -149,6 +156,34 @@ int main(void) {
   atlas_host_mmio mmio = {read32, write32, &device};
   atlas_host_map map = {IMEM, CSR, 32};
   assert(atlas_host_init(&host, map, mmio, unqualified) == ATLAS_HOST_INVALID);
+  fake_device reused = {.halt_reason = 2};
+  host = setup(&reused);
+  uint64_t ticks = 0;
+  assert(atlas_host_set_clock(&host, tick, &ticks) == ATLAS_HOST_OK);
+  static const uint32_t a[] = {0x13, 0x73}, duplicate[] = {0x13, 0x73}, b[] = {0x93, 0x73};
+  assert(atlas_host_ensure_loaded(&host, a, 2) == ATLAS_HOST_OK);
+  assert(atlas_host_ensure_loaded(&host, duplicate, 2) == ATLAS_HOST_OK);
+  assert(reused.imem_writes == 2 && host.image_reuses == 1);
+  assert(host.timings.load_ticks == 1);
+  assert(atlas_host_ensure_loaded(&host, b, 2) == ATLAS_HOST_OK);
+  assert(atlas_host_ensure_loaded(&host, a, 2) == ATLAS_HOST_OK);
+  assert(reused.imem_writes == 6 && host.image_loads == 3);
+  assert(atlas_host_ensure_loaded(&host, a, 9) == ATLAS_HOST_INVALID);
+  assert(!host.program_loaded && !host.resident_words);
+  assert(atlas_host_ensure_loaded(&host, a, 2) == ATLAS_HOST_OK);
+  assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_OK);
+  assert(atlas_host_ensure_loaded(&host, a, 2) == ATLAS_HOST_BUSY);
+  assert(atlas_host_wait(&host, 1) == ATLAS_HOST_TIMEOUT);
+  assert(atlas_host_invalidate_program(&host) == ATLAS_HOST_BUSY);
+  /* The platform has reset the fake hardware before acknowledging it. */
+  reused.starts = 0;
+  reused.status_reads = 0;
+  assert(atlas_host_reset_completed(&host) == ATLAS_HOST_OK);
+  assert(!host.active && !host.program_loaded && !host.resident_words);
+  assert(atlas_host_ensure_loaded(&host, a, 2) == ATLAS_HOST_OK);
+  assert(reused.imem_writes == 10);
+  assert(atlas_host_invalidate_program(&host) == ATLAS_HOST_OK);
+  assert(atlas_host_start(&host, buffers, 2) == ATLAS_HOST_NOT_READY);
   puts("atlas-host-launch: PASS");
   return 0;
 }
