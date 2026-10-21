@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdio>
 
+using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
 static std::vector<OpInfo> buildTable() {
@@ -333,7 +334,7 @@ struct Builder {
       long long lastLine = (*byteAddr + *bytes - 1) / kLineBytes;
       a.first = static_cast<int>(firstLine);
       a.count = static_cast<int>(lastLine - firstLine + 1);
-      if (*byteAddr + *bytes > kVmemBytes)
+      if (*byteAddr + *bytes > kAtlasVmemBytes)
         f.error = "VMEM access past the end of VMEM";
     }
     f.accesses.push_back(a);
@@ -453,13 +454,13 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
   case OpClass::VStore: {
     bool load = op.opClass == OpClass::VLoad;
     auto addr = vectorAddress(in, regs);
-    if (addr && (*addr % 1024 != 0 ||
-                 *addr / kVmemBankBytes != (*addr + 1023) / kVmemBankBytes))
+    if (addr && (*addr % kAtlasRegisterBytes != 0 ||
+                 *addr / kVmemBankBytes != (*addr + kAtlasRegisterBytes - 1) / kVmemBankBytes))
       b.f.error =
           "vload/vstore address must be 1 KiB aligned inside one VMEM bank";
     b.x(in.rs1, false, 0);
     if (load) {
-      b.vmem(addr, 1024, false, 1, 1);
+      b.vmem(addr, kAtlasRegisterBytes, false, 1, 1);
       b.mrows(in.rd, true, 3);
       b.f.mregWrites = {in.rd};
       b.f.writeRelease = 34;
@@ -468,7 +469,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
       b.bankHold(addr, 1, 32);
     } else {
       b.mrows(in.rd, false, 1);
-      b.vmem(addr, 1024, true, 3, 1);
+      b.vmem(addr, kAtlasRegisterBytes, true, 3, 1);
       b.f.mregReads = {in.rd};
       b.f.readRelease = b.f.writeRelease = 34;
       b.hold(Unit::VstorePath, 0, 0, 34);
@@ -648,7 +649,7 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.vmem(addr, bytes, load, 0, 0, true);
     if (addr && (*addr % 32 != 0))
       b.f.error = "DMA VMEM address must be 32-byte aligned";
-    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : 1024, !load);
+    b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : kAtlasRegisterBytes, !load);
     break;
   }
   case OpClass::DmaConfig: {

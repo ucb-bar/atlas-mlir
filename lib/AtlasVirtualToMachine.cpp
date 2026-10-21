@@ -1,10 +1,12 @@
 #include "Atlas/AtlasVirtualToMachine.h"
+#include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasSourceMemoryEffectContract.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -35,24 +37,19 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-constexpr uint64_t kTileBytes = 2048;
-constexpr uint64_t kHalfBytes = 1024;
-
-struct PlannedOp {
-  std::string name;
-  SmallVector<NamedAttribute> attrs;
-  Location loc;
-  std::optional<unsigned> targetLabel;
-};
 
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function)
-      : module(module), function(function), attrs(module.getContext()) {}
+      : module(module), function(function), attrs(module.getContext()),
+        emitter(module.getContext()) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
       return failure();
+    emitted = ModuleOp::create(module.getLoc());
+    emitter.setInsertionPointToEnd(emitted->getBody());
+    state = StartOp::create(emitter, module.getLoc(), stateType()).getResult();
     allocated = true;
     if (failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
@@ -79,9 +76,8 @@ public:
     // that one upper word whatever its channel field (ScalarCore.scala). The
     // ABI keeps DRAM below 4 GiB, so one configuration from x0 states the
     // zero upper word every transfer relies on.
-    add("atlas.dma_config", loc,
-        {{"channel", i32(fixed().loadChannel)}, {"base_reg", i32(0)}});
-    materializeScalar(fixed().halfSizeReg, kHalfBytes, loc);
+    emit<DMAConfigOp>(loc, /*channel=*/fixed().loadChannel, /*base_reg=*/0);
+    materializeScalar(fixed().halfSizeReg, kAtlasRegisterBytes, loc);
     if (controlBase)
       stageScalarArguments(loc);
 
@@ -104,16 +100,16 @@ public:
           return failure();
         if (planned.size() != first && !op.hasTrait<OpTrait::IsTerminator>()) {
           for (size_t n = first; n < planned.size(); ++n) {
-            planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(cfgOperations.lookup(&op)));
+            planned[n]->setAttr(kAtlasTagCFGSource, i32(cfgOperations.lookup(&op)));
             if (isa<VirtualPackFP8Op>(op))
-              planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGHelper), str("pack"));
+              planned[n]->setAttr(kAtlasTagCFGHelper, str("pack"));
           }
-          planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGOperation), i32(cfgOperations.lookup(&op)));
+          planned.back()->setAttr(kAtlasTagCFGOperation, i32(cfgOperations.lookup(&op)));
           for (Value result : op.getResults()) {
             if (!cfgTracked(result) || pendingLoads.count(result)) continue;
             StringRef name = registerKindOf(result) == RegisterKind::Scalar
                 ? kAtlasTagScalarResult : kAtlasTagTensorResult;
-            planned.back().attrs.emplace_back(attrs.getStringAttr(name), i32(cfgValues.lookup(result)));
+            planned.back()->setAttr(name, i32(cfgValues.lookup(result)));
           }
         }
       }
@@ -163,29 +159,15 @@ public:
     auto bufferContract = buildAtlasBufferContract(function, *cfgContract, *tileContract);
     if (failed(sourceMemoryContract) || failed(bufferContract))
       return failure();
-    OwningOpRef<ModuleOp> emitted = ModuleOp::create(module.getLoc());
     (*emitted)->setAttrs(module->getAttrs());
-    OpBuilder builder(module.getContext());
-    builder.setInsertionPointToEnd(emitted->getBody());
-    OperationState startState(module.getLoc(), "atlas.start");
-    startState.addTypes(StateType::get(module.getContext()));
-    Value state = builder.create(startState)->getResult(0);
-    for (const PlannedOp &step : planned) {
-      OperationState machineState(step.loc, step.name);
-      machineState.addOperands(state);
-      machineState.addTypes(StateType::get(module.getContext()));
-      machineState.addAttributes(step.attrs);
-      state = builder.create(machineState)->getResult(0);
-    }
+    Builder builder(module.getContext());
     (*emitted)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
     (*emitted)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
     // Explicit DMA launches without waits; insert-atlas-dma-waits adds them.
     if (!dmaAssignments.empty())
       (*emitted)->setAttr(kAtlasDMAWaitsPending, builder.getUnitAttr());
     // Branches and jumps without delay slots; the timing passes fill them.
-    if (llvm::any_of(planned, [](const PlannedOp &step) {
-          return step.name == "atlas.branch" || step.name == "atlas.jump";
-        }))
+    if (!redirects.empty())
       (*emitted)->setAttr(kAtlasDelaySlotsPending, builder.getUnitAttr());
     (*emitted)->removeAttr(kAtlasTimingProvider);
     (*emitted)->setAttr(kAtlasCFGContract, *cfgContract);
@@ -194,8 +176,8 @@ public:
     (*emitted)->setAttr(kAtlasTileContract, *tileContract);
     (*emitted)->setAttr(kAtlasSourceMemoryContract, *sourceMemoryContract);
     (*emitted)->setAttr(kAtlasBufferContract, *bufferContract);
-    (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(inputBase));
-    (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(outputBase));
+    (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(abi.inputBase));
+    (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(abi.outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
@@ -229,34 +211,49 @@ public:
   }
 
 private:
-  using Fields = std::initializer_list<std::pair<StringRef, Attribute>>;
   bool cfgTracked(Value v) const { return registerKindOf(v).has_value(); }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
   StringAttr str(StringRef value) { return attrs.getStringAttr(value); }
   BoolAttr boolean(bool value) { return attrs.getBoolAttr(value); }
 
-  void add(StringRef name, Location loc, Fields fields = {},
-           std::optional<unsigned> target = std::nullopt,
-           std::optional<unsigned> tileCommand = std::nullopt) {
-    PlannedOp step{name.str(), {}, loc, target};
-    step.attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBlock), i32(currentCFGBlock));
-    if (currentCFGEdge)
-      step.attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGEdge), i32(*currentCFGEdge));
-    for (const auto &[key, value] : fields)
-      step.attrs.emplace_back(StringAttr::get(module.getContext(), key), value);
-    if (name == "atlas.mxu_push" || name == "atlas.mxu_matmul" || name == "atlas.mxu_pop")
-      step.attrs.emplace_back(StringAttr::get(module.getContext(), kAtlasTagMXUCommand), i32(nextMXUCommand++));
-    planned.push_back(std::move(step));
-    if (name == "atlas.vload" || name == "atlas.vstore" || name == "atlas.dma" || name == "atlas.dma_wait")
-      tagTileCommand(tileCommand);
+  Type stateType() { return StateType::get(module.getContext()); }
+
+  // Appends the machine op `OpTy`, built from its fields, to the state chain.
+  template <typename OpTy, typename... Fields>
+  OpTy emit(Location loc, Fields &&...fields) {
+    OpTy op = OpTy::create(emitter, loc, stateType(), state,
+                           std::forward<Fields>(fields)...);
+    record(op);
+    return op;
   }
 
-  // Commands are numbered in source expansion order; an atomic DMA reserves
-  // its wait and VLOAD commands at the launch and issues them later.
-  void tagTileCommand(std::optional<unsigned> id = std::nullopt) {
-    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTileCommand),
-                                      i32(id ? *id : nextTileCommand++));
+  // Continues the state chain from `op` and tags it with its CFG block and
+  // edge and its MXU or tile command. Commands are numbered in source
+  // expansion order; an atomic DMA reserves its wait and VLOAD commands at the
+  // launch and issues them later as `tileCommand`.
+  void record(Operation *op, std::optional<unsigned> tileCommand = std::nullopt) {
+    state = op->getResult(0);
+    planned.push_back(op);
+    op->setAttr(kAtlasTagCFGBlock, i32(currentCFGBlock));
+    if (currentCFGEdge)
+      op->setAttr(kAtlasTagCFGEdge, i32(*currentCFGEdge));
+    if (isa<MXUPushOp, MXUMatmulOp, MXUPopOp>(op))
+      op->setAttr(kAtlasTagMXUCommand, i32(nextMXUCommand++));
+    if (isa<VLoadOp, VStoreOp, DMAOp, DMAWaitOp>(op))
+      op->setAttr(kAtlasTagTileCommand,
+                  i32(tileCommand ? *tileCommand : nextTileCommand++));
+  }
+
+  // A mailbox or slot load or store that is a tile command too.
+  void tagTileCommand() {
+    planned.back()->setAttr(kAtlasTagTileCommand, i32(nextTileCommand++));
+  }
+
+  // A branch or jump to `label`, whose offset resolveTargets sets.
+  void redirect(Operation *op, unsigned label) {
+    assert(op == planned.back() && "redirects the op just emitted");
+    redirects.push_back({planned.size() - 1, label});
   }
 
   unsigned newLabel() { return nextLabel++; }
@@ -289,46 +286,22 @@ private:
   }
 
   LogicalResult readABI() {
-    auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
-    auto output = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
-    if (!input || !output)
-      return function.emitOpError(
-          "lowering requires explicit atlas.input_dram_base and atlas.output_dram_base");
-    int64_t in = input.getValue().getSExtValue();
-    int64_t out = output.getValue().getSExtValue();
-    if (in < 0x80000000LL || out < 0x80000000LL ||
-        in > std::numeric_limits<uint32_t>::max() ||
-        out > std::numeric_limits<uint32_t>::max() ||
-        (in % kHalfBytes) || (out % kHalfBytes))
-      return function.emitOpError("DRAM bases must be aligned 32-bit selected-memory addresses");
-    inputBase = static_cast<uint64_t>(in);
-    outputBase = static_cast<uint64_t>(out);
-
-    uint64_t maxInput = 0, maxOutput = 0;
+    FailureOr<AtlasBoundaryABI> read = AtlasBoundaryABI::read(function);
+    if (failed(read))
+      return failure();
+    abi = *read;
+    // The boundary tiles' VMEM windows, and the PACK scratch after the input.
     bool hasPack = false;
-    function.walk([&](Operation *op) {
-      if (auto x = dyn_cast<VirtualInputBF16Op>(op))
-        maxInput = std::max(maxInput,
-                            static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-      if (auto x = dyn_cast<VirtualInputFP8Op>(op))
-        maxInput = std::max(maxInput,
-                            static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-      if (auto x = dyn_cast<VirtualOutputBF16Op>(op))
-        maxOutput = std::max(maxOutput,
-                             static_cast<uint64_t>(x.getIndexAttr().getValue().getZExtValue()));
-      hasPack |= isa<VirtualPackFP8Op>(op);
-    });
-    if (maxInput >= fixed().inputWindowWords * 4 / kTileBytes ||
-        maxOutput >= fixed().outputWindowWords * 4 / kTileBytes)
+    function.walk([&](Operation *op) { hasPack |= isa<VirtualPackFP8Op>(op); });
+    if (abi.inputSlots > fixed().inputWindowWords / kAtlasBF16TileWords ||
+        abi.outputSlots > fixed().outputWindowWords / kAtlasBF16TileWords)
       return function.emitOpError("input or output tile index exceeds its VMEM bank");
-    if (hasPack && maxInput >= (fixed().packWord - fixed().inputWord) / 512)
+    if (hasPack &&
+        abi.inputSlots > (fixed().packWord - fixed().inputWord) / kAtlasBF16TileWords)
       return function.emitOpError(
           "FP8 pack scratch window requires input indexes below 64");
-    uint64_t inputEnd = inputBase + (maxInput + 1) * kTileBytes;
-    uint64_t outputEnd = outputBase + (maxOutput + 1) * kTileBytes;
-    if (inputEnd > (1ULL << 32) || outputEnd > (1ULL << 32) ||
-        (inputBase < outputEnd && outputBase < inputEnd))
-      return function.emitOpError("input and output DRAM spans overlap or overflow");
+    if (failed(abi.verifySpans(function)))
+      return failure();
     if (function.getNumArguments()) {
       auto control =
           function->getAttrOfType<IntegerAttr>("atlas.control_dram_base");
@@ -338,28 +311,29 @@ private:
       int64_t address = control.getValue().getSExtValue();
       if (address < 0x80000000LL ||
           address > std::numeric_limits<uint32_t>::max() ||
-          address % kHalfBytes)
+          address % kAtlasRegisterBytes)
         return function.emitOpError(
             "control mailbox must have an aligned 32-bit DRAM address");
+      // The mailbox is one register's worth of controls.
       controlBase = static_cast<uint64_t>(address);
-      uint64_t controlEnd = *controlBase + kHalfBytes;
+      uint64_t controlEnd = *controlBase + kAtlasRegisterBytes;
       if (controlEnd > (1ULL << 32) ||
-          (*controlBase < inputEnd && inputBase < controlEnd) ||
-          (*controlBase < outputEnd && outputBase < controlEnd))
+          (*controlBase < abi.inputEnd() && abi.inputBase < controlEnd) ||
+          (*controlBase < abi.outputEnd() && abi.outputBase < controlEnd))
         return function.emitOpError(
             "control mailbox overlaps a tensor buffer or overflows DRAM");
       WalkResult checked = function.walk([&](Operation *op) {
-        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
-        bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-        if (!fp8 && !load && !isa<VirtualDMAStoreBF16Op>(op))
+        std::optional<VirtualDMATransfer> transfer = virtualDMATransfer(op);
+        if (!transfer)
           return WalkResult::advance();
-        auto address = constantAddress(op->getOperand(load ? 1 : 2));
+        auto address = constantAddress(transfer->dram->get());
         if (!address) {
           op->emitOpError("DMA address is not statically known");
           return WalkResult::interrupt();
         }
+        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
         uint64_t end = static_cast<uint64_t>(*address) +
-                       (fp8 ? kHalfBytes : kTileBytes);
+                       (fp8 ? kAtlasRegisterBytes : kAtlasBF16TileBytes);
         if (*address < controlEnd && *controlBase < end) {
           op->emitOpError("explicit DMA span overlaps the control mailbox");
           return WalkResult::interrupt();
@@ -387,13 +361,9 @@ private:
     if (lower >= 2048)
       lower -= 4096;
     if (upper)
-      add("atlas.upper", loc,
-          {{"kind", str("lui")}, {"dst", i32(dst)},
-           {"immediate", i32(upper)}});
+      emit<UpperOp>(loc, "lui", dst, /*immediate=*/upper);
     if (lower || !upper)
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(dst)},
-           {"src", i32(upper ? dst : 0)}, {"immediate", i32(lower)}});
+      emit<ALUImmOp>(loc, "addi", dst, /*src=*/upper ? dst : 0, /*immediate=*/lower);
   }
 
   void stageScalarArguments(Location loc) {
@@ -401,25 +371,20 @@ private:
     // may reuse it only after every asynchronous scalar LW has completed.
     materializeScalar(fixed().inputBaseReg, fixed().mailboxWord, loc);
     materializeScalar(fixed().inputDramReg, static_cast<uint32_t>(*controlBase), loc);
-    add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
-         {"reg", i32(fixed().inputBaseReg)},
-         {"dram", i32(fixed().inputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
+    emit<DMAOp>(loc, "load", /*channel=*/fixed().loadChannel,
+        /*reg=*/fixed().inputBaseReg, /*dram=*/fixed().inputDramReg,
+        /*size=*/fixed().halfSizeReg);
+    emit<DMAWaitOp>(loc, /*channel=*/fixed().loadChannel);
     if (function->hasAttr("atlas.memory_controls")) return;
     for (auto [index, arg] : llvm::enumerate(function.getArguments())) {
       unsigned reg = scalar(arg);
-      add("atlas.scalar_load", loc,
-          {{"kind", str("lw")}, {"dst", i32(reg)}, {"base", i32(0)},
-           {"offset", i32(4 * (fixed().mailboxWord + index))}});
+      emit<ScalarLoadOp>(loc, "lw", /*dst=*/reg, /*base=*/0,
+          /*offset=*/4 * (fixed().mailboxWord + index));
       tagTileCommand();
-      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagScalarArgument), i32(cfgValues.lookup(arg)));
+      planned.back()->setAttr(kAtlasTagScalarArgument, i32(cfgValues.lookup(arg)));
       if (arg.getType().isInteger(1))
-        add("atlas.alu_imm", loc,
-            {{"kind", str("andi")}, {"dst", i32(reg)},
-             {"src", i32(reg)}, {"immediate", i32(1)}});
-      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagScalarResult), i32(cfgValues.lookup(arg)));
+        emit<ALUImmOp>(loc, "andi", /*dst=*/reg, /*src=*/reg, /*immediate=*/1);
+      planned.back()->setAttr(kAtlasTagScalarResult, i32(cfgValues.lookup(arg)));
     }
   }
 
@@ -427,12 +392,9 @@ private:
     if (dst == src)
       return;
     if (tensor) {
-      add("atlas.vpu_unary", loc,
-          {{"kind", str("mov")}, {"dst", i32(dst)}, {"src", i32(src)}});
+      emit<VPUUnaryOp>(loc, "mov", dst, src);
     } else {
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(dst)},
-           {"src", i32(src)}, {"immediate", i32(0)}});
+      emit<ALUImmOp>(loc, "addi", dst, src, /*immediate=*/0);
     }
   }
 
@@ -482,44 +444,33 @@ private:
   }
 
   void jump(unsigned target, Location loc) {
-    add("atlas.jump", loc,
-        {{"kind", str("jal")}, {"dst", i32(0)}, {"base", i32(0)}}, target);
+    redirect(emit<JumpOp>(loc, "jal", /*dst=*/0, /*base=*/0, /*offset=*/0), target);
   }
 
   void inputHalf(unsigned dst, uint64_t index, unsigned half, Location loc) {
     uint32_t scratchWord = static_cast<uint32_t>(
-        fixed().inputWord + index * 512 + half * 256);
-    uint32_t dramByte = static_cast<uint32_t>(inputBase + index * kTileBytes +
-                                              half * kHalfBytes);
+        fixed().inputWord + index * kAtlasBF16TileWords + half * kAtlasRegisterWords);
+    uint32_t dramByte = static_cast<uint32_t>(abi.inputAddress(index, half));
     materializeScalar(fixed().inputBaseReg, scratchWord, loc);
     materializeScalar(fixed().inputDramReg, dramByte, loc);
-    add("atlas.dma", loc,
-        {{"direction", str("load")}, {"channel", i32(fixed().loadChannel)},
-         {"reg", i32(fixed().inputBaseReg)},
-         {"dram", i32(fixed().inputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().loadChannel)}});
-    add("atlas.vload", loc,
-        {{"dst", i32(dst)}, {"base", i32(fixed().inputBaseReg)}, {"offset", i32(0)},
-         {"format", str("raw")}});
+    emit<DMAOp>(loc, "load", /*channel=*/fixed().loadChannel,
+        /*reg=*/fixed().inputBaseReg, /*dram=*/fixed().inputDramReg,
+        /*size=*/fixed().halfSizeReg);
+    emit<DMAWaitOp>(loc, /*channel=*/fixed().loadChannel);
+    emit<VLoadOp>(loc, dst, /*base=*/fixed().inputBaseReg, /*offset=*/0, "raw");
   }
 
   void outputHalf(unsigned src, uint64_t index, unsigned half, Location loc) {
-    uint32_t scratchWord = static_cast<uint32_t>(fixed().outputWord +
-                                                 index * 512 + half * 256);
-    uint32_t dramByte = static_cast<uint32_t>(outputBase + index * kTileBytes +
-                                              half * kHalfBytes);
+    uint32_t scratchWord = static_cast<uint32_t>(
+        fixed().outputWord + index * kAtlasBF16TileWords + half * kAtlasRegisterWords);
+    uint32_t dramByte = static_cast<uint32_t>(abi.outputAddress(index, half));
     materializeScalar(fixed().outputBaseReg, scratchWord, loc);
-    add("atlas.vstore", loc,
-        {{"src", i32(src)}, {"base", i32(fixed().outputBaseReg)}, {"offset", i32(0)},
-         {"format", str("raw")}});
+    emit<VStoreOp>(loc, src, /*base=*/fixed().outputBaseReg, /*offset=*/0, "raw");
     materializeScalar(fixed().outputDramReg, dramByte, loc);
-    add("atlas.dma", loc,
-        {{"direction", str("store")}, {"channel", i32(fixed().storeChannel)},
-         {"reg", i32(fixed().outputBaseReg)},
-         {"dram", i32(fixed().outputDramReg)},
-         {"size", i32(fixed().halfSizeReg)}});
-    add("atlas.dma_wait", loc, {{"channel", i32(fixed().storeChannel)}});
+    emit<DMAOp>(loc, "store", /*channel=*/fixed().storeChannel,
+        /*reg=*/fixed().outputBaseReg, /*dram=*/fixed().outputDramReg,
+        /*size=*/fixed().halfSizeReg);
+    emit<DMAWaitOp>(loc, /*channel=*/fixed().storeChannel);
   }
 
   void launchDMA(Value transfer, Value dramByte, Value sizeBytes,
@@ -539,19 +490,17 @@ private:
       for (unsigned half = 0; half < placement.halves; ++half) {
         if (half)
           materializeScalar(placement.stagingReg,
-                            placement.stagingWord + half * 256, loc);
-        add("atlas.vstore", loc,
-            {{"src", i32(*src + half)}, {"base", i32(placement.stagingReg)},
-             {"offset", i32(0)}, {"format", str("raw")}});
+                            placement.stagingWord + half * kAtlasRegisterWords, loc);
+        emit<VStoreOp>(loc, /*src=*/*src + half, /*base=*/placement.stagingReg,
+            /*offset=*/0, "raw");
       }
       if (placement.halves > 1)
         materializeScalar(placement.stagingReg, placement.stagingWord, loc);
     }
-    add("atlas.dma", loc,
-        {{"direction", str(src ? "store" : "load")},
-         {"channel", i32(placement.channel)}, {"reg", i32(placement.stagingReg)},
-         {"dram", i32(placement.dramReg)}, {"size", i32(placement.sizeReg)},
-         {"atlas.virtual_dma_transfer", i32(placement.id)}});
+    emit<DMAOp>(loc, src ? "store" : "load", /*channel=*/placement.channel,
+                /*reg=*/placement.stagingReg, /*dram=*/placement.dramReg,
+                /*size=*/placement.sizeReg)
+        ->setAttr(kAtlasTagDMATransfer, i32(placement.id));
   }
 
   // A launched load whose staging VLOADs wait for its tile's first use.
@@ -564,7 +513,8 @@ private:
 
   void launchLoad(Operation &op, Value tile, unsigned dst) {
     Value transfer = op.getResult(0);
-    launchDMA(transfer, op.getOperand(1), op.getOperand(2), std::nullopt, op.getLoc());
+    std::optional<VirtualDMATransfer> dma = virtualDMATransfer(&op);
+    launchDMA(transfer, dma->dram->get(), dma->size->get(), std::nullopt, op.getLoc());
     const DMATransferPlacement &placement = allocation.dma(transfer);
     ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
     pendingLoads[tile] = {&placement, dst, nextTileCommand,
@@ -587,15 +537,15 @@ private:
     // VLOAD, as every scratch register is set where it is read.
     const DMATransferPlacement &placement = *load.placement;
     for (unsigned half = 0; half < placement.halves; ++half) {
-      materializeScalar(placement.stagingReg, placement.stagingWord + half * 256, loc);
-      add("atlas.vload", loc,
-          {{"dst", i32(load.dst + half)}, {"base", i32(placement.stagingReg)},
-           {"offset", i32(0)}, {"format", str("raw")}},
-          std::nullopt, load.firstVLoad + half);
+      materializeScalar(placement.stagingReg, placement.stagingWord + half * kAtlasRegisterWords, loc);
+      // Its tile command was reserved at the launch.
+      record(VLoadOp::create(emitter, loc, stateType(), state, load.dst + half,
+                             placement.stagingReg, /*offset=*/0, "raw"),
+             load.firstVLoad + half);
     }
     for (size_t n = first; n < planned.size(); ++n)
-      planned[n].attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGSource), i32(load.source));
-    planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagTensorResult), i32(load.result));
+      planned[n]->setAttr(kAtlasTagCFGSource, i32(load.source));
+    planned.back()->setAttr(kAtlasTagTensorResult, i32(load.result));
   }
 
   // placeDMA gives a launch an unread load's window only when all are taken.
@@ -619,24 +569,20 @@ private:
       return pack.emitOpError(
           "virtual-to-machine pack admits observed E8M0 scale codes 122..128 only");
     Location loc = pack.getLoc();
-    add("atlas.scalar_load", loc,
-        {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
-         {"offset", i32(pack.getScaleCode())}});
-    add("atlas.vpu_pack", loc,
-        {{"direction", str("bf16_to_fp8")},
-         {"dst", i32(fp8(pack.getResult()))}, {"src", i32(tile(pack.getSrc()))},
-         {"scale_reg", i32(fixed().scaleReg)}});
+    emit<ScalarLoadOp>(loc, "seli", /*dst=*/fixed().scaleReg, /*base=*/0,
+        /*offset=*/pack.getScaleCode());
+    emit<VPUPackOp>(loc, "bf16_to_fp8", /*dst=*/fp8(pack.getResult()),
+        /*src=*/tile(pack.getSrc()), /*scale_reg=*/fixed().scaleReg);
 
     // The selected PACK joins 64 physical BF16 rows of 16 lanes. The MXU
     // expects 32 logical rows of 32 FP8 lanes. Stage the raw packed result
     // in the free upper half of input VMEM and interleave its two 512-byte
     // halves through a bounded 32-row scalar loop.
     materializeScalar(fixed().outputBaseReg, fixed().packWord, loc);
-    add("atlas.vstore", loc,
-        {{"src", i32(fp8(pack.getResult()))}, {"base", i32(fixed().outputBaseReg)},
-         {"offset", i32(0)}, {"format", str("raw")}});
+    emit<VStoreOp>(loc, /*src=*/fp8(pack.getResult()), /*base=*/fixed().outputBaseReg,
+        /*offset=*/0, "raw");
     materializeScalar(fixed().packSourceRegs[0], fixed().packWord * 4, loc);
-    materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + 512, loc);
+    materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + kAtlasRegisterBytes / 2, loc);
     materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
     materializeScalar(fixed().packRowReg, 0, loc);
     materializeScalar(fixed().packRowsReg, 32, loc);
@@ -652,21 +598,16 @@ private:
     static_assert(kPackRelayoutRowWords == 8,
                   "the copy loop moves two halves of four words a row");
     auto copyLoad = [&](unsigned copy) {
-      add("atlas.scalar_load", loc,
-          {{"kind", str("lw")}, {"dst", i32(fixed().packTemporaryRegs[copy % 2])},
-           {"base", i32(fixed().packSourceRegs[copy % 2])},
-           {"offset", i32(4 * (copy / 2))}});
+      emit<ScalarLoadOp>(loc, "lw", /*dst=*/fixed().packTemporaryRegs[copy % 2],
+          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/4 * (copy / 2));
     };
     auto copyStore = [&](unsigned copy) {
-      add("atlas.scalar_store", loc,
-          {{"kind", str("sw")}, {"src", i32(fixed().packTemporaryRegs[copy % 2])},
-           {"base", i32(fixed().packDestinationReg)},
-           {"offset", i32(4 * (copy / 2) + 16 * (copy % 2))}});
+      emit<ScalarStoreOp>(loc, "sw", /*src=*/fixed().packTemporaryRegs[copy % 2],
+          /*base=*/fixed().packDestinationReg,
+          /*offset=*/4 * (copy / 2) + 16 * (copy % 2));
     };
     auto advance = [&](unsigned reg, int32_t step) {
-      add("atlas.alu_imm", loc,
-          {{"kind", str("addi")}, {"dst", i32(reg)}, {"src", i32(reg)},
-           {"immediate", i32(step)}});
+      emit<ALUImmOp>(loc, "addi", /*dst=*/reg, /*src=*/reg, /*immediate=*/step);
     };
     copyLoad(0);
     advance(fixed().packRowReg, 1);
@@ -678,14 +619,12 @@ private:
     }
     copyStore(kPackRelayoutRowWords - 1);
     advance(fixed().packDestinationReg, 32);
-    add("atlas.branch", loc,
-        {{"kind", str("blt")}, {"lhs", i32(fixed().packRowReg)},
-         {"rhs", i32(fixed().packRowsReg)}},
-        loop);
+    redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
+                            /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0),
+             loop);
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
-    add("atlas.vload", loc,
-        {{"dst", i32(fp8(pack.getResult()))}, {"base", i32(fixed().inputBaseReg)},
-         {"offset", i32(0)}, {"format", str("raw")}});
+    emit<VLoadOp>(loc, /*dst=*/fp8(pack.getResult()), /*base=*/fixed().inputBaseReg,
+        /*offset=*/0, "raw");
     return success();
   }
 
@@ -693,12 +632,11 @@ private:
     Location loc = op.getLoc();
     if (auto control = dyn_cast<VirtualControlOp>(op)) {
       unsigned reg = scalar(control.getValue());
-      add("atlas.scalar_load", loc, {{"kind", str("lw")}, {"dst", i32(reg)},
-          {"base", i32(0)}, {"offset", i32(4 * (fixed().mailboxWord + control.getIndex()))}});
+      emit<ScalarLoadOp>(loc, "lw", /*dst=*/reg, /*base=*/0,
+          /*offset=*/4 * (fixed().mailboxWord + control.getIndex()));
       tagTileCommand();
       if (control.getValue().getType().isInteger(1))
-        add("atlas.alu_imm", loc, {{"kind", str("andi")}, {"dst", i32(reg)},
-            {"src", i32(reg)}, {"immediate", i32(1)}});
+        emit<ALUImmOp>(loc, "andi", /*dst=*/reg, /*src=*/reg, /*immediate=*/1);
       return success();
     }
     if (auto slot = dyn_cast<VirtualSlotOp>(op)) {
@@ -709,52 +647,55 @@ private:
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
     if (isAtlasSlotAccess(&op)) {
-      auto source = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
-      bool copy = isa<VirtualSlotCopyOp>(op), save = isa<VirtualSaveOp>(op);
-      auto destination = copy ? op.getOperand(2).getDefiningOp<VirtualSlotOp>() : source;
+      auto source = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
+      auto copyOp = dyn_cast<VirtualSlotCopyOp>(op);
+      bool copy = bool(copyOp), save = isa<VirtualSaveOp>(op);
+      auto destination = copy ? copyOp.getDst().getDefiningOp<VirtualSlotOp>() : source;
       bool scalarValue = source.getWords() == 1;
-      Value value = copy ? Value() : save ? op.getOperand(2) : op.getResult(1);
+      Value value = atlasSlotValue(&op);
       unsigned reg = copy ? (scalarValue ? fixed().scalarTemporary : fixed().tensorTemporary) :
           scalarValue ? scalar(value) : isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value);
       auto access = [&](bool write, uint32_t word) {
         materializeScalar(fixed().dmaBaseReg, scalarValue ? word * 4 : word, loc);
+        unsigned base = fixed().dmaBaseReg;
         if (scalarValue) {
-          add(write ? "atlas.scalar_store" : "atlas.scalar_load", loc,
-              {{"kind", str(write ? "sw" : "lw")}, {write ? "src" : "dst", i32(reg)},
-               {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}});
+          if (write)
+            emit<ScalarStoreOp>(loc, "sw", /*src=*/reg, base, /*offset=*/0);
+          else
+            emit<ScalarLoadOp>(loc, "lw", /*dst=*/reg, base, /*offset=*/0);
           tagTileCommand();
+        } else if (write) {
+          emit<VStoreOp>(loc, /*src=*/reg, base, /*offset=*/0, "raw");
         } else {
-          add(write ? "atlas.vstore" : "atlas.vload", loc,
-              {{write ? "src" : "dst", i32(reg)}, {"base", i32(fixed().dmaBaseReg)},
-               {"offset", i32(0)}, {"format", str("raw")}});
+          emit<VLoadOp>(loc, /*dst=*/reg, base, /*offset=*/0, "raw");
         }
       };
-      for (unsigned half = 0; half < (scalarValue ? 1 : source.getWords() / 256); ++half) {
+      for (unsigned half = 0; half < (scalarValue ? 1 : source.getWords() / kAtlasRegisterWords); ++half) {
         if (copy) {
-          access(false, source.getSlotWord() + half * 256);
-          access(true, destination.getSlotWord() + half * 256);
+          access(false, source.getSlotWord() + half * kAtlasRegisterWords);
+          access(true, destination.getSlotWord() + half * kAtlasRegisterWords);
         } else {
           if (!scalarValue) reg = (isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value)) + half;
-          access(save, source.getSlotWord() + half * 256);
+          access(save, source.getSlotWord() + half * kAtlasRegisterWords);
         }
       }
       return success();
     }
     if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
       bool store = isAtlasSpillStore(&op);
-      Operation *writer = store ? &op : op.getOperand(1).getDefiningOp();
+      Operation *writer = atlasSpillSaved(&op).getDefiningOp();
       uint32_t word = writer->getAttrOfType<IntegerAttr>("slot_word").getInt();
-      unsigned halves = atlasSpillWords(writer) / 256;
-      Value value = store ? op.getOperand(1) : op.getResult(1);
+      unsigned halves = atlasSpillWords(writer) / kAtlasRegisterWords;
+      Value value = atlasSpillTile(&op);
       unsigned reg = isa<VirtualBF16Type>(value.getType()) ? tile(value) : fp8(value);
       for (unsigned half = 0; half < halves; ++half) {
-        materializeScalar(fixed().dmaBaseReg, word + half * 256, loc);
+        materializeScalar(fixed().dmaBaseReg, word + half * kAtlasRegisterWords, loc);
         if (store)
-          add("atlas.vstore", loc, {{"src", i32(reg + half)},
-              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+          emit<VStoreOp>(loc, /*src=*/reg + half, /*base=*/fixed().dmaBaseReg,
+              /*offset=*/0, "raw");
         else
-          add("atlas.vload", loc, {{"dst", i32(reg + half)},
-              {"base", i32(fixed().dmaBaseReg)}, {"offset", i32(0)}, {"format", str("raw")}});
+          emit<VLoadOp>(loc, /*dst=*/reg + half, /*base=*/fixed().dmaBaseReg,
+              /*offset=*/0, "raw");
       }
       return success();
     }
@@ -793,50 +734,40 @@ private:
     }
     if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
       MXUPlacement weight = mxu(load.getWeight());
-      add("atlas.mxu_push", loc,
-          {{"kind", str("weight_fp8")}, {"unit", i32(weight.unit)},
-           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(weight.slot)}});
+      emit<MXUPushOp>(loc, "weight_fp8", /*unit=*/weight.unit,
+          /*src=*/fp8(load.getSrc()), /*slot=*/weight.slot);
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
       MXUPlacement acc = mxu(load.getAcc());
-      add("atlas.mxu_push", loc,
-          {{"kind", str("acc_fp8")}, {"unit", i32(acc.unit)},
-           {"src", i32(fp8(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      emit<MXUPushOp>(loc, "acc_fp8", /*unit=*/acc.unit, /*src=*/fp8(load.getSrc()),
+          /*slot=*/acc.slot);
       return success();
     }
     if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
       MXUPlacement acc = mxu(load.getAcc());
-      add("atlas.mxu_push", loc,
-          {{"kind", str("acc_bf16")}, {"unit", i32(acc.unit)},
-           {"src", i32(tile(load.getSrc()))}, {"slot", i32(acc.slot)}});
+      emit<MXUPushOp>(loc, "acc_bf16", /*unit=*/acc.unit, /*src=*/tile(load.getSrc()),
+          /*slot=*/acc.slot);
       return success();
     }
     if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
       MXUPlacement weight = mxu(reset.getWeight());
       MXUPlacement acc = mxu(reset.getAcc());
-      add("atlas.mxu_matmul", loc,
-          {{"unit", i32(acc.unit)}, {"src", i32(fp8(reset.getActivation()))},
-           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
-           {"accumulate", boolean(false)}});
+      emit<MXUMatmulOp>(loc, /*unit=*/acc.unit, /*src=*/fp8(reset.getActivation()),
+          /*weight_slot=*/weight.slot, /*acc_slot=*/acc.slot, /*accumulate=*/false);
       return success();
     }
     if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
       MXUPlacement weight = mxu(accumulate.getWeight());
       MXUPlacement acc = mxu(accumulate.getAcc());
-      add("atlas.mxu_matmul", loc,
-          {{"unit", i32(acc.unit)},
-           {"src", i32(fp8(accumulate.getActivation()))},
-           {"weight_slot", i32(weight.slot)}, {"acc_slot", i32(acc.slot)},
-           {"accumulate", boolean(true)}});
+      emit<MXUMatmulOp>(loc, /*unit=*/acc.unit, /*src=*/fp8(accumulate.getActivation()),
+          /*weight_slot=*/weight.slot, /*acc_slot=*/acc.slot, /*accumulate=*/true);
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutBF16Op>(op)) {
       MXUPlacement acc = mxu(readout.getAcc());
-      add("atlas.mxu_pop", loc,
-          {{"format", str("bf16")}, {"unit", i32(acc.unit)},
-           {"dst", i32(tile(readout.getValue()))},
-           {"slot", i32(acc.slot)}, {"scale_reg", i32(0)}});
+      emit<MXUPopOp>(loc, "bf16", /*unit=*/acc.unit, /*dst=*/tile(readout.getValue()),
+          /*slot=*/acc.slot, /*scale_reg=*/0);
       return success();
     }
     if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
@@ -846,30 +777,21 @@ private:
             "FP8 readout currently requires a virtual_scale_constant");
       MXUPlacement acc = mxu(readout.getAcc());
       // Rematerialize each use: readouts and VPU pack share scratch e3.
-      add("atlas.scalar_load", loc,
-          {{"kind", str("seli")}, {"dst", i32(fixed().scaleReg)}, {"base", i32(0)},
-           {"offset", i32(scale.getCode())}});
-      add("atlas.mxu_pop", loc,
-          {{"format", str("fp8")}, {"unit", i32(acc.unit)},
-           {"dst", i32(fp8(readout.getValue()))},
-           {"slot", i32(acc.slot)}, {"scale_reg", i32(fixed().scaleReg)}});
+      emit<ScalarLoadOp>(loc, "seli", /*dst=*/fixed().scaleReg, /*base=*/0,
+          /*offset=*/scale.getCode());
+      emit<MXUPopOp>(loc, "fp8", /*unit=*/acc.unit, /*dst=*/fp8(readout.getValue()),
+          /*slot=*/acc.slot, /*scale_reg=*/fixed().scaleReg);
       return success();
     }
     if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
       unsigned unit = static_cast<unsigned>(matmul.getUnit());
-      add("atlas.mxu_push", loc,
-          {{"kind", str("weight_fp8")}, {"unit", i32(unit)},
-           {"src", i32(fp8(matmul.getWeight()))},
-           {"slot", i32(fixed().mxuWeightSlot)}});
-      add("atlas.mxu_matmul", loc,
-          {{"unit", i32(unit)}, {"src", i32(fp8(matmul.getActivation()))},
-           {"weight_slot", i32(fixed().mxuWeightSlot)},
-           {"acc_slot", i32(fixed().mxuAccSlot)},
-           {"accumulate", boolean(false)}});
-      add("atlas.mxu_pop", loc,
-          {{"format", str("bf16")}, {"unit", i32(unit)},
-           {"dst", i32(tile(matmul.getResult()))},
-           {"slot", i32(fixed().mxuAccSlot)}, {"scale_reg", i32(0)}});
+      emit<MXUPushOp>(loc, "weight_fp8", unit, /*src=*/fp8(matmul.getWeight()),
+          /*slot=*/fixed().mxuWeightSlot);
+      emit<MXUMatmulOp>(loc, unit, /*src=*/fp8(matmul.getActivation()),
+          /*weight_slot=*/fixed().mxuWeightSlot, /*acc_slot=*/fixed().mxuAccSlot,
+          /*accumulate=*/false);
+      emit<MXUPopOp>(loc, "bf16", unit, /*dst=*/tile(matmul.getResult()),
+          /*slot=*/fixed().mxuAccSlot, /*scale_reg=*/0);
       return success();
     }
     if (auto pack = dyn_cast<VirtualPackFP8Op>(op))
@@ -881,35 +803,28 @@ private:
       return success();
     }
     if (auto unary = dyn_cast<VirtualVPUUnaryOp>(op)) {
-      add("atlas.vpu_unary", loc,
-          {{"kind", unary.getKindAttr()}, {"dst", i32(tile(unary.getDst()))},
-           {"src", i32(tile(unary.getSrc()))}});
+      emit<VPUUnaryOp>(loc, unary.getKind(), /*dst=*/tile(unary.getDst()),
+          /*src=*/tile(unary.getSrc()));
       return success();
     }
     if (auto binary = dyn_cast<VirtualVPUBinaryOp>(op)) {
-      add("atlas.vpu_binary", loc,
-          {{"kind", binary.getKindAttr()},
-           {"dst", i32(tile(binary.getDst()))},
-           {"lhs", i32(tile(binary.getLhs()))},
-           {"rhs", i32(tile(binary.getRhs()))}});
+      emit<VPUBinaryOp>(loc, binary.getKind(), /*dst=*/tile(binary.getDst()),
+          /*lhs=*/tile(binary.getLhs()), /*rhs=*/tile(binary.getRhs()));
       return success();
     }
     if (auto reduce = dyn_cast<VirtualVPUReduceOp>(op)) {
-      add("atlas.vpu_reduce", loc,
-          {{"kind", reduce.getKindAttr()}, {"dst", i32(tile(reduce.getDst()))},
-           {"src", i32(tile(reduce.getSrc()))}});
+      emit<VPUReduceOp>(loc, reduce.getKind(), /*dst=*/tile(reduce.getDst()),
+          /*src=*/tile(reduce.getSrc()));
       return success();
     }
     if (auto splat = dyn_cast<VirtualVPUSplatOp>(op)) {
-      add("atlas.vli", loc,
-          {{"mode", str("all")}, {"dst", i32(tile(splat.getDst()))},
-           {"immediate", i32(splat.getBits())}});
+      emit<VLIOp>(loc, "all", /*dst=*/tile(splat.getDst()),
+          /*immediate=*/splat.getBits());
       return success();
     }
     if (auto transpose = dyn_cast<VirtualXLUTransposeOp>(op)) {
-      add("atlas.xlu_transpose", loc,
-          {{"dst", i32(fp8(transpose.getDst()))},
-           {"src", i32(fp8(transpose.getSrc()))}});
+      emit<XLUTransposeOp>(loc, /*dst=*/fp8(transpose.getDst()),
+          /*src=*/fp8(transpose.getSrc()));
       return success();
     }
     if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
@@ -923,10 +838,8 @@ private:
       return success();
     }
     if (auto addi = dyn_cast<arith::AddIOp>(op)) {
-      add("atlas.alu_reg", loc,
-          {{"kind", str("add")}, {"dst", i32(scalar(addi.getResult()))},
-           {"lhs", i32(scalar(addi.getLhs()))},
-           {"rhs", i32(scalar(addi.getRhs()))}});
+      emit<ALURegOp>(loc, "add", /*dst=*/scalar(addi.getResult()),
+          /*lhs=*/scalar(addi.getLhs()), /*rhs=*/scalar(addi.getRhs()));
       return success();
     }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op))
@@ -940,10 +853,10 @@ private:
     }
     if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
       unsigned trueEdge = newLabel();
-      add("atlas.branch", loc,
-          {{"kind", str("bne")}, {"lhs", i32(scalar(branch.getCondition()))},
-           {"rhs", i32(0)}}, trueEdge);
-      planned.back().attrs.emplace_back(attrs.getStringAttr(kAtlasTagCFGBranch), i32(currentCFGBlock));
+      redirect(emit<BranchOp>(loc, "bne", /*lhs=*/scalar(branch.getCondition()),
+                              /*rhs=*/0, /*offset_bytes=*/0),
+               trueEdge);
+      planned.back()->setAttr(kAtlasTagCFGBranch, i32(currentCFGBlock));
       currentCFGEdge = cfgEdges.lookup(op.getBlock())[1];
       edgeCopies(branch.getFalseDest(), branch.getFalseDestOperands(), loc);
       jump(labelFor(branch.getFalseDest()), loc);
@@ -956,10 +869,9 @@ private:
     }
     if (isa<func::ReturnOp>(op)) {
       materializeScalar(fixed().haltReg, 1, loc);
-      add("atlas.csr", loc,
-          {{"kind", str("rrw")}, {"dst", i32(0)}, {"source", i32(fixed().haltReg)},
-           {"address", i32(0xc10)}, {"atlas.complete", boolean(true)}});
-      add("atlas.trap", loc, {{"kind", str("ecall")}});
+      emit<CSROp>(loc, "rrw", /*dst=*/0, /*source=*/fixed().haltReg, /*address=*/0xc10)
+          ->setAttr("atlas.complete", boolean(true));
+      emit<TrapOp>(loc, "ecall");
       return success();
     }
     return op.emitOpError("has no virtual-to-machine lowering");
@@ -971,23 +883,17 @@ private:
     unsigned lhs = scalar(cmp.getLhs());
     unsigned rhs = scalar(cmp.getRhs());
     auto emitReg = [&](StringRef kind, unsigned first, unsigned second) {
-      add("atlas.alu_reg", loc,
-          {{"kind", str(kind)}, {"dst", i32(dst)},
-           {"lhs", i32(first)}, {"rhs", i32(second)}});
+      emit<ALURegOp>(loc, kind, dst, /*lhs=*/first, /*rhs=*/second);
     };
     auto invert = [&]() {
-      add("atlas.alu_imm", loc,
-          {{"kind", str("xori")}, {"dst", i32(dst)},
-           {"src", i32(dst)}, {"immediate", i32(1)}});
+      emit<ALUImmOp>(loc, "xori", dst, /*src=*/dst, /*immediate=*/1);
     };
     switch (cmp.getPredicate()) {
     case arith::CmpIPredicate::eq:
     case arith::CmpIPredicate::ne:
       emitReg("xor", lhs, rhs);
       if (cmp.getPredicate() == arith::CmpIPredicate::eq)
-        add("atlas.alu_imm", loc,
-            {{"kind", str("sltiu")}, {"dst", i32(dst)},
-             {"src", i32(dst)}, {"immediate", i32(1)}});
+        emit<ALUImmOp>(loc, "sltiu", dst, /*src=*/dst, /*immediate=*/1);
       else
         emitReg("sltu", 0, dst);
       return success();
@@ -1004,22 +910,20 @@ private:
   }
 
   LogicalResult resolveTargets() {
-    for (size_t pc = 0; pc < planned.size(); ++pc) {
-      PlannedOp &step = planned[pc];
-      if (!step.targetLabel)
-        continue;
-      auto found = labelPC.find(*step.targetLabel);
+    for (auto [pc, label] : redirects) {
+      auto found = labelPC.find(label);
       if (found == labelPC.end() || found->second >= planned.size())
         return function.emitOpError("unresolved virtual CFG target");
       int64_t offset = 2 * (static_cast<int64_t>(found->second) -
                             static_cast<int64_t>(pc));
-      bool branch = step.name == "atlas.branch";
+      auto branch = dyn_cast<BranchOp>(planned[pc]);
       int64_t bound = branch ? 4096 : 1048576;
       if (offset < -bound || offset > bound - 2)
         return function.emitOpError("virtual CFG target exceeds selected branch range");
-      step.attrs.emplace_back(
-          StringAttr::get(module.getContext(), branch ? "offset_bytes" : "offset"),
-          i32(offset));
+      if (branch)
+        branch.setOffsetBytesAttr(i32(offset));
+      else
+        cast<JumpOp>(planned[pc]).setOffsetAttr(i32(offset));
     }
     return success();
   }
@@ -1027,11 +931,17 @@ private:
   ModuleOp module;
   func::FuncOp function;
   Builder attrs;
+  // The machine program, built on one state chain as lowering goes: its ops
+  // in order, and its branches and jumps by index with the labels they target.
+  OwningOpRef<ModuleOp> emitted;
+  OpBuilder emitter;
+  Value state;
+  std::vector<Operation *> planned;
+  SmallVector<std::pair<size_t, unsigned>> redirects;
   VirtualAllocationPlan allocation;
   llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
-  std::vector<PlannedOp> planned;
   llvm::DenseMap<Value, int32_t> cfgValues;
   llvm::DenseMap<Block *, int32_t> cfgBlocks;
   llvm::DenseMap<Operation *, int32_t> cfgOperations;
@@ -1043,7 +953,7 @@ private:
   unsigned nextTileCommand = 0;
   llvm::DenseMap<Value, PendingLoad> pendingLoads;
   SmallVector<Value> pendingOrder;
-  uint64_t inputBase = 0, outputBase = 0;
+  AtlasBoundaryABI abi;
   std::optional<uint64_t> controlBase;
   bool allocated = false;
   std::optional<size_t> loweredWords;

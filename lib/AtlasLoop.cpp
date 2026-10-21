@@ -131,7 +131,7 @@ mlir::atlas::proveAtlasLoopAccess(const AtlasStream &stream, const AtlasLoop &lo
     if (kind == OpClass::ScalarLoad || kind == OpClass::ScalarStore) {
       ScalarAccess touched = scalarAccess(in, regs);
       // ScalarCore slices the address to VMEM, so one past it may alias anything.
-      if (!touched.first || *touched.first + touched.bytes > kVmemBytes)
+      if (!touched.first || *touched.first + touched.bytes > kAtlasVmemBytes)
         known = false;
       else
         (touched.write ? access.writes : access.reads)

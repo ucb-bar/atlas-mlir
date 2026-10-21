@@ -1,5 +1,6 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -210,19 +211,19 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
 }
 
 LogicalResult VirtualDMALoadFP8Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasRegisterBytes);
 }
 
 LogicalResult VirtualDMALoadBF16Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasBF16TileBytes);
 }
 
 LogicalResult VirtualDMAStoreFP8Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasRegisterBytes);
 }
 
 LogicalResult VirtualDMAStoreBF16Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasBF16TileBytes);
 }
 
 

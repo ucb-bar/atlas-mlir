@@ -14,6 +14,32 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+// Restores MXU state of `handle`'s type from its saved tile.
+Operation *createMXURestore(OpBuilder &builder, Location loc, Value state,
+                            Value tile, Type handle) {
+  Operation *load;
+  if (auto acc = dyn_cast<VirtualMXUAccType>(handle))
+    load = VirtualMXULoadAccBF16Op::create(builder, loc, state.getType(), handle,
+                                           state, tile, acc.getUnit());
+  else
+    load = VirtualMXULoadWeightOp::create(
+        builder, loc, state.getType(), handle, state, tile,
+        cast<VirtualMXUWeightType>(handle).getUnit());
+  load->setAttr("atlas.mxu_spill", builder.getStringAttr("restore"));
+  return load;
+}
+
+// Saves a completed accumulator as the BF16 tile it holds. A BF16 pop copies
+// its raw halves, unlike an FP8 readout, which would quantize them.
+Operation *createMXUSave(OpBuilder &builder, Location loc, Value state,
+                         Value acc) {
+  Operation *readout = VirtualMXUReadoutBF16Op::create(
+      builder, loc, state.getType(), VirtualBF16Type::get(builder.getContext()),
+      state, acc);
+  readout->setAttr("atlas.mxu_spill", builder.getStringAttr("save"));
+  return readout;
+}
+
 // Normalize explicit resource block arguments to ordinary tile edges. A BF16
 // readout consumes the completed accumulator once, even when a conditional
 // branch forwards it to both successors. The destination starts a new local
@@ -44,19 +70,11 @@ LogicalResult materializeMXUEdges(func::FuncOp function, unsigned limit,
       Type resource = arg.getType();
       if (!isa<VirtualMXUWeightType, VirtualMXUAccType>(resource)) continue;
       bool acc = isa<VirtualMXUAccType>(resource);
-      unsigned unit = acc ? cast<VirtualMXUAccType>(resource).getUnit()
-                          : cast<VirtualMXUWeightType>(resource).getUnit();
       SmallVector<OpOperand *> uses;
       for (OpOperand &use : arg.getUses()) uses.push_back(&use);
       arg.setType(acc ? Type(VirtualBF16Type::get(function.getContext()))
                       : Type(VirtualFP8Type::get(function.getContext())));
-      OperationState os(function.getLoc(), acc ? "atlas.virtual_mxu_load_acc_bf16"
-                                               : "atlas.virtual_mxu_load_weight");
-      os.addOperands({state, arg});
-      os.addTypes({initial.getType(), resource});
-      os.addAttribute("unit", builder.getI32IntegerAttr(unit));
-      os.addAttribute("atlas.mxu_spill", builder.getStringAttr("restore"));
-      Operation *load = builder.create(os);
+      Operation *load = createMXURestore(builder, function.getLoc(), state, arg, resource);
       state = load->getResult(0);
       for (OpOperand *use : uses) use->set(load->getResult(1));
     }
@@ -83,11 +101,7 @@ LogicalResult materializeMXUEdges(func::FuncOp function, unsigned limit,
           if (!load) return term->emitOpError("MXU edge weight has no local source");
           tile = load.getSrc();
         } else {
-          OperationState os(term->getLoc(), "atlas.virtual_mxu_readout_bf16");
-          os.addOperands({state, handle});
-          os.addTypes({state.getType(), VirtualBF16Type::get(function.getContext())});
-          os.addAttribute("atlas.mxu_spill", builder.getStringAttr("save"));
-          Operation *readout = builder.create(os);
+          Operation *readout = createMXUSave(builder, term->getLoc(), state, handle);
           state = readout->getResult(0);
           tile = readout->getResult(1);
         }
@@ -148,13 +162,13 @@ public:
           if (failed(makeRoom(handle.getType(), index, op, state)))
             return failure();
           bool acc = isa<VirtualMXUAccType>(handle.getType());
-          Value tile = append(op, state,
-              acc ? "atlas.virtual_reload_bf16" : "atlas.virtual_reload_fp8",
-              resource.saved, acc ? Type(VirtualBF16Type::get(op->getContext()))
-                                  : Type(VirtualFP8Type::get(op->getContext())));
-          resource.resident = append(op, state,
-              acc ? "atlas.virtual_mxu_load_acc_bf16" : "atlas.virtual_mxu_load_weight",
-              tile, handle.getType(), true);
+          OpBuilder builder(op);
+          Value tile = append(state, createAtlasReload(
+              builder, op->getLoc(), state, resource.saved,
+              acc ? Type(VirtualBF16Type::get(op->getContext()))
+                  : Type(VirtualFP8Type::get(op->getContext()))));
+          resource.resident = append(state, createMXURestore(
+              builder, op->getLoc(), state, tile, handle.getType()));
           resident[acc][unit(handle.getType())].push_back(handle);
         }
         op->setOperand(i, resource.resident);
@@ -202,17 +216,8 @@ private:
     return never;
   }
 
-  Value append(Operation *before, Value &state, StringRef name, Value operand,
-               Type result, bool load = false) {
-    OpBuilder builder(before);
-    OperationState os(before->getLoc(), name);
-    os.addOperands({state, operand});
-    os.addTypes({state.getType(), result});
-    if (load) {
-      os.addAttribute("unit", builder.getI32IntegerAttr(unit(result)));
-      os.addAttribute("atlas.mxu_spill", builder.getStringAttr("restore"));
-    }
-    Operation *op = builder.create(os);
+  // Continues the state chain from `op`, returning its value.
+  static Value append(Value &state, Operation *op) {
     state = op->getResult(0);
     return op->getResult(1);
   }
@@ -236,26 +241,15 @@ private:
       return before->emitOpError("MXU spill rewrite work limit or working slots exhausted");
     Resource &resource = resources[victim];
     Value tile = resource.source;
-    if (acc) {
-      // Selected MXU0/MXU1 completed buffers are BF16. BF16 pop copies their
-      // raw halves, unlike FP8 readout, which would introduce quantization.
-      tile = append(before, state, "atlas.virtual_mxu_readout_bf16",
-                    resource.resident, VirtualBF16Type::get(before->getContext()));
-      tile.getDefiningOp()->setAttr("atlas.mxu_spill",
-                                   StringAttr::get(before->getContext(), "save"));
-    }
-    if (acc || !resource.saved) {
-      OpBuilder builder(before);
-      OperationState os(before->getLoc(), acc ? "atlas.virtual_spill_bf16"
-                                             : "atlas.virtual_spill_fp8");
-      os.addOperands({state, tile});
-      os.addTypes({state.getType(), VirtualSpillType::get(before->getContext())});
-      os.addAttribute("slot_word", builder.getI32IntegerAttr(
+    OpBuilder builder(before);
+    // Selected MXU0/MXU1 completed buffers are BF16.
+    if (acc)
+      tile = append(state, createMXUSave(builder, before->getLoc(), state,
+                                         resource.resident));
+    if (acc || !resource.saved)
+      resource.saved = append(state, createAtlasSpillStore(
+          builder, before->getLoc(), state, tile,
           VirtualAllocationPlan().fixed().spillWord));
-      Operation *store = builder.create(os);
-      state = store->getResult(0);
-      resource.saved = store->getResult(1);
-    }
     resource.resident = {};
     llvm::erase(live, victim);
     ++spills;

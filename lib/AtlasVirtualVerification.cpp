@@ -28,23 +28,14 @@ struct DRAMEffect {
 };
 
 DRAMEffect dramEffect(Operation *launch) {
-  auto effect = [](Value address, Value size, bool write) {
-    std::optional<uint32_t> first = provenI32(address), bytes = provenI32(size);
-    DRAMEffect e{std::nullopt, write};
-    if (first && bytes)
-      e.span = {{*first, static_cast<uint64_t>(*first) + *bytes}};
-    return e;
-  };
-  return llvm::TypeSwitch<Operation *, DRAMEffect>(launch)
-      .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>([&](auto op) {
-        return effect(op.getDramByte(), op.getSizeBytes(), false);
-      })
-      .Case<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([&](auto op) {
-        return effect(op.getDramByte(), op.getSizeBytes(), true);
-      })
-      .Default([](Operation *) -> DRAMEffect {
-        llvm_unreachable("not a virtual DMA launch");
-      });
+  std::optional<VirtualDMATransfer> transfer = virtualDMATransfer(launch);
+  assert(transfer && "a virtual DMA launch");
+  std::optional<uint32_t> first = provenI32(transfer->dram->get()),
+                          bytes = provenI32(transfer->size->get());
+  DRAMEffect e{std::nullopt, transfer->store};
+  if (first && bytes)
+    e.span = {{*first, static_cast<uint64_t>(*first) + *bytes}};
+  return e;
 }
 
 // Track the weights resident on each unit and the current version of each
@@ -124,7 +115,7 @@ struct VirtualMXUResources {
       return consumeAccumulator(op, unit, accumulate.getAcc(),
                                 accumulate.getNextAcc());
     }
-    Value acc = op.getOperand(1);
+    Value acc = virtualMXUReadoutAcc(&op);
     unsigned unit = cast<VirtualMXUAccType>(acc.getType()).getUnit();
     if (unit > 1)
       return op.emitOpError("MXU unit must be in [0, 1]");
@@ -496,16 +487,36 @@ std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasVirtualStreamPass() {
   return std::make_unique<VerifyAtlasVirtualStreamPass>();
 }
 
+std::optional<VirtualDMATransfer>
+mlir::atlas::virtualDMATransfer(Operation *op) {
+  return llvm::TypeSwitch<Operation *, std::optional<VirtualDMATransfer>>(op)
+      .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>([](auto load) {
+        return VirtualDMATransfer{&load.getDramByteMutable(),
+                                  &load.getSizeBytesMutable(), load.getValue(),
+                                  false};
+      })
+      .Case<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>([](auto store) {
+        return VirtualDMATransfer{&store.getDramByteMutable(),
+                                  &store.getSizeBytesMutable(), store.getSrc(),
+                                  true};
+      })
+      .Default([](Operation *) { return std::nullopt; });
+}
+
+Value mlir::atlas::virtualMXUReadoutAcc(Operation *op) {
+  return llvm::TypeSwitch<Operation *, Value>(op)
+      .Case<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(
+          [](auto readout) { return readout.getAcc(); })
+      .Default([](Operation *) { return Value(); });
+}
+
 bool mlir::atlas::isVirtualDMAImmediate(Value value) {
   if (!value.getDefiningOp<arith::ConstantOp>() || !value.getType().isInteger(32) ||
       value.use_empty())
     return false;
-  // A DMA operation's address and size close its operand list.
   return llvm::all_of(value.getUses(), [](OpOperand &use) {
-    Operation *user = use.getOwner();
-    return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
-               VirtualDMAStoreBF16Op>(user) &&
-           use.getOperandNumber() + 2 >= user->getNumOperands();
+    auto transfer = virtualDMATransfer(use.getOwner());
+    return transfer && (&use == transfer->dram || &use == transfer->size);
   });
 }
 

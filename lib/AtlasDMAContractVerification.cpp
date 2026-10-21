@@ -3,6 +3,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
@@ -272,7 +273,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
             *transfer.dram.start + *transfer.dram.bytes > (uint64_t(1) << 32))
           transfer.dram.start.reset();
         if (transfer.vmem.start && transfer.vmem.bytes &&
-            *transfer.vmem.start + *transfer.vmem.bytes > kVmemBytes)
+            *transfer.vmem.start + *transfer.vmem.bytes > kAtlasVmemBytes)
           return op->emitOpError("DMA memory transfer exceeds VMEM capacity");
         for (Transfer &other : pending)
           if (failed(compare(op, transfer.vmem, other.vmem, "VMEM", other.launch)) ||
@@ -288,16 +289,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
         pending.erase(found);
       } else if (isa<VLoadOp, VStoreOp>(op)) {
         const Instr &in = s.instrs[i];
-        Span access{std::nullopt, 1024, isa<VStoreOp>(op)};
+        Span access{std::nullopt, kAtlasRegisterBytes, isa<VStoreOp>(op)};
         if (auto address = regs[in.rs1]) {
           // ScalarDecoder shifts signed imm12 by 5 WORDS, then RV32 ADD wraps.
           uint32_t word = *address +
                           uint32_t(signExtend(in.imm, 12) * 32);
           access.start = vmemStart(word);
           // LSU accepts aligned 1KiB vectors contained in one 256KiB bank.
-          if (*access.start % 1024 || *access.start + 1024 > kVmemBytes ||
+          if (*access.start % kAtlasRegisterBytes ||
+              *access.start + kAtlasRegisterBytes > kAtlasVmemBytes ||
               *access.start / kVmemBankBytes !=
-                  (*access.start + 1023) / kVmemBankBytes)
+                  (*access.start + kAtlasRegisterBytes - 1) / kVmemBankBytes)
             return op->emitOpError("vector DMA memory access has invalid VMEM span");
         }
         for (Transfer &other : pending)

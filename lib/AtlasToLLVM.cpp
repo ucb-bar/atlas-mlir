@@ -186,10 +186,9 @@ struct FinalizeAtlasLLVMCallsPass
       if (Attribute value = module->getAttr(name))
         reconstructed->setAttr(name, value);
     builder.setInsertionPointToStart(reconstructed.getBody());
-    OperationState startState(module.getLoc(), "atlas.start");
     auto stateType = mlir::atlas::StateType::get(module.getContext());
-    startState.addTypes(stateType);
-    Value previous = builder.create(startState)->getResult(0);
+    Value previous =
+        mlir::atlas::StartOp::create(builder, module.getLoc(), stateType).getResult();
 
     std::vector<uint32_t> stagedWords;
     unsigned index = 0;

@@ -2,6 +2,7 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseSet.h"
@@ -154,8 +155,7 @@ private:
           return ownershipError(op, next, id(previous), "MXU accumulator continuation must retain its unit and slot");
         if (failed(useWeight(op, accumulate.getWeight())))
           return failure();
-      } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-        Value acc = op.getOperand(1);
+      } else if (Value acc = virtualMXUReadoutAcc(&op)) {
         MXUPlacement at = placements.lookup(acc);
         if (auto violation = owners.readoutAccumulator(at.unit, at.slot, id(acc)))
           return ownershipError(op, acc, *violation, "MXU readout requires the current accumulator version");

@@ -4,6 +4,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "Atlas/AtlasVirtualAllocation.h"
@@ -107,7 +108,7 @@ E sourceCompare(int p, E a, E b) {
 }
 struct State {
   std::array<E, 32> x{};
-  std::array<int32_t, 64> tensor;
+  std::array<int32_t, kAtlasTensorRegisters> tensor;
   std::set<int32_t> done;
   int32_t chosen = -1;
   State() { x[0] = literal(0); tensor.fill(-1); }
@@ -115,7 +116,7 @@ struct State {
 bool merge(State &to, const State &from) {
   bool change = false;
   for (unsigned i = 1; i < 32; ++i) if (to.x[i] && !same(to.x[i], from.x[i])) { to.x[i].reset(); change = true; }
-  for (unsigned i = 0; i < 64; ++i) if (to.tensor[i] != -1 && to.tensor[i] != from.tensor[i]) { to.tensor[i] = -1; change = true; }
+  for (unsigned i = 0; i < kAtlasTensorRegisters; ++i) if (to.tensor[i] != -1 && to.tensor[i] != from.tensor[i]) { to.tensor[i] = -1; change = true; }
   for (auto i = to.done.begin(); i != to.done.end();) if (!from.done.count(*i)) { i = to.done.erase(i); change = true; } else ++i;
   if (to.chosen != from.chosen && to.chosen != -2) { to.chosen = -2; change = true; }
   return change;
@@ -155,7 +156,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     std::string type = typeName(value.getType());
     unsigned reg = regs.lookup(value), width = type == "bf16" ? 2 : 1;
     bool scalar = registerKindOf(value) == RegisterKind::Scalar;
-    if ((scalar && (reg == 0 || reg >= 32)) || (!scalar && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
+    if ((scalar && (reg == 0 || reg >= 32)) || (!scalar && (reg + width > kAtlasTensorRegisters || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
     Operation *op = value.getDefiningOp();
     SmallVector<int32_t> operands;
     if (op) for (Value v : op->getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
@@ -193,7 +194,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
         for (unsigned n = 0; n < mxuCount; ++n) mxuCommands.push_back(nextMXU++);
         SmallVector<NamedAttribute> record{field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))};
         if (isAtlasSlotAccess(&op)) {
-          auto slot = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
+          auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
           record.push_back(field("slot_word", slot.getSlotWordAttr()));
           record.push_back(field("slot_words", slot.getWordsAttr()));
           record.push_back(field("slot_kind", slot.getKindAttr()));
@@ -256,7 +257,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     auto id = contractI32(d,"id"), block = contractI32(d,"block"), reg = contractI32(d,"reg");
     std::string type = contractString(d,"type").str(), def = contractString(d,"def").str();
     if (!id || *id != int32_t(values.size()) || !block || *block < 0 || *block >= int32_t(br.size()) || !reg || def.empty() || !d.getAs<DenseI32ArrayAttr>("operands")) return bad();
-    if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > 64 || (type == "bf16" && *reg % 2)) return bad();
+    if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > kAtlasTensorRegisters || (type == "bf16" && *reg % 2)) return bad();
     ValueRecord r{*id,*block,*reg,type,def,contractString(d,"kind").str(),contractI32Array(d,"operands")};
     if (def == "arith.constant" || def == "atlas.virtual_vpu_splat" || def == "atlas.virtual_control") {
       auto n = contractI32(d, "constant");
@@ -416,14 +417,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       auto owner = contractTag(op,kAtlasTagCFGBlock); if (owner && *owner != block.id) return error("path changes source block without its source edge");
       const State before = s;
       auto tensorRead = [&](unsigned reg, int32_t id) {
-        if (id < 0 || id >= int32_t(values.size()) || reg >= 64) return false;
-        return before.tensor[reg] == id && (values[id].type != "bf16" || (reg + 1 < 64 && before.tensor[reg+1] == id));
+        if (id < 0 || id >= int32_t(values.size()) || reg >= kAtlasTensorRegisters) return false;
+        return before.tensor[reg] == id && (values[id].type != "bf16" || (reg + 1 < kAtlasTensorRegisters && before.tensor[reg+1] == id));
       };
       // Every actual tensor write kills the previous physical origin, even
       // when the instruction has no source identity. These widths follow the
       // machine opcode geometry, independently of timing-provider policies.
       auto killTensor = [&](unsigned reg, unsigned width) {
-        for (unsigned half = 0; half < width && reg + half < 64; ++half)
+        for (unsigned half = 0; half < width && reg + half < kAtlasTensorRegisters; ++half)
           s.tensor[reg + half] = -1;
       };
       if (auto write = dyn_cast<VLoadOp>(op)) killTensor(write.getDst(),1);
@@ -452,7 +453,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (name == "atlas.virtual_pack_fp8" && !results.empty()) expected = results[0];
           else if (!operands.empty()) expected = operands[0];
           if (name != "atlas.virtual_slot_copy" &&
-              (expected < 0 || store.getSrc() >= 64 || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
+              (expected < 0 || store.getSrc() >= kAtlasTensorRegisters || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
         }
         if (auto store = dyn_cast<ScalarStoreOp>(op); store && name == "atlas.virtual_save")
           if (operands.size() != 1 || values[operands[0]].reg != int32_t(store.getSrc()) ||

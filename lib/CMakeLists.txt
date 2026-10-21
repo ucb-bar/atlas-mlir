@@ -15,6 +15,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasScheduling.cpp
   AtlasPipeline.cpp
   AtlasVirtualVerification.cpp
+  AtlasBoundaryABI.cpp
   AtlasImmutableWeightReuse.cpp
   AtlasVirtualToMachine.cpp
   AtlasVirtualAllocation.cpp

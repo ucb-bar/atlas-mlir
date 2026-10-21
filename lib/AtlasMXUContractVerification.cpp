@@ -4,7 +4,9 @@
 #include "Atlas/AtlasMXUOwnership.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -30,7 +32,7 @@ bool isAccumulator(const Record &r) { return isSeed(r) || isMatmul(r); }
 
 bool validRecord(const Record &r) {
   if (r.id < 0 || r.block < 0 || r.unit < 0 || r.unit >= 2 ||
-      r.reg < 0 || r.reg >= 64 || r.slot < 0 || r.slot >= 2)
+      r.reg < 0 || r.reg >= kAtlasTensorRegisters || r.slot < 0 || r.slot >= 2)
     return false;
   if ((r.kind == "acc_bf16" || r.kind == "pop_bf16") && r.reg % 2)
     return false;
@@ -279,7 +281,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
         !isa<VirtualFP8Type, VirtualBF16Type>(value.getType()))
       return function.emitOpError("MXU contract tensor assignment refers to a foreign, stale, or non-tensor value");
     bool pair = isa<VirtualBF16Type>(value.getType());
-    if (mapped.contains(value) || assignment.reg >= 64 || (pair && assignment.reg % 2))
+    if (mapped.contains(value) || assignment.reg >= kAtlasTensorRegisters || (pair && assignment.reg % 2))
       return function.emitOpError("MXU contract tensor assignment has duplicate value or invalid register geometry");
     mapped[value] = assignment.reg;
   }
@@ -312,31 +314,46 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
         r.unit = placement.unit;
         r.slot = placement.slot;
       };
-      if (isa<VirtualMXULoadWeightOp, VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op>(op)) {
-        handle = op.getResult(1);
-        place(handle);
-        r.kind = isa<VirtualMXULoadWeightOp>(op) ? "weight_fp8" :
-                 isa<VirtualMXULoadAccFP8Op>(op) ? "acc_fp8" : "acc_bf16";
-        tensor = op.getOperand(1);
-      } else if (isa<VirtualMXUResetOp, VirtualMXUAccumulateOp>(op)) {
-        handle = op.getResult(1);
-        Value weight = op.getOperand(2);
-        place(handle);
+      auto weighs = [&](Value weight) {
         r.weightSlot = placements.lookup(weight).slot;
         r.weight = producer.lookup(weight);
-        r.kind = isa<VirtualMXUResetOp>(op) ? "reset" : "accumulate";
-        if (r.kind == "accumulate")
-          r.previous = producer.lookup(op.getOperand(3));
-        tensor = op.getOperand(1);
-      } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-        Value acc = op.getOperand(1);
+      };
+      if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
+        handle = load.getWeight();
+        place(handle);
+        r.kind = "weight_fp8";
+        tensor = load.getSrc();
+      } else if (auto load = dyn_cast<VirtualMXULoadAccFP8Op>(op)) {
+        handle = load.getAcc();
+        place(handle);
+        r.kind = "acc_fp8";
+        tensor = load.getSrc();
+      } else if (auto load = dyn_cast<VirtualMXULoadAccBF16Op>(op)) {
+        handle = load.getAcc();
+        place(handle);
+        r.kind = "acc_bf16";
+        tensor = load.getSrc();
+      } else if (auto reset = dyn_cast<VirtualMXUResetOp>(op)) {
+        handle = reset.getAcc();
+        place(handle);
+        weighs(reset.getWeight());
+        r.kind = "reset";
+        tensor = reset.getActivation();
+      } else if (auto accumulate = dyn_cast<VirtualMXUAccumulateOp>(op)) {
+        handle = accumulate.getNextAcc();
+        place(handle);
+        weighs(accumulate.getWeight());
+        r.kind = "accumulate";
+        r.previous = producer.lookup(accumulate.getAcc());
+        tensor = accumulate.getActivation();
+      } else if (Value acc = virtualMXUReadoutAcc(&op)) {
         place(acc);
         r.previous = producer.lookup(acc);
         tensor = op.getResult(1);
         r.kind = isa<VirtualMXUReadoutBF16Op>(op) ? "pop_bf16" : "pop_fp8";
         r.scaleReg = 0;
-        if (r.kind == "pop_fp8") {
-          auto scale = op.getOperand(2).getDefiningOp<VirtualScaleConstantOp>();
+        if (auto readout = dyn_cast<VirtualMXUReadoutFP8Op>(op)) {
+          auto scale = readout.getScale().getDefiningOp<VirtualScaleConstantOp>();
           if (!scale)
             return op.emitOpError("MXU contract FP8 readout requires a source scale constant");
           r.scaleReg = fixed.scaleReg;

@@ -8,6 +8,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/JSON.h"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -38,6 +39,10 @@ constexpr unsigned kPackRelayoutRowWords = 8;
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
   unsigned scalarTemporary;
+  // Scalar values take x<firstScalarValue>..x<lastScalarValue>, starting above
+  // the PACK loop's registers in a function with a pack.
+  unsigned firstScalarValue;
+  unsigned lastScalarValue;
   unsigned halfSizeReg;
   unsigned haltReg;
   unsigned inputBaseReg;
@@ -67,6 +72,19 @@ struct FixedResourcePlacement {
   std::array<unsigned, 2> packTemporaryRegs;
   unsigned mxuWeightSlot;
   unsigned mxuAccSlot;
+
+  // The span of scalar registers the PACK loop's registers lie in, which a
+  // function with a pack keeps from its values.
+  unsigned firstPackRegister() const {
+    return std::min({packSourceRegs[0], packSourceRegs[1], packDestinationReg,
+                     packRowReg, packRowsReg, packTemporaryRegs[0],
+                     packTemporaryRegs[1]});
+  }
+  unsigned lastPackRegister() const {
+    return std::max({packSourceRegs[0], packSourceRegs[1], packDestinationReg,
+                     packRowReg, packRowsReg, packTemporaryRegs[0],
+                     packTemporaryRegs[1]});
+  }
 };
 
 enum class RegisterKind { BF16, FP8, Scalar };
