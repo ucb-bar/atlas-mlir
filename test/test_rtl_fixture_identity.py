@@ -75,3 +75,18 @@ def test_mixed_width_fixture_rejects_unexpected_input_size(tmp_path: Path) -> No
     (root / "input-4.bin").write_bytes(bytes(1056))
     with pytest.raises(ValueError, match="byte count"):
         fixture_identity(root)
+
+
+def test_resident_fixture_requires_a_watchdog_and_reports_bounded_dma(tmp_path: Path) -> None:
+    root = tmp_path / "resident"
+    make_fixture(root)
+    manifest = root / "manifest.properties"
+    manifest.write_text(manifest.read_text().replace("atlas.rtl_tile_fixture.v1", "atlas.rtl_tile_fixture.v3") + "output_count=17\n")
+    (root / "expected.bin").write_bytes(bytes(17*2048))
+    with pytest.raises(ValueError, match="watchdog"):
+        fixture_identity(root)
+    with manifest.open("a") as stream:
+        stream.write("max_cycles=200000\n")
+    _, _, beats, words, _ = fixture_identity(root)
+    assert beats is None  # Intermediate reads are checked by address bounds.
+    assert words == 17*1024

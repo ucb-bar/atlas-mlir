@@ -100,6 +100,29 @@ class GraphPlatformTest(unittest.TestCase):
         self.assertEqual(linked["status"], "platform_elf_checked")
         self.assertEqual(linked["host_elf"]["sha256"], _sha(self.elf_path.read_bytes()))
 
+    def test_c_handoff_checks_each_serial_image_and_its_bytes(self) -> None:
+        handoff = self.root / "handoff"
+        (handoff / "programs").mkdir(parents=True)
+        (handoff / "programs/a.bin").write_bytes(self.program)
+        second = b"\x73\x00\x00\x00"
+        (handoff / "programs/b.bin").write_bytes(second)
+        other_plan = {**self.plan, "output_addresses": [0x90018000]}
+        abi = {"schema": "merlin.c_handoff.v1",
+               "target_identity": json.loads((self.compiled / "manifest.json").read_text())["target_identity"],
+               "files": {"programs/a.bin": _sha(self.program), "programs/b.bin": _sha(second)},
+               "programs": [{"path": "programs/a.bin", "sha256": _sha(self.program), "bytes": 4, "execution": self.plan},
+                            {"path": "programs/b.bin", "sha256": _sha(second), "bytes": 4, "execution": other_plan}]}
+        (handoff / "abi.json").write_text(json.dumps(abi))
+        report, _ = check(handoff, self.host_map_path, self.memmap_path, self.elf_path)
+        self.assertEqual(len(report["program_sha256s"]), 2)
+        abi["programs"][1]["execution"]["output_addresses"] = [0x91000000]
+        (handoff / "abi.json").write_text(json.dumps(abi))
+        with self.assertRaisesRegex(ValueError, "DRAM output_0"):
+            check(handoff, self.host_map_path, self.memmap_path)
+        (handoff / "programs/b.bin").write_bytes(self.program)
+        with self.assertRaisesRegex(ValueError, "member identity"):
+            check(handoff, self.host_map_path, self.memmap_path)
+
     def test_changed_map_or_target_fails_before_build(self) -> None:
         self.memmap_path.write_text(self.memmap_path.read_text() + " ")
         with self.assertRaisesRegex(ValueError, "memmap hash"):

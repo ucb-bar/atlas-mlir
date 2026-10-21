@@ -2575,6 +2575,11 @@ class AtlasNativeBinding:
 
     """Selected RTL facts live here; Merlin owns the search algorithms."""
 
+    @staticmethod
+    def application_adapter(policy, *, original_source_sha256):
+        from .application import AtlasApplicationAdapter
+
+        return AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
 
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:
