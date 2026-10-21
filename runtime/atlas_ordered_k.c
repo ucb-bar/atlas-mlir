@@ -126,7 +126,7 @@ atlas_ordered_k_status atlas_ordered_k_run(
       return ATLAS_ORDERED_K_MEMORY_ERROR;
   }
 
-  atlas_host_result host_result = atlas_host_load(tile->host, tile->program_words,
+  atlas_host_result host_result = atlas_host_ensure_loaded(tile->host, tile->program_words,
                                                   tile->program_word_count);
   if (device_result)
     *device_result = host_result;

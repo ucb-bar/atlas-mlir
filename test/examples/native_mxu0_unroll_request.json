@@ -1,0 +1,132 @@
+{
+  "schema": "merlin.semantic_kernel.v2",
+  "nodes": [
+    {
+      "id": "a",
+      "op": "input",
+      "inputs": [],
+      "type": {
+        "shape": [
+          2,
+          257
+        ],
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "raw-bit-pattern"
+      },
+      "attrs": {
+        "input_domain": "finite-normal-e4m3-or-positive-zero"
+      },
+      "effect": "input",
+      "index_maps": []
+    },
+    {
+      "id": "w",
+      "op": "input",
+      "inputs": [],
+      "type": {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp8_e4m3",
+        "numerical_policy": "raw-bit-pattern"
+      },
+      "attrs": {
+        "input_domain": "finite-normal-e4m3-or-positive-zero"
+      },
+      "effect": "input",
+      "index_maps": []
+    },
+    {
+      "id": "y",
+      "op": "matmul",
+      "inputs": [
+        "a",
+        "w"
+      ],
+      "type": {
+        "shape": [
+          2,
+          3
+        ],
+        "dtype": "bf16",
+        "numerical_policy": "mxu0-e4m3-ordered-bf16-finite-v1"
+      },
+      "attrs": {},
+      "effect": "pure",
+      "index_maps": [
+        {
+          "loop_rank": 3,
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "loop_rank": 3,
+          "coefficients": [
+            [
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "loop_rank": 3,
+          "coefficients": [
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0
+            ]
+          ],
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ]
+    }
+  ],
+  "outputs": [
+    "y"
+  ],
+  "output_storages": [
+    "external"
+  ],
+  "input_storages": {
+    "a": "external",
+    "w": "external"
+  },
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
+  "lowering_policy": "diagnostic",
+  "source_identity": "",
+  "constants": []
+}

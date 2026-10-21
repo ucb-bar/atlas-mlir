@@ -59,7 +59,7 @@ from .layout import pack_bf16_pair_halves
 from .pack_lane import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY
 
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
-TARGET_IDENTITY = f"atlas-rtl-{RTL_REVISION}:movement-mxu01-vpu-pack-tile-v21"
+TARGET_IDENTITY = f"atlas-rtl-{RTL_REVISION}:movement-mxu01-vpu-pack-tile-v24"
 FP8_DRAM_TILE_LAYOUT = "atlas.dram.fp8-e4m3-row-major-32x32-in-2k-slot.v1"
 FP8_TENSOR_TILE_LAYOUT = "atlas.tensor.fp8-e4m3-row-major-32x32.v1"
 BF16_DRAM_PAIR_LAYOUT = "atlas.dram.bf16-pair-halves-32x32-in-2k-slot.v1"
@@ -67,6 +67,8 @@ BF16_TENSOR_PAIR_LAYOUT = "atlas.tensor.bf16-pair-halves-32x32.v1"
 MXU0_ACC_TILE_LAYOUT = "atlas.mxu0.accumulator-slot-32x32-bf16.v1"
 MXU0_POLICY = "mxu0-e4m3-ordered-bf16-finite-v1"
 MXU0_INPUT_DOMAIN = "finite-normal-e4m3-or-positive-zero"
+MXU0_SEED_ATTRS = (("accumulator_role", "completed-ordered-mxu0-bf16"),
+                  ("input_domain", "finite-normal-bf16-or-positive-zero"))
 MXU1_POLICY = "mxu1-e4m3-anchor-bf16-bounded-v1"
 MXU1_INPUT_DOMAIN = "e4m3-positive-zero-or-signed-one-two-v1"
 MXU1_FINITE_POLICY = "mxu1-e4m3-anchor-bf16-finite-reset-v1"
@@ -101,12 +103,22 @@ PACK_RULE_BY_TRANSPOSE_RULE = {
 }
 BF16_RELU_ATTRS = (("input_domain", "finite-normal-or-zero-bf16"),
                   ("numeric_semantics", "bf16-sign-clamp-v1"))
+BF16_SIGMOID_DOMAIN = ("input_domain", "bf16-signed-zero-or-normal-pow2-minus63-to32-v1")
 BF16_ADD_ATTRS = (("input_domain", "finite-normal-exact-fp32-sum-v1"),
                   ("numeric_semantics", "selected-f32-rne-bf16-chop-v1"))
 BF16_SUB_ATTRS = (("input_domain", "finite-normal-exact-fp32-difference-or-zero-v1"),
                   ("numeric_semantics", "selected-f32-rne-bf16-chop-v1"))
 BF16_MUL_ATTRS = (("input_domain", "finite-normal-bf16-product-normal-v1"),
                   ("numeric_semantics", "bf16-product-rne-v1"))
+# Separate semantic variants retain the original normal-only descriptions.
+BF16_ZERO_BINARY_ATTRS = {
+    "add_bf16_zero": (("input_domain", "finite-normal-or-signed-zero-exact-fp32-sum-or-zero-v1"),
+                       ("numeric_semantics", "selected-f32-rne-bf16-chop-v1")),
+    "sub_bf16_zero": (("input_domain", "finite-normal-or-signed-zero-exact-fp32-difference-or-zero-v1"),
+                       ("numeric_semantics", "selected-f32-rne-bf16-chop-v1")),
+    "mul_bf16_zero": (("input_domain", "finite-normal-or-signed-zero-bf16-product-normal-or-zero-v1"),
+                       ("numeric_semantics", "bf16-product-rne-v1")),
+}
 BF16_ROW_MAX_ATTRS = (("input_domain", "bf16-raw-all-codes-v1"),
                       ("numeric_semantics", "selected-rtl-bf16-total-order-row-max-v1"))
 BF16_ROW_SUM_ATTRS = (
@@ -121,10 +133,60 @@ BF16_RECIP_ATTRS = (
     ("input_domain", "bf16-positive-normal-1-to-32-v1"),
     ("numeric_semantics", "selected-rtl-bf16-rcp-lut-trunc-v1"),
 )
-BF16_UNARY_ATTRS = {"exp_bf16": BF16_EXP_ATTRS, "recip_bf16": BF16_RECIP_ATTRS}
+BF16_WIDE_RECIP_ATTRS = (
+    ("input_domain", "bf16-positive-normal-1-to-65536-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-rcp-lut-trunc-v1"),
+)
+BF16_BOUNDED_RECIP_ATTRS = (
+    ("input_domain", "bf16-positive-normal-pow2-minus63-plus63-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-rcp-lut-trunc-v1"),
+)
+BF16_SQRT_ATTRS = (
+    ("input_domain", "bf16-positive-normal-pow2-minus63-plus63-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-sqrt-q1p16-lut-chop-v1"),
+)
+BF16_TANH_ATTRS = (
+    ("input_domain", "bf16-finite-all-codes-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-tanh-q16-lut-rne-v1"),
+)
+BF16_CUBE_ATTRS = (
+    ("input_domain", "bf16-finite-all-codes-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-cube-chop-flush-v1"),
+)
+# A reusable bounded activation input can feed several arithmetic operations.
+# It implies their operand premises; each operation's result-domain obligation
+# remains in the checked numerical trace rather than following from this label.
+BF16_ACTIVATION_DOMAIN = ("input_domain", "bf16-signed-zero-or-normal-pow2-minus32-plus32-v1")
+BF16_MAX_ATTRS = (
+    ("input_domain", "bf16-raw-all-codes-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-total-order-pair-max-v1"),
+)
+BF16_RNE_BINARY_ATTRS = {
+    "add_bf16_rne": (
+        ("input_domain", "bf16-normal-or-signed-zero-fp32-rne-normal-or-zero-sum-v1"),
+        ("numeric_semantics", "selected-f32-rne-bf16-chop-v1"),
+    ),
+    "sub_bf16_rne": (
+        ("input_domain", "bf16-normal-or-signed-zero-fp32-rne-normal-or-zero-difference-v1"),
+        ("numeric_semantics", "selected-f32-rne-bf16-chop-v1"),
+    ),
+}
+BF16_UNARY_ATTRS = {
+    "cube_bf16": BF16_CUBE_ATTRS,
+    "tanh_bf16": BF16_TANH_ATTRS,
+    "exp_bf16": BF16_EXP_ATTRS, "recip_bf16": BF16_RECIP_ATTRS,
+    "recip_bf16_wide": BF16_WIDE_RECIP_ATTRS,
+    "recip_bf16_bounded": BF16_BOUNDED_RECIP_ATTRS,
+    "sqrt_bf16_bounded": BF16_SQRT_ATTRS,
+}
 BF16_UNARY_MODES = {
+    "atlas.vpu_cube_bf16_tile": "cube",
+    "atlas.vpu_tanh_bf16_tile": "tanh",
     "atlas.vpu_exp_bf16_tile": "exp",
     "atlas.vpu_recip_bf16_tile": "recip",
+    "atlas.vpu_recip_bf16_wide_tile": "recip",
+    "atlas.vpu_recip_bf16_bounded_tile": "recip",
+    "atlas.vpu_sqrt_bf16_bounded_tile": "sqrt",
 }
 BF16_ROW_REDUCTION_ATTRS = {
     "row_max_bf16": BF16_ROW_MAX_ATTRS,
@@ -138,15 +200,51 @@ BF16_BINARY_ATTRS = {
     "add_bf16": BF16_ADD_ATTRS,
     "sub_bf16": BF16_SUB_ATTRS,
     "mul_bf16": BF16_MUL_ATTRS,
+    **BF16_ZERO_BINARY_ATTRS,
+    **BF16_RNE_BINARY_ATTRS,
+    "max_bf16": BF16_MAX_ATTRS,
 }
 BF16_BINARY_MODES = {
     "atlas.vpu_add_bf16_tile": "add",
     "atlas.vpu_sub_bf16_tile": "sub",
     "atlas.vpu_mul_bf16_tile": "mul",
+    "atlas.vpu_add_bf16_zero_tile": "add",
+    "atlas.vpu_sub_bf16_zero_tile": "sub",
+    "atlas.vpu_mul_bf16_zero_tile": "mul",
+    "atlas.vpu_add_bf16_rne_tile": "add",
+    "atlas.vpu_sub_bf16_rne_tile": "sub",
+    "atlas.vpu_max_bf16_tile": "max",
 }
 TILE_BYTES = 2048
 DRAM_BASE = 0x90000000
 DRAM_SLOTS = 128
+
+
+def dram_slots():
+    """Selected I/O allocation window, separate from fixed on-chip memories.
+
+    The default is the original diagnostic window. An explicit byte budget
+    changes the snapshot's external bank geometry. It does not establish a
+    platform mapping, cache policy or additional VMEM/register capacity.
+    The current host buffer ABI admits only 32-bit device addresses.
+    """
+    from merlin.semantic_compiler.codegen import current_codegen_options
+
+    size = current_codegen_options().io_memory_bytes
+    if size is None:
+        return DRAM_SLOTS
+    if size % TILE_BYTES or DRAM_BASE + size > 1 << 32:
+        raise NativeCompilationError("compile_error", "I/O window must use whole tiles within the 32-bit buffer ABI")
+    return size // TILE_BYTES
+
+
+def check_io_memory_manifest(manifest):
+    """Replay configured geometry; older artifacts use the original window."""
+    size = manifest.get("io_memory_bytes", DRAM_SLOTS * TILE_BYTES)
+    if type(size) is not int or size != dram_slots() * TILE_BYTES:
+        raise ValueError("compiled I/O window differs from the selected memory configuration")
+
+
 NATIVE_PIPELINES = {
     "mandatory": ("--atlas-compile-unscheduled",),
     "optimized": ("--atlas-compile",),
@@ -217,9 +315,10 @@ def _bf16_tile_request(request: KernelRequest) -> bool:
             node.type.numerical_policy != "raw-bit-pattern"
         ):
             return False
-        if node.op == "input":
-            if (node.effect != "input" or node.attrs not in (
-                (), *((attrs[0],) for attrs in BF16_UNARY_ATTRS.values()),
+        if node.op in {"input", "constant"}:
+            if (node.effect != node.op or node.attrs not in (
+                (), (BF16_RELU_ATTRS[0],), (BF16_ACTIVATION_DOMAIN,), (BF16_SIGMOID_DOMAIN,),
+                *((attrs[0],) for attrs in BF16_UNARY_ATTRS.values()),
                 *((attrs[0],) for attrs in BF16_ROW_REDUCTION_ATTRS.values()),
                 *((attrs[0],) for attrs in BF16_BINARY_ATTRS.values()),
             )
@@ -255,7 +354,13 @@ def _bf16_tile_request(request: KernelRequest) -> bool:
             # it for the selected invocation; diagnostic compilation records
             # that obligation in the execution plan.
             sources_admitted = all(
-                (source.op == "input" and source.attrs == (attributes[0],))
+                (source.op in {"input", "constant"} and source.attrs == (attributes[0],))
+                or (source.op in {"input", "constant"} and source.attrs == (BF16_ACTIVATION_DOMAIN,)
+                    and node.op in {"add_bf16_rne", "mul_bf16_zero"})
+                # This narrower input fact is compatible with both operand
+                # premises: nonzero magnitudes lie between 2^-63 and 32.
+                or (source.op in {"input", "constant"} and source.attrs == (BF16_SIGMOID_DOMAIN,)
+                    and node.op in {"sub_bf16_zero", "mul_bf16_zero"})
                 or (source.op in BF16_BINARY_ATTRS
                     and source.attrs == BF16_BINARY_ATTRS[source.op])
                 or (source.op == "relu" and source.attrs == BF16_RELU_ATTRS)
@@ -267,7 +372,7 @@ def _bf16_tile_request(request: KernelRequest) -> bool:
             )
             if (node.effect != "pure" or node.attrs != attributes
                     or node.index_maps != pointwise_identity_maps(2, 2)
-                    or len(node.inputs) != 2 or node.inputs[0] == node.inputs[1]
+                    or len(node.inputs) != 2
                     or not sources_admitted):
                 return False
         else:
@@ -427,7 +532,7 @@ def _mxu_bf16_dag_request(request: KernelRequest) -> bool:
            for output in request.outputs):
         return False
     if any(
-        node.op != "mul_bf16" or node.attrs != BF16_MUL_ATTRS
+        node.op not in {"mul_bf16", "mul_bf16_zero"} or node.attrs != BF16_BINARY_ATTRS[node.op]
         for constant in request.nodes if constant.op == "constant"
         for node in request.nodes if constant.id in node.inputs
     ):
@@ -475,7 +580,7 @@ def _mxu0_k_chain_request(request: KernelRequest) -> bool:
     """An ordered MXU0 reduction bounded by declared external storage."""
     if (
         len(request.nodes) % 3 or len(request.nodes) // 3 < 2
-        or 2 * (len(request.nodes) // 3) + 1 > DRAM_SLOTS
+        or 2 * (len(request.nodes) // 3) + 1 > dram_slots()
         or request.outputs != (request.nodes[-1].id,)
     ):
         return False
@@ -654,17 +759,24 @@ def _sha256(data: bytes) -> str:
 
 
 def _run(command: list[str], *, input_text: str) -> str:
+    from merlin.semantic_compiler.codegen import current_codegen_options
+
+    budget = current_codegen_options().program_size_limit_bytes
+    if budget is not None:
+        command = [
+            f"{arg}=program-size-limit-bytes={budget}"
+            if arg in ("--lower-atlas-virtual-to-machine", "--atlas-compile", "--atlas-compile-unscheduled", "--atlas-compile-lower")
+            else arg
+            for arg in command
+        ]
     try:
-        result = subprocess.run(command, input=input_text, text=True,
-                                capture_output=True, timeout=30, check=False)
+        result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)
     except subprocess.TimeoutExpired as exc:
         raise NativeCompilationError("search_timeout", f"Atlas tool timed out: {exc}") from exc
     except OSError as exc:
         raise NativeCompilationError("tool_unavailable", f"Atlas tool failed: {exc}") from exc
     if result.returncode:
-        raise NativeCompilationError(
-            "compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}"
-        )
+        raise NativeCompilationError("compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}")
     return result.stdout
 
 
@@ -986,7 +1098,8 @@ def _tile_effects(program: dict) -> list[tuple]:
     return effects
 
 
-def _check_atomic_dma_schedule(observed: list[tuple], expected: list[tuple], *, context: str) -> None:
+def _check_atomic_dma_schedule(observed: list[tuple], expected: list[tuple], *,
+                               context: str, allow_load_reordering: bool = False) -> None:
     """Replay a physical DMA schedule against logical transfers and scratch contents."""
     def transfer(effect: tuple) -> tuple:
         return effect[1], effect[2], effect[4]
@@ -996,8 +1109,9 @@ def _check_atomic_dma_schedule(observed: list[tuple], expected: list[tuple], *, 
 
     observed_dma = Counter(map(transfer, (e for e in observed if e[0] == "dma")))
     expected_dma = Counter(map(transfer, (e for e in expected if e[0] == "dma")))
-    observed_order = [non_dma(e) for e in observed if e[0] not in {"dma", "wait"}]
-    expected_order = [non_dma(e) for e in expected if e[0] not in {"dma", "wait"}]
+    movable = {"dma", "wait", "vload"} if allow_load_reordering else {"dma", "wait"}
+    observed_order = [non_dma(e) for e in observed if e[0] not in movable]
+    expected_order = [non_dma(e) for e in expected if e[0] not in movable]
     if observed_dma != expected_dma:
         raise NativeCompilationError(
             "unqualified_target", f"{context} DMA transfers differ: "
@@ -1011,6 +1125,21 @@ def _check_atomic_dma_schedule(observed: list[tuple], expected: list[tuple], *, 
             "unqualified_target", f"{context} non-DMA effect {index} differs: "
             f"expected={expected_order[index:index + 1]!r}, observed={observed_order[index:index + 1]!r}"
         )
+    if allow_load_reordering:
+        from .bf16_stream import trace_bf16_data
+
+        modes = {
+            "unary_modes": {"relu", *BF16_UNARY_MODES.values(), *BF16_ROW_REDUCTION_MODES.values()},
+            "binary_modes": set(BF16_BINARY_MODES.values()),
+        }
+        actual = trace_bf16_data(observed, **modes)
+        planned = trace_bf16_data(expected, **modes)
+        if (Counter(actual.loads) != Counter(planned.loads)
+                or actual.computations != planned.computations
+                or actual.stores != planned.stores):
+            raise NativeCompilationError(
+                "unqualified_target", f"{context} reordered loads change data identities"
+            )
 
     def overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
         return a[0] < b[1] and b[0] < a[1]
@@ -1084,7 +1213,10 @@ def _check_atomic_dma_schedule(observed: list[tuple], expected: list[tuple], *, 
                    for active in ((active_words[0], active_words[-1] + 1024),)):
                 raise NativeCompilationError("unqualified_target", f"{context} accesses in-flight DMA scratch")
             if kind == "vload":
-                if load_index >= len(expected_loads) or scratch.get(addr) != ("dram", expected_loads[load_index]):
+                if load_index >= len(expected_loads) or (
+                    not allow_load_reordering
+                    and scratch.get(addr) != ("dram", expected_loads[load_index])
+                ):
                     raise NativeCompilationError("unqualified_target", f"{context} VLOAD reads wrong input data")
                 load_index += 1
             else:
@@ -1157,13 +1289,13 @@ def _check_bf16_selection(graph: CandidateGraph, order: tuple[int, ...],
     output_indices = {value_id: index for index, value_id in enumerate(graph.outputs)}
     registers: set[int] = set()
     for value in graph.values:
-        if value.kind == "input":
+        if value.kind in {"input", "constant"}:
             if value.source_node not in source_ids or value.storage != "external" or (
                 assignment[value.id] != input_slots[source_ids.index(value.source_node)]
             ):
                 raise NativeCompilationError("unqualified_target", "selected BF16 input binding changed")
         elif names[value.id] == "atlas.load_bf16_tile":
-            if len(value.children) != 1 or graph.value(value.children[0]).kind != "input" or (
+            if len(value.children) != 1 or graph.value(value.children[0]).kind not in {"input", "constant"} or (
                 value.storage != "tensor_bf16"
             ):
                 raise NativeCompilationError("unqualified_target", "selected BF16 load has invalid source")
@@ -1196,12 +1328,17 @@ def _check_bf16_selection(graph: CandidateGraph, order: tuple[int, ...],
                        *BF16_ROW_REDUCTION_MODES, *BF16_BINARY_MODES}
             if len(value.children) != 2 or any(names[child] not in sources
                                                for child in value.children) or (
-                value.children[0] == value.children[1] or value.storage != "tensor_bf16"
+                value.storage != "tensor_bf16"
             ):
                 raise NativeCompilationError("unqualified_target", "selected BF16 binary op has invalid sources")
             pair = assignment[value.id]
             sources = tuple(assignment[child] for child in value.children)
-            if pair % 2 or not 0 <= pair <= 60 or pair in sources or sources[0] == sources[1]:
+            # VectorEngineTop mirrors equal-bank/equal-row reads. One SSA
+            # value may supply both operands; distinct live values may not
+            # overlap, and the result still needs its own pair.
+            if pair % 2 or not 0 <= pair <= 60 or pair in sources or (
+                sources[0] == sources[1] and value.children[0] != value.children[1]
+            ):
                 raise NativeCompilationError("unqualified_target", "selected BF16 binary op pairs overlap")
             registers.update((pair, pair + 1))
         elif names[value.id] == "atlas.store_bf16_tile":
@@ -1237,17 +1374,24 @@ def _realized_bf16_assignment(program: dict, *, graph: CandidateGraph,
         2 * expected_loads, expected_binaries, expected_unaries, expected_reductions
     ):
         raise NativeCompilationError("unqualified_target", "emitted BF16 instruction count differs from selection")
+    from .bf16_stream import loaded_bf16_pairs, trace_bf16_data
+
+    pairs = loaded_bf16_pairs(trace_bf16_data(
+        effects,
+        unary_modes={"relu", *BF16_UNARY_MODES.values(), *BF16_ROW_REDUCTION_MODES.values()},
+        binary_modes=set(BF16_BINARY_MODES.values()),
+    ))
     realized = dict(selected)
-    load_index = binary_index = unary_index = reduction_index = 0
+    binary_index = unary_index = reduction_index = 0
     for value_id in order:
         value = graph.value(value_id)
         name = names[value_id]
         if name == "atlas.load_bf16_tile":
-            first, second = loads[load_index:load_index + 2]
-            load_index += 2
-            if type(first[1]) is not int or second[1] != first[1] + 1:
-                raise NativeCompilationError("unqualified_target", "emitted BF16 load has no adjacent register pair")
-            realized[value_id] = first[1]
+            address = DRAM_BASE + selected[value.children[0]] * TILE_BYTES
+            available = pairs.get(address, [])
+            if not available:
+                raise NativeCompilationError("unqualified_target", "emitted BF16 load source changed")
+            realized[value_id] = available.pop(0)
         elif name in BF16_BINARY_MODES:
             effect = binaries[binary_index]
             binary_index += 1
@@ -1338,7 +1482,7 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
             raise NativeCompilationError("unqualified_target", "BF16 stream checker has an unknown selection")
     expected.extend((("complete",), ("trap",)))
     observed = _tile_effects(program)
-    _check_atomic_dma_schedule(observed, expected, context="BF16 stream")
+    _check_atomic_dma_schedule(observed, expected, context="BF16 stream", allow_load_reordering=True)
     cycle = 0
     ready_at: dict[int, int] = {}
     pending_stores: list[int] = []
@@ -1630,7 +1774,7 @@ def _mxu0_k_chain_selection(
 ) -> tuple[list[int], tuple[int, ...]]:
     """Replay the selected K chain before materializing physical state."""
     tile_count = len(source_ids) // 2
-    if tile_count < 2 or 2 * tile_count + 1 > DRAM_SLOTS or len(input_slots) != 2 * tile_count or len(graph.outputs) != 1:
+    if tile_count < 2 or 2 * tile_count + 1 > dram_slots() or len(input_slots) != 2 * tile_count or len(graph.outputs) != 1:
         raise NativeCompilationError("unqualified_target", "K chain exceeds its input or output DRAM slots")
     loads: dict[str, int] = {}
     for value in graph.values:
@@ -1684,7 +1828,7 @@ def check_mxu0_k_chain_stream(
     """Replay a reset/continue/readout stream from emitted physical fields."""
     tile_count = len(input_addresses) // 2
     if (
-        tile_count < 2 or 2 * tile_count + 1 > DRAM_SLOTS
+        tile_count < 2 or 2 * tile_count + 1 > dram_slots()
         or len(input_addresses) != 2 * tile_count
         or len(source_registers) != len(input_addresses)
         or len(set(input_addresses)) != len(input_addresses)
@@ -1946,8 +2090,7 @@ def _mxu_dag_selection(
                     or len(value.children) != 1
                     or names[value.children[0]] not in {
                         "atlas.mxu0_reset_tile", "atlas.vpu_relu_bf16_tile",
-                        "atlas.vpu_relu_bf16_from_mxu0_tile", "atlas.vpu_add_bf16_tile",
-                        "atlas.vpu_mul_bf16_tile", "atlas.vpu_sub_bf16_tile",
+                        "atlas.vpu_relu_bf16_from_mxu0_tile", *BF16_BINARY_MODES,
                         *BF16_UNARY_MODES,
                         *BF16_ROW_REDUCTION_MODES,
                     }
@@ -2012,8 +2155,7 @@ def _mxu_dag_selection(
             if ((name == "atlas.store_bf16_mxu0_tile" and producer != "atlas.mxu0_reset_tile")
                     or (name == "atlas.store_bf16_tile" and producer not in {
                         "atlas.load_bf16_tile", "atlas.vpu_relu_bf16_tile",
-                        "atlas.vpu_relu_bf16_from_mxu0_tile", "atlas.vpu_add_bf16_tile",
-                        "atlas.vpu_mul_bf16_tile", "atlas.vpu_sub_bf16_tile",
+                        "atlas.vpu_relu_bf16_from_mxu0_tile", *BF16_BINARY_MODES,
                         *BF16_UNARY_MODES,
                         *BF16_ROW_REDUCTION_MODES,
                     })):
@@ -2423,7 +2565,86 @@ def _check_mxu_dag_timing(program: dict) -> None:
 
 
 class AtlasNativeBinding:
+    codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes")
+
+    @staticmethod
+    def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
+        from .looped_tiling import tuning_key
+
+        return tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits)
+
     """Selected RTL facts live here; Merlin owns the search algorithms."""
+
+
+    @staticmethod
+    def plan_boundary_abi(request: KernelRequest) -> dict:
+        """Place current tile inputs/constants and outputs without source-ID tables."""
+        from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+
+        from .looped_tiling import (
+            is_looped_request,
+            prepare_execution_plan,
+            split_seeded_request,
+        )
+        from .pointwise import is_pointwise_request, plan_abi
+        from .resident_graph import is_resident_graph
+
+        if is_resident_graph(request):
+            from .resident_graph import plan_abi as resident_abi
+
+            return resident_abi(request)
+
+        if request.nodes[-1].op == "reduce_sum":
+            from .reduction import plan_abi as reduction_abi
+            return reduction_abi(request)
+        if is_pointwise_request(request):
+            return plan_abi(request)
+
+        if is_looped_request(request):
+            _, loop, _ = prepare_execution_plan(request)
+            _, seed = split_seeded_request(request)
+            bank = next(item for item in AtlasNativeBinding.profile().banks if item.name == "external")
+            names = [node.id for node in request.nodes[:2]] + ([seed.id] if seed else []) + [request.outputs[0]]
+            sizes = (*loop.buffer_bytes[:2], *((loop.buffer_bytes[2],) if seed else ()), loop.buffer_bytes[2])
+            buffers = tuple(Buffer(name, bank.name, (size+TILE_BYTES-1)//TILE_BYTES, 0, 1)
+                            for name, size in zip(names, sizes, strict=True))
+            allocation = allocate_buffers(buffers, (bank,))
+            if allocation.status != "sat":
+                status = "resource_limit" if allocation.status == "unsat" else "search_timeout"
+                raise NativeCompilationError(status, "loop buffer placement: " + allocation.reason)
+            addresses = dict(allocation.addresses)
+            return {"fixed_inputs":{name:addresses[name] for name in names[:-1]},
+                    "fixed_outputs":[addresses[names[-1]]]}
+        sources = [node for node in request.nodes if node.op in {"input", "constant"}]
+        nodes = {node.id: node for node in request.nodes}
+        if (not sources or any(node.type.shape != (32, 32) or node.type.dtype not in {"bf16", "fp8_e4m3"}
+                               for node in [*sources, *(nodes[key] for key in request.outputs)])):
+            raise NativeCompilationError("unsupported_semantics", "automatic Atlas ABI requires admitted 32x32 tiles")
+        bank = next(item for item in AtlasNativeBinding.profile().banks if item.name == "external")
+        # Indexed boundary lowering requires contiguous groups. The shared
+        # allocator places two disjoint frames; each tile is a checked view.
+        buffers = [Buffer("inputs", bank.name, len(sources), 0, 1),
+                   Buffer("outputs", bank.name, len(request.outputs), 0, 1)]
+        buffers += [Buffer(f"input:{index}", bank.name, 1, 0, 1, view_of="inputs", view_offset=index)
+                    for index in range(len(sources))]
+        buffers += [Buffer(f"output:{index}", bank.name, 1, 0, 1, view_of="outputs", view_offset=index)
+                    for index in range(len(request.outputs))]
+        result = allocate_buffers(tuple(buffers), (bank,))
+        if result.status != "sat":
+            raise NativeCompilationError("resource_limit" if result.status == "unsat" else "search_timeout",
+                                         "automatic boundary layout: " + result.reason)
+        addresses = dict(result.addresses)
+        return {
+            "fixed_inputs": {node.id: addresses[f"input:{index}"] for index, node in enumerate(sources)},
+            "fixed_outputs": [addresses[f"output:{index}"] for index in range(len(request.outputs))],
+        }
+
+    @staticmethod
+    def prepare_row_softmax(request: KernelRequest):
+        """Select the explicit whole-row BF16 normalization decomposition."""
+        from .row_softmax import prepare_row_softmax
+
+        return prepare_row_softmax(request)
 
     @staticmethod
     def prepare_ordered_mn(request: KernelRequest, tile_m: int, tile_n: int):
@@ -2494,15 +2715,24 @@ class AtlasNativeBinding:
             raise NativeCompilationError("unsupported_semantics", str(exc)) from exc
 
     @staticmethod
-    def prepare_precision_graph(source: str, *, entry: str, policy: dict[str, object]):
+    def prepare_precision_graph(source: str, *, entry: str, policy: dict[str, object],
+                                original_source_sha256: str | None = None):
         """Apply the selected diagnostic graph precision policy to parsed Linalg."""
         from .graph_precision import lower_diagnostic_graph
 
+        if isinstance(policy, dict) and policy.get("schema") == "atlas.diagnostic_row_softmax_precision.v1":
+            from .softmax_precision import lower_source_softmax
+
+            return lower_source_softmax(source, entry=entry, policy=policy,
+                                        original_source_sha256=original_source_sha256)
+        if original_source_sha256 is not None:
+            raise NativeCompilationError("unsupported_semantics", "selected graph policy does not support staged source binding")
         return lower_diagnostic_graph(source, entry=entry, policy=policy)
 
     @staticmethod
     def prepare_precision_tile(
         staged: StagedCompileInputs, region_id: str, *, tile_index: int | None = None,
+        whole_contraction: bool = False,
     ) -> DiagnosticMatmulTile:
         if staged.precision_policy_document is None:
             raise NativeCompilationError("unsupported_semantics", "source-bound tile needs a selected policy")
@@ -2537,6 +2767,13 @@ class AtlasNativeBinding:
         ):
             raise NativeCompilationError(
                 "unqualified_target", "positive-zero source boundary currently needs MXU0"
+            )
+        if whole_contraction and (tile_index is not None or is_batched or decision != {
+            "mxu_unit": 0, "activation_pack_scale_code": 127,
+        }):
+            raise NativeCompilationError(
+                "unsupported_semantics",
+                "whole source contractions require unscaled MXU0 and no tile or batch selection",
             )
         if decision == {"mxu_unit": 0, "activation_pack_scale_code": 127}:
             profile = diagnostic_mxu0_f32_profile()
@@ -2587,7 +2824,7 @@ class AtlasNativeBinding:
                 "unsupported_semantics", "batched source contraction needs an explicit tile index"
             )
         if tile_index is None:
-            return build_diagnostic_matmul_tile(staged.program, **args)
+            return build_diagnostic_matmul_tile(staged.program, **args, whole_contraction=whole_contraction)
         if type(tile_index) is not int or tile_index < 0:
             raise NativeCompilationError("unsupported_semantics", "source tile index must be nonnegative")
         tiles = (build_diagnostic_batched_matmul_tiles if is_batched else build_diagnostic_matmul_tiles)(
@@ -2617,8 +2854,23 @@ class AtlasNativeBinding:
             source = load_declared_static_operand(staged_root, plan, role)
             if source is None:
                 continue
+            if plan.whole_contraction and execution_plan.get("streaming"):
+                raise NativeCompilationError(
+                    "unsupported_semantics",
+                    "streamed parameters require application C export; a full parameter cannot bind one panel address",
+                )
             try:
-                payload = pack_source_operand(plan, role, source.value)
+                if plan.whole_contraction:
+                    from merlin.semantic_compiler.ordered_mnk_tiling import (
+                        materialize_looped_mnk_operand,
+                    )
+
+                    from .looped_tiling import prepare_plan
+
+                    codes = conversion.convert_values(source.value)
+                    payload = materialize_looped_mnk_operand(prepare_plan(plan.request), role, codes.tobytes(order="C"))
+                else:
+                    payload = pack_source_operand(plan, role, source.value)
             except ValueError as error:
                 if "outside the selected target input domain" not in str(error):
                     raise
@@ -2655,6 +2907,18 @@ class AtlasNativeBinding:
                                   **signature("bf16")),
             InstructionDescriptor("atlas.vpu_exp_bf16_tile", "exp_bf16", ("tensor_bf16",),
                                   "tensor_bf16", extent=2, required_attrs=BF16_EXP_ATTRS,
+                                  index_maps=pointwise_identity_maps(2, 1),
+                                  input_read_offsets=(32,), completion_offset=65,
+                                  input_policy_alternatives=((MXU0_POLICY,),),
+                                  **signature("bf16")),
+            InstructionDescriptor("atlas.vpu_tanh_bf16_tile", "tanh_bf16", ("tensor_bf16",),
+                                  "tensor_bf16", extent=2, required_attrs=BF16_TANH_ATTRS,
+                                  index_maps=pointwise_identity_maps(2, 1),
+                                  input_read_offsets=(32,), completion_offset=65,
+                                  input_policy_alternatives=((MXU0_POLICY,),),
+                                  **signature("bf16")),
+            InstructionDescriptor("atlas.vpu_cube_bf16_tile", "cube_bf16", ("tensor_bf16",),
+                                  "tensor_bf16", extent=2, required_attrs=BF16_CUBE_ATTRS,
                                   index_maps=pointwise_identity_maps(2, 1),
                                   input_read_offsets=(32,), completion_offset=65,
                                   input_policy_alternatives=((MXU0_POLICY,),),
@@ -2880,6 +3144,16 @@ class AtlasNativeBinding:
                 input_read_offsets=(32, 32), completion_offset=96,
             ),
             InstructionDescriptor(
+                "atlas.load_mxu0_acc_bf16_tile", "identity", ("external",),
+                "tensor_mxu0_acc", "bf16", MXU0_POLICY, (2,),
+                input_layouts=(BF16_DRAM_PAIR_LAYOUT,), output_layout=MXU0_ACC_TILE_LAYOUT,
+                input_dtypes=("bf16",), input_numerical_policies=(MXU0_POLICY,),
+                input_ranks=(2,), value_preserving_copy=True, source_required_attrs=MXU0_SEED_ATTRS,
+                output_axis_bounds=(AxisBound(0, 32, 32), AxisBound(1, 32, 32)),
+                input_axis_bounds=((AxisBound(0, 32, 32), AxisBound(1, 32, 32)),),
+                input_read_offsets=(32,), completion_offset=96,
+            ),
+            InstructionDescriptor(
                 "atlas.mxu0_accumulate_tile", "matmul_accumulate",
                 ("tensor_fp8", "tensor_fp8", "tensor_mxu0_acc"),
                 "tensor_mxu0_acc", "bf16", MXU0_POLICY, (2,),
@@ -2971,8 +3245,24 @@ class AtlasNativeBinding:
                 value_preserving_copy=True,
             ),
         )
+        by_name = {descriptor.name: descriptor for descriptor in descriptors}
+        descriptors += tuple(
+            replace(by_name[f"atlas.vpu_{op.partition('_')[0]}_bf16_tile"],
+                    name=f"atlas.vpu_{op}_tile", computation=op, required_attrs=attrs)
+            for op, attrs in {**BF16_ZERO_BINARY_ATTRS, **BF16_RNE_BINARY_ATTRS}.items()
+        )
+        descriptors += (
+            replace(by_name["atlas.vpu_add_bf16_tile"], name="atlas.vpu_max_bf16_tile",
+                    computation="max_bf16", required_attrs=BF16_MAX_ATTRS),
+            replace(by_name["atlas.vpu_recip_bf16_tile"], name="atlas.vpu_recip_bf16_wide_tile",
+                    computation="recip_bf16_wide", required_attrs=BF16_WIDE_RECIP_ATTRS),
+            replace(by_name["atlas.vpu_recip_bf16_tile"], name="atlas.vpu_recip_bf16_bounded_tile",
+                    computation="recip_bf16_bounded", required_attrs=BF16_BOUNDED_RECIP_ATTRS),
+            replace(by_name["atlas.vpu_recip_bf16_tile"], name="atlas.vpu_sqrt_bf16_bounded_tile",
+                    computation="sqrt_bf16_bounded", required_attrs=BF16_SQRT_ATTRS),
+        )
         banks = (
-            StorageBank("external", "selected_dram_window", DRAM_SLOTS, "2048_byte_tile"),
+            StorageBank("external", "selected_dram_window", dram_slots(), "2048_byte_tile"),
             StorageBank("tensor_bf16", "tensor_register_file", 62,
                         "1024_byte_register", alignment=2),
             StorageBank("tensor_fp8", "tensor_register_file", 32,
@@ -2992,7 +3282,11 @@ class AtlasNativeBinding:
         target_source: Path,
         destination: Path,
         limits: SearchLimits,
+        allow_staging: bool = True,
     ) -> dict[str, object]:
+        external = [bank for bank in snapshot.profile.banks if bank.name == "external"]
+        if len(external) != 1 or external[0].capacity != dram_slots():
+            raise NativeCompilationError("compile_error", "snapshot I/O window differs from selected configuration")
         pipeline = _native_pipeline()
         if request.lowering_policy != "diagnostic":
             raise NativeCompilationError(
@@ -3008,17 +3302,42 @@ class AtlasNativeBinding:
         if request.target_identity != TARGET_IDENTITY:
             raise NativeCompilationError("unsupported_semantics", "tile needs the selected target")
         if (
-            not (1 <= len(request.input_storages) <= DRAM_SLOTS)
-            or not (1 <= len(request.outputs) <= DRAM_SLOTS)
+            not (1 <= len(request.input_storages) <= dram_slots())
+            or not (1 <= len(request.outputs) <= dram_slots())
             or any(storage != "external" for _, storage in request.input_storages)
             or request.output_storages != ("external",) * len(request.outputs)
         ):
             raise NativeCompilationError("unsupported_semantics", "tile needs DRAM inputs and outputs")
+        from .looped_tiling import compile_looped, is_looped_request
+        from .pointwise import compile_pointwise, is_pointwise_request
+        from .resident_graph import is_resident_graph
+
+        if is_resident_graph(request, allow_staging=allow_staging):
+            from .resident_graph import compile_resident
+
+            return compile_resident(snapshot, request, fixed_inputs=fixed_inputs,
+                                    fixed_outputs=fixed_outputs, target_source=target_source,
+                                    destination=destination, limits=limits)
+
+        if request.nodes[-1].op == "reduce_sum":
+            from .reduction import compile_reduction
+            return compile_reduction(snapshot, request, fixed_inputs=fixed_inputs,
+                                     fixed_outputs=fixed_outputs, target_source=target_source,
+                                     destination=destination, limits=limits)
+        if is_pointwise_request(request):
+            return compile_pointwise(snapshot, request, fixed_inputs=fixed_inputs,
+                                     fixed_outputs=fixed_outputs, target_source=target_source,
+                                     destination=destination, limits=limits)
+
+        if is_looped_request(request):
+            return compile_looped(snapshot, request, fixed_inputs=fixed_inputs,
+                                  fixed_outputs=fixed_outputs, target_source=target_source,
+                                  destination=destination, limits=limits)
         bf16_tile = _bf16_tile_request(request)
         mxu_k_chain = _mxu0_k_chain_request(request)
         mxu_binary = _mxu_bf16_binary_request(request)
         mxu_dag = _mxu_bf16_dag_request(request) and not mxu_binary
-        if request.constants and not mxu_dag:
+        if request.constants and not (mxu_dag or bf16_tile):
             raise NativeCompilationError("unsupported_semantics", "declared constants need an admitted BF16 MXU/VPU DAG")
         mxu_inputs = {node.id: node.inputs for node in request.nodes if node.op == "matmul"}
         transpose_inputs = {
@@ -3148,7 +3467,7 @@ class AtlasNativeBinding:
         input_slots = tuple(fixed_inputs[source_id] for source_id in source_ids)
         output_slots = tuple(fixed_outputs)
         output_slot = output_slots[0]
-        if any(type(slot) is not int or slot < 0 or slot >= DRAM_SLOTS
+        if any(type(slot) is not int or slot < 0 or slot >= dram_slots()
                for slot in (*input_slots, *output_slots)) or len({*input_slots, *output_slots}) != len(input_slots) + len(output_slots):
             raise NativeCompilationError("unqualified_target", "tile DRAM slots are invalid or overlap")
         # The BF16 DAG stream checker covers explicitly addressed tile DMA.
@@ -3165,9 +3484,27 @@ class AtlasNativeBinding:
         for binding in request.constants:
             logical = bytes.fromhex(binding.data_hex)
             codes = struct.unpack("<1024H", logical)
-            if any(not 1 <= ((code >> 7) & 0xff) <= 254 for code in codes):
+            domain = dict(request.node(binding.node_id).attrs).get("input_domain")
+            zero_domains = {
+                *(attrs[0][1] for attrs in BF16_ZERO_BINARY_ATTRS.values()),
+                *(attrs[0][1] for attrs in BF16_RNE_BINARY_ATTRS.values()),
+                BF16_EXP_ATTRS[0][1], BF16_ROW_SUM_ATTRS[0][1],
+            }
+            invalid = any((code >> 7) & 255 == 255 for code in codes) if domain == BF16_TANH_ATTRS[0][1] else (
+                domain != BF16_MAX_ATTRS[0][1] and any(
+                    not 1 <= ((code >> 7) & 0xff) <= 254
+                    and not (domain in zero_domains
+                             and (code == 0 or code == 0x8000 and domain != BF16_ROW_SUM_ATTRS[0][1]))
+                    for code in codes
+                )
+            )
+            if domain == BF16_ACTIVATION_DOMAIN[1]:
+                invalid = any(code & 0x7FFF and not 0x2F80 <= (code & 0x7FFF) <= 0x4F80 for code in codes)
+            if invalid:
                 raise NativeCompilationError(
-                    "unsupported_semantics", "declared BF16 multiplier constant is outside finite-normal domain"
+                    "unsupported_semantics",
+                    "declared BF16 constant leaves its finite input domain" if domain == BF16_TANH_ATTRS[0][1]
+                    else "declared BF16 multiplier constant is outside finite-normal domain",
                 )
             constant_payloads[binding.node_id] = pack_bf16_pair_halves(logical)
 
@@ -3532,12 +3869,17 @@ class AtlasNativeBinding:
             for value in selected.graph.values
         )
         has_exp = any(node.op == "exp_bf16" for node in request.nodes)
-        has_recip = any(node.op == "recip_bf16" for node in request.nodes)
-        has_add = any(node.op == "add_bf16" for node in request.nodes)
-        has_sub = any(node.op == "sub_bf16" for node in request.nodes)
+        has_recip = any(node.op in {"recip_bf16", "recip_bf16_wide", "recip_bf16_bounded"} for node in request.nodes)
+        has_add = any(node.op in {"add_bf16", "add_bf16_rne"} for node in request.nodes)
+        has_sub = any(node.op in {"sub_bf16", "sub_bf16_rne"} for node in request.nodes)
         has_mul = any(node.op == "mul_bf16" for node in request.nodes)
         has_row_max = any(node.op == "row_max_bf16" for node in request.nodes)
         has_row_sum = any(node.op == "row_sum_bf16" for node in request.nodes)
+        has_max = any(node.op == "max_bf16" for node in request.nodes)
+        arithmetic = [node for node in request.nodes
+                      if node.op in {**BF16_BINARY_ATTRS, **BF16_UNARY_ATTRS, **BF16_ROW_REDUCTION_ATTRS}]
+        arithmetic_kinds = {node.op for node in arithmetic}
+        declared_domains = {dict(node.attrs)["input_domain"] for node in arithmetic}
         selected_registers = materialized.selected_registers
         virtual = materialized.virtual
         machine = materialized.machine
@@ -3551,7 +3893,7 @@ class AtlasNativeBinding:
         constant_rows = []
         if constant_payloads:
             (destination / "constants").mkdir()
-        for index, node_id in enumerate(sorted(constant_payloads)):
+        for index, node_id in enumerate(value for value in source_ids if value in constant_payloads):
             payload = constant_payloads[node_id]
             path = f"constants/constant-{index:03d}.bin"
             (destination / path).write_bytes(payload)
@@ -3576,12 +3918,8 @@ class AtlasNativeBinding:
                 return "bf16-sign-clamp-v1"
             if node.op in BF16_UNARY_ATTRS:
                 return BF16_UNARY_ATTRS[node.op][1][1]
-            if node.op == "add_bf16":
-                return BF16_ADD_ATTRS[1][1]
-            if node.op == "sub_bf16":
-                return BF16_SUB_ATTRS[1][1]
-            if node.op == "mul_bf16":
-                return BF16_MUL_ATTRS[1][1]
+            if node.op in BF16_BINARY_ATTRS:
+                return BF16_BINARY_ATTRS[node.op][1][1]
             if node.op in BF16_ROW_REDUCTION_ATTRS:
                 return BF16_ROW_REDUCTION_ATTRS[node.op][1][1]
             return node.type.numerical_policy
@@ -3653,7 +3991,8 @@ class AtlasNativeBinding:
             "operation": ("mxu0_bf16_dag" if mxu_dag else "mxu0_bf16_binary" if mxu_binary else
                           f"mxu0_k{len(input_slots) // 2}" if mxu_k_chain else
                           "mxu0_relu" if mxu_relu else "bf16_relu_pack" if relu_pack
-                          else "bf16_mixed" if sum((has_add, has_sub, has_mul, has_row_max, has_row_sum, has_exp, has_recip)) > 1
+                          else "bf16_mixed" if len(arithmetic_kinds) > 1
+                          else "bf16_max" if has_max
                           else "bf16_add_relu" if has_add and has_relu
                           else "bf16_add" if has_add
                           else "bf16_sub_relu" if has_sub and has_relu
@@ -3681,14 +4020,8 @@ class AtlasNativeBinding:
                              MXU0_INPUT_DOMAIN if mxu_k_chain else simple_mxu_mode[1] if mxu else
                              pack_domain if pack and scaled_code is not None else
                              "bf16-seven-powers-and-zero-v1" if pack else
-                             "per-operation-declared" if sum((has_add, has_sub, has_mul, has_row_max, has_row_sum, has_exp, has_recip)) > 1 else
-                             BF16_ADD_ATTRS[0][1] if has_add else
-                             BF16_SUB_ATTRS[0][1] if has_sub else
-                             BF16_MUL_ATTRS[0][1] if has_mul else
-                             BF16_ROW_MAX_ATTRS[0][1] if has_row_max else
-                             BF16_ROW_SUM_ATTRS[0][1] if has_row_sum else
-                             BF16_EXP_ATTRS[0][1] if has_exp else
-                             BF16_RECIP_ATTRS[0][1] if has_recip else
+                             "per-operation-declared" if len(declared_domains) > 1 else
+                             next(iter(declared_domains)) if declared_domains else
                              "finite-normal-or-zero-bf16" if has_relu else "all-bit-patterns"),
             "runtime_domain_guard": False,
             "boundary_domain_obligations": boundary_domain_obligations,
@@ -3702,6 +4035,13 @@ class AtlasNativeBinding:
         if constant_rows:
             plan["constant_inputs"] = constant_rows
         if mxu_dag:
+            from merlin.semantic_compiler.codegen import current_codegen_options
+
+            plan["codegen"] = {
+                "requested_reduction_unroll": current_codegen_options().reduction_unroll,
+                "effective_reduction_unroll": 1,
+                "reason": "each contraction fits one hardware tile; no software K loop",
+            }
             plan["weight_addresses"] = [
                 DRAM_BASE + fixed_inputs[weight] * TILE_BYTES if weight in fixed_inputs else None
                 for _, weight in mxu_inputs.values()
@@ -3758,10 +4098,11 @@ class AtlasNativeBinding:
             ],
         }
         (destination / "native-selection.json").write_text(json.dumps(selection, sort_keys=True, indent=2) + "\n")
+        (destination / "source-request.json").write_text(json.dumps(request.record(), sort_keys=True, indent=2) + "\n")
         stage_artifacts = {
             name: _sha256((destination / name).read_bytes())
             for name in ("native-selection.json", "atlas-virtual.mlir", "atlas-machine.mlir",
-                         "physical-program.json")
+                         "physical-program.json", "source-request.json")
         }
         if materialized.qualification_machine is not None:
             for name, payload in (
@@ -3782,6 +4123,7 @@ class AtlasNativeBinding:
             "request_digest": request.digest(), "target_identity": TARGET_IDENTITY,
             "native_check_fingerprint": selected.check_fingerprint,
             "native_snapshot_sha256": _sha256((snapshot.root / "manifest.json").read_bytes()),
+            "io_memory_bytes": dram_slots() * TILE_BYTES,
             "binding_source_sha256": _sha256(Path(__file__).read_bytes()),
             "target_inventory_sha256": _sha256(inventory_path.read_bytes()),
             "atlas_opt_sha256": tool_hashes[0], "atlas_emit_sha256": tool_hashes[1],

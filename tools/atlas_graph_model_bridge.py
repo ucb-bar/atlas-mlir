@@ -75,8 +75,10 @@ def prepare(source_path: Path, bridge_root: Path, compiled: Path) -> tuple[dict,
         target_identity=compilation.get("target_identity"),
     )
     selected = json.loads(_member(compiled, "native-selection.json"))
-    precision = json.loads(_member(compiled, "precision-plan.json"))
-    plan = json.loads(_member(compiled, "execution_plan.json"))
+    precision_bytes = _member(compiled, "precision-plan.json")
+    plan_bytes = _member(compiled, "execution_plan.json")
+    precision = json.loads(precision_bytes)
+    plan = json.loads(plan_bytes)
     if any(not isinstance(item, dict) for item in (selected, precision, plan)):
         raise ValueError("native graph stages must be object records")
     binary = _member(compiled, "program.bin")
@@ -314,43 +316,349 @@ void atlas_graph_invoke_host(const atlas_f32_memref2 *inputs,
         "source_sha256": bridge["source_sha256"],
         "request_digest": bridge["request_digest"],
         "program_sha256": _sha(binary),
+        "target_identity": compilation["target_identity"],
+        "execution_plan_sha256": _sha(plan_bytes),
+        "precision_plan_sha256": _sha(precision_bytes),
         "native_manifest_sha256": _sha(compilation_bytes),
         "host_bridge_manifest_sha256": _sha(bridge_bytes),
         "input_count": input_count,
         "output_count": output_count,
         "constant_count": len(constants),
+        "source_inputs": [f"arg{index}" for index in range(input_count)],
+        "source_outputs": bridge["source_outputs"],
         "linked": False,
         "executed": False,
     }
     return record, files
 
 
+def prepare_c_package(record: dict, generated: dict[str, str], compiled: Path,
+                      name: str, *, compile_inputs: Path | None = None) -> tuple[dict, dict[str, bytes]]:
+    """Package the existing checked callback and runtime without a host main."""
+    from merlin.common.paths import merlin_dir
+    from merlin.compile.c_sources import c_source_pair
+
+    runtime = Path(__file__).resolve().parents[1] / "runtime"
+    public = {member: _member(runtime, member).decode()
+              for member in ("atlas_host.h", "atlas_model_tile.h")}
+    private = {
+        "finite_float_boundary.h": (Path(merlin_dir()) / "runtime/c/finite_float_boundary.h").read_text(),
+        "atlas_graph_memref.h": _member(runtime, "atlas_graph_memref.h").decode(),
+        **{member: generated[member] for member in (
+            "atlas_graph_data.h", "atlas_graph_model_wrapper.h")},
+    }
+    sources = {member: _member(runtime, member).decode()
+               for member in ("atlas_host.c", "atlas_model_tile.c", "atlas_graph_memref.c")}
+    sources["atlas_graph_model_wrapper.c"] = generated["atlas_graph_model_wrapper.c"]
+    inputs, outputs = record["input_count"], record["output_count"]
+    suffix = _sha(record["device_symbol"].encode())[:12]
+    result_type = f"atlas_graph_results_{suffix}"
+    arguments = ", ".join(f"&views[{index}]" for index in range(inputs))
+    declarations = f"""
+#define {name.upper()}_INPUT_COUNT {inputs}u
+#define {name.upper()}_OUTPUT_COUNT {outputs}u
+#define {name.upper()}_TENSOR_ELEMENTS 1024u
+#define {name.upper()}_DIAGNOSTIC_PRECISION 1
+int {name}_bind(atlas_host *host, atlas_tile_memory_io io, size_t max_polls);
+/* Dense 32x32 binary32 host buffers; selected FP8/BF16 conversion is inside.
+ * Output buffers must not overlap. Calls are synchronous and not reentrant.
+ * Finish a timed-out device launch before calling again or reusing buffers. */
+atlas_model_tile_status {name}_run(const float *const *inputs,
+                                  float *const *outputs,
+                                  atlas_host_result *device_result);
+const uint32_t *{name}_program(size_t *word_count);
+/* Merlin serial-dispatch ABI. Uses the same binding and precision as _run;
+ * context is unused. Zero means the device call and readback have completed. */
+int {name}_dispatch(void *context, const void *const *inputs, void *const *outputs);
+"""
+    implementation = f"""
+int {name}_bind(atlas_host *host, atlas_tile_memory_io io, size_t max_polls) {{
+  return {record['binding_function']}(host, io, max_polls);
+}}
+const uint32_t *{name}_program(size_t *word_count) {{
+  if (word_count) *word_count = ATLAS_GRAPH_PROGRAM_WORD_COUNT;
+  return atlas_graph_program_words;
+}}
+atlas_model_tile_status {name}_run(const float *const *inputs,
+                                  float *const *outputs,
+                                  atlas_host_result *device_result) {{
+  if (device_result) *device_result = ATLAS_HOST_INVALID;
+  if (!inputs || !outputs) return ATLAS_MODEL_TILE_INVALID;
+  atlas_f32_memref2 views[{inputs}];
+  for (size_t i = 0; i < {inputs}u; ++i) {{
+    if (!inputs[i]) return ATLAS_MODEL_TILE_INVALID;
+    views[i] = (atlas_f32_memref2){{(float *)inputs[i], (float *)inputs[i], 0,
+                                 {{32, 32}}, {{32, 1}}}};
+  }}
+  for (size_t i = 0; i < {outputs}u; ++i) {{
+    uintptr_t begin = (uintptr_t)outputs[i];
+    if (!begin || begin > UINTPTR_MAX - 4096u) return ATLAS_MODEL_TILE_INVALID;
+    for (size_t j = 0; j < i; ++j) {{
+      uintptr_t other = (uintptr_t)outputs[j];
+      if (begin < other + 4096u && other < begin + 4096u)
+        return ATLAS_MODEL_TILE_INVALID;
+    }}
+  }}
+  {result_type} result = {{0}};
+  atlas_model_tile_status status = {record['checked_function']}(
+      &result, {arguments}, device_result);
+  if (status != ATLAS_MODEL_TILE_OK) return status;
+  for (size_t i = 0; i < {outputs}u; ++i) {{
+    __builtin_memcpy(outputs[i], result.values[i].aligned, 4096u);
+    free(result.values[i].allocated);
+  }}
+  return ATLAS_MODEL_TILE_OK;
+}}
+int {name}_dispatch(void *context, const void *const *inputs, void *const *outputs) {{
+  (void)context;
+  if (!inputs || !outputs) return ATLAS_MODEL_TILE_INVALID;
+  const float *typed_inputs[{inputs}];
+  float *typed_outputs[{outputs}];
+  for (size_t i = 0; i < {inputs}u; ++i) typed_inputs[i] = (const float *)inputs[i];
+  for (size_t i = 0; i < {outputs}u; ++i) typed_outputs[i] = (float *)outputs[i];
+  atlas_host_result device;
+  return (int){name}_run(typed_inputs, typed_outputs, &device);
+}}
+"""
+    frozen = None
+    if compile_inputs is not None:
+        import numpy as np
+        from merlin.compile.c_parameters import freeze_c_arguments
+        from merlin.frontends.compile_inputs import (
+            load_compile_inputs,
+            load_lifted_argument_bytes,
+        )
+
+        frozen = freeze_c_arguments(
+            compile_inputs, name=name, source_sha256=record["source_sha256"])
+        if len(frozen.arguments) != inputs:
+            raise ValueError("staged argument count differs from compiled graph")
+        staged = load_compile_inputs(compile_inputs)
+        precision = json.loads(_member(compiled, "precision-plan.json"))
+        for index, payload in load_lifted_argument_bytes(compile_inputs, staged).items():
+            _float_spec(precision["boundary_conversions"][index]["conversion_spec"]).encode(
+                np.frombuffer(payload, dtype="<f4"))
+        count = len(frozen.runtime_inputs)
+        declarations += f"""
+#define {name.upper()}_MODEL_INPUT_COUNT {count}u
+/* Declared parameters are embedded. Only runtime inputs are passed here,
+ * in captured input order. The binding, outputs and status match _run. */
+atlas_model_tile_status {name}_model_run(const float *const *inputs,
+                                        float *const *outputs,
+                                        atlas_host_result *device_result);
+int {name}_model_dispatch(void *context, const void *const *inputs, void *const *outputs);
+"""
+        implementation += frozen.declarations + f"""
+atlas_model_tile_status {name}_model_run(const float *const *inputs,
+                                        float *const *outputs,
+                                        atlas_host_result *device_result) {{
+  if (device_result) *device_result = ATLAS_HOST_INVALID;
+  {'if (!inputs) return ATLAS_MODEL_TILE_INVALID;' if count else '(void)inputs;'}
+  const float *arguments[{inputs}] = {{{', '.join(frozen.arguments)}}};
+  return {name}_run(arguments, outputs, device_result);
+}}
+int {name}_model_dispatch(void *context, const void *const *inputs, void *const *outputs) {{
+  (void)context;
+  if ({'!inputs || ' if count else ''}!outputs) return ATLAS_MODEL_TILE_INVALID;
+  const float *typed_inputs[{max(1, count)}] = {{0}};
+  float *typed_outputs[{outputs}];
+  for (size_t i = 0; i < {count}u; ++i) typed_inputs[i] = (const float *)inputs[i];
+  for (size_t i = 0; i < {outputs}u; ++i) typed_outputs[i] = (float *)outputs[i];
+  atlas_host_result device;
+  return (int){name}_model_run(typed_inputs, typed_outputs, &device);
+}}
+"""
+    pair = c_source_pair(name, public_headers=public, private_headers=private,
+                         sources=sources, declarations=declarations,
+                         implementation=implementation)
+    files = {member: text.encode() for member, text in pair.items()}
+    compilation_bytes = _member(compiled, "manifest.json")
+    binary = _member(compiled, "program.bin")
+    execution_plan = _member(compiled, "execution_plan.json")
+    precision_plan = _member(compiled, "precision-plan.json")
+    if (_sha(compilation_bytes) != record["native_manifest_sha256"] or
+            _sha(binary) != record["program_sha256"] or
+            _sha(execution_plan) != record["execution_plan_sha256"] or
+            _sha(precision_plan) != record["precision_plan_sha256"]):
+        raise ValueError("native compilation changed during C export")
+    files[name + ".bin"] = binary
+    files[name + ".words.txt"] = "".join(
+        f"{word:08x}\n" for (word,) in struct.iter_unpack("<I", binary)).encode()
+    for item in json.loads(compilation_bytes)["constant_inputs"]:
+        if Path(item["path"]).parts[0] != "constants":
+            raise ValueError("C export constants must use the constants directory")
+        data = _member(compiled, item["path"])
+        if _sha(data) != item["sha256"]:
+            raise ValueError("constant changed during C export")
+        files[item["path"]] = data
+    files["README.md"] = f"""# {name}
+
+Compile `{name}.c` and include `{name}.h` in your application. The C file embeds
+the device program, constants and selected conversion tables; no repository
+include path or external binary loader is required. `{name}.bin` contains
+little-endian 32-bit Atlas words; `{name}.words.txt` lists them in hex.
+`constants/` contains the same constant payloads embedded in the C file.
+
+Use C11 and `-DATLAS_DIAGNOSTIC_GRAPH_PRECISION=1`. This prototype uses a selected
+FP8/BF16 precision policy; original-model quality and FPGA execution are not
+qualified by this export. Link against the platform C allocator (`malloc` and
+`free`) and ordinary C memory functions. Do not use fast-math options.
+Intermediate value-domain assumptions remain in `device_layout` in the manifest;
+the runtime does not check all of them.
+
+The application supplies startup, linker script, IMEM/CSR map, MMIO callbacks,
+DRAM read/write callbacks and cache maintenance. Reserve the device addresses
+listed in `manifest.json`. No `main`, mailbox loop, linker script or host ELF is
+included. The source includes the existing Atlas load/start/wait implementation.
+
+1. Initialize an `atlas_host` with `atlas_host_init` and the platform services.
+2. Call `{name}_bind(&host, io, max_polls)` and check that it returns zero.
+3. Pass {inputs} input pointers and {outputs} output pointers to `{name}_run`.
+   Each points to 1024 contiguous `float` elements. Check both returned statuses.
+
+Outputs are caller-owned. On failure they remain unchanged. A timeout leaves
+the device active: finish or reset that launch before reusing its buffers.
+Calls use one static binding and must not overlap.
+
+Input order is the source function's `arg0`, `arg1`, etc. Output order is
+`source_outputs` in the manifest. This exports one whole-graph Atlas call;
+it does not translate arbitrary CPU computation from LLVM into C.
+
+For a Merlin serial dispatch program, bind `{name}_dispatch` as the compiled
+pointer-ABI implementation of this graph node. It calls the same synchronous
+`{name}_run`, ignores its context pointer and returns zero only after readback.
+Host operations before or after it need their own compiled wrappers; there is
+no CPU fallback when the device call fails.
+""".encode()
+    result = dict(record)
+    result.update({
+        "schema": "atlas.graph_c_package.v1", "package_name": name,
+        "entry_function": name + "_run", "binding_function": name + "_bind",
+        "dispatch_function": name + "_dispatch", "dispatch_completion": "synchronous",
+        "lowering_pipeline": json.loads(compilation_bytes).get("lowering_pipeline", "unspecified"),
+        "source_members": {member: _sha(text.encode()) for member, text in
+                           {**public, **private, **sources}.items()},
+        "device_layout": json.loads(execution_plan),
+        "precision_plan": json.loads(precision_plan),
+        "startup_included": False, "elf_included": False,
+    })
+    if frozen is not None:
+        result["model_interface"] = {
+            "entry_function": name + "_model_run",
+            "dispatch_function": name + "_model_dispatch",
+            "runtime_inputs": list(frozen.runtime_inputs),
+            "parameters": list(frozen.parameters),
+            "weights_sha256": frozen.weights_sha256,
+            "state": "stateless",
+        }
+        files["README.md"] += f"""
+## Captured model entry
+
+`{name}_model_run` embeds the declared parameters and accepts only the
+{len(frozen.runtime_inputs)} runtime input pointers listed in
+`model_interface.runtime_inputs` in the manifest. Use
+`{name.upper()}_MODEL_INPUT_COUNT` for this pointer array. Outputs and platform
+binding are the same as `{name}_run`. `{name}_model_dispatch` provides the
+corresponding Merlin dispatch entry. Neither entry reads a capture directory
+at runtime. Mutable captured buffers require a separate state interface and
+are rejected by this export.
+""".encode()
+    return result, files
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--linalg", required=True, type=Path)
-    parser.add_argument("--host-bridge", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--linalg", type=Path)
+    source.add_argument("--request", type=Path, help="typed contraction or row-softmax request for C/H export")
+    parser.add_argument("--host-bridge", type=Path)
+    parser.add_argument("--linalg-entry", help="source entry for an explicit row-softmax precision policy")
+    parser.add_argument("--diagnostic-graph-policy", type=Path,
+                        help="source row-softmax precision policy; no LLVM host bridge is required")
     parser.add_argument("--compiled", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--c-package-name", help="emit one self-contained C/H pair and device binaries")
+    parser.add_argument("--runtime-linkage", choices=("embedded", "separate"), default="embedded",
+                        help="link the Atlas host runtime once when combining region C files")
+    parser.add_argument("--compile-inputs", type=Path,
+                        help="embed declared parameters from a checked compiler-input stage")
     args = parser.parse_args(argv)
+    if args.c_package_name and args.out.resolve().is_relative_to(args.compiled.resolve()):
+        print(json.dumps({"status": "compile_error",
+                          "reason": "C package output must be outside the native compilation"}),
+              file=sys.stderr)
+        return 2
     try:
+        if args.runtime_linkage == "separate" and (not args.c_package_name or
+                args.request is None and args.diagnostic_graph_policy is None):
+            raise ValueError("separate runtime linkage requires a contraction or row-softmax C package")
+        if args.compile_inputs is not None and not args.c_package_name:
+            raise ValueError("--compile-inputs requires --c-package-name")
         if args.out.exists() or args.out.is_symlink():
             raise ValueError("fresh graph wrapper output directory required")
-        record, files = prepare(args.linalg, args.host_bridge, args.compiled)
+        if args.diagnostic_graph_policy is not None:
+            if args.linalg is None or not args.c_package_name or args.host_bridge is not None:
+                raise ValueError("source row-softmax export requires --linalg, --c-package-name and no host bridge")
+            from atlas_mlir_native.softmax_c_source import prepare_source_c_package
+
+            record, payloads = prepare_source_c_package(
+                args.linalg,args.diagnostic_graph_policy,args.compiled,args.c_package_name,
+                entry=args.linalg_entry,target_source=Path(__file__).resolve().parents[1],
+                compile_inputs=args.compile_inputs, runtime_linkage=args.runtime_linkage)
+        elif args.linalg_entry is not None:
+            raise ValueError("--linalg-entry requires --diagnostic-graph-policy")
+        elif args.request is not None:
+            if not args.c_package_name or args.host_bridge is not None:
+                raise ValueError("--request requires --c-package-name and no graph bridge")
+            from merlin.semantic_compiler.model import KernelRequest
+
+            request = KernelRequest.from_record(json.loads(args.request.read_text()))
+            target_source = Path(__file__).resolve().parents[1]
+            if request.nodes[-1].op == "softmax":
+                if args.compile_inputs is not None:
+                    raise ValueError("row-softmax export takes an explicit BF16 request, not capture parameters")
+                from atlas_mlir_native.softmax_c import (
+                    prepare_c_package as prepare_softmax_c,
+                )
+
+                record, payloads = prepare_softmax_c(args.request,args.compiled,args.c_package_name,
+                                                    target_source=target_source, runtime_linkage=args.runtime_linkage)
+            else:
+                from atlas_mlir_native.looped_c import (
+                    prepare_c_package as prepare_looped_c,
+                )
+
+                record, payloads = prepare_looped_c(args.request,args.compiled,args.c_package_name,
+                                                   target_source=target_source,
+                                                   compile_inputs=args.compile_inputs, runtime_linkage=args.runtime_linkage)
+        else:
+            if args.host_bridge is None:
+                raise ValueError("--linalg requires its checked --host-bridge")
+            record, files = prepare(args.linalg, args.host_bridge, args.compiled)
+            if args.c_package_name:
+                record, payloads = prepare_c_package(record, files, args.compiled, args.c_package_name,
+                                                    compile_inputs=args.compile_inputs)
+            else:
+                payloads = {name: content.encode() for name, content in files.items()}
         args.out.mkdir(parents=True)
-        for name, content in files.items():
-            (args.out / name).write_text(content)
-        record["files"] = {name: _sha(content.encode()) for name, content in files.items()}
+        for name, content in payloads.items():
+            (args.out / name).parent.mkdir(parents=True, exist_ok=True)
+            (args.out / name).write_bytes(content)
+        record["files"] = {name: _sha(content) for name, content in payloads.items()}
         (args.out / "manifest.json").write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
         print(json.dumps({"status": record["status"], "out": str(args.out)}, sort_keys=True))
         return 0
-    except (OSError, ValueError, TypeError, KeyError, ImportError, UnicodeError) as error:
+    except (OSError, ValueError, TypeError, KeyError, ImportError, UnicodeError, RuntimeError) as error:
+        status = getattr(error, "status", "compile_error")
         if not args.out.exists() and not args.out.is_symlink():
             args.out.mkdir(parents=True, exist_ok=True)
             (args.out / "manifest.json").write_text(json.dumps({
-                "schema": "atlas.diagnostic_graph_model_wrapper.v1",
-                "status": "compile_error", "reason": str(error),
+                "schema": ("atlas.row_softmax_c_package.v1" if args.diagnostic_graph_policy is not None else
+                           "atlas.looped_c_package.v1" if args.request is not None else
+                           "atlas.diagnostic_graph_model_wrapper.v1"),
+                "status": status, "reason": str(error),
             }, sort_keys=True, indent=2) + "\n")
-        print(json.dumps({"status": "compile_error", "reason": str(error)}, sort_keys=True),
+        print(json.dumps({"status": status, "reason": str(error)}, sort_keys=True),
               file=sys.stderr)
         return 2
 
