@@ -83,7 +83,7 @@ The example hosts call this hook when built with `-DATLAS_PLATFORM_CACHE_SYNC=1`
 
 `host_graph_mailbox.c` initializes the host and graph binding once, then waits
 for requests in a static `atlas_graph_mailbox` (64-byte aligned). Each graph
-invocation converts the f32 inputs, reloads the program into IMEM, stages inputs
+invocation converts the f32 inputs, ensures the matching program is resident, stages inputs
 and constants, starts Atlas, waits for ECALL, then reads and decodes outputs.
 The build writes the mailbox address and offsets to `host/handoff-status.json`.
 All fields are little-endian.
@@ -220,3 +220,15 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
   not show which bitstream ran or that the run was fresh.
 - One synchronous caller; one program in IMEM at a time; fixed DMA addresses
   chosen at compile time.
+
+## Resident images
+
+Generated C uses `atlas_host_ensure_loaded` to retain an identical immutable image.
+It compares all words and keeps one image per `atlas_host`; share one context per
+physical device. Explicit `atlas_host_load` always writes the supplied image.
+Data staging and cache synchronization are independent of instruction residency.
+Invalidate the retained image before external idle IMEM writes. After a completed
+platform reset, call `atlas_host_reset_completed`; this notification does not reset
+hardware or establish that outstanding DMA has drained. A timeout preserves active
+state until completion or reset. Runtime counters report image loads, reuse hits,
+IMEM words written, and launches; they do not estimate platform latency.
