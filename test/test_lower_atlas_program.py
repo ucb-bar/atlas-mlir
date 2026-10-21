@@ -78,7 +78,7 @@ class LowerAtlasProgramTest(unittest.TestCase):
             source = Path(temp) / "long.mlir"
             source.write_text(virtual_chain(1050))
             done = Path(temp) / "out"
-            result = drive(source, done)
+            result = drive(source, done, "--program-size-limit-bytes", "8192")
             self.assertEqual(result.returncode, 1, result.stderr)
             report = json.loads((done / "3-allocation.json").read_text())
             self.assertTrue(report["fits"])
@@ -140,7 +140,7 @@ class LowerAtlasProgramTest(unittest.TestCase):
             source = Path(temp) / "wide.mlir"
             source.write_text(wide_return_block(32))
             spilled = Path(temp) / "wide"
-            result = drive(source, spilled)
+            result = drive(source, spilled, "--program-size-limit-bytes", "8192")
             self.assertIn('"atlas.virtual_save"', (spilled / "2-spilled.mlir").read_text())
             self.assertTrue(json.loads((spilled / "3-allocation.json").read_text())["fits"])
             self.assertEqual(result.returncode, 0, result.stderr)

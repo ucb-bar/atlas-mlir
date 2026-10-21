@@ -14,6 +14,10 @@ include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include)
 add_definitions(${LLVM_DEFINITIONS})
+file(READ "${PROJECT_SOURCE_DIR}/runtime/selected-host-map.json" ATLAS_HOST_MAP)
+string(JSON ATLAS_IMEM_BYTES GET "${ATLAS_HOST_MAP}" imem_capacity_bytes)
+configure_file(include/Atlas/AtlasTargetConfig.h.in
+  include/Atlas/AtlasTargetConfig.h @ONLY)
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
@@ -39,5 +43,6 @@ foreach(test_file IN LISTS atlas_python_tests)
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test)
   set_tests_properties(atlas-python-${module} PROPERTIES
     ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
-    ENVIRONMENT_MODIFICATION PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python)
+    ENVIRONMENT_MODIFICATION
+      "PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python;PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}")
 endforeach()

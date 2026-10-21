@@ -1,4 +1,5 @@
 #include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasBranchRelaxation.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
@@ -253,6 +254,9 @@ unsigned mlir::atlas::atlasWordEncodeCount() { return encodeCount; }
 LogicalResult mlir::atlas::encodeAtlasWords(
     ModuleOp module, llvm::SmallVectorImpl<uint32_t> &words) {
   ++encodeCount;
+  if (failed(verifyAtlasRelaxedBranches(module))) return failure();
+  auto limit = atlasProgramWordLimit(module);
+  if (failed(limit)) return failure();
   llvm::SmallVector<uint32_t> collected;
   llvm::SmallVector<Operation *> encodedOps;
   Value previous;
@@ -297,6 +301,8 @@ LogicalResult mlir::atlas::encodeAtlasWords(
     module.emitError("branch or jump lacks its required delay-slot instruction");
     return failure();
   }
+  if (collected.size() > *limit)
+    return module.emitOpError("encoded program exceeds the ") << *limit << "-word policy limit";
   words.append(collected.begin(), collected.end());
   return success();
 }

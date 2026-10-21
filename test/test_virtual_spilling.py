@@ -358,7 +358,8 @@ class VirtualSpillingTest(unittest.TestCase):
     def test_spills_do_not_bypass_the_final_program_size_limit(self):
         from test_virtual_scheduling import wide_return_block
 
-        result = run(wide_return_block(32), "--spill-atlas-virtual")
+        source = wide_return_block(32).replace("attributes {", "attributes {atlas.program_size_limit_bytes = 8192 : i64, ", 1)
+        result = run(source, "--spill-atlas-virtual")
         self.assertEqual(result.returncode, 0, result.stderr)
         lowered = run(result.stdout, "--lower-atlas-virtual-to-machine")
         self.assertNotEqual(lowered.returncode, 0)

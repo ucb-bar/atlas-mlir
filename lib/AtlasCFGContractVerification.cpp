@@ -234,6 +234,9 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   for (auto &e : edges) edgeRecords.push_back(dictionary({field("id",i(e.id)),field("from",i(e.from)),field("to",i(e.to)),field("incoming",b.getDenseI32ArrayAttr(e.incoming))}));
   SmallVector<NamedAttribute> records{field("values",b.getArrayAttr(values)),field("blocks",b.getArrayAttr(blockRecords)),field("edges",b.getArrayAttr(edgeRecords)),field("operations",b.getArrayAttr(operationRecords))};
   if (memoryControls) records.push_back(field("control_count", i(function.getNumArguments())));
+  if (auto bytes = function->getAttr("atlas.output_dram_bytes"))
+    records.push_back(field("output_buffer", b.getDictionaryAttr({
+        field("base", function->getAttr("atlas.output_dram_base")), field("bytes", bytes)})));
   return dictionary(records);
 }
 
@@ -246,7 +249,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   auto bad = [&]() { return module.emitOpError("CFG contract malformed source records"); };
   if (!contract) return bad();
   auto controlCount = contractI32(contract, "control_count");
-  if (controlCount ? contract.size() != 5 || *controlCount < 1 || *controlCount > 256 : contract.size() != 4) return bad();
+  unsigned fields = 4 + unsigned(bool(controlCount)) + unsigned(bool(contract.get("output_buffer")));
+  if (contract.size() != fields || (controlCount && (*controlCount < 1 || *controlCount > 256))) return bad();
   auto vr = contract.getAs<ArrayAttr>("values"), br = contract.getAs<ArrayAttr>("blocks"), er = contract.getAs<ArrayAttr>("edges");
   auto opRecords = contract.getAs<ArrayAttr>("operations");
   if (!vr || !br || !er || !opRecords || br.empty()) return bad();
@@ -476,6 +480,21 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         auto record = sourceOperations[*source];
         auto operands = contractI32Array(record,"operands"), results = contractI32Array(record,"results");
         std::string name = contractString(record,"name").str();
+        if (auto dma = dyn_cast<DMAOp>(op)) {
+          auto transfer = contractTag(op,kAtlasTagDMATransfer);
+          auto records = module->getAttrOfType<ArrayAttr>(kAtlasDMAContract);
+          if (transfer && records) for (Attribute a : records) {
+            auto d = dyn_cast<DictionaryAttr>(a);
+            if (!d || contractI32(d,"id") != transfer) continue;
+            if (auto address = contractI32(d,"dram_value")) {
+              bool store = StringRef(name).starts_with("atlas.virtual_dma_store_");
+              size_t index = store ? 1 : 0;
+              if (operands.size() <= index || operands[index] != *address ||
+                  !same(before.x[dma.getDram()],origin(*address)))
+                return error("DMA pointer differs from its source scalar origin");
+            }
+          }
+        }
         if (auto push = dyn_cast<MXUPushOp>(op)) {
           size_t n = name == "atlas.virtual_mxu_matmul" && push.getKind() == "weight_fp8" ? 1 : 0;
           if (n >= operands.size() || !tensorRead(push.getSrc(),operands[n])) return error("MXU producer read lost its source tensor origin");
@@ -611,11 +630,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       if (auto id = contractTag(op,kAtlasTagCFGOperation)) { if (s.done.count(*id)) return error("source operation repeats inside one source block visit"); s.done.insert(*id); }
       if (auto branch = dyn_cast<BranchOp>(op)) {
         if (contractTag(op,kAtlasTagCFGBranch)) {
-          if (block.edges.size() != 2 || branch.getKind() != "bne" || branch.getRhs() != 0 || !same(s.x[branch.getLhs()],origin(block.condition)) || target(op) != edgeStarts[block.edges[0]]) return error("source branch condition, polarity or true target differs");
-          size_t fallthrough = pc + width; if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
+          bool relaxed = op->hasAttr("atlas.relaxed_branch");
+          Operation *redirect = relaxed ? ops[pc+width] : op;
+          if (block.edges.size() != 2 || branch.getKind() != (relaxed ? "beq" : "bne") || branch.getRhs() != 0 || !same(s.x[branch.getLhs()],origin(block.condition)) || target(redirect) != edgeStarts[block.edges[0]]) return error("source branch condition, polarity or true target differs");
+          size_t fallthrough = pc + (relaxed ? 2*width : width); if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
         } else if (!op->hasAttr(kAtlasTagCFGHelper)) return error("unowned conditional redirect changes source visits");
       }
       if (auto jump = dyn_cast<JumpOp>(op)) {
+        if (op->hasAttr("atlas.branch_trampoline")) return success();
         auto id = contractTag(op,kAtlasTagCFGEdge); if (!id || jump.getKind() != "jal" || jump.getDst() != 0 || edges[*id].from != block.id || target(op) != starts[edges[*id].to]) return error("source edge target differs or redirect is unowned");
       }
       if (isa<TrapOp>(op)) { if (!block.edges.empty()) return error("source block exits before its source edge"); for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source return skips an operation"); }
@@ -627,7 +649,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       Operation *op = ops[pc];
       if (failed(transfer(pc,s,diagnose))) return failure();
       if (width == 2 && isa<BranchOp,JumpOp>(op) && failed(transfer(pc+1,s,diagnose))) return failure();
-      if (!isa<JumpOp>(op)) return success();
+      if (!isa<JumpOp>(op) || op->hasAttr("atlas.branch_trampoline")) return success();
       auto error = [&](StringRef message) -> LogicalResult {
         if (diagnose) return op->emitOpError("CFG contract ") << message;
         return failure();
@@ -644,11 +666,15 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       size_t pc = work.front(); work.pop_front(); State s = entries[pc];
       if (failed(step(pc,s,false))) continue;
       Operation *op = ops[pc];
-      if (isa<JumpOp,TrapOp>(op)) continue;
+      if (isa<JumpOp,TrapOp>(op)) {
+        if (op->hasAttr("atlas.branch_trampoline")) propagate(target(op),s);
+        continue;
+      }
       if (isa<BranchOp>(op)) {
         State taken = s, fall = s;
         if (contractTag(op,kAtlasTagCFGBranch)) { taken.chosen = block.edges[0]; fall.chosen = block.edges[1]; }
-        propagate(target(op),taken); propagate(pc+width,fall);
+        bool relaxed = contractTag(op,kAtlasTagCFGBranch) && op->hasAttr("atlas.relaxed_branch");
+        propagate(target(relaxed ? ops[pc+width] : op),taken); propagate(pc+(relaxed ? 2*width : width),fall);
       } else propagate(pc+1,s);
     }
     for (size_t pc = 0; pc < ops.size(); ++pc) if (reached[pc]) { State s = entries[pc]; if (failed(step(pc,s,true))) return failure(); }

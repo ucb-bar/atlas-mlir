@@ -1,3 +1,4 @@
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTarget.h"
@@ -194,18 +195,19 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
   if (failed(verifyVirtualDMAAttributes(op)))
     return failure();
   llvm::DenseMap<Value, std::optional<uint32_t>> constants;
-  auto address = constantI32(dramByte, constants);
+  auto address = provenI32AddressSpan(dramByte, op);
   auto size = constantI32(sizeBytes, constants);
   if (!address || !size)
     return op->emitOpError(
-        "DRAM address and byte length must be proven by i32 arith.constant/arith.addi expressions");
+        "DRAM address and byte length must be proven by i32 arith.constant/arith.addi expressions "
+        "or a guarded nonwrapping address induction with a constant byte length");
   if (*size != tileBytes)
     return op->emitOpError("byte length must equal the complete tile size ")
            << tileBytes;
-  if (*address < 0x80000000u || *address % 32)
+  if (address->first < 0x80000000u || address->first % 32 || address->last % 32)
     return op->emitOpError(
         "DRAM address must be a 32-byte-aligned selected-memory address");
-  if (static_cast<uint64_t>(*address) + *size > (1ULL << 32))
+  if (static_cast<uint64_t>(address->last) + *size > (1ULL << 32))
     return op->emitOpError("DRAM transfer span exceeds the 32-bit address space");
   return success();
 }

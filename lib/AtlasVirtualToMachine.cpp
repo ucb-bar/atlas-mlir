@@ -10,8 +10,10 @@
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasBranchRelaxation.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -45,6 +47,9 @@ public:
         emitter(module.getContext()) {}
 
   LogicalResult plan() {
+    auto limit = atlasProgramWordLimit(function);
+    if (failed(limit)) return failure();
+    wordLimit = *limit;
     if (failed(readABI()))
       return failure();
     emitted = ModuleOp::create(module.getLoc());
@@ -115,8 +120,8 @@ public:
       }
     }
     loweredWords = planned.size();
-    if (planned.size() > kAtlasGeneratedWordLimit)
-      return function.emitOpError("lowered program exceeds the 2048-word policy limit");
+    if (planned.size() > wordLimit)
+      return function.emitOpError("lowered program exceeds the ") << wordLimit << "-word policy limit";
     return resolveTargets();
   }
 
@@ -160,6 +165,8 @@ public:
     if (failed(sourceMemoryContract) || failed(bufferContract))
       return failure();
     (*emitted)->setAttrs(module->getAttrs());
+    if (auto limit = function->getAttr(kAtlasProgramSizeLimit))
+      (*emitted)->setAttr(kAtlasProgramSizeLimit, limit);
     Builder builder(module.getContext());
     (*emitted)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
     (*emitted)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
@@ -178,6 +185,8 @@ public:
     (*emitted)->setAttr(kAtlasBufferContract, *bufferContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(abi.inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(abi.outputBase));
+    if (auto bytes = function->getAttr("atlas.output_dram_bytes"))
+      (*emitted)->setAttr("atlas.output_dram_bytes", bytes);
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
@@ -187,6 +196,7 @@ public:
       (*emitted)->setAttr("atlas.control_argument_types", builder.getDenseI32ArrayAttr(types));
     }
     llvm::SmallVector<uint32_t> words;
+    if (failed(relaxAtlasBranches(*emitted))) return failure();
     if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words,
                                    /*allowPendingDMAWaits=*/true)))
       return failure();
@@ -206,7 +216,7 @@ public:
     if (loweredWords)
       report["untimed_words"] =
           llvm::json::Object{{"words", *loweredWords},
-                             {"limit", kAtlasGeneratedWordLimit}};
+                             {"limit", wordLimit}};
     return report;
   }
 
@@ -326,15 +336,15 @@ private:
         std::optional<VirtualDMATransfer> transfer = virtualDMATransfer(op);
         if (!transfer)
           return WalkResult::advance();
-        auto address = constantAddress(transfer->dram->get());
+        auto address = provenI32AddressSpan(transfer->dram->get(), op);
         if (!address) {
-          op->emitOpError("DMA address is not statically known");
+          op->emitOpError("DMA address has no checked bound");
           return WalkResult::interrupt();
         }
         bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
-        uint64_t end = static_cast<uint64_t>(*address) +
+        uint64_t end = static_cast<uint64_t>(address->last) +
                        (fp8 ? kAtlasRegisterBytes : kAtlasBF16TileBytes);
-        if (*address < controlEnd && *controlBase < end) {
+        if (address->first < controlEnd && *controlBase < end) {
           op->emitOpError("explicit DMA span overlaps the control mailbox");
           return WalkResult::interrupt();
         }
@@ -927,7 +937,7 @@ private:
                             static_cast<int64_t>(pc));
       auto branch = dyn_cast<BranchOp>(planned[pc]);
       int64_t bound = branch ? 4096 : 1048576;
-      if (offset < -bound || offset > bound - 2)
+      if (!branch && (offset < -bound || offset > bound - 2))
         return function.emitOpError("virtual CFG target exceeds selected branch range");
       if (branch)
         branch.setOffsetBytesAttr(i32(offset));
@@ -964,6 +974,7 @@ private:
   SmallVector<Value> pendingOrder;
   AtlasBoundaryABI abi;
   std::optional<uint64_t> controlBase;
+  unsigned wordLimit = kAtlasGeneratedWordLimit;
   bool allocated = false;
   std::optional<size_t> loweredWords;
 };
@@ -982,6 +993,9 @@ struct LowerAtlasVirtualToMachinePass
            "instruction stream with its resource contracts; insert-atlas-delays "
            "or schedule-atlas-stream then times it";
   }
+
+  Option<unsigned> programSizeLimit{*this, "program-size-limit-bytes",
+      llvm::cl::desc("Smaller deployment budget within selected physical IMEM"), llvm::cl::init(0)};
 
   Option<std::string> allocationReport{
       *this, "allocation-report",
@@ -1002,6 +1016,8 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
     }
+    if (programSizeLimit)
+      function->setAttr(kAtlasProgramSizeLimit, IntegerAttr::get(IntegerType::get(&getContext(), 64), programSizeLimit));
     reuseAtlasImmutableWeights(function);
     VirtualPlanner planner(module, function);
     if (allocationReport.empty()) {
@@ -1056,8 +1072,10 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 }
 
 std::unique_ptr<Pass>
-mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport) {
+mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport,
+                                                unsigned programSizeLimit) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
+  pass->programSizeLimit = programSizeLimit;
   return pass;
 }
