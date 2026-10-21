@@ -3,7 +3,9 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -24,7 +26,7 @@ struct Record {
 };
 
 bool validGeometry(const Record &r) {
-  return r.id <= 0x7fffffff && r.channel < 8 &&
+  return r.id <= 0x7fffffff && r.channel < kAtlasDMAChannels &&
          (r.direction == "load" || r.direction == "store") &&
          validDMATileGeometry(uint64_t(r.stagingWord) * 4, r.dramByte, r.sizeBytes) &&
          r.stagingReg > 0 && r.stagingReg < 32 &&
@@ -74,14 +76,15 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(source);
     bool bf16 = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(source);
     // Proven from source SSA only, never planned commands; additions wrap in RV32.
-    auto address = provenI32(source->getOperand(load ? 1 : 2));
-    auto size = provenI32(source->getOperand(load ? 2 : 3));
+    auto transfer = virtualDMATransfer(source);
+    auto address = provenI32(transfer->dram->get());
+    auto size = provenI32(transfer->size->get());
     if (!address || !size)
       return source->emitOpError("DMA contract requires proven wrapping-i32 source address and size");
     const DMATransferPlacement &p = assignment.placement;
     Record r{p.id, p.channel, p.stagingWord, *address, *size,
              p.stagingReg, p.dramReg, p.sizeReg, load ? "load" : "store"};
-    if (*size != (bf16 ? 2048u : 1024u) || !validGeometry(r))
+    if (*size != (bf16 ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || !validGeometry(r))
       return source->emitOpError("DMA contract source must describe an aligned complete tile in the supported 32-bit address range");
     records.push_back(r);
   }
@@ -272,7 +275,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
             *transfer.dram.start + *transfer.dram.bytes > (uint64_t(1) << 32))
           transfer.dram.start.reset();
         if (transfer.vmem.start && transfer.vmem.bytes &&
-            *transfer.vmem.start + *transfer.vmem.bytes > kVmemBytes)
+            *transfer.vmem.start + *transfer.vmem.bytes > kAtlasVmemBytes)
           return op->emitOpError("DMA memory transfer exceeds VMEM capacity");
         for (Transfer &other : pending)
           if (failed(compare(op, transfer.vmem, other.vmem, "VMEM", other.launch)) ||
@@ -288,16 +291,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
         pending.erase(found);
       } else if (isa<VLoadOp, VStoreOp>(op)) {
         const Instr &in = s.instrs[i];
-        Span access{std::nullopt, 1024, isa<VStoreOp>(op)};
+        Span access{std::nullopt, kAtlasRegisterBytes, isa<VStoreOp>(op)};
         if (auto address = regs[in.rs1]) {
           // ScalarDecoder shifts signed imm12 by 5 WORDS, then RV32 ADD wraps.
           uint32_t word = *address +
                           uint32_t(signExtend(in.imm, 12) * 32);
           access.start = vmemStart(word);
           // LSU accepts aligned 1KiB vectors contained in one 256KiB bank.
-          if (*access.start % 1024 || *access.start + 1024 > kVmemBytes ||
+          if (*access.start % kAtlasRegisterBytes ||
+              *access.start + kAtlasRegisterBytes > kAtlasVmemBytes ||
               *access.start / kVmemBankBytes !=
-                  (*access.start + 1023) / kVmemBankBytes)
+                  (*access.start + kAtlasRegisterBytes - 1) / kVmemBankBytes)
             return op->emitOpError("vector DMA memory access has invalid VMEM span");
         }
         for (Transfer &other : pending)

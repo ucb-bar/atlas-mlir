@@ -68,8 +68,8 @@ inline LogicalResult checkCaptured(Operation *op, StringRef prefix, StringRef fi
 // AtlasCore uses wordAddr[18:3], size[12:0]; DMA consumes complete
 // 32-byte beats. Full FP8/BF16 tiles are 1/2 KiB in selected VMEM.
 inline bool validDMATileGeometry(uint64_t vmemByte, uint64_t dramByte, uint64_t bytes) {
-  return (bytes == 1024 || bytes == 2048) && vmemByte % 1024 == 0 &&
-         vmemByte + bytes <= timing::kVmemBytes && dramByte >= 0x80000000u &&
+  return (bytes == kAtlasRegisterBytes || bytes == kAtlasBF16TileBytes) && vmemByte % kAtlasRegisterBytes == 0 &&
+         vmemByte + bytes <= kAtlasVmemBytes && dramByte >= 0x80000000u &&
          dramByte % 32 == 0 && dramByte + bytes <= (uint64_t(1) << 32);
 }
 

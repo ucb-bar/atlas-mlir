@@ -22,6 +22,7 @@ int main(int argc, char **argv) {
   atlas::registerLowerAtlasVirtualToMachinePass();
   atlas::registerInsertAtlasDMAWaitsPass();
   atlas::registerInsertAtlasDelaysPass();
+  atlas::registerScheduleAtlasStreamPass();
   MLIRContext context(registry);
   ScopedDiagnosticHandler handler(&context, [](Diagnostic &diagnostic) {
     llvm::raw_string_ostream stream(diagnostics);

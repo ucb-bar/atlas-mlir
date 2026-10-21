@@ -1,4 +1,5 @@
 #include "Atlas/AtlasImmutableWeightReuse.h"
+#include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -24,6 +25,10 @@ struct Input {
   Operation *op;
   Key key;
   Span span;
+  // Its state operand, which removing an earlier duplicate redirects, and
+  // its results.
+  OpOperand *state;
+  Value next, value;
 };
 
 bool overlaps(Span a, Span b) {
@@ -32,48 +37,22 @@ bool overlaps(Span a, Span b) {
 
 bool onlyWeightUses(Value value) {
   return !value.use_empty() && llvm::all_of(value.getUses(), [](OpOperand &use) {
-    return use.getOperandNumber() == 1 &&
-           isa<VirtualMXUMatmulOp, VirtualMXULoadWeightOp>(use.getOwner());
+    Operation *user = use.getOwner();
+    if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(user))
+      return &use == &matmul.getWeightMutable();
+    if (auto load = dyn_cast<VirtualMXULoadWeightOp>(user))
+      return &use == &load.getSrcMutable();
+    return false;
   });
 }
 
-std::optional<Span> dmaSpan(Operation *op, bool store) {
-  auto address = provenI32(op->getOperand(store ? 2 : 1));
-  auto size = provenI32(op->getOperand(store ? 3 : 2));
+std::optional<Span> dmaSpan(Operation *op) {
+  std::optional<VirtualDMATransfer> transfer = virtualDMATransfer(op);
+  auto address = provenI32(transfer->dram->get());
+  auto size = provenI32(transfer->size->get());
   if (!address || !size || uint64_t(*address) + *size > (1ULL << 32))
     return std::nullopt;
   return Span{*address, uint64_t(*address) + *size};
-}
-
-// Validate the complete original boundary spans before considering reuse.
-// This does not replace the lowering ABI checks (including VMEM placement).
-bool boundaryBases(func::FuncOp function, uint64_t &input, uint64_t &output) {
-  uint64_t inputSlots = 1, outputSlots = 1;
-  bool hasBoundary = false;
-  for (Operation &op : function.front()) {
-    if (isa<VirtualInputFP8Op, VirtualInputBF16Op, VirtualOutputBF16Op>(op)) {
-      hasBoundary = true;
-      uint64_t slots = op.getAttrOfType<IntegerAttr>("index").getValue().getZExtValue() + 1;
-      auto &maximum = isa<VirtualOutputBF16Op>(op) ? outputSlots : inputSlots;
-      maximum = std::max(maximum, slots);
-    }
-  }
-  if (!hasBoundary)
-    return true;
-  auto in = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
-  auto out = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
-  if (!in || !out)
-    return false;
-  int64_t a = in.getValue().getSExtValue(), b = out.getValue().getSExtValue();
-  if (a < 0x80000000LL || b < 0x80000000LL || a >= (1LL << 32) ||
-      b >= (1LL << 32) || a % 1024 || b % 1024)
-    return false;
-  input = a;
-  output = b;
-  Span reads{input, input + inputSlots * 2048};
-  Span writes{output, output + outputSlots * 2048};
-  return reads.second <= (1ULL << 32) && writes.second <= (1ULL << 32) &&
-         !overlaps(reads, writes);
 }
 
 SmallVector<Input> candidates(func::FuncOp function) {
@@ -83,23 +62,30 @@ SmallVector<Input> candidates(func::FuncOp function) {
   // that verifier; an unclassified write must prevent reuse.
   SmallVector<Input> inputs;
   SmallVector<Span> writes;
-  uint64_t inputBase = 0, outputBase = 0;
-  if (!boundaryBases(function, inputBase, outputBase))
-    return inputs;
+  // Validate the complete original boundary spans before considering reuse.
+  // This does not replace the lowering ABI checks (including VMEM placement).
+  AtlasBoundaryABI abi;
+  if (hasAtlasBoundaryTiles(function)) {
+    FailureOr<AtlasBoundaryABI> read = AtlasBoundaryABI::read(function, /*diagnose=*/false);
+    if (failed(read) || failed(read->verifySpans(function, /*diagnose=*/false)))
+      return inputs;
+    abi = *read;
+  }
   for (Operation &op : function.front()) {
     if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
-      auto span = dmaSpan(&op, true);
+      auto span = dmaSpan(&op);
       if (!span)
         return {};
       writes.push_back(*span);
     } else if (auto output = dyn_cast<VirtualOutputBF16Op>(op)) {
-      uint64_t first = outputBase + output.getIndexAttr().getValue().getZExtValue() * 2048;
-      writes.push_back({first, first + 2048});
+      uint64_t first = abi.outputAddress(output.getIndexAttr().getValue().getZExtValue());
+      writes.push_back({first, first + kAtlasBF16TileBytes});
     } else if (auto input = dyn_cast<VirtualInputFP8Op>(op)) {
       if (onlyWeightUses(input.getValue())) {
         uint64_t index = input.getIndexAttr().getValue().getZExtValue();
-        uint64_t first = inputBase + index * 2048;
-        inputs.push_back({&op, {false, index}, {first, first + 1024}});
+        uint64_t first = abi.inputAddress(index);
+        inputs.push_back({&op, {false, index}, {first, first + kAtlasRegisterBytes},
+                          &input.getStateMutable(), input.getNext(), input.getValue()});
       }
     } else if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op)) {
       // Restrict to direct constants, so removing a transfer can clean up
@@ -108,9 +94,10 @@ SmallVector<Input> candidates(func::FuncOp function) {
           !load.getDramByte().getDefiningOp<arith::ConstantOp>() ||
           !load.getSizeBytes().getDefiningOp<arith::ConstantOp>())
         continue;
-      auto span = dmaSpan(&op, false);
-      if (span && span->second - span->first == 1024)
-        inputs.push_back({&op, {true, span->first}, *span});
+      auto span = dmaSpan(&op);
+      if (span && span->second - span->first == kAtlasRegisterBytes)
+        inputs.push_back({&op, {true, span->first}, *span, &load.getStateMutable(),
+                          load.getNext(), load.getValue()});
     }
   }
   llvm::erase_if(inputs, [&](const Input &input) {
@@ -129,20 +116,20 @@ bool hasRepeat(ArrayRef<Input> inputs) {
 
 void rewrite(ArrayRef<Input> inputs) {
   std::map<Key, Value> seen;
-  for (const Input &input : inputs) {
+  for (Input input : inputs) {
     Operation *op = input.op;
-    auto [entry, first] = seen.emplace(input.key, op->getResult(1));
+    auto [entry, first] = seen.emplace(input.key, input.value);
     if (first)
       continue;
     SmallVector<Operation *> constants;
-    if (isa<VirtualDMALoadFP8Op>(op))
-      for (unsigned operand : {1u, 2u}) {
-        Operation *constant = op->getOperand(operand).getDefiningOp();
+    if (auto load = dyn_cast<VirtualDMALoadFP8Op>(op))
+      for (Value operand : {load.getDramByte(), load.getSizeBytes()}) {
+        Operation *constant = operand.getDefiningOp();
         if (!llvm::is_contained(constants, constant))
           constants.push_back(constant);
       }
-    op->getResult(1).replaceAllUsesWith(entry->second);
-    op->getResult(0).replaceAllUsesWith(op->getOperand(0));
+    input.value.replaceAllUsesWith(entry->second);
+    input.next.replaceAllUsesWith(input.state->get());
     op->erase();
     for (Operation *constant : constants)
       if (constant->use_empty())

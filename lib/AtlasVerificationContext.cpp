@@ -23,7 +23,8 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
     if (!isa<StartOp>(op))
       ops.push_back(&op);
   // The only loops an interval may hold (canOverlapAtlasGeneratedDMA).
-  std::vector<AtlasLoop> loops = findAtlasLoops(ops);
+  bool delaySlots = atlasHasDelaySlots(module);
+  std::vector<AtlasLoop> loops = findAtlasLoops(ops, delaySlots);
   int64_t pc = 0;
   for (Operation &op : module.getBody()->getOperations()) {
     std::optional<int32_t> id;
@@ -58,9 +59,10 @@ static LogicalResult verifyGeneratedStructure(ModuleOp module) {
     } else if (!pending.empty() && !canOverlapAtlasGeneratedDMA(ops, loops, currentPC)) {
       return op.emitOpError("unexpected instruction while DMA is pending");
     }
-    if (isa<BranchOp, JumpOp>(op) && !isExactAtlasNop(op.getNextNode()))
+    if (delaySlots && isa<BranchOp, JumpOp>(op) &&
+        !isAtlasDelaySlotWork(op.getNextNode()))
       return op.emitOpError(
-          "generated redirect requires a nonredirecting x0 NOP delay slot");
+          "generated redirect requires a scalar ALU delay slot");
   }
   if (!pending.empty())
     return pending.begin()->second.launch.emitOpError("generated DMA has no matching DMA.WAIT");

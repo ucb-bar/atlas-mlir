@@ -2,6 +2,7 @@
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasStream.h"
@@ -63,7 +64,7 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
   std::map<uint32_t, std::pair<uint32_t, StringRef>> slots;
   auto values = cfg.getAs<ArrayAttr>("values");
   auto declareSlot = [&](uint32_t word, uint32_t words, StringRef kind) {
-    unsigned alignment = words == 1 ? 1 : 256;
+    unsigned alignment = words == 1 ? 1 : kAtlasRegisterWords;
     if (word < fixed.spillWord || word % alignment ||
         uint64_t(word) + words > uint64_t(fixed.spillWord) + fixed.spillWindowWords)
       return false;
@@ -86,8 +87,10 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
     auto word = contractI32(op, "slot_word"), words = contractI32(op, "slot_words");
     StringRef kind = contractString(op, "slot_kind");
     if (!word || !words || *words <= 0 ||
-        (kind == "bf16" ? *words != 512 : kind == "fp8" ? *words != 256 :
-         kind == "i1" || kind == "i32" ? *words != 1 : kind != "raw" || *words % 256) ||
+        (kind == "bf16"                ? *words != kAtlasBF16TileWords
+         : kind == "fp8"               ? *words != kAtlasRegisterWords
+         : kind == "i1" || kind == "i32" ? *words != 1
+                                       : kind != "raw" || *words % kAtlasRegisterWords) ||
         !declareSlot(*word, *words, kind)) return failure();
     uint32_t destination = *word;
     if (copy) {
@@ -97,7 +100,7 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
     }
     auto commands = contractI32Array(op, "tile_commands");
     bool scalar = *words == 1;
-    unsigned halves = scalar ? 1 : *words / 256;
+    unsigned halves = scalar ? 1 : *words / kAtlasRegisterWords;
     if (commands.size() != halves * (copy ? 2 : 1)) return failure();
     auto operands = contractI32Array(op, "operands"), results = contractI32Array(op, "results");
     int32_t reg = scalar ? fixed.scalarTemporary : fixed.tensorTemporary;
@@ -114,18 +117,19 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
         int32_t id = commands[half * (copy ? 2 : 1) + step];
         if (id < 0 || id >= int32_t(tiles.size())) return failure();
         bool write = save || (copy && step == 1);
-        uint32_t address = (write ? destination : uint32_t(*word)) + half * 256;
+        uint32_t address = (write ? destination : uint32_t(*word)) + half * kAtlasRegisterWords;
         const Tile &t = tiles[id];
         auto record = cast<DictionaryAttr>(records[id]);
         if (t.kind != (scalar ? (write ? "slot_store" : "slot_load") : (write ? "vstore" : "vload")) ||
-            !t.after.empty() || t.bytes != (scalar ? 4 : 1024) || t.vmem != address * 4 ||
+            !t.after.empty() || t.bytes != (scalar ? 4 : kAtlasRegisterBytes) ||
+            t.vmem != address * 4 ||
             contractI32(record, "reg") != reg + (!copy && !scalar ? half : 0)) return failure();
         if (write) {
-          d.slotWrites[id] = {-int32_t(destination) - 1, half * 256};
-          if (copy) d.copyWrites[id] = {-*word - 1, half * 256};
+          d.slotWrites[id] = {-int32_t(destination) - 1, half * kAtlasRegisterWords};
+          if (copy) d.copyWrites[id] = {-*word - 1, half * kAtlasRegisterWords};
         } else {
           slotReads.insert(id);
-          d.reads.push_back({id, -*word - 1, t.vmem, t.bytes, half * 256, false});
+          d.reads.push_back({id, -*word - 1, t.vmem, t.bytes, half * kAtlasRegisterWords, false});
         }
       }
     }
@@ -146,9 +150,11 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
       if (id < 0 || id >= int32_t(tiles.size())) return failure();
       const Tile &t = tiles[id];
       if (!half) base = t.vmem;
-      if (t.kind != "vstore" || t.bytes != 1024 || t.vmem != base + half * 1024 ||
-          base % 1024 || base < fixed.spillWord * 4 ||
-          uint64_t(base) + halves * 1024 > uint64_t(fixed.spillWord + fixed.spillWindowWords) * 4 ||
+      if (t.kind != "vstore" || t.bytes != kAtlasRegisterBytes ||
+          t.vmem != base + half * kAtlasRegisterBytes ||
+          base % kAtlasRegisterBytes || base < fixed.spillWord * 4 ||
+          uint64_t(base) + halves * kAtlasRegisterBytes >
+              uint64_t(fixed.spillWord + fixed.spillWindowWords) * 4 ||
           !spillWriters.emplace(id, std::make_pair(*source, half)).second) return failure();
       for (auto [word, geometry] : slots)
         if (uint64_t(t.vmem) < uint64_t(word + geometry.first) * 4 &&
@@ -169,7 +175,7 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
       int32_t id = commands[half];
       if (id < 0 || id >= int32_t(tiles.size())) return failure();
       const Tile &t = tiles[id];
-      if (t.kind != "vload" || t.bytes != 1024 || t.after.size() != 1) return failure();
+      if (t.kind != "vload" || t.bytes != kAtlasRegisterBytes || t.after.size() != 1) return failure();
       auto saved = spillWriters.find(t.after[0]);
       if (saved == spillWriters.end()) return failure();
       if (!half) writer = saved->second.first;
@@ -186,7 +192,10 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
     auto commands = contractI32Array(op, "tile_commands");
     if (!source || commands.size() != 2 || commands[0] < 0 || commands[1] <= commands[0] || commands[1] >= int32_t(tiles.size())) return failure();
     const Tile &store = tiles[commands[0]], &load = tiles[commands[1]];
-    if (store.kind != "vstore" || load.kind != "vload" || load.after != std::vector<int32_t>{commands[0]} || store.bytes != 1024 || load.bytes != 1024) return failure();
+    if (store.kind != "vstore" || load.kind != "vload" ||
+        load.after != std::vector<int32_t>{commands[0]} ||
+        store.bytes != kAtlasRegisterBytes || load.bytes != kAtlasRegisterBytes)
+      return failure();
     d.packs.push_back({*source, commands[0], commands[1]});
   }
   auto contains = [](const Tile &outer, const Tile &inner) {
@@ -239,13 +248,13 @@ struct Word {
 struct State {
   RegValues x = unknownRegs();
   std::array<std::optional<Word>, 32> carried{}; // the word a scalar register holds since its LW
-  std::array<std::optional<Word>, 64> tensor{}; // first of 256 consecutive words in a raw register
+  std::array<std::optional<Word>, kAtlasTensorRegisters> tensor{}; // first of 256 consecutive words in a raw register
   std::map<uint32_t, Word> memory;               // by VMEM word index; absent is unproved
 };
 // Must-facts: a word survives a join only when every reaching path agrees.
 bool merge(State &to, const State &from) {
   bool changed = false;
-  for (unsigned r = 0; r < 64; ++r)
+  for (unsigned r = 0; r < kAtlasTensorRegisters; ++r)
     if (to.tensor[r] && to.tensor[r] != from.tensor[r]) { to.tensor[r].reset(); changed = true; }
   for (unsigned r = 0; r < 32; ++r) {
     if (to.x[r] && to.x[r] != from.x[r]) { to.x[r].reset(); changed = true; }
@@ -330,7 +339,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
   std::map<size_t, Helper> helpers;
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!s.endsInBranch(block)) continue;
-    Operation *branch = s.ops[s.blockEnd(block) - 2];
+    Operation *branch = s.ops[s.redirectOf(block)];
     if (!isa<BranchOp>(branch) || !branch->hasAttr(kAtlasTagCFGHelper)) continue;
     const AtlasLoop *loop = s.loop(block);
     const Pack *p = packOf(branch);
@@ -413,7 +422,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
           return op->emitOpError("buffer contract: PACK copy loop store is not proven inside its relayout scratch");
       }
       // RTL slices VMEM addresses, so an out-of-range store may alias any word.
-      if (!a || uint64_t(*a) + width > uint64_t(kVmemBytes)) {
+      if (!a || uint64_t(*a) + width > uint64_t(kAtlasVmemBytes)) {
         state.memory.clear();
       } else {
         for (uint64_t word = *a / 4; word <= (uint64_t(*a) + width - 1) / 4; ++word) state.memory.erase(uint32_t(word));

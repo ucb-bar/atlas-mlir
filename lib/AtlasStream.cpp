@@ -165,6 +165,12 @@ bool mlir::atlas::isNop(Operation *op) {
   return false;
 }
 
+Instr mlir::atlas::atlasNopInstr() {
+  Instr nop;
+  nop.op = findOp("addi");
+  return nop;
+}
+
 static Operation *createNop(OpBuilder &builder, Location loc, Value state) {
   return ALUImmOp::create(builder, loc, StateType::get(builder.getContext()),
                           state, builder.getStringAttr("addi"),
@@ -200,8 +206,13 @@ size_t AtlasStream::blockEnd(size_t block) const {
 }
 
 bool AtlasStream::endsInBranch(size_t block) const {
-  size_t end = blockEnd(block);
-  return end - starts[block] >= 2 && isControlFlow(*instrs[end - 2].op);
+  size_t end = blockEnd(block), width = delaySlots ? 2 : 1;
+  return end - starts[block] >= width && isControlFlow(*instrs[end - width].op);
+}
+
+size_t AtlasStream::redirectOf(size_t block) const {
+  assert(endsInBranch(block) && "the block ends in a branch or jump");
+  return blockEnd(block) - (delaySlots ? 2 : 1);
 }
 
 bool AtlasStream::endsInHalt(size_t block) const {
@@ -245,6 +256,7 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
                           : verifyAtlasArtifact(module, /*llvmBlock=*/false, encoded)))
     return failure();
   AtlasStream s;
+  s.delaySlots = atlasHasDelaySlots(module);
   SmallVector<Operation *> &ops = s.ops;
   for (Operation &op : module.getBody()->getOperations())
     if (!isa<StartOp>(op))
@@ -306,10 +318,11 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
   for (size_t i = 0; i < n; ++i) {
     if (isControlFlow(*instrs[i].op)) {
       size_t target = targetIndex(i);
-      if (target > 0 && target < n && isControlFlow(*instrs[target - 1].op))
+      if (s.delaySlots && target > 0 && target < n &&
+          isControlFlow(*instrs[target - 1].op))
         return ops[i]->emitOpError("targets a delay slot");
       leaders.insert(target);
-      leaders.insert(i + 2);
+      leaders.insert(i + (s.delaySlots ? 2 : 1));
     }
     if (instrs[i].op->opClass == OpClass::Halt)
       leaders.insert(i + 1);
@@ -330,9 +343,10 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
   for (size_t b = 0; b < blocks; ++b) {
     size_t e = s.blockEnd(b);
     if (s.endsInBranch(b)) {
-      if (targetIndex(e - 2) < n)
-        succs[b].push_back(blockAt[targetIndex(e - 2)]);
-      if (instrs[e - 2].op->opClass == OpClass::Branch && e < n)
+      size_t redirect = s.redirectOf(b);
+      if (targetIndex(redirect) < n)
+        succs[b].push_back(blockAt[targetIndex(redirect)]);
+      if (instrs[redirect].op->opClass == OpClass::Branch && e < n)
         succs[b].push_back(blockAt[e]);
     } else if (instrs[e - 1].op->opClass != OpClass::Halt && e < n) {
       succs[b].push_back(blockAt[e]);
@@ -362,9 +376,9 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     }
   }
 
-  // A loop's back-edge target and the instruction after its delay slot are
-  // leaders, and nothing between them can be, so each loop fills one block.
-  for (const AtlasLoop &loop : findAtlasLoops(ops)) {
+  // A loop's back-edge target and the instruction after it and its delay slot
+  // are leaders, and nothing between them can be, so each loop fills one block.
+  for (const AtlasLoop &loop : findAtlasLoops(ops, s.delaySlots)) {
     size_t block = blockAt[loop.begin];
     assert(s.blockEnd(block) == loop.end() && "an analyzed loop fills one block");
     AtlasLoopFacts facts;
@@ -422,10 +436,12 @@ mlir::atlas::atlasScaleRegisterEntries(const AtlasStream &s) {
 }
 
 bool mlir::atlas::atlasBlockExits(const AtlasStream &s, size_t block) {
-  size_t end = s.blockEnd(block);
   if (s.succs[block].empty())
     return true;
-  return s.endsInBranch(block) && (!s.targetOf.lookup(s.ops[end - 2]) || (s.instrs[end - 2].op->opClass == OpClass::Branch && end == s.ops.size()));
+  if (!s.endsInBranch(block))
+    return false;
+  size_t redirect = s.redirectOf(block);
+  return !s.targetOf.lookup(s.ops[redirect]) || (s.instrs[redirect].op->opClass == OpClass::Branch && s.blockEnd(block) == s.ops.size());
 }
 
 LogicalResult mlir::atlas::checkAtlasStream(
@@ -444,10 +460,10 @@ LogicalResult mlir::atlas::checkAtlasStream(
   // Transfers stay in flight across a block boundary only into and out of an
   // analyzed loop (AtlasStream::dmaMayCross), so a block starts with the
   // transfers the block before it ended with.
-  std::array<std::vector<std::pair<size_t, Footprint>>, 8> pending;
+  std::array<std::vector<std::pair<size_t, Footprint>>, kAtlasDMAChannels> pending;
   auto anyPending = [&] { return llvm::any_of(pending, [](const auto &p) { return !p.empty(); }); };
   auto meetsPending = [&](size_t i, const Footprint &f) -> LogicalResult {
-    for (int ch = 0; ch < 8; ++ch)
+    for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
       for (const auto &[k, dma] : pending[ch]) {
         auto conflict = provider.dmaConflict(dma, f);
         if (!conflict.error.empty())
@@ -492,12 +508,12 @@ LogicalResult mlir::atlas::checkAtlasStream(
         return s.ops[i]->emitOpError(f.error);
       if (f.doneAge < 0)
         return s.ops[i]->emitOpError("timing provider returned a negative completion age");
-      if (i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
+      if (s.delaySlots && i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
           (f.doneAge > 0 || op.opClass == OpClass::Halt))
         return s.ops[i]->emitOpError(
             "delay-slot instruction must be single-cycle scalar work");
       if (in.release)
-        for (int ch = 0; ch < 8; ++ch)
+        for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ") << ch;
       if (!loop && failed(meetsPending(i, f)))
@@ -510,7 +526,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
             << " may still be in flight; the timing model needs an "
                "atlas.dma_wait here, which a delay cannot replace";
       if (op.opClass == OpClass::Halt)
-        for (int ch = 0; ch < 8; ++ch)
+        for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
           if (!pending[ch].empty())
             return s.ops[i]->emitOpError()
                    << "halts while DMA channel " << ch
@@ -524,7 +540,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
     // Timing is checked one block at a time, so elsewhere a transfer must
     // complete in the block that starts it, as verifyAtlasTimedStream requires.
     if (!s.dmaMayCross(b))
-      for (int ch = 0; ch < 8; ++ch)
+      for (int ch = 0; ch < kAtlasDMAChannels; ++ch)
         if (!pending[ch].empty())
           return s.ops[pending[ch].back().first]->emitOpError(
               "may still be in flight when its block ends; timing requires DMA "
@@ -574,6 +590,7 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
       append(delay);
     }
   };
+  bool fillSlots = !s.delaySlots && !timedBy.empty();
   size_t block = 0;
   for (size_t position = 0; position < order.size(); ++position) {
     size_t i = order[position];
@@ -593,6 +610,18 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
     // A block's trailing delays follow its last op and belong to it, so a
     // branch to the next block skips them.
     if (position + 1 == s.blockEnd(block)) {
+      bool redirectLast = s.endsInBranch(block) && i == s.redirectOf(block);
+      assert((s.delaySlots || !s.endsInBranch(block) || redirectLast ||
+              (fillSlots && order[position - 1] == s.redirectOf(block))) &&
+             "a pending delay slot is filled by the op after its redirect");
+      if (fillSlots && redirectLast) {
+        builder.setInsertionPointAfter(prev);
+        Operation *nop = createNop(builder, op->getLoc(), state);
+        nop->setAttr("atlas.reason", builder.getStringAttr(
+                                         "no instruction can fill the delay slot"));
+        carryCFGOwner(op, nop);
+        append(nop);
+      }
       if (!after.empty())
         emitDelays(after[block], op);
       ++block;
@@ -618,6 +647,8 @@ LogicalResult mlir::atlas::writeAtlasStream(ModuleOp module,
   }
 
   bool timed = !timedBy.empty();
+  if (fillSlots)
+    module->removeAttr(kAtlasDelaySlotsPending);
   module->setAttr(kAtlasTimingState, builder.getStringAttr(timed ? "timed" : "untimed"));
   if (timed)
     module->setAttr(kAtlasTimingProvider, builder.getStringAttr(timedBy));
@@ -645,6 +676,8 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
   }
   if (state.getValue() == "timed" && !rawProvider)
     return module.emitOpError("timed Atlas stream requires its timing provider");
+  if (state.getValue() == "timed" && !atlasHasDelaySlots(module))
+    return module.emitOpError("timed Atlas stream requires its delay slots");
   if (requireTimed && state.getValue() != "timed")
     return module.emitOpError("untimed Atlas stream requires scheduling or delay insertion before executable emission");
   return success();
@@ -656,7 +689,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
   // As in checkAtlasStream, DMA stays in flight only into and out of an analyzed loop.
-  std::array<Operation *, 8> pendingDMA{};
+  std::array<Operation *, kAtlasDMAChannels> pendingDMA{};
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto reservations = provider.createReservations();
@@ -812,4 +845,8 @@ struct VerifyAtlasTimingPass
 
 void mlir::atlas::registerVerifyAtlasTimingPass() {
   PassRegistration<VerifyAtlasTimingPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createVerifyAtlasTimingPass() {
+  return std::make_unique<VerifyAtlasTimingPass>();
 }

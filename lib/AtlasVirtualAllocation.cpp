@@ -4,6 +4,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
@@ -20,12 +21,11 @@ using namespace mlir::atlas;
 
 namespace {
 constexpr unsigned kTensorPairTemporary = 62;
-constexpr unsigned kFirstScalarValue = 10;
-constexpr unsigned kLastScalarValue = 26;
-// The DMA engine's channels. Each transfer in flight holds one, and a staging
-// window the size of a BF16 tile.
-constexpr unsigned kDMAChannels = 8;
-constexpr uint32_t kStagingWindowWords = 512;
+// A function with FP8 values keeps m0..m31 for them and puts BF16 pairs above.
+constexpr unsigned kFP8Registers = 32;
+// Each DMA transfer in flight holds a channel and a staging window the size of
+// a BF16 tile.
+constexpr uint32_t kStagingWindowWords = kAtlasBF16TileWords;
 
 // Whether `function` has FP8 values, which keep m0-m31 and move BF16 pairs
 // above them, and a pack, which keeps x10-x17 for its relayout loop.
@@ -39,18 +39,12 @@ void findReservations(func::FuncOp function, bool &mixedFp8, bool &hasPack) {
   });
 }
 
-unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
-  unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
-  return kind == RegisterKind::BF16
-             ? (mixedFp8 ? 15 : kTensorPairTemporary / 2)
-             : kind == RegisterKind::FP8 ? 32
-                                         : kLastScalarValue - firstScalar + 1;
-}
-
 FixedResourcePlacement selectedResources() {
   FixedResourcePlacement resources;
   resources.tensorTemporary = kTensorPairTemporary;
   resources.scalarTemporary = 27;
+  resources.firstScalarValue = 10;
+  resources.lastScalarValue = 26;
   resources.halfSizeReg = 2;
   resources.haltReg = 1;
   resources.inputBaseReg = 6;
@@ -72,8 +66,8 @@ FixedResourcePlacement selectedResources() {
   resources.dmaSizeReg = 9;
   // Bank 2: eight DMA staging windows first, then the spill frame. The
   // boundary windows and PACK scratch use banks 0 and 1.
-  resources.spillWord = resources.stagingWord + kDMAChannels * kStagingWindowWords;
-  resources.spillWindowWords = 65536 - kDMAChannels * kStagingWindowWords;
+  resources.spillWord = resources.stagingWord + kAtlasDMAChannels * kStagingWindowWords;
+  resources.spillWindowWords = 65536 - kAtlasDMAChannels * kStagingWindowWords;
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;
@@ -84,7 +78,32 @@ FixedResourcePlacement selectedResources() {
   resources.mxuAccSlot = 0;
   return resources;
 }
+
+unsigned firstScalarValue(const FixedResourcePlacement &fixed, bool hasPack) {
+  return hasPack ? fixed.lastPackRegister() + 1 : fixed.firstScalarValue;
+}
+
+unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
+  if (kind == RegisterKind::BF16)
+    return (kTensorPairTemporary - (mixedFp8 ? kFP8Registers : 0)) / 2;
+  if (kind == RegisterKind::FP8)
+    return kFP8Registers;
+  FixedResourcePlacement fixed = selectedResources();
+  return fixed.lastScalarValue - firstScalarValue(fixed, hasPack) + 1;
+}
 } // namespace
+
+std::optional<RegisterKind> mlir::atlas::registerKindOf(Value value) {
+  Type type = value.getType();
+  if (isa<VirtualBF16Type>(type))
+    return RegisterKind::BF16;
+  if (isa<VirtualFP8Type>(type))
+    return RegisterKind::FP8;
+  if ((type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value) &&
+      !isAtlasMemoryControl(value))
+    return RegisterKind::Scalar;
+  return std::nullopt;
+}
 
 RegisterCapacities mlir::atlas::registerCapacities(func::FuncOp function) {
   bool mixedFp8, hasPack;
@@ -194,8 +213,8 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
         return failure();
       mxuResources[accumulate.getNextAcc()] = *placement;
       accSlots[placement->unit][placement->slot] = accumulate.getNextAcc();
-    } else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op)) {
-      FailureOr<MXUPlacement> placement = liveAccumulator(op, op.getOperand(1));
+    } else if (Value acc = virtualMXUReadoutAcc(&op)) {
+      FailureOr<MXUPlacement> placement = liveAccumulator(op, acc);
       if (failed(placement))
         return failure();
       accSlots[placement->unit][placement->slot] = Value{};
@@ -241,7 +260,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
     unsigned channel, window;
     bool holdsChannel = true, holdsWindow = true;
   };
-  SmallVector<InFlight, kDMAChannels> inFlight;
+  SmallVector<InFlight, kAtlasDMAChannels> inFlight;
   // The transfer's DMA completes; a load keeps its window for its VLOADs.
   auto completeDMA = [](InFlight &t) {
     t.holdsChannel = false;
@@ -281,18 +300,18 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
     unsigned channel = load ? fixedResources.loadChannel : fixedResources.storeChannel;
     if (channelHeld(channel)) {
       channel = 0;
-      while (channel < kDMAChannels && channelHeld(channel))
+      while (channel < kAtlasDMAChannels && channelHeld(channel))
         ++channel;
     }
-    if (channel == kDMAChannels) {
+    if (channel == kAtlasDMAChannels) {
       InFlight &oldest = *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsChannel; });
       channel = oldest.channel;
       completeDMA(oldest);
     }
     unsigned window = 0;
-    while (window < kDMAChannels && windowHeld(window))
+    while (window < kAtlasDMAChannels && windowHeld(window))
       ++window;
-    if (window == kDMAChannels) {
+    if (window == kAtlasDMAChannels) {
       auto store = llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow && !t.loaded; });
       InFlight &oldest = store != inFlight.end() ? *store : *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow; });
       window = oldest.window;
@@ -361,16 +380,7 @@ Operation *VirtualAllocationPlan::stagingPoint(Value tile) const {
 
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   using Set = llvm::DenseSet<Value>;
-  auto selected = [&](Value value) {
-    if (isAtlasMemoryControl(value)) return false;
-    Type type = value.getType();
-    if (kind == RegisterKind::BF16)
-      return isa<VirtualBF16Type>(type);
-    if (kind == RegisterKind::FP8)
-      return isa<VirtualFP8Type>(type);
-    // Lowering builds a DMA immediate at each launch instead.
-    return (type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value);
-  };
+  auto selected = [&](Value value) { return registerKindOf(value) == kind; };
   SmallVector<Value> values;
   llvm::DenseMap<Block *, Set> uses, defs, liveIn, liveOut;
   for (Block &block : function.getBody()) {
@@ -549,7 +559,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     return neighbors[a].size() > neighbors[b].size();
   });
   llvm::DenseMap<Value, unsigned> colors;
-  unsigned firstScalar = hasPack ? 18 : kFirstScalarValue;
+  unsigned firstScalar = firstScalarValue(fixedResources, hasPack);
   unsigned count = demand.capacity;
   unsigned used = 0;
   for (Value value : values) {
@@ -566,23 +576,25 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
         break;
       }
     }
-    if (!assigned)
-      return function.emitOpError(
-          kind == RegisterKind::BF16
-              ? (mixedFp8 ? "mixed virtual BF16 interference exceeds 15 physical pairs"
-                          : "virtual BF16 interference exceeds 31 physical pairs")
-              : kind == RegisterKind::FP8
-                    ? "virtual FP8 interference exceeds 32 physical registers"
-                    : (hasPack
-                           ? "virtual control interference exceeds 9 scalar registers with FP8 pack"
-                           : "virtual control interference exceeds 17 scalar registers"));
+    if (!assigned) {
+      InFlightDiagnostic diag = function.emitOpError();
+      if (kind == RegisterKind::BF16)
+        diag << (mixedFp8 ? "mixed " : "") << "virtual BF16 interference exceeds "
+             << count << " physical pairs";
+      else if (kind == RegisterKind::FP8)
+        diag << "virtual FP8 interference exceeds " << count << " physical registers";
+      else
+        diag << "virtual control interference exceeds " << count
+             << " scalar registers" << (hasPack ? " with FP8 pack" : "");
+      return diag;
+    }
   }
   for (Value value : values) {
     for (Value other : neighbors[value])
       if (colors[value] == colors[other])
         return function.emitOpError("internal register-coloring overlap");
     if (kind == RegisterKind::BF16)
-      tileRegs[value] = (mixedFp8 ? 32 : 0) + 2 * colors[value];
+      tileRegs[value] = (mixedFp8 ? kFP8Registers : 0) + 2 * colors[value];
     else if (kind == RegisterKind::FP8)
       fp8Regs[value] = colors[value];
     else
@@ -686,7 +698,9 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       registersOf(fp8Regs, "fp8", 1);
     } else if (isVirtualDMAImmediate(value)) {
       entry["kind"] = "dma_immediate"; // built in the command register at each launch
-    } else if (type.isInteger(1) || type.isInteger(32)) {
+    } else if (isAtlasMemoryControl(value)) {
+      entry["kind"] = "memory_control"; // read from the control buffer where used
+    } else if (registerKindOf(value) == RegisterKind::Scalar) {
       registersOf(scalarRegs, "scalar", 1);
     } else if (auto mxu = mxuResources.find(value); mxu != mxuResources.end()) {
       bool weight = isa<VirtualMXUWeightType>(type);
@@ -720,7 +734,7 @@ llvm::json::Object VirtualAllocationPlan::report() const {
 
   // Legacy matmul and synchronous I/O have no SSA resource handles, but
   // still occupy fixed MXU slots and DMA channels during their expansion.
-  std::array<bool, kDMAChannels> synchronousChannels{};
+  std::array<bool, kAtlasDMAChannels> synchronousChannels{};
   if (function.getNumArguments())
     synchronousChannels[fixedResources.loadChannel] = true;
   function.walk([&](Operation *op) {
@@ -735,7 +749,7 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       synchronousChannels[fixedResources.storeChannel] = true;
   });
   Array implicitChannels;
-  for (unsigned channel = 0; channel < kDMAChannels; ++channel)
+  for (unsigned channel = 0; channel < kAtlasDMAChannels; ++channel)
     if (synchronousChannels[channel])
       implicitChannels.push_back(channel);
   unsigned peakInFlight =
@@ -749,7 +763,7 @@ llvm::json::Object VirtualAllocationPlan::report() const {
   // VMEM in 4-byte words, as the lowering addresses it.
   SmallVector<std::tuple<uint32_t, std::string, uint32_t>> windows;
   if (function.getNumArguments())
-    windows.push_back({fixedResources.mailboxWord, "control mailbox", 256});
+    windows.push_back({fixedResources.mailboxWord, "control mailbox", kAtlasRegisterWords});
   function.walk([&](Operation *op) {
     if (auto slot = dyn_cast<VirtualSlotOp>(op))
       windows.push_back({slot.getSlotWord(), slot.getPurpose().str(), unsigned(slot.getWords())});
@@ -757,18 +771,18 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       windows.push_back({uint32_t(op->getAttrOfType<IntegerAttr>("slot_word").getInt()),
                          "spill", atlasSpillWords(op)});
     if (auto input = dyn_cast<VirtualInputBF16Op>(op))
-      windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
-                         llvm::formatv("input {0}", input.getIndex()), 512});
+      windows.push_back({fixedResources.inputWord + input.getIndex() * kAtlasBF16TileWords,
+                         llvm::formatv("input {0}", input.getIndex()), kAtlasBF16TileWords});
     else if (auto input = dyn_cast<VirtualInputFP8Op>(op))
-      windows.push_back({fixedResources.inputWord + input.getIndex() * 512,
-                         llvm::formatv("input {0}", input.getIndex()), 256});
+      windows.push_back({fixedResources.inputWord + input.getIndex() * kAtlasBF16TileWords,
+                         llvm::formatv("input {0}", input.getIndex()), kAtlasRegisterWords});
     else if (auto output = dyn_cast<VirtualOutputBF16Op>(op))
-      windows.push_back({fixedResources.outputWord + output.getIndex() * 512,
-                         llvm::formatv("output {0}", output.getIndex()), 512});
+      windows.push_back({fixedResources.outputWord + output.getIndex() * kAtlasBF16TileWords,
+                         llvm::formatv("output {0}", output.getIndex()), kAtlasBF16TileWords});
   });
   if (hasPack) {
-    windows.push_back({fixedResources.packWord, "pack", 256});
-    windows.push_back({fixedResources.packRelayoutWord, "pack relayout", 256});
+    windows.push_back({fixedResources.packWord, "pack", kAtlasRegisterWords});
+    windows.push_back({fixedResources.packRelayoutWord, "pack relayout", kAtlasRegisterWords});
   }
   for (unsigned window = 0; window < windowsUsed; ++window)
     windows.push_back(
@@ -784,8 +798,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       {"registers", std::move(registers)},
       {"mxu", Object{{"slots_per_unit", kVirtualMXUSlots},
                      {"units", std::move(units)}}},
-      {"dma", Object{{"channels", kDMAChannels},
-                     {"staging_windows", kDMAChannels},
+      {"dma", Object{{"channels", kAtlasDMAChannels},
+                     {"staging_windows", kAtlasDMAChannels},
                      {"synchronous_channels", std::move(implicitChannels)},
                      {"peak_in_flight", peakInFlight}}},
       {"vmem", std::move(vmem)},

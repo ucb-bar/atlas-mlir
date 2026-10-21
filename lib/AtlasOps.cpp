@@ -1,5 +1,6 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -112,6 +113,22 @@ void VirtualOutputBF16Op::getEffects(
   effects.emplace_back(MemoryEffects::Write::get());
 }
 
+// The legacy matmul uses fixed MXU slots and PACK uses fixed VMEM scratch: each
+// must keep its place among other users of that state.
+void VirtualMXUMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void VirtualPackFP8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 static LogicalResult inRange(Operation *op, StringRef name, int64_t value,
                              int64_t first, int64_t last) {
   if (value >= first && value <= last)
@@ -194,19 +211,19 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
 }
 
 LogicalResult VirtualDMALoadFP8Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasRegisterBytes);
 }
 
 LogicalResult VirtualDMALoadBF16Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasBF16TileBytes);
 }
 
 LogicalResult VirtualDMAStoreFP8Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 1024);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasRegisterBytes);
 }
 
 LogicalResult VirtualDMAStoreBF16Op::verify() {
-  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), 2048);
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasBF16TileBytes);
 }
 
 

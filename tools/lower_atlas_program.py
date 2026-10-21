@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Lower one virtual Atlas program through every stage, keeping each artifact.
+"""Lower one virtual Atlas program through the stages of --atlas-compile, keeping each artifact.
 
 The output directory receives:
-  0-mxu-spilled.mlir after MXU lifetime splitting, when --spill is selected
-  1-virtual.mlir    the source, after --verify-atlas-virtual-stream
-  2-scheduled.mlir  after --schedule-atlas-virtual
-  2-spilled.mlir    after --spill-atlas-virtual, when --spill is selected
-  3-allocated.mlir  untimed machine IR, after --lower-atlas-virtual-to-machine
-                    and --insert-atlas-dma-waits
+  1-virtual.mlir    the source after MXU state spilling and verification (--atlas-compile-verify)
+  2-scheduled.mlir  after boundary DMA and virtual scheduling (--atlas-compile-schedule)
+  2-spilled.mlir    after register spilling (--atlas-compile-spill)
+  3-allocated.mlir  untimed machine IR, before DMA waits (--atlas-compile-lower)
   3-allocation.json the allocation plan: each value's registers, MXU slot or
                     DMA channel, peak demand against capacity per register
                     kind, the VMEM windows used, whether it fits, and every
                     error; written even when the program does not fit
-  4-timed.mlir      after the timing pass
+  4-timed.mlir      after DMA waits and stream scheduling (--atlas-compile-time)
   5-words.hex       instruction words, from atlas-emit
   5-map.json        the word-to-operation map, from atlas-emit --map-json
   5-program.json    the decoded program, from atlas-emit --program-json
@@ -37,30 +35,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def stages(source: Path, timing: str, spill: bool = False) -> list[tuple[str, str, Path | str, list[str]]]:
+def stages(source: Path) -> list[tuple[str, str, Path | str, list[str]]]:
     """(artifact, tool, input, options) for each command, in order."""
-    result = [
-        ("1-virtual.mlir", "atlas-opt", source, ["--verify-atlas-virtual-stream"]),
-        ("2-scheduled.mlir", "atlas-opt", "1-virtual.mlir",
-         ["--schedule-atlas-virtual", "--verify-atlas-virtual-stream"]),
-        ("3-allocated.mlir", "atlas-opt", "2-scheduled.mlir",
-         ["--lower-atlas-virtual-to-machine=allocation-report=3-allocation.json",
-          "--insert-atlas-dma-waits", "--verify-atlas-generated-schedule"]),
-        ("4-timed.mlir", "atlas-opt", "3-allocated.mlir",
-         [f"--{timing}", "--verify-atlas-timing", "--verify-atlas-generated-schedule"]),
+    return [
+        ("1-virtual.mlir", "atlas-opt", source, ["--atlas-compile-verify"]),
+        ("2-scheduled.mlir", "atlas-opt", "1-virtual.mlir", ["--atlas-compile-schedule"]),
+        ("2-spilled.mlir", "atlas-opt", "2-scheduled.mlir", ["--atlas-compile-spill"]),
+        ("3-allocated.mlir", "atlas-opt", "2-spilled.mlir",
+         ["--atlas-compile-lower=allocation-report=3-allocation.json"]),
+        ("4-timed.mlir", "atlas-opt", "3-allocated.mlir", ["--atlas-compile-time"]),
         ("5-words.hex", "atlas-emit", "4-timed.mlir", []),
         ("5-map.json", "atlas-emit", "4-timed.mlir", ["--map-json"]),
         ("5-program.json", "atlas-emit", "4-timed.mlir", ["--program-json"]),
     ]
-    if spill:
-        result.insert(2, ("2-spilled.mlir", "atlas-opt", "2-scheduled.mlir",
-                          ["--spill-atlas-virtual", "--verify-atlas-virtual-stream"]))
-        artifact, tool, _, options = result[3]
-        result[3] = artifact, tool, "2-spilled.mlir", options
-        result[0] = "1-virtual.mlir", "atlas-opt", "0-mxu-spilled.mlir", result[0][3]
-        result.insert(0, ("0-mxu-spilled.mlir", "atlas-opt", source,
-                          ["--spill-atlas-mxu-state"]))
-    return result
 
 
 def main() -> int:
@@ -70,10 +57,6 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--timing", choices=("insert-atlas-delays", "schedule-atlas-stream"),
-                        default="insert-atlas-delays")
-    parser.add_argument("--spill", action="store_true",
-                        help="recover MXU, tensor and scalar pressure through VMEM spills")
     args = parser.parse_args()
     try:
         source = args.source.resolve(strict=True)
@@ -86,7 +69,7 @@ def main() -> int:
         parser.error(str(error))
 
     commands, log = [], []
-    for artifact, tool, given, options in stages(source, args.timing, args.spill):
+    for artifact, tool, given, options in stages(source):
         command = [str(bin_dir / tool), *options, str(output / given)]
         if tool == "atlas-opt":
             # A diagnostic names the failing resource; the operation dump would bury it.

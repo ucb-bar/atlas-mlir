@@ -242,7 +242,7 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   }
   if (!pending.empty())
     return module.emitOpError("generated stream ends with a DMA transfer in flight");
-  for (size_t pc = 1; pc < n; ++pc)
+  for (size_t pc = 1; stream->delaySlots && pc < n; ++pc)
     if (redirect(ops[pc - 1]) && !waitsBefore[pc].empty())
       return ops[pc]->emitOpError("a delay slot cannot hold a DMA completion");
 
@@ -266,16 +266,15 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     for (int32_t id : waitsBefore[pc]) {
       const Transfer &t = transfers->find(id)->second;
       rewriter.setInsertionPoint(op);
-      OperationState state(op->getLoc(), "atlas.dma_wait");
-      state.addOperands(op->getOperand(0));
-      state.addTypes(op->getOperand(0).getType());
-      state.addAttribute("channel", rewriter.getI32IntegerAttr(t.channel));
-      state.addAttribute(kAtlasTagDMATransfer, rewriter.getI32IntegerAttr(t.id));
-      state.addAttribute(kAtlasTagTileCommand, rewriter.getI32IntegerAttr(t.waitCommand));
-      state.addAttribute(kAtlasTagCFGBlock, rewriter.getI32IntegerAttr(t.ownerBlock));
-      state.addAttribute(kAtlasTagCFGSource, rewriter.getI32IntegerAttr(t.ownerOperation));
-      Operation *wait = rewriter.create(state);
-      op->setOperand(0, wait->getResult(0));
+      // Every machine op threads its state as its first operand.
+      Value state = op->getOperand(0);
+      auto wait = DMAWaitOp::create(rewriter, op->getLoc(), state.getType(), state,
+                                    t.channel);
+      wait->setAttr(kAtlasTagDMATransfer, rewriter.getI32IntegerAttr(t.id));
+      wait->setAttr(kAtlasTagTileCommand, rewriter.getI32IntegerAttr(t.waitCommand));
+      wait->setAttr(kAtlasTagCFGBlock, rewriter.getI32IntegerAttr(t.ownerBlock));
+      wait->setAttr(kAtlasTagCFGSource, rewriter.getI32IntegerAttr(t.ownerOperation));
+      op->setOperand(0, wait.getResult());
     }
   }
   module->removeAttr(kAtlasDMAWaitsPending);
@@ -304,4 +303,8 @@ struct InsertAtlasDMAWaitsPass
 
 void mlir::atlas::registerInsertAtlasDMAWaitsPass() {
   PassRegistration<InsertAtlasDMAWaitsPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass() {
+  return std::make_unique<InsertAtlasDMAWaitsPass>();
 }

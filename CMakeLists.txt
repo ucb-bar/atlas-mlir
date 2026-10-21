@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 project(atlas_mlir LANGUAGES CXX C)
 
 find_package(MLIR REQUIRED CONFIG)
@@ -22,7 +22,22 @@ add_subdirectory(runtime)
 enable_testing()
 add_subdirectory(test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME atlas-dialect
-  COMMAND ${CMAKE_COMMAND} -E env
-    ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
-    ${Python3_EXECUTABLE} -m unittest discover -s ${PROJECT_SOURCE_DIR}/test -v)
+# One test per Python test module, run from test/ as discovery would, with the
+# native binding package importable. Modules of plain test functions use
+# pytest; the rest are unittest suites.
+file(GLOB atlas_python_tests CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/test/test_*.py)
+foreach(test_file IN LISTS atlas_python_tests)
+  get_filename_component(module ${test_file} NAME_WE)
+  file(STRINGS ${test_file} unittest_suite REGEX "unittest\\.TestCase")
+  if(unittest_suite)
+    set(runner unittest -v ${module})
+  else()
+    set(runner pytest -v -p no:cacheprovider ${module}.py)
+  endif()
+  add_test(NAME atlas-python-${module}
+    COMMAND ${Python3_EXECUTABLE} -m ${runner}
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test)
+  set_tests_properties(atlas-python-${module} PROPERTIES
+    ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
+    ENVIRONMENT_MODIFICATION PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python)
+endforeach()

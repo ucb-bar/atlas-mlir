@@ -3,6 +3,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/IR/Builders.h"
@@ -46,7 +47,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
     auto after = d.getAs<DenseI32ArrayAttr>("after");
     if (!id || *id != int32_t(tiles.size()) || !dram || !bytes || !channel || !after) return failure();
     Tile t{contractString(d, "kind"), uint32_t(*dram), uint32_t(*bytes), *channel, {after.asArrayRef().begin(), after.asArrayRef().end()}};
-    if ((t.kind == "dma_load" || t.kind == "dma_store" || t.kind == "dma_wait") && (t.channel < 0 || t.channel >= 8)) return failure();
+    if ((t.kind == "dma_load" || t.kind == "dma_store" || t.kind == "dma_wait") && (t.channel < 0 || t.channel >= kAtlasDMAChannels)) return failure();
     tiles.push_back(t);
   }
   for (const Tile &t : tiles)
@@ -117,7 +118,7 @@ ArrayAttr encodeEffects(Builder &b, ArrayRef<Effect> effects) {
 struct State {
   int32_t sourceBlock = 0;
   llvm::BitVector launched, completed;
-  std::array<int32_t, 8> pending;
+  std::array<int32_t, kAtlasDMAChannels> pending;
   explicit State(unsigned effects) : launched(effects), completed(effects) { pending.fill(-1); }
 };
 // Launches merge as may-facts to detect duplication; completions merge as
@@ -129,7 +130,7 @@ bool merge(State &to, const State &from) {
   to.launched |= from.launched;
   to.completed &= from.completed;
   changed |= launched != to.launched || completed != to.completed;
-  for (unsigned channel = 0; channel < 8; ++channel)
+  for (unsigned channel = 0; channel < kAtlasDMAChannels; ++channel)
     if (to.pending[channel] != from.pending[channel] && to.pending[channel] != -2) { to.pending[channel] = -2; changed = true; }
   return changed;
 }

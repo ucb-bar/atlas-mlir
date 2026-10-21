@@ -5,7 +5,9 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -38,19 +40,19 @@ bool validRecord(const Record &r) {
     return false;
   if (r.kind == "dma_wait")
     return r.reg == -1 && r.vmemByte == 0 && r.dramByte == 0 &&
-           r.bytes == 0 && r.channel >= 0 && r.channel < 8;
+           r.bytes == 0 && r.channel >= 0 && r.channel < kAtlasDMAChannels;
   if (isDMA(r))
-    return r.reg == -1 && r.channel >= 0 && r.channel < 8 &&
+    return r.reg == -1 && r.channel >= 0 && r.channel < kAtlasDMAChannels &&
            validDMATileGeometry(r.vmemByte, r.dramByte, r.bytes);
   if (r.channel != -1 || r.dramByte != 0)
     return false;
   if (isVector(r))
-    return r.reg >= 0 && r.reg < 64 && r.bytes == 1024 &&
-           r.vmemByte % 1024 == 0 && uint64_t(r.vmemByte) + 1024 <= kVmemBytes &&
-           r.vmemByte / kVmemBankBytes == (r.vmemByte + 1023) / kVmemBankBytes;
+    return r.reg >= 0 && r.reg < kAtlasTensorRegisters && r.bytes == kAtlasRegisterBytes &&
+           r.vmemByte % kAtlasRegisterBytes == 0 && uint64_t(r.vmemByte) + kAtlasRegisterBytes <= kAtlasVmemBytes &&
+           r.vmemByte / kVmemBankBytes == (r.vmemByte + kAtlasRegisterBytes - 1) / kVmemBankBytes;
   return (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") && r.reg > 0 && r.reg < 32 &&
          r.transfer == -1 && r.bytes == 4 && r.vmemByte % 4 == 0 &&
-         uint64_t(r.vmemByte) + 4 <= kVmemBytes;
+         uint64_t(r.vmemByte) + 4 <= kAtlasVmemBytes;
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
@@ -108,7 +110,7 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
         ((r.kind == "slot_load" || r.kind == "vload") && slotReads.count(r.id))) {
       valid = r.after.empty();
     } else if (r.kind == "dma_store") {
-      valid = r.after.size() == r.bytes / 1024;
+      valid = r.after.size() == r.bytes / kAtlasRegisterBytes;
       unsigned covered = 0;
       for (int32_t id : r.after) {
         const Record &store = records[id];
@@ -117,14 +119,14 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
           valid = false;
           break;
         }
-        unsigned half = (store.vmemByte - r.vmemByte) / 1024;
+        unsigned half = (store.vmemByte - r.vmemByte) / kAtlasRegisterBytes;
         if (covered & (1u << half)) {
           valid = false;
           break;
         }
         covered |= 1u << half;
       }
-      valid &= covered == (1u << (r.bytes / 1024)) - 1;
+      valid &= covered == (1u << (r.bytes / kAtlasRegisterBytes)) - 1;
     } else if (r.kind == "dma_wait") {
       if (r.after.size() == 1) {
         const Record &launch = records[r.after[0]];
@@ -209,8 +211,8 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
 AtlasTileExpansion mlir::atlas::atlasTileExpansion(Operation *op) {
   if (isa<VirtualControlOp>(op)) return {1, 0};
   if (isAtlasSlotAccess(op)) {
-    auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
-    unsigned halves = slot.getWords() == 1 ? 1 : slot.getWords() / 256;
+    auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
+    unsigned halves = slot.getWords() == 1 ? 1 : slot.getWords() / kAtlasRegisterWords;
     return {halves * (isa<VirtualSlotCopyOp>(op) ? 2u : 1u), 0};
   }
   return atlasTileExpansion(op->getName().getStringRef());
@@ -228,7 +230,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   llvm::DenseMap<Value, unsigned> registers;
   for (const VirtualRegisterAssignment &assignment : tensorRegisters) {
     if (!assignment.value || !knownValues.contains(assignment.value) ||
-        assignment.reg >= 64 ||
+        assignment.reg >= kAtlasTensorRegisters ||
         !isa<VirtualBF16Type, VirtualFP8Type>(assignment.value.getType()) ||
         (isa<VirtualBF16Type>(assignment.value.getType()) && assignment.reg % 2) ||
         !registers.try_emplace(assignment.value, assignment.reg).second)
@@ -254,7 +256,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     if (!attr || attr.getValue().isNegative() || attr.getValue().getActiveBits() > 32)
       return std::nullopt;
     uint64_t value = attr.getValue().getZExtValue();
-    if (value < 0x80000000u || value % 1024)
+    if (value < 0x80000000u || value % kAtlasRegisterBytes)
       return std::nullopt;
     return value;
   };
@@ -288,7 +290,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     if (!controlBase || function.getNumArguments() > 256)
       return function.emitOpError("tile contract requires an aligned bounded scalar mailbox");
     auto launch = add("dma_load", -1, uint64_t(fixed.mailboxWord) * 4,
-                      *controlBase, 1024, fixed.loadChannel, -1);
+                      *controlBase, kAtlasRegisterBytes, fixed.loadChannel, -1);
     if (failed(launch))
       return function.emitOpError("tile contract has invalid mailbox transfer geometry");
     auto wait = addWait(*launch, fixed.loadChannel, -1);
@@ -319,26 +321,26 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
           return failure();
         uint64_t index = indexAttr.getValue().getZExtValue();
         uint64_t window = output ? fixed.outputWindowWords : fixed.inputWindowWords;
-        if (index >= window / 512)
+        if (index >= window / kAtlasBF16TileWords)
           return op.emitOpError("tile contract boundary index exceeds its fixed VMEM window");
         for (unsigned half = 0; half < (bf16 ? 2u : 1u); ++half) {
           uint64_t vmem = (uint64_t(output ? fixed.outputWord : fixed.inputWord) +
-                           index * 512 + half * 256) * 4;
-          uint64_t dram = *(output ? outputBase : inputBase) + index * 2048 + half * 1024;
+                           index * kAtlasBF16TileWords + half * kAtlasRegisterWords) * 4;
+          uint64_t dram = *(output ? outputBase : inputBase) + index * kAtlasBF16TileBytes + half * kAtlasRegisterBytes;
           unsigned channel = output ? fixed.storeChannel : fixed.loadChannel;
           if (output) {
-            auto store = add("vstore", *reg + half, vmem, 0, 1024, -1, -1);
+            auto store = add("vstore", *reg + half, vmem, 0, kAtlasRegisterBytes, -1, -1);
             if (failed(store))
               return failure();
-            auto launch = add("dma_store", -1, vmem, dram, 1024, channel, -1, {*store});
+            auto launch = add("dma_store", -1, vmem, dram, kAtlasRegisterBytes, channel, -1, {*store});
             if (failed(launch) || failed(addWait(*launch, channel, -1)))
               return failure();
           } else {
-            auto launch = add("dma_load", -1, vmem, dram, 1024, channel, -1);
+            auto launch = add("dma_load", -1, vmem, dram, kAtlasRegisterBytes, channel, -1);
             if (failed(launch))
               return failure();
             auto wait = addWait(*launch, channel, -1);
-            if (failed(wait) || failed(add("vload", *reg + half, vmem, 0, 1024, -1, -1, {*wait})))
+            if (failed(wait) || failed(add("vload", *reg + half, vmem, 0, kAtlasRegisterBytes, -1, -1, {*wait})))
               return failure();
           }
         }
@@ -351,13 +353,13 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
         SmallVector<int32_t, 2> after;
         if (store) {
-          auto reg = tensorReg(op.getOperand(1));
+          auto reg = tensorReg(virtualDMATransfer(&op)->tile);
           if (failed(reg))
             return failure();
           for (unsigned half = 0; half < p.halves; ++half) {
             auto id = add("vstore", *reg + half,
-                          (uint64_t(p.stagingWord) + half * 256) * 4,
-                          0, 1024, -1, p.id);
+                          (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,
+                          0, kAtlasRegisterBytes, -1, p.id);
             if (failed(id))
               return failure();
             after.push_back(*id);
@@ -380,8 +382,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
             return failure();
           for (unsigned half = 0; half < p.halves; ++half)
             if (failed(add("vload", *reg + half,
-                           (uint64_t(p.stagingWord) + half * 256) * 4,
-                           0, 1024, -1, p.id, {*wait})))
+                           (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,
+                           0, kAtlasRegisterBytes, -1, p.id, {*wait})))
               return failure();
         }
       } else if (auto control = dyn_cast<VirtualControlOp>(op)) {
@@ -390,39 +392,40 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
             (uint64_t(fixed.mailboxWord) + control.getIndex()) * 4,
             0, 4, -1, -1, {1}))) return failure();
       } else if (isAtlasSlotAccess(&op)) {
-        auto slot = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
-        bool copy = isa<VirtualSlotCopyOp>(op), save = isa<VirtualSaveOp>(op);
-        auto destination = copy ? op.getOperand(2).getDefiningOp<VirtualSlotOp>() : slot;
+        auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
+        auto copy = dyn_cast<VirtualSlotCopyOp>(op);
+        bool save = isa<VirtualSaveOp>(op);
+        auto destination = copy ? copy.getDst().getDefiningOp<VirtualSlotOp>() : slot;
         bool scalar = slot.getWords() == 1;
         auto reg = copy ? FailureOr<unsigned>(scalar ? fixed.scalarTemporary : fixed.tensorTemporary) :
-            tensorReg(save ? op.getOperand(2) : op.getResult(1));
+            tensorReg(atlasSlotValue(&op));
         if (failed(reg)) return failure();
-        unsigned halves = scalar ? 1 : slot.getWords() / 256;
+        unsigned halves = scalar ? 1 : slot.getWords() / kAtlasRegisterWords;
         for (unsigned half = 0; half < halves; ++half) {
           auto access = [&](bool write, VirtualSlotOp memory) {
             return add(scalar ? (write ? "slot_store" : "slot_load") : (write ? "vstore" : "vload"),
                 *reg + (!copy && !scalar ? half : 0),
-                (uint64_t(memory.getSlotWord()) + half * 256) * 4, 0,
-                scalar ? 4 : 1024, -1, -1);
+                (uint64_t(memory.getSlotWord()) + half * kAtlasRegisterWords) * 4, 0,
+                scalar ? 4 : kAtlasRegisterBytes, -1, -1);
           };
           if (copy && failed(access(false, slot))) return failure();
           if (failed(access(copy || save, destination))) return failure();
         }
       } else if (isAtlasSpillStore(&op) || isAtlasSpillLoad(&op)) {
         bool store = isAtlasSpillStore(&op);
-        Value saved = store ? op.getResult(1) : op.getOperand(1);
+        Value saved = atlasSpillSaved(&op);
         Operation *writer = saved.getDefiningOp();
-        auto reg = tensorReg(store ? op.getOperand(1) : op.getResult(1));
+        auto reg = tensorReg(atlasSpillTile(&op));
         if (failed(reg)) return failure();
         uint64_t word = writer->getAttrOfType<IntegerAttr>("slot_word").getInt();
-        unsigned halves = atlasSpillWords(writer) / 256;
+        unsigned halves = atlasSpillWords(writer) / kAtlasRegisterWords;
         if (!store && spillStores[saved].size() != halves)
           return op.emitOpError("reload has no established spill writer");
         for (unsigned half = 0; half < halves; ++half) {
           SmallVector<int32_t, 2> after;
           if (!store) after.push_back(spillStores[saved][half]);
           auto id = add(store ? "vstore" : "vload", *reg + half,
-                        (word + half * 256) * 4, 0, 1024, -1, -1, after);
+                        (word + half * kAtlasRegisterWords) * 4, 0, kAtlasRegisterBytes, -1, -1, after);
           if (failed(id)) return failure();
           if (store) spillStores[saved].push_back(*id);
         }
@@ -431,10 +434,10 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         if (failed(reg))
           return failure();
         auto store = add("vstore", *reg, uint64_t(fixed.packWord) * 4,
-                         0, 1024, -1, -1);
+                         0, kAtlasRegisterBytes, -1, -1);
         if (failed(store) || failed(add("vload", *reg,
                                       uint64_t(fixed.packRelayoutWord) * 4,
-                                      0, 1024, -1, -1, {*store})))
+                                      0, kAtlasRegisterBytes, -1, -1, {*store})))
           return failure();
       }
     }

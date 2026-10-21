@@ -1,7 +1,9 @@
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dominance.h"
@@ -12,6 +14,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include <algorithm>
 #include <deque>
 
@@ -29,7 +32,7 @@ bool mlir::atlas::isAtlasSpillLoad(Operation *op) {
 unsigned mlir::atlas::atlasSpillWords(Operation *store) {
   if (auto slot = dyn_cast<VirtualSlotOp>(store))
     return slot.getWords();
-  return isa<VirtualSpillBF16Op>(store) ? 512 : 256;
+  return isa<VirtualSpillBF16Op>(store) ? kAtlasBF16TileWords : kAtlasRegisterWords;
 }
 
 StringRef mlir::atlas::atlasSlotKind(Type type) {
@@ -44,6 +47,54 @@ bool mlir::atlas::isAtlasSlotAccess(Operation *op) {
   return isa<VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp>(op);
 }
 
+Value mlir::atlas::atlasAccessedSlot(Operation *op) {
+  return llvm::TypeSwitch<Operation *, Value>(op)
+      .Case<VirtualSaveOp, VirtualRestoreOp>([](auto x) { return x.getSlot(); })
+      .Case([](VirtualSlotCopyOp copy) { return copy.getSrc(); })
+      .Default([](Operation *) { return Value(); });
+}
+
+Value mlir::atlas::atlasSlotValue(Operation *op) {
+  return llvm::TypeSwitch<Operation *, Value>(op)
+      .Case([](VirtualSaveOp save) { return save.getSrc(); })
+      .Case([](VirtualRestoreOp restore) { return restore.getValue(); })
+      .Default([](Operation *) { return Value(); });
+}
+
+Value mlir::atlas::atlasSpillTile(Operation *op) {
+  return llvm::TypeSwitch<Operation *, Value>(op)
+      .Case<VirtualSpillBF16Op, VirtualSpillFP8Op>([](auto x) { return x.getSrc(); })
+      .Case<VirtualReloadBF16Op, VirtualReloadFP8Op>([](auto x) { return x.getValue(); })
+      .Default([](Operation *) { return Value(); });
+}
+
+Operation *mlir::atlas::createAtlasSpillStore(OpBuilder &builder, Location loc,
+                                              Value state, Value tile,
+                                              uint32_t slotWord) {
+  Type saved = VirtualSpillType::get(builder.getContext());
+  if (isa<VirtualBF16Type>(tile.getType()))
+    return VirtualSpillBF16Op::create(builder, loc, state.getType(), saved, state,
+                                      tile, slotWord);
+  return VirtualSpillFP8Op::create(builder, loc, state.getType(), saved, state,
+                                   tile, slotWord);
+}
+
+Operation *mlir::atlas::createAtlasReload(OpBuilder &builder, Location loc,
+                                          Value state, Value saved, Type type) {
+  if (isa<VirtualBF16Type>(type))
+    return VirtualReloadBF16Op::create(builder, loc, state.getType(), type, state,
+                                       saved);
+  return VirtualReloadFP8Op::create(builder, loc, state.getType(), type, state,
+                                    saved);
+}
+
+Value mlir::atlas::atlasSpillSaved(Operation *op) {
+  return llvm::TypeSwitch<Operation *, Value>(op)
+      .Case<VirtualSpillBF16Op, VirtualSpillFP8Op, VirtualReloadBF16Op,
+            VirtualReloadFP8Op>([](auto x) { return x.getSaved(); })
+      .Default([](Operation *) { return Value(); });
+}
+
 bool mlir::atlas::isAtlasMemoryControl(Value value) {
   auto arg = dyn_cast<BlockArgument>(value);
   auto function = arg ? dyn_cast<func::FuncOp>(arg.getOwner()->getParentOp()) : func::FuncOp();
@@ -55,15 +106,15 @@ LogicalResult mlir::atlas::verifyAtlasSlotOperation(Operation *op) {
     StringRef kind = slot.getKind();
     int64_t words = slot.getWordsAttr().getInt();
     auto fixed = VirtualAllocationPlan().fixed();
-    if ((kind == "bf16" ? words != 512 : kind == "fp8" ? words != 256 :
+    if ((kind == "bf16" ? words != kAtlasBF16TileWords : kind == "fp8" ? words != kAtlasRegisterWords :
          kind == "i1" || kind == "i32" ? words != 1 :
-         kind != "raw" || words <= 0 || words % 256) ||
+         kind != "raw" || words <= 0 || words % kAtlasRegisterWords) ||
         words > fixed.spillWindowWords ||
         (slot.getPurpose() != "spill" && slot.getPurpose() != "edge" &&
          slot.getPurpose() != "scratch"))
       return op->emitOpError("invalid VMEM slot kind, extent or purpose");
     int64_t word = slot.getSlotWordAttr().getInt();
-    unsigned alignment = words == 1 ? 1 : 256;
+    unsigned alignment = words == 1 ? 1 : kAtlasRegisterWords;
     if (word != -1 && (word < fixed.spillWord || word % alignment ||
         uint64_t(word) + words > uint64_t(fixed.spillWord) + fixed.spillWindowWords))
       return op->emitOpError("VMEM slot is unaligned or outside the temporary pool");
@@ -74,7 +125,7 @@ LogicalResult mlir::atlas::verifyAtlasSlotOperation(Operation *op) {
       return op->emitOpError("VMEM slots must be declared in the entry block");
     return success();
   }
-  auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
+  auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
   if (!slot || slot->getParentOp() != op->getParentOp())
     return op->emitOpError("VMEM access needs a slot in the same function");
   if (auto copy = dyn_cast<VirtualSlotCopyOp>(op)) {
@@ -84,8 +135,7 @@ LogicalResult mlir::atlas::verifyAtlasSlotOperation(Operation *op) {
         destination.getKind() != slot.getKind() || destination.getWords() != slot.getWords())
       return op->emitOpError("slot copy needs distinct slots with matching formats and extents");
   } else {
-    Type type = isa<VirtualSaveOp>(op) ? op->getOperand(2).getType() : op->getResult(1).getType();
-    if (atlasSlotKind(type) != slot.getKind())
+    if (atlasSlotKind(atlasSlotValue(op).getType()) != slot.getKind())
       return op->emitOpError("VMEM access type differs from its slot format");
   }
   return success();
@@ -98,10 +148,10 @@ LogicalResult mlir::atlas::verifyAtlasSpillOperation(Operation *op) {
     unsigned words = atlasSpillWords(op);
     if (!slot || slot.getInt() < fixed.spillWord ||
         uint64_t(slot.getInt()) + words > uint64_t(fixed.spillWord) + fixed.spillWindowWords ||
-        slot.getInt() % 256)
+        slot.getInt() % kAtlasRegisterWords)
       return op->emitOpError("spill slot is unaligned or outside the reserved VMEM frame");
   } else {
-    Operation *store = op->getOperand(1).getDefiningOp();
+    Operation *store = atlasSpillSaved(op).getDefiningOp();
     bool bf16 = isa<VirtualReloadBF16Op>(op);
     if (!store || !isAtlasSpillStore(store) ||
         bf16 != isa<VirtualSpillBF16Op>(store) ||
@@ -116,7 +166,7 @@ struct Slot {
   Operation *store;
   unsigned begin, end, words;
   uint32_t word;
-  unsigned alignment = 256;
+  unsigned alignment = kAtlasRegisterWords;
   bool pinned = false;
 };
 
@@ -146,7 +196,7 @@ SmallVector<Slot> slotsOf(func::FuncOp function) {
       slots.push_back({&op, begin, end, atlasSpillWords(&op),
                        word ? uint32_t(word.getInt()) : 0});
       if (auto slot = dyn_cast<VirtualSlotOp>(op)) {
-        slots.back().alignment = slot.getWords() == 1 ? 1 : 256;
+        slots.back().alignment = slot.getWords() == 1 ? 1 : kAtlasRegisterWords;
         slots.back().pinned = slot.getPinned();
       }
     }
@@ -211,52 +261,50 @@ Value stateBefore(Operation *where) {
   return state;
 }
 
-Operation *insertMemoryOp(Operation *before, StringRef name, Value value,
-                          Type result, bool store) {
+// Inserts the op `build` makes from the state before `before`. The new op
+// consumes the old state; the following operation must consume the new one.
+// The verified input has one chain.
+Operation *insertOnChain(Operation *before,
+                         function_ref<Operation *(OpBuilder &, Location, Value)> build) {
   OpBuilder builder(before);
   Value state = stateBefore(before);
-  OperationState os(before->getLoc(), name);
-  os.addOperands({state, value});
-  os.addTypes({state.getType(), result});
-  if (store)
-    os.addAttribute("slot_word", builder.getI32IntegerAttr(0));
-  Operation *op = builder.create(os);
-  // The newly inserted operation consumes the old state; the following
-  // operation must consume the new one. The verified input has one chain.
+  Operation *op = build(builder, before->getLoc(), state);
   state.replaceUsesWithIf(op->getResult(0), [&](OpOperand &use) {
     return use.getOwner() != op && use.getOwner()->getBlock() == before->getBlock();
   });
   return op;
 }
 
-Operation *slotAccess(Operation *before, StringRef name, Value slot,
-                      Value value = {}, Type result = {}) {
-  OpBuilder builder(before);
-  Value state = stateBefore(before);
-  OperationState os(before->getLoc(), name);
-  os.addOperands(state);
-  if (slot) os.addOperands(slot);
-  if (value) os.addOperands(value);
-  os.addTypes(state.getType());
-  if (result) os.addTypes(result);
-  Operation *op = builder.create(os);
-  state.replaceUsesWithIf(op->getResult(0), [&](OpOperand &use) {
-    return use.getOwner() != op && use.getOwner()->getBlock() == before->getBlock();
+void saveToSlot(Operation *before, Value slot, Value value) {
+  insertOnChain(before, [&](OpBuilder &builder, Location loc, Value state) {
+    return VirtualSaveOp::create(builder, loc, state.getType(), state, slot, value)
+        .getOperation();
   });
-  return op;
+}
+
+Value restoreFromSlot(Operation *before, Value slot, Type type) {
+  return insertOnChain(before, [&](OpBuilder &builder, Location loc, Value state) {
+           return VirtualRestoreOp::create(builder, loc, state.getType(), type,
+                                           state, slot)
+               .getOperation();
+         })
+      ->getResult(1);
+}
+
+void copySlot(Operation *before, Value src, Value dst) {
+  insertOnChain(before, [&](OpBuilder &builder, Location loc, Value state) {
+    return VirtualSlotCopyOp::create(builder, loc, state.getType(), state, src, dst)
+        .getOperation();
+  });
 }
 
 Value newSlot(func::FuncOp function, Type type, StringRef purpose) {
   OpBuilder builder(&*std::next(function.front().begin()));
-  OperationState os(function.getLoc(), "atlas.virtual_slot");
   StringRef kind = atlasSlotKind(type);
-  unsigned words = kind == "bf16" ? 512 : kind == "fp8" ? 256 : 1;
-  os.addTypes(VirtualSpillType::get(function.getContext()));
-  os.addAttribute("kind", builder.getStringAttr(kind));
-  os.addAttribute("words", builder.getI32IntegerAttr(words));
-  os.addAttribute("slot_word", builder.getI32IntegerAttr(-1));
-  os.addAttribute("purpose", builder.getStringAttr(purpose));
-  return builder.create(os)->getResult(0);
+  unsigned words = kind == "bf16" ? kAtlasBF16TileWords : kind == "fp8" ? kAtlasRegisterWords : 1;
+  return VirtualSlotOp::create(builder, function.getLoc(),
+                               VirtualSpillType::get(function.getContext()), kind,
+                               words, /*slot_word=*/-1, purpose);
 }
 
 void spillEntryArguments(func::FuncOp function) {
@@ -269,13 +317,15 @@ void spillEntryArguments(func::FuncOp function) {
         if (llvm::is_contained(op.getOperands(), argument)) consumers.push_back(&op);
     if (consumers.empty()) continue;
     Value slot = newSlot(function, argument.getType(), "spill");
-    Operation *load = slotAccess(anchor, "atlas.virtual_control", {}, {}, argument.getType());
-    load->setAttr("index", IntegerAttr::get(IntegerType::get(function.getContext(), 32), argument.getArgNumber()));
-    slotAccess(anchor, "atlas.virtual_save", slot, load->getResult(1));
-    for (Operation *consumer : consumers) {
-      Value restored = slotAccess(consumer, "atlas.virtual_restore", slot, {}, argument.getType())->getResult(1);
-      consumer->replaceUsesOfWith(argument, restored);
-    }
+    Operation *load = insertOnChain(anchor, [&](OpBuilder &builder, Location loc, Value state) {
+      return VirtualControlOp::create(builder, loc, state.getType(), argument.getType(),
+                                      state, argument.getArgNumber())
+          .getOperation();
+    });
+    saveToSlot(anchor, slot, load->getResult(1));
+    for (Operation *consumer : consumers)
+      consumer->replaceUsesOfWith(argument,
+                                  restoreFromSlot(consumer, slot, argument.getType()));
   }
 }
 
@@ -288,9 +338,7 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
   for (Block &block : function.getBody()) {
     if (&block == &function.front()) continue;
     for (BlockArgument arg : block.getArguments())
-      if ((kind == RegisterKind::BF16 && isa<VirtualBF16Type>(arg.getType())) ||
-          (kind == RegisterKind::FP8 && isa<VirtualFP8Type>(arg.getType())) ||
-          (kind == RegisterKind::Scalar && (arg.getType().isInteger(1) || arg.getType().isInteger(32))))
+      if (registerKindOf(arg) == kind)
         arguments.push_back(arg);
   }
   if (arguments.empty()) return 0;
@@ -326,12 +374,12 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
           StringRef kind = atlasSlotKind(moves.front().type);
           Value &temporary = temporaries[kind];
           if (!temporary) temporary = newSlot(function, moves.front().type, "edge");
-          slotAccess(branch, "atlas.virtual_slot_copy", source, temporary);
+          copySlot(branch, source, temporary);
           for (Move &move : moves) if (move.src == source) move.src = temporary;
           continue;
         }
-        if (ready->src) slotAccess(branch, "atlas.virtual_slot_copy", ready->src, ready->dst);
-        else slotAccess(branch, "atlas.virtual_save", ready->dst, ready->value);
+        if (ready->src) copySlot(branch, ready->src, ready->dst);
+        else saveToSlot(branch, ready->dst, ready->value);
         moves.erase(ready);
       }
       for (BlockArgument arg : llvm::reverse(destination->getArguments()))
@@ -356,10 +404,8 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
     for (Block &block : function.getBody())
       for (Operation &op : block)
         if (llvm::is_contained(op.getOperands(), arg)) consumers.push_back(&op);
-    for (Operation *consumer : consumers) {
-      Value value = slotAccess(consumer, "atlas.virtual_restore", slots[arg], {}, arg.getType())->getResult(1);
-      consumer->replaceUsesOfWith(arg, value);
-    }
+    for (Operation *consumer : consumers)
+      consumer->replaceUsesOfWith(arg, restoreFromSlot(consumer, slots[arg], arg.getType()));
   }
   for (BlockArgument arg : llvm::reverse(arguments)) arg.getOwner()->eraseArgument(arg.getArgNumber());
   return arguments.size();
@@ -377,21 +423,18 @@ void spill(Value value, Operation *staged) {
   if (auto constant = provenI32(value)) {
     for (Operation *consumer : consumers) {
       OpBuilder builder(consumer);
-      OperationState os(consumer->getLoc(), "arith.constant");
-      os.addTypes(value.getType());
-      os.addAttribute("value", builder.getI32IntegerAttr(*constant));
-      os.addAttribute("atlas.spill_rematerialized", builder.getUnitAttr());
-      consumer->replaceUsesOfWith(value, builder.create(os)->getResult(0));
+      auto rematerialized = arith::ConstantIntOp::create(
+          builder, consumer->getLoc(), int64_t(*constant), 32);
+      rematerialized->setAttr("atlas.spill_rematerialized", builder.getUnitAttr());
+      consumer->replaceUsesOfWith(value, rematerialized);
     }
     return;
   }
-  if (value.getType().isInteger(1) || value.getType().isInteger(32)) {
+  if (registerKindOf(value) == RegisterKind::Scalar) {
     Value slot = newSlot(function, value.getType(), "spill");
-    slotAccess(value.getDefiningOp()->getNextNode(), "atlas.virtual_save", slot, value);
-    for (Operation *consumer : consumers) {
-      Value restored = slotAccess(consumer, "atlas.virtual_restore", slot, {}, value.getType())->getResult(1);
-      consumer->replaceUsesOfWith(value, restored);
-    }
+    saveToSlot(value.getDefiningOp()->getNextNode(), slot, value);
+    for (Operation *consumer : consumers)
+      consumer->replaceUsesOfWith(value, restoreFromSlot(consumer, slot, value.getType()));
     return;
   }
   // A loaded tile stays in its staging window until `staged`, where its
@@ -406,14 +449,13 @@ void spill(Value value, Operation *staged) {
       consumers.erase(consumers.begin());
     }
   }
-  bool bf16 = isa<VirtualBF16Type>(value.getType());
-  Operation *store = insertMemoryOp(saveBefore,
-      bf16 ? "atlas.virtual_spill_bf16" : "atlas.virtual_spill_fp8",
-      value, VirtualSpillType::get(value.getContext()), true);
+  Operation *store = insertOnChain(saveBefore, [&](OpBuilder &builder, Location loc, Value state) {
+    return createAtlasSpillStore(builder, loc, state, value, /*slotWord=*/0);
+  });
   for (Operation *consumer : consumers) {
-    Operation *reload = insertMemoryOp(consumer,
-        bf16 ? "atlas.virtual_reload_bf16" : "atlas.virtual_reload_fp8",
-        store->getResult(1), value.getType(), false);
+    Operation *reload = insertOnChain(consumer, [&](OpBuilder &builder, Location loc, Value state) {
+      return createAtlasReload(builder, loc, state, store->getResult(1), value.getType());
+    });
     for (OpOperand &operand : consumer->getOpOperands())
       if (operand.get() == value)
         operand.set(reload->getResult(1));
@@ -457,7 +499,7 @@ struct SpillAtlasVirtualPass
     auto function = *functions.begin();
     auto fixed = VirtualAllocationPlan().fixed();
     unsigned limit = frameWords ? unsigned(frameWords) : fixed.spillWindowWords;
-    if (limit > fixed.spillWindowWords || limit % 256) {
+    if (limit > fixed.spillWindowWords || limit % kAtlasRegisterWords) {
       function.emitError("spill budget must be aligned and fit the reserved VMEM frame");
       return signalPassFailure();
     }
@@ -560,10 +602,9 @@ struct SpillAtlasVirtualPass
           if (isAtlasSpillLoad(&op) || isAtlasSpillStore(&op) || isAtlasSlotAccess(&op))
             continue;
           for (Value value : op.getResults()) {
-            if (saved.contains(value) ||
-                (!(bf16 && isa<VirtualBF16Type>(value.getType())) &&
-                 !(fp8 && isa<VirtualFP8Type>(value.getType())) &&
-                 !(scalar && (value.getType().isInteger(1) || value.getType().isInteger(32)))))
+            std::optional<RegisterKind> kind = registerKindOf(value);
+            bool overflowed = kind == RegisterKind::BF16 ? bf16 : kind == RegisterKind::FP8 ? fp8 : scalar;
+            if (saved.contains(value) || !kind || !overflowed)
               continue;
             // A loaded tile holds registers from where it is staged.
             unsigned first = order.lookup(&op);
@@ -634,10 +675,10 @@ LogicalResult mlir::atlas::verifyAtlasSpillSlots(func::FuncOp function) {
       if (!isAtlasSlotAccess(&op)) continue;
       if (failed(verifyAtlasSlotOperation(&op))) return failure();
       if (isa<VirtualRestoreOp, VirtualSlotCopyOp>(op) &&
-          !state.contains(op.getOperand(1)) && diagnose)
+          !state.contains(atlasAccessedSlot(&op)) && diagnose)
         return op.emitOpError("VMEM slot is not initialized on every reaching path");
-      if (isa<VirtualSaveOp>(op)) state.insert(op.getOperand(1));
-      if (isa<VirtualSlotCopyOp>(op)) state.insert(op.getOperand(2));
+      if (auto save = dyn_cast<VirtualSaveOp>(op)) state.insert(save.getSlot());
+      if (auto copy = dyn_cast<VirtualSlotCopyOp>(op)) state.insert(copy.getDst());
     }
     return success();
   };
@@ -667,4 +708,8 @@ LogicalResult mlir::atlas::verifyAtlasSpillSlots(func::FuncOp function) {
 void mlir::atlas::registerSpillAtlasVirtualPass() {
   registerSpillAtlasMXUStatePass();
   PassRegistration<SpillAtlasVirtualPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createSpillAtlasVirtualPass() {
+  return std::make_unique<SpillAtlasVirtualPass>();
 }

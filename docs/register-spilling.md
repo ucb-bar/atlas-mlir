@@ -10,25 +10,21 @@ and physical timing passes.
 
 ```sh
 mkdir -p out
-build/bin/atlas-opt input.mlir \
-  --spill-atlas-mxu-state --schedule-atlas-virtual --spill-atlas-virtual \
-  --lower-atlas-virtual-to-machine --insert-atlas-dma-waits \
-  --insert-atlas-delays --verify-atlas-generated-schedule \
-  --verify-atlas-timing -o out/machine.mlir
+build/bin/atlas-opt input.mlir --atlas-compile -o out/machine.mlir
 build/bin/atlas-emit out/machine.mlir > out/words.hex
 ```
 
-The native Merlin binding enables spilling in both compilation pipelines.
-The stage-preserving driver enables it with `--spill` and retains the rewritten
-virtual IR in `2-spilled.mlir`:
+Both native binding pipelines spill, and so does the stage-preserving driver,
+which retains the rewritten virtual IR in `2-spilled.mlir`:
 
 ```sh
-python tools/lower_atlas_program.py input.mlir --spill --output-dir out/spilled
+python tools/lower_atlas_program.py input.mlir --output-dir out/spilled
 ```
 
 ## Scheduling integration
 
-For programs that need spilling, use this order:
+For programs that need spilling, use this order, which `atlas-opt
+--atlas-compile` runs:
 
 1. `--spill-atlas-mxu-state`: turn live MXU handles into saved tiles before
    scheduling or strict virtual-stream verification.

@@ -1,6 +1,7 @@
 #include "Atlas/AtlasDMAAllocationVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/DenseSet.h"
@@ -13,10 +14,7 @@ using namespace mlir::atlas;
 namespace {
 // Selected RTL: ScalarCore.scala AtlasMemMap, DmaParams.scala defaults, and
 // LSU.scala VLOAD/VSTORE assertions. DMA bases are VMEM word indices, as wired
-// by AtlasCore.scala; every staging half is one aligned 1 KiB tensor transfer.
-constexpr uint64_t kVMEMWords = 0x180000 / 4;
-constexpr unsigned kDMAChannels = 8;
-constexpr unsigned kHalfWords = 1024 / 4;
+// by AtlasCore.scala; every staging half is one aligned register transfer.
 
 bool isLaunch(Operation *op) {
   return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
@@ -72,7 +70,7 @@ private:
     auto &note = diagnostic.attachNote(transfer.getLoc());
     note << label << " " << stream.str();
     if (const DMATransferPlacement *placement = placements.lookup(transfer)) {
-      uint64_t end = uint64_t(placement->stagingWord) + placement->halves * kHalfWords;
+      uint64_t end = uint64_t(placement->stagingWord) + placement->halves * kAtlasRegisterWords;
       note << "; channel " << placement->channel << ", VMEM words ["
            << placement->stagingWord << ", " << end << ")";
     }
@@ -90,14 +88,14 @@ private:
     unsigned halves = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(launch) ? 2 : 1;
     if (placement.halves != halves)
       return assignmentError(transfer, "DMA placement halves do not match the transfer format");
-    if (placement.channel >= kDMAChannels)
+    if (placement.channel >= kAtlasDMAChannels)
       return assignmentError(transfer, "DMA channel is outside [0, 7]");
     if (placement.id > 0x7FFFFFFFU)
       return assignmentError(transfer, "DMA transfer id must fit a nonnegative i32");
-    if (placement.stagingWord % kHalfWords)
+    if (placement.stagingWord % kAtlasRegisterWords)
       return assignmentError(transfer, "DMA staging word address must be aligned to 1 KiB");
-    uint64_t end = uint64_t(placement.stagingWord) + halves * kHalfWords;
-    if (end > kVMEMWords)
+    uint64_t end = uint64_t(placement.stagingWord) + halves * kAtlasRegisterWords;
+    if (end > kAtlasVmemBytes / 4)
       return assignmentError(transfer, "DMA staging range exceeds selected VMEM capacity");
     for (unsigned reg : {placement.stagingReg, placement.dramReg, placement.sizeReg})
       if (reg == 0 || reg >= 32)

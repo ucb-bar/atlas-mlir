@@ -117,6 +117,9 @@ struct Fixture {
 FixedResourcePlacement fixedPlacement() {
   FixedResourcePlacement fixed{};
   fixed.tensorTemporary = 62; fixed.scalarTemporary = 27; fixed.halfSizeReg = 2;
+  fixed.firstScalarValue = 10; fixed.lastScalarValue = 26;
+  fixed.packSourceRegs = {10, 11}; fixed.packDestinationReg = 12; fixed.packRowReg = 13;
+  fixed.packRowsReg = 14; fixed.packTemporaryRegs = {16, 17};
   fixed.haltReg = 1; fixed.inputBaseReg = 6; fixed.inputDramReg = 1; fixed.outputBaseReg = 8; fixed.outputDramReg = 3;
   fixed.dmaBaseReg = 4; fixed.dmaDramReg = 7; fixed.dmaSizeReg = 9;
   return fixed;

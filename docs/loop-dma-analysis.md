@@ -7,9 +7,9 @@ the condition that enables overlap.
 ## Discovery and proof
 
 Discovery inspects the flat machine stream's redirects and instruction effects.
-A supported loop is one block closed by a backward conditional branch and its
-exact NOP delay slot. Its body consists of scalar loads, scalar stores, ALU
-operations, and delays. No other redirect may enter the body. DMA launches,
+A supported loop is one block closed by a backward conditional branch and,
+once timing fills it, its delay slot. Its body, the slot included, consists of
+scalar loads, scalar stores, ALU operations, and delays. No other redirect may enter the body. DMA launches,
 waits, configuration, nested/interior redirects, and unsupported effects are
 not admitted. An indirect jump disables discovery because its destination
 cannot be proved. No helper tags, source-operation IDs, particular registers,

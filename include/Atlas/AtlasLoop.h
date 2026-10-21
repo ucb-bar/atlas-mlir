@@ -41,9 +41,10 @@ struct AtlasVmemAccess {
 // Where a loop sits in the flat stream.
 struct AtlasLoop {
   size_t begin = 0;    // the first instruction, which the back-edge targets
-  size_t branch = 0;   // the back-edge; its delay slot ends the loop
+  size_t branch = 0;   // the back-edge; it or its delay slot ends the loop
+  bool delaySlot = true;
 
-  size_t end() const { return branch + 2; }
+  size_t end() const { return branch + (delaySlot ? 2 : 1); }
   bool contains(size_t pc) const { return begin <= pc && pc < end(); }
 };
 
@@ -61,10 +62,12 @@ struct AtlasLoopFacts {
 // included, have none.
 std::optional<int64_t> atlasRedirectDistance(Operation *op);
 
-// Discover disjoint single-block conditional loops with an exact NOP delay
-// slot and no other redirect into the body. Indirect control flow disables
-// discovery. Unsupported bodies remain ordinary conservative CFG boundaries.
-std::vector<AtlasLoop> findAtlasLoops(llvm::ArrayRef<Operation *> ops);
+// Discover disjoint single-block conditional loops with no other redirect into
+// the body, whose delay slot, unless `delaySlots` are pending, is body work
+// too. Indirect control flow disables discovery. Unsupported bodies remain
+// ordinary conservative CFG boundaries.
+std::vector<AtlasLoop> findAtlasLoops(llvm::ArrayRef<Operation *> ops,
+                                      bool delaySlots);
 
 // The loop that holds `pc`, else null.
 const AtlasLoop *findAtlasLoopAt(llvm::ArrayRef<AtlasLoop> loops, size_t pc);

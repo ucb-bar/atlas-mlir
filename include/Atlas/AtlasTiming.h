@@ -5,6 +5,7 @@
 // 3ae2b5d (src/core) with its names. DMA VMEM addresses count words, as in
 // Atlas RTL. An age counts cycles after an instruction issues.
 
+#include "Atlas/AtlasTarget.h"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -70,9 +71,8 @@ struct ScalarAccess {
 };
 ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
-const int kVmemBytes = 1536 * 1024;
 const int kVmemBankBytes = 256 * 1024;
-const int kVmemBanks = kVmemBytes / kVmemBankBytes;
+const int kVmemBanks = kAtlasVmemBytes / kVmemBankBytes;
 const int kLineBytes = 32;
 
 enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase };
@@ -161,7 +161,7 @@ struct DepGraph {
 };
 
 // Pending transfers per channel at block entry; null keeps broad barriers.
-using IncomingDma = std::array<std::vector<Footprint>, 8>;
+using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
                     const IncomingDma *incomingDma = nullptr);
 // Longest path in cycles from each node until everything after it finishes.

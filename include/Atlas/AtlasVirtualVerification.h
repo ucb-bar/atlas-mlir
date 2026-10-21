@@ -1,13 +1,29 @@
 #ifndef ATLAS_VIRTUAL_VERIFICATION_H
 #define ATLAS_VIRTUAL_VERIFICATION_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
+#include <optional>
 
 namespace mlir::atlas {
 
 // Per-unit MXU weights/accumulators the virtual stage may hold at once.
 constexpr unsigned kVirtualMXUSlots = 2;
+
+// A virtual DMA load's or store's DRAM byte address and byte count operands,
+// and its tile: what a load produces or a store reads.
+struct VirtualDMATransfer {
+  OpOperand *dram, *size;
+  Value tile;
+  bool store;
+};
+// Null for any other operation.
+std::optional<VirtualDMATransfer> virtualDMATransfer(Operation *op);
+
+// The accumulator a virtual MXU readout pops; null for any other operation.
+Value virtualMXUReadoutAcc(Operation *op);
 
 // Whether two virtual DMA operations may touch the same DRAM bytes while one
 // of them writes, by the address and size their op verifiers prove. Their
@@ -35,6 +51,7 @@ LogicalResult verifyAtlasVirtualModule(ModuleOp module,
                                       bool allowMXUPressure = false,
                                       bool allowMXUCFG = false);
 void registerVerifyAtlasVirtualStreamPass();
+std::unique_ptr<Pass> createVerifyAtlasVirtualStreamPass();
 
 } // namespace mlir::atlas
 

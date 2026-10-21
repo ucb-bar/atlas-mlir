@@ -135,7 +135,9 @@ def Atlas_VirtualScaleConstantOp : Atlas_Op<"virtual_scale_constant", [Pure]> {
   let hasVerifier = 1;
 }
 
-def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul", [Pure]> {
+// Reads and writes the fixed weight and accumulator slots of its unit.
+def Atlas_VirtualMXUMatmulOp : Atlas_Op<"virtual_mxu_matmul",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Reset one selected MXU with 32 by 32 FP8 operands";
   let arguments = (ins Atlas_VirtualFP8Type:$activation,
                        Atlas_VirtualFP8Type:$weight, I32Attr:$unit);
@@ -217,7 +219,9 @@ def Atlas_VirtualMXUReadoutFP8Op :
                       Atlas_VirtualFP8Type:$value);
 }
 
-def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8", [Pure]> {
+// Relays its tile through fixed VMEM scratch, which it reads and writes.
+def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Convert a logical BF16 tile to a logical FP8 MXU operand tile";
   let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
   let results = (outs Atlas_VirtualFP8Type:$result);

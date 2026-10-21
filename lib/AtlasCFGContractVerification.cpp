@@ -4,8 +4,10 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -23,17 +25,13 @@
 using namespace mlir;
 using namespace mlir::atlas;
 namespace {
-bool tracked(Type t) { return t.isInteger(1) || t.isInteger(32) || isa<VirtualBF16Type, VirtualFP8Type>(t); }
-// A CFG value has a register; a DMA immediate is built at each launch instead.
-bool tracked(Value v) {
-  return tracked(v.getType()) && !isVirtualDMAImmediate(v) && !isAtlasMemoryControl(v);
-}
+// A CFG value is one that takes a register.
+bool tracked(Value v) { return registerKindOf(v).has_value(); }
 // A source operation that issues nothing of its own and so has no record.
 bool issuesNothing(Operation &op) {
   return isa<VirtualStartOp, VirtualScaleConstantOp, VirtualSlotOp>(op) ||
          (isa<arith::ConstantOp>(op) && isVirtualDMAImmediate(op.getResult(0)));
 }
-bool scalar(Type t) { return t.isInteger(1) || t.isInteger(32); }
 std::string typeName(Type t) { return t.isInteger(1) ? "i1" : t.isInteger(32) ? "i32" : isa<VirtualBF16Type>(t) ? "bf16" : "fp8"; }
 struct ValueRecord {
   int32_t id, block, reg;
@@ -110,7 +108,7 @@ E sourceCompare(int p, E a, E b) {
 }
 struct State {
   std::array<E, 32> x{};
-  std::array<int32_t, 64> tensor;
+  std::array<int32_t, kAtlasTensorRegisters> tensor;
   std::set<int32_t> done;
   int32_t chosen = -1;
   State() { x[0] = literal(0); tensor.fill(-1); }
@@ -118,7 +116,7 @@ struct State {
 bool merge(State &to, const State &from) {
   bool change = false;
   for (unsigned i = 1; i < 32; ++i) if (to.x[i] && !same(to.x[i], from.x[i])) { to.x[i].reset(); change = true; }
-  for (unsigned i = 0; i < 64; ++i) if (to.tensor[i] != -1 && to.tensor[i] != from.tensor[i]) { to.tensor[i] = -1; change = true; }
+  for (unsigned i = 0; i < kAtlasTensorRegisters; ++i) if (to.tensor[i] != -1 && to.tensor[i] != from.tensor[i]) { to.tensor[i] = -1; change = true; }
   for (auto i = to.done.begin(); i != to.done.end();) if (!from.done.count(*i)) { i = to.done.erase(i); change = true; } else ++i;
   if (to.chosen != from.chosen && to.chosen != -2) { to.chosen = -2; change = true; }
   return change;
@@ -157,7 +155,8 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
     if (!regs.count(value)) return function.emitOpError("CFG contract missing source placement");
     std::string type = typeName(value.getType());
     unsigned reg = regs.lookup(value), width = type == "bf16" ? 2 : 1;
-    if ((scalar(value.getType()) && (reg == 0 || reg >= 32)) || (!scalar(value.getType()) && (reg + width > 64 || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
+    bool scalar = registerKindOf(value) == RegisterKind::Scalar;
+    if ((scalar && (reg == 0 || reg >= 32)) || (!scalar && (reg + width > kAtlasTensorRegisters || (width == 2 && reg % 2)))) return function.emitOpError("CFG contract invalid register geometry");
     Operation *op = value.getDefiningOp();
     SmallVector<int32_t> operands;
     if (op) for (Value v : op->getOperands()) if (tracked(v)) operands.push_back(ids.lookup(v));
@@ -195,7 +194,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
         for (unsigned n = 0; n < mxuCount; ++n) mxuCommands.push_back(nextMXU++);
         SmallVector<NamedAttribute> record{field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))};
         if (isAtlasSlotAccess(&op)) {
-          auto slot = op.getOperand(1).getDefiningOp<VirtualSlotOp>();
+          auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
           record.push_back(field("slot_word", slot.getSlotWordAttr()));
           record.push_back(field("slot_words", slot.getWordsAttr()));
           record.push_back(field("slot_kind", slot.getKindAttr()));
@@ -258,7 +257,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     auto id = contractI32(d,"id"), block = contractI32(d,"block"), reg = contractI32(d,"reg");
     std::string type = contractString(d,"type").str(), def = contractString(d,"def").str();
     if (!id || *id != int32_t(values.size()) || !block || *block < 0 || *block >= int32_t(br.size()) || !reg || def.empty() || !d.getAs<DenseI32ArrayAttr>("operands")) return bad();
-    if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > 64 || (type == "bf16" && *reg % 2)) return bad();
+    if ((type == "i1" || type == "i32") ? (*reg <= 0 || *reg >= 32) : (type != "bf16" && type != "fp8") || *reg < 0 || *reg + (type == "bf16" ? 2 : 1) > kAtlasTensorRegisters || (type == "bf16" && *reg % 2)) return bad();
     ValueRecord r{*id,*block,*reg,type,def,contractString(d,"kind").str(),contractI32Array(d,"operands")};
     if (def == "arith.constant" || def == "atlas.virtual_vpu_splat" || def == "atlas.virtual_control") {
       auto n = contractI32(d, "constant");
@@ -377,8 +376,6 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         }
       }
     }
-    if (isa<BranchOp,JumpOp>(op) && !isExactAtlasNop(pc + 1 < ops.size() ? ops[pc+1] : nullptr))
-      return op->emitOpError("CFG contract redirect requires an exact x0 NOP delay slot");
     if (auto id = contractTag(op,kAtlasTagCFGBranch)) if (!isa<BranchOp>(op) || *id != *owner || blocks[*id].condition < 0 || !seenBranches.insert(*id).second) return op->emitOpError("CFG contract invalid source branch identity");
     if (Attribute h = op->getAttr(kAtlasTagCFGHelper)) {
       auto name = dyn_cast<StringAttr>(h);
@@ -400,6 +397,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   for (auto &b : blocks) if (starts[b.id] == ops.size() || (b.condition >= 0 && !seenBranches.count(b.id))) return module.emitOpError("CFG contract missing source block or branch site");
   for (auto &v : values) if ((v.def != "argument" || v.block == 0) && !seenResults.count(v.id)) return module.emitOpError("CFG contract missing source result site");
   auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? ctx.pcOf.lookup(t) : ops.size(); };
+  // A redirect's fall-through, after its delay slot if the stream has them.
+  size_t width = stream->delaySlots ? 2 : 1;
   auto matches = [&](const State &s, const ValueRecord &v, int32_t expected) { return v.type == "i1" || v.type == "i32" ? same(s.x[v.reg],origin(expected)) : s.tensor[v.reg] == expected && (v.type != "bf16" || s.tensor[v.reg+1] == expected); };
   auto install = [&](State &s, const ValueRecord &v) { if (v.type == "i1" || v.type == "i32") s.x[v.reg] = origin(v.id); else { s.tensor[v.reg] = v.id; if (v.type == "bf16") s.tensor[v.reg+1] = v.id; } };
   for (auto &block : blocks) {
@@ -418,14 +417,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       auto owner = contractTag(op,kAtlasTagCFGBlock); if (owner && *owner != block.id) return error("path changes source block without its source edge");
       const State before = s;
       auto tensorRead = [&](unsigned reg, int32_t id) {
-        if (id < 0 || id >= int32_t(values.size()) || reg >= 64) return false;
-        return before.tensor[reg] == id && (values[id].type != "bf16" || (reg + 1 < 64 && before.tensor[reg+1] == id));
+        if (id < 0 || id >= int32_t(values.size()) || reg >= kAtlasTensorRegisters) return false;
+        return before.tensor[reg] == id && (values[id].type != "bf16" || (reg + 1 < kAtlasTensorRegisters && before.tensor[reg+1] == id));
       };
       // Every actual tensor write kills the previous physical origin, even
       // when the instruction has no source identity. These widths follow the
       // machine opcode geometry, independently of timing-provider policies.
       auto killTensor = [&](unsigned reg, unsigned width) {
-        for (unsigned half = 0; half < width && reg + half < 64; ++half)
+        for (unsigned half = 0; half < width && reg + half < kAtlasTensorRegisters; ++half)
           s.tensor[reg + half] = -1;
       };
       if (auto write = dyn_cast<VLoadOp>(op)) killTensor(write.getDst(),1);
@@ -454,7 +453,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (name == "atlas.virtual_pack_fp8" && !results.empty()) expected = results[0];
           else if (!operands.empty()) expected = operands[0];
           if (name != "atlas.virtual_slot_copy" &&
-              (expected < 0 || store.getSrc() >= 64 || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
+              (expected < 0 || store.getSrc() >= kAtlasTensorRegisters || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
         }
         if (auto store = dyn_cast<ScalarStoreOp>(op); store && name == "atlas.virtual_save")
           if (operands.size() != 1 || values[operands[0]].reg != int32_t(store.getSrc()) ||
@@ -569,32 +568,46 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       if (auto branch = dyn_cast<BranchOp>(op)) {
         if (contractTag(op,kAtlasTagCFGBranch)) {
           if (block.edges.size() != 2 || branch.getKind() != "bne" || branch.getRhs() != 0 || !same(s.x[branch.getLhs()],origin(block.condition)) || target(op) != edgeStarts[block.edges[0]]) return error("source branch condition, polarity or true target differs");
-          size_t fallthrough = pc + 2; if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
+          size_t fallthrough = pc + width; if (fallthrough != edgeStarts[block.edges[1]]) return error("source branch false target differs");
         } else if (!op->hasAttr(kAtlasTagCFGHelper)) return error("unowned conditional redirect changes source visits");
       }
       if (auto jump = dyn_cast<JumpOp>(op)) {
         auto id = contractTag(op,kAtlasTagCFGEdge); if (!id || jump.getKind() != "jal" || jump.getDst() != 0 || edges[*id].from != block.id || target(op) != starts[edges[*id].to]) return error("source edge target differs or redirect is unowned");
-        if (block.condition >= 0 && s.chosen != *id) return error("source conditional edge does not match branch outcome");
-        for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source operation is skipped before source edge");
-        auto &edge = edges[*id]; auto &dest = blocks[edge.to];
-        for (size_t n = 0; n < edge.incoming.size(); ++n) if (!matches(s,values[dest.args[n]],edge.incoming[n])) return error("simultaneous source edge copy lost its incoming origin");
-        for (int32_t v : dest.live) if (!matches(s,values[v],v)) return error("source edge clobbers a live-through origin");
       }
       if (isa<TrapOp>(op)) { if (!block.edges.empty()) return error("source block exits before its source edge"); for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source return skips an operation"); }
       return success();
     };
+    // A redirect's delay slot runs on each path out of it, and a jump takes
+    // its source edge after the slot.
+    auto step = [&](size_t pc, State &s, bool diagnose) -> LogicalResult {
+      Operation *op = ops[pc];
+      if (failed(transfer(pc,s,diagnose))) return failure();
+      if (width == 2 && isa<BranchOp,JumpOp>(op) && failed(transfer(pc+1,s,diagnose))) return failure();
+      if (!isa<JumpOp>(op)) return success();
+      auto error = [&](StringRef message) -> LogicalResult {
+        if (diagnose) return op->emitOpError("CFG contract ") << message;
+        return failure();
+      };
+      int32_t id = *contractTag(op,kAtlasTagCFGEdge);
+      if (block.condition >= 0 && s.chosen != id) return error("source conditional edge does not match branch outcome");
+      for (int32_t expected : block.operations) if (!s.done.count(expected)) return error("source operation is skipped before source edge");
+      auto &edge = edges[id]; auto &dest = blocks[edge.to];
+      for (size_t n = 0; n < edge.incoming.size(); ++n) if (!matches(s,values[dest.args[n]],edge.incoming[n])) return error("simultaneous source edge copy lost its incoming origin");
+      for (int32_t v : dest.live) if (!matches(s,values[v],v)) return error("source edge clobbers a live-through origin");
+      return success();
+    };
     while (!work.empty()) {
       size_t pc = work.front(); work.pop_front(); State s = entries[pc];
-      if (failed(transfer(pc,s,false))) continue;
+      if (failed(step(pc,s,false))) continue;
       Operation *op = ops[pc];
       if (isa<JumpOp,TrapOp>(op)) continue;
       if (isa<BranchOp>(op)) {
         State taken = s, fall = s;
         if (contractTag(op,kAtlasTagCFGBranch)) { taken.chosen = block.edges[0]; fall.chosen = block.edges[1]; }
-        propagate(target(op),taken); propagate(pc+2,fall);
+        propagate(target(op),taken); propagate(pc+width,fall);
       } else propagate(pc+1,s);
     }
-    for (size_t pc = 0; pc < ops.size(); ++pc) if (reached[pc]) { State s = entries[pc]; if (failed(transfer(pc,s,true))) return failure(); }
+    for (size_t pc = 0; pc < ops.size(); ++pc) if (reached[pc]) { State s = entries[pc]; if (failed(step(pc,s,true))) return failure(); }
     if (block.edges.empty()) {
       bool returned = false;
       for (size_t pc = 0; pc < ops.size(); ++pc)

@@ -2,6 +2,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
 #include <climits>
@@ -18,14 +19,19 @@ constexpr int kMaxIdle = 100000;
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
-                            std::vector<size_t> &order,
+                            bool fillSlots, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before,
                             int &tailIdle) {
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   bool branch = s.endsInBranch(block);
   bool halt = s.endsInHalt(block);
+  // A pending delay slot is timed as a NOP after the block's ops, and when
+  // filled may take one of them once they are scheduled.
+  bool pendingSlot = branch && !s.delaySlots;
   std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
+  if (pendingSlot)
+    nodes.push_back(atlasNopInstr());
   int n = static_cast<int>(nodes.size());
   int nb = n - (branch ? 2 : halt ? 1 : 0);
   int term = branch || halt ? nb : -1;
@@ -48,7 +54,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       g.out[from].push_back(index);
       g.in[to].push_back(index);
     };
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < static_cast<int>(end - begin); ++i) {
       if (nodes[i].op->opClass == OpClass::DmaWait) {
         waits.push_back(i);
       } else if (nodes[i].op->opClass == OpClass::DmaLoad ||
@@ -80,7 +86,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
 
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
-  int channelRelease[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  int channelRelease[kAtlasDMAChannels] = {};
   int dmaQueueEnd = 0;
   auto release = [&](int i) { return channelRelease[nodes[i].op->channel]; };
   auto isWait = [&](int i) {
@@ -188,8 +194,55 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     placed++;
   }
 
+  std::vector<int> body(nb);
+  std::iota(body.begin(), body.end(), 0);
+  std::stable_sort(body.begin(), body.end(),
+                   [&](int a, int b) { return issue[a] < issue[b]; });
+  if (pendingSlot && fillSlots) {
+    // The slot takes the last-issued scalar ALU work that nothing after it
+    // depends on: it still runs after the rest of the block, on both paths.
+    auto filler = llvm::find_if(llvm::reverse(body), [&](int i) {
+      return isAtlasDelaySlotWork(op(i)) && g.out[i].empty() &&
+             g.footprints[i].doneAge == 0;
+    });
+    if (filler != body.rend()) {
+      slot = *filler;
+      body.erase(std::next(filler).base());
+      // Keep the chosen order, but reclaim the filler's old issue cycle.
+      table = ReservationTable();
+      nextFree = 0;
+      earliest.assign(n, 0);
+      why.assign(n, "");
+      for (int i : body) {
+        cycle = std::max(nextFree, earliest[i]);
+        reason[i] = cycle > nextFree ? why[i] : "";
+        for (;;) {
+          std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
+          if (busy.empty())
+            break;
+          cycle++;
+          reason[i] = busy;
+          if (cycle - nextFree > kMaxIdle)
+            return op(i)->emitOpError("scheduler made no progress");
+        }
+        issue[i] = cycle;
+        table.reserve(nodes[i], g.footprints[i], cycle);
+        if (isWait(i))
+          table.extendForWait(cycle);
+        for (int e : g.out[i]) {
+          const Edge &ed = g.edges[e];
+          if (cycle + ed.distance > earliest[ed.to]) {
+            earliest[ed.to] = cycle + ed.distance;
+            why[ed.to] = ed.reason + " after " + name(i);
+          }
+        }
+        nextFree = cycle + naturalGap(nodes[i]);
+      }
+    }
+  }
+
   int drain = 0;
-  for (int i = 0; i < nb; i++)
+  for (int i : body)
     drain = std::max(drain, issue[i] + g.footprints[i].doneAge + 1);
 
   int termCycle = nextFree;
@@ -223,10 +276,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     }
   }
 
-  std::vector<int> body(nb);
-  std::iota(body.begin(), body.end(), 0);
-  std::stable_sort(body.begin(), body.end(),
-                   [&](int a, int b) { return issue[a] < issue[b]; });
   int free = 0;
   for (int i : body) {
     if (issue[i] > free)
@@ -236,8 +285,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   }
   if (term >= 0) {
     int idle = termCycle - free;
-    size_t last = nb > 0 ? order.back() : 0;
-    if (idle > 0 && halt && nb > 0 && isNop(s.ops[last]) &&
+    size_t last = !body.empty() ? order.back() : 0;
+    if (idle > 0 && halt && !body.empty() && isNop(s.ops[last]) &&
         before[last].delays.empty())
       before[last] = {idleDelays(idle), false, termReason};
     else if (idle > 0 && halt)
@@ -245,7 +294,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     else if (idle > 0)
       before[begin + term] = {idleDelays(idle), false, termReason};
     order.push_back(begin + term);
-    if (slot >= 0)
+    // writeAtlasStream fills a pending slot that took no op with a NOP.
+    if (slot >= 0 && begin + slot < end)
       order.push_back(begin + slot);
   } else {
     // No branch or halt: the block drains before the next one, or the
@@ -270,7 +320,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
     if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
-                             order, before, tailIdle[b])))
+                             insertDelays, order, before, tailIdle[b])))
       return failure();
   // A block without a branch or halt drains as its own trailing delays, so a
   // branch into the next block does not run them.
@@ -323,4 +373,8 @@ struct ScheduleAtlasStreamPass
 
 void mlir::atlas::registerScheduleAtlasStreamPass() {
   PassRegistration<ScheduleAtlasStreamPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasStreamPass() {
+  return std::make_unique<ScheduleAtlasStreamPass>();
 }

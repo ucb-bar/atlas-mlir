@@ -9,6 +9,7 @@
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"

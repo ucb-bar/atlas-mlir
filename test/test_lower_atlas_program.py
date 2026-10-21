@@ -17,6 +17,14 @@ from test_virtual_lowering import virtual_chain
 ATTENTION = ROOT / "test/examples/virtual_attention_tile.mlir"
 
 
+def report_of(source: Path, pipeline: str, directory: Path) -> tuple[subprocess.CompletedProcess[str], dict]:
+    """Run `pipeline` with an allocation report, returning the run and the report."""
+    path = directory / "allocation.json"
+    result = subprocess.run([str(BIN / "atlas-opt"), f"--{pipeline}=allocation-report={path}", str(source)],
+                            text=True, capture_output=True)
+    return result, json.loads(path.read_text())
+
+
 def drive(source: Path, output: Path, *options: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(ROOT / "tools/lower_atlas_program.py"),
                            str(source), "--output-dir", str(output),
@@ -32,7 +40,7 @@ class LowerAtlasProgramTest(unittest.TestCase):
             source = Path(directory) / "copy.mlir"
             source.write_text(raw_roundtrip())
             output = Path(directory) / "compiled"
-            result = drive(source, output, "--spill")
+            result = drive(source, output)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('"atlas.virtual_spill_bf16"', (output / "2-spilled.mlir").read_text())
             allocation = json.loads((output / "3-allocation.json").read_text())
@@ -69,24 +77,23 @@ class LowerAtlasProgramTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "long.mlir"
             source.write_text(virtual_chain(1050))
-            for timing in ("insert-atlas-delays", "schedule-atlas-stream"):
-                with self.subTest(timing=timing):
-                    done = Path(temp) / timing
-                    result = drive(source, done, "--timing", timing)
-                    self.assertEqual(result.returncode, 1, result.stderr)
-                    report = json.loads((done / "3-allocation.json").read_text())
-                    self.assertTrue(report["fits"])
-                    self.assertLess(report["untimed_words"]["words"], 2048)
-                    self.assertIn("2048-word policy limit", result.stderr)
-                    self.assertFalse((done / "4-timed.mlir").exists())
-                    self.assertFalse((done / "5-words.hex").exists())
+            done = Path(temp) / "out"
+            result = drive(source, done)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            report = json.loads((done / "3-allocation.json").read_text())
+            self.assertTrue(report["fits"])
+            self.assertLess(report["untimed_words"]["words"], 2048)
+            self.assertIn("2048-word policy limit", result.stderr)
+            self.assertFalse((done / "4-timed.mlir").exists())
+            self.assertFalse((done / "5-words.hex").exists())
 
     def test_legacy_resources_are_included_in_the_report(self) -> None:
+        # Boundary tiles use the synchronous helper channels unless
+        # boundary DMA conversion runs, which the unscheduled pipeline skips.
         with tempfile.TemporaryDirectory() as temp:
-            done = Path(temp) / "mlp"
-            result = drive(ROOT / "test/examples/virtual_fp8_two_layer_mlp.mlir", done)
+            result, report = report_of(ROOT / "test/examples/virtual_fp8_two_layer_mlp.mlir",
+                                       "atlas-compile-unscheduled", Path(temp))
             self.assertEqual(result.returncode, 0, result.stderr)
-            report = json.loads((done / "3-allocation.json").read_text())
             self.assertEqual(report["dma"]["synchronous_channels"], [0, 1])
             self.assertEqual(report["dma"]["peak_in_flight"], 1)
             self.assertTrue(any(unit["weight_slots_used"] == 1 and
@@ -99,10 +106,10 @@ class LowerAtlasProgramTest(unittest.TestCase):
             result = drive(ATTENTION, done)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sorted(path.name for path in done.iterdir()), [
-                "1-virtual.mlir", "2-scheduled.mlir", "3-allocated.mlir", "3-allocation.json",
-                "4-timed.mlir", "5-map.json", "5-program.json", "5-words.hex", "commands.txt",
-                "log.txt"])
-            self.assertEqual(len((done / "commands.txt").read_text().splitlines()), 7)
+                "1-virtual.mlir", "2-scheduled.mlir", "2-spilled.mlir", "3-allocated.mlir",
+                "3-allocation.json", "4-timed.mlir", "5-map.json", "5-program.json", "5-words.hex",
+                "commands.txt", "log.txt"])
+            self.assertEqual(len((done / "commands.txt").read_text().splitlines()), 8)
             report = json.loads((done / "3-allocation.json").read_text())
             self.assertTrue(report["fits"])
             self.assertEqual(report["failures"], [])
@@ -113,11 +120,11 @@ class LowerAtlasProgramTest(unittest.TestCase):
                 self.assertLessEqual(demand["used"], demand["capacity"])
             # With FP8 values, BF16 pairs sit above the FP8 registers.
             self.assertEqual(report["registers"]["bf16"]["capacity"], 15)
-            # Each value is named as 2-scheduled.mlir defines it, on its line.
-            lines = (done / "2-scheduled.mlir").read_text().splitlines()
+            # Each value is named as 2-spilled.mlir, the lowering's input, defines it, on its line.
+            lines = (done / "2-spilled.mlir").read_text().splitlines()
             for value in report["values"]:
                 file, line, _ = value["loc"].split(":")
-                self.assertEqual(file, "2-scheduled.mlir")
+                self.assertEqual(file, "2-spilled.mlir")
                 self.assertRegex(lines[int(line) - 1].split(" = ")[0],
                                  re.escape(value["value"].split("#")[0]) + r"\b")
             self.assertEqual({value["kind"] for value in report["values"]},
@@ -127,18 +134,28 @@ class LowerAtlasProgramTest(unittest.TestCase):
                                      if value["kind"] == "dma"))
             self.assertLessEqual(report["untimed_words"]["words"], 2048)
 
-            # 32 BF16 tiles live across one edge cannot fit 31 register pairs.
+            # 32 BF16 tiles live across one edge exceed 31 register pairs. The
+            # spill stage recovers them; its code then exceeds the 2048-word
+            # program limit when timed.
             source = Path(temp) / "wide.mlir"
             source.write_text(wide_return_block(32))
-            failed = Path(temp) / "wide"
-            result = drive(source, failed)
+            spilled = Path(temp) / "wide"
+            result = drive(source, spilled)
+            self.assertIn('"atlas.virtual_save"', (spilled / "2-spilled.mlir").read_text())
+            self.assertTrue(json.loads((spilled / "3-allocation.json").read_text())["fits"])
             self.assertEqual(result.returncode, 1)
-            self.assertFalse((failed / "3-allocated.mlir").exists())
-            last = (failed / "log.txt").read_text().split("\n$ ")[-1]
-            self.assertIn("--lower-atlas-virtual-to-machine", last)
-            self.assertIn("exceeds 31 physical pairs", last)
-            # The report still names the kind that does not fit, and only it.
-            report = json.loads((failed / "3-allocation.json").read_text())
+            self.assertIn("2048-word policy limit", result.stderr)
+            self.assertFalse((spilled / "4-timed.mlir").exists())
+
+    def test_allocation_report_names_the_kind_that_does_not_fit(self) -> None:
+        # Lowered without spilling, 32 BF16 tiles live across one edge cannot
+        # fit 31 register pairs; the report still names that kind, and only it.
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "wide.mlir"
+            source.write_text(wide_return_block(32))
+            result, report = report_of(source, "lower-atlas-virtual-to-machine", Path(temp))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exceeds 31 physical pairs", result.stderr)
             self.assertFalse(report["fits"])
             self.assertEqual(len(report["failures"]), 1)
             self.assertIn("exceeds 31 physical pairs", report["failures"][0])

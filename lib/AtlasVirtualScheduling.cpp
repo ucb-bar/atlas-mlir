@@ -1,13 +1,14 @@
 // Pre-allocation scheduling of virtual Atlas operations. Each block is list
 // scheduled onto the functional units its operations occupy, keeping every
-// SSA and implicit-state dependence. Costs are rough on purpose: registers,
-// delays, and delay slots do not exist until the virtual-to-machine lowering,
-// and the machine passes after it time the real instructions.
+// SSA and implicit-state dependence. Costs are rough on purpose: registers
+// and delays do not exist until the virtual-to-machine lowering, nor delay
+// slots until the stream scheduler, which times the real instructions.
 
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -69,10 +70,11 @@ bool isImplicitMemory(Operation *op) {
   return isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op>(op);
 }
 
-// An explicit table: `Pure` is not trusted, because legacy virtual_mxu_matmul
-// and virtual_pack_fp8 are declared Pure yet have ordering obligations. DMA
-// ordering and slot limits are edges of their own (buildGraph, SlotPool).
-// An operation missing from the table is a full barrier.
+// An explicit table, finer than the ops' declared memory effects: a PACK
+// writes only its scratch and a legacy matmul only its unit, so transfers and
+// other work can move across them. DMA ordering and slot limits are edges of
+// their own (buildGraph, SlotPool). An operation missing from the table is a
+// full barrier.
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
@@ -85,8 +87,8 @@ Effects effectsOf(Operation *op) {
     e.reads |= bit(kUnit0 + unitOf(op->getResult(1).getType()));
   else if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op))
     e.reads |= bit(kUnit0 + unitOf(acc.getAcc().getType()));
-  else if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op))
-    e.reads |= bit(kUnit0 + unitOf(op->getOperand(1).getType()));
+  else if (Value acc = virtualMXUReadoutAcc(op))
+    e.reads |= bit(kUnit0 + unitOf(acc.getType()));
   else if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op))
     e.writes = bit(kUnit0 + matmul.getUnit());
   else if (!isDMA(op) &&
@@ -315,7 +317,7 @@ struct Cost {
 };
 
 // Explicit transfers in flight at once: one per DMA channel and staging window.
-constexpr unsigned kMaxQueuedDMA = 8;
+constexpr unsigned kMaxQueuedDMA = kAtlasDMAChannels;
 
 // A machine operation's timing by npu_model's rules: cycles until its work
 // is done, and until the same operation on other registers and slots can
@@ -364,10 +366,8 @@ MachineTiming timingOf(const std::string &name) {
   return {firstFootprint.doneAge + 1, interval};
 }
 
-// A tile is 32 x 32 elements: one M register of FP8 or a pair of BF16. An M
-// register holds 32 lines.
+// A tile is 32 x 32 elements: one M register of FP8 or a pair of BF16.
 int registersOf(bool fp8) { return fp8 ? 1 : 2; }
-constexpr int kRegisterBytes = 32 * timing::kLineBytes;
 
 Cost onMxu(StringRef name, unsigned unit) {
   MachineTiming t = timingOf((name + ".mxu" + Twine(unit)).str());
@@ -399,8 +399,8 @@ constexpr int kScalarSlotCycles = 8;
 Cost costOf(Operation *op) {
   static const MachineTiming vload = timingOf("vload");
   static const MachineTiming vstore = timingOf("vstore");
-  static const int registerLoad = timing::dmaTransferCycles(kRegisterBytes, false);
-  static const int registerStore = timing::dmaTransferCycles(kRegisterBytes, true);
+  static const int registerLoad = timing::dmaTransferCycles(kAtlasRegisterBytes, false);
+  static const int registerStore = timing::dmaTransferCycles(kAtlasRegisterBytes, true);
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
@@ -415,7 +415,7 @@ Cost costOf(Operation *op) {
   // pack or store user, where insert-atlas-dma-waits will put the DMA.WAIT.
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes, false);
+    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, false);
     int loaded = (registers - 1) * vload.interval + vload.latency;
     Cost cost{Unit::Dma, cycles, cycles + loaded};
     cost.queuedDMA = true;
@@ -425,19 +425,19 @@ Cost costOf(Operation *op) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int staged = (registers - 1) * vstore.interval + vstore.latency;
-    int cycles = timing::dmaTransferCycles(registers * kRegisterBytes, true);
+    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, true);
     Cost cost{Unit::Dma, cycles, cycles, staged + 1};
     cost.queuedDMA = true;
     return cost;
   }
   if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
-    Operation *writer = isAtlasSpillStore(op) ? op : op->getOperand(1).getDefiningOp();
-    return blocking(Unit::Dma, vmemCycles(atlasSpillWords(writer) / 256, isAtlasSpillStore(op)));
+    Operation *writer = atlasSpillSaved(op).getDefiningOp();
+    return blocking(Unit::Dma, vmemCycles(atlasSpillWords(writer) / kAtlasRegisterWords, isAtlasSpillStore(op)));
   }
   if (isAtlasSlotAccess(op)) {
-    auto slot = op->getOperand(1).getDefiningOp<VirtualSlotOp>();
+    auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
-    unsigned cycles = words == 1 ? kScalarSlotCycles : (words / 256) * (vload.latency + vstore.latency);
+    unsigned cycles = words == 1 ? kScalarSlotCycles : (words / kAtlasRegisterWords) * (vload.latency + vstore.latency);
     return blocking(Unit::Dma, cycles);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
@@ -454,10 +454,10 @@ Cost costOf(Operation *op) {
     return onMxu("vmatmul", unitOf(reset.getAcc().getType()));
   if (auto acc = dyn_cast<VirtualMXUAccumulateOp>(op))
     return onMxu("vmatmul.acc", unitOf(acc.getAcc().getType()));
-  if (isa<VirtualMXUReadoutBF16Op, VirtualMXUReadoutFP8Op>(op))
+  if (Value acc = virtualMXUReadoutAcc(op))
     return onMxu(isa<VirtualMXUReadoutBF16Op>(op) ? "vmatpop.bf16.acc"
                                                   : "vmatpop.fp8.acc",
-                 unitOf(op->getOperand(1).getType()));
+                 unitOf(acc.getType()));
   if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
@@ -479,10 +479,10 @@ Cost costOf(Operation *op) {
     // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
     // words a row (lowerPack). Each store hides behind the next word's load,
     // so a row takes a load per load-path interval, then the last word's load
-    // and store, the destination step, and the back-edge with its delay slot.
+    // and store, and the back-edge, whose delay slot takes the destination step.
     static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
-    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 3;
-    int rows = registersOf(true) * kRegisterBytes / 4 / rowWords;
+    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 2;
+    int rows = registersOf(true) * kAtlasRegisterBytes / 4 / rowWords;
     int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
     return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
                                    vstore.latency + rows * row + vload.latency);
@@ -497,16 +497,6 @@ constexpr std::array<RegisterKind, 3> kKinds = {
 using KindCounts = std::array<int, kKinds.size()>;
 
 unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
-
-std::optional<RegisterKind> kindOf(Type type) {
-  if (isa<VirtualBF16Type>(type))
-    return RegisterKind::BF16;
-  if (isa<VirtualFP8Type>(type))
-    return RegisterKind::FP8;
-  if (type.isInteger(1) || type.isInteger(32))
-    return RegisterKind::Scalar;
-  return std::nullopt;
-}
 
 // What spilling one value of `kind` costs: a save and `reloads` reloads, as
 // costOf charges the operations --spill-atlas-virtual inserts.
@@ -597,7 +587,7 @@ public:
         continue;
       Value victim;
       for (Value value : values)
-        if (kindOf(value.getType()) == kKinds[k] &&
+        if (registerKindOf(value) == kKinds[k] &&
             (!victim || lastUse.lookup(value) > lastUse.lookup(victim)))
           victim = value;
       int reloads = victim ? std::max(1u, remaining.lookup(victim)) : 1;
@@ -636,14 +626,11 @@ private:
     return kept.contains(value) || remaining.lookup(value) > 0;
   }
 
-  // A DMA immediate takes no register: each launch builds it.
-  static bool hasRegister(Value value) {
-    return !isVirtualDMAImmediate(value) && kindOf(value.getType());
-  }
+  static bool hasRegister(Value value) { return registerKindOf(value).has_value(); }
 
   static void count(KindCounts &counts, Value value, int delta) {
-    if (hasRegister(value))
-      counts[indexOf(*kindOf(value.getType()))] += delta;
+    if (std::optional<RegisterKind> kind = registerKindOf(value))
+      counts[indexOf(*kind)] += delta;
   }
 
   void enter(Value value) {
@@ -974,4 +961,8 @@ struct ScheduleAtlasVirtualPass
 
 void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass() {
+  return std::make_unique<ScheduleAtlasVirtualPass>();
 }

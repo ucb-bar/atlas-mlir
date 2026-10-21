@@ -1,5 +1,6 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "Atlas/AtlasSpilling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -39,15 +40,10 @@ DMALaunch dmaLaunch(Operation &op) {
 }
 
 bool isScalar(Value value) {
-  return value.getType().isInteger(1) || value.getType().isInteger(32);
+  return registerKindOf(value) == RegisterKind::Scalar;
 }
 
-// A value with a register; a DMA immediate is built at each launch instead.
-bool isTracked(Value value) {
-  if (isAtlasMemoryControl(value)) return false;
-  return (isScalar(value) && !isVirtualDMAImmediate(value)) ||
-         isa<VirtualBF16Type, VirtualFP8Type>(value.getType());
-}
+bool isTracked(Value value) { return registerKindOf(value).has_value(); }
 
 uint32_t immediateOf(Value value) {
   auto constant = value.getDefiningOp<arith::ConstantOp>();
@@ -138,8 +134,8 @@ private:
         return true;
     if (!hasPack)
       return false;
-    // x15 is intentionally reserved along with the pack helper's x10..x17.
-    if (reg >= 10 && reg <= 17)
+    // x15 is intentionally reserved along with the rest of the pack helper's span.
+    if (reg >= fixed.firstPackRegister() && reg <= fixed.lastPackRegister())
       return true;
     return reg == fixed.packSourceRegs[0] || reg == fixed.packSourceRegs[1] ||
            reg == fixed.packDestinationReg || reg == fixed.packRowReg ||
@@ -165,16 +161,18 @@ private:
         return assignmentError(value, "duplicate register assignment");
       unsigned reg = assignment.reg;
       if (isScalar(value)) {
-        if (reg < 10 || reg > 26)
+        if (reg < fixed.firstScalarValue || reg > fixed.lastScalarValue)
           return assignmentError(
               value, llvm::Twine("x") + llvm::Twine(reg) +
-                         " is outside scalar allocation pool x10..x26");
+                         " is outside scalar allocation pool x" +
+                         llvm::Twine(fixed.firstScalarValue) + "..x" +
+                         llvm::Twine(fixed.lastScalarValue));
         if (reservedScalar(reg))
           return assignmentError(
               value, llvm::Twine("reserved scalar register x") + llvm::Twine(reg));
       } else {
         bool pair = isa<VirtualBF16Type>(value.getType());
-        if (reg >= 64 || (pair && reg >= 63))
+        if (reg >= kAtlasTensorRegisters || (pair && reg >= kAtlasTensorRegisters - 1))
           return assignmentError(
               value, llvm::Twine("tensor register ") + llvm::Twine(reg) +
                          " is outside tensor register bank [0, 63]");
@@ -443,7 +441,7 @@ private:
     // of every half it reads.
     for (Value loaded : stagingLoads.lookup(&op)) {
       const DMATransferPlacement &p = *dmaPlacements.lookup(loaded);
-      write(p.stagingReg, p.stagingWord + 256 * (p.halves - 1));
+      write(p.stagingReg, p.stagingWord + kAtlasRegisterWords * (p.halves - 1));
     }
     auto [transfer, dram, size] = dmaLaunch(op);
     if (transfer) {
@@ -468,11 +466,11 @@ private:
       unsigned halves = isa<VirtualInputFP8Op>(op) ? 1 : 2;
       for (unsigned half = 0; half < halves; ++half) {
         write(input ? fixed.inputBaseReg : fixed.outputBaseReg,
-              uint32_t((input ? fixed.inputWord : fixed.outputWord) + index * 512 + half * 256));
+              uint32_t((input ? fixed.inputWord : fixed.outputWord) + index * kAtlasBF16TileWords + half * kAtlasRegisterWords));
         write(input ? fixed.inputDramReg : fixed.outputDramReg,
               boundaryAddress(input ? "atlas.input_dram_base" : "atlas.output_dram_base",
-                              index * 2048 + half * 1024));
-        if (diagnose && failed(helperRead(op, contents, fixed.halfSizeReg, 1024,
+                              index * kAtlasBF16TileBytes + half * kAtlasRegisterBytes));
+        if (diagnose && failed(helperRead(op, contents, fixed.halfSizeReg, kAtlasRegisterBytes,
                 "persistent DMA half-size helper is not preserved", writers)))
           return failure();
       }
@@ -481,7 +479,7 @@ private:
     if (isa<VirtualPackFP8Op>(op)) {
       write(fixed.outputBaseReg, fixed.packWord);
       write(fixed.packSourceRegs[0], fixed.packWord * 4);
-      write(fixed.packSourceRegs[1], fixed.packWord * 4 + 512);
+      write(fixed.packSourceRegs[1], fixed.packWord * 4 + kAtlasRegisterBytes / 2);
       write(fixed.packDestinationReg, fixed.packRelayoutWord * 4);
       write(fixed.packRowReg, 0);
       write(fixed.packRowsReg, 32);
@@ -555,14 +553,14 @@ private:
     HelperRegisters initial{};
     initial[0] = 0;
     if (fixed.halfSizeReg > 0 && fixed.halfSizeReg < 32)
-      initial[fixed.halfSizeReg] = 1024;
+      initial[fixed.halfSizeReg] = kAtlasRegisterBytes;
     if (function.getNumArguments()) {
       if (fixed.inputBaseReg > 0 && fixed.inputBaseReg < 32)
         initial[fixed.inputBaseReg] = fixed.mailboxWord;
       if (fixed.inputDramReg > 0 && fixed.inputDramReg < 32)
         initial[fixed.inputDramReg] = boundaryAddress("atlas.control_dram_base", 0);
       if (failed(helperRead(*function.getOperation(), initial, fixed.halfSizeReg,
-              1024, "persistent DMA half-size helper is not preserved", nullptr)))
+              kAtlasRegisterBytes, "persistent DMA half-size helper is not preserved", nullptr)))
         return failure();
       for (BlockArgument argument : function.getArguments())
         initial[registers.lookup(argument)].reset();

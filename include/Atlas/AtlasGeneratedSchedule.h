@@ -1,6 +1,8 @@
 #ifndef ATLAS_GENERATED_SCHEDULE_H
 #define ATLAS_GENERATED_SCHEDULE_H
 
+#include "mlir/Pass/Pass.h"
+
 #include "Atlas/AtlasLoop.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
@@ -21,6 +23,7 @@ bool canOverlapAtlasGeneratedDMA(llvm::ArrayRef<Operation *> ops,
 LogicalResult verifyAtlasGeneratedSchedule(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasGeneratedSchedule(ModuleOp module);
 void registerVerifyAtlasGeneratedSchedulePass();
+std::unique_ptr<Pass> createVerifyAtlasGeneratedSchedulePass();
 }
 
 #endif
