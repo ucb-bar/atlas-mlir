@@ -6,6 +6,7 @@ npu_model ticks; npu_model is idle while QEMU runs. No SoC/FPGA binding.
 """
 
 import argparse
+import importlib
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,19 @@ def interrupted(signum, frame):
     raise InterruptedError("host ISA replay terminated by signal " + str(signum))
 
 
+def resnet_completion(remote, image, device, out):
+    mailbox = remote.read(image.symbols["atlas_workload_mailbox"]["address"], 928)
+    (out / "mailbox.bin").write_bytes(mailbox)
+    fields = struct.unpack_from("<10I", mailbox)
+    tohost = int.from_bytes(remote.read(image.symbols["tohost"]["address"], 8), "little")
+    logits = remote.read(image.symbols["logits"]["address"], 4000)
+    (out / "logits.bin").write_bytes(logits)
+    expected = image.bytes_at(image.symbols["graph_expected"]["address"], 4000)
+    verify_completion(mailbox, tohost, logits, expected, device.completed)
+    return dict(mailbox_words=fields, tohost=tohost, logits_words=1000,
+        logits_sha256=digest(logits), all_logits_exact=True)
+
+
 def run(args):
     out = checked(Path(args.out).absolute())
     out.mkdir(exist_ok=False)
@@ -41,22 +55,39 @@ def run(args):
     deadline = time.monotonic() + args.wall_seconds
     pins = {}
     try:
-        bundle = Bundle(Path(args.bundle_root).absolute())
+        workload = getattr(args, "workload", "resnet")
+        contract = None
+        if workload == "resnet":
+            bundle = Bundle(Path(args.bundle_root).absolute())
+        else:
+            from block_bundle import BlockBundle
+            bundle = BlockBundle(Path(args.bundle_root).absolute(), workload)
+            contract = importlib.import_module(workload + "_contract")
+        receipt["workload"] = workload
         elf = checked(Path(args.elf).absolute())
         qemu = checked(Path(args.qemu).absolute())
         assert sha(elf) == bundle.sums["host/host.elf"], "ELF differs from supplied bundle"
         image = Image(elf.read_bytes())
         sites = mmio_sites(image)
-        stop_sites = {pc for name in ("atlas_workload_main", "atlas_block_trap_report") for pc, length,
-            word in image.instructions(name) if length == 4 and word == 0x10500073}
+        if contract is None:
+            stop_sites = {pc: length for name in ("atlas_workload_main", "atlas_block_trap_report")
+                for pc, length, word in image.instructions(name) if length == 4 and word == 0x10500073}
+        else:
+            contract.validate_bundle(bundle, image)
+            stop_sites = contract.stop_sites(image)
         assert stop_sites, "completion WFI instruction missing"
-        for name in ("run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py"):
+        helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py"]
+        if contract is not None:
+            helpers.append("block_bundle.py")
+            path = checked(Path(contract.__file__).absolute())
+            pins[str(path)] = sha(path)
+        for name in helpers:
             path = checked(Path(__file__).absolute().parent / name)
             pins[str(path)] = sha(path)
         for path in (elf, qemu):
             pins[str(path)] = sha(path)
         pins[str(LAYOUT_HEADER)] = HEADER_SHA256
-        for module in ("atlas_path_guard", "atlas_host_layout", "run_model_tile", "atlas_tile_arithmetic"):
+        for module in ("atlas_tooling", "atlas_path_guard", "atlas_host_layout", "run_model_tile", "atlas_tile_arithmetic"):
             path = checked(Path(sys.modules[module].__file__).absolute())
             pins[str(path)] = sha(path)
         model_root = checked(Path(args.model_root).absolute())
@@ -83,9 +114,13 @@ def run(args):
             for pc, site in sites.items():
                 assert remote.read(pc, site["length"]) == image.bytes_at(pc, site["length"])
                 remote.breakpoint(pc, site["length"])
-            for pc in stop_sites:
-                remote.breakpoint(pc, 4)
-            device = Device(remote, out, deadline, bundle, model_root)
+            for pc, length in stop_sites.items():
+                remote.breakpoint(pc, length)
+            cycle_cap = getattr(args, "kernel_cycle_cap", None) or (
+                contract.CYCLE_CAP if contract is not None else 20000000)
+            device = Device(remote, out, deadline, bundle, model_root, cycle_cap=cycle_cap)
+            receipt["kernel_cycle_cap"] = cycle_cap
+            receipt["memory_backend"] = device.memory_backend
             accesses = 0
             while time.monotonic() < deadline:
                 receipt["host_elf_execution_attempted"] = True
@@ -108,22 +143,15 @@ def run(args):
                 assert accesses < 100000, "MMIO access cap"
             else:
                 raise TimeoutError("host graph wall cap")
-            mailbox = remote.read(image.symbols["atlas_workload_mailbox"]["address"], 928)
-            (out / "mailbox.bin").write_bytes(mailbox)
-            fields = struct.unpack_from("<10I", mailbox)
-            tohost = int.from_bytes(remote.read(image.symbols["tohost"]["address"], 8), "little")
-            logits = remote.read(image.symbols["logits"]["address"], 4000)
-            (out / "logits.bin").write_bytes(logits)
-            expected = image.bytes_at(image.symbols["graph_expected"]["address"], 4000)
-            verify_completion(mailbox, tohost, logits, expected, device.completed)
+            completion = (resnet_completion(remote, image, device, out) if contract is None
+                else contract.verify_completion(remote, image, device, bundle, out))
             bundle.verify_bookends()
             device.verify_bookends()
             assert all(sha(Path(path)) == expected_hash for path, expected_hash in pins.items())
             assert time.monotonic() < deadline, "absolute completion deadline"
             receipt.update(status="PASS_RV64_HOST_WITH_MODEL_DEVICE", kernels=device.completed, mmio_accesses=accesses,
-                mailbox_words=fields, tohost=tohost, logits_words=1000, logits_sha256=digest(logits), all_logits_exact=True,
                 one_device_reset=True, model_binding=device.binding, device_payloads_sha256=device.pins,
-                source_bookends_equal=True)
+                source_bookends_equal=True, **completion)
     except Exception as error:
         receipt["error"] = dict(type=type(error).__name__, message=str(error))
         if device:
@@ -169,8 +197,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--wall-seconds", type=int, default=21600)
+    parser.add_argument("--workload", choices=("resnet", "tiny", "smol"), default="resnet")
+    parser.add_argument("--kernel-cycle-cap", type=int)
     for name in ("elf", "bundle-root", "model-root", "qemu"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
     assert 0 < args.wall_seconds <= 86400
+    assert args.kernel_cycle_cap is None or args.kernel_cycle_cap > 0
     raise SystemExit(run(args))

@@ -4,7 +4,7 @@ from atlas_tooling import sha256 as sha
 
 import io
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import struct
 
@@ -19,11 +19,15 @@ def relative_name(name):
         or any(ord(c) < 32 or ord(c) == 127 for c in name) or name.startswith("/")
         or any(p in ("", ".", "..") for p in name.split("/"))):
         raise ValueError("unsafe bundle member name")
+    if re.search(r"hammer|vlsi", name, re.IGNORECASE):
+        raise ValueError("restricted bundle member name")
     return PurePosixPath(name)
 
 
-class Bundle:
+class ChecksumBundle:
     def __init__(self, root):
+        if any(re.search(r"hammer|vlsi", part, re.IGNORECASE) for part in Path(root).parts):
+            raise ValueError("restricted bundle root")
         self.root = checked(root)
         self.sums = {}
         sums_path = self.path("SHA256SUMS")
@@ -40,17 +44,6 @@ class Bundle:
         if not self.sums:
             raise ValueError("empty SHA256SUMS")
         self.verify_bookends()
-        provenance = json.loads(self.read("provenance.json"))
-        if provenance.get("schema") != "atlas.full_resnet_bundle.v3" or provenance.get("kernel_count") != 54:
-            raise ValueError("only the complete ResNet v3 development bundle is supported")
-        build = json.loads(self.read("host/build.json"))
-        if (build.get("returncode") != 0 or build.get("source_bookends_equal") is not True or build.get("kernel_count") != 54
-            or build.get("elf_sha256") != self.sums.get("host/host.elf")):
-            raise ValueError("host build identity disagrees with bundle")
-        for index in range(54):
-            for name in ("receipt.json", "program.S", "program.bin", "initial-dram.bin", "expected-bf16-tiles.bin"):
-                if f"kernels/{index:02d}/model/{name}" not in self.sums:
-                    raise ValueError("missing model payload")
 
     def path(self, name):
         relative = relative_name(name)
@@ -71,6 +64,21 @@ class Bundle:
             if sha(self.path(name)) != expected:
                 raise ValueError("changed bundle payload " + name)
 
+
+class Bundle(ChecksumBundle):
+    def __init__(self, root):
+        super().__init__(root)
+        provenance = json.loads(self.read("provenance.json"))
+        if provenance.get("schema") != "atlas.full_resnet_bundle.v3" or provenance.get("kernel_count") != 54:
+            raise ValueError("only the complete ResNet v3 development bundle is supported")
+        build = json.loads(self.read("host/build.json"))
+        if (build.get("returncode") != 0 or build.get("source_bookends_equal") is not True or build.get("kernel_count") != 54
+            or build.get("elf_sha256") != self.sums.get("host/host.elf")):
+            raise ValueError("host build identity disagrees with bundle")
+        for index in range(54):
+            for name in ("receipt.json", "program.S", "program.bin", "initial-dram.bin", "expected-bf16-tiles.bin"):
+                if f"kernels/{index:02d}/model/{name}" not in self.sums:
+                    raise ValueError("missing model payload")
 
 def runtime_program(source, original, assemble):
     """Reconstruct the exact six-word runtime completion epilogue."""

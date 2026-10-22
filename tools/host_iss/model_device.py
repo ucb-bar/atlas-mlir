@@ -1,8 +1,7 @@
 """Diagnostic MMIO bridge: real host buffers, admitted instruction objects.
 
-Only the hash-bound 54-kernel ResNet development bundle is supported.
-Derived from the validated diagnostic bridge; this portable adaptation has not
-executed the whole ELF. No TileLink or SoC timing claim.
+Runs checksum-bound workload launch sequences with one persistent device.
+No TileLink or SoC timing claim.
 """
 
 from atlas_tooling import write_json, sha as digest
@@ -25,6 +24,7 @@ class Device:
         self.remote, self.out = remote, checked(out)
         self.deadline, self.cycle_cap = wall_deadline, cycle_cap
         self.bundle = bundle
+        self.kernel_count = getattr(bundle, "kernel_count", 54)
         self.pins = {}
         self.model_root = checked(model_root)
         _, self.torch, self.assemble, _ = configure_model(self.model_root)
@@ -35,6 +35,8 @@ class Device:
         from npu_model.logging.logger import Logger, LoggerConfig
 
         config = DefaultHardwareConfig()
+        assert config.dma_memory_backend == "curve", "whole-host qualification requires the SoC curve backend"
+        self.memory_backend = dict(backend=config.dma_memory_backend, parameters=dict(config.dma_memory_params))
         config.arch_state_config = replace(config.arch_state_config, numerics="rtl", randomize_init=True, init_seed=42)
         self.logger = Logger(LoggerConfig(filename="/dev/null"))
         self.core = Core(config, self.logger)
@@ -44,13 +46,25 @@ class Device:
         self.written = set()
         self.completed = []
         self.programs = []
-        for index in range(54):
-            receipt = json.loads(self.payload(f"kernels/{index:02d}/model/receipt.json"))
-            assert receipt["status"] == "passed_model_only"
-            source = self.payload(f"kernels/{index:02d}/model/program.S").decode()
-            original = self.payload(f"kernels/{index:02d}/model/program.bin")
+        for index in range(self.kernel_count):
+            paths = (bundle.kernel_paths(index) if hasattr(bundle, "kernel_paths")
+                else self.resnet_kernel_paths(index))
+            source = self.payload(paths["source"]).decode()
+            original = self.payload(paths["original"])
             program, words = runtime_program(source, original, self.assemble)
-            self.programs.append((program, words, receipt))
+            self.programs.append((program, words, paths))
+
+    def resnet_kernel_paths(self, index):
+        """Keep the existing bundle-style segment-capture provider compatible."""
+        prefix = f"kernels/{index:02d}/model/"
+        receipt = json.loads(self.payload(prefix + "receipt.json"))
+        assert receipt["status"] == "passed_model_only"
+        initial = self.payload(prefix + "initial-dram.bin")
+        expected = self.payload(prefix + "expected-bf16-tiles.bin")
+        return dict(source=prefix + "program.S", original=prefix + "program.bin",
+            initial=prefix + "initial-dram.bin", expected=prefix + "expected-bf16-tiles.bin",
+            output_offset=len(initial) - len(expected) - 256, dram_base=ATLAS_DRAM_BASE,
+            requested_dma=receipt["requested_dma"])
 
     def payload(self, name):
         raw = self.bundle.read(name)
@@ -86,19 +100,20 @@ class Device:
 
     def start(self):
         index = len(self.completed)
-        assert index < 54
+        assert index < self.kernel_count
         core, state = self.core, self.core.arch_state
         assert state.halted and not any(exu.has_in_flight for exu in core.exus)
         assert not any(state.check_flag(channel) for channel in range(8))
-        program, words, receipt = self.programs[index]
+        program, words, paths = self.programs[index]
         assert self.written == set(range(len(words) // 4))
         assert self.imem[: len(words)] == words, "actual host IMEM does not match admitted program"
         assert state.read_csrf(0xC10) == 0 and state.read_csrf(0xC11) == index + 1
-        initial = self.payload(f"kernels/{index:02d}/model/initial-dram.bin")
-        expected = self.payload(f"kernels/{index:02d}/model/expected-bf16-tiles.bin")
-        actual_host_input = self.remote.read(ATLAS_DRAM_BASE, len(initial))
+        initial = self.payload(paths["initial"])
+        expected = self.payload(paths["expected"])
+        dram_base = paths["dram_base"]
+        actual_host_input = self.remote.read(dram_base, len(initial))
         assert actual_host_input == initial, "host staging differs from frozen native/model input"
-        state.write_dram(ATLAS_DRAM_BASE,
+        state.write_dram(dram_base,
             self.torch.frombuffer(bytearray(actual_host_input), dtype=self.torch.uint8).clone())
         # ScalarCore hostStart restarts PC/hold/delay and clears dmaBaseReg;
         # it preserves registers, VMEM, accumulators, DRAM and CSR counters.
@@ -127,14 +142,15 @@ class Device:
         assert not any(exu.has_in_flight for exu in core.exus)
         assert not any(state.check_flag(channel) for channel in range(8))
         assert state.read_csrf(0xC10) == index + 1
-        for key, count in receipt["requested_dma"].items():
+        for key, count in paths["requested_dma"].items():
             assert events[key] == count
-        actual = state.read_dram(ATLAS_DRAM_BASE, len(initial)).numpy().tobytes()
-        offset = len(initial) - len(expected) - 256
+        actual = state.read_dram(dram_base, len(initial)).numpy().tobytes()
+        offset = paths["output_offset"]
+        assert 0 <= offset and offset + len(expected) <= len(initial), "output extent exceeds staging image"
         assert (actual[:offset] == initial[:offset]
             and actual[offset + len(expected) :] == initial[offset + len(expected) :])
         assert actual[offset : offset + len(expected)] == expected
-        self.remote.write(ATLAS_DRAM_BASE, actual)
+        self.remote.write(dram_base, actual)
         result = dict(index=index, sequence=index + 1, cycles=core.cycle_count - before, program_sha256=digest(words),
             host_input_sha256=digest(actual_host_input),
             actual_output_sha256=digest(actual[offset : offset + len(expected)]), expected_output_sha256=digest(expected),
