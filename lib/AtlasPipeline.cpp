@@ -2,6 +2,7 @@
 #include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasStream.h"
@@ -18,9 +19,11 @@ using namespace mlir::atlas;
 namespace {
 // Live MXU handles become saved tiles before the strict virtual verifier,
 // which bounds each unit's slots.
-void buildVerifyStage(OpPassManager &pm) {
+void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createSpillAtlasMXUStatePass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
+  if (options.guardedPack)
+    pm.addPass(createLowerAtlasGuardedPackPass());
 }
 
 // Boundary tiles become explicit DMA, which the scheduler can queue and
@@ -66,7 +69,7 @@ void buildTimeStage(OpPassManager &pm) {
 
 void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
                                             const AtlasCompileOptions &options) {
-  buildVerifyStage(pm);
+  buildVerifyStage(pm, options);
   buildScheduleStage(pm);
   buildSpillStage(pm);
   buildLowerStage(pm, options);
@@ -75,6 +78,10 @@ void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
 
 void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
     OpPassManager &pm, const AtlasCompileOptions &options) {
+  if (options.guardedPack) {
+    pm.addPass(createSpillAtlasMXUStatePass());
+    pm.addPass(createLowerAtlasGuardedPackPass());
+  }
   // Spilling admits MXU pressure, so it runs before strict verification.
   buildSpillStage(pm);
   buildLowerStage(pm, options);
@@ -93,7 +100,7 @@ void mlir::atlas::registerAtlasCompilePipelines() {
       "Compile one virtual Atlas function without boundary DMA or scheduling, "
       "inserting delays in source order",
       buildAtlasCompileUnscheduledPipeline);
-  PassPipelineRegistration<>("atlas-compile-verify",
+  PassPipelineRegistration<AtlasCompileOptions>("atlas-compile-verify",
                              "atlas-compile stage 1: spill MXU state and verify",
                              buildVerifyStage);
   PassPipelineRegistration<>(

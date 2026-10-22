@@ -11,6 +11,9 @@ struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
       *this, "allocation-report",
       llvm::cl::desc("Write the allocation plan as JSON to this file, also "
                      "when it does not fit")};
+  Option<bool> guardedPack{
+      *this, "guarded-pack", llvm::cl::desc("Convert proven-finite PACK through MXU"),
+      llvm::cl::init(false)};
 };
 
 // --atlas-compile: one virtual function to timed machine IR, with every

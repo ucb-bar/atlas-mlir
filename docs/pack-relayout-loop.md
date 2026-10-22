@@ -142,3 +142,20 @@ cheaper PACK cost tips the other way.
   cycles.
 - Removing the relayout altogether, which needs a PACK or XLU layout the MXU
   accepts: a hardware question.
+
+## Guarded MXU conversion
+
+`atlas-opt --atlas-compile=guarded-pack=true` or
+`tools/lower_atlas_program.py --guarded-pack` opts in to MXU conversion of
+proven-finite BF16 sources, bit-exact with PACK for every finite encoding and
+scale. The registered pipeline runs the conversion before boundary conversion,
+scheduling and allocation, and always recovers register pressure through spilling.
+For pass-level use, run `--lower-atlas-guarded-pack` before these stages.
+
+Finiteness propagates from finite splats and raw FP8 reset contractions through
+mov/ReLU, min/max of finite operands and BF16 accumulator copies. Unknown
+sources, overflow-capable arithmetic and continued accumulations retain PACK.
+It uses MXU0 (`unit=1` selects MXU1) in single-block functions with a free
+accumulator slot. The ordinary spill stage handles register pressure introduced
+by conversion. Native fallback still admits only scales 122..128. Exactness
+does not guarantee a speedup under MXU contention or register pressure.
