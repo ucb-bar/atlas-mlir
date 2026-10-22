@@ -139,3 +139,25 @@ When a model receipt binds a separate producer source snapshot, pass it with
 `--model-producer-tools`. Every named helper is checked against the unchanged
 receipt digest; the current templates and all prepared launch bytes are still
 compared to the recorded model payloads.
+
+## EE290 SoC kernels
+
+The frozen per-kernel network-model fixture supplies `kernel-*/model/{program.bin,initial-dram.bin,expected-bf16-tiles.bin}`. Build one independent ELF per kernel with a RISC-V GCC toolchain that supplies `htif_nano.specs` and `htif.ld`; the builder links the shared host runtime in place. Provide physical paths without symbolic links for all inputs and toolchain executables. LOADMEM places the initial device image at `0x100000000`; HTIF reports completion and the ELF checks every output word, both guards and the runtime sequence markers.
+
+```sh
+python tools/chipyard/resnet_kernels.py build --network-model "$NETWORK_MODEL" \
+  --cc "$RISCV_CC" --out out/resnet-soc-kernels
+# Use an already built EE290GenericIOSimConfig simulator; set its library/license environment separately.
+export ATLAS_SOC_SIMULATOR="$EE290_SIMULATOR"
+export ATLAS_DRAMSIM_INI="$DRAMSIM_INI"  # Enable +dramsim to reproduce the recorded cycle totals.
+python tools/chipyard/resnet_kernels.py run --build-root out/resnet-soc-kernels \
+  --out out/resnet-soc-runs --jobs 1
+python tools/chipyard/resnet_kernels.py results --build-root out/resnet-soc-kernels \
+  --runs-root out/resnet-soc-runs --out out/resnet-soc-results.json
+```
+
+The runner records logs, exit status and ELF identity with finite cycle and wall limits; select them with `--max-cycles` and `--wall-seconds`. Increase `--jobs` only after allocating simulator licenses and CPU resources. Results require a matching ELF identity and runner status in `run.json`, zero exit, no timeout and exactly one matching PASS for every built kernel; the complete fixture must report 54/54 exact. No simulator is built by these tools.
+
+Measured on EE290GenericIOSimConfig with VCS: all 54 kernels are exact, totaling 200,874,497 Atlas cycles, about 3.2 times the standalone AtlasCore total of 63,480,310 because the SoC uses real DRAM. A full host run takes about 4.09 billion host instructions even without the startup BSS clear; at about 2,300 simulated cycles/second (measured on the segment runs) it is impractical in RTL simulation. Coverage combines per-kernel exactness, segment stitching on QEMU and short SoC segments; a full end-to-end run remains for FPGA or FireSim.
+
+For a full host loaded by a loader that zero-fills every PT_LOAD memory tail, `build_resnet_graph_host.py --skip-bss-clear` omits the redundant startup clear. The default still clears BSS.
