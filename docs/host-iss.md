@@ -54,3 +54,24 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -p 'test_host_iss
 ```
 
 These checks use synthetic payloads and an in-memory duplex transport. They cover checksum/path and source bookends, exact epilogue reconstruction, actual MMIO instruction decoding, workload geometry and ELF bindings, CSR/IMEM refusals, live-buffer/DMA/output/guard failures, completion/trap/sequence/cache failures, and RSP framing, acknowledgments, checksum and deadlines. They launch neither QEMU nor a model Core and provide no numerical execution verdict.
+
+## Independent EE290 SoC kernel checks
+
+`tools/chipyard/block_kernels.py` builds independent LOADMEM ELFs from a hash-bound manifest without invoking Chipyard's build. The manifest has schema `atlas.block_soc_kernels.v1` and a nonempty `programs` list. Each entry declares a unique `id`, `program_bin`, `program_sha256`, `initial_dram_bin`, `initial_dram_sha256`, `expected_dram_bin`, `expected_dram_sha256`, aligned `dram_base`, and disjoint `output_ranges` with integer `offset` and `size`. Relative payload paths resolve beneath the manifest. Both DRAM images cover the full region; expected bytes outside the output ranges must equal the initial bytes. Supply the complete admitted inventory for a workload, 24 kernels for Tiny or seven for Smol, when claiming full block kernel coverage.
+
+The builder links the current shared raw runtime, preserves the original program bytes, binds the completion epilogue separately, and audits the actual ELF load mappings and embedded assets. The C harness checks every output byte, preserved inputs and guards, one launch, drained completion and sequence markers. These are independent kernel checks; host graph arithmetic requires separate whole-host or segment execution.
+
+```sh
+python3 tools/chipyard/block_kernels.py build \
+  --manifest "$BLOCK_SOC_MANIFEST" --cc "$RISCV_CC" --out out/block-soc-build
+# Set the simulator's library and license environment before running.
+python3 tools/chipyard/block_kernels.py run \
+  --build-root out/block-soc-build --out out/block-soc-runs --jobs 1 \
+  --simulator "$EE290_SIMULATOR" --dramsim-ini "$DRAMSIM_INI" \
+  --max-cycles 2000000000 --wall-seconds 172800
+python3 tools/chipyard/block_kernels.py results \
+  --build-root out/block-soc-build --runs-root out/block-soc-runs \
+  --out out/block-soc-results.json
+```
+
+Allocate simulator licenses and CPU resources before increasing `--jobs`, which is bounded at 18 per invocation; enforce the aggregate limit across invocations separately. `--resume` reuses only completed exact runs with matching ELF/status evidence and refuses incomplete or failed existing directories. A successful report requires every listed kernel, zero process exits, no timeout, matching ELF hashes, exact output/preservation checks and completion markers. Interrupted runs are not exact results. Use the curve model and real SoC cycle totals before standalone RTL timing when comparing platforms.
