@@ -123,11 +123,15 @@ def verify_completion(remote, image, device, bundle, out):
     assert len(mailbox) == 128, "Tiny mailbox extent"
     words = struct.unpack("<16Q", mailbox)
     assert words == (MAGIC, 2, 24, 23, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0), ("Tiny completion mailbox", words)
-    tohost = int.from_bytes(remote.read(image.symbols["tohost"]["address"], 8), "little")
+    tohost_raw = remote.read(image.symbols["tohost"]["address"], 8)
+    assert len(tohost_raw) == 8, "Tiny tohost extent"
+    tohost = int.from_bytes(tohost_raw, "little")
     assert tohost == 1, ("Tiny tohost", tohost)
     assert len(device.completed) == KERNEL_COUNT, "Tiny completed start count"
     assert [x["index"] for x in device.completed] == list(range(KERNEL_COUNT)), "Tiny launch order"
     assert [x["sequence"] for x in device.completed] == list(range(1, KERNEL_COUNT + 1)), "Tiny completion sequences"
+    assert all(x.get("exact") is True and x.get("drained") is True and x.get("reset_count") == 1
+               for x in device.completed), "Tiny device launch ledger"
     results = []
     for item in data["final_actual_C_output_KV_assets"]:
         name = item["actual_symbol"]

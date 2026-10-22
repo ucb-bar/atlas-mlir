@@ -110,7 +110,7 @@ def fixture():
         actual_returncode=0, source_bookends_verified=True, host_elf_executed=False, platform_executed=False,
         elf=dict(sha256=tiny.digest(image.raw)))).encode())
     bundle.contract(data)
-    return image, bundle, data, types.SimpleNamespace(completed=[dict(index=i, sequence=i+1) for i in range(24)])
+    return image, bundle, data, types.SimpleNamespace(completed=[dict(index=i, sequence=i+1, exact=True, drained=True, reset_count=1) for i in range(24)])
 
 
 class TinyContractTests(unittest.TestCase):
@@ -158,6 +158,17 @@ class TinyContractTests(unittest.TestCase):
         for completed in (original[:-1], list(reversed(original)), [dict(index=i, sequence=i+2) for i in range(24)]):
             self.device.completed = completed
             with self.assertRaises(AssertionError): self.verify()
+
+    def test_short_tohost_and_unqualified_device_ledger_refused(self):
+        address = self.image.symbols["tohost"]["address"]
+        self.remote.read = lambda observed, size: b"\x01" if observed == address else self.image.bytes_at(observed, size)
+        with self.assertRaises(AssertionError): self.verify()
+        self.remote.read = self.image.bytes_at
+        for change in (dict(exact=False), dict(drained=False), dict(reset_count=2)):
+            original = dict(self.device.completed[0])
+            self.device.completed[0].update(change)
+            with self.assertRaises(AssertionError): self.verify()
+            self.device.completed[0] = original
 
     def test_contract_digest_refused(self):
         self.bundle.provenance["contract_sha256"] = "0"*64
