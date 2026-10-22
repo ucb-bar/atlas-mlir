@@ -10,13 +10,18 @@ _start:
   la sp, __stack_top
   la t0, atlas_block_trap
   csrw mtvec,t0
+/* ATLAS_SKIP_BSS_CLEAR drops the BSS clear. Valid only when the loader zero-fills memory (the Chipyard SimDRAM LOADMEM
+   path); never define it for QEMU or any loader that leaves BSS uninitialised. */
+#ifndef ATLAS_SKIP_BSS_CLEAR
   la t0, __bss_start
   la t1, __bss_end
 1: bgeu t0,t1,2f
   sd zero,0(t0)
   addi t0,t0,8
   j 1b
-2: li t0,0x6000
+2:
+#endif
+  li t0,0x6000
   csrs mstatus,t0
   csrwi fcsr,0
   call atlas_workload_main
