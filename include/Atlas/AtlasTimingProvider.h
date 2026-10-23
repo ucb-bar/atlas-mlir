@@ -68,6 +68,7 @@ struct TimingProvider {
   std::function<TimingRuleResult<int>(const Instr &)> issueGap;
   std::function<TimingRuleResult<std::unique_ptr<TimingReservations>>()>
       createReservations;
+  bool fillPendingDelaySlots = false;
   // DMA wait insertion completes launch n-8 before launch n reuses its command slot.
   bool waitReusedDMASlots = false;
   // Optional legal virtual-cost operands; absent uses the default probes.
@@ -93,8 +94,10 @@ FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
 
 constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
 constexpr llvm::StringLiteral kLegacyBuiltinTimingProviderId = "npu-model-rtl-match-v1";
-// The stream scheduler fills pending delay slots, and virtual costs assume it, only for the builtin provider.
-inline bool fillsDelaySlots(const TimingProvider &provider) { return provider.id == kBuiltinTimingProviderId; }
+// Virtual costs and physical filling must use the same provider capability.
+inline bool fillsDelaySlots(const TimingProvider &provider) {
+  return provider.fillPendingDelaySlots;
+}
 llvm::StringRef canonicalTimingProviderId(llvm::StringRef id);
 // Built-in rules ported from npu_model's rtl-match mode.
 TimingProvider builtinTimingProvider();

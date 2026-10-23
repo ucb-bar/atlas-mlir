@@ -669,6 +669,18 @@ class TiledSelectionTest(unittest.TestCase):
             receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1, op_timing=facts,
                                      pairs=pairs, scorer=lambda program, **_: len(program["instructions"]), **digests)
         self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
+        # Lowered for model, the default order reuses a pending transfer's slot unless insertion waits for it.
+        evidence = evidence_option(facts, digests["op_timing_sha256"], pairs, digests["pairs_sha256"])
+        lowered = run("atlas-opt", source.read_text(), *evidence, "--atlas-compile-prepare",
+                      "--schedule-atlas-virtual=provider=model", "--atlas-compile-spill",
+                      "--atlas-compile-lower=provider=model")
+        self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        for provider, pending in (("model", False), ("builtin", True)):
+            with self.subTest(provider=provider):
+                timed = run("atlas-opt", lowered.stdout, f"--insert-atlas-dma-waits=provider={provider}",
+                            "--schedule-atlas-stream=provider=model", "--verify-atlas-timing")
+                self.assertEqual(timed.returncode != 0, pending, timed.stderr)
+                self.assertEqual("DMA command slot is still pending" in timed.stderr, pending)
 
 
 class ModelOrderReplayTest(unittest.TestCase):
