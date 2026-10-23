@@ -1,0 +1,592 @@
+{
+  "dependencies": {
+    "architecture_memory": {
+      "callees": [
+        "ArchState.read_mrf_bf16",
+        "ArchState.write_mrf_bf16",
+        "ArchState._check_dram_window",
+        "ArchState.read_dram",
+        "ArchState.write_dram",
+        "ArchState.read_vmem",
+        "ArchState.write_vmem",
+        "SparseMemory.*",
+        "Program.*",
+        "InstantiableProgram.__init__",
+        "InstructionMemory.load_program"
+      ],
+      "guard": "complete arch_state/sparse_memory/program/ifu modules; atlas_derive_arch extracts mappings",
+      "roots": [
+        "ArchState.initialize_buffers",
+        "ArchState.read_mrf_bf16_tile",
+        "ArchState.write_mrf_bf16_tile",
+        "Core.load_program"
+      ]
+    },
+    "banking": {
+      "callees": [
+        "begin_cycle",
+        "reset",
+        "reserve_mreg",
+        "release_mreg",
+        "access_mreg",
+        "VMEM announcement/owner",
+        "weight/accumulator acquisition/release"
+      ],
+      "guard": "whole bank_conflict.py AST in atlas_derive_vpu._check_source, atlas_derive_mxu._check_checker, atlas_derive_memory and atlas_derive_overlap; not inferred from callers",
+      "roots": [
+        "BankConflictChecker.*",
+        "module operand access classifiers"
+      ]
+    },
+    "boundary": {
+      "callees": [
+        "HardwareConfig/ArchStateConfig fields",
+        "Python standard library",
+        "PyTorch",
+        "selected RTL numerical routines and LUTs",
+        "no-op log methods"
+      ],
+      "guard": "configuration capabilities/effective digest; source and numerical manifests bind selected routines/data; existing numerical validation only, no new arithmetic equivalence proof; Python/PyTorch are trusted execution dependencies, logger has no model state effects",
+      "roots": [
+        "configuration",
+        "tensor arithmetic",
+        "logger"
+      ]
+    },
+    "engines": {
+      "callees": [
+        "ExecutionUnit.*",
+        "StagedExecution.*",
+        "_Memory.*",
+        "ArchState storage methods",
+        "bank checker",
+        "native memory backend"
+      ],
+      "guard": "vpu whole AST after latency-table extraction; mxu whole AST after planner expression extraction; lsu/xlu whole AST; DMA/backend guards in atlas_derive_curve; shared exu helpers guarded here",
+      "roots": [
+        "VectorExecutionUnit.*",
+        "_MatrixExecutionUnit.*",
+        "MatrixExecutionUnitSystolic.*",
+        "MatrixExecutionUnitInner.*",
+        "LoadStoreUnit.*",
+        "CrossLaneExecutionUnit.*",
+        "DmaExecutionUnit.*"
+      ]
+    },
+    "fatal_errors": {
+      "callees": [
+        "Core._tick_s1",
+        "Core._recover_s1_fault",
+        "Core._recover_exu_fault",
+        "Core._recover_ifu_fault"
+      ],
+      "guard": "hardware/core.py; complete helpers and module/class bindings",
+      "roots": [
+        "Core.__init__",
+        "Core.tick",
+        "Core._handle_runtime_error"
+      ]
+    },
+    "frontend": {
+      "callees": [
+        "StageData.*",
+        "Uop.__init__",
+        "InstructionMemory.*",
+        "ArchState.set_pc",
+        "ArchState.set_npc",
+        "ArchState.check_flag",
+        "ArchState.set_flag",
+        "instruction exec"
+      ],
+      "guard": "complete core/ifu/stage_data/software/instruction/arch_state/configs/isa_definition modules; atlas_derive_frontend extracts issue/control timing",
+      "roots": [
+        "Core._tick_s1",
+        "Core.is_finished",
+        "InstructionFetch.tick"
+      ]
+    },
+    "initialization_reset_dispatch": {
+      "callees": [
+        "ArchState.__init__",
+        "ArchState.initialize_buffers",
+        "ArchState.reset",
+        "InstructionFetch.__init__",
+        "InstructionFetch.reset",
+        "ExecutionUnit.__init__",
+        "ScalarExecutionUnit.__init__",
+        "ScalarExecutionUnit.reset",
+        "EXU",
+        "configured engine constructors/reset"
+      ],
+      "guard": "core, arch_state, ifu, exu, isa_types helpers; exact configuration execution_units order; engine owners below",
+      "roots": [
+        "Core.__init__",
+        "Core.reset",
+        "Core._reset_s1"
+      ]
+    },
+    "isa_dispatch_execution": {
+      "callees": [
+        "EXU",
+        "BoundedInt",
+        "register/immediate constructors",
+        "_sign_extend",
+        "_MASK32",
+        "_load_word",
+        "_store",
+        "_vmem_address",
+        "_vmem_line_address"
+      ],
+      "guard": "complete isa.py/isa_types.py/isa_patterns.py/configs/isa_definition.py; vocabulary and ISA metadata cross-check effective configuration",
+      "roots": [
+        "IsaSpec",
+        "Instruction.__init_subclass__",
+        "InstructionPatternMeta",
+        "InstructionPattern",
+        "scalar exec methods"
+      ]
+    },
+    "scalar_storage": {
+      "callees": [
+        "ArchState._csr_address",
+        "ArchState.begin_csr_cycle",
+        "ArchState.finish_csr_cycle",
+        "ArchState.reset",
+        "ArchState.initialize_buffers"
+      ],
+      "guard": "complete hardware/arch_state.py; atlas_derive_arch extracts width/capacity only after guard",
+      "roots": [
+        "ArchState.write_xrf",
+        "ArchState.read_xrf",
+        "ArchState.write_erf",
+        "ArchState.read_erf",
+        "ArchState.write_csrf",
+        "ArchState.read_csrf"
+      ]
+    }
+  },
+  "files": {
+    "__init__.py": {
+      "bindings": "ad2e13b69c4fc1fda46413f740f426fc1793cfc6d6da8d226ba619f1aef48be7",
+      "helpers": {}
+    },
+    "configs/__init__.py": {
+      "bindings": "ad2e13b69c4fc1fda46413f740f426fc1793cfc6d6da8d226ba619f1aef48be7",
+      "helpers": {}
+    },
+    "configs/isa_definition.py": {
+      "bindings": "d8efa4b9f77733819849f012a216f57cc5c58f28179a9c1cb90c504e322c021a",
+      "helpers": {
+        "ADD.exec": "1661a1b6f60471976e3c70074aed7b85a0f2d117a36b2aee8d7c609408e302cd",
+        "ADDI.exec": "f8286801fc6cea2452b640e58a3136ea0dc9900cc957f0fe485d581c7d287167",
+        "AND.exec": "dbc527dce635382169eef866be5718652d317ae5de266a2c91c07c9076a1cc5c",
+        "ANDI.exec": "fd702ce1ff673fcb89cd3accf5a4fd096e9cf73b3da61bf1f5603711c2b39d2d",
+        "AUIPC.exec": "3301c11cf6c34a1f53805964e5927f566f804a537eed28dd7233d7c781e9c329",
+        "BEQ.exec": "4931be90d12b315d92ef9b233ae8c4fe5a746420b59016247abc8da426897aca",
+        "BGE.exec": "892a43a37c3e6bb4154314dcd6abb37d594c58d9e5219f3b5fb14c6cdce744e8",
+        "BGEU.exec": "7521ebfa7db64aebd7fd0f78dd3a063ac848fe78c78f2a98298b3f84364e6cd6",
+        "BLT.exec": "1405092053e11be3222e4831d6cedae589089aa6695c1e9a84401c7c92fed7cb",
+        "BLTU.exec": "33adb3e00c3b3962de257f2b11ea5255efbe8bc2b1c67238a543d620fb21fb44",
+        "BNE.exec": "01fdaad10b02968d9d7d5e8753a88e50604b145f6b66cfff2d0ca76c42af53a9",
+        "CSRRC.exec": "54f9a577dca3b3062d9557a729a1b07af2da11edbba8ea9d9ac997573b9aadd5",
+        "CSRRCI.exec": "4eafd3ced84cae9d21222b6bc5f41ca2038c38fa1eacbd4e99135d5e4dcb9474",
+        "CSRRS.exec": "8d8086580081bf82c1e6b9fc48948a585859994ac68ace109f45c0024ff89afb",
+        "CSRRSI.exec": "699e742f3dbf7e4d175d90407257c9b417824cd8d37f158a7dd00d0877fb22de",
+        "CSRRW.exec": "90ff53744b087e190c0907fc1fcd93d954093b7856f1a3b102fa6166561782d7",
+        "CSRRWI.exec": "23371c578572f5b50b30b6cb8b676b4959060862421f42f9a0429b5e81cce77c",
+        "DELAY.exec": "cc89abb94f6c7abde63a774f3b8de7acea24b96c64dd2b62d3c49ef5a9232536",
+        "DMA_CONFIG.exec": "64035318f27ba566d1a5adfbaf35746cfed3216eb547d22c87072ca84153ea79",
+        "DMA_LOAD.exec": "a52a0f3900fe25d777e7dc31f46bb57b382cb3406601a47f3a5313f670877dc2",
+        "DMA_STORE.exec": "d52cbbb12426c67c88cbd9e0e491b21d808de9af666dc8c4309849a992a3c9d8",
+        "DMA_WAIT.exec": "cc89abb94f6c7abde63a774f3b8de7acea24b96c64dd2b62d3c49ef5a9232536",
+        "EBREAK.exec": "df9cf800bf81e655cc4fdc235e0cc7fecca20bff51510b3c5f8c64fe24af7aab",
+        "ECALL.exec": "52a32b25594249e4bf75945e50b337d1079584e3eb34bcbdefe462f03eda66c3",
+        "FENCE.exec": "cc89abb94f6c7abde63a774f3b8de7acea24b96c64dd2b62d3c49ef5a9232536",
+        "JAL.exec": "9f585fcf7e952ac0a781e46853b809cf9da6e5ef39e6745b7a042540b917d1cd",
+        "JALR.exec": "54a0e38d22fb420756730d75cd2f3e6eae38f9ed3e5f934afa09e5b8b126fba7",
+        "LB.exec": "2fa64a628b4182ef66c17edc0c4db98c5c10f6d2c4f167403aac9b66bd631507",
+        "LBU.exec": "95c073415e1cbd2ac9c991071debb68751a0d968d2098232951bf0449f8a25d1",
+        "LH.exec": "c429d148ad892b1041f6a90ce86aa1b83cd3f535487b752f6e090bc1ac688e09",
+        "LHU.exec": "9c9b1bd5c233aa4f7e8c92581d29030d38fdad7bb4878dd3646679623207d295",
+        "LUI.exec": "55875489b9f500eee0bbb07a2f76f3af1c0d1eacb54ffcbd30ec82710e21e457",
+        "LW.exec": "9fdb71bc68761d7672e35b2d57ce01eaa20fe90ce9123553106f93156820a53f",
+        "OR.exec": "fdc06c50c3fc9c4d5f4045a6750091d25f1f2cb458fe0dee1d00034a08e9726b",
+        "ORI.exec": "b317da24c61dc3ed2747455ba53c207e73ff554396bad11b4f0f27866509ecd7",
+        "SB.exec": "d2987b5f10a6d82bfec50ee4ffb3971fbdde8257af26038892e15dfad3c91063",
+        "SELD.exec": "21ac363b33bc95a6dac569c6d775377991e28b177ef8c843de554783c225e726",
+        "SELI.exec": "3582c849eaf5764a41859a74df2d79b0db6ee867b32d86116e739446815a4ee8",
+        "SH.exec": "0354dd078e2c6f4cf34e7203ffd2d2f7e63902421cf47b8cd8d8f1f40ab8a73c",
+        "SLL.exec": "f2f92c493179e22a6eaae22d20937a909931e3f9e587f0b66271452ffb572882",
+        "SLLI.exec": "0e680d1bc5fc893cd28185bd8a169ba8d99baca00e616ac137a70b49559c78db",
+        "SLT.exec": "5cfbd4e6280af980661c19179259b8bc41af65cc17c1d87d52b954426a21afd0",
+        "SLTI.exec": "5344dfc8bd1c1d31c1b950caadca2e63b3b973bc7d886229de67a42c3190f3cc",
+        "SLTIU.exec": "3bebcff767ad9d47d49fec7e78b9d4b7b55d5e7e3157a45fae5e5f709cc60cc1",
+        "SLTU.exec": "52ea0d915d34f97f97772860043ea0f67bca13e844d7f5af1610afc70369ee40",
+        "SRA.exec": "42f941058df9bf021496c4589ea790cbff034974c53ebded18a5f644caf3742d",
+        "SRAI.exec": "510c531db3ce1fbf773110cbd3697961e28ffd93d9f2a12e2b49af58286017e1",
+        "SRL.exec": "4f57f5494035eeca9e45f9fb20d968a191ba9937a1cd741de1336fb749f08932",
+        "SRLI.exec": "a4bcf16c6def99ce4181580a21bac4cef18392966843fe0ff7a968dfa4a4760d",
+        "SUB.exec": "1e3be27a48f80ad88192790b9318d3468fc24f55bb5f2e02fc1dab839ae389da",
+        "SW.exec": "e6384b3986e84171f9f26aae8628fac57a1d0cbbc233c7b8d696a97176054b66",
+        "VADD_BF16.exec": "ab4eea1fc8812e5d7686214759668919b7f8ef37b0d03b544439094530111f99",
+        "VCOS_BF16.exec": "09a8927a977dd9ff12d5778f387266841e0a533336f5077250451c89a34947b5",
+        "VCUBE_BF16.exec": "cbd7078f5370232ed3865ba75831a40876b3f80d9c63696a11e14de19e9ae994",
+        "VEXP2_BF16.exec": "4981c424a2d5505757160413cfdd49d054db09c50461419b787118b00d911108",
+        "VEXP_BF16.exec": "d5bd43325e091931da093af8c4c81152145ab84ad9d0dd18b38484f0bedd3917",
+        "VLI_ALL.exec": "fb135e7e2253ce230651d1e0896de8a43715e9430da6bfc420ebd0c841dd6d0e",
+        "VLI_COL.exec": "e9c637fc73fc375e1cebe6919c029eb051a68978d67c36dcc746297584578fca",
+        "VLI_ONE.exec": "89f8712fe7c1a7e65e86b43a17d9ffbe6d479a949eec43cd834b39983e7e40e3",
+        "VLI_ROW.exec": "a42e2dd13b4506a6a7158df0601b6fd76a4208c8fcf876132025a177914e5bc9",
+        "VLOAD.exec": "c1e1ba01bc1438457d10e2ea96f7de958dbb0d31bfe30da10af4a468b89954c6",
+        "VLOG2_BF16.exec": "4caeb85fb638be8330602046efdfe8490d39d5e05bb8dd5d8adda1046344354e",
+        "VMATMUL_ACC_MXU0.exec": "46b211755fd0201f1f73585d44bd0cc863f75b84e7f1cbe63e8ac0ceb3f13e21",
+        "VMATMUL_ACC_MXU1.exec": "09edb6a1644db5a153787834bae751a0c64253d92a8ca0f5baf35902df989e8b",
+        "VMATMUL_MXU0.exec": "cea71f97a7b4b1c0fda00ec8f09186b53038bbec9cd6fd68c06c8ef09623009d",
+        "VMATMUL_MXU1.exec": "3ef67a65575773f742ff11109ffd74c2a8507f1b878a582bb38767e7e86c92d5",
+        "VMATPOP_BF16_ACC_MXU0.exec": "7adb2286775b1bfb8b9c9e13b7cc6fc93faae51f25e695686f719ad7fbfdf620",
+        "VMATPOP_BF16_ACC_MXU1.exec": "36f9fb89461f3d26035c4ac402051a5656714c378e7ebc17067ecf84937792bb",
+        "VMATPOP_FP8_ACC_MXU0.exec": "a0e1665d1302f7515910d55b7434a659dded4b3c40514d08e9dab105a4840b21",
+        "VMATPOP_FP8_ACC_MXU1.exec": "d54a10a4dfd6a48d04b271647b366da94539fff201a121db5afb634fd77a7499",
+        "VMATPUSH_ACC_BF16_MXU0.exec": "3718daedd9982f511f8a1129f15cd74b3ab31e74acec5098a6dcfa2c498953fc",
+        "VMATPUSH_ACC_BF16_MXU1.exec": "de2441268f8e829c670ea2693f7f47da25007cc7876372d28df942e6bb126b27",
+        "VMATPUSH_ACC_FP8_MXU0.exec": "e2701c7d8a5deeeeeab625ee41eb498f00bf256a4704a1d58cf1eee8d18633ea",
+        "VMATPUSH_ACC_FP8_MXU1.exec": "f556b41e7b40b25d531021a631e2c5042cc3ed20090db341b73c19c6b60521dd",
+        "VMATPUSH_WEIGHT_MXU0.exec": "7dbc7c938f0e445cb84d1e7a8feb507957c7906f553af0f6b74cb9a8940f16c4",
+        "VMATPUSH_WEIGHT_MXU1.exec": "7f1aab3a4929469e5927fba5139043d57d0b7952849f4d2d4de2945b5684a8a6",
+        "VMAXIMUM_BF16.exec": "5ca7c627a7e23ea672554b4b0d563ae95dd4476c07298d2288ced9abb488013e",
+        "VMINIMUM_BF16.exec": "31faa762026d5286a54064c62296293b26428888f59bb64b72ba61b1b1561c8d",
+        "VMOV.exec": "ba601243081f0b027d43866901e9e5b014e783164d8ec0adf7cf61f27630f0d9",
+        "VMUL_BF16.exec": "bc81e0a1124b5667d84a72faebe33644c5bf298868d887516099ad1382de9e11",
+        "VPACK_BF16_FP8.exec": "a823ab9d0ba1cc136282df048cec71e701fef30d8c95aaf19555ba671313f794",
+        "VRECIP_BF16.exec": "f07af68887b83094548601442945e8abd2c1b1d2d7bb341711bdd7e1d55e63ac",
+        "VREDMAX_BF16.exec": "9fb07350154501d5fd89ad72c31cb531af01937942e91851fdfc6d7981ecce38",
+        "VREDMAX_ROW_BF16.exec": "7c280ae4b5e985135ce9a2c3edfd384d55845d4cc82933caaf646fe93fbf6323",
+        "VREDMIN_BF16.exec": "62e2d3fa9380b4fa3e2744e75747d0316f6c3a691697fe77dc0022e32fa74924",
+        "VREDMIN_ROW_BF16.exec": "e64b46f863f880d1fc2c562ce7d463adc07680ec8e99a0329cdd00d8f4ded996",
+        "VREDSUM_BF16.exec": "d06920ec2af315fbe20418547d71d60386319694c3175992922978519c2e6e3c",
+        "VREDSUM_ROW_BF16.exec": "b27fc7f6a7bbb01a0d670b55ea17279a693711062e3daa6506f72ff0e585faa8",
+        "VRELU_BF16.exec": "6c86089a98b261dc00e3d219e1d57ea7254ba0f08a35f064a060eea34b043fa7",
+        "VSIN_BF16.exec": "85ddca24f48bc22d07b69d7d2dd1ce3424048c504d585c0092ce8e3c9e7f0397",
+        "VSQRT_BF16.exec": "d7f5e289c727fd231ee85275b7a8f5bc54d55637b29c6eba8563b7e727d0e647",
+        "VSQUARE_BF16.exec": "ddc68398645f60d640c368dbafc655317ff0526c117aff7b8315a34c3c3bf503",
+        "VSTORE.exec": "110d324d7f0aa48f0ed87ac5ec0aebd24a55330d96f96b56916fab6097ad5b45",
+        "VSUB_BF16.exec": "d342a3ff49566c38166769f42b1d1256c82203302c5fcc3a266666c89ab85185",
+        "VTANH_BF16.exec": "cc972ed0f1302e5663704454729ca8512e76cff0de160810dfdf579a130da70b",
+        "VTRPOSE_XLU.exec": "df42dfb90f761f9f11d1db5cc7efd1d3c162889bbe457a9b3ae928242d4f592b",
+        "VUNPACK_FP8_BF16.exec": "87df4d9856e972837c5450706c5d3042e12b2a9f163bd49c08bbb6483e67eae2",
+        "XOR.exec": "b84c8abd760a36f513d2756452425ee3520e954697a954a083005890ac81c2d7",
+        "XORI.exec": "b739dae87b403d89dfa2b1966a3694a51f2483d346e9888e7d6ea71b516bb713",
+        "_assert_bf16_pair": "936aba34d3ae4281c18d4c96e735aaa41065b702e850927337745daa4879fda2",
+        "_bf16_pair_shape": "4377c3b4a1462db7a49330078e7f693a4ab0bade8f39d03a6ef800d4f95bb421",
+        "_bf16_register_shape": "03440ba5bbe386be580f16807ed505c4b6d59a48dfd809a866ceb1619e92f49f",
+        "_int_to_le_bytes": "63c21568848c6f4f03460e4fcedec858f52b3a18512f6c46135a478908eaca3c",
+        "_le_bytes_to_int": "fc82b1bb23e7f3d9b993bc1b3971135e6d87b973ff4d9d569ced48c96412d3fb",
+        "_load_word": "f8e1903791c2dbf05a9f725d36b04efdbfae64ae0695d42822a2f7d2e8a4d60e",
+        "_read_mrf_bf16_pair": "01c5d7d498244cfbf9fd7dd2f79e75fd25f64685960b3c8f78de9fec95a5e78d",
+        "_read_mrf_bf16_rows": "45b72b085de77a865bd35fb2bbf377ac2b100f3dfb865611c613ce43219ba7fd",
+        "_sign_extend": "f8ad624e39f02fdd3c12b128978588c50c984b2320a7f7cae923fb6362d07329",
+        "_store": "7d3bac4c772212e2793b3f503a7bdad4d6d531b984f3135bdfc1a040dc982bf6",
+        "_tensor_register_bytes": "cc452c1b1131db44a393c2e451352820c6e89a74a2abdb31dd62a27e1547972b",
+        "_vmatmul": "56b5a964b057f5e5e9ccd7b2e722fb31f8d7d204edc45e417a686b628b646a7d",
+        "_vmem_address": "d6521a2400ac059a7c770797fee72dd5e6f3b407dfa1771b7562e929e60af785",
+        "_vmem_line_address": "208ca7799e0447ba8a62260186b505d903aa5e4041158dcba905e218c95998f0",
+        "_write_mrf_bf16_pair": "48f0384021935fe0ac621e21a6135e4f96a7225cff4a8d22bae678ea6ef4b474",
+        "_write_mrf_bf16_rows": "5ee4158025af4db426483af5bb0355a01be7025b69865a783d78a1adf717b7cf"
+      }
+    },
+    "hardware/__init__.py": {
+      "bindings": "adeb2507c0d7c35768ab0f0d0c24796a6d57c92358b85bea41fe526329d5920b",
+      "helpers": {}
+    },
+    "hardware/arch_state.py": {
+      "bindings": "865755260877b0d904714a1b4cd5da1f8272ac6aad9f9ee2e13930a566675669",
+      "helpers": {
+        "ArchState.__init__": "685049b911f45a389ae56d078aca6611b5ab4f177b738e0c5b6355ba5076750f",
+        "ArchState._check_dram_window": "4117b3e1a7e6c89c52edbfd0d71a31b99060c72eafc01281bc95111590a32fc6",
+        "ArchState._csr_address": "5fe6dec1ecb91a1075dd5f10d9d9ecb97fe985a13a5e75f462a01dc6b0a1088f",
+        "ArchState._fill_bf16_random": "b3ad627e86ea899447c51dd1d499fe751e16294cc99b02093c04775b08725c4c",
+        "ArchState._fill_u8_random": "99bf82847928b87677735f156c7bfaea5229a4b079166402ba888f4e08e0f767",
+        "ArchState._make_generator": "222e9d06834beeaa0b70fe7dee25d84d339747b0e010e3c6243ccd5dfe93c91a",
+        "ArchState._random_byte_list": "13c0c4df428e30ec64feaf59a4afbc328cda497c1f69e1546f65a10ea2482213",
+        "ArchState._random_int_list": "7ae6c0d7a049a13e0823590a6ce8f9058c74af612a6da96d9a047a553400b013",
+        "ArchState.begin_csr_cycle": "6d2c718adc0fc4ac49f8250be003fa456c8ba5d82aa206e5f5014e4a3d1e9c40",
+        "ArchState.check_flag": "29eb028746ca8be2b914b205a39d0f57032db28134e94b3830f7b2dfe0c2b7ba",
+        "ArchState.clear_flag": "1c0feea1b3f51595dc7179deeac5ccd2434f1af5de02ad4502c8c1415b01603a",
+        "ArchState.close": "73c24f0341034bd5e2d2953269bbc9bd0f6594f5a4967f01a067dea39c0a182c",
+        "ArchState.dma_dram_address": "8ee3efd0129993939ea6515cb8283e707bf8d94c179cf5bc30c2a17331379fe1",
+        "ArchState.dma_vmem_byte_address": "9ae304b516285df4acd6e9316fb99f4c7335021ce6540ec0fb6f87aa18a1e722",
+        "ArchState.finish_csr_cycle": "c18d1c5da878ff9a4c1a8caf679cd0e0da9aa37de9c39023215029e15c35a7a9",
+        "ArchState.initialize_buffers": "3812c7cf5818f6b0840d96474591bb62d9ef9e14d79897c1b30cdda9895419f7",
+        "ArchState.read_acc_bf16": "bda7f6d349b56bed14cdfd81f4553036cdd5d2e9ee1eceb09daeccbf264f0271",
+        "ArchState.read_csrf": "246ef06b10ad25ed3ce3762f3153b4a740842cfd57860e8f664497106a2fafc2",
+        "ArchState.read_dram": "27fdf9a0b4169bdebd8827038f5d3e6a38af3c018289e1bb1c36fedaf485e9bf",
+        "ArchState.read_erf": "55151e07709904821f01e6143f2a6b72f1528b54b89b95dd9a42cb5e58f30d0a",
+        "ArchState.read_mrf_bf16": "7a440eb6ed5f022262c9b383dd0523e4525c47498a88b39f7223ae5df7746ca1",
+        "ArchState.read_mrf_bf16_tile": "f8ee8802eb0b30dd5a3fa8bae426cc014ff6c2f958fbf90cb63d5c432fee4dc9",
+        "ArchState.read_mrf_bf16_transposed": "2382ba75fed94ae786e2ca7e99c8eeabd7f5f79a62ecfa81bff00d68bed23ac3",
+        "ArchState.read_mrf_f32": "e7e370c2ce76d56a6cb7f8e467cdca18f49ce5d44312b434c4eedd9b2dfd7d88",
+        "ArchState.read_mrf_fp8": "36b4757a4373e23b153000172040d222cc1c7284a4fcd9608c340d780417f32c",
+        "ArchState.read_mrf_u8": "bed0b7624e3f107d24be08fc8326bc592a18f2de0911cd52b15b158c8f863cf2",
+        "ArchState.read_vmem": "f91f4cb1fd5edd5ab8356f9fe04e51f247df89c75f08ffb4ac693642895c1e71",
+        "ArchState.read_vrf_bf16": "e23129bb97aaee16eddfef8efcec12f0bc4fcd4c7a5b3ecdaa567de32b758ad2",
+        "ArchState.read_wb_bf16": "c2501e9455aaa0b720e4f991e2dd03c02986351929ad26c05ed8a4e00b751947",
+        "ArchState.read_wb_fp8": "898f833d7fdc725b6cff7749e0cd47044e08835b4b32c87b4aac055bc1a8d961",
+        "ArchState.read_wb_u8": "0570c6aea331ead80a1d145f43340b9d029a5b77477e898eb10c0ad6114606e2",
+        "ArchState.read_xrf": "6d13d5b45fb24d391e188032e6cf9fb2464e2ba1d0b1614b8e5afadbf8e18a02",
+        "ArchState.reset": "d1a27756d3ea3809e15744f77a43a91152de0a060eb84fe9810c3a162e5bd9da",
+        "ArchState.set_flag": "8d08fb4f87f2c6b9256e197164d855dc5f5252708df3f0612371c5e9a7850a7d",
+        "ArchState.set_npc": "6d542a822d8d486f01cac57c353a0019e076c7760282f05fd90bf17279188f88",
+        "ArchState.set_pc": "651a3cc6aa64ba0c01ce59c38f9c19ecc71bd1a9c127554aede8c84863ef5e84",
+        "ArchState.write_acc_bf16": "095315b2f1cc393088a3b964a180f9c562479050b967ebd9d34d131bef5585ff",
+        "ArchState.write_base": "8c1d4fb3795e0acd7ad2fa06381ca207948f746547c18b7b28d37486c6331a86",
+        "ArchState.write_csrf": "b9e252e2a6cf508ad06fe2ca071c7576fa4344e8c3e52dc302fe579b5035c831",
+        "ArchState.write_dram": "711e542c79b31ae73ad347a8607b1e425e7a4f392543d1151dc1ab9f7d2047a1",
+        "ArchState.write_erf": "8febd844b0747dbb673c8397a31f3217526a1949d331bbc0e25e5b01c04b9a37",
+        "ArchState.write_mrf_bf16": "d4fde60cb3e85292c2292881603b674b21adce18263cad25e5d76cfa2a1bed4d",
+        "ArchState.write_mrf_bf16_tile": "883c3323c6e8bffeee4d99d1d44c155334f942a0ab00aed411f267826f74cc2c",
+        "ArchState.write_mrf_f32": "8bf1cc381c6313c411da9b54d78a0da508a2d7bd35f4543715cba7f1725b2998",
+        "ArchState.write_mrf_fp8": "fd87ae5a7e558483319cb207c0460fc944c88bdd00742883ccde205f6415179b",
+        "ArchState.write_mrf_u8": "25a738dde0a52ba7b243bfe963c7557c19f0488a03d4e03e6d76490efe77ff6c",
+        "ArchState.write_vmem": "8f46bb7d62c9198aa897e427aca119827ff7ed01c56e8302e3eb68f6fc146f05",
+        "ArchState.write_vrf_bf16": "a5995e6054a1ae01ae9d4db2a88041415273c34f3c56f7755685963809717357",
+        "ArchState.write_wb_bf16": "a04684310de827695cbf4149f5a46b15e2443d1b754f134bd8d270f62bcfef4a",
+        "ArchState.write_wb_fp8": "7b6af9152c66675f6ca8697991a597bc50917e04712281cbcc12c08bc400cea4",
+        "ArchState.write_wb_u8": "d59c681ec81fd3848ce236461da8fab5c87337d5f49f26bff8db2010a37daedb",
+        "ArchState.write_xrf": "885c3e1b081d6a2d2517efa385af6e2a7ae7d29c839d703d8ba26b9f2e0903b3"
+      }
+    },
+    "hardware/core.py": {
+      "bindings": "fb9566cdab554c66338a328933dd7233228cb43088037522f05698e892fdbdc5",
+      "helpers": {
+        "Core.__init__": "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9",
+        "Core._handle_runtime_error": "15ee1d33ce77fb96d8ae4fbff90d0f7d3a6abc595d07f4ea750363a9f6e4f010",
+        "Core._is_control_flow_instruction": "6dd12795ccce3fc69272fe00f27e275f9e6e9b91d0e631d0cc7da15a47094532",
+        "Core._recover_exu_fault": "f22e79ae2cbe5bd86621fae5bd3b1ae213411509d7870ff1ccd0e17df01fc143",
+        "Core._recover_ifu_fault": "30d612deb7bde797c5a2b76d034a9a9f760b40838bcde96d8241681046edf7ef",
+        "Core._recover_s1_fault": "02bc5110ae351139e8f41671f96dc31c1ae85d2a333523ca80bd2f816d820b0c",
+        "Core._reset_s1": "80c098b9c6099d9ffcc767d88942525eae887a1a89544e16e9424b368e6b7552",
+        "Core._tick_s1": "6491abe0b70b84111c60e06051f4c3afcd760cff0d1faa7a0ce64d572d05cd9c",
+        "Core.close": "203d825e64d0d01206b30404c1675c49f87a43a3be126d11c15d70a3eddc5a98",
+        "Core.is_finished": "da9883f625b183cf4f7869b632ba39d2d80303e6d9a31c5d56c7c8d76af07a8f",
+        "Core.load_program": "97898fff5a87dd2a2c30aba1bcdecece0b8f7446e36501848fb0947030089bc6",
+        "Core.reset": "bab658d12ea1e9954a2f41ec5d0e38a0af21de50ed29e0a1347bd5941b3b4ec2",
+        "Core.stop": "1cbe33aa50386c967764d4abe844d80593a512be621768f89f45a23936cdfdf1",
+        "Core.tick": "bcccfaa10cdff924e81a427456f087618fd1eba266a07759082c6c89f8f08304"
+      }
+    },
+    "hardware/exu.py": {
+      "bindings": "9959805afd0b208a9471326b6f9494a80ec482a0e05bbf88f1d9f5572d704242",
+      "helpers": {
+        "ExecutionUnit.__init__": "db56f02669e4aea1d4bd51988b74ec8f51d59ec36da754ff899180946e5e6712",
+        "ExecutionUnit.__repr__": "a565e3a262f7af4d251936f5bd305b38391d46d974b5275c28d05c5865a1cfaa",
+        "ExecutionUnit.busy_cycles": "b80f851224fc09fb5f48048cbd311ca013ec245f48d28af46c066bfca7455f78",
+        "ExecutionUnit.can_handle": "9a53854d2e028c20a111da866ebc1699c97797e4e1248b2589946f0a01c6ca19",
+        "ExecutionUnit.complete_count": "757252534afa79dbe972e9dfc382dcc144cc6317e0b392230995ebb0e5e5618b",
+        "ExecutionUnit.flush_completions": "ee03d6b1c7cd2ab058f65f5c7c44c787f487c0ce9e255f9352e6d754aa97f1bb",
+        "ExecutionUnit.has_in_flight": "1c9beb8ec2d4efc7c93086d20f035f837e77b93fe199a6c16e1ba0169e0a0532",
+        "ExecutionUnit.reset": "8ba8d9c13dbe6f270698881204156840ea367e1ec6111cf7ab7df08740b6ac32",
+        "ExecutionUnit.tick": "4a6eec7e254a1b1edce9f8bf25c65cf06f99efe3ba008a67d233481512735f69",
+        "ExecutionUnit.total_instructions": "a85c44dbb68e3776fee4692b47ec08609da4727dc054f4cb1f7a953bd4d23515",
+        "ScalarExecutionUnit.__init__": "dc2a37dcba05dd60eea545c5c4424b6a63c1aaab8c693154f4e115698359357f",
+        "ScalarExecutionUnit.busy_cycles": "3fb1466a9ad3fed673380e56a7205180b83b843a65090063194890b8178501a2",
+        "ScalarExecutionUnit.can_handle": "a583299e1018433a94840a479bce49af39d0335ed74d6d697f82148b65b1329b",
+        "ScalarExecutionUnit.complete_count": "fe0a601951f99ccc23f917b350b959bb0179be2bd1573e2b077913a14e893836",
+        "ScalarExecutionUnit.flush_completions": "5fac89b50213cd82c8c8221b9b77ddf71228e7a0bb6686006df3e64ed910d9ae",
+        "ScalarExecutionUnit.has_in_flight": "f5d7e602e95a3519001c8eb17faf539b9c034d40f6e6cbf9f2e0f981f83f4695",
+        "ScalarExecutionUnit.reset": "8791b0986186619992501aeea42a959562ed869437cc614881552b2f48249361",
+        "ScalarExecutionUnit.tick": "63b61ec41113ed7b336e0128dc7f65488ebf22d6a062cb10f34beb3d30958fb7",
+        "ScalarExecutionUnit.total_instructions": "3942b395e583a5f55e836465bc61840e3379d02abaa0807c15331ca6941d361d",
+        "StagedExecution.__init__": "7cb7f4fdfaeb94391978d3e34f4baacd0606d05e1566ee8c9d713cf4b78027c5",
+        "StagedExecution._execute": "184feb130addb4f0cf4f36049f60adfdfad6915eee524015faa4e3f2d237d372",
+        "StagedExecution._region": "7d923aed2be185b997b4a6133e613f75db13b321cb093f0a6fa61191f71804b9",
+        "StagedExecution.result": "358380e4ff80da34ae7a39bed744b723ff94b28cca0dd5be963fee170aa9eaa6",
+        "StagedExecution.sample": "315635ef0dc2170c8180c94366591f86f3bdb47eb32c01fde1cef9babb57333d",
+        "_Memory.__getitem__": "4012dc530e1d3169b2b9d6297b27064aeeb8b046a524d2a06ce4db2ad1f8a386",
+        "_Memory.__init__": "6b6d895404db965f253f04e8a42157c99659636df65dd5c80fbbf6f0cc788838",
+        "_Memory.__setitem__": "3118fccfdb4b52872a6910f46cc995326fa28c83d35c6c929e4767d0cb8513e3",
+        "_bits": "2dad505bc2a1cc2dce0d7e6d88470ebb40dae3df48ce61ecb1a8466e4083f99e",
+        "_name": "15e4ea723d5304e2f991df00e07332cde4989f9a958ca2ffc1600bf7c105f384",
+        "_tiles": "82c4b22dc093b88a5171afa9745296c040ed6769cd6323e1743c1d2b7f3ac5b2"
+      }
+    },
+    "hardware/hardware.py": {
+      "bindings": "ea1f703e193eac69d59676fbdabe3574aae482dcd7d85594e55000ea53573f04",
+      "helpers": {
+        "Module.__init__": "5422d3af599890146e390d59963a17d4cefbeddd8e60afbe639120ca82d8709b",
+        "Module.reset": "8ba8d9c13dbe6f270698881204156840ea367e1ec6111cf7ab7df08740b6ac32"
+      }
+    },
+    "hardware/ifu.py": {
+      "bindings": "c98deb17d72cce90110204f2ee3c2d43dfdf307ded5425b39c5ad9043e3e98c6",
+      "helpers": {
+        "InstructionFetch.__init__": "6fc08ebdd01bf5da93e13fa579ed53debca0cb2e5efb27745a6e3aa07b7b34c8",
+        "InstructionFetch.force_unstall": "c86f2c73bd888eefd6fe90142a62d840432193266f8b8174722727b2242c1854",
+        "InstructionFetch.is_finished": "6f595d90bac7796b2efecb63f460f4e2a493866c1bf717ebcb81df613dcf1fd1",
+        "InstructionFetch.is_stalled": "71dd1af72e666477ce703cabcc3750e0f3e2ed106d618f58062b7dded04d89e8",
+        "InstructionFetch.load_program": "e058445d936c562f286865f125e289b7aeb4554e97e28c91e64d22a05f1eed3d",
+        "InstructionFetch.reset": "16093da6020cf4886b872abcb182e1709c67fc8506ea35eafeb606ecfeca8c69",
+        "InstructionFetch.tick": "1f770b39adf44367b14e2a395ab865ff68606729598ba3ab99cf8a4503b4f98b",
+        "InstructionMemory.__init__": "30de84a055d8124b7dd875697fe8db9e3c22f31962996dddcf1b69637af9a7f4",
+        "InstructionMemory.load_program": "aa7f3f990a5c0cec827b2dbea0b955386ebc4d1d6b649aacfc0572b799aba5cc",
+        "InstructionMemory.reset": "d07ddc76ce6b2788bcad4d108805c82011bc73ae3a0d822cf6dc99d773cae52f",
+        "InstructionMemory.response": "e6e0671129709973c6baf2ebf75534a1bbbc11e834ef95b85e8f142b8a3ec6b0",
+        "InstructionMemory.tick": "d5ccb487079eded4cbadb51ca553c9539f86a507c9af0f25f02cf524eb7e9d70"
+      }
+    },
+    "hardware/sparse_memory.py": {
+      "bindings": "4524098c14893e1d52b180acc4346429e7b03a342cb3bacd16da3f5630644c8d",
+      "helpers": {
+        "SparseMemory.__getitem__": "5e2ab668b59e25e01082a09d580da87d654ee29dbd707e6fd7af8a15083e64fb",
+        "SparseMemory.__init__": "380172d7e323067b4d895a12e6aaa3f010a9f8a2e530a3e3c3c79afc926831b9",
+        "SparseMemory.__len__": "3ec5769204fd7de03921ea1e07d6d2f47d2fd1eb2eb5d9c629be4f2315738ae3",
+        "SparseMemory.__setitem__": "8737157eb9e6038b39ae891c0594b40843539966cf7ce15ed9d52c331c2ec27c",
+        "SparseMemory._bounds": "6539a0a3149b7b82b3aaf1a62b8c785cc8cb7ca1df1f2a868cdf0e2d417929fe",
+        "SparseMemory._page": "b15cca3482e9bd3a8b5d40331313ed2d8f9a074916781b6309ea10c9a27fd197",
+        "SparseMemory.dense": "ac75cb3ada593ba41156dbb46ae269f10cb5b7686d3de5065ae6142a2ba24dc0",
+        "SparseMemory.dtype": "5c4e48e9a4c3233bd50fd42786261a7049650b9c6afdc92f881c07341cd3b6ef",
+        "SparseMemory.numel": "cd880d52cce00dbb6157bba301602cab778e153742748d8be707ac037470dc61",
+        "SparseMemory.pages": "0ecfe724bfd6f7fd3f1933068a2e4b1a6ef51e700f863096af27b5358e6557dc",
+        "SparseMemory.randomize": "e16da7b5f887140b3c32b8dbac9fed576abd8dfeed763abb42f9b321843f55b3",
+        "SparseMemory.shape": "dde73163b8665a878df25883dddc7c27128cc1ddd39ddc72de0569261fa73559"
+      }
+    },
+    "hardware/stage_data.py": {
+      "bindings": "37993ba63614542d159211e44e6727c73a923f3dda77f33cb7977c854ac41ca3",
+      "helpers": {
+        "StageData.__init__": "1f3b40a715308b3414428dc5fe194444794821f19f0d4cd1329a5e952aaa14cc",
+        "StageData.__repr__": "aa47ee01f2af33237665b69508ddd30b7fea124b4b83bb2093059438c2b831d0",
+        "StageData._is_dict": "5422b0d70c925900ecb887bb10f370716406deba81825cb3dac5dd8518f295e9",
+        "StageData._is_list": "866013d3da754d23844b4ef2201c01efcbe791a5d00638963f0114498d525502",
+        "StageData._is_non_empty": "e6b7e6cf43a9d6d12847f7c8c7e6dd2f7dd8c2bf16283812e107dbeeaf054bd7",
+        "StageData.claim": "8ef7f12a67afd28e82d9a518f7749205c083655556cbbd6a4b4613386d6ef906",
+        "StageData.is_valid": "c36ba25ef8338886d8ac2460e48e13c5e4c4981c29cf56a81c4c4a0f93d49a1c",
+        "StageData.peek": "918c03e1dc879168769a68c2ce1b99a4a5277e17b03d5f201c66f83af4bef14d",
+        "StageData.prepare": "eb02a2f38554c96c61efa25aa5c895257f102e46e5279ea2db68cf2164ab9010",
+        "StageData.reset": "4cb6f604ebf0944d1af828f369ae4e592943a9f207d918d03c3dbd42fb81e8ae",
+        "StageData.should_stall": "bc6f0fbc245316c7df76330d2a8546330731d031a3b82d9bc28e26c83f83fba9"
+      }
+    },
+    "isa.py": {
+      "bindings": "7ed6bbadd6d1d67bccb3f5acd6b7160b24540fb24bafc5b39e1e5eba00585229",
+      "helpers": {
+        "CSRType.__init_subclass__": "38da4362f7150c384355565e15cdea0e40410097950037206a12d9270a5bc621",
+        "CSRType.to_bytecode": "5160c00c419754fd511968bcc5dc4d24caf82f5a8c69eb1c0ad9d7acfc02731b",
+        "IType.__init_subclass__": "7eeef90849db39ae51e42b8ccf95ecf2a601fb8eda110f4a95f2828deb07144f",
+        "IType.to_bytecode": "4e9356f86f4c388d8c42e5ddebcce3ef721cb731789336795ef1fc393f5ca77b",
+        "Instruction.__init_subclass__": "02f5bc29bd262a5c811bf1cbd052e540a549d87b101fa5f0b39199c0a2b3c857",
+        "Instruction.__str__": "a719c0cd7974700a6dbd129c3216a6e98d8c86d5aa46820ab6373fc2eb03b376",
+        "Instruction.exec": "2feda54c994eb54e020f39b8514cdb3c87c3e92267013b1402ae4534365257f7",
+        "Instruction.to_bytecode": "010fe6a292748ac855cb55f4217dfa478e16bd108b17a15facd941ab24710a51",
+        "RType.__init_subclass__": "9aa6d593f72735b42d03e090f390a55f5df1d1c9f40d32f05e07b956bc1f27b9",
+        "RType.to_bytecode": "02a26fbe3882f07fe3760a34378d0074efe65f51f28dee08aec86295a1d19f2c",
+        "SBType.__init_subclass__": "9fa8791f07dc25dfbb77ba4a2a4b7bf24acfce95eb3029f7a63702ed443e2422",
+        "SBType.to_bytecode": "c1d769e0af32d57fc21c875c868bf97e40665fb1595ded0051447f77f0bd5959",
+        "SType.__init_subclass__": "9f10cead3009a6e887fcfd23a70ef8dbb9a8a8e477a860b551969ca08c352578",
+        "SType.to_bytecode": "8184ce24162144321de7617023652b8468da9faf2179a19a4da1275c4aa9987f",
+        "UJType.__init_subclass__": "376f1d3f24904dded17d863de46339f3dad0232fa8093ef12c5a0fb1d6026712",
+        "UJType.to_bytecode": "def6667a9569e59ada411de08a3c2a31691948bb8c2b88c5c2fb08f0e43bc151",
+        "UType.__init_subclass__": "2c470793a953c6d5cdd42356c8006badad4b138b80a450ce06f744495f03a63e",
+        "UType.to_bytecode": "45e4da6bd66806dc53f10c0653e71fd6fbbcb502ec52a13179d88ab445029c27",
+        "VIType.__init_subclass__": "c52fa12606cf67f5e63a1d936214d07b7dd419d199753cbb944faa18a0b79a83",
+        "VIType.to_bytecode": "b9152232b324264814f391bf41ebc52b18b77741854bc19ef708f710b275bbcd",
+        "VLSType.__init_subclass__": "7a9d767b493bc31d96dfeea032fec7769f5ccbf22e4443febb7f5048bceca8e0",
+        "VLSType.to_bytecode": "f218fb151ce8174029affb93ccb9c0ba2afc24b634f893f81c5bf4a9744579bd",
+        "VRType.__init_subclass__": "f22e38b8a36edf98e231c1829781ad5a7d4878c678e3da5f1f485baeaf77f554",
+        "VRType.to_bytecode": "793c5f43c927ad88da1647d6f4b429ad94714575d1aab3829d00dd6510dd6e7a",
+        "_mask": "ffcfefb932c71803d46c8cb503be644adb68f207f3c97ca4c1746bd598fe1e33",
+        "is_exponent_itype": "e2c5fcfd14dd12380f4bfb23bf04b2c00e1129356fc006ec2d3766b70be9e97d",
+        "is_exponent_reg": "147156242bcff7441fee9a4c06c921e701a140c86a428586ddb150b7134513ee",
+        "is_scalar_itype": "9b12518f97711915105e121e1142fcf19c3b4d9453f4a3cdbc9efc4dd98a773b",
+        "is_scalar_reg": "5134caed00c48f96f73224d92ba098eecc2ad85ce6899e98369da07d6ff4d6af"
+      }
+    },
+    "isa_patterns.py": {
+      "bindings": "5090d4e9387679c77be648e3759c21fcfe01462016e5c3ab5cd6b29df5d37272",
+      "helpers": {
+        "CSRImm.__init__": "e0d40f06370209be9487403ce32ea0df1bc44fc73f270a8cbc61a5f20bde811f",
+        "CSRReg.__init__": "a58aa2abc30c442859996263e20353f2087496dd92917d6034d8408b8f3d70b5",
+        "DMAConfig.__init__": "d430aeb9d0d50c844f6525f59dd7a3a6d0e203951160a52703d7d3c9de0a66fe",
+        "DMATransfer.__init__": "6ef094d3880ee83833c2ef59f026a1fdc7eb9960d3a155f8b887c2b3c01c35f8",
+        "DMAWait.__init__": "aa276199768d702ec83c9cc58aab4d6d8c8fffbd2d5416b61cdae6f8d93fb634",
+        "DirectImm.__init__": "e53f6627b19923cb23a4671c5f0e183b476485490965104a0c814baa535b66d6",
+        "ExponentImm.__init__": "c018044df3d83bf7d6c3acd5882ac07ae8acaaa4b9a21ad0b178eafb2dbf22f9",
+        "ExponentOffsetLoad.__init__": "09c204d1f8b07ebff3f5de7b57fe8848e260d7d24831f1ee66f053df9a30c036",
+        "InstructionPattern._word_offset_errors": "346176fe6f578f5b65fdc4471bb52a61b9757c99ad14b43b2f02d9dface7071e",
+        "InstructionPattern.format_params": "76df151c5e4d95d07f97d232bc795072da379ddd42e78642d5c31c80ee0038c2",
+        "InstructionPattern.from_asm": "3b2f14248811669445795f37fdee760454bfca46d3333543b25593bdae2c1240",
+        "InstructionPattern.lint": "302d1d029e7f22b2e08f2be7a5680de3e63eeeafaab20a48225cbd2ac771defb",
+        "InstructionPattern.num_args": "a5db7b78534fb68b61f038915850b2344541ed777b73b06616b5a37ff182b3aa",
+        "InstructionPattern.num_toks": "a2502a24b543ae7890db418af864d886926098616a2b4d69e671f276f1c707a2",
+        "InstructionPatternMeta.__new__": "2aad502a0c3e1aa29a416c06824684e3c9e41ffb7aa6641c78736e118c77c9fb",
+        "JalrPattern.__init__": "ec553ba904103d6a92d24d52d6b54562e991f6852ee7a5fb333d14f80b6f6423",
+        "ScalarBaseOffsetStore.__init__": "e3918f042e9ba53d93aaa0b5e3f79e108b88f71e10b3603938c36ac79d16eee2",
+        "ScalarBranchImm.__init__": "624d86a7c2ff541717b51bed111b2edaca0a1b5038c775f1e2d2bf5a8761746c",
+        "ScalarComputeImm.__init__": "ec553ba904103d6a92d24d52d6b54562e991f6852ee7a5fb333d14f80b6f6423",
+        "ScalarComputeShamt.__init__": "8dab760d0d48b07267863fc3e22358c53fbf3fec9f2c4037ef0e2230d52d0f8c",
+        "ScalarImm.__init__": "1650ebd0b39db0f06a236497eb329d716186fd8ba05008ff7ed60b7b7244be94",
+        "ScalarOffsetLoad.__init__": "8c0ea637a66ecfbe6286dc445466a6ede572782516b4cbe07af6d67bed7f34e6",
+        "TensorBaseOffset.__init__": "9552aa3f6ddf29ce190826f01c19464d3ec0cd222b77e2f5b8e42162f243577a",
+        "UnaryImm.__init__": "60587639fce48783bbb7cbb5ba75d1a6b14d3efb62fd5de4fe60e6572984c53e",
+        "_ChannelFunct3.__get__": "f618e8d2a7568f8b47c1311c4f0bd3b2caff4ff11c4e0283c6d7431473cfa82b",
+        "_DMAChannel._set_channel": "a7cdf43500d8614122b0b29c2189c136c0e94e9f07d5fcd73c042f4dffdc446c",
+        "_wrong_cnt_error": "69e4d26ab0512b9554dd63a56e9a9e9336bf375694f0a10b08c952e32c40ba1e"
+      }
+    },
+    "isa_types.py": {
+      "bindings": "e1e98b42ab8166f9398ccddb8362414824a9596f6b2302bb0daa5080bf5f9432",
+      "helpers": {
+        "AsmError.__init__": "9685c328e1160fc67627675eb157376af08e2ee39b08a1559306a68120a8c04b",
+        "BoundedInt.__new__": "918547c4faeca9a777340bb8c2d70baa0c847a66725422d620c6205f7c575fe5",
+        "BoundedInt.autocomplete": "4232c5e22325d825b9517b5a4e222795bf30e6ab8bf6edc007ab827ad643751a",
+        "BoundedInt.format_arg": "b6ed13ff99e7c8ca4be6608c4f7f161f62428817a9275f553080dcbaec50a9fa",
+        "BoundedInt.is_signed": "d654e3352171faca402e5b59bbf1bfa506b71b1bbfd0ddc35ffd3eae324edd7f",
+        "BoundedInt.isreturn_unsigned": "7c4e75f5e1dc539f88ad27246e27a0e097e48f2a468da968d95dd0fcacc6090e",
+        "BoundedInt.lint": "2396f1ad0629a6ce83ec4077bc5292de85b26577675e037f6160ae5a7f70c026",
+        "Bundled.__init__": "5c0aaa6dd5a0706930860a147beee9844c1112cf5e4f016a22198e7301339530",
+        "Bundled.format_arg": "f6f8f8c8a0d4218859f1d540d3fd6b087c012008b64bd4dc1a1fc422cddea21c",
+        "Bundled.lint": "fd4691cf27ea7f557b140783a98a0bcfcb0839e429956b6b0f85be37f65023cb",
+        "Bundled.parse_token": "c7cf36515d6261de38474a4157f9ff9fbad319b9d3f8cbdeb96319d8c65aa281",
+        "Imm21.lint": "24aea9553ad73521048aec6bdeb7b234a6d38e2ca7a7d2ae7e0bb755d43579f3",
+        "Named.__init__": "e3481604e4bf4b767410183e19e6a189b38c71c40ec11debc151f1b8d1755d62",
+        "Named.autocomplete": "acc20359f48d91556406ef29b729af116e2c2ed675a7d1400c1e78b0a466a523",
+        "Named.format_arg": "a37760547def112078116462257547b4236531dd9f2b97f2f70d8f9e414083da",
+        "Named.lint": "2a7495a8a496aae6851ffdc8bebd659e4154306d70234b3900221219c3c0220b",
+        "Named.parse_token": "1a577d73564a42554af7dc64ae2855bcd72db6103730c516461685cd41f9e08b",
+        "RegBase.__new__": "7ad12437149e3aedb81a7191041e5ca8442d68ef0fdf2e6b593b23d1f51f914a",
+        "RegBase.autocomplete": "3bf857c95602a678c67fea2fc557d1a966072a8b7a0905133c90fc95c5801a02",
+        "RegBase.format_arg": "f041711fafb73a0bc369b8c6b6fafba37d99f0963bdf2637574071f2ddaf5260",
+        "RegBase.lint": "1459b8ce276d66962f801371f80e9084a91800ccf309c50fef3a85bd66e27de2",
+        "SBImm12.lint": "b6c871dae1fc450e098756e7216d88c5a877a781a8de1e77664ee80297c33cd5",
+        "ScalarReg.__new__": "450b953c34c2b8e6d1712fb7589009fce0ece533de4bc35a126c6a37a62f69df",
+        "ScalarReg.lint": "25ef64c27a81f9c15204ddfb51812fbda4385f3115d83d464ae8c20d71eca17f"
+      }
+    },
+    "software/__init__.py": {
+      "bindings": "261941595af8fb959838200b2827c92b89468101e37d6541b4af2ac1d092b233",
+      "helpers": {}
+    },
+    "software/instruction.py": {
+      "bindings": "e21775ef4765e3705cab3964589ae1d3bb392a13e6bfbb269f44f6beaf2c7be0",
+      "helpers": {
+        "Uop.__init__": "18097c3b2cd71b081065a2be2a3269c66e3c04037b64b6bce4f01a82cf26f78a",
+        "acc": "09118d2ab78e9ed39a99a9df80f7b56a03c436d26110b1c105712e41da29a1e7",
+        "e": "425790e2c8b647b8fc1880151d8c051ed1d5643f1c043446ff4571a8550c7c1e",
+        "m": "61dd52b7a4e38bb6cc0b5c2d67252cb4e7ea4ada63e7e5208a20330c7afee3f4",
+        "w": "cde871bb7ff469ef710cde26a497c2587d7badfb52ff15675ce2042229b0de23",
+        "x": "42ae5cd6c0a23163d697e604a3a6158009245d649958da0bf6e96bb206c2448b"
+      }
+    },
+    "software/program.py": {
+      "bindings": "d814f62da95d7fe400b90525df1da431d31d63e21c06c7311ba81cef3aca11f4",
+      "helpers": {
+        "InstantiableProgram.__init__": "37512af79504064c75b3dc2b861f508b55bb0d4a7b0e55c853af324a877beac5",
+        "Program.__getitem__": "36a70f4913795b039b0a730fdd55a9e779031670d1ac707cdec84d07debfe5a0",
+        "Program.__len__": "6a1978306ce99a8d5325e5fecd5a24e7c7a1a2b3678a30c1a387b59778cd7ad9",
+        "Program.assemble": "59154cebaddaff809c0d80c41e93794ed0eb410961449dc7444235d83aaebc8d",
+        "Program.get_instruction": "51f774597708b9f39cf2446cc03a6dc59695715dc76ff0477692dc87c54ddff8",
+        "Program.is_finished": "262a1f7b735d33020cfdcec13b31f359f110c520b24713c55fc3cc0b895cb155"
+      }
+    }
+  },
+  "schema": "atlas.model_semantics.v1"
+}

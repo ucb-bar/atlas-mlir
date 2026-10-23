@@ -43,6 +43,8 @@ def check_configuration(cfg):
                           XLU="CrossLaneExecutionUnit", DMA0="DmaExecutionUnit", LSU="LoadStoreUnit")
     if not isinstance(units, dict):
         unsupported("execution_units")
+    if tuple(units) != tuple(expected_units):
+        unsupported("execution_units dispatch order/membership")
     for field, expected in expected_units.items():
         if units.get(field) != expected:
             unsupported("execution_units." + field)

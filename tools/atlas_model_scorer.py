@@ -11,6 +11,8 @@ from atlas_derive_curve import resolve_curve_path
 from atlas_model_facts import safe_path
 from atlas_model_profiles import bind_synthetic_configuration, scoring_configuration_receipt, synthetic_targets
 from atlas_model_schema import LOCK
+from atlas_model_semantics import check_model_semantics
+from atlas_model_capabilities import check_configuration
 from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
 from check_program_decode import decode_binary
 
@@ -18,6 +20,7 @@ from check_program_decode import decode_binary
 @lru_cache(maxsize=1)
 def _model_content(root):
     root = safe_path(root)
+    check_model_semantics(root)
     sys.path.insert(0, str(root))
     import npu_model
     import torch
@@ -32,6 +35,7 @@ def _model_content(root):
 def selected_model(root, *, include_configuration=False):
     root, source, numerical = _model_content(root)
     cfg, values = configuration()
+    check_configuration(cfg)
     identity = root, source, numerical, sha256(encoded(values))
     return (*identity, cfg) if include_configuration else identity
 

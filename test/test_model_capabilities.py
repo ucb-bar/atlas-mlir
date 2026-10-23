@@ -29,6 +29,14 @@ def configuration():
 
 
 class CapabilitiesTest(unittest.TestCase):
+    def test_dispatch_membership_and_order_are_closed(self):
+        for mutation in (lambda units: dict(reversed(list(units.items()))),
+                         lambda units: dict(units, Extra="ScalarExecutionUnit")):
+            cfg = configuration()
+            cfg.execution_units = mutation(cfg.execution_units)
+            with self.assertRaisesRegex(UnsupportedModelTiming, "dispatch order/membership"):
+                check_configuration(cfg)
+
     def test_supported_config_and_independent_in_flight(self):
         cfg = configuration()
         check_configuration(cfg)
