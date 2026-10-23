@@ -60,7 +60,7 @@ def load_policy() -> dict:
     def keys(value, expected, label):
         if not isinstance(value, dict) or set(value) != set(expected.split()):
             raise ValueError("unsupported search policy fields: " + label)
-    keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering replay_projection validation execution_contract", "definition")
+    keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering dma_proposal replay_projection validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
         keys(preset, "max_candidates search_evaluations search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
@@ -86,7 +86,7 @@ def load_policy() -> dict:
     keys(policy["validation"], "core_edges reviewed_suite", "validation suites")
     suite = policy["validation"]["reviewed_suite"]
     keys(suite, "revision scope limits", "reviewed validation suite")
-    if suite["revision"] != "atlas.reviewed_model_validation.v1":
+    if suite["revision"] != "atlas.reviewed_model_validation.v2":
         raise ValueError("unsupported reviewed validation suite revision")
     for name in ("scope", "limits"):
         if not isinstance(suite[name], list) or not suite[name] or not all(isinstance(row, str) and row for row in suite[name]):
@@ -105,6 +105,12 @@ def load_policy() -> dict:
     keys(policy["engineering"]["compiler"], "timing_search_cycles generated_word_limit spill_rewrite_limit", "compiler bounds")
     keys(policy["engineering"]["scorer"], "max_cycles torch_threads assertions_required", "scorer bounds")
     keys(policy["replay_projection"], "projection_policy start place", "replay projection")
+    dma = policy["dma_proposal"]
+    keys(dma, "classification intercommand_serialization_cycles", "DMA proposal")
+    if (dma["classification"] != "compiler_policy"
+            or type(dma["intercommand_serialization_cycles"]) is not int
+            or not 1 <= dma["intercommand_serialization_cycles"] < 2**31):
+        raise ValueError("invalid DMA proposal serialization policy")
     for name in ("supported_lookaheads", "initial_lookaheads", "virtual_scheduler_lookaheads",
                  "random_seeds", "mreg_seeds", "mreg_rank_choices", "uniform_store_ranks"):
         if not integers(pools[name]) or len(set(pools[name])) != len(pools[name]):
@@ -139,12 +145,18 @@ def load_policy() -> dict:
     return policy
 
 
+def compiler_policy_hash(policy: dict) -> str:
+    """Bind compiler choices, excluding run budgets and candidate seed pools."""
+    return canonical_hash({"engineering": policy["engineering"]["compiler"],
+                           "virtual_scheduler_lookaheads": policy["pools"]["virtual_scheduler_lookaheads"],
+                           "supported_lookaheads": policy["pools"]["supported_lookaheads"],
+                           "dma_proposal": policy["dma_proposal"],
+                           "algorithms": {name: policy["algorithms"][name] for name in
+                                          ("virtual_scheduler", "proposal_cost_adapter", "proposal_operand_placement")}})
+
+
 POLICY = load_policy()
-COMPILER_POLICY_SHA256 = canonical_hash({"engineering": POLICY["engineering"]["compiler"],
-                                        "virtual_scheduler_lookaheads": POLICY["pools"]["virtual_scheduler_lookaheads"],
-                                        "supported_lookaheads": POLICY["pools"]["supported_lookaheads"],
-                                        "algorithms": {name: POLICY["algorithms"][name] for name in
-                                                       ("virtual_scheduler", "proposal_cost_adapter", "proposal_operand_placement")}})
+COMPILER_POLICY_SHA256 = compiler_policy_hash(POLICY)
 
 
 def policy_receipt(effective: dict) -> dict:
@@ -163,6 +175,7 @@ def generated_header() -> str:
     lookaheads = ", ".join(str(value) + "u" for value in POLICY["pools"]["virtual_scheduler_lookaheads"])
     supported = ", ".join(str(value) + "u" for value in POLICY["pools"]["supported_lookaheads"])
     projection = json.dumps(POLICY["replay_projection"], sort_keys=True, separators=(",", ":"))
+    dma = json.dumps(POLICY["dma_proposal"], sort_keys=True, separators=(",", ":"))
     return f'''// Generated from tools/model-search-policy.json; do not edit.
 #ifndef ATLAS_SEARCH_POLICY_H
 #define ATLAS_SEARCH_POLICY_H
@@ -174,6 +187,9 @@ inline constexpr unsigned kVirtualLookaheads[] = {{{lookaheads}}};
 inline constexpr unsigned kSupportedLookaheads[] = {{{supported}}};
 inline constexpr char kProposalOperandPlacement[] = "{POLICY["algorithms"]["proposal_operand_placement"]}";
 inline constexpr char kCompilerPolicySHA256[] = "{COMPILER_POLICY_SHA256}";
+inline constexpr int kDMAProposalSerializationCycles = {POLICY["dma_proposal"]["intercommand_serialization_cycles"]};
+inline constexpr char kDMAProposalPolicyJson[] = R"atlas_policy({dma})atlas_policy";
+inline constexpr char kDMAProposalPolicySHA256[] = "{canonical_hash(POLICY["dma_proposal"])}";
 inline constexpr char kReplayProjectionJson[] = R"atlas_policy({projection})atlas_policy";
 inline constexpr char kReplayProjectionSHA256[] = "{canonical_hash(POLICY["replay_projection"])}";
 }} // namespace mlir::atlas::search_policy
