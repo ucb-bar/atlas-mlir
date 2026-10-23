@@ -302,6 +302,67 @@ with TemporaryDirectory() as directory:
         self.assertIsNone(receipt["selected_cycles"])
         self.assertEqual(receipt["profile"], "fifo43")
 
+    def test_curve_ties_score_fifo43_lazily_and_cache_by_profile_and_words(self):
+        calls = Counter()
+
+        def scorer(program, profile):
+            word = program["instructions"][0]["word_u32"]
+            calls[profile, word] += 1
+            return program["cycles"] if profile == "curve" else {0: 1, 1: 0, 2: 9, 8: 8}[word]
+
+        def tied_run(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
+                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+            return result
+
+        with patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
+            receipt = select_program(self.source, self.directory / "compiled", self.directory,
+                                     curve_candidates=False, max_candidates=16, scorer=scorer)
+        self.assertEqual(receipt["selected_index"], 4)
+        self.assertEqual(receipt["selected_cycles"], 5)
+        self.assertEqual(calls, Counter({("curve", word): 1 for word in (0, 1, 2, 8)}) +
+                         Counter({("fifo43", 2): 1, ("fifo43", 8): 1}))
+        tied = [row for row in receipt["candidates"] if "fifo43_cycles" in row]
+        self.assertTrue(all(row["cycles"] == 5 for row in tied))
+        self.assertEqual([row["fifo43_cycles"] for row in tied[:2]], [9, 8])
+        self.assertTrue(any(row["fifo43_score_cache_hit"] for row in tied))
+        self.assertEqual(receipt["fifo43_tiebreak_cache_entries"], 2)
+        self.assertEqual(json.loads((self.directory / "compiled/selection.json").read_text())["candidates"][4]["fifo43_cycles"], 8)
+
+    def test_unique_curve_minimum_never_scores_fifo43(self):
+        def scorer(program, profile):
+            self.assertEqual(profile, "curve")
+            return program["cycles"]
+
+        with patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
+            receipt = select_program(self.source, self.directory / "compiled", self.directory,
+                                     curve_candidates=False, max_candidates=3, scorer=scorer)
+        self.assertEqual(receipt["selected_index"], 2)
+        self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
+
+    def test_curve_secondary_gains_drive_search_restarts_and_patience(self):
+        trajectories = []
+        for profile in ("curve", "fifo43"):
+            def scorer(program, profile):
+                return 10 if profile == "curve" else program["cycles"]
+
+            with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
+                receipt = select_program(self.source, self.directory / profile, self.directory,
+                                         profile=profile, curve_candidates=False, max_candidates=32,
+                                         search_evaluations=48, search_group_evaluations=48, search_patience=12,
+                                         workers=4, pack_reload_candidates=True,
+                                         pack_preload_candidates=True, scorer=scorer)
+            self.assertTrue(receipt["search"]["accepted_indices"])
+            self.assertTrue(receipt["group_search"]["accepted_indices"])
+            phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
+                      for field in ("search", "group_search")]
+            trajectories.append(([(row["options"], row["status"], row.get("parent_index"))
+                                  for row in receipt["candidates"]], phases, receipt["selected_index"]))
+            if profile == "fifo43":
+                self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
+        self.assertEqual(*trajectories)
+
     def test_duplicate_words_are_scored_once(self) -> None:
         scores = []
         receipt = self.select(profile="fifo43", max_candidates=16,
