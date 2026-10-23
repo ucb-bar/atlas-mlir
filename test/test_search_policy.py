@@ -87,11 +87,34 @@ class SearchPolicyTest(unittest.TestCase):
             self.assertIn(f"{name} = {policy.POLICY['engineering']['compiler'][value]};", header)
         self.assertIn(policy.COMPILER_POLICY_SHA256, header)
         self.assertIn(policy.canonical_hash(policy.POLICY["replay_projection"]), header)
+        self.assertIn(f"kDMAProposalSerializationCycles = {policy.POLICY['dma_proposal']['intercommand_serialization_cycles']};", header)
+        self.assertIn(policy.canonical_hash(policy.POLICY["dma_proposal"]), header)
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "AtlasSearchPolicy.h"
             subprocess.run([sys.executable, "-B", str(ROOT / "tools/atlas_search_policy.py"),
                             "--header", str(output)], check=True)
             self.assertEqual(header, output.read_text())
+
+    def test_dma_serialization_has_one_active_definition_and_identity(self):
+        changed = deepcopy(policy.POLICY)
+        changed["dma_proposal"]["intercommand_serialization_cycles"] = 2
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "policy.json"
+            source.write_text(json.dumps(changed))
+            with patch.object(policy, "POLICY_PATH", source):
+                loaded = policy.load_policy()
+        self.assertNotEqual(policy.compiler_policy_hash(loaded), policy.COMPILER_POLICY_SHA256)
+        with patch.object(policy, "POLICY", loaded), patch.object(policy, "COMPILER_POLICY_SHA256", policy.compiler_policy_hash(loaded)):
+            header = policy.generated_header()
+            receipt = policy.policy_receipt({})
+        self.assertIn("kDMAProposalSerializationCycles = 2;", header)
+        self.assertIn(json.dumps(loaded["dma_proposal"], sort_keys=True, separators=(",", ":")), header)
+        self.assertEqual(receipt["definition"]["dma_proposal"], loaded["dma_proposal"])
+        self.assertEqual(receipt["compiler_policy_sha256"], policy.compiler_policy_hash(loaded))
+        # Candidate budgets and seeds cannot change the compiler adapter hash.
+        loaded["presets"]["full"]["max_candidates"] += 1
+        loaded["pools"]["random_seeds"] = [93]
+        self.assertEqual(policy.compiler_policy_hash(loaded), policy.compiler_policy_hash(changed))
 
     def test_algorithm_changes_refuse_instead_of_becoming_unused_labels(self):
         changed = deepcopy(policy.POLICY)
@@ -106,6 +129,11 @@ class SearchPolicyTest(unittest.TestCase):
         for mutate in (lambda value: value.update(unknown_variant={}),
                        lambda value: value["engineering"]["compiler"].update(unused_limit=17),
                        lambda value: value["engineering"]["scorer"].update(max_cycles=0),
+                       lambda value: value["dma_proposal"].update(unused_gap=1),
+                       lambda value: value["dma_proposal"].update(classification="model_fact"),
+                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=0),
+                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=True),
+                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=2**31),
                        lambda value: value["candidates"].update(batch_width=0),
                        lambda value: value["presets"]["full"].update(max_candidates=False)):
             changed = deepcopy(policy.POLICY)

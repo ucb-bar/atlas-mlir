@@ -177,6 +177,10 @@
       "assertions_required": true
     }
   },
+  "dma_proposal": {
+    "classification": "compiler_policy",
+    "intercommand_serialization_cycles": 1
+  },
   "replay_projection": {
     "projection_policy": {
       "identity": "atlas.cold_serial_graph.v1",
@@ -302,17 +306,22 @@
       "dma_wait_max_cycles": 4096
     },
     "reviewed_suite": {
-      "revision": "atlas.reviewed_model_validation.v1",
+      "revision": "atlas.reviewed_model_validation.v2",
       "scope": [
         "isolated operation age/release and zero/nonzero numerical observation gates",
         "curve backend streams plus isolated/mixed DMA reference checks",
         "source-derived overlap pair/composition boundary and drain checks",
-        "Core phase order, ordinary/DELAY issue gaps and prior-edge DMA.WAIT visibility"
+        "Core phase order, ordinary/DELAY issue gaps and prior-edge DMA.WAIT visibility",
+        "MXU weight-use masks, numerical overwrite/consumer boundaries and mutable-PE use edges",
+        "fatal native runtime fault pairs for VPU issue busy, VMEM bank, MREG reservation, pair alignment and branch delay slots",
+        "source-derived engine initiation and asynchronous DMA admission with native boundary, drain and numerical checks",
+        "complete supported standalone VPU operand-equivalence partition and source-derived slot/tracker capacity boundaries"
       ],
       "limits": [
         "Finite reviewed validator suites; case constants remain in their versioned validator implementations except explicit Core-edge knobs.",
         "Native observations validate extracted facts; no fitting of timing or projection policy.",
-        "No arbitrary-program, complete operand partition, numerical-domain or RTL-equivalence proof."
+        "Operand qualification covers the supported guarded operand-equivalence classes; numerical checks use finite reviewed data patterns.",
+        "No arbitrary-program, arbitrary-data, full numerical-domain or RTL-equivalence proof."
       ]
     }
   },
