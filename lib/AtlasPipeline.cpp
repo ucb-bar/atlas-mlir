@@ -20,7 +20,8 @@ namespace {
 // Live MXU handles become saved tiles before the strict virtual verifier,
 // which bounds each unit's slots.
 void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createSpillAtlasMXUStatePass());
+  if (options.spillMXUState)
+    pm.addPass(createSpillAtlasMXUStatePass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
   if (options.guardedPack)
     pm.addPass(createLowerAtlasGuardedPackPass());
@@ -28,9 +29,25 @@ void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 
 // Boundary tiles become explicit DMA, which the scheduler can queue and
 // overlap with other work.
-void buildScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createLowerAtlasVirtualBoundaryToDMAPass());
+void buildBoundaryStage(OpPassManager &pm, const AtlasCompileOptions &options) {
+  if (options.boundary == AtlasCompileOptions::Boundary::All)
+    pm.addPass(createLowerAtlasVirtualBoundaryToDMAPass());
+}
+
+void buildVirtualScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createScheduleAtlasVirtualPass(options.provider, options.lookahead, options.randomSeed));
+  pm.addPass(createVerifyAtlasVirtualStreamPass());
+}
+
+void buildScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
+  buildBoundaryStage(pm, options);
+  buildVirtualScheduleStage(pm, options);
+}
+
+// Prepare once, so repeated candidate orders use the same graph node IDs.
+void buildPrepareStage(OpPassManager &pm, const AtlasCompileOptions &options) {
+  buildVerifyStage(pm, options);
+  buildBoundaryStage(pm, options);
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -71,7 +88,8 @@ void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
                                             const AtlasCompileOptions &options) {
   buildVerifyStage(pm, options);
   buildScheduleStage(pm, options);
-  buildSpillStage(pm);
+  if (options.spill)
+    buildSpillStage(pm);
   buildLowerStage(pm, options);
   buildTimeStage(pm, options);
 }
@@ -91,6 +109,17 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
 }
 
 void mlir::atlas::registerAtlasCompilePipelines() {
+  PassPipelineRegistration<AtlasCompileOptions>(
+      "atlas-compile-prepare", "Prepare a shared virtual graph for candidate search", buildPrepareStage);
+  PassPipelineRegistration<AtlasCompileOptions>(
+      "atlas-compile-candidate", "Compile and verify one prepared virtual candidate",
+      [](OpPassManager &pm, const AtlasCompileOptions &options) {
+        buildVirtualScheduleStage(pm, options);
+        if (options.spill)
+          buildSpillStage(pm);
+        buildLowerStage(pm, options);
+        buildTimeStage(pm, options);
+      });
   PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile",
       "Compile one virtual Atlas function to timed, verified machine IR",

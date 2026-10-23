@@ -7,6 +7,14 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
+  Option<bool> spill{*this, "spill", llvm::cl::desc("Recover register pressure"), llvm::cl::init(true)};
+  Option<bool> spillMXUState{*this, "spill-mxu-state", llvm::cl::desc("Recover MXU pressure"), llvm::cl::init(true)};
+  enum class Boundary { All, None };
+  Option<Boundary> boundary{
+      *this, "boundary", llvm::cl::desc("Expose boundary DMA"),
+      llvm::cl::values(clEnumValN(Boundary::All, "boundary", "Convert boundary tiles"),
+                       clEnumValN(Boundary::None, "none", "Keep boundary tiles")),
+      llvm::cl::init(Boundary::All)};
   Option<unsigned> lookahead{*this, "lookahead", llvm::cl::desc("Virtual lookahead"), llvm::cl::init(0)};
   Option<int> randomSeed{*this, "random-seed", llvm::cl::desc("Virtual schedule seed"), llvm::cl::init(-1)};
   Option<std::string> storeWindows{*this, "store-windows", llvm::cl::desc("Free staging-window ranks"), llvm::cl::init("")};

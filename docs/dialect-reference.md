@@ -179,7 +179,8 @@ explicitly in virtual and physical scheduling; selection alone leaves the defaul
 unchanged. Missing coverage, unsupported operands/configurations, stale hashes and
 replacement of timed evidence fail. Verification, emission and LLVM handoff retain
 the selection. See [model timing](model-timing.md) for source derivation, numerical
-validation, exact pair/chain admission, scalar PACK proofs, regeneration.
+validation, exact pair/chain admission, scalar PACK proofs, regeneration and
+model-scored schedule selection.
 
 ## Machine operations
 
