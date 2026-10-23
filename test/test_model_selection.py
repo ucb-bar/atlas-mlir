@@ -306,6 +306,7 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 0)
         self.assertIsNone(receipt["selected_cycles"])
         self.assertEqual(receipt["profile"], "fifo43")
+        self.assert_objective(receipt, scoring="none")
 
     def test_builtin_accepts_symlinked_source_and_binary_directory(self):
         linked_source = self.directory / "linked.mlir"
@@ -320,13 +321,28 @@ with TemporaryDirectory() as directory:
             select_program(linked_source, self.directory / "model-linked", linked_binaries,
                            provider="model", scorer=lambda *_: 1)
 
-    def test_curve_ties_score_fifo43_lazily_and_cache_by_profile_and_words(self):
+    def assert_objective(self, receipt, *, scoring, configuration=None):
+        objective = receipt["objective"]
+        model = receipt["provider"] == "model"
+        expected = {"schema": "atlas.model_selection_objective.v1",
+                    "policy": "selected-profile-cycles-then-index-v1" if model else "builtin-default-v1",
+                    "scoring": scoring, "profile": receipt["profile"] if model else None,
+                    "minimize": ["cycles", "index"] if model else ["index"],
+                    "tie_rule": "canonical-candidate-index-v1",
+                    "scoring_configuration_sha256": configuration}
+        self.assertEqual({key: value for key, value in objective.items() if key != "sha256"}, expected)
+        digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(objective["sha256"], digest)
+        self.assertNotIn("fifo43_tiebreak_cache_entries", receipt)
+
+    def test_curve_exact_ties_use_index_cache_words_and_copy_the_winner(self):
         calls = Counter()
 
         def scorer(program, profile):
+            self.assertEqual(profile, "curve")
             word = program["instructions"][0]["word_u32"]
             calls[profile, word] += 1
-            return program["cycles"] if profile == "curve" else {0: 1, 1: 0, 2: 9, 8: 8}[word]
+            return program["cycles"]
 
         def tied_run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
@@ -335,47 +351,23 @@ with TemporaryDirectory() as directory:
                                                "instructions": [{"word_u32": 8}], "cycles": 5}
             return result
 
-        with patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
-            receipt = select_program(self.source, self.directory / "compiled", self.directory,
-                                     curve_candidates=False, max_candidates=16, scorer=scorer)
-        self.assertEqual(receipt["selected_index"], 4)
-        self.assertEqual(receipt["selected_cycles"], 5)
-        self.assertEqual(calls, Counter({("curve", word): 1 for word in (0, 1, 2, 8)}) +
-                         Counter({("fifo43", 2): 1, ("fifo43", 8): 1}))
-        tied = [row for row in receipt["candidates"] if "fifo43_cycles" in row]
-        self.assertTrue(all(row["cycles"] == 5 for row in tied))
-        self.assertEqual([row["fifo43_cycles"] for row in tied[:2]], [9, 8])
-        self.assertTrue(any(row["fifo43_score_cache_hit"] for row in tied))
-        self.assertEqual(receipt["fifo43_tiebreak_cache_entries"], 2)
-        self.assertEqual(json.loads((self.directory / "compiled/selection.json").read_text())["candidates"][4]["fifo43_cycles"], 8)
+        receipt = self.select(runner=tied_run, profile="curve", curve_candidates=False,
+                              max_candidates=16, workers=4, scorer=scorer)
+        self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
+        self.assertEqual(calls, Counter({("curve", word): 1 for word in (0, 1, 2, 8)}))
+        self.assertEqual(receipt["score_cache_entries"], 4)
+        self.assertGreater(receipt["score_cache_hits"], 0)
+        self.assertFalse(any("fifo43_cycles" in row or "fifo43_score_cache_hit" in row
+                             for row in receipt["candidates"]))
+        output = self.directory / "compiled"
+        winner = output / receipt["candidates"][2]["directory"]
+        for artifact in ("program.json", "program.hex", "final.mlir", "allocation.json"):
+            self.assertEqual((output / artifact).read_bytes(), (winner / artifact).read_bytes())
+        self.assertEqual((output / "program.hex").read_text(), "00000002\n")
+        self.assertEqual(json.loads((output / "selection.json").read_text()), json.loads(json.dumps(receipt)))
+        self.assert_objective(receipt, scoring="injected-scorer")
 
-    def test_programming_errors_during_fifo43_tie_scoring_propagate(self):
-        def tied_run(argv, **kwargs):
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
-                                               "instructions": [{"word_u32": 8}], "cycles": 5}
-            return result
-
-        for deferred in (False, True):
-            for error_type in (TypeError, KeyError):
-                error = error_type("unexpected tie scorer bug")
-                def scorer(program, profile):
-                    if profile == "curve":
-                        return program["cycles"]
-                    if deferred:
-                        future = Future()
-                        future.set_exception(error)
-                        return future
-                    raise error
-                name = f"tie-bug-{deferred}-{error_type.__name__}"
-                with self.subTest(deferred=deferred, error_type=error_type), \
-                        self.assertRaises(error_type) as raised:
-                    self.select(name=name, runner=tied_run, profile="curve", curve_candidates=False,
-                                max_candidates=5, workers=1, scorer=scorer)
-                self.assertIs(raised.exception, error)
-
-    def test_native_profile_receipts_follow_primary_and_lazy_tie_scores(self):
+    def test_native_profile_receipts_bind_only_the_selected_profile(self):
         class NativeScorer:
             def __call__(self, program, profile):
                 return program["cycles"]
@@ -396,7 +388,7 @@ with TemporaryDirectory() as directory:
                                                "instructions": [{"word_u32": 8}], "cycles": 5}
             return result
 
-        for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve", "fifo43"}),
+        for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve"}),
                                        ("fifo43", 5, {"fifo43"})):
             with self.subTest(profile=profile, cap=cap), \
                     patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
@@ -409,6 +401,7 @@ with TemporaryDirectory() as directory:
                 output = self.directory / f"native-{profile}-{cap}"
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
                                          profile=profile, model_facts=self.directory, curve_candidates=False, max_candidates=cap, workers=2)
+            self.assert_objective(receipt, scoring="native-model", configuration=profile + "-configuration-digest")
             self.assertEqual(set(receipt["scoring_configurations"]), expected)
             self.assertEqual(capture_inputs.call_args.args[-1], receipt["search_policy"])
             self.assertEqual(json.loads((output / "selection.json").read_text())["scoring_configurations"],
@@ -425,7 +418,7 @@ with TemporaryDirectory() as directory:
                 return {"curve_path": str(self_source), "configuration": {}, "python": "test"}
 
             def profile_receipt(self, program, profile):
-                return {"profile": profile}
+                return {"profile": profile, "sha256": profile + "-configuration-digest"}
 
             def __call__(self, program, profile):
                 self_source.write_text("module { /* changed while scoring */ }")
@@ -460,26 +453,44 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 2)
         self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
 
-    def test_curve_secondary_gains_drive_search_restarts_and_patience(self):
+    def test_curve_ties_do_not_restart_search_or_reset_patience(self):
+        def scorer(program, profile):
+            self.assertEqual(profile, "curve")
+            return 10
+
+        receipt = self.select(runner=self.search_run, profile="curve",
+                              curve_candidates=False, max_candidates=1, search_evaluations=48,
+                              search_group_evaluations=48, search_patience=12, workers=4, scorer=scorer)
+        self.assertEqual(receipt["selected_index"], 0)
+        for field in ("search", "group_search"):
+            phase = receipt[field]
+            self.assertEqual(phase["start_index"], 0)
+            self.assertEqual(phase["accepted_indices"], [])
+            self.assertEqual(phase["evaluations"], 12)
+            self.assertTrue(phase["stopped_for_patience"])
+        self.assertTrue(all(row["parent_index"] == 0 for row in receipt["candidates"][1:]))
+
+    def test_strict_primary_improvements_restart_search_and_reset_patience(self):
         trajectories = []
         for profile in ("curve", "fifo43"):
             def scorer(program, profile):
-                return 10 if profile == "curve" else program["cycles"]
+                return program["cycles"]
 
-            with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
-                receipt = select_program(self.source, self.directory / profile, self.directory,
-                                         profile=profile, curve_candidates=False, max_candidates=32,
-                                         search_evaluations=48, search_group_evaluations=48, search_patience=12,
-                                         workers=4, pack_reload_candidates=True,
-                                         pack_preload_candidates=True, scorer=scorer)
-            self.assertTrue(receipt["search"]["accepted_indices"])
-            self.assertTrue(receipt["group_search"]["accepted_indices"])
+            receipt = self.select(name=profile, runner=self.search_run, profile=profile,
+                                  curve_candidates=False, max_candidates=32, search_evaluations=48,
+                                  search_group_evaluations=48, search_patience=12, workers=4,
+                                  pack_reload_candidates=True, pack_preload_candidates=True, scorer=scorer)
+            for field in ("search", "group_search"):
+                phase = receipt[field]
+                self.assertTrue(phase["accepted_indices"])
+                self.assertGreater(phase["evaluations"], 12)
+                for index in phase["accepted_indices"]:
+                    row = receipt["candidates"][index]
+                    self.assertLess(row["cycles"], receipt["candidates"][row["parent_index"]]["cycles"])
             phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
                       for field in ("search", "group_search")]
             trajectories.append(([(row["options"], row["status"], row.get("parent_index"))
                                   for row in receipt["candidates"]], phases, receipt["selected_index"]))
-            if profile == "fifo43":
-                self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
         self.assertEqual(*trajectories)
 
     def test_duplicate_words_are_scored_once(self) -> None:
