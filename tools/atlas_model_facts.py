@@ -69,7 +69,10 @@ def tool_manifest():
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",
              "atlas_derive_scratchpad.py", "atlas_derive_frontend.py", "atlas_validate_mxu_weights.py",
-             "atlas_model_semantics.py", "model-semantics.json", "atlas_validate_runtime.py"]
+             "atlas_model_semantics.py", "model-semantics.json", "atlas_validate_runtime.py",
+             "atlas_derive_replay.py",
+             "atlas_model_replay.py", "atlas_validate_replay.py", "atlas_derive_costs.py",
+             "atlas_search_policy.py", "model-search-policy.json"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -117,6 +120,9 @@ def regenerate(model, out):
     from atlas_derive_curve import derive_curve
     from atlas_derive_scratchpad import derive_scratchpad
     from atlas_derive_frontend import derive_frontend
+    from atlas_derive_replay import derive_replay
+    from atlas_validate_replay import validate_replay
+    from atlas_derive_costs import derive_costs
     from atlas_validate_curve import validate_curve
     from atlas_validate_runtime import validate_runtime
     from atlas_derive_arch import derive_arch
@@ -140,6 +146,8 @@ def regenerate(model, out):
     dma_timing = derive_curve(cfg)
     scratchpad_contract = derive_scratchpad(cfg)
     frontend_timing = derive_frontend(cfg)
+    replay_timing = derive_replay(cfg)
+    proposal_costs = derive_costs(cfg, architecture, isa_metadata)
     blocks = vpu | mxu | memory
     releases = vpu_releases | mxu_releases | memory_releases
     if set(blocks) != {case["name"] for case in inputs} or set(releases) != set(blocks):
@@ -157,6 +165,9 @@ def regenerate(model, out):
     report["mxu_weight_validation"] = validate_weight_timing(cfg, mxu_weight_timing)
     report["runtime_validation"] = dict(passed=True, report_sha256=runtime_report_hash)
     dma_report = validate_curve(cfg, dma_timing, out / "dma-validation")
+    replay_report = validate_replay(cfg, replay_timing)
+    report["replay_validation"] = dict(passed=True, report_sha256=write(out, "replay-validation.json", replay_report),
+                                       program_sha256=replay_report["program_sha256"], runs=replay_report["runs"])
     dma_report_hash = sha256((out / "dma-validation" / "validation-report.json").read_bytes())
     dma_timing["validation"] = dict(passed=True, report_sha256=dma_report_hash,
                                     backend_streams=dma_report["backend_streams"],
@@ -184,6 +195,7 @@ def regenerate(model, out):
                    dma_timing=dma_timing,
                    mxu_weight_timing=mxu_weight_timing,
                    scratchpad_contract=scratchpad_contract, frontend_timing=frontend_timing,
+                   replay_timing=replay_timing, proposal_costs=proposal_costs,
                    vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),

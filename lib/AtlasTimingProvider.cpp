@@ -1,3 +1,4 @@
+#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasTimingProvider.h"
 #include "Atlas/AtlasModelTiming.h"
 #include "llvm/ADT/StringMap.h"
@@ -183,11 +184,13 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   if (!isolated.value.empty()) return error("representative instruction can never issue: " + isolated.value);
   std::string why = table.value->reserveWithContext(first, a, 0, firstContext);
   if (!why.empty()) return error(why);
-  constexpr int kMaximumInterval = 100000;
+  constexpr int kMaximumInterval = mlir::atlas::search_policy::kTimingSearchCycles;
   for (int interval = gap.value; interval <= kMaximumInterval; ++interval) {
     auto conflict = table.value->conflictWithContext(second, b, interval, secondContext);
     if (!conflict.error.empty()) return error(conflict.error);
     if (conflict.value.empty())
+      // Issue-edge-zero ages include the final event/release edge. The
+      // source-bound frontend advances one edge before the work is drained.
       return MachineOpTiming{a.doneAge + 1, interval};
   }
   return error("same-unit issue interval exceeds bounded timing search");

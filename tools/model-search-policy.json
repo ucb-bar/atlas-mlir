@@ -1,0 +1,305 @@
+{
+  "schema": "atlas.search_policy.v1",
+  "revision": "bounded-native-selection-v1",
+  "algorithms": {
+    "proposal_replay": "atlas.projected_core_replay.v1",
+    "order_neighbors": "dependency-window-insertion-v1",
+    "group_neighbors": "dependency-closure-insertion-v1",
+    "candidate_ranking": "stable-summed-estimates-prefix-v1",
+    "search_restart": "restart-on-any-objective-improvement-v1",
+    "budget_accounting": "refusals-count-patience-after-batch-v1",
+    "score_cache": "invocation-profile-exact-word-stream-v1",
+    "virtual_scheduler": "start-plus-spill-frontend-negative-height-source-index-v1",
+    "lowering_alternatives": "compiler-verified-pack-wait-placement-v1",
+    "selection_objective": "exact-cycles-lazy-secondary-canonical-index-v1",
+    "curve_candidates_default": "model-curve-profile-only-v1",
+    "proposal_cost_adapter": "representative-disjoint-copy-serial-pack-setup-omitted-optimistic-filled-slot-v1",
+    "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride"
+  },
+  "presets": {
+    "selection": {
+      "max_candidates": 24,
+      "search_evaluations": 0,
+      "search_group_evaluations": 0,
+      "search_patience": 0,
+      "bank_candidates": false,
+      "pack_reload_candidates": false,
+      "pack_preload_candidates": false
+    },
+    "full": {
+      "max_candidates": 32,
+      "search_evaluations": 96,
+      "search_group_evaluations": 204,
+      "search_patience": 96,
+      "bank_candidates": true,
+      "pack_reload_candidates": true,
+      "pack_preload_candidates": true
+    }
+  },
+  "defaults": {
+    "lower_provider": "builtin",
+    "selection_provider": "model",
+    "model_profile": "curve",
+    "builtin_profile": "fifo43",
+    "search_budget": "full",
+    "workers": 12,
+    "guarded_pack": false,
+    "spill": true,
+    "spill_mxu": true,
+    "boundary": "boundary",
+    "api_max_candidates": 32,
+    "api_search_evaluations": 0,
+    "api_search_group_evaluations": 0,
+    "api_search_patience": 0,
+    "api_pack_reload_candidates": false,
+    "api_pack_preload_candidates": false
+  },
+  "pools": {
+    "supported_lookaheads": [
+      0,
+      1,
+      2,
+      4,
+      8
+    ],
+    "initial_lookaheads": [
+      1,
+      2,
+      4
+    ],
+    "virtual_scheduler_lookaheads": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "random_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "neighbor_shuffle_seed": 0,
+    "group_max_nodes": 4,
+    "mreg_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "mreg_rank_choices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "mreg_vector_length": 64,
+    "uniform_store_ranks": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  "candidates": {
+    "initial_knob_cap": 24,
+    "batch_width": 12,
+    "curve_ranking_fields": [
+      "makespan",
+      "exposed_waiting"
+    ],
+    "curve_wait_placements": [
+      "default",
+      "source"
+    ],
+    "initial_wait_placement": "source",
+    "pack_preload_wait_placement": "preloaded"
+  },
+  "objectives": {
+    "curve": [
+      "cycles",
+      "fifo43_cycles",
+      "index"
+    ],
+    "fifo43": [
+      "cycles",
+      "index"
+    ]
+  },
+  "engineering": {
+    "compiler": {
+      "timing_search_cycles": 100000,
+      "generated_word_limit": 2048,
+      "spill_rewrite_limit": 256
+    },
+    "scorer": {
+      "max_cycles": 200000,
+      "torch_threads": 1,
+      "assertions_required": true
+    }
+  },
+  "replay_projection": {
+    "projection_policy": {
+      "identity": "atlas.cold_serial_graph.v1",
+      "initial_state": "empty_queues_zero_relative_clock",
+      "dependencies": "wait_for_all_predecessor_results",
+      "engines": "one_serial_lifetime_per_virtual_unit",
+      "dma": "anonymous_channels_serial_cold_transfers",
+      "exclusions": [
+        "emitted_instruction_stream",
+        "branch_paths",
+        "register_allocation",
+        "port_conflicts",
+        "mixed_memory_history",
+        "vmem_backpressure",
+        "Core_conflict_errors",
+        "exact_wait_placement"
+      ]
+    },
+    "start": [
+      [
+        "cycle",
+        [
+          "queued",
+          "frontend",
+          "frontend",
+          "unit_free",
+          "max",
+          "select"
+        ]
+      ],
+      [
+        "cycle",
+        [
+          "drains",
+          "cycle",
+          "transfer_end",
+          "max",
+          "cycle",
+          "select"
+        ]
+      ],
+      [
+        "cycle",
+        [
+          "cycle",
+          "dependency_end",
+          "max",
+          "capacity_end",
+          "max"
+        ]
+      ]
+    ],
+    "place": [
+      [
+        "work",
+        [
+          "queued",
+          "cycle",
+          "frontend_cost",
+          "add",
+          "$clock_step",
+          "sub",
+          "unit_free",
+          "max",
+          "cycle",
+          "select"
+        ]
+      ],
+      [
+        "finished",
+        [
+          "work",
+          "latency",
+          "add"
+        ]
+      ],
+      [
+        "unit_free",
+        [
+          "work",
+          "busy",
+          "add"
+        ]
+      ],
+      [
+        "waiting",
+        [
+          "waiting",
+          "cycle",
+          "frontend",
+          "sub",
+          "add"
+        ]
+      ],
+      [
+        "frontend",
+        [
+          "cycle",
+          "frontend_cost",
+          "add"
+        ]
+      ],
+      [
+        "makespan",
+        [
+          "makespan",
+          "finished",
+          "max"
+        ]
+      ]
+    ]
+  },
+  "validation": {
+    "core_edges": {
+      "schema": "atlas.core_edge_validation_policy.v1",
+      "algorithm": "native-phase-delay-prior-flag-boundaries-v1",
+      "delay_immediates": [
+        0,
+        1,
+        3
+      ],
+      "ordinary_max_cycles": 64,
+      "dma_wait_max_cycles": 4096
+    }
+  }
+}

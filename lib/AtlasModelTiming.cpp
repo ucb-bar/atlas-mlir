@@ -98,6 +98,9 @@ llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
       {"bf16_pair_stride", 1, nullptr, false},
       {"bf16_tile_bytes", kAtlasBF16TileBytes, nullptr, false},
       {"bf16_element_bytes", 2, nullptr, false},
+      {"fp8_element_bytes", 1, nullptr, false},
+      {"fp8_registers_per_tile", 1, nullptr, false},
+      {"fp8_tile_bytes", kAtlasRegisterBytes, nullptr, false},
       {"vmem_bytes", kAtlasVmemBytes, "vmem_size", true},
       {"vmem_bank_bytes", kVmemBankBytes, "vmem_bank_bytes", false},
       {"vmem_bank_count", kVmemBanks, nullptr, false},
@@ -510,7 +513,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
     if (!value) return factsError(std::string("missing derived semantic ") + key);
     semantic[key] = *value;
   }
-  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing", "replay_timing", "proposal_costs"})
     if (const auto *value = root.get(key)) semantic[key] = *value;
   if (const auto *value = root.get("dma_timing")) {
     const Object *dma = value->getAsObject();
@@ -585,7 +588,8 @@ llvm::Expected<ModelFrontendTiming> parseFrontend(const Object &f) {
   // scalar source commits register effects during exec at read_age/write_age.
   ModelFrontendTiming result{int(*f.getInteger("ordinary_issue_gap")), int(*delay->getInteger("base_gap")),
       int(*delay->getInteger("immediate_mask")), int(*scalar->getInteger("read_age")),
-      int(*scalar->getInteger("write_age")), int(*control->getInteger("operand_read_age")), {}};
+      int(*scalar->getInteger("write_age")), int(*control->getInteger("operand_read_age")),
+      int(*control->getInteger("delay_slots")), {}};
   const Object *instructions = f.getObject("instructions");
   if (!instructions || instructions->empty()) return error("missing frontend instruction access coverage");
   for (const auto &[name, value] : *instructions) {
@@ -858,6 +862,52 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     if (!hash || !hashSyntax(*hash)) return factsError("overlap_rules_sha256 must be a SHA-256 digest");
     result.overlapRules = hash->str();
   }
+  if (!testObservations || root->get("replay_timing")) {
+    const Object *document = root->getObject("replay_timing");
+    if (!document) return factsError("missing source-derived replay timing contract");
+    auto program = ModelReplayProgram::parse(*document);
+    if (!program) return factsError(llvm::toString(program.takeError()));
+    result.replay = std::move(*program);
+  }
+  if (!testObservations || root->get("proposal_costs")) {
+    const Object *document = root->getObject("proposal_costs");
+    if (!document) return factsError("missing source-derived representative cost probes");
+    const Object *proof = document->getObject("timing_class");
+    const Object *probes = document ? document->getObject("probes") : nullptr;
+    if (!document || !exactKeys(*document, {"schema", "timing_class", "probes", "placement_policy"}) ||
+        document->getString("schema") != "atlas.proposal_costs.v1" ||
+        document->getString("placement_policy") != search_policy::kProposalOperandPlacement || !proof || !probes ||
+        !exactKeys(*proof, {"kind", "vpu", "mxu", "memory", "interval_scope"}) ||
+        proof->getString("kind") != "guarded_operand_independent_isolated_ages" ||
+        proof->getString("vpu") != "mnemonic_latency_and_register_independent_row_predicates" ||
+        proof->getString("mxu") != "guarded_age_geometry_expressions" ||
+        proof->getString("memory") != "guarded_age_geometry_predicates" ||
+        proof->getString("interval_scope") != "selected_representative_pair_only")
+      return factsError("requires source-derived representative cost probes and timing-class proof");
+    for (const auto &[name, value] : *probes) {
+      const Array *pair = value.getAsArray();
+      if (!pair || pair->size() != 2) return factsError("representative cost needs exactly two probes");
+      const OpInfo *op = findOp(name.str());
+      std::pair<Instr, Instr> decoded;
+      for (size_t index = 0; index < pair->size(); ++index) {
+        const Object *row = (*pair)[index].getAsObject();
+        if (!row || !exactKeys(*row, {"rd", "rs1", "rs2", "imm"}))
+          return factsError("invalid representative cost operand record");
+        Instr &in = index ? decoded.second : decoded.first;
+        in.op = op;
+        for (auto [field, destination] : {std::pair<const char *, int *>{"rd", &in.rd},
+                                         {"rs1", &in.rs1}, {"rs2", &in.rs2}}) {
+          auto number = row->getInteger(field);
+          if (!number || *number < 0 || *number > 4095) return factsError("cost probe operand exceeds supported domain");
+          *destination = int(*number);
+        }
+        auto immediate = row->getInteger("imm");
+        if (!immediate || *immediate != 0) return factsError("representative cost requires zero immediate");
+        in.imm = *immediate;
+      }
+      if (op) result.probes.emplace(name.str(), decoded);
+    }
+  }
   int readLatency = 1;
   if (!testObservations || root->get("mxu_weight_timing")) {
     const Object *document = root->getObject("mxu_weight_timing");
@@ -894,6 +944,13 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
   if (auto capability = unsupportedCapability(*configuration); !capability.empty())
     return factsError("unsupported capability: " + capability);
   if (auto error = checkArchitecture(*root, *configuration)) return std::move(error);
+  const Object &architecture = *root->getObject("architecture");
+  result.dmaChannels = int(*architecture.getInteger("dma_channels"));
+  result.geometry = {int(*architecture.getInteger("mreg_bytes")),
+      int(*architecture.getInteger("mreg_row_bytes")), int(*architecture.getInteger("mreg_rows")),
+      int(*architecture.getInteger("scalar_word_bytes")), int(*architecture.getInteger("bf16_registers_per_tile")),
+      int(*architecture.getInteger("bf16_element_bytes")), int(*architecture.getInteger("fp8_registers_per_tile")),
+      int(*architecture.getInteger("fp8_element_bytes"))};
   const Object *vocabulary = root->getObject("operand_vocabulary");
   if (!vocabulary || modelSha256(canonicalJson(llvm::json::Value(Object(*vocabulary)))) !=
                          model_schema::vocabularySha256())
@@ -909,12 +966,19 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
   if (modelSha256(*configurationJson) != *model->getString("configuration_sha256"))
     return factsError("configuration content hash mismatch");
   for (const auto &[key, value] : *model) {
+    if (key == "replay_timing_sha256" || key == "proposal_costs_sha256")
+      return factsError("reserved derived provenance field " + key.str());
     if (key == "configuration") continue;
     auto text = value.getAsString();
     if (!text || (llvm::StringRef(key).ends_with("sha256") && !hashSyntax(*text)))
       return factsError("invalid model provenance field " + key.str());
     result.provenance[key.str()] = text->str();
   }
+  // Derive extension identities after model metadata so arbitrary provenance
+  // keys cannot override the selected semantic program/cost binding.
+  for (const char *key : {"replay_timing", "proposal_costs"})
+    if (const Object *document = root->getObject(key))
+      result.provenance[std::string(key) + "_sha256"] = modelSha256(canonicalJson(llvm::json::Value(Object(*document))));
   const Object *geometry = root->getObject("geometry");
   if (!geometry || geometry->getInteger("rows") != kAtlasMregRows || geometry->getInteger("columns") != kAtlasMregRowBytes ||
       geometry->getInteger("mreg_count") != kAtlasTensorRegisters)
@@ -1537,63 +1601,73 @@ std::string modelScope(const AtlasStream &stream) {
 }
 } // namespace
 
+TimingRuleResult<std::pair<Instr, Instr>> ModelTimingFacts::costProbes(const OpInfo &op) const {
+  auto found = probes.find(op.name);
+  if (found != probes.end()) return {found->second, {}};
+  if (!testOverlap) return {{}, modelTimingDiagnostic("missing generated representative cost operands for " + std::string(op.name))};
+  // Explicit raw-observation tests retain their historical fixture operands.
+  Instr first{&op, 0, 2, 4}, second{&op, 6, 8, 10};
+  if (op.engine == Engine::Scalar) {
+    if (!hasOperand(op, "x1")) first.rs1 = second.rs1 = 0;
+    if (!hasOperand(op, "x2")) first.rs2 = second.rs2 = 0;
+  }
+  switch (op.opClass) {
+  case OpClass::WeightPush:
+  case OpClass::AccPushFp8:
+  case OpClass::AccPushBf16:
+    first = {&op, 0, 0, 0};
+    second = {&op, 1, 2, 0};
+    break;
+  case OpClass::PopFp8:
+  case OpClass::PopBf16:
+    first = {&op, 0, 0, 0};
+    second = {&op, 2, 0, 1};
+    break;
+  case OpClass::MatMul:
+  case OpClass::MatMulAcc:
+    first = {&op, 0, 0, 0};
+    second = {&op, 1, 2, 1};
+    break;
+  case OpClass::VLoad:
+  case OpClass::VStore:
+  case OpClass::ScalarLoad:
+  case OpClass::ScaleLoad:
+  case OpClass::Transpose:
+  case OpClass::VpuRowReduce:
+  case OpClass::VpuColReduce:
+    first.rs2 = second.rs2 = 0;
+    break;
+  case OpClass::ScalarStore:
+    first.rd = second.rd = 0;
+    break;
+  case OpClass::VpuElementwise:
+    if (!op.twoInput) first.rs2 = second.rs2 = 0;
+    break;
+  case OpClass::VpuLoadImmPair:
+  case OpClass::VpuLoadImmSingle:
+    first.rs1 = first.rs2 = second.rs1 = second.rs2 = 0;
+    break;
+  default:
+    break;
+  }
+  return TimingRuleResult<std::pair<Instr, Instr>>{{first, second}, {}};
+}
+
 TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts,
                                                       std::shared_ptr<const ModelOverlapFacts> overlap, bool chains) {
   TimingProvider provider;
   provider.id = kModelTimingProviderId.str();
   provider.proposalFactsSha256 = facts->factsSha256();
+  provider.proposalGeometry = facts->proposalGeometry();
+  provider.proposalDMACapacity = facts->dmaCapacity();
+  provider.frontendSpacing = facts->frontendSpacing();
+  if (facts->replayProgram()) provider.proposalReplay = std::make_shared<const ModelReplayProgram>(*facts->replayProgram());
   provider.dmaEstimate = [facts](int64_t bytes, bool store) {
     auto result = facts->estimateDMACycles(bytes, store);
     if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
     return result;
   };
-  provider.costProbes = [](const OpInfo &op) {
-    Instr first{&op, 0, 2, 4}, second{&op, 6, 8, 10};
-    if (op.engine == Engine::Scalar) {
-      if (!hasOperand(op, "x1")) first.rs1 = second.rs1 = 0;
-      if (!hasOperand(op, "x2")) first.rs2 = second.rs2 = 0;
-    }
-    switch (op.opClass) {
-    case OpClass::WeightPush:
-    case OpClass::AccPushFp8:
-    case OpClass::AccPushBf16:
-      first = {&op, 0, 0, 0};
-      second = {&op, 1, 2, 0};
-      break;
-    case OpClass::PopFp8:
-    case OpClass::PopBf16:
-      first = {&op, 0, 0, 0};
-      second = {&op, 2, 0, 1};
-      break;
-    case OpClass::MatMul:
-    case OpClass::MatMulAcc:
-      first = {&op, 0, 0, 0};
-      second = {&op, 1, 2, 1};
-      break;
-    case OpClass::VLoad:
-    case OpClass::VStore:
-    case OpClass::ScalarLoad:
-    case OpClass::ScaleLoad:
-    case OpClass::Transpose:
-    case OpClass::VpuRowReduce:
-    case OpClass::VpuColReduce:
-      first.rs2 = second.rs2 = 0;
-      break;
-    case OpClass::ScalarStore:
-      first.rd = second.rd = 0;
-      break;
-    case OpClass::VpuElementwise:
-      if (!op.twoInput) first.rs2 = second.rs2 = 0;
-      break;
-    case OpClass::VpuLoadImmPair:
-    case OpClass::VpuLoadImmSingle:
-      first.rs1 = first.rs2 = second.rs1 = second.rs2 = 0;
-      break;
-    default:
-      break;
-    }
-    return TimingRuleResult<std::pair<Instr, Instr>>{{first, second}, {}};
-  };
+  provider.costProbes = [facts](const OpInfo &op) { return facts->costProbes(op); };
   provider.validateScope = [](const AtlasStream &stream) {
     auto error = modelScope(stream);
     return error.empty() ? error : modelTimingDiagnostic(error);

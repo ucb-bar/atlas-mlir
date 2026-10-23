@@ -634,7 +634,7 @@ private:
     materializeScalar(fixed().packSourceRegs[1], fixed().packWord * 4 + kAtlasRegisterBytes / 2, loc);
     materializeScalar(fixed().packDestinationReg, fixed().packRelayoutWord * 4, loc);
     materializeScalar(fixed().packRowReg, 0, loc);
-    materializeScalar(fixed().packRowsReg, 32, loc);
+    materializeScalar(fixed().packRowsReg, kAtlasMregRows, loc);
     unsigned loop = newLabel();
     mark(loop);
     // A row copies eight words: copy i moves word i / 2 of half i % 2, from
@@ -648,12 +648,12 @@ private:
                   "the copy loop moves two halves of four words a row");
     auto copyLoad = [&](unsigned copy) {
       emit<ScalarLoadOp>(loc, "lw", /*dst=*/fixed().packTemporaryRegs[copy % 2],
-          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/4 * (copy / 2));
+          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/sizeof(uint32_t) * (copy / 2));
     };
     auto copyStore = [&](unsigned copy) {
       emit<ScalarStoreOp>(loc, "sw", /*src=*/fixed().packTemporaryRegs[copy % 2],
           /*base=*/fixed().packDestinationReg,
-          /*offset=*/4 * (copy / 2) + 16 * (copy % 2));
+          /*offset=*/sizeof(uint32_t) * (copy / 2) + (kAtlasMregRowBytes / 2) * (copy % 2));
     };
     auto advance = [&](unsigned reg, int32_t step) {
       emit<ALUImmOp>(loc, "addi", /*dst=*/reg, /*src=*/reg, /*immediate=*/step);
@@ -664,10 +664,10 @@ private:
       copyLoad(copy);
       copyStore(copy - 1);
       if (copy >= kPackRelayoutRowWords - 2)
-        advance(fixed().packSourceRegs[copy % 2], 16);
+        advance(fixed().packSourceRegs[copy % 2], kAtlasMregRowBytes / 2);
     }
     copyStore(kPackRelayoutRowWords - 1);
-    advance(fixed().packDestinationReg, 32);
+    advance(fixed().packDestinationReg, kAtlasMregRowBytes);
     redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
                             /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0), loop);
     size_t reloadBegin = planned.size();
