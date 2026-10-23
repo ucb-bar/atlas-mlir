@@ -19,14 +19,14 @@ struct ModelTimingGroup {
 };
 
 struct ModelReservationRelease {
-  int firstAge = 0, releaseAge = 0, availableAge = 0;
+  int firstAge = 0, releaseAge = 0;
   std::vector<int> banks;
 };
 
 struct ModelTimingBlock {
   std::string engine;
   std::map<std::string, ModelTimingGroup> events;
-  int firstFreeAge = 0, nextIssueAge = 0, readLatency = 1;
+  int firstFreeAge = 0, readLatency = 1;
   std::map<std::string, ModelReservationRelease> releases;
 };
 
@@ -50,6 +50,7 @@ private:
 };
 
 bool hashSyntax(llvm::StringRef value);
+std::string modelSha256(llvm::StringRef bytes);
 std::string canonicalJson(const llvm::json::Value &value);
 llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef bytes, llvm::StringRef expectedSha256,
                                                        bool dmaWait = false);
