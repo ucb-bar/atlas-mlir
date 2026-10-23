@@ -723,7 +723,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
 # External evidence is optional only when neither pin was configured.
 @requires_model_evidence
 class TiledSelectionTest(unittest.TestCase):
-    def test_mlp16_default_needs_and_receives_command_slot_waits(self):
+    def test_mlp16_default_is_ring_legal_after_wait_insertion(self):
         source = ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir"
         facts, pairs = Path(os.environ["ATLAS_TEST_OP_TIMING"]), Path(os.environ["ATLAS_TEST_PAIR_TIMING"])
         digests = {"op_timing_sha256": hashlib.sha256(facts.read_bytes()).hexdigest(),
@@ -732,18 +732,17 @@ class TiledSelectionTest(unittest.TestCase):
             receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1, op_timing=facts,
                                      pairs=pairs, scorer=lambda program, **_: len(program["instructions"]), **digests)
         self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
-        # Lowered for model, the default order reuses a pending transfer's slot unless insertion waits for it.
+        # Derived costs may change whether this default needs an extra ring wait.
+        # Explicit ninth-launch negative controls are covered by test_dma_ring_waits.
         evidence = evidence_option(facts, digests["op_timing_sha256"], pairs, digests["pairs_sha256"])
         lowered = run("atlas-opt", source.read_text(), *evidence, "--atlas-compile-prepare",
                       "--schedule-atlas-virtual=provider=model", "--atlas-compile-spill",
                       "--atlas-compile-lower=provider=model")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
-        for provider, pending in (("model", False), ("builtin", True)):
-            with self.subTest(provider=provider):
-                timed = run("atlas-opt", lowered.stdout, f"--insert-atlas-dma-waits=provider={provider}",
-                            "--schedule-atlas-stream=provider=model", "--verify-atlas-timing")
-                self.assertEqual(timed.returncode != 0, pending, timed.stderr)
-                self.assertEqual("DMA command slot is still pending" in timed.stderr, pending)
+        timed = run("atlas-opt", lowered.stdout, "--insert-atlas-dma-waits=provider=model",
+                    "--schedule-atlas-stream=provider=model", "--verify-atlas-timing",
+                    "--verify-atlas-generated-schedule")
+        self.assertEqual(timed.returncode, 0, timed.stderr)
 
 
 class ModelOrderReplayTest(unittest.TestCase):

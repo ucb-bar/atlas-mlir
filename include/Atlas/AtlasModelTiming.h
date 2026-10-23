@@ -5,6 +5,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include <map>
+#include <optional>
 
 namespace mlir::atlas {
 
@@ -30,12 +31,22 @@ struct ModelTimingBlock {
   std::map<std::string, ModelReservationRelease> releases;
 };
 
+// Reviewed cold isolated transfers, with pure read/store history and no VMEM grant denial.
+// These fields are proposal inputs and make no completion or overlap claim.
+struct ModelDMATiming {
+  int beatBytes, maxBytes, maxInFlight, queueDepth, issueInterval;
+  int loadStartup, storeStartup;
+  double readLatency, writeLatency, readSpacing, writeSpacing, epsilon, resetReady;
+  TimingRuleResult<int> estimate(int64_t bytes, bool store) const;
+};
+
 class ModelTimingFacts {
 public:
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   const std::string &factsSha256() const { return sha256; }
   const std::map<std::string, std::string> &modelProvenance() const { return provenance; }
   bool dmaWait() const { return dma; }
+  TimingRuleResult<int> estimateDMACycles(int64_t bytes, bool store) const;
   const ModelTimingBlock *block(llvm::StringRef name) const {
     auto found = blocks.find(name.str());
     return found == blocks.end() ? nullptr : &found->second;
@@ -46,6 +57,7 @@ private:
   std::map<std::string, std::string> provenance;
   std::string sha256;
   bool dma = false;
+  std::optional<ModelDMATiming> dmaTiming;
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef, llvm::StringRef, bool);
 };
 

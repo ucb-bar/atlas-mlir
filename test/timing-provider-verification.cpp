@@ -497,6 +497,10 @@ void testVirtualCosts(MLIRContext &context) {
   }
   p = builtinTimingProvider();
   p.id = "synthetic-virtual-costs";
+  auto dmaEstimate = [](int64_t bytes, bool store) {
+    return TimingRuleResult<int>{dmaTransferCycles(bytes, store), {}};
+  };
+  p.dmaEstimate = dmaEstimate;
   auto footprint = p.footprint;
   p.footprint = [=](const Instr &in, const RegValues &regs) {
     Footprint f = footprint(in, regs);
@@ -527,6 +531,13 @@ void testVirtualCosts(MLIRContext &context) {
   check(!runPipeline(context, retained, "schedule-atlas-virtual{provider=builtin}") &&
             diagnosed("disagrees with retained provider identity"),
         "virtual scheduling rejects conflicting explicit and retained providers", diagnostics);
+  auto missingDMA = p;
+  missingDMA.id = "synthetic-missing-dma-cost";
+  missingDMA.dmaEstimate = {};
+  registerPolicy(missingDMA);
+  diagnostics.clear();
+  check(!runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-missing-dma-cost}") &&
+            diagnosed("no DMA proposal estimator"), "virtual DMA costs have no implicit provider fallback", diagnostics);
   p.id = "synthetic-missing-virtual-cost";
   p.footprint = [=](const Instr &in, const RegValues &regs) {
     Footprint f = footprint(in, regs);
@@ -551,6 +562,7 @@ void testVirtualCosts(MLIRContext &context) {
 
   auto noLoadPolicy = toy();
   noLoadPolicy.id = "synthetic-no-tile-load-virtual-costs";
+  noLoadPolicy.dmaEstimate = dmaEstimate;
   noLoadPolicy.footprint = [](const Instr &in, const RegValues &) {
     Footprint f;
     if (in.op->opClass == OpClass::VLoad)
