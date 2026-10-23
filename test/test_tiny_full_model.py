@@ -1,0 +1,194 @@
+"""Compile the full-model host and exercise advancing KV and greedy feedback."""
+import ctypes as ct
+import _ctypes
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+import numpy as np
+
+
+class Parameters(ct.Structure):
+    _fields_ = [("embedding", ct.c_void_p), ("input_norm", ct.c_void_p * 22),
+                ("post_norm", ct.c_void_p * 22), ("final_norm", ct.c_void_p),
+                ("cosine", ct.c_void_p), ("sine", ct.c_void_p), ("epsilon", ct.c_float)]
+
+
+class State(ct.Structure):
+    _fields_ = [("keys", ct.c_void_p * 2), ("values", ct.c_void_p * 2),
+                ("position", ct.c_size_t), ("bank", ct.c_uint), ("next_token", ct.c_uint32)]
+
+
+Projection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void_p,
+                         ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p)
+
+
+class FullModelTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        value = os.environ.get("TINY_MERLIN_COMPARISONS")
+        if value is None:
+            raise unittest.SkipTest("set TINY_MERLIN_COMPARISONS to the explicit source provider")
+        provider = Path(value)
+        if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
+            raise ValueError("restricted source provider")
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        source = Path(__file__).absolute().parents[1] / "tools/tiny_full/tiny_full_model.c"
+        names = ("smol_host_ops.c", "llama_host_attention.c", "llama_host_layout.c",
+                 "llama_rotary_table.c", "llama_host_bmm.c", "smol_host_softmax.c")
+        command = ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                   "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC", "-I", str(provider),
+                   str(source), *(str(provider / name) for name in names), "-lm", "-o", str(cls.root / "host.so")]
+        subprocess.run(command, check=True, capture_output=True, timeout=120)
+        cls.lib = ct.CDLL(str(cls.root / "host.so"))
+        cls.lib.tiny_full_workspace_bytes.restype = ct.c_size_t
+        cls.lib.tiny_full_argmax_bf16.argtypes = [ct.c_void_p, ct.c_size_t, ct.POINTER(ct.c_uint32)]
+        cls.lib.tiny_full_model_step.argtypes = [ct.POINTER(Parameters), ct.POINTER(State), ct.c_void_p,
+            ct.c_size_t, Projection, ct.c_void_p, ct.c_void_p, ct.c_size_t, ct.c_void_p, ct.c_size_t]
+
+    @classmethod
+    def tearDownClass(cls):
+        _ctypes.dlclose(cls.lib._handle)
+        cls.temp.cleanup()
+
+    def fixture(self):
+        self.embedding = np.zeros((32000, 2048), np.uint16)
+        self.norm = np.full(2048, 0x3f80, np.uint16)
+        self.cosine = np.full((160, 64), 0x3f80, np.uint16)
+        self.sine = np.zeros((160, 64), np.uint16)
+        self.keys = [np.zeros((22, 4 * 160 * 64), np.uint16) for _ in range(2)]
+        self.values = [np.zeros_like(value) for value in self.keys]
+        self.workspace = np.zeros(self.lib.tiny_full_workspace_bytes() // 8 + 1, np.uint64)
+        self.logits = np.zeros(32000, np.uint16)
+        p = Parameters(self.embedding.ctypes.data, (ct.c_void_p * 22)(*[self.norm.ctypes.data] * 22),
+            (ct.c_void_p * 22)(*[self.norm.ctypes.data] * 22), self.norm.ctypes.data,
+            self.cosine.ctypes.data, self.sine.ctypes.data, 1e-5)
+        s = State((ct.c_void_p * 2)(*[v.ctypes.data for v in self.keys]),
+                  (ct.c_void_p * 2)(*[v.ctypes.data for v in self.values]), 128, 0, 7)
+        return p, s
+
+    def step(self, p, s, token, callback):
+        tokens = np.array([token], np.uint32)
+        return self.lib.tiny_full_model_step(ct.byref(p), ct.byref(s), tokens.ctypes.data, 1,
+            callback, None, self.workspace.ctypes.data, self.workspace.nbytes,
+            self.logits.ctypes.data, self.logits.size)
+
+    def test_argmax_first_tie_signed_zero_and_nonfinite(self):
+        words = np.full(32000, 0xbf80, np.uint16)
+        words[31] = words[91] = 0x3f80
+        token = ct.c_uint32(123)
+        self.assertEqual(self.lib.tiny_full_argmax_bf16(words.ctypes.data, words.size, ct.byref(token)), 0)
+        self.assertEqual(token.value, 31)
+        words[:] = 0x8000
+        words[17] = 0
+        self.assertEqual(self.lib.tiny_full_argmax_bf16(words.ctypes.data, words.size, ct.byref(token)), 0)
+        self.assertEqual(token.value, 0)
+        for nonfinite in (0x7f80, 0xff80, 0x7fc1):
+            words[31999] = nonfinite
+            token.value = 123
+            self.assertEqual(self.lib.tiny_full_argmax_bf16(words.ctypes.data, words.size, ct.byref(token)), -1)
+            self.assertEqual(token.value, 123)
+
+    def test_two_decode_iterations_advance_each_layer_cache_and_greedy(self):
+        p, s = self.fixture()
+        observed = []
+        step_index = 0
+
+        @Projection
+        def callback(_, layer, logical, incoming, rows, k, width, output):
+            observed.append((layer, logical, rows, k, width))
+            words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)), shape=(rows * width,))
+            words[:] = 0
+            if logical == 2:
+                words[:] = 0x3f80 if step_index == 0 else 0x4000
+            if layer == 22:
+                words[8 + step_index] = 0x3f80
+            return 0
+
+        for step_index in range(2):
+            self.assertEqual(self.step(p, s, s.next_token, callback), 0)
+            self.assertEqual((s.position, s.next_token), (129 + step_index, 8 + step_index))
+            active = self.values[s.bank]
+            for layer in range(22):
+                cache = active[layer, :4 * s.position * 64].reshape(4, s.position, 64)
+                self.assertTrue(np.all(cache[:, :128] == 0))
+                self.assertTrue(np.all(cache[:, 128] == 0x3f80))
+                if step_index:
+                    self.assertTrue(np.all(cache[:, 129] == 0x4000))
+        expected = [(layer, role) for layer in range(22) for role in range(7)] + [(22, 7)]
+        self.assertEqual([(layer, role) for layer, role, *_ in observed], expected * 2)
+        self.assertEqual(observed[-1], (22, 7, 1, 2048, 32000))
+
+    def test_teacher_forcing_rejected_before_projection(self):
+        p, s = self.fixture()
+        called = []
+
+        @Projection
+        def callback(*args):
+            called.append(args)
+            return -1
+
+        self.assertEqual(self.step(p, s, 8, callback), -1)
+        self.assertEqual(called, [])
+        self.assertEqual((s.position, s.bank, s.next_token), (128, 0, 7))
+
+    def test_decode_before_complete_prefill_rejected_without_projection(self):
+        p, s = self.fixture()
+        called = []
+
+        @Projection
+        def callback(*args):
+            called.append(args)
+            return -1
+
+        for position in (1, 64, 127):
+            s.position = position
+            self.assertEqual(self.step(p, s, 7, callback), -1)
+            self.assertEqual((s.position, s.bank, s.next_token), (position, 0, 7))
+        self.assertEqual(called, [])
+
+    def test_prefill_transition_all22_caches_and155_calls(self):
+        p, s = self.fixture()
+        s.position = 0
+        tokens = np.arange(128, dtype=np.uint32)
+        logits = np.zeros((128, 32000), np.uint16)
+        observed = []
+
+        @Projection
+        def callback(_, layer, logical, incoming, rows, k, width, output):
+            observed.append((layer, logical, rows))
+            words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)), shape=(rows * width,))
+            words[:] = 0x3f80 if logical == 2 else 0
+            if layer == 22:
+                words[(rows - 1) * width + 11] = 0x3f80
+            return 0
+
+        status = self.lib.tiny_full_model_step(ct.byref(p), ct.byref(s), tokens.ctypes.data, 128,
+            callback, None, self.workspace.ctypes.data, self.workspace.nbytes,
+            logits.ctypes.data, logits.size)
+        self.assertEqual(status, 0)
+        self.assertEqual((s.position, s.bank, s.next_token), (128, 1, 11))
+        self.assertEqual(len(observed), 155)
+        self.assertTrue(all(rows == 128 for _, _, rows in observed))
+        for layer in range(22):
+            cache = self.values[s.bank][layer, :4 * 128 * 64].reshape(4, 128, 64)
+            self.assertTrue(np.all(cache == 0x3f80))
+
+    def test_projection_failure_preserves_last_complete_state(self):
+        p, s = self.fixture()
+
+        @Projection
+        def callback(*args):
+            return -1
+
+        self.assertEqual(self.step(p, s, 7, callback), -2)
+        self.assertEqual((s.position, s.bank, s.next_token), (128, 0, 7))
+        self.assertTrue(np.all(self.keys[s.bank] == 0))
+        self.assertTrue(np.all(self.values[s.bank] == 0))
+
+
+if __name__ == "__main__":
+    unittest.main()
