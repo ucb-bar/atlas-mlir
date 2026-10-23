@@ -10,13 +10,20 @@ from block_bundle import integer
 from bundle import ChecksumBundle
 
 
-class FullBundle(ChecksumBundle):
+class KernelAssets(ChecksumBundle):
+    """Checksum-bound kernel sources only; never host/live admission."""
+
     def __init__(self, root, workload):
+        self._metadata(root, workload, "kernels.json", "atlas.full_kernel_assets.v1")
+        self.preparation_only = True
+        self._validate_kernels()
+
+    def _metadata(self, root, workload, filename, schema):
         super().__init__(root)
-        self.provenance = json.loads(self.read("provenance.json"))
-        self.build = json.loads(self.read("host/build.json"))
+        self.metadata_name = filename
+        self.provenance = json.loads(self.read(filename))
         if (workload not in ("tiny-full", "smol-full")
-                or self.provenance.get("schema") != "atlas.full_bundle.v1"
+                or self.provenance.get("schema") != schema
                 or self.provenance.get("workload") != workload):
             raise ValueError("unsupported full-model bundle")
         self.workload = workload
@@ -26,13 +33,12 @@ class FullBundle(ChecksumBundle):
         self.kernels = self.provenance.get("kernels")
         if not isinstance(self.kernels, list) or len(self.kernels) != self.kernel_count:
             raise ValueError("full-model launch count differs")
-        for name in ("host/host.elf", self.provenance.get("contract")):
-            if not isinstance(name, str) or name not in self.sums:
-                raise ValueError("unlisted full-model ELF or contract")
-        contract = self.provenance["contract"]
-        if self.sums[contract] != self.provenance.get("contract_sha256"):
-            raise ValueError("full-model contract identity differs")
+
+    def _validate_kernels(self):
         for index, descriptor in enumerate(self.kernels):
+            if (not isinstance(descriptor, dict) or type(descriptor.get("index")) is not int
+                    or descriptor["index"] != index):
+                raise ValueError("full-model launch descriptor order differs")
             self.validate_kernel(descriptor)
             self.initial_dram(index)
 
@@ -90,3 +96,16 @@ class FullBundle(ChecksumBundle):
                 or hashlib.sha256(initial).hexdigest() != item["initial_sha256"]):
             raise ValueError("full-model reconstructed initial image differs")
         return initial
+
+
+class FullBundle(KernelAssets):
+    def __init__(self, root, workload):
+        self._metadata(root, workload, "provenance.json", "atlas.full_bundle.v1")
+        self.build = json.loads(self.read("host/build.json"))
+        for name in ("host/host.elf", self.provenance.get("contract")):
+            if not isinstance(name, str) or name not in self.sums:
+                raise ValueError("unlisted full-model ELF or contract")
+        contract = self.provenance["contract"]
+        if self.sums[contract] != self.provenance.get("contract_sha256"):
+            raise ValueError("full-model contract identity differs")
+        self._validate_kernels()

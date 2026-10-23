@@ -14,7 +14,7 @@ from unittest.mock import Mock
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TOOLS / "host_iss"))
-from full_bundle import FullBundle
+from full_bundle import FullBundle, KernelAssets
 from model_device import Device
 from run import arguments, mmio_access_cap
 
@@ -24,26 +24,29 @@ def sha(raw):
 
 
 class FullBundleTest(unittest.TestCase):
-    def fixture(self, mutate=None):
+    def fixture(self, mutate=None, *, kernel_only=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         activation, weights, expected = b"a" * 1024, b"w" * 1024, b"e" * 2048
         initial = activation + weights + b"\xa5" * 256 + b"\xcd" * 2048 + b"\x5a" * 256
-        descriptor = dict(source="assets/program.S", original="assets/program.bin",
+        descriptor = dict(index=0, source="assets/program.S", original="assets/program.bin",
                           activation="assets/a.bin", weights="assets/w.bin", expected="assets/out.bin",
                           physical_mkn=[32, 32, 32], initial_sha256=sha(initial),
                           output_offset=2304, total_dram_bytes=4608, dram_base=0x100000000,
                           requested_dma=dict(load_bytes=2048, store_bytes=2048))
-        provenance = dict(schema="atlas.full_bundle.v1", workload="tiny-full", kernel_count=2,
-                          kernels=[descriptor, dict(descriptor)], contract="contract.json",
+        provenance = dict(schema="atlas.full_kernel_assets.v1" if kernel_only else "atlas.full_bundle.v1",
+                          workload="tiny-full", kernel_count=2,
+                          kernels=[descriptor, dict(descriptor, index=1)], contract="contract.json",
                           contract_sha256=sha(b"{}"))
         if mutate is not None:
             mutate(provenance)
-        files = {"host/host.elf": b"bound elf", "host/build.json": b"{}", "contract.json": b"{}",
-                 "provenance.json": json.dumps(provenance).encode(),
+        metadata = "kernels.json" if kernel_only else "provenance.json"
+        files = {metadata: json.dumps(provenance).encode(),
                  "assets/program.S": b"ecall\n", "assets/program.bin": struct.pack("<I", 0x73),
                  "assets/a.bin": activation, "assets/w.bin": weights, "assets/out.bin": expected}
+        if not kernel_only:
+            files.update({"host/host.elf": b"bound elf", "host/build.json": b"{}", "contract.json": b"{}"})
         for name, raw in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +54,30 @@ class FullBundleTest(unittest.TestCase):
         (root / "SHA256SUMS").write_text("".join(sha(raw) + "  " + name + "\n"
                                                     for name, raw in files.items()))
         return root, initial
+
+    def test_kernel_assets_are_preparation_without_host_and_cannot_admit_full_host(self):
+        root, initial = self.fixture(kernel_only=True)
+        assets = KernelAssets(root, "tiny-full")
+        self.assertTrue(assets.preparation_only)
+        self.assertFalse(hasattr(assets, "build"))
+        self.assertEqual(assets.initial_dram(1), initial)
+        self.assertEqual(assets.metadata_name, "kernels.json")
+        with self.assertRaises(ValueError):
+            FullBundle(root, "tiny-full")
+
+    def test_kernel_assets_require_listed_metadata_and_ordered_typed_indices(self):
+        for mutate in (lambda p: p["kernels"][1].update(index=0),
+                       lambda p: p["kernels"][0].update(index=True),
+                       lambda p: p.update(workload="smol-full")):
+            root, _ = self.fixture(mutate, kernel_only=True)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                KernelAssets(root, "tiny-full")
+        root, _ = self.fixture(kernel_only=True)
+        sums = root / "SHA256SUMS"
+        sums.write_text(''.join(line + '\n' for line in sums.read_text().splitlines()
+                                if not line.endswith('  kernels.json')))
+        with self.assertRaisesRegex(ValueError, "unlisted"):
+            KernelAssets(root, "tiny-full")
 
     def test_shared_weights_reconstruct_each_exact_image(self):
         root, initial = self.fixture()

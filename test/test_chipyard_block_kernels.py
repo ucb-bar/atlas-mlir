@@ -181,24 +181,27 @@ class FullPreparationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def bundle(self, name='bundle', mutate=None):
+    def bundle(self, name='bundle', mutate=None, *, kernel_only=False):
         root = self.root / name
         program = struct.pack('<2I', 0x13, 0x73)
         initial = b'a' * 1024 + b'w' * 1024 + b'\xa5' * 256 + b'\xcd' * 2048 + b'\x5a' * 256
-        descriptor = dict(source='assets/program.S', original='assets/program.bin',
+        descriptor = dict(index=0, source='assets/program.S', original='assets/program.bin',
                           activation='assets/a.bin', weights='assets/w.bin', expected='assets/out.bin',
                           physical_mkn=[32, 32, 32], output_offset=2304, total_dram_bytes=len(initial),
                           initial_sha256=sha(initial), dram_base=0x100000000,
                           requested_dma=dict(load_bytes=2048, store_bytes=2048))
-        provenance = dict(schema='atlas.full_bundle.v1', workload='tiny-full', kernel_count=2,
-                          kernels=[descriptor, dict(descriptor)], contract='contract.json',
+        provenance = dict(schema='atlas.full_kernel_assets.v1' if kernel_only else 'atlas.full_bundle.v1',
+                          workload='tiny-full', kernel_count=2,
+                          kernels=[descriptor, dict(descriptor, index=1)], contract='contract.json',
                           contract_sha256=sha(b'{}'))
         if mutate:
             mutate(provenance)
-        files = {'host/host.elf': b'not executed', 'host/build.json': b'{}', 'contract.json': b'{}',
-                 'provenance.json': json.dumps(provenance).encode(),
+        metadata = 'kernels.json' if kernel_only else 'provenance.json'
+        files = {metadata: json.dumps(provenance).encode(),
                  'assets/program.S': b'nop\necall\n', 'assets/program.bin': program,
                  'assets/a.bin': b'a' * 1024, 'assets/w.bin': b'w' * 1024, 'assets/out.bin': b'e' * 2048}
+        if not kernel_only:
+            files.update({'host/host.elf': b'not executed', 'host/build.json': b'{}', 'contract.json': b'{}'})
         for filename, raw in files.items():
             path = root / filename
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +209,14 @@ class FullPreparationTest(unittest.TestCase):
         (root / 'SHA256SUMS').write_text(''.join(sha(raw) + '  ' + filename + '\n'
                                                for filename, raw in files.items()))
         return root, program, initial
+
+    def test_staged_kernel_assets_prepare_without_a_host_elf(self):
+        root, program, _ = self.bundle(kernel_only=True)
+        receipt = kernels.prepare_full(root, 'tiny-full', self.root / 'staged')
+        self.assertEqual(receipt['source_metadata'], 'kernels.json')
+        self.assertEqual(receipt['kernel_count'], 2)
+        rows = kernels.read_manifest(Path(receipt['manifest']))
+        self.assertEqual([Path(row['program_bin']).read_bytes() for row in rows], [program, program])
 
     def test_full_images_preserve_program_inputs_guards_and_duplicate_launches(self):
         root, program, initial = self.bundle()

@@ -44,7 +44,10 @@ def full_bundle(root, workload):
     import full_bundle as provider
     if safe_path(provider.__file__) != directory / "full_bundle.py":
         raise ValueError("full bundle provider imported from another source")
-    return provider.FullBundle(safe_path(root), workload)
+    root = safe_path(root)
+    if safe_path(root / "kernels.json").exists():
+        return provider.KernelAssets(root, workload)
+    return provider.FullBundle(root, workload)
 
 
 def prepare_full(bundle_root, workload, out):
@@ -60,6 +63,7 @@ def prepare_full(bundle_root, workload, out):
     out.mkdir(parents=True)
     receipt = dict(status="FAILED", workload=workload, kernel_count=bundle.kernel_count,
                    bundle_root=str(bundle_root), source_sha256=pins,
+                   source_metadata=bundle.metadata_name,
                    bundle_sha256sums_sha256=bundle.checksums_sha256,
                    hardware_execution=False, full_host_execution=False)
     try:
