@@ -368,8 +368,33 @@ FailureOr<int64_t> vmemCycles(unsigned halves, bool store, Operation *at, const 
   return int64_t(halves - 1) * t->interval + t->latency;
 }
 
-// A scalar slot save or restore.
-constexpr int kScalarSlotCycles = 8;
+// Scalar slots lower to materializeScalar(byte address), then LW or SW.
+// Before slot allocation the address is unknown, so include both LUI and
+// ADDI; an allocated address uses the same zero-part elision as lowering.
+// These are serial proposal costs, not additional overlap admissions.
+FailureOr<int64_t> scalarSlotCycles(bool store, int64_t word, Operation *at,
+                                  const timing::TimingProvider &provider) {
+  if (provider.scalarSlotProposalCycles > 0)
+    return provider.scalarSlotProposalCycles;
+  uint32_t address = static_cast<uint32_t>(word) * 4;
+  uint32_t upper = ((static_cast<uint64_t>(address) + 0x800) >> 12) & 0xfffff;
+  bool unknown = word < 0;
+  int64_t cycles = 0;
+  auto append = [&](const char *name) -> LogicalResult {
+    auto t = timing::machineTimingOf(provider, name, at);
+    if (failed(t))
+      return failure();
+    cycles += std::max(t->latency, t->interval);
+    return success();
+  };
+  if ((unknown || upper) && failed(append("lui")))
+    return failure();
+  if ((unknown || (address & 0xfff) || !upper) && failed(append("addi")))
+    return failure();
+  if (failed(append(store ? "sw" : "lw")))
+    return failure();
+  return cycles;
+}
 
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
@@ -442,7 +467,23 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     if (failed(vstore)) return failure();
     auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
-    int64_t cycles = words == 1 ? kScalarSlotCycles : int64_t(words / kAtlasRegisterWords) * (vload->latency + vstore->latency);
+    int64_t cycles;
+    if (words == 1) {
+      auto access = scalarSlotCycles(isa<VirtualSaveOp>(op), slot.getSlotWordAttr().getInt(), op, provider);
+      if (failed(access)) return failure();
+      cycles = *access;
+      if (auto copy = dyn_cast<VirtualSlotCopyOp>(op)) {
+        // A fixed slot proposal covers the whole copy; derived costs include both accesses.
+        if (provider.scalarSlotProposalCycles == 0) {
+          auto destination = copy.getDst().getDefiningOp<VirtualSlotOp>();
+          auto store = scalarSlotCycles(true, destination.getSlotWordAttr().getInt(), op, provider);
+          if (failed(store)) return failure();
+          cycles += *store;
+        }
+      }
+    } else {
+      cycles = int64_t(words / kAtlasRegisterWords) * (vload->latency + vstore->latency);
+    }
     return blocking(op, Unit::Dma, cycles);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
@@ -531,12 +572,30 @@ using KindCounts = std::array<int, kKinds.size()>;
 
 unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
 
+// One validated set of provider operands serves scheduling and graph metadata.
+FailureOr<std::vector<Cost>> costsOf(const BlockGraph &g, const timing::TimingProvider &provider) {
+  std::vector<Cost> costs;
+  int64_t cycleBound = 0;
+  for (Operation *op : g.nodes) {
+    FailureOr<Cost> cost = costOf(op, provider);
+    if (failed(cost))
+      return failure();
+    // Bound heights and cycle arithmetic by conservatively serializing all cost fields.
+    cycleBound += int64_t(cost->busy) + cost->latency + cost->frontend;
+    if (cycleBound > std::numeric_limits<int>::max())
+      return op->emitOpError("virtual block cost exceeds nonnegative cycle domain");
+    cost->drains = isImplicitMemory(op);
+    costs.push_back(*cost);
+  }
+  return costs;
+}
+
 // What spilling one value of `kind` costs: a save and `reloads` reloads, as
 // costOf charges the operations --spill-atlas-virtual inserts.
 struct SpillCycles {
   KindCounts save, reload;
-  int of(RegisterKind kind, int reloads) const {
-    return save[indexOf(kind)] + reloads * reload[indexOf(kind)];
+  int64_t of(RegisterKind kind, int reloads) const {
+    return int64_t(save[indexOf(kind)]) + int64_t(reloads) * reload[indexOf(kind)];
   }
 };
 
@@ -548,7 +607,15 @@ FailureOr<SpillCycles> spillCyclesOf(Operation *at, const timing::TimingProvider
     if (!possibleSpills[k])
       continue;
     if (kind == RegisterKind::Scalar) {
-      spill.save[k] = spill.reload[k] = kScalarSlotCycles;
+      auto save = scalarSlotCycles(true, -1, at, provider);
+      if (failed(save)) return failure();
+      auto reload = scalarSlotCycles(false, -1, at, provider);
+      if (failed(reload)) return failure();
+      for (int64_t cycles : {*save, *reload})
+        if (cycles < 0 || cycles > std::numeric_limits<int>::max())
+          return at->emitOpError("virtual cost exceeds nonnegative cycle domain");
+      spill.save[k] = static_cast<int>(*save);
+      spill.reload[k] = static_cast<int>(*reload);
       continue;
     }
     unsigned halves = registersOf(kind == RegisterKind::FP8);
@@ -633,9 +700,9 @@ public:
   // spills are already counted), --spill-atlas-virtual saves the
   // longest-lived value and reloads it before each of its uses. The live
   // value of that kind used last in source order stands in for it.
-  int spillCost(Operation *op) const {
+  int64_t spillCost(Operation *op) const {
     KindCounts counts = during(op);
-    int cycles = 0;
+    int64_t cycles = 0;
     for (unsigned k = 0; k < kKinds.size(); ++k) {
       int spills = counts[k] - std::max(capacity[k], peak[k]);
       if (spills <= 0)
@@ -674,7 +741,7 @@ public:
   }
 
   // The spill cycles of the operations placed so far.
-  int spilled = 0;
+  int64_t spilled = 0;
 
 private:
   bool needed(Value value) const {
@@ -752,11 +819,12 @@ public:
     unitFree[unit(node)] = work + cost.busy;
     if (cost.queuedDMA)
       transfers.push_back(work + cost.busy);
+    exposedWaiting += cycle - frontend;
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }
 
-  int makespan = 0;
+  int makespan = 0, exposedWaiting = 0;
 
 private:
   unsigned unit(unsigned node) const {
@@ -819,7 +887,7 @@ public:
   }
 
   // The spill cycles `order` needs (Pressure::spillCost).
-  int spillCost(ArrayRef<Operation *> order, const KindCounts &capacity) const {
+  int64_t spillCost(ArrayRef<Operation *> order, const KindCounts &capacity) const {
     Pressure pressure(block, g.nodes, liveness, capacity, spill);
     for (Operation *op : order)
       pressure.place(op);
@@ -954,19 +1022,8 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   if (failed(graph))
     return failure();
   const BlockGraph &g = *graph;
-  std::vector<Cost> costs;
-  int64_t cycleBound = 0;
-  for (Operation *op : g.nodes) {
-    FailureOr<Cost> cost = costOf(op, provider);
-    if (failed(cost))
-      return failure();
-    // Bound heights and cycle arithmetic by conservatively serializing all cost fields.
-    cycleBound += int64_t(cost->busy) + cost->latency + cost->frontend;
-    if (cycleBound > std::numeric_limits<int>::max())
-      return op->emitOpError("virtual block cost exceeds nonnegative cycle domain");
-    cost->drains = isImplicitMemory(op);
-    costs.push_back(*cost);
-  }
+  auto costs = costsOf(g, provider);
+  if (failed(costs)) return failure();
   // A kind with no more values than physical registers cannot spill in any
   // legal order. Do not require facts for machine operations it never issues.
   llvm::DenseSet<Value> candidates;
@@ -987,7 +1044,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   FailureOr<SpillCycles> spill = spillCyclesOf(block.getParentOp(), provider, possibleSpills);
   if (failed(spill))
     return failure();
-  BlockScheduler scheduler(block, g, liveness, std::move(costs), *spill);
+  BlockScheduler scheduler(block, g, liveness, std::move(*costs), *spill);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
@@ -1007,10 +1064,10 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
     return scheduler.makespan(order) + scheduler.spillCost(opsOf(order), capacity);
   };
   std::vector<unsigned> order;
-  int best = 0;
+  int64_t best = 0;
   for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
     std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
-    int estimate = cycles(candidate);
+    int64_t estimate = cycles(candidate);
     if (order.empty() || estimate < best) {
       order = std::move(candidate);
       best = estimate;
@@ -1154,7 +1211,10 @@ struct ScheduleAtlasVirtualPass
           return signalPassFailure();
         }
         if (!graphOutput.empty()) {
-          llvm::json::Array preds, names, order;
+          auto costs = costsOf(*graph, *selected);
+          if (failed(costs)) return signalPassFailure();
+          Machine estimate(*graph, *costs);
+          llvm::json::Array preds, names, order, costRecords;
           llvm::DenseMap<Operation *, unsigned> ids;
           for (unsigned node = 0; node < graph->nodes.size(); ++node) {
             ids[graph->nodes[node]] = node;
@@ -1163,11 +1223,23 @@ struct ScheduleAtlasVirtualPass
               incoming.push_back(pred);
             preds.push_back(std::move(incoming));
             names.push_back(graph->nodes[node]->getName().getStringRef());
+            const Cost &cost = (*costs)[node];
+            costRecords.push_back(llvm::json::Object{{"unit", unsigned(cost.unit)}, {"busy", cost.busy},
+                {"latency", cost.latency}, {"frontend", cost.frontend}, {"queued_dma", cost.queuedDMA},
+                {"drains", cost.drains}});
           }
-          for (Operation *op : freeOperations(block))
-            order.push_back(ids.lookup(op));
+          for (Operation *op : freeOperations(block)) {
+            unsigned node = ids.lookup(op);
+            order.push_back(node);
+            estimate.place(node);
+          }
           graphs.push_back(llvm::json::Object{{"preds", std::move(preds)}, {"operations", std::move(names)},
-                                             {"order", std::move(order)}});
+              {"order", std::move(order)},
+              {"proposal", llvm::json::Object{{"schema", "atlas.virtual_proposal.v1"},
+                  {"facts_sha256", selected->proposalFactsSha256}, {"units", kUnits},
+                  {"dma_capacity", kMaxQueuedDMA}, {"costs", std::move(costRecords)},
+                  {"estimate", llvm::json::Object{{"makespan", estimate.makespan},
+                                                 {"exposed_waiting", estimate.exposedWaiting}}}}}});
         }
         ++index;
         ++blockIndex;

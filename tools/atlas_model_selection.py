@@ -13,7 +13,9 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 import hashlib
+import heapq
 import json
+from itertools import chain
 import multiprocessing
 import os
 from pathlib import Path
@@ -141,6 +143,7 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
     """Move a node together with the dependencies crossed by its insertion."""
     moves = []
     seen = set()
+    parent_edges = [set(zip((-1,) + order, order + (-2,))) for order in orders]
     for block, (graph, order) in enumerate(zip(graphs, orders)):
         positions = {node: index for index, node in enumerate(order)}
         successors = [[] for _ in order]
@@ -170,12 +173,166 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
                 rank = {other: index for index, other in enumerate(moved)}
                 if any(rank[pred] >= rank[other] for other in moved for pred in graph["preds"][other]):
                     continue
-                candidate = orders[:block] + (moved,) + orders[block + 1:]
-                if moved != order and candidate not in seen:
-                    seen.add(candidate)
-                    moves.append(candidate)
+                # Added adjacency edges identify the resulting permutation exactly,
+                # without retaining a complete order for every legal group move.
+                signature = (block, tuple(edge for edge in zip((-1,) + moved, moved + (-2,))
+                                          if edge not in parent_edges[block]))
+                if moved != order and signature not in seen:
+                    seen.add(signature)
+                    moves.append((block, tuple(group), insertion))
     random.Random(0).shuffle(moves)
-    yield from moves
+    for block, group, insertion in moves:
+        members = set(group)
+        remaining = [node for node in orders[block] if node not in members]
+        moved = tuple(remaining[:insertion]) + group + tuple(remaining[insertion:])
+        yield orders[:block] + (moved,) + orders[block + 1:]
+
+
+def proposal_estimate(graph: dict, order: tuple[int, ...]) -> tuple[int, int]:
+    """Replay the native virtual Machine; this priority never establishes completion."""
+    proposal = graph["proposal"]
+    costs = proposal["costs"]
+    free = {}
+    finished = [0] * len(costs)
+    transfers = []
+    transfer_end = 0
+    frontend = makespan = waiting = 0
+    for node in order:
+        cost = costs[node]
+        unit = cost["unit"]
+        cycle = frontend if cost["queued_dma"] else max(frontend, free.get(unit, 0))
+        if cost["drains"]:
+            cycle = max(cycle, transfer_end)
+        for pred in graph["preds"][node]:
+            cycle = max(cycle, finished[pred])
+        if cost["queued_dma"]:
+            # Frontend cycles never decrease. Retire completed transfers once;
+            # the active completion heap stays bounded by DMA capacity.
+            while transfers and transfers[0] <= cycle:
+                heapq.heappop(transfers)
+            capacity = proposal["dma_capacity"]
+            while len(transfers) >= capacity:
+                cycle = heapq.heappop(transfers)
+        work = max(cycle + cost["frontend"] - 1, free.get(unit, 0)) if cost["queued_dma"] else cycle
+        finished[node] = work + cost["latency"]
+        free[unit] = work + cost["busy"]
+        if cost["queued_dma"]:
+            end = work + cost["busy"]
+            heapq.heappush(transfers, end)
+            transfer_end = max(transfer_end, end)
+        waiting += cycle - frontend
+        frontend = cycle + cost["frontend"]
+        makespan = max(makespan, finished[node])
+    return makespan, waiting
+
+
+def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
+    """Fail closed before ranking if metadata differs from the scored parent's facts."""
+    def reject(why):
+        raise ValueError("curve proposal metadata: " + why)
+
+    evidence = program.get("model_evidence") if isinstance(program, dict) else None
+    identity = evidence.get("op_timing_sha256") if isinstance(evidence, dict) else None
+    if not isinstance(identity, str) or len(identity) != 64 or any(c not in "0123456789abcdef" for c in identity):
+        reject("parent program requires its selected op_timing_sha256")
+    if not isinstance(graphs, list):
+        reject("graphs must be an array")
+    for graph in graphs:
+        if not isinstance(graph, dict) or not isinstance(graph.get("preds"), list):
+            reject("missing graph predecessors")
+        count = len(graph["preds"])
+        order = graph.get("order")
+        if not isinstance(order, list) or any(type(node) is not int for node in order) or sorted(order) != list(range(count)):
+            reject("parent order is not a complete permutation")
+        positions = {node: index for index, node in enumerate(order)}
+        for node, preds in enumerate(graph["preds"]):
+            if not isinstance(preds, list) or any(type(pred) is not int or not 0 <= pred < count for pred in preds):
+                reject("invalid graph predecessor")
+            if len(set(preds)) != len(preds) or any(positions[pred] >= positions[node] for pred in preds):
+                reject("parent order violates its graph")
+        proposal = graph.get("proposal")
+        if not isinstance(proposal, dict) or set(proposal) != {"schema", "facts_sha256", "units", "dma_capacity", "costs", "estimate"}:
+            reject("missing or unsupported proposal schema")
+        if proposal["schema"] != "atlas.virtual_proposal.v1" or proposal["facts_sha256"] != identity:
+            reject("proposal identity differs from parent model evidence")
+        for key in ("units", "dma_capacity"):
+            if type(proposal[key]) is not int or not 0 < proposal[key] <= 2**31 - 1:
+                reject("invalid " + key)
+        costs = proposal["costs"]
+        if not isinstance(costs, list) or len(costs) != count:
+            reject("cost coverage differs from graph")
+        cycle_bound = 0
+        for cost in costs:
+            if not isinstance(cost, dict) or set(cost) != {"unit", "busy", "latency", "frontend", "queued_dma", "drains"}:
+                reject("missing or unsupported cost fields")
+            if type(cost["unit"]) is not int or not 0 <= cost["unit"] < proposal["units"]:
+                reject("invalid functional unit")
+            for key in ("busy", "latency", "frontend"):
+                if type(cost[key]) is not int or not 0 <= cost[key] <= 2**31 - 1:
+                    reject("cost outside nonnegative native cycle domain")
+                cycle_bound += cost[key]
+            if type(cost["queued_dma"]) is not bool or type(cost["drains"]) is not bool:
+                reject("invalid DMA flags")
+            if cost["queued_dma"] and cost["frontend"] < 1:
+                reject("queued DMA must issue before its transfer starts")
+        if cycle_bound > 2**31 - 1:
+            reject("block exceeds native cycle domain")
+        estimate = proposal["estimate"]
+        if not isinstance(estimate, dict) or set(estimate) != {"makespan", "exposed_waiting"} or any(
+                type(value) is not int or value < 0 for value in estimate.values()):
+            reject("invalid native replay estimate")
+        if proposal_estimate(graph, tuple(order)) != (estimate["makespan"], estimate["exposed_waiting"]):
+            reject("native replay parity failure")
+
+
+def rank_order_neighbors(graphs: list[dict], neighbors, max_orders: int | None = None,
+                         eligible: Callable | None = None):
+    """Stream estimates and retain only the stable prefix the attempt budget can use.
+
+    Every unseen legal order must still be estimated to preserve the exhaustive
+    ranking's prefix. Storage for full orders and sorting scale with max_orders,
+    not neighborhood size. Compact adjacency signatures deduplicate before replay.
+    """
+    if max_orders is not None and max_orders < 0:
+        raise ValueError("ranked order limit must be nonnegative")
+    if max_orders == 0:
+        return iter(())
+    baseline = [tuple(graph["order"]) for graph in graphs]
+    parent_edges = [set(zip((-1,) + order, order + (-2,))) for order in baseline]
+    estimates_at_parent = [proposal_estimate(graph, order) for graph, order in zip(graphs, baseline)]
+
+    def unique_neighbors():
+        seen = set()
+        for orders in neighbors:
+            if eligible is not None and not eligible(orders):
+                continue
+            signature = tuple((block, tuple(edge for edge in zip((-1,) + order, order + (-2,))
+                                             if edge not in parent_edges[block]))
+                              for block, order in enumerate(orders) if order != baseline[block])
+            if signature not in seen:
+                seen.add(signature)
+                yield orders
+
+    def key(orders):
+        estimates = [estimates_at_parent[block] if order == baseline[block] else proposal_estimate(graph, order)
+                     for block, (graph, order) in enumerate(zip(graphs, orders))]
+        return tuple(sum(estimate[index] for estimate in estimates) for index in (0, 1))
+    if max_orders is None:
+        return iter(sorted(unique_neighbors(), key=key))
+    return iter(heapq.nsmallest(max_orders, unique_neighbors(), key=key))
+
+
+def order_candidates(base: Candidate, orders, curve_candidates: bool):
+    """Each wait sibling is a separate ordinary attempt under existing search limits."""
+    for order in orders:
+        if curve_candidates:
+            # Local search precedes PACK-placement trials. Reset preloaded state
+            # defensively so inherited options cannot suppress either wait sibling.
+            for placement in ("default", "source"):
+                yield replace(base, virtual_orders=order, wait_placement=placement,
+                              pack_weight_before_pack=False)
+        else:
+            yield replace(base, virtual_orders=order)
 
 
 def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = "model",
@@ -191,7 +348,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    search_evaluations: int = 0, search_group_evaluations: int = 0,
                    search_patience: int = 0,
                    pack_reload_candidates: bool = False, pack_preload_candidates: bool = False,
-                   scorer: Callable | None = None) -> dict:
+                   curve_candidates: bool | None = None, scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
     All candidates run allocation, timing and generated-schedule verification
@@ -205,6 +362,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         profile = "curve" if provider == "model" else "fifo43"
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
         raise ValueError("unsupported provider or memory profile")
+    if curve_candidates is None:
+        curve_candidates = provider == "model" and profile == "curve"
+    if type(curve_candidates) is not bool or (curve_candidates and (provider != "model" or profile != "curve")):
+        raise ValueError("curve-candidates requires the model curve profile")
     if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
     if provider != "model" and mreg_candidates != ():
@@ -227,7 +388,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     commands, logs = [], []
     log_lock, score_lock = threading.Lock(), threading.Lock()
     receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
-               "guarded_pack": guarded_pack,
+               "guarded_pack": guarded_pack, "curve_candidates": curve_candidates,
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "search_group_evaluations": search_group_evaluations,
                "search_patience": search_patience,
@@ -394,7 +555,26 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                     orders = tuple(tuple(graph["order"]) for graph in graphs)
                     base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
                     seen.add(base)
-                    pending = (replace(base, virtual_orders=order) for order in neighbors(graphs, orders))
+                    proposed = neighbors(graphs, orders)
+                    if curve_candidates:
+                        parent_program = json.loads((output / parent["directory"] / "program.json").read_text())
+                        try:
+                            validate_proposal_graphs(graphs, parent_program)
+                        except ValueError as error:
+                            fail(str(error))
+                        # Bank choices or a new order can change the best wait placement.
+                        # Include the incumbent order; the seen set drops its unchanged sibling.
+                        # Each retained order has at least one unseen wait sibling.
+                        # Thus remaining attempts also bound the orders needed for
+                        # every canonical batch within the attempt budget.
+                        remaining = limit - len(receipt["candidates"])
+                        proposed = rank_order_neighbors(
+                            graphs, chain((orders,), proposed), remaining,
+                            eligible=lambda order: any(candidate not in seen for candidate in
+                                                       order_candidates(base, (order,), True)))
+                        receipt[field]["proposal_policy"] = "native-cost-rank-with-wait-siblings-v1"
+                        receipt[field]["proposal_facts_sha256"] = parent_program["model_evidence"]["op_timing_sha256"]
+                    pending = order_candidates(base, proposed, curve_candidates)
                     while len(receipt["candidates"]) < limit:
                         batch = []
                         width = min(12, limit - len(receipt["candidates"]))
@@ -466,6 +646,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="additional verified dependency-group attempts after local search (model only)")
     parser.add_argument("--search-patience", type=int,
                         help="stop a phase after this many nonimproving attempts, checked after each batch; zero disables")
+    parser.add_argument("--curve-candidates", action=argparse.BooleanOptionalAction, default=None,
+                        help="rank legal order proposals by derived costs and score default/source wait siblings (curve default)")
     parser.add_argument("--pack-reload-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score loading a pending weight before an adjacent PACK reload (model only)")
     parser.add_argument("--pack-preload-candidates", action=argparse.BooleanOptionalAction, default=None,
@@ -481,6 +663,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
     profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
     return {"provider": args.provider, "profile": profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "op_timing": args.op_timing,
+            "curve_candidates": args.curve_candidates,
             "op_timing_sha256": args.op_timing_sha256, "pairs": args.pairs,
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,
             "composed_sha256": args.composed_sha256, "workers": args.workers,
