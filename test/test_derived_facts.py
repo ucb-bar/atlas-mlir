@@ -1,5 +1,7 @@
 """Source contracts, complete ISA coverage, and fatal derivation validation."""
+from contextlib import redirect_stderr
 from dataclasses import replace
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -14,7 +16,8 @@ import atlas_model_timing as timing
 import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
-from atlas_model_facts import safe_path, identity
+from atlas_model_facts import safe_path, identity, note_unqualified_model
+from atlas_model_schema import LOCK
 from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingEvidenceError, with_update_guidance
 from atlas_model_selection import evidence_option
 import atlas_model_pairs as pairs
@@ -54,6 +57,23 @@ def retained_probe_cases():
 
 
 class DerivationGateTest(unittest.TestCase):
+    def test_qualification_note_is_quiet_for_pins_and_nonfatal_for_changed_content(self):
+        source, configuration = LOCK["source_sha256"], LOCK["configuration_sha256"]
+        cases = [(source, configuration, False), ("0" * 64, configuration, True),
+                 (source, "0" * 64, True), ("0" * 64, "0" * 64, True)]
+        for actual_source, actual_configuration, changed in cases:
+            with self.subTest(source=actual_source, configuration=actual_configuration):
+                output = StringIO()
+                with redirect_stderr(output):
+                    self.assertIsNone(note_unqualified_model(actual_source, actual_configuration))
+                lines = output.getvalue().splitlines()
+                self.assertEqual(len(lines), int(changed))
+                if changed:
+                    self.assertIn("results are not from the qualified revision", lines[0])
+                    self.assertIn(LOCK["model_revision"], lines[0])
+                    self.assertIn("tools/model-timing.lock.json", lines[0])
+                    self.assertIn("Compilation requires the locked configuration", lines[0])
+                    self.assertIn("overlap additionally requires the locked revision", lines[0])
 
     def test_refusals_end_with_one_shared_model_update_guidance_line(self):
         with tempfile.TemporaryDirectory() as directory:

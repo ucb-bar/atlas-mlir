@@ -42,6 +42,14 @@ def identity(root):
                 numerical_data_sha256=numerical), sources, data
 
 
+def note_unqualified_model(source_sha256, configuration_sha256):
+    """Derivation can inspect changes; compilation and overlap retain lock gates."""
+    if (source_sha256 != LOCK["source_sha256"] or
+            configuration_sha256 != LOCK["configuration_sha256"]):
+        print("Note: results are not from the qualified revision " + LOCK["model_revision"] +
+              " (source or configuration content differs from tools/model-timing.lock.json). "
+              "Compilation requires the locked configuration; overlap additionally requires the locked revision.",
+              file=sys.stderr)
 
 
 def write(directory, name, value):
@@ -81,6 +89,7 @@ def regenerate(model, out):
         raise UnsupportedModelTiming("imported model does not match --npu-model")
     torch.set_num_threads(1)
     cfg, config = configuration()
+    note_unqualified_model(before[0]["source_sha256"], sha256(encoded(config)))
     # Preserve the exporter's fatal runtime-error propagation check for every model.
     core = Core(config=cfg, logger=Mock(spec=Logger))
     try:
