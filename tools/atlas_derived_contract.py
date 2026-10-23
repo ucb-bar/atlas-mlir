@@ -19,6 +19,7 @@ MODEL_FIELDS = ("revision", "revision_kind", "source_sha256", "numerical_data_sh
 PAYLOAD_FIELDS = ("geometry", "age_convention", "op_timing", "reservation_releases",
                   "vocabulary_sha256", "architecture", "operand_vocabulary", "isa_metadata")
 EXTENSIONS = ("frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing", "replay_timing", "proposal_costs")
+VALIDATED_FIELDS = ("dma_timing", "engine_admission", "dma_admission")
 
 
 def overlap_semantics(artifact):
@@ -38,9 +39,10 @@ def semantic_payload(facts):
     for name in EXTENSIONS:
         if name in facts:
             result[name] = copy.deepcopy(facts[name])
-    if "dma_timing" in facts:
-        result["dma_timing"] = {key: copy.deepcopy(value) for key, value in facts["dma_timing"].items()
-                                if key != "validation"}
+    for name in VALIDATED_FIELDS:
+        if name in facts:
+            result[name] = {key: copy.deepcopy(value) for key, value in facts[name].items()
+                            if key not in {"validation", "producer_sources"}}
     return result
 
 
@@ -55,8 +57,9 @@ def seal_derived(facts):
         raise ValueError("derived facts require successful operation validation")
     if set(facts["reservation_releases"]) != {block["name"] for block in facts["op_timing"]}:
         raise ValueError("derived facts require complete reservation release coverage")
-    if "dma_timing" in facts and facts["dma_timing"].get("validation", {}).get("passed") is not True:
-        raise ValueError("derived facts require successful DMA validation")
+    for name in VALIDATED_FIELDS:
+        if name in facts and facts[name].get("validation", {}).get("passed") is not True:
+            raise ValueError("derived facts require successful " + name + " validation")
     if "mxu_weight_timing" in facts and validation.get("mxu_weight_validation", {}).get("passed") is not True:
         raise ValueError("derived facts require successful MXU weight validation")
     if "mxu_weight_timing" in facts:
@@ -68,8 +71,9 @@ def seal_derived(facts):
         derivation=dict(schema="atlas.derivation.v1", kind="source_derived", payload_sha256=digest),
         validation=dict(schema="atlas.validation.v1", passed=True, payload_sha256=digest))
     validation["payload_sha256"] = digest
-    if "dma_timing" in facts:
-        facts["dma_timing"]["validation"]["payload_sha256"] = digest
+    for name in VALIDATED_FIELDS:
+        if name in facts:
+            facts[name]["validation"]["payload_sha256"] = digest
     return facts
 
 
@@ -88,8 +92,8 @@ def verify_derived(facts):
         raise ValueError("missing or mismatched source derivation record")
     if contract.get("validation") != dict(schema="atlas.validation.v1", passed=True, payload_sha256=digest):
         raise ValueError("missing or mismatched derived validation record")
-    for record in (facts.get("validation", {}), *([facts["dma_timing"].get("validation", {})]
-                                                if "dma_timing" in facts else [])):
+    for record in (facts.get("validation", {}), *(facts[name].get("validation", {})
+                                                for name in VALIDATED_FIELDS if name in facts)):
         if record.get("passed") is not True or record.get("payload_sha256") != digest:
             raise ValueError("validation is not bound to the derived payload")
     if "mxu_weight_timing" in facts:

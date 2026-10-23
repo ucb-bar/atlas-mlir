@@ -124,6 +124,29 @@ class DerivedContractTest(unittest.TestCase):
         self.assertEqual(json.loads(contract["payload_json"]), semantic_payload(facts))
         self.assertEqual(sha256(contract["payload_json"].encode()), verify_derived(facts))
 
+    def test_admission_contracts_bind_rules_and_successful_validation(self):
+        for field in ("engine_admission", "dma_admission"):
+            facts = contract_format_fixture()
+            facts[field] = dict(schema="test.admission", minimum_gap=1,
+                                producer_sources=[{"sha256": "1" * 64}],
+                                validation=dict(passed=True, report_sha256="2" * 64))
+            seal_derived(facts)
+            digest = verify_derived(facts)
+            facts[field]["producer_sources"] = []
+            facts[field]["validation"]["report_sha256"] = "3" * 64
+            self.assertEqual(verify_derived(facts), digest)
+            facts[field]["minimum_gap"] = 2
+            with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
+                verify_derived(facts)
+            seal_derived(facts)
+            self.assertNotEqual(verify_derived(facts), digest)
+            facts[field]["validation"]["payload_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "validation is not bound"):
+                verify_derived(facts)
+            facts[field]["validation"]["passed"] = False
+            with self.assertRaisesRegex(ValueError, "require successful"):
+                seal_derived(facts)
+
 
 class OverlapSemanticBindingTest(unittest.TestCase):
     def fixture(self):

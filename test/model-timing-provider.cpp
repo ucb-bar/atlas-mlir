@@ -20,6 +20,7 @@ using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 
 int testScalarOverlap(Object fixture);
+int testEngineAdmission();
 
 namespace {
 int failures = 0;
@@ -242,6 +243,13 @@ void sealContractFixture(Object &object) {
     deterministic.erase("validation");
     semantic["dma_timing"] = std::move(deterministic);
   }
+  for (const char *key : {"engine_admission", "dma_admission"})
+    if (auto *document = object.getObject(key)) {
+      Object deterministic(*document);
+      deterministic.erase("validation");
+      deterministic.erase("producer_sources");
+      semantic[key] = std::move(deterministic);
+    }
   auto bytes = canonicalJson(llvm::json::Value(std::move(semantic)));
   auto payloadHash = hash(bytes);
   object["derivation_contract"] = Object{{"schema", "atlas.derived_facts.v1"}, {"payload_json", bytes},
@@ -255,6 +263,8 @@ void sealContractFixture(Object &object) {
     (*object.getObject("validation"))["mxu_weight_validation"] = Object{{"passed", true}};
   if (auto *dma = object.getObject("dma_timing"))
     (*dma->getObject("validation"))["payload_sha256"] = payloadHash;
+  for (const char *key : {"engine_admission", "dma_admission"})
+    if (auto *document = object.getObject(key)) (*document->getObject("validation"))["payload_sha256"] = payloadHash;
 }
 
 Object replayFixture() {
@@ -288,6 +298,67 @@ Object costsFixture() {
           {"interval_scope", "selected_representative_pair_only"}}}};
 }
 
+Object admissionFixture(const Object &object) {
+  const auto &model = *object.getObject("model");
+  Object identity, sources, final;
+  for (const char *key : {"source_sha256", "configuration_sha256", "numerical_data_sha256"}) identity[key] = *model.get(key);
+  for (const char *key : {"core.py", "xlu.py", "lsu.py", "vpu.py", "mxu.py", "bank_conflict.py"}) sources[key] = std::string(64, 'a');
+  for (const auto &value : *object.getArray("op_timing")) {
+    const auto &block = *value.getAsObject();
+    if (block.getString("engine") == "vpu") final[*block.getString("name")] = *block.getInteger("first_free_age") - 1;
+  }
+  return Object{{"schema", "atlas.engine_admission.v1"}, {"age_convention", "issue_edge_zero"},
+      {"contract", "source-engine-initiation-v1"}, {"model", std::move(identity)},
+      {"source_contract", Object{{"source_sha256", std::move(sources)},
+          {"core_init_shape", "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9"},
+          {"execution_units", *model.getObject("configuration")->get("execution_units")}}},
+      {"vpu", Object{{"capacity", 2}, {"live", "age_lt_final_write"}, {"final_write_age", std::move(final)},
+          {"logic_groups", Array{}}, {"double", Array{}}}},
+      {"xlu", Object{{"independent_from_vpu", true}, {"initiation", "prior_first_free"}, {"initiation_age", 66}}},
+      {"vlsu", Object{{"independent_load_store_paths", true}, {"initiation", "same_path_prior_first_free"},
+          {"initiation_ages", Object{{"vlsu.vload", 35}, {"vlsu.vstore", 35}}}}},
+      {"scalar_lsu", Object{{"load_response_gap", 3}, {"store_busy", "none"}, {"independent_vector_paths", true}}},
+      {"policy", Object{{"mreg_ports", "vpu_same_logical_register_row_read_coalescing"}, {"unknown_vmem", "aliases_all_banks"},
+          {"scalar_lsu", "existing_alias_dependency_and_writeback_checks"}, {"mxu", "existing_source_overlap_rules"},
+          {"waits", "invalidate_live_admission"}}},
+      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
+          {"positive_runs", 1}, {"negative_runs", 1}, {"numerical_checks", 1}}}};
+}
+
+Object dmaAdmissionFixture(const Object &object) {
+  Object sources, shapes, geometry;
+  for (const auto &[key, value] : model_schema::dmaIdentity()) {
+    if (key == "curve_sha256") continue;
+    if (llvm::StringRef(key).starts_with("shape:")) shapes[llvm::StringRef(key).drop_front(6)] = value;
+    else sources[key] = value;
+  }
+  const auto &engineSources = *object.getObject("engine_admission")->getObject("source_contract")->getObject("source_sha256");
+  for (const char *name : {"core.py", "lsu.py", "bank_conflict.py"}) sources[name] = *engineSources.get(name);
+  shapes["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5";
+  shapes["lsu.py"] = "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722";
+  shapes["bank_conflict.py"] = "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467";
+  const auto &config = *object.getObject("model")->getObject("configuration");
+  for (auto [key, field] : std::initializer_list<std::pair<const char *, const char *>>{
+      {"num_channels", "dma_num_channels"}, {"beat_bytes", "dma_beat_bytes"}, {"max_in_flight", "dma_max_in_flight"},
+      {"max_transfer_bytes", "dma_max_transfer_bytes"}, {"vmem_bank_bytes", "vmem_bank_bytes"}})
+    geometry[key] = *config.get(field);
+  return Object{{"schema", "atlas.dma_admission.v1"}, {"age_convention", "issue_edge_zero"},
+      {"contract", "source-asynchronous-dma-admission-v1"}, {"source_sha256", std::move(sources)},
+      {"source_shapes", std::move(shapes)}, {"configuration", std::move(geometry)},
+      {"issue", Object{{"ordinary_gap", 1}, {"first_engine_age", 1}, {"store_read_to_request_cycles", 2}}},
+      {"semantics", Object{{"operands", "captured_at_issue"}, {"launch", "enqueue_after_registered_progress"},
+          {"requests", "oldest_undispatched_slot"}, {"vmem_grants", "lsu_priority_then_dma_load_write_then_dma_store_read"},
+          {"completion", "all_beats_dispatched_and_acknowledged"}, {"wait", "busy_flag_checked_before_engine_progress"},
+          {"channel_reuse", "matching_wait_required"}, {"aliases", "existing_completion_conflict_policy"},
+          {"curve_history", "persists_across_wait_and_engine_drain"}, {"fixed_dma_windows", "none"},
+          {"command_ring", "separate_unchanged_rtl_contract"}}},
+      {"producer_sources", Object{{"atlas_derive_dma_admission.py", std::string(64, 'a')},
+                                    {"atlas_validate_dma_admission.py", std::string(64, 'b')}}},
+      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
+                               {"positive_runs", 94}, {"negative_runs", 6}, {"numerical_checks", 94}}}};
+}
+
+
 Object contractFixture() {
   Object object = fixture();
   object.erase("test_only");
@@ -318,6 +389,8 @@ Object contractFixture() {
       {"checked_source_methods", Array{"synthetic:read"}}};
   object["replay_timing"] = replayFixture();
   object["proposal_costs"] = costsFixture();
+  object["engine_admission"] = admissionFixture(object);
+  object["dma_admission"] = dmaAdmissionFixture(object);
   sealContractFixture(object);
   return object;
 }
@@ -1228,6 +1301,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc != 1) return 2;
+  failures += testEngineAdmission();
   testDerivedContract();
   testScalarCosts();
   testDMAEstimates();

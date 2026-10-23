@@ -36,6 +36,12 @@ class ModelConfigContractTest(unittest.TestCase):
         model["configuration_sha256"] = hashlib.sha256(model["configuration_json"].encode()).hexdigest()
         # These mutations isolate compiler capability checks from derivation.
         # Resealing is a private test operation, never a production bypass.
+        self.facts["engine_admission"]["model"]["configuration_sha256"] = model["configuration_sha256"]
+        self.facts["engine_admission"]["source_contract"]["execution_units"] = deepcopy(model["configuration"]["execution_units"])
+        for field, config in (("num_channels", "dma_num_channels"), ("beat_bytes", "dma_beat_bytes"),
+                              ("max_in_flight", "dma_max_in_flight"), ("max_transfer_bytes", "dma_max_transfer_bytes"),
+                              ("vmem_bank_bytes", "vmem_bank_bytes")):
+            self.facts["dma_admission"]["configuration"][field] = model["configuration"][config]
         seal_derived(self.facts)
         path = self.directory / "synthetic-config-test-only.json"
         path.write_text(json.dumps(self.facts))
