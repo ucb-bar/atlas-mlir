@@ -22,31 +22,29 @@ class ModelSchemaTest(unittest.TestCase):
             return loader(path)
 
     def test_python_consumers_share_vocabulary_and_pins(self):
-        import atlas_model_pairs as pairs
+        import atlas_overlap_rules as rules
         import atlas_model_timing as timing
-        self.assertIs(pairs.RELATION_VALUES, schema.RELATION_VALUES)
-        self.assertIs(pairs.QUALIFIED_CONSTRAINT_HASHES, schema.QUALIFIED_CONSTRAINT_HASHES)
+        self.assertIs(rules.RELATION_VALUES, schema.RELATION_VALUES)
         self.assertIs(timing.VPU_BLOCKS, schema.VPU_BLOCKS)
         self.assertIs(timing.MXU_BLOCKS, schema.MXU_BLOCKS)
         self.assertIs(timing.encoded, schema.canonical)
-        self.assertIs(pairs.canonical, schema.canonical)
-        self.assertIs(timing.sha256, pairs.sha256)
+        self.assertIs(timing.sha256, schema.sha256)
         for name in schema.LOCK:
-            if name in {"schema", "source_shapes", "qualified_constraint_hashes"}:
+            if name in {"schema", "source_shapes"}:
                 continue
-            for consumer in (pairs, timing):
+            for consumer in (timing,):
                 if hasattr(consumer, name.upper()):
                     self.assertEqual(getattr(consumer, name.upper()), schema.LOCK[name])
 
     def test_lock_rejects_missing_unknown_and_malformed_pins(self):
         for name, value in (("model_revision", "a" * 39), ("source_sha256", "A" * 64),
-                            ("per_op_sha256", None), ("unknown_sha256", "a" * 64)):
+                            ("numerical_data_sha256", None), ("unknown_sha256", "a" * 64)):
             with self.subTest(name=name):
                 changed = dict(schema.LOCK, **{name: value})
                 with self.assertRaises(ValueError):
                     self.load_changed(schema.load_lock, changed)
         changed = dict(schema.LOCK)
-        del changed["master_sha256"]
+        del changed["source_sha256"]
         with self.assertRaises(ValueError):
             self.load_changed(schema.load_lock, changed)
 

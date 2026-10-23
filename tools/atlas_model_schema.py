@@ -52,10 +52,10 @@ def _load(path):
 def load_lock(path):
     lock = _load(path)
     names = set("model_revision source_sha256 reference_configuration_sha256 configuration_sha256 "
-                "numerical_data_sha256 reference_sha256 master_sha256 validation_sha256 per_op_sha256".split())
+                "numerical_data_sha256".split())
     # Older locks predate the optional DMA curve contract.
     optional = {"curve_sha256", "dma_source_sha256"}
-    if (not isinstance(lock, dict) or set(lock) - optional != names | {"schema", "source_shapes", "qualified_constraint_hashes"}
+    if (not isinstance(lock, dict) or set(lock) - optional != names | {"schema", "source_shapes"}
             or lock["schema"] != "atlas.model_timing.lock.v1"):
         raise ValueError("invalid model timing lock schema")
     for name in names:
@@ -78,14 +78,6 @@ def load_lock(path):
         if (not re.fullmatch(r"[a-z_]+\.py", name) or not isinstance(digest, str) or
                 not re.fullmatch(r"[0-9a-f]{64}", digest)):
             raise ValueError("invalid model source shape: " + name)
-    constraints = lock["qualified_constraint_hashes"]
-    if not isinstance(constraints, dict) or not constraints:
-        raise ValueError("invalid constraint fingerprints")
-    for name, values in constraints.items():
-        if (not re.fullmatch(r"[a-z_]+", name) or not isinstance(values, list) or not values
-                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in values)
-                or len(values) != len(set(values))):
-            raise ValueError("invalid constraint fingerprints: " + name)
     return lock
 
 
@@ -149,13 +141,9 @@ def load_vocabulary(path):
 _DIRECTORY = Path(__file__).resolve().parent
 LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
 SOURCE_SHAPES = LOCK["source_shapes"]
-QUALIFIED_CONSTRAINT_HASHES = {key: set(values) for key, values in LOCK["qualified_constraint_hashes"].items()}
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
 MODEL_REVISION = LOCK["model_revision"]
 CONFIGURATION_SHA256 = LOCK["configuration_sha256"]
-MASTER_SHA256 = LOCK["master_sha256"]
-VALIDATION_SHA256 = LOCK["validation_sha256"]
-PER_OP_SHA256 = LOCK["per_op_sha256"]
 BASE_KEYS = set(VOCABULARY["base_relation_keys"])
 RELATION_VALUES = {key: set(values) for key, values in VOCABULARY["relation_values"].items()}
 RELATION_KEYS = BASE_KEYS | set(RELATION_VALUES)
@@ -207,13 +195,6 @@ def generate(vocabulary):
     table("std::map<std::string, std::set<std::string>> &relationValues()", (
         "{" + quote(key) + ", {" + ", ".join(map(quote, values)) + "}}"
         for key, values in vocabulary["relation_values"].items()))
-    table("std::map<std::string, std::set<std::string>> &qualifiedConstraintHashes()", (
-        "{" + quote(key) + ", {" + ", ".join(map(quote, values)) + "}}"
-        for key, values in LOCK["qualified_constraint_hashes"].items()))
-    table("std::map<std::string, std::string> &compositionIdentity()", (
-        "{" + quote(key) + ", " + quote(LOCK[pin]) + "}"
-        for key, pin in (("revision", "model_revision"), ("source_sha256", "source_sha256"),
-                         ("configuration_sha256", "configuration_sha256"))))
     dma_identity = ({"curve_sha256": LOCK["curve_sha256"]} | LOCK["dma_source_sha256"] |
                     {"shape:" + name: LOCK["source_shapes"][name] for name in LOCK["dma_source_sha256"]}
                     if "curve_sha256" in LOCK and "dma_source_sha256" in LOCK else {})

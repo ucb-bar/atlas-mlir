@@ -8,9 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import atlas_derive_overlap as derive
-from atlas_model_chain_composition import compose
-from atlas_model_composed_projection import complete_relations
-from atlas_model_pairs import validate_relation
+from atlas_overlap_rules import validate_relation
 from atlas_model_schema import sha256
 
 
@@ -135,18 +133,6 @@ class DeriveOverlapTests(unittest.TestCase):
         strict = derive.SourceRules(facts, changed)
         self.assertIn("tracker", strict.capacity_conflict(["mxu0.matmul"] * 2, [0, 32]))
         self.assertIsNone(rules.capacity_conflict(["mxu0.matmul"] * 2, [0, 32]))
-
-    def test_generated_chain_controls_have_independent_causes(self):
-        facts, contract = fixtures()
-        rules = derive.SourceRules(facts, contract)
-        for sample in derive.chain_samples(rules):
-            with self.subTest(sample=sample["id"]):
-                record = complete_relations(sample)
-                verdict = compose(record, record["gaps"], rules, rules)
-                self.assertEqual(verdict["admitted"], sample["expectation"] == "positive")
-                if sample["category"] == "port_history" and sample["expectation"] == "reject":
-                    self.assertEqual(verdict["rejected_pairs"], [])
-                    self.assertIsNotNone(verdict["capacity_conflict"])
 
     def test_retired_prefix_port_choice_survives_first_command_drain(self):
         facts, contract = fixtures()

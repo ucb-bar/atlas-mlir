@@ -12,10 +12,8 @@ import atlas_derive_mxu as mxu
 import atlas_derive_vpu as vpu
 import atlas_model_facts as facts
 import atlas_model_timing as timing
-try:
-    import atlas_model_pairs as pairs
-except ModuleNotFoundError:
-    pairs = None
+import atlas_derive_overlap as overlap
+import atlas_validate_overlap as validator
 try:
     import atlas_derive_curve as curve
 except ModuleNotFoundError:
@@ -28,8 +26,7 @@ class AccessBoundaryTest(unittest.TestCase):
             checks = [lambda: scratchpad.read_source(name), lambda: facts.safe_path(name), lambda: mxu._read(name),
                       lambda: vpu._check_source(SimpleNamespace()),
                       lambda: timing.manifest(Path(name), "npu_model")]
-            if pairs is not None:
-                checks.append(lambda: pairs.safe_path(name))
+            checks.extend((lambda: overlap.safe_path(name), lambda: validator.safe_path(name)))
             if curve is not None:
                 checks.append(lambda: curve._safe(name))
             for check in checks:
@@ -78,8 +75,7 @@ class AccessBoundaryTest(unittest.TestCase):
         checks = [lambda: scratchpad.read_source(leaf), lambda: facts.safe_path(leaf), lambda: mxu._read(leaf),
                   lambda: vpu._check_source(SimpleNamespace()),
                   lambda: timing.manifest(link.parent, "link/child.py")]
-        if pairs is not None:
-            checks.append(lambda: pairs.safe_path(leaf))
+        checks.extend((lambda: overlap.safe_path(leaf), lambda: validator.safe_path(leaf)))
         if curve is not None:
             checks.append(lambda: curve._safe(leaf))
         for check in checks:

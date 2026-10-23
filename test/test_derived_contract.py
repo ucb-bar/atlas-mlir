@@ -1,12 +1,13 @@
 """Integrity and determinism tests; fixtures here are synthetic test data only."""
 import copy
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from atlas_derived_contract import semantic_payload, seal_derived, verify_derived
+from atlas_derived_contract import semantic_payload, seal_derived, verify_derived, overlap_semantics
 from atlas_model_schema import canonical, sha256
 
 
@@ -95,6 +96,64 @@ class DerivedContractTest(unittest.TestCase):
         contract = facts["derivation_contract"]
         self.assertEqual(json.loads(contract["payload_json"]), semantic_payload(facts))
         self.assertEqual(sha256(contract["payload_json"].encode()), verify_derived(facts))
+
+
+class OverlapSemanticBindingTest(unittest.TestCase):
+    def fixture(self):
+        return dict(schema="atlas.model_overlap_derived.v1", age_convention="issue_edge_zero",
+                    derivation=dict(contract="source-resource-occupancy-v1", source_contract={
+                        "capacity": {"vpu_slots": 2}, "producer_sources": [{"sha256": "a" * 64}]}),
+                    pairs=[{"first": "vpu.mov", "second": "vpu.mov", "minimum": 1}],
+                    composition={"engines": {"vpu": ["vpu.mov"]}},
+                    validation={"passed": True, "seconds": 1})
+
+    def digest(self, artifact):
+        return sha256(canonical(overlap_semantics(artifact)))
+
+    def test_all_decision_inputs_change_the_digest(self):
+        original = self.fixture()
+        for change in (lambda d: d.__setitem__("schema", "other"),
+                       lambda d: d.__setitem__("age_convention", "other"),
+                       lambda d: d["derivation"].__setitem__("contract", "other"),
+                       lambda d: d["derivation"]["source_contract"]["capacity"].__setitem__("vpu_slots", 3),
+                       lambda d: d["pairs"][0].__setitem__("minimum", 2),
+                       lambda d: d["composition"]["engines"]["vpu"].append("vpu.add")):
+            changed = copy.deepcopy(original)
+            change(changed)
+            self.assertNotEqual(self.digest(changed), self.digest(original))
+
+    def test_receipts_and_producer_sources_do_not_change_rules(self):
+        original = self.fixture()
+        changed = copy.deepcopy(original)
+        changed["validation"].update(seconds=999, report_sha256="b" * 64)
+        changed["derivation"]["source_contract"]["producer_sources"] = []
+        changed["derivation"]["tool_sha256"] = "c" * 64
+        self.assertEqual(self.digest(original), self.digest(changed))
+        self.assertIn("producer_sources", original["derivation"]["source_contract"])
+
+    def test_overlap_digest_is_bound_to_derived_validation(self):
+        facts = contract_format_fixture()
+        facts["overlap_rules_sha256"] = self.digest(self.fixture())
+        seal_derived(facts)
+        original = verify_derived(facts)
+        facts["overlap_rules_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
+            verify_derived(facts)
+        seal_derived(facts)
+        self.assertNotEqual(verify_derived(facts), original)
+
+
+@unittest.skipUnless("ATLAS_REGENERATED_MODEL_FACTS" in os.environ,
+                     "set ATLAS_TEST_MODEL_FACTS and ATLAS_REGENERATED_MODEL_FACTS to independent bundles")
+class IndependentBundleDeterminismTest(unittest.TestCase):
+    def test_independent_regenerations_have_identical_timing_and_overlap(self):
+        first = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+        second = Path(os.environ["ATLAS_REGENERATED_MODEL_FACTS"])
+        self.assertNotEqual(first.resolve(), second.resolve())
+        for name in ("model-timing.json", "model-overlap.json", "facts.lock.json"):
+            self.assertEqual((first / name).read_bytes(), (second / name).read_bytes(), name)
+        self.assertEqual(verify_derived(json.loads((first / "model-timing.json").read_text())),
+                         verify_derived(json.loads((second / "model-timing.json").read_text())))
 
 
 if __name__ == "__main__":

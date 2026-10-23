@@ -36,7 +36,7 @@ class ScalarSlotProposalTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.facts = json.loads(Path(os.environ["ATLAS_TEST_OP_TIMING"]).read_text())
+        self.facts = json.loads((Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json").read_text())
         # CLI integration consumes genuinely derived facts. Synthetic lifetime
         # mutation/cost propagation is covered by the explicit C++ test API.
 
@@ -46,7 +46,7 @@ class ScalarSlotProposalTest(unittest.TestCase):
         path.write_text(json.dumps(facts))
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         return run("atlas-opt", source or scalar_slots(),
-                   f"--select-atlas-model-evidence=op-timing={path} op-timing-sha256={digest} dma=wait",
+                   f"--select-atlas-model-evidence=test-op-timing={path} test-op-timing-sha256={digest}",
                    f"--schedule-atlas-virtual=provider=model graph-output={self.directory / 'graph.json'}")
 
     def costs(self, facts=None, word=-1):

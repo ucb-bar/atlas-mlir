@@ -44,24 +44,23 @@ Object relation(const char *first = "lw", const char *second = "sw") {
       {"scalar_registers", "independent"}, {"scalar_address_alignment", "word"},
       {"vmem_bank", "same"}, {"vmem_window", "disjoint"}};
 }
-Object source(const std::string &pointer) {
-  return Object{{"json_pointer", pointer}, {"sha256", std::string(64, 'a')}, {"proof_sha256", std::string(64, 'b')}};
-}
 Object pair(const char *first, const char *second, Object rel, int minimum, int boundary, int index) {
   return Object{{"first", first}, {"second", second}, {"relation", std::move(rel)},
-      {"swept", Array{1, boundary}}, {"min_gap", minimum}, {"first_live_window_end", boundary},
-      {"negative", minimum == 1 ? Object{{"gap", 0}, {"result", "inexpressible"}} :
-          Object{{"gap", minimum - 1}, {"result", "conflict"}, {"error", Object{{"message", "synthetic load path busy"}}}}},
-      {"source_record", source("/pairs/" + std::to_string(index))}, {"verilator", Object{{"confirmed", true}}}};
+                {"minimum", minimum}, {"high", boundary}};
 }
-Object projection(const ModelTimingFacts &facts, const Object &model, Array pairs, Array chains = {}) {
-  return Object{{"schema", "atlas.model_pairs.v1"}, {"age_convention", "issue_edge_zero"},
-      {"model", Object(model)}, {"pairs", std::move(pairs)}, {"chains", std::move(chains)},
-      {"projection", Object{{"version", 2}, {"policy", "confirmed-exact-scalar-relations-v2"},
-          {"master_sha256", std::string(64, 'c')}, {"master_path", "synthetic-master.json"},
-          {"validation_sha256", std::string(64, 'd')}, {"validation_path", "synthetic-validation.json"},
-          {"per_op_sha256", facts.factsSha256()}, {"projector_sha256", std::string(64, 'e')},
-          {"counts", Object{}}, {"excluded_reasons", Object{}}}}};
+Object projection(const ModelTimingFacts &facts, const Object &model, Array pairs) {
+  Object contract{{"capacity", Object{{"sequencer_cycles", 32}, {"mxu0_compute", 3},
+                                      {"mxu1_compute", 2}, {"vpu_slots", 2}}}};
+  return Object{{"schema", "atlas.model_overlap_derived.v1"}, {"age_convention", "issue_edge_zero"},
+      {"per_op_sha256", facts.factsSha256()}, {"model", Object(model)}, {"pairs", std::move(pairs)},
+      {"derivation", Object{{"contract", "source-resource-occupancy-v1"}, {"tool_sha256", std::string(64, 'a')},
+          {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(contract))))},
+          {"source_contract", std::move(contract)}}},
+      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'b')},
+          {"sample_policy", "source-mechanism-boundaries-v1"}, {"positive_runs", 2}, {"negative_runs", 3},
+          {"negative_rejections", 1}, {"numerical_checks", 2}, {"engines", Object{{"scalar_lsu", Object{
+              {"positive_runs", 2}, {"negative_runs", 3}, {"negative_rejections", 1}, {"numerical_checks", 2}}}}}}},
+      {"composition", Object{{"engines", Object{}}, {"classes", Array{}}}}};
 }
 std::optional<ModelOverlapFacts> parse(Object object, const ModelTimingFacts &facts) {
   std::string bytes = encode(std::move(object));
@@ -218,36 +217,7 @@ int testScalarOverlap(Object perOp) {
     module.erase();
   }
   auto triple = replay(context, {load, store, Instr{findOp("sw"), 0, 12, 18, 0}}, entry);
-  Array matrix;
-  for (int i = 0; i < 3; ++i)
-    for (int j = i + 1; j < 3; ++j)
-      matrix.push_back(Object{{"first_index", i}, {"second_index", j}, {"relation", relation(i ? "sw" : "lw", "sw")}});
-  Object sequence{{"operations", Array{"scalar_lsu.load", "scalar_lsu.store", "scalar_lsu.store"}},
-      {"gaps", Array{1, 1}}, {"relation", relation()}, {"all_pair_relations", std::move(matrix)},
-      {"relation_scope", "adjacent"}, {"result", "accepted"}, {"in_flight_count", 2},
-      {"witness_only", true}, {"no_stable_suffix_claim", true}, {"source_record", source("/chains/0")},
-      {"verilator", Object{{"confirmed", true}}}};
-  auto chainFacts = [&]() {
-    return projection(*facts, model,
-        Array{pair("scalar_lsu.load", "scalar_lsu.store", relation(), 1, 4, 0),
-              pair("scalar_lsu.store", "scalar_lsu.store", relation("sw", "sw"), 1, 2, 1)},
-        Array{Object(sequence)});
-  };
-  auto chain = parse(chainFacts(), *facts);
-  check(chain && !chain->admits(triple, false), "pair facts alone never imply a three-command chain");
-  check(chain && chain->admits(triple, true), "whole scalar chain matches exact gap vector and complete matrix");
-  auto altered = triple; altered[2].issue = 3;
-  check(chain && !chain->admits(altered, true), "a chain witness grants no independent gap suffix");
-  auto badMatrix = chainFacts();
-  auto &nonadjacent = *(*badMatrix.getArray("chains"))[0].getAsObject()->getArray("all_pair_relations");
-  (*nonadjacent[1].getAsObject()->getObject("relation"))["vmem_bank"] = "other";
-  auto wrongRelation = parse(std::move(badMatrix), *facts);
-  check(wrongRelation && !wrongRelation->admits(triple, true), "a nonadjacent chain relation cannot be skipped");
-  auto missingPair = chainFacts(); missingPair.getArray("pairs")->pop_back();
-  auto uncovered = parse(std::move(missingPair), *facts);
-  check(uncovered && !uncovered->admits(triple, true), "the complete chain still needs every live pair fact");
-  auto fourth = replay(context, {load, store, Instr{findOp("sw"), 0, 12, 18, 0}, Instr{findOp("sw"), 0, 12, 19, 4}}, entry);
-  check(chain && !chain->admits(fourth, true), "a witnessed triple never grants general scalar capacity");
+  check(!overlap->admits(triple, true), "source scalar pairs never grant general scalar capacity");
   llvm::outs() << "scalar overlap relation checks, " << failures << " failures\n";
   return failures;
 }

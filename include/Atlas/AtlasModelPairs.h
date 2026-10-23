@@ -21,10 +21,6 @@ public:
   bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
               llvm::StringRef origin = "dependence") const;
   bool rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const;
-  llvm::Error addComposedFacts(llvm::StringRef bytes, llvm::StringRef expectedSha256,
-                              const ModelTimingFacts &operations);
-  llvm::Error loadComposedFacts(llvm::StringRef path, llvm::StringRef expectedSha256,
-                               const ModelTimingFacts &operations);
   const std::map<std::string, std::string> &metadata() const { return provenance; }
 
 private:
@@ -33,16 +29,9 @@ private:
     std::string first, second;
     Relation relation;
     int minimum = 0, high = 0;
-    std::string source = "catalog";
-  };
-  struct Chain {
-    std::vector<std::string> operations;
-    std::vector<int> gaps;
-    std::map<std::pair<int, int>, Relation> relations;
-    int inFlight = 0;
+    std::string source = "source-derived";
   };
   std::vector<Pair> pairs;
-  std::vector<Chain> sequences;
   std::map<std::string, std::set<Relation>> compositionClasses;
   std::set<std::string> composedOperations;
   bool structuralCapacity = false;

@@ -43,7 +43,7 @@ class DiagnosticBoundaryTest(unittest.TestCase):
             self.assertIs(raised.exception, error)
 
     def test_missing_evidence_options_are_plain_usage_errors(self):
-        for options in (dict(op_timing=Path("facts.json")), dict(pairs=Path("pairs.json"))):
+        for options in (dict(model_facts=Path("missing-facts.json")),):
             with self.subTest(options=options), self.assertRaises(ValueError) as raised:
                 selection.evidence_option(**options)
             self.assertNotIn(UPDATE_GUIDANCE, str(raised.exception))

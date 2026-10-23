@@ -728,27 +728,44 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 3)
         self.assertEqual(receipt["candidates"][-1]["status"], "FAIL")
 
-    def test_model_evidence_requires_explicit_pins(self) -> None:
-        with self.assertRaisesRegex(ValueError, "SHA-256"):
+    def bundle(self):
+        bundle = self.directory / "facts"
+        bundle.mkdir(exist_ok=True)
+        for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+            (bundle / name).write_text("{}")
+        return bundle
+
+    def test_model_evidence_requires_complete_bundle(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bundle directory"):
             evidence_option(self.source)
-        with self.assertRaisesRegex(ValueError, "requires"):
-            evidence_option(pairs=self.source, pairs_sha256="ab")
         self.assertEqual(evidence_option(), [])
+        bundle = self.bundle()
+        option = evidence_option(bundle)[0]
+        self.assertIn("facts=", option)
+        self.assertNotIn("sha256", option)
+        (bundle / "model-overlap.json").unlink()
+        with self.assertRaisesRegex(ValueError, "model-overlap.json"):
+            evidence_option(bundle)
 
-    def test_composed_evidence_requires_pinned_base_and_side(self) -> None:
-        for kwargs in ({"composed": self.source}, {"composed_sha256": "cd"}):
-            with self.assertRaisesRegex(ValueError, "SHA-256"):
-                evidence_option(self.source, "ab", self.source, "ef", **kwargs)
-        with self.assertRaisesRegex(ValueError, "requires its pinned pairs"):
-            evidence_option(self.source, "ab", composed=self.source, composed_sha256="cd")
-
-    def test_composed_selection_retains_exact_base_evidence(self) -> None:
-        receipt = self.select(op_timing=self.source, op_timing_sha256="ab", pairs=self.source,
-                              pairs_sha256="ef", composed=self.source, composed_sha256="cd", max_candidates=1)
-        self.assertNotIn("overlap_projection", receipt)
+    def test_bundle_selection_uses_one_directory(self) -> None:
+        self.select(model_facts=self.bundle(), max_candidates=1)
         option = next(arg for arg in self.invocations[0] if arg.startswith("--select-atlas-model-evidence="))
-        self.assertIn("pairs-sha256=ef", option)
-        self.assertIn("composed-sha256=cd", option)
+        self.assertIn("facts=", option)
+        self.assertNotIn("pairs=", option)
+        self.assertNotIn("sha256", option)
+
+    def test_model_selection_regenerates_bundle_by_default(self) -> None:
+        def run(argv, **kwargs):
+            if len(argv) > 2 and argv[1] == "-B" and "atlas_model_facts.py" in argv[2]:
+                bundle = Path(argv[argv.index("--out") + 1]); bundle.mkdir()
+                for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+                    (bundle / name).write_text("{}")
+                self.invocations.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return self.fake_run(argv, **kwargs)
+        self.select(model=self.directory, runner=run, max_candidates=1)
+        self.assertEqual(self.invocations[0][2], str(ROOT / "tools/atlas_model_facts.py"))
+        self.assertIn("facts=", self.invocations[1][2])
 
     def test_curve_priorities_preserve_all_neighbors_and_change_with_pacing(self):
         initial = (0, 1, 2)
@@ -1000,6 +1017,77 @@ EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
 
 
 @requires_model_evidence
+class ModelFactsBundleTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.bundle = Path(self.temporary.name)
+        original = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+        for name in ("model-timing.json", "model-overlap.json", "facts.lock.json"):
+            (self.bundle / name).write_bytes((original / name).read_bytes())
+        self.lock = json.loads((self.bundle / "facts.lock.json").read_text())
+
+    def write_lock(self):
+        (self.bundle / "facts.lock.json").write_text(json.dumps(self.lock))
+
+    def select(self):
+        return run("atlas-opt", "module {}", *evidence_option(self.bundle))
+
+    def test_bundle_selects_source_overlap_and_composition(self):
+        selected = self.select()
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertIn('chains = "true"', selected.stdout)
+        self.assertIn('derived_sha256', selected.stdout)
+        self.assertIn(self.lock["op_timing_sha256"], selected.stdout)
+
+    def test_unqualified_or_mismatched_lock_refuses(self):
+        for key, value in (("schema", "unsupported"), ("overlap_sha256", "0" * 64),
+                           ("op_timing_sha256", "0" * 64), ("overlap_sha256", None)):
+            old = dict(self.lock)
+            if value is None:
+                self.lock.pop(key)
+            else:
+                self.lock[key] = value
+            self.write_lock()
+            selected = self.select()
+            self.assertNotEqual(selected.returncode, 0, selected.stdout)
+            self.lock = old
+
+    def test_changed_operation_or_overlap_file_refuses(self):
+        for name in ("model-timing.json", "model-overlap.json"):
+            path = self.bundle / name
+            original = path.read_bytes()
+            path.write_bytes(original + b" ")
+            selected = self.select()
+            self.assertNotEqual(selected.returncode, 0, selected.stdout)
+            self.assertIn("hash", selected.stderr)
+            path.write_bytes(original)
+
+    def test_changed_configuration_cannot_reuse_original_overlap(self):
+        from atlas_derived_contract import seal_derived
+        path = self.bundle / "model-timing.json"
+        facts = json.loads(path.read_text())
+        facts["model"]["configuration"]["dma_memory_params"]["frequency_ghz"] = .75
+        facts["dma_timing"]["frequency_ghz"] = .75
+        config = json.dumps(facts["model"]["configuration"], sort_keys=True, separators=(",", ":"))
+        facts["model"].update(configuration_json=config,
+                              configuration_sha256=hashlib.sha256(config.encode()).hexdigest())
+        seal_derived(facts)
+        path.write_text(json.dumps(facts))
+        self.lock["op_timing_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.write_lock()
+        selected = self.select()
+        self.assertNotEqual(selected.returncode, 0)
+        self.assertNotIn("falling back to isolated lifetimes", selected.stderr)
+
+    def test_manual_legacy_selection_options_are_unavailable(self):
+        for option in ("op-timing", "op-timing-sha256", "pairs", "pairs-sha256", "composed", "composed-sha256"):
+            selected = run("atlas-opt", "module {}", f"--select-atlas-model-evidence={option}=unused")
+            self.assertNotEqual(selected.returncode, 0)
+            self.assertIn("no such option", selected.stderr)
+
+
+@requires_model_evidence
 class GuardedModelPreparationTest(unittest.TestCase):
     def test_guarded_model_preparation_converts_pack(self):
         from test_dialect import OPT
@@ -1009,10 +1097,11 @@ class GuardedModelPreparationTest(unittest.TestCase):
                     ': (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            facts = Path(os.environ["ATLAS_TEST_OP_TIMING"])
+            facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json"
             source_file = root / "guarded.mlir"
             source_file.write_text(source(after=consumer, value="%result"))
-            evidence = evidence_option(facts, hashlib.sha256(facts.read_bytes()).hexdigest())
+            evidence = [f"--select-atlas-model-evidence=test-op-timing={facts} "
+                        f"test-op-timing-sha256={hashlib.sha256(facts.read_bytes()).hexdigest()}"]
             for guarded in (False, True):
                 flag = "--atlas-compile-prepare" + ("=guarded-pack=true" if guarded else "")
                 prepared = subprocess.run([str(OPT), str(source_file), *evidence, flag],
@@ -1077,21 +1166,19 @@ class ModelSelectionKnobsTest(unittest.TestCase):
                 self.assertEqual(before.stdout, after.stdout)
 
 
-# External evidence is optional only when neither pin was configured.
+# External evidence is optional only when no bundle was configured.
 @requires_model_evidence
 class TiledSelectionTest(unittest.TestCase):
     def test_mlp16_default_is_ring_legal_after_wait_insertion(self):
         source = ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir"
-        facts, pairs = Path(os.environ["ATLAS_TEST_OP_TIMING"]), Path(os.environ["ATLAS_TEST_PAIR_TIMING"])
-        digests = {"op_timing_sha256": hashlib.sha256(facts.read_bytes()).hexdigest(),
-                   "pairs_sha256": hashlib.sha256(pairs.read_bytes()).hexdigest()}
+        bundle = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
         with tempfile.TemporaryDirectory() as directory:
-            receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1, op_timing=facts,
-                                     pairs=pairs, scorer=lambda program, **_: len(program["instructions"]), **digests)
+            receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1,
+                                     model_facts=bundle, scorer=lambda program, **_: len(program["instructions"]))
         self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
         # Derived costs may change whether this default needs an extra ring wait.
         # Explicit ninth-launch negative controls are covered by test_dma_ring_waits.
-        evidence = evidence_option(facts, digests["op_timing_sha256"], pairs, digests["pairs_sha256"])
+        evidence = evidence_option(bundle)
         lowered = run("atlas-opt", source.read_text(), *evidence, "--atlas-compile-prepare",
                       "--schedule-atlas-virtual=provider=model", "--atlas-compile-spill",
                       "--atlas-compile-lower=provider=model")
@@ -1188,7 +1275,7 @@ class ModelOrderReplayTest(unittest.TestCase):
 
     def test_native_proposal_metadata_matches_explicit_order_replay(self):
         graphs, _ = self.graph()
-        identity = re.search(r'op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)
+        identity = re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)
         program = {"model_evidence": {"op_timing_sha256": identity}}
         validate_proposal_graphs(graphs, program)
         self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
@@ -1226,7 +1313,7 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.assertTrue(costs[load]["queued_dma"])
         self.assertEqual(costs[load]["frontend"], 1)
         validate_proposal_graphs(graphs, {"model_evidence": {
-            "op_timing_sha256": re.search(r'op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)}})
+            "op_timing_sha256": re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)}})
 
     def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
         graphs, scheduled = self.graph()

@@ -18,7 +18,17 @@ MODEL_FIELDS = ("revision", "revision_kind", "source_sha256", "numerical_data_sh
                 "configuration", "configuration_sha256")
 PAYLOAD_FIELDS = ("geometry", "age_convention", "op_timing", "reservation_releases",
                   "vocabulary_sha256", "architecture", "operand_vocabulary", "isa_metadata")
-EXTENSIONS = ("frontend_timing", "scratchpad_contract")
+EXTENSIONS = ("frontend_timing", "scratchpad_contract", "overlap_rules_sha256")
+
+
+def overlap_semantics(artifact):
+    """Bind every overlap decision input without receipt or producer identities."""
+    contract = copy.deepcopy(artifact["derivation"]["source_contract"])
+    contract.pop("producer_sources", None)
+    return dict(schema=artifact["schema"], age_convention=artifact["age_convention"],
+                contract=artifact["derivation"]["contract"], source_contract=contract,
+                pairs=copy.deepcopy(artifact["pairs"]),
+                composition=copy.deepcopy(artifact["composition"]))
 
 
 def semantic_payload(facts):

@@ -79,23 +79,26 @@ def _option_path(path: Path) -> str:
     return '"' + str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def evidence_option(op_timing: Path | None = None, op_timing_sha256: str | None = None,
-                    pairs: Path | None = None, pairs_sha256: str | None = None,
-                    composed: Path | None = None, composed_sha256: str | None = None) -> list[str]:
-    if not op_timing:
-        if op_timing_sha256 or pairs or pairs_sha256 or composed or composed_sha256:
-            raise ValueError("model evidence requires --op-timing and its digest")
-        return []  # The source may already carry selected model evidence.
-    if not op_timing_sha256 or (bool(pairs) != bool(pairs_sha256)) or (bool(composed) != bool(composed_sha256)):
-        raise ValueError("each model evidence file requires its explicit SHA-256 digest")
-    if composed and not pairs:
-        raise ValueError("composed model evidence requires its pinned pairs")
-    options = f"op-timing={_option_path(op_timing)} op-timing-sha256={op_timing_sha256} dma=wait"
-    if pairs:
-        options += f" pairs={_option_path(pairs)} pairs-sha256={pairs_sha256} chains=true"
-    if composed:
-        options += f" composed={_option_path(composed)} composed-sha256={composed_sha256}"
-    return ["--select-atlas-model-evidence=" + options]
+def evidence_option(model_facts: Path | None = None) -> list[str]:
+    if model_facts is None:
+        return []  # A library caller may supply IR with selected evidence.
+    def bundle_path(value: Path) -> Path:
+        path = Path(value)
+        if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
+            raise ValueError("prohibited path")
+        if ".." in path.parts:
+            raise ValueError("parent traversal is unsupported")
+        path = Path(os.path.abspath(path))
+        if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
+            raise ValueError("model facts paths must not contain symlinks")
+        return path
+    directory = bundle_path(model_facts)
+    if not directory.is_dir():
+        raise ValueError("--model-facts must name a qualified bundle directory")
+    for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+        if not bundle_path(directory / name).is_file():
+            raise ValueError(f"model facts bundle requires {name}")
+    return ["--select-atlas-model-evidence=facts=" + _option_path(directory)]
 
 
 def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
@@ -344,9 +347,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
                    spill: bool = True, spill_mxu: bool = True, boundary: str = "boundary",
                    guarded_pack: bool = False,
-                   op_timing: Path | None = None, op_timing_sha256: str | None = None,
-                   pairs: Path | None = None, pairs_sha256: str | None = None,
-                   composed: Path | None = None, composed_sha256: str | None = None,
+                   model_facts: Path | None = None,
                    max_candidates: int = 32, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
@@ -423,8 +424,11 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             stdout.write_text(result.stdout)
         return result.stdout
 
-    options = evidence_option(op_timing, op_timing_sha256, pairs, pairs_sha256,
-                              composed, composed_sha256) if provider == "model" else []
+    if provider == "model" and model_facts is None and model is not None:
+        model_facts = output / "model-facts"
+        command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
+                 "--npu-model", str(model), "--out", str(model_facts)], output)
+    options = evidence_option(model_facts) if provider == "model" else []
     options.append("--atlas-compile-prepare=" +
                    f"spill-mxu-state={str(spill_mxu).lower()} boundary={boundary}")
     if guarded_pack:
@@ -659,12 +663,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--npu-model", type=Path, help="selected npu_model source tree; must match provider evidence")
     parser.add_argument("--model-region", type=Path, action="append", default=[],
                         help="DRAM region JSON with address, initial_hex and optional expected_hex")
-    parser.add_argument("--op-timing", type=Path)
-    parser.add_argument("--op-timing-sha256")
-    parser.add_argument("--pairs", type=Path)
-    parser.add_argument("--pairs-sha256")
-    parser.add_argument("--composed", type=Path)
-    parser.add_argument("--composed-sha256")
+    parser.add_argument("--model-facts", type=Path,
+                        help="qualified model facts bundle (default: regenerate from --npu-model)")
     parser.add_argument("--search-budget", choices=tuple(SEARCH_BUDGETS), default="full",
                         help="selection knobs only or bounded full search (default)")
     parser.add_argument("--max-candidates", type=int)
@@ -693,11 +693,9 @@ def model_arguments(args: argparse.Namespace) -> dict:
     banks = budget.pop("bank_candidates")
     profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
     return {"provider": args.provider, "profile": profile, "model": args.npu_model,
-            "model_regions": tuple(args.model_region), "op_timing": args.op_timing,
+            "model_regions": tuple(args.model_region), "model_facts": args.model_facts,
             "curve_candidates": args.curve_candidates,
-            "op_timing_sha256": args.op_timing_sha256, "pairs": args.pairs,
-            "pairs_sha256": args.pairs_sha256, "composed": args.composed,
-            "composed_sha256": args.composed_sha256, "workers": args.workers,
+            "workers": args.workers,
             "mreg_candidates": None if banks else (), **budget,
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 

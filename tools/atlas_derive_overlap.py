@@ -21,7 +21,7 @@ import sys
 sys.dont_write_bytecode = True
 
 from atlas_derive_mxu import _plan, _check_checker, _assignment, _method, _one, _integer
-from atlas_model_composition import RuleSet, engine, relation_class
+from atlas_overlap_rules import RuleSet, engine, relation_class
 from atlas_model_schema import SOURCE_SHAPES, VOCABULARY, canonical, sha256
 from atlas_model_timing import configuration, source_digest, numerical_data, encoded
 
@@ -29,9 +29,10 @@ CONTRACT = "source-resource-occupancy-v1"
 
 
 def safe_path(value):
-    path = Path(os.path.abspath(value))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
+    raw = Path(value)
+    if any(word in part.lower() for part in raw.parts for word in ("hammer", "vlsi")):
         raise ValueError("prohibited overlap source/output path")
+    path = Path(os.path.abspath(raw))
     for parent in reversed((path, *path.parents)):
         if parent.is_symlink():
             raise ValueError("overlap source/output path contains a symlink")
@@ -535,9 +536,9 @@ def generate(model_root, per_op_path, output_path, samples_path=None):
     # class across every opcode Cartesian pair would discard valid classes.
     composition = [value for _, value in sorted(classes.items())]
     samples.extend(chain_samples(rules))
-    tool_names = ("atlas_derive_overlap.py", "atlas_model_composition.py", "atlas_derive_mxu.py",
+    tool_names = ("atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_derive_mxu.py",
                   "atlas_derive_vpu.py", "atlas_derive_memory.py", "atlas_model_schema.py", "atlas_model_timing.py",
-                  "atlas_model_pairs.py", "atlas_model_observer.py", "model-timing.lock.json",
+                  "atlas_model_observer.py", "model-timing.lock.json",
                   "model-timing-vocabulary.json")
     tools = {name: sha256(safe_path(Path(__file__).parent / name).read_bytes()) for name in tool_names}
     contract["producer_sources"] = tools

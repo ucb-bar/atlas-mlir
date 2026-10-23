@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive isolated model timing, then validate it with the numerical observer."""
+"""Derive model timing and overlap rules, then run their native validation gates."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,7 @@ sys.dont_write_bytecode = True
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
 from atlas_model_capabilities import check_configuration
-from atlas_derived_contract import seal_derived, verify_derived
+from atlas_derived_contract import seal_derived, verify_derived, overlap_semantics
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
 
@@ -50,7 +50,7 @@ def note_unqualified_model(source_sha256, configuration_sha256):
             configuration_sha256 != LOCK["configuration_sha256"]):
         print("Note: results are not from the qualified revision " + LOCK["model_revision"] +
               " (source or configuration content differs from tools/model-timing.lock.json). "
-              "Compilation requires supported capabilities; overlap additionally requires the locked configuration and revision.",
+              "Compilation requires supported capabilities and reviewed source contracts.",
               file=sys.stderr)
 
 
@@ -63,12 +63,39 @@ def write(directory, name, value):
 def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
+             "atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_validate_overlap.py",
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",
              "atlas_derive_scratchpad.py", "atlas_derive_frontend.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
+
+
+def overlap_bundle(model, out):
+    """Freeze source proposals before native observations; publish only on success."""
+    from atlas_derive_overlap import generate
+    from atlas_validate_overlap import validate
+    candidate, samples = out / "overlap-candidate.json", out / "overlap-samples.json"
+    start = time.monotonic()
+    try:
+        rules = generate(model, out / "model-timing.json", candidate, samples)
+        facts = json.loads((out / "model-timing.json").read_text())
+        if "overlap_rules_sha256" in facts and sha256(encoded(overlap_semantics(rules))) != facts["overlap_rules_sha256"]:
+            raise ValueError("overlap proposal differs from the sealed derived semantics")
+    except ValueError as error:
+        raise UnsupportedModelTiming(str(error)) from error
+    derive_seconds = time.monotonic() - start
+    print(f"Derived {len(rules['pairs'])} overlap rows without model runs; validating native boundaries", flush=True)
+    try:
+        # Sequential execution also works where native process semaphores are unavailable.
+        report = validate(model, out / "model-timing.json", candidate, samples,
+                          out / "overlap-validation", out / "model-overlap.json", workers=1)
+    except (ValueError, RuntimeError) as error:
+        raise ModelTimingValidationError(str(error)) from error
+    return dict(overlap_sha256=sha256((out / "model-overlap.json").read_bytes()),
+                overlap_validation_sha256=sha256((out / "overlap-validation" / "validation-report.json").read_bytes()),
+                overlap_derive_seconds=derive_seconds, overlap_validation_seconds=report["seconds"])
 
 
 def regenerate(model, out):
@@ -168,22 +195,36 @@ def regenerate(model, out):
                    lineage=dict(source_manifest_sha256=sha256(encoded(sources)), inputs=inputs,
                                 numerical_data_manifest_sha256=sha256(encoded(data)), observer_sources=observer_sources,
                                 generator_sources=generator_sources, contract_lock=LOCK))
+    # Freeze rule semantics before sealing operation facts. The native gate then
+    # validates a proposal bound to those final facts bytes; publish the bundle
+    # lock only after it succeeds. This avoids a circular file-hash dependency.
+    from atlas_derive_overlap import generate
+    write(out, "model-timing.json", payload)
+    proposal = generate(model, out / "model-timing.json", out / "overlap-candidate.json",
+                        out / "overlap-samples.json")
+    payload["overlap_rules_sha256"] = sha256(encoded(overlap_semantics(proposal)))
     seal_derived(payload)
     semantic_hash = verify_derived(payload)
     facts_hash = write(out, "model-timing.json", payload)
     write(out, "source-manifest.json", sources)
     write(out, "numerical-data-manifest.json", data)
+    overlap = overlap_bundle(model, out)
+    if before != identity(model) or generator_sources != tool_manifest():
+        raise ModelTimingValidationError("model or generator tools changed during overlap validation")
     write(out, "facts.lock.json", dict(schema="atlas.model_facts.lock.v1", model=source_identity,
                                      configuration_sha256=model_values["configuration_sha256"],
                                      op_timing_sha256=facts_hash, validation_sha256=report_hash,
                                      semantic_payload_sha256=semantic_hash,
-                                     vocabulary_sha256=payload["vocabulary_sha256"]))
+                                     vocabulary_sha256=payload["vocabulary_sha256"],
+                                     overlap_sha256=overlap["overlap_sha256"],
+                                     overlap_validation_sha256=overlap["overlap_validation_sha256"]))
     write(out, "timing-receipt.json", dict(schema="atlas.model_derivation_receipt.v1",
                                          facts_sha256=facts_hash, semantic_payload_sha256=semantic_hash,
                                          validation_sha256=report_hash, derive_seconds=derive_seconds,
-                                         validation_seconds=validate_seconds))
+                                         validation_seconds=validate_seconds, **overlap))
     print(json.dumps(dict(passed=True, operations=len(blocks), facts_sha256=facts_hash,
-                          derive_seconds=derive_seconds, validation_seconds=validate_seconds)), flush=True)
+                          derive_seconds=derive_seconds, validation_seconds=validate_seconds,
+                          **overlap)), flush=True)
     return payload
 
 

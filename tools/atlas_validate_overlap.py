@@ -27,10 +27,11 @@ ENGINES = {'mxu0', 'mxu1', 'vpu', 'scalar_lsu'}
 
 
 def safe_path(value):
-    path = Path(os.path.abspath(value))
-    if any(word in part.lower() for part in path.parts for word in ('hammer', 'vlsi')):
+    raw = Path(value)
+    if any(word in part.lower() for part in raw.parts for word in ('hammer', 'vlsi')):
         raise ValueError('prohibited path')
-    if any(p.is_symlink() for p in (path, *path.parents)):
+    path = Path(os.path.abspath(raw))
+    if any(p.is_symlink() for p in reversed((path, *path.parents))):
         raise ValueError('symlink paths are not supported')
     return path
 
@@ -621,8 +622,12 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
                 exclusions=descriptor.get('exclusions',[]),limitations=['Bounded mechanism samples are not exhaustive pair/operand enumeration or RTL qualification.',
                 'One-short native acceptance records conservative bounds; no timing values are fitted.',
                 'Zero one-short gaps are ISA-unencodable, not observed model conflicts.'])
+    sample_seconds = {result['id']: result.pop('seconds') for result in results}
     write(output_dir/'observations.json',results)
+    elapsed = report.pop('seconds')
     report_hash=write(output_dir/'validation-report.json',report)
+    write(output_dir/'timing-receipt.json',dict(validation_seconds=elapsed, sample_seconds=sample_seconds, report_sha256=report_hash))
+    report['seconds'] = elapsed
     if not passed:
         raise RuntimeError('native overlap validation failed; final artifact was not emitted')
     final=dict(candidate)

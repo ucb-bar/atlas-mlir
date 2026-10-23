@@ -25,12 +25,12 @@ class ModelConfigContractTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.facts = json.loads(Path(os.environ["ATLAS_TEST_OP_TIMING"]).read_text())
+        self.facts = json.loads((Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json").read_text())
         # Check the genuine input before creating any private synthetic variants.
         # Raw observer fixtures must never be promoted to derived facts here.
         verify_derived(self.facts)
 
-    def select(self, *, pairs=False):
+    def select(self):
         model = self.facts["model"]
         model["configuration_json"] = json.dumps(model["configuration"], sort_keys=True, separators=(",", ":"))
         model["configuration_sha256"] = hashlib.sha256(model["configuration_json"].encode()).hexdigest()
@@ -39,11 +39,8 @@ class ModelConfigContractTest(unittest.TestCase):
         seal_derived(self.facts)
         path = self.directory / "synthetic-config-test-only.json"
         path.write_text(json.dumps(self.facts))
-        option = (f"--select-atlas-model-evidence=op-timing={path} "
-                  f"op-timing-sha256={hashlib.sha256(path.read_bytes()).hexdigest()} dma=wait")
-        if pairs:
-            # Must not even open stale default evidence for a different config.
-            option += f" pairs={self.directory / 'absent.json'} pairs-sha256={'a' * 64} chains=true"
+        option = (f"--select-atlas-model-evidence=test-op-timing={path} "
+                  f"test-op-timing-sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
         return run(OPT, program([("trap", 'kind = "ecall"')]), option,
                    "--schedule-atlas-stream=provider=model", "--verify-atlas-timing")
 
@@ -59,20 +56,6 @@ class ModelConfigContractTest(unittest.TestCase):
         result = self.select()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('dma_curve_sha256 = "' + "a" * 64, result.stdout)
-        self.assertIn("falling back to isolated lifetimes", result.stderr)
-
-    def test_nondefault_configuration_ignores_pinned_overlap(self):
-        self.change_timing()
-        result = self.select(pairs=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("default-pinned overlap evidence is disabled", result.stderr)
-        self.assertIn("falling back to isolated lifetimes", result.stderr)
-        self.assertNotIn("pairs =", result.stdout)
-        self.assertNotIn("chains =", result.stdout)
-
-    def test_default_configuration_still_loads_requested_overlap(self):
-        result = self.select(pairs=True)
-        self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("falling back to isolated lifetimes", result.stderr)
 
     def test_architecture_change_names_unsupported_capability(self):
