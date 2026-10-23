@@ -377,6 +377,41 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
       capacity->getInteger("sequencer_cycles") != 32 || !boundedCapacity("mxu0_compute", 64) ||
       !boundedCapacity("mxu1_compute", 64) || !boundedCapacity("vpu_slots", 3))
     return invalid("source contract is missing, changed or incompatible with structural capacity");
+  if (const auto *admission = operations.engineAdmission()) {
+    if (capacity->getInteger("vpu_slots") != admission->vpuCapacity)
+      return invalid("engine admission capacity differs from authoritative overlap contract");
+    const Object *sources = contract->getObject("source_sha256"), *vpu = contract->getObject("vpu");
+    const Object *scalar = contract->getObject("scalar_lsu");
+    if (!sources || !vpu || !scalar || scalar->getInteger("load_response_gap") != admission->scalarLoadGap)
+      return invalid("engine admission differs from authoritative overlap source predicates");
+    for (const char *name : {"mxu.py", "vpu.py", "bank_conflict.py", "lsu.py", "xlu.py"}) {
+      auto expected = admission->sourceHashes.find(name);
+      if (expected == admission->sourceHashes.end() || sources->getString(name) != expected->second)
+        return invalid("engine admission source differs from authoritative overlap contract");
+    }
+    auto names = [](const Array *array) -> std::optional<std::set<std::string>> {
+      if (!array) return std::nullopt;
+      std::set<std::string> result;
+      for (const auto &value : *array) {
+        auto name = value.getAsString();
+        if (!name || !result.insert("vpu." + name->str()).second) return std::nullopt;
+      }
+      return result;
+    };
+    auto doubles = names(vpu->getArray("double"));
+    if (!doubles || *doubles != admission->vpuDouble)
+      return invalid("engine admission double-input predicates differ from authoritative overlap contract");
+    const Array *groups = vpu->getArray("logic_groups");
+    std::vector<std::set<std::string>> actual;
+    if (!groups) return invalid("missing authoritative VPU logic groups");
+    for (const auto &group : *groups) {
+      auto members = names(group.getAsArray());
+      if (!members) return invalid("invalid authoritative VPU logic group");
+      actual.push_back(std::move(*members));
+    }
+    if (actual != admission->vpuLogicGroups)
+      return invalid("engine admission logic groups differ from authoritative overlap contract");
+  }
   Object semanticContract(*contract);
   semanticContract.erase("producer_sources");
   Object semantic{{"schema", *root.get("schema")}, {"age_convention", *root.get("age_convention")},

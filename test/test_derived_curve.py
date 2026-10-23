@@ -68,6 +68,10 @@ class NativeCurveTest(unittest.TestCase):
             facts = curve.derive_curve(self.cfg)
         self.assertEqual(facts["curve_sha256"], schema.LOCK["curve_sha256"])
         self.assertEqual(facts["source_sha256"], schema.LOCK["dma_source_sha256"])
+        shared = facts["source_contract"]
+        self.assertEqual(shared["source_shapes"], schema.DMA_SOURCE_SHAPES)
+        self.assertEqual(shared["edge_order"], facts["proposal_contract"]["source_evidence"]["edge_order"])
+        self.assertEqual(shared["core_tick_shape"], facts["proposal_contract"]["source_evidence"]["core_tick_shape"])
         self.assertTrue(facts["estimate_only"])
         self.assertEqual(facts["semantics"]["address_dependence"], "none")
 

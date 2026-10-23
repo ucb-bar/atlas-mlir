@@ -39,11 +39,14 @@ def sample_plan(admission, per_op):
         _, second = command("vpu.vliOne", dict(rs1=8, rs2=10, rd=12))
         add(name + "-double-short", [first, second], [0, final[name]-1], False)
         add(name + "-double-final", [first, second], [0, final[name]])
-    instructions = [command(name, values)[1] for name, values in zip(
-        ("vpu.relu", "vpu.exp2", "vpu.sin"),
-        (dict(rs1=0, rs2=2, rd=4), dict(rs1=8, rs2=10, rd=12), dict(rs1=16, rs2=18, rd=20)))]
-    add("vpu-two-slots-full", instructions, [0, 1, 2], False)
-    add("vpu-final-slot-reuse", instructions, [0, 1, final["vpu.relu"]])
+    capacity = admission["vpu"]["capacity"]
+    if type(capacity) is not int or not 1 <= capacity <= 3:
+        raise ValueError("unsupported source VPU slot capacity")
+    names = ("vpu.relu", "vpu.exp2", "vpu.sin", "vpu.fp8pack")[:capacity + 1]
+    instructions = [command(name, dict(rs1=8*i, rs2=8*i, rd=8*i+4))[1]
+                    for i, name in enumerate(names)]
+    add("vpu-source-slots-full", instructions, list(range(capacity + 1)), False)
+    add("vpu-final-slot-reuse", instructions, [*range(capacity), final["vpu.relu"]])
     xfree = admission["xlu"]["initiation_age"]
     add("xlu-self-busy", ["vtrpose.xlu m4, m0", "vtrpose.xlu m12, m8"], [0, xfree-1], False)
     add("xlu-self-free", ["vtrpose.xlu m4, m0", "vtrpose.xlu m12, m8"], [0, xfree])

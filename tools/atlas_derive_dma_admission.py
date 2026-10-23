@@ -6,19 +6,17 @@ and configuration values are extracted without executing the model.
 """
 from __future__ import annotations
 
-import ast
 from copy import deepcopy
 from pathlib import Path
 
-from atlas_derive_curve import _engine_values
+from atlas_derive_curve import review_dma_sources, UnsupportedCurve
 from atlas_derive_overlap import safe_path
 from atlas_model_diagnostics import UnsupportedModelTiming
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, sha256
+from atlas_model_schema import DMA_SOURCE_SHAPES, canonical, sha256
 
 
 CONTRACT = "source-asynchronous-dma-admission-v1"
-CORE_SHAPE = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5"
-SOURCE_NAMES = ("core.py", "dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py")
+SOURCE_NAMES = tuple(DMA_SOURCE_SHAPES)
 SEMANTICS = dict(
     operands="captured_at_issue",
     launch="enqueue_after_registered_progress",
@@ -39,29 +37,11 @@ class UnsupportedDMAAdmission(UnsupportedModelTiming):
 
 def review_sources(sources):
     """Pure AST contract, including a mutation-test interface."""
-    if set(sources) != set(SOURCE_NAMES):
-        raise UnsupportedDMAAdmission("missing DMA admission source")
-    trees, shapes = {}, {}
-    for name in SOURCE_NAMES:
-        tree = ast.parse(sources[name])
-        digest = ast_digest(tree)
-        expected = CORE_SHAPE if name == "core.py" else SOURCE_SHAPES[name]
-        if digest != expected:
-            raise UnsupportedDMAAdmission("unsupported DMA admission control-flow semantics: " + name)
-        trees[name], shapes[name] = tree, digest
-    startup, interval = _engine_values(trees["dma.py"])
-    # The reviewed Core has a single S1 launch per clock edge. Extract its
-    # increment instead of inferring issue width from the DMA beat stream.
-    cls = next(n for n in trees["core.py"].body if isinstance(n, ast.ClassDef) and n.name == "Core")
-    tick = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "tick")
-    increments = [n.value.value for n in ast.walk(tick)
-                  if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute)
-                  and n.target.attr == "cycle_count" and isinstance(n.op, ast.Add)
-                  and isinstance(n.value, ast.Constant) and type(n.value.value) is int]
-    if increments != [1] or interval != 1:
-        raise UnsupportedDMAAdmission("unsupported DMA admission clock/issue progression")
-    return shapes, dict(ordinary_gap=increments[0], first_engine_age=startup["load"],
-                        store_read_to_request_cycles=startup["store"] - startup["load"])
+    try:
+        contract = review_dma_sources(sources)
+    except UnsupportedCurve as error:
+        raise UnsupportedDMAAdmission(str(error)) from error
+    return contract["source_shapes"], contract["issue"]
 
 
 def derive_dma_admission(model, per_op):
@@ -69,12 +49,27 @@ def derive_dma_admission(model, per_op):
     model = safe_path(model)
     paths = {name: safe_path(model / "npu_model" / "hardware" / name) for name in SOURCE_NAMES}
     sources = {name: path.read_text() for name, path in paths.items()}
-    shapes, issue = review_sources(sources)
+    try:
+        shared = review_dma_sources(sources)
+    except UnsupportedCurve as error:
+        raise UnsupportedDMAAdmission(str(error)) from error
+    timing = per_op.get("dma_timing", {})
+    if timing.get("source_contract") != shared:
+        raise UnsupportedDMAAdmission("DMA admission differs from authoritative DMA source/phase contract")
+    shapes, issue = shared["source_shapes"], shared["issue"]
+    if (timing.get("startup_cycles") != dict(load=issue["first_engine_age"],
+            store=issue["first_engine_age"] + issue["store_read_to_request_cycles"])
+            or timing.get("issue_interval_cycles") != issue["ordinary_gap"]
+            or timing.get("proposal_contract", {}).get("source_evidence", {}).get("edge_order") != shared["edge_order"]):
+        raise UnsupportedDMAAdmission("DMA admission differs from authoritative launch/staging/phase fields")
     config = per_op["model"]["configuration"]
     configuration = {name: config[key] for name, key in (
         ("num_channels", "dma_num_channels"), ("beat_bytes", "dma_beat_bytes"),
         ("max_in_flight", "dma_max_in_flight"), ("max_transfer_bytes", "dma_max_transfer_bytes"),
         ("vmem_bank_bytes", "vmem_bank_bytes"))}
+    for key in ("num_channels", "beat_bytes", "max_in_flight", "max_transfer_bytes"):
+        if timing.get(key) != configuration[key]:
+            raise UnsupportedDMAAdmission("DMA admission differs from authoritative geometry: " + key)
     if any(type(value) is not int or value < 1 for value in configuration.values()):
         raise UnsupportedDMAAdmission("invalid DMA admission geometry")
     if (configuration["num_channels"] != 8 or configuration["beat_bytes"] != 32
@@ -87,6 +82,7 @@ def derive_dma_admission(model, per_op):
     return dict(schema="atlas.dma_admission.v1", age_convention="issue_edge_zero", contract=CONTRACT,
                 source_sha256={name: sha256(sources[name].encode()) for name in SOURCE_NAMES},
                 source_shapes=shapes, configuration=configuration, issue=issue,
+                source_contract_sha256=sha256(canonical(shared)),
                 semantics=deepcopy(SEMANTICS),
                 producer_sources={name: sha256(safe_path(Path(__file__).with_name(name)).read_bytes())
                                   for name in ("atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py")},
