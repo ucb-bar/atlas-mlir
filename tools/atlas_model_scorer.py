@@ -73,7 +73,7 @@ class ModelScorer:
         object.__setattr__(self, "model", safe_path(self.model))
         object.__setattr__(self, "regions", tuple(json.loads(safe_path(path).read_text()) for path in self.regions))
 
-    def __call__(self, document, profile="fifo43"):
+    def __call__(self, document, profile="curve"):
         if sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
         root, source, numerical, config_hash = selected_model(self.model)
