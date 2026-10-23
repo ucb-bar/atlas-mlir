@@ -1,3 +1,4 @@
+#include "Atlas/AtlasModelTiming.h"
 // Pre-allocation scheduling of virtual Atlas operations. Each block is list
 // scheduled onto the functional units its operations occupy, keeping every
 // SSA and implicit-state dependence. Costs are rough on purpose: registers
@@ -929,6 +930,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
                             std::optional<unsigned> randomSeed,
+                            unsigned forcedLookahead,
                             const timing::TimingProvider &provider) {
   FailureOr<BlockGraph> graph = buildGraph(block);
   if (failed(graph))
@@ -978,6 +980,10 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
     reorder(block, opsOf(scheduler.randomOrder(*randomSeed + index)));
     return success();
   }
+  if (forcedLookahead) {
+    reorder(block, opsOf(scheduler.listSchedule(capacity, forcedLookahead)));
+    return success();
+  }
 
   auto cycles = [&](ArrayRef<unsigned> order) {
     return scheduler.makespan(order) + scheduler.spillCost(opsOf(order), capacity);
@@ -1024,6 +1030,10 @@ struct ScheduleAtlasVirtualPass
       llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
       llvm::cl::init("")};
 
+  Option<unsigned> lookahead{
+      *this, "lookahead", llvm::cl::desc("Force an existing list schedule (0, 1, 2, 4, or 8; model only)"),
+      llvm::cl::init(0)};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
@@ -1031,6 +1041,18 @@ struct ScheduleAtlasVirtualPass
     FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
+    if (lookahead != 0 && lookahead != 1 && lookahead != 2 && lookahead != 4 && lookahead != kMaxQueuedDMA) {
+      module.emitError("lookahead must be 0, 1, 2, 4, or 8");
+      return signalPassFailure();
+    }
+    if (lookahead && selected->id != timing::kModelTimingProviderId) {
+      module.emitError("lookahead requires the model timing provider");
+      return signalPassFailure();
+    }
+    if (lookahead && randomSeed >= 0) {
+      module.emitError("lookahead and random-seed are mutually exclusive");
+      return signalPassFailure();
+    }
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
@@ -1043,7 +1065,7 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, *selected)))
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, lookahead, *selected)))
           return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
@@ -1062,8 +1084,10 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider) {
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider, unsigned lookahead, int randomSeed) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
+  pass->lookahead = lookahead;
+  pass->randomSeed = randomSeed;
   return pass;
 }
