@@ -46,8 +46,8 @@ void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 
 // Each transfer's wait goes before what needs it done; the generated-schedule
 // check requires the waits.
-void insertDMAWaits(OpPassManager &pm) {
-  pm.addPass(createInsertAtlasDMAWaitsPass());
+void insertDMAWaits(OpPassManager &pm, const AtlasCompileOptions &options) {
+  pm.addPass(createInsertAtlasDMAWaitsPass(options.provider));
   pm.addPass(createVerifyAtlasMachineStreamPass());
   pm.addPass(createVerifyAtlasGeneratedSchedulePass());
 }
@@ -61,7 +61,7 @@ void verifyTimedStream(OpPassManager &pm) {
 // The stream scheduler reorders each block and inserts the delays its order
 // needs.
 void buildTimeStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  insertDMAWaits(pm);
+  insertDMAWaits(pm, options);
   pm.addPass(createScheduleAtlasStreamPass(options.provider));
   verifyTimedStream(pm);
 }
@@ -85,7 +85,7 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
   // Spilling admits MXU pressure, so it runs before strict verification.
   buildSpillStage(pm);
   buildLowerStage(pm, options);
-  insertDMAWaits(pm);
+  insertDMAWaits(pm, options);
   pm.addPass(createInsertAtlasDelaysPass());
   verifyTimedStream(pm);
 }

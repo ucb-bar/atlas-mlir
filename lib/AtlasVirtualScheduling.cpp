@@ -7,6 +7,7 @@
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasStream.h"
@@ -330,23 +331,19 @@ FailureOr<Cost> checkedCost(Operation *at, Unit unit, int64_t busy,
   for (int64_t value : {busy, latency, frontend})
     if (value < 0 || value > std::numeric_limits<int>::max())
       return at->emitOpError("virtual cost exceeds nonnegative cycle domain");
-  Cost cost{unit, static_cast<int>(busy), static_cast<int>(latency),
-            static_cast<int>(frontend)};
+  Cost cost{unit, static_cast<int>(busy), static_cast<int>(latency), static_cast<int>(frontend)};
   cost.queuedDMA = queuedDMA;
   return cost;
 }
 
-FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at,
-                     const timing::TimingProvider &provider) {
-  auto t = timing::machineTimingOf(provider,
-                                   (name + ".mxu" + Twine(unit)).str(), at);
+FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at, const timing::TimingProvider &provider) {
+  auto t = timing::machineTimingOf(provider, (name + ".mxu" + Twine(unit)).str(), at);
   if (failed(t))
     return failure();
   return checkedCost(at, unit ? Unit::Mxu1 : Unit::Mxu0, t->interval, t->latency);
 }
 
-FailureOr<Cost> onVpu(const std::string &name, Operation *at,
-                     const timing::TimingProvider &provider) {
+FailureOr<Cost> onVpu(const std::string &name, Operation *at, const timing::TimingProvider &provider) {
   auto t = timing::machineTimingOf(provider, name, at);
   if (failed(t))
     return failure();
@@ -360,8 +357,7 @@ FailureOr<Cost> blocking(Operation *at, Unit unit, int64_t cycles) {
 
 // A VMEM store or load of `halves` tile registers, back to back, as a spill
 // save or reload issues them.
-FailureOr<int64_t> vmemCycles(unsigned halves, bool store, Operation *at,
-                              const timing::TimingProvider &provider) {
+FailureOr<int64_t> vmemCycles(unsigned halves, bool store, Operation *at, const timing::TimingProvider &provider) {
   auto t = timing::machineTimingOf(provider, store ? "vstore" : "vload", at);
   if (failed(t))
     return failure();
@@ -382,15 +378,13 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload))
       return failure();
-    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) *
-                                       (int64_t(registerLoad) + vload->latency));
+    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) * (int64_t(registerLoad) + vload->latency));
   }
   if (isa<VirtualOutputBF16Op>(op)) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
     if (failed(vstore))
       return failure();
-    return blocking(op, Unit::Dma,
-                    registersOf(false) * (int64_t(vstore->latency) + registerStore));
+    return blocking(op, Unit::Dma, registersOf(false) * (int64_t(vstore->latency) + registerStore));
   }
   // An atomic load's tile is ready once its transfer lands and its VLOADs
   // (one per register) finish. A consumer cannot start before then, so the
@@ -464,8 +458,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     FailureOr<Cost> pop = onMxu("vmatpop.bf16.acc", unit, op, provider);
     if (failed(pop))
       return failure();
-    return blocking(op, unit ? Unit::Mxu1 : Unit::Mxu0,
-                    int64_t(push->latency) + multiply->latency + pop->latency);
+    return blocking(op, unit ? Unit::Mxu1 : Unit::Mxu0, int64_t(push->latency) + multiply->latency + pop->latency);
   }
   if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp>(op))
     return onVpu(
@@ -484,13 +477,14 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // words a row (lowerPack). Each store hides behind the next word's load,
     // so a row takes a load per load-path interval, then the last word's load
     // and store, and the back-edge, whose delay slot takes the destination step.
+    // The loads are timed as the loop proof admits them (AtlasPackLoop).
     auto pack = timing::machineTimingOf(provider, "vpack.bf16.fp8", op);
     if (failed(pack))
       return failure();
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
     if (failed(vstore))
       return failure();
-    auto lw = timing::machineTimingOf(provider, "lw", op);
+    auto lw = timing::machineTimingOf(provider, "lw", op, atlasPackRelayoutCopyContexts);
     if (failed(lw))
       return failure();
     auto sw = timing::machineTimingOf(provider, "sw", op);
@@ -763,8 +757,7 @@ class BlockScheduler {
 public:
   BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
                  std::vector<Cost> nodeCosts, const SpillCycles &spill)
-      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)),
-        spill(spill) {
+      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill) {
     unsigned n = g.nodes.size();
     // The earliest output each value reaches through non-state operands, or n
     // for none. Among equal starts, prefer it: shared operands load for their
@@ -1035,8 +1028,7 @@ struct ScheduleAtlasVirtualPass
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
-    FailureOr<timing::TimingProvider> selected =
-        selectAtlasTimingProvider(module, provider.getValue());
+    FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
     std::optional<unsigned> seed;
@@ -1051,8 +1043,7 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed,
-                                 *selected)))
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, *selected)))
           return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here

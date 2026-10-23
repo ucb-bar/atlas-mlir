@@ -13,6 +13,9 @@ constexpr int kAtlasVmemBytes = 1536 * 1024;
 // DMA channels (DmaParams.scala); a transfer holds one while in flight.
 constexpr unsigned kAtlasDMAChannels = 8;
 
+// Shared DMA command ring depth (DmaParams.scala), across channels and directions.
+constexpr unsigned kAtlasDMACommandSlots = 8;
+
 // Tensor registers m0..m63 of 1 KiB. One VLOAD or VSTORE moves one register,
 // 1 KiB-aligned (LSU.scala). An FP8 tile fills one register and a BF16 tile an
 // even-based pair, which is also the size of one boundary tile slot in DRAM.

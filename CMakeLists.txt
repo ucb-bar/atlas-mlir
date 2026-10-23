@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(atlas_mlir LANGUAGES CXX C)
 
 find_package(MLIR REQUIRED CONFIG)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard")
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
@@ -21,7 +22,6 @@ add_subdirectory(runtime)
 
 enable_testing()
 add_subdirectory(test)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.

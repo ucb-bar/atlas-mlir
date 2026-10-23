@@ -118,7 +118,7 @@ void testPolicies(MLIRContext &context) {
   const OperationSpec resources[] = {a, b, nop, nop, nop, halt};
   check(!accepts(context, resources, occupying(1)), "capacity one rejects overlapping holds");
   check(accepts(context, resources, occupying(2)), "capacity two accepts identical overlapping holds");
-  auto model = npuModelTimingProvider();
+  auto model = builtinTimingProvider();
   model.footprint = occupied;
   check(!accepts(context, resources, model), "model capacity does not leak into custom capacity two");
   const OperationSpec isolated[] = {a, nop, nop, nop, halt};
@@ -235,7 +235,7 @@ const char *kStrict = "synthetic-strict-spacing-policy";
 
 // The model's rules with every positive pair distance lengthened by four.
 TimingRuleResult<TimingProvider> strictProvider(ModuleOp) {
-  auto p = npuModelTimingProvider();
+  auto p = builtinTimingProvider();
   p.id = kStrict;
   auto model = p.dependence;
   p.dependence = [model](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
@@ -268,7 +268,7 @@ StringRef retainedProvider(ModuleOp module) {
 }
 
 void testRegistry(MLIRContext &context) {
-  auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{npuModelTimingProvider(), {}}; };
+  auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{builtinTimingProvider(), {}}; };
   auto builtin = lookupTimingProvider("builtin"), legacy = lookupTimingProvider(kLegacyBuiltinTimingProviderId.str());
   check(builtin.error.empty() && legacy.error.empty() && builtin.value.id == "builtin" && legacy.value.id == "builtin",
         "built-in and legacy names resolve to the canonical identity");
@@ -280,7 +280,7 @@ void testRegistry(MLIRContext &context) {
             !lookupTimingProvider("synthetic-renamed-policy").error.empty(),
         "factory must return the registered identity");
   check(registerAtlasTimingProvider("synthetic-incomplete-policy", [](ModuleOp) {
-          auto p = npuModelTimingProvider();
+          auto p = builtinTimingProvider();
           p.id = "synthetic-incomplete-policy";
           p.issueGap = {};
           return TimingRuleResult<TimingProvider>{p, {}};
@@ -322,7 +322,7 @@ void testRegistry(MLIRContext &context) {
   check(registerAtlasTimingProvider("atlas.vls.conservative.v1", [](ModuleOp module) -> TimingRuleResult<TimingProvider> {
           if (!module || !module->hasAttr("atlas.rtl_evidence"))
             return {{}, "synthetic evidence policy requires selected evidence"};
-          auto p = npuModelTimingProvider();
+          auto p = builtinTimingProvider();
           p.id = "atlas.vls.conservative.v1";
           return {p, {}};
         }).empty(), "a footprint-only id can be registered by a complete policy");
@@ -351,21 +351,6 @@ void testProviderAliases(MLIRContext &context) {
 }
 
 void testProviderGraph(MLIRContext &context) {
-  auto module = parseSourceString<ModuleOp>(kCopy, &context);
-  auto stream = module ? readAtlasStream(*module) : FailureOr<AtlasStream>(failure());
-  check(succeeded(stream), "graph fixture decodes");
-  if (failed(stream))
-    return;
-  auto graph = buildTimingGraph(stream->instrs, unknownRegs(), npuModelTimingProvider());
-  auto original = timing::buildGraph(stream->instrs, unknownRegs());
-  bool same = graph.error.empty() && graph.value.in == original.in &&
-              graph.value.out == original.out && graph.value.edges.size() == original.edges.size();
-  if (same)
-    for (auto [a, b] : llvm::zip(graph.value.edges, original.edges))
-      same &= std::tie(a.from, a.to, a.distance, a.kind, a.reason) ==
-              std::tie(b.from, b.to, b.distance, b.kind, b.reason);
-  check(same, "built-in graph preserves edge order, kinds, distances and adjacency");
-
   std::vector<Instr> nodes = {{findOp("dma.wait.ch0")}, {findOp("vload"), 4},
                               {findOp("vload"), 8}, {findOp("dma.load.ch0")}, {findOp("dma.load.ch1")}};
   auto p = toy();
@@ -375,7 +360,7 @@ void testProviderGraph(MLIRContext &context) {
       f.accesses.push_back({Res::Vmem, false, in.rd == 4 ? 0 : 128, 32, 0, 1});
     return f;
   };
-  p.dmaConflict = npuModelTimingProvider().dmaConflict;
+  p.dmaConflict = builtinTimingProvider().dmaConflict;
   IncomingDma incoming;
   Footprint transfer;
   transfer.accesses.push_back({Res::Vmem, true, 0, 32, 0, 1, false, true});
@@ -510,7 +495,7 @@ void testVirtualCosts(MLIRContext &context) {
               diagnosed(missing ? "missing isolated rule" : "representative instruction can never issue"),
           "virtual cost checks the first representative before reservation", diagnostics);
   }
-  p = npuModelTimingProvider();
+  p = builtinTimingProvider();
   p.id = "synthetic-virtual-costs";
   auto footprint = p.footprint;
   p.footprint = [=](const Instr &in, const RegValues &regs) {

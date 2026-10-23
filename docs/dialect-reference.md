@@ -157,18 +157,21 @@ transfers ([DMA across loops](loop-dma-analysis.md)).
 
 Scheduling and timing passes take `provider=<id>` (default: the module's
 `atlas.timing_provider`, else `builtin`) from a registry that
-holds only the built-in default ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
+holds the built-in default and the selected model provider ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
 The selected provider supplies virtual machine-operation costs, physical
 dependence distances, issue gaps, reservations, DMA conflicts and verification.
 Unknown ids, missing rules and disagreement with retained provider metadata fail.
 The old `npu-model-rtl-match-v1` ID remains an accepted alias for `builtin`; timed MLIR
-and program JSON record `builtin`.
+and program JSON record `builtin`. `model` consumes isolated model
+facts and qualified overlap evidence.
 The schedulers estimate a DMA transfer with npu_model main's DRAM model
 (`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
 loading or 21.68 storing); no check depends on that estimate, since every
 transfer completes at an explicit `dma.wait`.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
+
+`--select-atlas-model-evidence="op-timing=FILE op-timing-sha256=SHA dma=wait"` selects pinned isolated facts before timing. Add `pairs=FILE pairs-sha256=SHA chains=true` for supplied confirmed overlap evidence. Select `provider=model` explicitly in virtual and physical scheduling; evidence selection alone leaves the default unchanged. Verification, emission and LLVM handoff retain the selection. See [model timing](model-timing.md) for the derivation and catalog contracts.
 
 ## Machine operations
 
@@ -219,7 +222,7 @@ numerical policy, or availability across the stream.
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass, and delay slots to the timing passes (`atlas.delay_slots_pending`). `allocation-report=<file>` writes the plan as JSON, even on failure. |
-| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. |
+| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. Under `provider=model`, launch n also completes launch n-8, whose RTL command slot it reuses. |
 | `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and scalar ALU delay slots; on timed streams also recheck issue spacing. |
 | `--verify-atlas-machine-stream` | pass | Check field verifiers, the flat state chain, encoding, delay slots, and in-block targets. |
 | `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Each pending delay slot gets a NOP. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |
