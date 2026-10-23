@@ -30,7 +30,7 @@ void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 // overlap with other work.
 void buildScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createLowerAtlasVirtualBoundaryToDMAPass());
-  pm.addPass(createScheduleAtlasVirtualPass(options.provider));
+  pm.addPass(createScheduleAtlasVirtualPass(options.provider, options.lookahead, options.randomSeed));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -41,7 +41,7 @@ void buildSpillStage(OpPassManager &pm) {
 }
 
 void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport));
+  pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport, options.provider, options.storeWindows));
 }
 
 // Each transfer's wait goes before what needs it done; the generated-schedule
@@ -62,7 +62,7 @@ void verifyTimedStream(OpPassManager &pm) {
 // needs.
 void buildTimeStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   insertDMAWaits(pm, options);
-  pm.addPass(createScheduleAtlasStreamPass(options.provider));
+  pm.addPass(createScheduleAtlasStreamPass(options.provider, options.waitPlacement));
   verifyTimedStream(pm);
 }
 } // namespace

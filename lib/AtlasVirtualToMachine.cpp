@@ -1,3 +1,4 @@
+#include "Atlas/AtlasModelTiming.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
@@ -13,6 +14,7 @@
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -40,9 +42,9 @@ namespace {
 
 class VirtualPlanner {
 public:
-  VirtualPlanner(ModuleOp module, func::FuncOp function)
+  VirtualPlanner(ModuleOp module, func::FuncOp function, ArrayRef<unsigned> storeWindowRanks = {})
       : module(module), function(function), attrs(module.getContext()),
-        emitter(module.getContext()) {}
+        emitter(module.getContext()), allocation(storeWindowRanks) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
@@ -980,6 +982,12 @@ struct LowerAtlasVirtualToMachinePass
                      "when it does not fit, with every error the lowering "
                      "reports")};
 
+  Option<std::string> provider{
+      *this, "provider", llvm::cl::desc("Timing provider for model selection candidates"), llvm::cl::init("")};
+  Option<std::string> storeWindows{
+      *this, "store-windows", llvm::cl::desc("Comma-separated free staging window ranks per DMA store (model only)"),
+      llvm::cl::init("")};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
@@ -993,8 +1001,28 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
     }
+    SmallVector<unsigned> storeWindowRanks;
+    if (!storeWindows.empty()) {
+      auto selected = selectAtlasTimingProvider(module, provider.getValue());
+      if (failed(selected))
+        return signalPassFailure();
+      if (selected->id != timing::kModelTimingProviderId) {
+        module.emitError("store-windows requires the model timing provider");
+        return signalPassFailure();
+      }
+      SmallVector<StringRef> ranks;
+      StringRef(storeWindows.getValue()).split(ranks, ',', -1, true);
+      for (StringRef text : ranks) {
+        unsigned rank;
+        if (text.empty() || text.getAsInteger(10, rank)) {
+          module.emitError("store-windows must contain comma-separated unsigned integers");
+          return signalPassFailure();
+        }
+        storeWindowRanks.push_back(rank);
+      }
+    }
     reuseAtlasImmutableWeights(function);
-    VirtualPlanner planner(module, function);
+    VirtualPlanner planner(module, function, storeWindowRanks);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1047,8 +1075,10 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 }
 
 std::unique_ptr<Pass>
-mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport) {
+mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, StringRef provider, StringRef storeWindows) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
+  pass->provider = provider.str();
+  pass->storeWindows = storeWindows.str();
   return pass;
 }

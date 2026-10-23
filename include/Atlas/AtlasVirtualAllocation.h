@@ -118,7 +118,7 @@ std::string locationText(Location loc);
 
 class VirtualAllocationPlan {
 public:
-  VirtualAllocationPlan();
+  explicit VirtualAllocationPlan(llvm::ArrayRef<unsigned> storeWindowRanks = {});
 
   // Requires a verified virtual CFG. Rebuild after changing its values or order;
   // placement accessors require successful allocation and live source IR.
@@ -147,7 +147,7 @@ public:
 private:
   LogicalResult colorValues(RegisterKind kind);
   LogicalResult placeMXU(Block &block);
-  LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
+  LogicalResult placeDMA(Block &block, unsigned &nextTransfer, unsigned &nextStore);
   void stageLoads();
 
   func::FuncOp function;
@@ -158,6 +158,7 @@ private:
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   std::array<RegisterPressure, 3> pressure;
+  llvm::SmallVector<unsigned> storeWindowRanks;
   bool mixedFp8 = false;
   bool hasPack = false;
   const FixedResourcePlacement fixedResources;
