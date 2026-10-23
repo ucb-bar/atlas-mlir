@@ -143,14 +143,9 @@ class RunProvenanceTest(unittest.TestCase):
         self.numerical.write_bytes(b"different numerical bytes")
         self.assertNotEqual(self.capture().complete()["semantic_sha256"], before)
 
-    def test_legacy_policy_fallback_is_explicit_and_checks_selector(self):
-        selector = self.write("selector.py", b"selector version one")
-        capture = self.capture(search_policy=None, selector=selector)
-        policy = capture.complete()["semantic"]["search_policy"]
-        self.assertEqual(policy, {"kind": "legacy_selector_source_sha256", "sha256": sha(selector.read_bytes())})
-        selector.write_bytes(b"selector version two")
-        with self.assertRaisesRegex(ValueError, "legacy_search_selector"):
-            capture.complete()
+    def test_missing_policy_refuses_without_legacy_fallback(self):
+        with self.assertRaisesRegex(ValueError, "versioned effective search policy"):
+            self.capture(search_policy=None)
 
     def test_archived_region_mutation_is_rejected(self):
         capture = self.capture(archive_dir=self.directory / "receipt")

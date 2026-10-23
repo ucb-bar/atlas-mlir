@@ -16,6 +16,14 @@ from atlas_model_diagnostics import UnsupportedModelTiming
 
 
 class NormalizationTest(unittest.TestCase):
+    def test_unsupported_python_refuses_before_source_access(self):
+        from collections import namedtuple
+        version = namedtuple("Version", "major minor micro releaselevel serial")
+        for minor in (12, 13, 15):
+            with self.subTest(minor=minor), patch.object(semantics.sys, "version_info", version(3, minor, 0, "final", 0)), patch.object(semantics, "read_source", side_effect=AssertionError("source accessed")):
+                with self.assertRaisesRegex(UnsupportedModelTiming, "requires Python 3.14"):
+                    semantics.check_model_semantics(Path("unused"))
+
     def same(self, before, after):
         self.assertEqual(semantics.module_contract(before), semantics.module_contract(after))
 

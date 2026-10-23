@@ -452,13 +452,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             raise ValueError("model scoring requires --npu-model")
         capture = capture_selection_inputs(source, output, binaries, model, model_regions, effective_policy)
         capture.bind(semantic={"invocation": {
-            key: value for key, value in receipt.items() if key not in ("candidates", "source_sha256", "workers")
+            key: value for key, value in receipt.items() if key not in ("candidates", "source_sha256", "workers", "search_policy")
         } | dict(boundary=boundary, spill=spill, spill_mxu=spill_mxu,
                  random_seeds=random_seeds, store_window_candidates=store_window_candidates,
                  mreg_candidates=mreg_candidates)})
         from atlas_model_scorer import ModelScorer
         scorer = ModelScorer(model, model_regions)
         # Capture external configuration data before facts regeneration or compilation.
+        # Use an isolated process with the same interpreter as native scoring.
         # A short-lived process preserves model import isolation on prepare failures.
         with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
             runtime = executor.submit(scorer.runtime_receipt).result()

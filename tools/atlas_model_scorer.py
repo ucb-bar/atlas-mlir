@@ -132,7 +132,6 @@ class ModelScorer:
         import numpy
         import torch
 
-        # Use an isolated process with the same interpreter as native scoring.
         _, _, _, _, cfg = selected_model(self.model, include_configuration=True)
         curve = resolve_curve_path(cfg)
         from atlas_model_timing import configuration_values

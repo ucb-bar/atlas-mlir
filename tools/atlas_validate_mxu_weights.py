@@ -72,13 +72,17 @@ def validate_weight_timing(cfg, facts):
     """Require exact masks on all PE use edges and real safe/unsafe overwrites."""
     import torch
     checks = []
+    runs = dict(isolated_runs=0, boundary_runs=0, consumer_runs=0, mutable_pe_runs=0)
+    def run(kind, engine, **kwargs):
+        runs[kind] += 1
+        return _native(cfg, engine, **kwargs)
     for engine, value in facts["engines"].items():
         window = value["use_window"]
         grid = torch.arange(32)
         first = window["first_age"] + grid[:, None] * window["row_step"] + grid[None, :] * window["column_step"]
         last = window["last_age"] + grid[:, None] * window["row_step"] + grid[None, :] * window["column_step"]
         for slot in (0, 1):
-            uses = _native(cfg, engine, slot=slot, observe=True)
+            uses = run("isolated_runs", engine, slot=slot, observe=True)
             for age, used, native_first in uses:
                 if not torch.equal(used, (first <= age) & (age <= last)) or not torch.equal(native_first, first == age):
                     raise ModelTimingValidationError(f"{engine} weight-use mask mismatch at age {age}")
@@ -91,9 +95,9 @@ def validate_weight_timing(cfg, facts):
         # A row writer cannot overwrite until all inner lanes' last reads.
         # Source reads occur before writes, so equal-cycle read/write is safe.
         safe_gap = max(row["last_age"] - i for i, row in enumerate(value["use_rows"]))
-        _native(cfg, engine, push_gap=safe_gap)
+        run("boundary_runs", engine, push_gap=safe_gap)
         try:
-            _native(cfg, engine, push_gap=safe_gap - 1)
+            run("boundary_runs", engine, push_gap=safe_gap - 1)
         except RuntimeError as error:
             expected = "before previous matmul on same slot drained" if engine == "mxu0" else "weight slot busy"
             if expected not in str(error):
@@ -103,10 +107,10 @@ def validate_weight_timing(cfg, facts):
         checks.append(dict(engine=engine, kind="native_overwrite_boundary", passed=True,
                            accepted_gap=safe_gap, rejected_gap=safe_gap - 1, numerical_result_verified=True))
         ready_gap = max(i + 1 - row["first_age"] + 1 for i, row in enumerate(value["use_rows"]))
-        _native(cfg, engine, push_gap=ready_gap, push_first=True)
+        run("consumer_runs", engine, push_gap=ready_gap, push_first=True)
         if ready_gap > 1:
             try:
-                _native(cfg, engine, push_gap=ready_gap - 1, push_first=True)
+                run("consumer_runs", engine, push_gap=ready_gap - 1, push_first=True)
             except RuntimeError as error:
                 if "compute reads buffer with an active push" not in str(error):
                     raise ModelTimingValidationError("early weight consumer failed for an unrelated reason") from error
@@ -124,7 +128,7 @@ def validate_weight_timing(cfg, facts):
         for age, changes_result, rejected in ((first_use, True, False), (first_use + 1, False, True),
                                                (last_use, False, True), (last_use + 1, False, False)):
             try:
-                _native(cfg, engine, mutation=dict(age=age, row=row, column=column, changes_result=changes_result))
+                run("mutable_pe_runs", engine, mutation=dict(age=age, row=row, column=column, changes_result=changes_result))
             except RuntimeError as error:
                 if not rejected or "weights changed while a matmul was using them" not in str(error):
                     raise ModelTimingValidationError("native weight mutation failed unexpectedly") from error
@@ -135,5 +139,4 @@ def validate_weight_timing(cfg, facts):
                            accepted_first_age=first_use, rejected_first_late_age=first_use + 1,
                            rejected_last_age=last_use, accepted_post_last_age=last_use + 1,
                            numerical_result_verified=True))
-    return dict(passed=True, checks=checks, isolated_runs=4, boundary_runs=4,
-                consumer_runs=3, mutable_pe_runs=8)
+    return dict(passed=True, checks=checks, **runs)
