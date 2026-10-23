@@ -7,7 +7,8 @@ namespace mlir::atlas {
 void registerLowerAtlasVirtualToMachinePass();
 std::unique_ptr<Pass>
 createLowerAtlasVirtualToMachinePass(llvm::StringRef allocationReport = "", llvm::StringRef provider = "",
-                                     llvm::StringRef storeWindows = "", llvm::StringRef mregRanks = "");
+                                     llvm::StringRef storeWindows = "", llvm::StringRef mregRanks = "",
+                                     bool packReloadAfterWeight = false);
 }
 
 #endif

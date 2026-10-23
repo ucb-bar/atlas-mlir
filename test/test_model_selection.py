@@ -404,6 +404,34 @@ with TemporaryDirectory() as directory:
         with self.assertRaisesRegex(ValueError, "MREG candidates require"):
             self.select(name="other", provider="builtin", mreg_candidates=None)
 
+    def test_pack_reload_candidate_requires_provider_and_strict_model_improvement(self):
+        with self.assertRaisesRegex(ValueError, "pack-reload-candidates requires"):
+            self.select(provider="builtin", pack_reload_candidates=True)
+        for cycles in (4, 5, 6):
+            def compile_reload(argv, **kwargs):
+                result = self.fake_run(argv, **kwargs)
+                if candidate_command(argv) and "pack-reload-after-weight=true" in " ".join(argv):
+                    self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 99}], "cycles": cycles}
+                return result
+            with self.subTest(cycles=cycles):
+                receipt = self.select(name=str(cycles), runner=compile_reload, max_candidates=3,
+                                      pack_reload_candidates=True)
+            candidate = receipt["candidates"][-1]
+            self.assertEqual(candidate["class"], "pack-reload-order")
+            self.assertEqual(candidate["options"]["lookahead"], 2)
+            self.assertTrue(candidate["options"]["pack_reload_after_weight"])
+            self.assertEqual(receipt["selected_index"], 3 if cycles < 5 else 2)
+
+    def test_invalid_pack_reload_candidate_keeps_verified_incumbent(self):
+        def reject_reload(argv, **kwargs):
+            if "pack-reload-after-weight=true" in " ".join(argv):
+                return subprocess.CompletedProcess(argv, 1, "", "reload timing rejected")
+            return self.fake_run(argv, **kwargs)
+        receipt = self.select(runner=reject_reload, max_candidates=3, pack_reload_candidates=True)
+        self.assertEqual(receipt["selected_index"], 2)
+        self.assertEqual(receipt["candidates"][-1]["status"], "FAIL")
+        self.assertIn("reload timing rejected", receipt["candidates"][-1]["error"])
+
 
     def test_model_evidence_requires_explicit_pins(self) -> None:
         with self.assertRaisesRegex(ValueError, "SHA-256"):
@@ -429,7 +457,7 @@ with TemporaryDirectory() as directory:
 
 
 from test_virtual_ssa import BIN, ROOT, run
-from test_virtual_scheduling import S, function, start, inp, const, dma_load, dma_store, outp
+from test_virtual_scheduling import S, T, F, function, start, inp, const, dma_load, dma_store, outp
 
 EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
 
@@ -467,6 +495,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
             ("--schedule-atlas-virtual=graph-output=unused.json", "require the model"),
             ("--lower-atlas-virtual-to-machine=store-windows=1", "store-windows requires the model"),
             ("--lower-atlas-virtual-to-machine=mreg-ranks=1", "mreg-ranks requires the model"),
+            ("--lower-atlas-virtual-to-machine=pack-reload-after-weight=true", "pack-reload-after-weight requires the model"),
             ("--schedule-atlas-stream=wait-placement=source", "wait-placement=source requires the model"),
         ):
             with self.subTest(option=option):
@@ -498,7 +527,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         source = EXAMPLE.read_text()
         for ordinary, explicit in (
             ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin lookahead=0"),
-            ("--lower-atlas-virtual-to-machine", "--lower-atlas-virtual-to-machine=provider=builtin"),
+            ("--lower-atlas-virtual-to-machine", "--lower-atlas-virtual-to-machine=provider=builtin pack-reload-after-weight=false"),
         ):
             with self.subTest(ordinary=ordinary):
                 before = run("atlas-opt", source, ordinary)
@@ -544,6 +573,29 @@ class ModelOrderReplayTest(unittest.TestCase):
         option = "--schedule-atlas-virtual=provider=model " + " ".join(
             f"{key.replace('_', '-')}={value}" for key, value in options.items())
         return run("atlas-opt", source or self.source, self.evidence, option, "--verify-atlas-virtual-stream")
+
+    def test_pack_reload_moves_only_the_trailing_same_block_reload(self):
+        pack = f'%packed = "atlas.virtual_pack_fp8"(%tile) {{scale_code = 127 : i32}} : ({T}) -> {F}'
+        matmul = f'%result = "atlas.virtual_mxu_matmul"(%packed, %weight) {{unit = 1 : i32}} : ({F}, {F}) -> {T}'
+        prefix = [start(), inp("io0", "s1", "tile", 0), inp("s1", "s2", "weight", 1, "fp8"), pack]
+        tail = [matmul, outp("s2", "s3", "result", 0), f"return %s3 : {S}"]
+        source = function("reload", prefix + tail)
+        def lower(text, enabled):
+            result = run("atlas-opt", text, self.evidence, "--lower-atlas-virtual-boundary-to-dma",
+                         "--verify-atlas-virtual-stream",
+                         "--lower-atlas-virtual-to-machine=provider=model pack-reload-after-weight=" + str(enabled).lower(),
+                         "--insert-atlas-dma-waits", "--verify-atlas-machine-stream")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+        before, after = lower(source, False), lower(source, True)
+        self.assertNotEqual(before, after)
+        def operations(text):
+            return [re.sub(r'%[0-9]+', '%state', line.strip()) for line in text.splitlines() if '"atlas.' in line]
+        self.assertEqual(Counter(operations(before)), Counter(operations(after)))
+        # An emitted operation between PACK and its consumer forbids suffix motion.
+        intervening = outp("s2", "s4", "tile", 1)
+        blocked = function("blocked", prefix + [intervening] + [line.replace("%s2", "%s4") for line in tail])
+        self.assertEqual(lower(blocked, False), lower(blocked, True))
 
     def graph(self):
         result = self.schedule(graph_output=self.graph_path)

@@ -38,6 +38,7 @@ class Candidate:
     wait_placement: str = "default"
     virtual_orders: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
+    pack_reload_after_weight: bool = False
 
     def __post_init__(self) -> None:
         if self.lookahead not in (0, 1, 2, 4, 8):
@@ -91,6 +92,8 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
         options.append("store-windows='" + ",".join(map(str, candidate.store_windows)) + "'")
     if candidate.mreg_ranks:
         options.append("mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'")
+    if candidate.pack_reload_after_weight:
+        options.append("pack-reload-after-weight=true")
     if candidate.wait_placement != "default":
         options.append("wait-placement=" + candidate.wait_placement)
     return ["--atlas-compile-candidate=" + " ".join(options)]
@@ -171,6 +174,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_evaluations: int = 0, search_group_evaluations: int = 0,
+                   pack_reload_candidates: bool = False,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
@@ -189,6 +193,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("search-evaluations must be nonnegative and requires the model provider")
     if search_group_evaluations < 0 or (search_group_evaluations and provider != "model"):
         raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
+    if pack_reload_candidates and provider != "model":
+        raise ValueError("pack-reload-candidates requires the model provider")
     source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
@@ -200,6 +206,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "guarded_pack": guarded_pack,
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "search_group_evaluations": search_group_evaluations,
+               "pack_reload_candidates": pack_reload_candidates,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                "candidates": []}
 
@@ -367,6 +374,9 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                         break
                 receipt[field].update(evaluations=len(receipt["candidates"]) - initial_count,
                                       elapsed_seconds=time.monotonic() - search_started)
+            if pack_reload_candidates:
+                evaluate_batch([(replace(winner(), pack_reload_after_weight=True), "pack-reload-order")],
+                               len(receipt["candidates"]) + 1)
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
@@ -397,6 +407,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="additional verified local order attempts after knob selection (model only)")
     parser.add_argument("--search-group-evaluations", type=int, default=0,
                         help="additional verified dependency-group attempts after local search (model only)")
+    parser.add_argument("--pack-reload-candidates", action="store_true",
+                        help="score loading a pending weight before an adjacent PACK reload (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
@@ -409,6 +421,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
             "composed_sha256": args.composed_sha256, "max_candidates": args.max_candidates,
             "workers": args.workers, "search_evaluations": args.search_evaluations,
             "search_group_evaluations": args.search_group_evaluations,
+            "pack_reload_candidates": args.pack_reload_candidates,
             "mreg_candidates": None if args.bank_candidates else (),
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
