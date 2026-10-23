@@ -39,25 +39,39 @@ llvm::Error factsError(const std::string &message) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(), modelTimingDiagnostic("model timing facts: " + message));
 }
 
-bool supportedConfiguration(const Object &cfg) {
+// This contract describes lowering capabilities, not a qualified timing profile.
+// Timing values belong to the selected facts; legacy link/bus knobs are dormant
+// in the curve backend and therefore impose no compiler capability requirement.
+std::string unsupportedCapability(const Object &cfg) {
   const Object *arch = cfg.getObject("arch_state_config"), *units = cfg.getObject("execution_units");
+  if (!arch) return "arch_state_config";
+  if (!units) return "execution_units";
+  if (cfg.getBoolean("ignore_runtime_errors") != false) return "ignore_runtime_errors (requires false)";
+  if (arch->getString("numerics") != "rtl") return "arch_state_config.numerics (requires rtl)";
+  if (arch->getBoolean("randomize_init") != false) return "arch_state_config.randomize_init (requires false)";
+  if (cfg.getString("dma_memory_backend") != "curve") return "dma_memory_backend (requires curve)";
   const Object *memory = cfg.getObject("dma_memory_params");
-  const auto *memoryLatency = cfg.get("dma_memory_latency_cycles"), *memoryBeat = cfg.get("dma_memory_cycles_per_beat");
-  if (!arch || !units || cfg.getBoolean("ignore_runtime_errors") != false ||
-      arch->getString("numerics") != "rtl" || arch->getBoolean("randomize_init") != false)
-    return false;
-  // DMA proposal facts below bind the reviewed curve backend and engine separately.
-  if (cfg.getString("dma_memory_backend") != "curve" || !memory || memory->size() != 1 ||
-      memory->getString("curves") != "ee290sim_vcs_probe.json" || !memoryLatency || !memoryBeat ||
-      memoryLatency->kind() != llvm::json::Value::Null || memoryBeat->kind() != llvm::json::Value::Null)
-    return false;
-  // Model-owned geometry is checked against derived architecture facts below.
+  if (!memory || !memory->getString("curves") || memory->getString("curves")->empty())
+    return "dma_memory_params.curves (requires a selected curve file)";
+  for (auto [key, value] : std::initializer_list<std::pair<const char *, int64_t>>{
+           {"mrf_depth", 32}, {"mrf_width", 32}, {"num_m_registers", 64}, {"num_wb_registers", 2},
+           {"wb_width", 1024}, {"num_x_registers", 32}, {"num_e_registers", 32}, {"num_csrs", 4096},
+           {"vmem_size", kAtlasVmemBytes}, {"dram_base", 0x80000000LL}, {"dram_size", 0x1000000000LL}})
+    if (arch->getInteger(key) != value)
+      return std::string("arch_state_config.") + key + " (requires " + std::to_string(value) + ")";
+  for (auto [key, value] : std::initializer_list<std::pair<const char *, int64_t>>{
+           {"fetch_width", 1}, {"dma_num_channels", 8}, {"dma_beat_bytes", 32},
+           {"dma_max_transfer_bytes", 4096}, {"vmem_bank_bytes", kVmemBankBytes}})
+    if (cfg.getInteger(key) != value)
+      return std::string(key) + " (requires " + std::to_string(value) + ")";
   for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
            {"Scalar0", "ScalarExecutionUnit"}, {"Matrix0", "MatrixExecutionUnitSystolic"},
            {"Matrix1", "MatrixExecutionUnitInner"}, {"Vector0", "VectorExecutionUnit"},
            {"XLU", "CrossLaneExecutionUnit"}, {"DMA0", "DmaExecutionUnit"}, {"LSU", "LoadStoreUnit"}})
-    if (units->getString(key) != value) return false;
-  return cfg.getString("isa") == "npu_model.isa.IsaSpec";
+    if (units->getString(key) != value)
+      return std::string("execution_units.") + key + " (requires " + value + ")";
+  if (cfg.getString("isa") != "npu_model.isa.IsaSpec") return "isa (requires npu_model.isa.IsaSpec)";
+  return {};
 }
 
 // Fixed-layout compiler capabilities, including the layout used by overlap
@@ -93,17 +107,11 @@ llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
       {"scalar_word_bytes", 4, nullptr, false},
       {"dma_channels", kAtlasDMAChannels, "dma_num_channels", false},
       {"dma_beat_bytes", 32, "dma_beat_bytes", false},
-      {"dma_max_in_flight", 64, "dma_max_in_flight", false},
       {"dma_max_transfer_bytes", 4096, "dma_max_transfer_bytes", false},
       {"fetch_width", 1, "fetch_width", false},
       {"dram_base", 0x80000000LL, "dram_base", true},
       {"dram_bytes", 0x1000000000LL, "dram_size", true},
-      {"offchip_link_width_bits", 32, "offchip_link_width_bits", false},
-      {"offchip_link_core_cycles_per_beat", 2, "offchip_link_core_cycles_per_beat", false},
-      {"dma_offchip_command_words", 2, "dma_offchip_command_words", false},
-      {"vmem_bus_width_bits", 512, "vmem_bus_width_bits", false},
-      {"vmem_bus_core_cycles_per_beat", 1, "vmem_bus_core_cycles_per_beat", false},
-      {"vmem_bytes_per_cycle", 64, "vmem_bytes_per_cycle", false}}) {
+      }) {
     auto value = facts->getInteger(cap.key);
     if (!value || *value != cap.value)
       return factsError(std::string("unsupported architecture capability ") + cap.key +
@@ -111,6 +119,15 @@ llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
     const Object *config = cap.arch ? cfg.getObject("arch_state_config") : &cfg;
     if (cap.config && (!config || config->getInteger(cap.config) != value))
       return factsError(std::string("derived architecture differs from configuration: ") + cap.key);
+  }
+  // Selected timing capacity and dormant legacy geometry are derived and bound
+  // to configuration, but impose no fixed-layout compiler requirement.
+  for (const char *key : {"dma_max_in_flight", "offchip_link_width_bits",
+                         "offchip_link_core_cycles_per_beat", "dma_offchip_command_words",
+                         "vmem_bus_width_bits", "vmem_bus_core_cycles_per_beat", "vmem_bytes_per_cycle"}) {
+    auto value = facts->getInteger(key);
+    if (!value || cfg.getInteger(key) != value)
+      return factsError(std::string("derived architecture differs from configuration: ") + key);
   }
   return llvm::Error::success();
 }
@@ -191,6 +208,19 @@ llvm::Error checkIsaMetadata(const Object &root) {
     return factsError("source-derived ISA metadata has incomplete compiler-op coverage");
   return llvm::Error::success();
 }
+
+bool hasDefaultOverlapConfiguration(const ModelTimingFacts &facts) {
+  const auto &provenance = facts.modelProvenance();
+  auto selected = provenance.find("configuration_sha256");
+  return selected != provenance.end() &&
+         selected->second == model_schema::compositionIdentity().at("configuration_sha256") &&
+         (!provenance.count("dma_curve_sha256") ||
+          provenance.at("dma_curve_sha256") == model_schema::dmaIdentity().at("curve_sha256"));
+}
+
+constexpr const char *isolatedConfigurationWarning =
+    "non-default model configuration: default-pinned overlap evidence is disabled; "
+    "falling back to isolated lifetimes";
 
 using model_schema::RegisterEvent;
 using model_schema::vpuBlocks;
@@ -422,7 +452,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
     auto actual = key == "curve_sha256" ? d.getString(key) :
         llvm::StringRef(key).starts_with("shape:") ? shapes->getString(llvm::StringRef(key).drop_front(6)) :
         sources->getString(key);
-    if (!actual || !hashSyntax(*actual) || *actual != pin)
+    if (!actual || !hashSyntax(*actual) || (key != "curve_sha256" && *actual != pin))
       return error("unreviewed source, shape or curve: " + key);
   }
   const Object *validation = d.getObject("validation");
@@ -456,12 +486,40 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   int inFlight = integer("max_in_flight"), queue = integer("queue_depth"), interval = integer("issue_interval_cycles");
   if (!beat || !maxBytes || !inFlight || !queue || !interval || !integer("window_beats") ||
       cfg.getInteger("dma_beat_bytes") != beat || cfg.getInteger("dma_max_transfer_bytes") != maxBytes ||
-      cfg.getInteger("dma_max_in_flight") != inFlight || cfg.getInteger("dma_max_in_flight") != queue ||
+      cfg.getInteger("dma_max_in_flight") != inFlight ||
       cfg.getInteger("dma_num_channels") != integer("num_channels") ||
       maxBytes % beat || !integer("access_bytes") || !integer("measured_channels") ||
       number("frequency_ghz") <= 0 || number("frequency_ghz") > INT_MAX ||
       !integer("channels"))
     return error("invalid numeric geometry or mismatch with selected configuration");
+  const Object &params = *cfg.getObject("dma_memory_params");
+  const std::set<llvm::StringRef> backendKeys = {
+      "curves", "window_beats", "converge", "latency_mode", "knee", "frequency_ghz",
+      "beat_bytes", "channels", "enforce_peak", "queue_depth", "min_latency"};
+  for (const auto &[key, value] : params) {
+    bool nullable = key == "frequency_ghz" || key == "channels" || key == "latency_mode";
+    if (!backendKeys.count(key) || (value.kind() == llvm::json::Value::Null && !nullable))
+      return error("unsupported capability: dma_memory_params." + key.str());
+  }
+  for (const char *key : {"window_beats", "beat_bytes", "channels", "queue_depth", "min_latency"})
+    if (params.get(key) && params.get(key)->kind() != llvm::json::Value::Null &&
+        !params.getInteger(key))
+      return error(std::string("unsupported capability: dma_memory_params.") + key);
+  auto selectedQueue = params.getInteger("queue_depth");
+  if (queue != selectedQueue.value_or(inFlight))
+    return error("queue_depth mismatch with selected configuration");
+  // Explicit backend settings must agree with the derived effective values.
+  // Omitted settings are resolved by the model converter, not compiler defaults.
+  for (const char *key : {"frequency_ghz", "window_beats", "channels", "beat_bytes",
+                          "min_latency", "converge", "knee"}) {
+    if (params.get(key) && params.get(key)->kind() != llvm::json::Value::Null &&
+        params.getNumber(key) != d.getNumber(key))
+      return error(std::string(key) + " mismatch with selected configuration");
+  }
+  for (const char *key : {"latency_mode", "enforce_peak"})
+    if (params.get(key) && params.get(key)->kind() != llvm::json::Value::Null &&
+        *params.get(key) != *d.get(key))
+      return error(std::string(key) + " mismatch with selected configuration");
   double minimum = integer("min_latency"), epsilon = number("rounding_epsilon_cycles"), reset = number("reset_last_ready_cycles");
   if (d.getString("latency_mode") != "unloaded" || number("converge") != 1. ||
       d.getBoolean("enforce_peak") != true || minimum < 1 || minimum > INT_MAX ||
@@ -584,19 +642,23 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   }
   const Object *configuration = model->getObject("configuration");
   auto configurationJson = model->getString("configuration_json");
-  if (!configuration || !configurationJson || !supportedConfiguration(*configuration))
-    return factsError("unsupported or missing explicit model configuration profile");
+  if (!configuration || !configurationJson)
+    return factsError("missing explicit model configuration profile");
+  if (auto capability = unsupportedCapability(*configuration); !capability.empty())
+    return factsError("unsupported capability: " + capability);
   if (auto error = checkArchitecture(*root, *configuration)) return std::move(error);
   const Object *vocabulary = root->getObject("operand_vocabulary");
   if (!vocabulary || modelSha256(canonicalJson(llvm::json::Value(Object(*vocabulary)))) !=
                          model_schema::vocabularySha256())
     return factsError("source-derived operand vocabulary differs from the compiled compiler-op adapter");
   if (auto error = checkIsaMetadata(*root)) return std::move(error);
+
   auto decodedConfiguration = llvm::json::parse(*configurationJson);
   if (!decodedConfiguration) return factsError(llvm::toString(decodedConfiguration.takeError()));
-  if (*decodedConfiguration != llvm::json::Value(Object(*configuration)) ||
-      *configurationJson != canonicalJson(llvm::json::Value(Object(*configuration))))
-    return factsError("configuration_json is not the canonical explicit configuration");
+  // Hash the producer's exact serialization after checking its decoded values.
+  // LLVM and Python spell valid floats differently (1 vs 1.0, exponents).
+  if (*decodedConfiguration != llvm::json::Value(Object(*configuration)))
+    return factsError("configuration_json differs from the explicit configuration");
   if (modelSha256(*configurationJson) != *model->getString("configuration_sha256"))
     return factsError("configuration content hash mismatch");
   for (const auto &[key, value] : *model) {
@@ -699,6 +761,7 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     auto parsedDMA = parseDMATiming(*document, *configuration);
     if (!parsedDMA) return parsedDMA.takeError();
     result.dmaTiming = std::move(*parsedDMA);
+    result.provenance["dma_curve_sha256"] = document->getString("curve_sha256")->str();
   }
   result.sha256 = expectedSha256.str();
   result.dma = dmaWait;
@@ -1337,6 +1400,10 @@ static TimingRuleResult<TimingProvider> modelTimingProviderFactoryImpl(ModuleOp 
   if (!facts) return {{}, llvm::toString(facts.takeError())};
   for (const auto &[key, value] : facts->modelProvenance()) {
     auto retained = selection.getAs<StringAttr>(key);
+    // Legacy selected modules could only carry the locked curve. Preserve that
+    // default success path; a different curve always needs its explicit digest.
+    if (!retained && key == "dma_curve_sha256" && value == model_schema::dmaIdentity().at("curve_sha256"))
+      continue;
     if (!retained || retained.getValue() != value) return {{}, "model evidence provenance mismatch: " + key};
   }
   std::shared_ptr<const ModelOverlapFacts> overlap;
@@ -1348,7 +1415,9 @@ static TimingRuleResult<TimingProvider> modelTimingProviderFactoryImpl(ModuleOp 
       (selection.get("composed") && !composed) || (selection.get("composed_sha256") && !composedHash) ||
       bool(composed) != bool(composedHash) || (composed && !pairs) ||
       bool(pairs) != bool(pairsHash) || (chains && !pairs)) return {{}, "incomplete model overlap selection"};
-  if (pairs) {
+  if (pairs && !hasDefaultOverlapConfiguration(*facts))
+    module.emitWarning(isolatedConfigurationWarning);
+  if (pairs && hasDefaultOverlapConfiguration(*facts)) {
     auto loaded = loadModelOverlapFacts(pairs.getValue(), pairsHash.getValue(), *facts);
     if (!loaded) return {{}, llvm::toString(loaded.takeError())};
     if (composed)
@@ -1399,7 +1468,9 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     if (composedPath.empty() != composedHash.empty() || (!composedPath.empty() && pairsPath.empty()))
       return fail("composed and composed-sha256 are required together and require pairs");
     std::shared_ptr<const ModelOverlapFacts> overlap;
-    if (!pairsPath.empty()) {
+    if (!hasDefaultOverlapConfiguration(*facts))
+      module.emitWarning(isolatedConfigurationWarning);
+    if (!pairsPath.empty() && hasDefaultOverlapConfiguration(*facts)) {
       auto loaded = loadModelOverlapFacts(pairsPath, pairsHash, *facts);
       if (!loaded) return fail(llvm::toString(loaded.takeError()));
       if (!composedPath.empty())

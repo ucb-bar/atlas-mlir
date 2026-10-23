@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
-
+from atlas_model_capabilities import check_configuration
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
 
@@ -44,12 +44,12 @@ def identity(root):
 
 
 def note_unqualified_model(source_sha256, configuration_sha256):
-    """Derivation can inspect changes; compilation and overlap retain lock gates."""
+    """Derivation can inspect changes; compilation checks capabilities."""
     if (source_sha256 != LOCK["source_sha256"] or
             configuration_sha256 != LOCK["configuration_sha256"]):
         print("Note: results are not from the qualified revision " + LOCK["model_revision"] +
               " (source or configuration content differs from tools/model-timing.lock.json). "
-              "Compilation requires the locked configuration; overlap additionally requires the locked revision.",
+              "Compilation requires supported capabilities; overlap additionally requires the locked configuration and revision.",
               file=sys.stderr)
 
 
@@ -63,7 +63,7 @@ def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
-             "atlas_derive_vocabulary.py", "model-timing.lock.json",
+             "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
@@ -93,6 +93,7 @@ def regenerate(model, out):
         raise UnsupportedModelTiming("imported model does not match --npu-model")
     torch.set_num_threads(1)
     cfg, config = configuration()
+    check_configuration(cfg)
     note_unqualified_model(before[0]["source_sha256"], sha256(encoded(config)))
     architecture = derive_arch(cfg)
     vocabulary = validate_vocabulary(cfg)

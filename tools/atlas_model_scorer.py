@@ -7,13 +7,15 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+from atlas_derive_curve import resolve_curve_path
 from atlas_model_facts import safe_path
+from atlas_model_schema import LOCK
 from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
 from check_program_decode import decode_binary
 
 
 @lru_cache(maxsize=1)
-def selected_model(root):
+def _model_content(root):
     root = safe_path(root)
     sys.path.insert(0, str(root))
     import npu_model
@@ -23,8 +25,28 @@ def selected_model(root):
     torch.set_num_threads(1)
     source, _ = source_digest(root)
     numerical, _ = numerical_data(root)
-    _, values = configuration()
-    return root, source, numerical, sha256(encoded(values))
+    return root, source, numerical
+
+
+def selected_model(root, *, include_configuration=False):
+    root, source, numerical = _model_content(root)
+    cfg, values = configuration()
+    identity = root, source, numerical, sha256(encoded(values))
+    return (*identity, cfg) if include_configuration else identity
+
+
+def bind_curve_configuration(cfg, evidence):
+    """Run exactly the configured curve bytes whose digest the provider retained."""
+    path = resolve_curve_path(cfg)
+    curve_bytes = path.read_bytes()
+    # Older providers admitted only the locked curve, and did not retain a
+    # separate digest. Omission must not admit arbitrary replacement bytes.
+    expected = evidence.get("dma_curve_sha256", LOCK["curve_sha256"])
+    if sha256(curve_bytes) != expected:
+        raise ValueError("scoring DMA curve differs from provider evidence")
+    # Pass the checked bytes through the backend's supported dict input. This
+    # prevents a second implicit path resolution or file read during Core init.
+    cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=json.loads(curve_bytes))
 
 
 def model_instruction(row, inventory, isa):
@@ -76,7 +98,7 @@ class ModelScorer:
     def __call__(self, document, profile="curve"):
         if sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
-        root, source, numerical, config_hash = selected_model(self.model)
+        root, source, numerical, config_hash, cfg = selected_model(self.model, include_configuration=True)
         evidence = document.get("model_evidence", {})
         expected = (evidence.get("source_sha256"), evidence.get("numerical_data_sha256"), evidence.get("configuration_sha256"))
         if (source, numerical, config_hash) != expected:
@@ -91,13 +113,11 @@ class ModelScorer:
         inventory = json.loads((Path(__file__).parents[1] / "docs/selected-variant-inventory.json").read_text())
         decoded = decode_binary(inventory, b"".join(word.to_bytes(4, "little") for word in words))
         program = InstantiableProgram([model_instruction(row, inventory, isa) for row in decoded["instructions"]])
-        cfg, _ = configuration()
         if profile == "fifo43":
             cfg.dma_memory_backend = "fixed"
             cfg.dma_memory_params = dict(latency=43, cycles_per_beat=1, accept_fn=lambda cycle: cycle % 11 < 4)
         elif profile == "curve":
-            cfg.dma_memory_params = dict(cfg.dma_memory_params,
-                                         curves=str(root / "npu_model/configs/memory_curves/ee290sim_vcs_probe.json"))
+            bind_curve_configuration(cfg, evidence)
         else:
             raise ValueError("unsupported memory profile")
         logger = SimpleNamespace(**{name: lambda *args, **kwargs: None for name in dir(Logger) if name.startswith("log_")})

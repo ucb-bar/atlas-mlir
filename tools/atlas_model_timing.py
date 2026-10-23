@@ -127,7 +127,7 @@ def configuration_values(cfg):
         value = getattr(cfg, key)
         if key == "arch_state_config":
             values[key] = asdict(value)
-        elif isinstance(value, (str, int, bool, dict, type(None))):
+        elif isinstance(value, (str, int, float, bool, dict, type(None))):
             values[key] = value
         elif isinstance(value, type):
             values[key] = value.__module__ + "." + value.__qualname__

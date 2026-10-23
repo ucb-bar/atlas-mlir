@@ -72,8 +72,8 @@ class DerivationGateTest(unittest.TestCase):
                     self.assertIn("results are not from the qualified revision", lines[0])
                     self.assertIn(LOCK["model_revision"], lines[0])
                     self.assertIn("tools/model-timing.lock.json", lines[0])
-                    self.assertIn("Compilation requires the locked configuration", lines[0])
-                    self.assertIn("overlap additionally requires the locked revision", lines[0])
+                    self.assertIn("Compilation requires supported capabilities", lines[0])
+                    self.assertIn("overlap additionally requires the locked configuration and revision", lines[0])
 
     def test_refusals_end_with_one_shared_model_update_guidance_line(self):
         with tempfile.TemporaryDirectory() as directory:
