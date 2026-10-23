@@ -157,8 +157,113 @@ def _engine_values(tree):
     return dict(load=edge, store=edge + delay), edge
 
 
+def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsilon, interval):
+    """Checked analytic bound, with source expressions as its proof premises.
+
+    The bound is deliberately serialized. It covers retained history, but not
+    pre-existing live work or externally denied grants. No observed timing enters
+    this function. Full reviewed method guards also protect predicates that the
+    compact evidence below does not repeat.
+    """
+    from copy import deepcopy
+    from atlas_derive_frontend import _SHAPES as frontend_shapes
+    from atlas_derive_scratchpad import method, shape
+
+    core_tick = method(core_source, "Core", "tick")
+    s1 = method(core_source, "Core", "_tick_s1")
+    normalized = deepcopy(s1)
+    mask = _one((n for n in ast.walk(normalized) if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Attribute) and t.attr == "delay_counter" for t in n.targets)
+                 and isinstance(n.value, ast.BinOp) and isinstance(n.value.op, ast.BitAnd)), "Core DELAY mask")
+    mask.value.right = ast.Name(id="DERIVED_DELAY_MASK", ctx=ast.Load())
+    if (shape(core_tick) != frontend_shapes[("core.py", "Core", "tick")] or
+            shape(normalized) != frontend_shapes[("core.py", "Core", "_tick_s1")]):
+        raise UnsupportedCurve("unsupported DMA/Core completion visibility semantics")
+    dma_cls = _one((n for n in dma_tree.body if isinstance(n, ast.ClassDef)
+                    and n.name == "DmaExecutionUnit"), "DMA class")
+    tick = _method(dma_cls, "tick")
+    backend_cls = _one((n for n in backend_tree.body if isinstance(n, ast.ClassDef)
+                        and n.name == "CurveMemoryBackend"), "curve class")
+    issue = _method(backend_cls, "issue")
+
+    def expression(tree, expected):
+        target = ast.dump(ast.parse(expected, mode="eval").body, include_attributes=False)
+        node = _one((n for n in ast.walk(tree) if ast.dump(n, include_attributes=False) == target),
+                    "DMA proof premise " + expected)
+        return ast.unparse(node)
+
+    def call_line(tree, value):
+        target = expression(tree, value)
+        return _one((n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                     and ast.unparse(n) == target), "DMA ordered call " + value)
+
+    if not (call_line(core_tick, "self._tick_s1()") <
+            call_line(core_tick, "exu.tick(self.issued_uop if exu is target else None)")):
+        raise UnsupportedCurve("unsupported Core S1/DMA tick order")
+    if not (call_line(tick, "self.backend.pop_response(cycle)") <
+            call_line(tick, "self.backend.issue(BeatRequest(self._next_source, address, head.is_store, cycle))") <
+            call_line(tick, "state.clear_flag(slot.channel)") <
+            call_line(tick, "self._slots.append(slot)")):
+        raise UnsupportedCurve("unsupported DMA response/request/retirement/launch order")
+    premises = dict(
+        ready_base=expression(issue, "request.cycle + max(float(self.min_latency), latency)"),
+        ready_pacing=expression(issue, "max(ready, self._last_ready + 1.0 / peak_bw)"),
+        ready_rounding=expression(issue, "math.ceil(ready - 1e-9)"),
+        engine_capacity=expression(tick, "in_flight_reg < self.max_in_flight"),
+        registered_source_free=expression(tick, "self._next_source not in ids_reg"),
+        backend_capacity=expression(tick, "self.backend.can_accept(cycle)"),
+        retirement=expression(tick, "dispatched and will_be_zero"),
+        wait_blocked=expression(s1, 'insn.mnemonic.startswith("dma.wait") and state.check_flag(insn.funct3)'))
+    maximum = max(minimum, *(r["unloaded_latency_cycles"] for r in rows),
+                  *(r["cycles_per_beat"] for r in rows))
+    maximum_cycle = 2147483647
+    if not math.isfinite(maximum) or maximum > maximum_cycle:
+        raise UnsupportedCurve("unsupported DMA proposal arithmetic domain")
+    # Do not subtract the backend rounding epsilon here: IEEE addition followed
+    # by subtraction can round across an integer even on small cycle counts.
+    # Rounding upward without that reduction preserves the service envelope.
+    quantum = math.ceil(maximum) + interval
+    if type(interval) is not int or interval != 1 or minimum < interval or quantum <= interval:
+        raise UnsupportedCurve("unsupported DMA bound service/positive response latency")
+    if quantum > maximum_cycle:
+        raise UnsupportedCurve("unsupported DMA proposal arithmetic domain")
+    return dict(schema="atlas.dma_proposal.v1", kind="serialized_all_mix_upper_bound",
+                response_to_retire_cycles=0, retire_to_wait_issue_cycles=interval,
+                per_beat_bound_cycles=quantum,
+                preconditions=dict(engine_backend_drained_at_launch=True, vmem_grant_denials=0,
+                                   history="arbitrary_retained_issue_history",
+                                   maximum_cycle=maximum_cycle, maximum_arithmetic_operand=maximum_cycle),
+                policy=dict(classification="compiler_policy", intercommand_serialization_cycles=1),
+                recurrence=dict(retire="launch+startup[direction]+beats*per_beat_bound_cycles",
+                                wait="retire+retire_to_wait_issue_cycles"),
+                source_evidence=dict(core_tick_shape=shape(core_tick), core_s1_shape=shape(normalized),
+                                     expressions=premises,
+                                     edge_order=["Core.S1", "DMA.D", "DMA.store_read", "DMA.A",
+                                                 "DMA.retire_clear_flag", "DMA.enqueue_launch"],
+                                     service_maximum_cycles=maximum,
+                                     service_quantum="ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval"),
+                proof=["Every retained-history mix selects a curve row; the maximum covers every row.",
+                       "Within the supported arithmetic domain a fractional ready value acknowledged at integer D is strictly below D+1, including IEEE rounding.",
+                       "Let K=ceil(max latency), C=ceil(max spacing), Q=max(K,C)+issue_interval. Integer upper endpoints are exactly representable and floating arithmetic is monotone.",
+                       "For beat j, A_j<=max(launch+startup+j-1,D_previous+issue_interval); response D_j<=max(A_j+K,D_previous+1+C). Induction gives D_j<=launch+startup+j*Q.",
+                       "Without denied grants, responses drain one per edge. Registered capacity and source reuse add at most one issue interval after drain.",
+                       "Induct over beats using the serialized issue/response envelope; store startup includes read staging and subsequent reads pipeline at the issue interval.",
+                       "Positive response latency separates final A from final D; registered dispatched therefore permits retirement at final D.",
+                       "Core checks the busy flag before DMA clears it, making retirement visible to wait on the next edge."],
+                limitations=["No finite completion bound exists for arbitrary VMEM grant denial.",
+                             "Pre-existing live occupancy is outside this command bound; serialization is a compiler proposal policy."])
+
+
+def proposal_duration(facts, *, store, beats):
+    """Interpret the exported bound; used by validation, never to fit facts."""
+    if type(beats) is not int or not 0 < beats <= facts["max_transfer_bytes"] // facts["beat_bytes"]:
+        raise ValueError("unsupported DMA proposal transfer size")
+    return (facts["startup_cycles"]["store" if store else "load"] +
+            beats * facts["proposal_contract"]["per_beat_bound_cycles"])
+
+
 def derive_curve(cfg):
-    from npu_model.hardware import dma, memory_backend
+    from npu_model.hardware import core, dma, memory_backend
     from atlas_derive_mxu import UnsupportedMXU
     try:
         backend_tree, backend_sha = _review(memory_backend)
@@ -218,6 +323,9 @@ def derive_curve(cfg):
         rows.append(dict(read_percentage=pct, unloaded_latency_cycles=backend.latency_at(0.0, pct),
                          peak_beats_per_cycle=peak, cycles_per_beat=1.0 / peak,
                          points=[list(point) for point in points]))
+    core_source = _read(_safe(inspect.getsourcefile(core)))
+    proposal = _proposal_contract(core_source, dma_tree, backend_tree, rows, backend.min_latency,
+                                  epsilon, issue_interval)
     return dict(schema="atlas.dma_timing.v1", backend="curve", resolved=True, estimate_only=True,
                 curve_sha256=curve_sha, source_sha256={"memory_backend.py": backend_sha, "dma.py": dma_sha},
                 source_shapes={name: SOURCE_SHAPES[name] for name in ("memory_backend.py", "dma.py")},
@@ -231,6 +339,7 @@ def derive_curve(cfg):
                 startup_cycles=startup, issue_interval_cycles=issue_interval,
                 rounding_epsilon_cycles=epsilon, curves=rows,
                 reset_last_ready_cycles=reset_last_ready,
+                proposal_contract=proposal,
                 semantics=dict(history="last_window_beats_issued_including_current_beat",
                                curve_selection="nearest_read_percentage_tie_lower",
                                acceptance="pending_count_below_queue_depth_including_presented_response",

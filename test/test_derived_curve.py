@@ -1,5 +1,6 @@
 """Fail-closed curve extraction and independent native DMA validation."""
 from copy import copy
+import ast
 import json
 import os
 from pathlib import Path
@@ -164,6 +165,83 @@ class NativeCurveTest(unittest.TestCase):
         self.assertEqual(native, _stream(FactBackend(facts), [False] * 65))
         facts["curves"][-1]["cycles_per_beat"] *= 1.01
         self.assertNotEqual(native, _stream(FactBackend(facts), [False] * 65))
+
+    def test_bound_covers_every_history_curve_and_extracts_wait_visibility(self):
+        import math
+        facts = curve.derive_curve(self.cfg)
+        contract = facts["proposal_contract"]
+        maximum = max(facts["min_latency"], *(r["unloaded_latency_cycles"] for r in facts["curves"]),
+                      *(r["cycles_per_beat"] for r in facts["curves"]))
+        self.assertEqual(contract["per_beat_bound_cycles"], math.ceil(maximum) + facts["issue_interval_cycles"])
+        self.assertEqual(contract["response_to_retire_cycles"], 0)
+        self.assertEqual(contract["retire_to_wait_issue_cycles"], 1)
+        self.assertTrue(contract["preconditions"]["engine_backend_drained_at_launch"])
+        self.assertEqual(contract["preconditions"]["maximum_cycle"], 2147483647)
+        self.assertEqual(contract["policy"]["classification"], "compiler_policy")
+
+    def test_core_order_and_wait_predicate_mutations_refuse(self):
+        original_read = curve._read
+        for before, after in (("target = self._tick_s1()", "target = None"),
+                              ("and state.check_flag(insn.funct3):", "and not state.check_flag(insn.funct3):")):
+            def mutated(path):
+                source = original_read(path)
+                if Path(path).name == "core.py":
+                    self.assertIn(before, source)
+                    return source.replace(before, after)
+                return source
+            with self.subTest(before=before), patch.object(curve, "_read", side_effect=mutated):
+                with self.assertRaisesRegex(curve.UnsupportedCurve, "completion visibility"):
+                    curve.derive_curve(self.cfg)
+
+    def test_source_bound_refuses_unknown_ready_expression_independently_of_pin(self):
+        from npu_model.hardware import core, dma, memory_backend
+        facts = curve.derive_curve(self.cfg)
+        backend = Path(memory_backend.__file__).read_text().replace(
+            "self._last_ready + 1.0 / peak_bw", "self._last_ready + 2.0 / peak_bw")
+        with self.assertRaisesRegex(curve.UnsupportedModelTiming, "DMA proof premise"):
+            curve._proposal_contract(Path(core.__file__).read_text(), ast.parse(Path(dma.__file__).read_text()),
+                                     ast.parse(backend), facts["curves"], facts["min_latency"],
+                                     facts["rounding_epsilon_cycles"], facts["issue_interval_cycles"])
+
+    def test_core_positive_and_one_short_wait_edges(self):
+        from atlas_validate_curve import _core_wait_observation
+        for store in (False, True):
+            early = _core_wait_observation(self.cfg, store=store, beats=1)
+            age = early["retired_cycle"] - early["launch_cycle"]
+            short = _core_wait_observation(self.cfg, store=store, beats=1, wait_age=age)
+            positive = _core_wait_observation(self.cfg, store=store, beats=1, wait_age=age + 1)
+            self.assertEqual(short["wait_checks"][0], dict(cycle=short["retired_cycle"], fired=False, stall="dma.wait"))
+            self.assertEqual(positive["wait_checks"], [dict(cycle=positive["retired_cycle"] + 1, fired=True, stall=None)])
+
+    def test_mixed_queued_grant_denials_preserve_native_backend_parity(self):
+        from atlas_validate_curve import _mixed_engine_observation
+        facts = curve.derive_curve(self.cfg)
+        native = _mixed_engine_observation(self.cfg, facts, deny_grants=True)
+        self.assertEqual(native, _mixed_engine_observation(self.cfg, facts, fact_backend=True, deny_grants=True))
+        denied = [access for event in native["trace"] for access in (event["vmem_read"], event["vmem_write"])
+                  if access is not None and not access[2]]
+        self.assertTrue(denied)
+
+    def test_near_epsilon_latency_bound_uses_ceiling_before_issue_interval(self):
+        from atlas_validate_curve import _engine_observation
+        cfg = copy(self.cfg)
+        cfg.dma_max_in_flight = 1
+        # Construct selected curve bytes in native units; use the converter's
+        # resulting values, never observations, to build the bound.
+        data = json.loads(curve.resolve_curve_path(cfg).read_text())
+        for points in data["curves"].values():
+            for point in points:
+                point[0] = 1000000.0
+                point[1] = 1.000000001 / float(cfg.dma_memory_params.get("frequency_ghz", data.get("frequencyGHz", 1.0)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "epsilon.json"
+            path.write_text(json.dumps(data))
+            cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=str(path), min_latency=1)
+            facts = curve.derive_curve(cfg)
+            self.assertEqual(facts["proposal_contract"]["per_beat_bound_cycles"], 3)
+            native = _engine_observation(cfg, store=False, beats=4, history=[False] * 31)
+            self.assertLessEqual(native["retired_cycle"] - native["launch_cycle"],
+                                 curve.proposal_duration(facts, store=False, beats=4))
 
 
 if __name__ == "__main__":

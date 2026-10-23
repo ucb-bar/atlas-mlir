@@ -1,8 +1,8 @@
 """Independent fact-driven DMA predictions checked against the native pinned model.
 
 This module never derives facts or fits timings. Its reference consumes only the
-exported fact object and compares exact request/response/retirement edges and bytes
-with the unchanged backend and DMA engine under deliberately varied streams.
+exported fact object and compares exact backend traces, native Core completion
+visibility, source-derived command bounds, and bytes under varied streams.
 """
 from __future__ import annotations
 
@@ -86,31 +86,7 @@ def _stream(backend, stores, *, translation=0, stalls=False, gap=0):
     raise ModelTimingValidationError("backend validation timed out")
 
 
-def _engine_prediction(facts, stores, beats, launch):
-    from npu_model.hardware.memory_backend import BeatRequest
-    backend = FactBackend(facts)
-    issued, completed = [], []
-    index, in_flight = 0, 0
-    first = launch + facts["startup_cycles"]["store" if stores else "load"]
-    for cycle in range(launch, 200000):
-        registered = in_flight
-        response = backend.response(cycle)
-        if response is not None:
-            completed.append(cycle)
-            backend.pop_response(cycle)
-            in_flight -= 1
-        if (index < beats and cycle >= first + index * facts["issue_interval_cycles"] and
-                registered < facts["max_in_flight"] and backend.can_accept(cycle)):
-            backend.issue(BeatRequest(index, index * facts["beat_bytes"], stores, cycle))
-            issued.append(cycle)
-            index += 1
-            in_flight += 1
-        if index == beats and in_flight == 0:
-            return dict(issued=issued, completed=completed, retired_cycle=cycle)
-    raise ModelTimingValidationError("DMA fact prediction timed out")
-
-
-def _engine_observation(cfg, *, store, beats):
+def _engine_observation(cfg, *, store, beats, history=()):
     import torch
     from npu_model.hardware.arch_state import ArchState
     from npu_model.hardware.dma import DmaExecutionUnit
@@ -133,6 +109,12 @@ def _engine_observation(cfg, *, store, beats):
         mnemonic = "dma.store x1, x2, x3, ch0" if store else "dma.load x2, x1, x3, ch0"
         instruction, = stream_to_instrs(StringIO(mnemonic + "\n"))
         unit = DmaExecutionUnit("dma", Mock(spec=Logger), state, config=cfg)
+        if history:
+            # Drain a prior mixed backend stream, preserving issued history and
+            # fractional ready state. The launch follows its last acknowledgement.
+            prior = _stream(unit.backend, history)
+            unit.cycle = prior["completed"][-1][0]
+        launch = unit.cycle + 1
         uop = Uop(instruction, pc=0)
         issued, completed = [], []
         for age in range(200000):
@@ -148,13 +130,13 @@ def _engine_observation(cfg, *, store, beats):
                     raise ModelTimingValidationError("isolated DMA validation data mismatch")
                 if unit.backend.outstanding or unit._in_flight or unit._ids_in_flight:
                     raise ModelTimingValidationError("isolated DMA validation did not drain")
-                return dict(issued=issued, completed=completed, retired_cycle=unit.cycle)
+                return dict(issued=issued, completed=completed, retired_cycle=unit.cycle, launch_cycle=launch)
         raise ModelTimingValidationError("native isolated DMA validation timed out")
     finally:
         state.close()
 
 
-def _mixed_engine_observation(cfg, facts, *, fact_backend=False):
+def _mixed_engine_observation(cfg, facts, *, fact_backend=False, deny_grants=False):
     """Three concurrent channels, mixed commands, disjoint source/destination bytes."""
     import torch
     from dataclasses import asdict
@@ -188,9 +170,11 @@ def _mixed_engine_observation(cfg, facts, *, fact_backend=False):
             unit.backend = FactBackend(facts)
         trace = []
         for age in range(200000):
+            if deny_grants and age % 19 < 7:
+                state.conflict_checker.announce_vmem_ports(unit.cycle + 1, {0: "validation", 1: "validation", 2: "validation"})
             unit.tick(commands[age] if age < len(commands) else None)
             event = asdict(unit.last_cycle)
-            if event["a"] is not None or event["d"] is not None or unit.complete_count:
+            if any(event[key] is not None for key in ("a", "d", "vmem_read", "vmem_write")) or unit.complete_count:
                 trace.append(dict(event, complete_count=unit.complete_count))
             if age >= len(commands) and not unit.has_in_flight:
                 comparisons = (torch.equal(state.read_vmem(0, 0, size), read0),
@@ -205,9 +189,48 @@ def _mixed_engine_observation(cfg, facts, *, fact_backend=False):
         state.close()
 
 
+def _core_wait_observation(cfg, *, store, beats, wait_age=1):
+    """Execute real Core S1 and DMA edges, including a precisely placed wait."""
+    from npu_model.hardware.core import Core
+    from npu_model.hardware.dma import DmaExecutionUnit
+    from npu_model.logging.logger import Logger
+    from npu_model.software.program import InstantiableProgram
+    from npu_model.util.converter import stream_to_instrs
+    core = Core(config=cfg, logger=Mock(spec=Logger))
+    try:
+        state = core.arch_state
+        state.write_xrf(1, state.cfg.dram_base)
+        state.write_xrf(2, 0)
+        state.write_xrf(3, beats * cfg.dma_beat_bytes)
+        mnemonic = "dma.store x1, x2, x3, ch0" if store else "dma.load x2, x1, x3, ch0"
+        assembly = [mnemonic] + ["addi x0, x0, 0"] * (wait_age - 1) + ["dma.wait ch0"]
+        core.load_program(InstantiableProgram(stream_to_instrs(StringIO("\n".join(assembly) + "\n"))))
+        dma = next(unit for unit in core.exus if isinstance(unit, DmaExecutionUnit))
+        launch = retired = waited = None
+        wait_checks = []
+        for _ in range(200000):
+            core.tick()
+            edge = core.cycle_count
+            event = core.last_cycle
+            if event["instruction"] == ("dma.store" if store else "dma.load") and event["s1_fire"]:
+                launch = edge
+            if dma.complete_count:
+                retired = edge
+            if event["instruction"] == "dma.wait":
+                wait_checks.append(dict(cycle=edge, fired=event["s1_fire"], stall=event["stall"]))
+                if event["s1_fire"]:
+                    waited = edge
+            if waited is not None and not dma.has_in_flight:
+                return dict(launch_cycle=launch, retired_cycle=retired, wait_issue_cycle=waited,
+                            wait_checks=wait_checks, drained=not dma.backend.outstanding)
+        raise ModelTimingValidationError("native Core DMA/wait validation timed out")
+    finally:
+        core.close()
+
+
 def validate_curve(cfg, facts, out):
-    """Require exact independent/native parity; write diagnostic traces and receipt."""
-    from atlas_derive_curve import derive_curve
+    """Require backend parity, command bounds and Core edges; write native receipts."""
+    from atlas_derive_curve import derive_curve, proposal_duration
     from npu_model.hardware.memory_backend import make_memory_backend
     from atlas_model_schema import canonical, sha256
     out.mkdir(parents=True, exist_ok=False)
@@ -242,28 +265,61 @@ def validate_curve(cfg, facts, out):
             for store in (False, True):
                 for beats in (1, 32, 128):
                     key = variant_name + ("-store-" if store else "-load-") + str(beats)
-                    expected = _engine_prediction(derived, store, beats, launch=1)
                     native = _engine_observation(selected, store=store, beats=beats)
-                    if native != expected:
-                        (out / (key + "-mismatch.json")).write_bytes(canonical(dict(expected=expected, native=native)))
-                        raise ModelTimingValidationError("isolated DMA fact/native mismatch: " + key)
+                    duration = proposal_duration(derived, store=store, beats=beats)
+                    if (native["retired_cycle"] > native["launch_cycle"] + duration or
+                            native["issued"][0] != native["launch_cycle"] + derived["startup_cycles"]["store" if store else "load"] or
+                            native["retired_cycle"] != native["completed"][-1]):
+                        raise ModelTimingValidationError("isolated DMA source bound/edge mismatch: " + key)
                     (out / (key + ".json")).write_bytes(canonical(dict(name=key, passed=True, trace=native)) + b"\n")
                     checks.append(dict(name=key, passed=True, beats=beats, bytes_verified=True,
                                        retired_cycle=native["retired_cycle"]))
-            key = variant_name + "-mixed-dma"
-            native = _mixed_engine_observation(selected, derived)
-            expected = _mixed_engine_observation(selected, derived, fact_backend=True)
-            if native != expected:
-                raise ModelTimingValidationError("mixed native DMA fact/backend mismatch: " + key)
-            (out / (key + ".json")).write_bytes(canonical(dict(name=key, passed=True, **native)) + b"\n")
-            checks.append(dict(name=key, passed=True, bytes_verified=True,
-                               commands=native["commands"], retired_cycle=native["retired_cycle"]))
+            for denied in (False, True):
+                key = variant_name + "-mixed-dma" + ("-denied-grants" if denied else "")
+                native = _mixed_engine_observation(selected, derived, deny_grants=denied)
+                expected = _mixed_engine_observation(selected, derived, fact_backend=True, deny_grants=denied)
+                if native != expected:
+                    raise ModelTimingValidationError("mixed native DMA fact/backend mismatch: " + key)
+                denied_events = sum(not access[2] for event in native["trace"]
+                                    for access in (event["vmem_read"], event["vmem_write"]) if access is not None)
+                if denied and not denied_events:
+                    raise ModelTimingValidationError("mixed DMA denied-grant control did not deny a request")
+                (out / (key + ".json")).write_bytes(canonical(dict(name=key, passed=True, **native)) + b"\n")
+                checks.append(dict(name=key, passed=True, bytes_verified=True, denied_grant_events=denied_events,
+                                   bound_checked=False, commands=native["commands"], retired_cycle=native["retired_cycle"]))
+            for store in (False, True):
+                key = variant_name + "-retained-mixed-history-" + ("store" if store else "load")
+                native = _engine_observation(selected, store=store, beats=32,
+                                             history=[False] * 17 + [True] * 13 + [False, True] * 11)
+                bound = proposal_duration(derived, store=store, beats=32)
+                if native["retired_cycle"] > native["launch_cycle"] + bound:
+                    raise ModelTimingValidationError("retained-history DMA bound mismatch: " + key)
+                checks.append(dict(name=key, passed=True, bound_cycles=bound,
+                                   native_cycles=native["retired_cycle"] - native["launch_cycle"]))
+        for store in (False, True):
+            for beats in (1, 32):
+                early = _core_wait_observation(cfg, store=store, beats=beats)
+                retired_age = early["retired_cycle"] - early["launch_cycle"]
+                short = _core_wait_observation(cfg, store=store, beats=beats, wait_age=retired_age)
+                positive = _core_wait_observation(cfg, store=store, beats=beats, wait_age=retired_age + 1)
+                gap = facts["proposal_contract"]["retire_to_wait_issue_cycles"]
+                for native in (early, short, positive):
+                    if native["wait_issue_cycle"] != native["retired_cycle"] + gap or not native["drained"]:
+                        raise ModelTimingValidationError("Core DMA completion/wait visibility mismatch")
+                if (short["wait_checks"][0] != dict(cycle=short["retired_cycle"], fired=False, stall="dma.wait") or
+                        positive["wait_checks"] != [dict(cycle=positive["wait_issue_cycle"], fired=True, stall=None)]):
+                    raise ModelTimingValidationError("Core wait one-short/positive boundary control mismatch")
+                key = "core-wait-" + ("store-" if store else "load-") + str(beats)
+                (out / (key + ".json")).write_bytes(canonical(dict(early=early, one_short=short, positive=positive)) + b"\n")
+                checks.append(dict(name=key, passed=True, one_short_stalled=True, positive_no_stall=True,
+                                   retire_to_wait_issue_cycles=gap))
         report = dict(schema="atlas.dma_timing_validation.v1", passed=True, checks=checks,
                       backend_streams=len(variants) * len(streams),
                       isolated_dma_runs=len(variants) * 2 * 3,
-                      mixed_dma_runs=len(variants) * 2,
+                      mixed_dma_runs=len(variants) * 4,
+                      retained_history_dma_runs=len(variants) * 2, core_wait_runs=12,
                       fact_sha256=sha256(canonical(facts)),
-                      scope="Exact native-model parity; no RTL/SoC qualification or fitted constants.")
+                      scope="Exact backend parity, source-bound and Core edge validation; no RTL/SoC qualification or fitted constants.")
     except Exception as error:
         report = dict(schema="atlas.dma_timing_validation.v1", passed=False, checks=checks, error=str(error))
         (out / "validation-report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")

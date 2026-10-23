@@ -11,6 +11,7 @@
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <climits>
 #include <tuple>
 
 using namespace mlir;
@@ -44,6 +45,23 @@ Object block(const std::string &name, const std::string &engine, int free, Objec
           {"assumptions", Object{{"scratchpad_read_latency", 1}}},
           {"observation", Object{{"accepted", true}, {"drained", true}}}};
 }
+Object proposalFixture(double maximum = 5., int quantum = 6) {
+  return Object{{"schema", "atlas.dma_proposal.v1"}, {"kind", "serialized_all_mix_upper_bound"},
+      {"response_to_retire_cycles", 0}, {"retire_to_wait_issue_cycles", 1}, {"per_beat_bound_cycles", quantum},
+      {"preconditions", Object{{"engine_backend_drained_at_launch", true}, {"vmem_grant_denials", 0},
+                               {"history", "arbitrary_retained_issue_history"},
+                               {"maximum_cycle", INT_MAX}, {"maximum_arithmetic_operand", INT_MAX}}},
+      {"policy", Object{{"classification", "compiler_policy"}, {"intercommand_serialization_cycles", 1}}},
+      {"recurrence", Object{{"retire", "launch+startup[direction]+beats*per_beat_bound_cycles"},
+                            {"wait", "retire+retire_to_wait_issue_cycles"}}},
+      {"source_evidence", Object{{"core_tick_shape", std::string(64, 'a')}, {"core_s1_shape", std::string(64, 'b')},
+          {"expressions", Object{{"fixture", "synthetic proof premises"}}},
+          {"edge_order", Array{"Core.S1", "DMA.D", "DMA.store_read", "DMA.A", "DMA.retire_clear_flag", "DMA.enqueue_launch"}},
+          {"service_maximum_cycles", maximum},
+          {"service_quantum", "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval"}}},
+      {"proof", Array{"Synthetic contract fixture; production proof comes from checked model source."}},
+      {"limitations", Array{"Drained engine/backend and no VMEM grant denial."}}};
+}
 Object dmaFixture() {
   Object sources, shapes;
   for (const auto &[key, value] : model_schema::dmaIdentity()) {
@@ -64,6 +82,7 @@ Object dmaFixture() {
       {"queue_depth", 64}, {"window_beats", 32}, {"frequency_ghz", .5}, {"channels", 1},
       {"measured_channels", 1}, {"access_bytes", 32}, {"latency_mode", "unloaded"}, {"converge", 1.},
       {"knee", .9}, {"enforce_peak", true}, {"min_latency", 1},
+      {"proposal_contract", proposalFixture()},
       {"startup_cycles", Object{{"load", 1}, {"store", 3}}}, {"issue_interval_cycles", 1},
       {"rounding_epsilon_cycles", 1e-9}, {"reset_last_ready_cycles", 0.}, {"curves", std::move(curves)},
       {"semantics", Object{{"history", "last_window_beats_issued_including_current_beat"},
@@ -530,7 +549,7 @@ void testDerivedContract() {
   (*changed.getObject("dma_timing")->getObject("startup_cycles"))["load"] = 8;
   sealContractFixture(changed);
   auto rebound = parse(std::move(changed));
-  check(bool(rebound) && rebound->estimateDMACycles(1024, false).value == 91,
+  check(bool(rebound) && rebound->estimateDMACycles(1024, false).value == 200,
         "rebound derived operands propagate through production contract parser");
   if (!rebound) llvm::consumeError(rebound.takeError());
   changed = contractFixture();
@@ -1213,25 +1232,26 @@ void testDMAEstimates() {
   auto baseline = parse(fixture());
   check(bool(baseline), "synthetic source-pinned DMA proposal facts load");
   if (!baseline) { llvm::consumeError(baseline.takeError()); return; }
-  check(baseline->estimateDMACycles(32, false).value == 6 && baseline->estimateDMACycles(1024, false).value == 84 &&
-        baseline->estimateDMACycles(32, true).value == 6 && baseline->estimateDMACycles(1024, true).value == 68,
-        "cold estimates replay synthetic endpoint startup, latency and fractional pacing");
+  check(baseline->estimateDMACycles(32, false).value == 7 && baseline->estimateDMACycles(1024, false).value == 193 &&
+        baseline->estimateDMACycles(32, true).value == 9 && baseline->estimateDMACycles(1024, true).value == 195,
+        "all-mixture bounds consume startup and source-derived service quantum");
   check(!baseline->estimateDMACycles(0, false).error.empty() && !baseline->estimateDMACycles(33, true).error.empty() &&
         !baseline->estimateDMACycles(8192, false).error.empty(), "DMA proposals reject invalid transfer geometry");
   Object changed = fixture();
   changed.getObject("dma_timing")->getObject("startup_cycles")->operator[]("load") = 8;
   auto startup = parse(std::move(changed));
-  check(bool(startup) && startup->estimateDMACycles(1024, false).value == 91,
+  check(bool(startup) && startup->estimateDMACycles(1024, false).value == 200,
         "DMA proposal consumes derived launch startup");
   if (!startup) llvm::consumeError(startup.takeError());
   changed = fixture();
   Object &read = *(*changed.getObject("dma_timing")->getArray("curves"))[1].getAsObject();
-  read["peak_beats_per_cycle"] = .2;
-  read["cycles_per_beat"] = 5.;
-  (*(*read.getArray("points"))[0].getAsArray())[0] = .1;
-  (*(*read.getArray("points"))[1].getAsArray())[0] = .2;
+  read["peak_beats_per_cycle"] = .1;
+  read["cycles_per_beat"] = 10.;
+  (*(*read.getArray("points"))[0].getAsArray())[0] = .05;
+  (*(*read.getArray("points"))[1].getAsArray())[0] = .1;
+  (*changed.getObject("dma_timing"))["proposal_contract"] = proposalFixture(10., 11);
   auto slower = parse(std::move(changed));
-  check(bool(slower) && slower->estimateDMACycles(1024, false).value == 161,
+  check(bool(slower) && slower->estimateDMACycles(1024, false).value == 353,
         "DMA proposal responds to derived curve pacing, not builtin calibration");
   if (!slower) llvm::consumeError(slower.takeError());
   changed = fixture();
@@ -1239,15 +1259,15 @@ void testDMAEstimates() {
   longRead["unloaded_latency_cycles"] = 1000.;
   (*(*longRead.getArray("points"))[0].getAsArray())[1] = 1000.;
   (*(*longRead.getArray("points"))[1].getAsArray())[1] = 2000.;
+  (*changed.getObject("dma_timing"))["proposal_contract"] = proposalFixture(1000., 1001);
   auto bounded = parse(std::move(changed));
-  check(bool(bounded) && bounded->estimateDMACycles(4096, false).value == 2160,
-        "isolated replay observes registered in-flight capacity before same-cycle response");
+  check(bool(bounded) && bounded->estimateDMACycles(4096, false).value == 128129,
+        "service envelope includes registered-capacity progress after responses");
   if (!bounded) llvm::consumeError(bounded.takeError());
   changed = fixture();
   (*changed.getObject("dma_timing"))["reset_last_ready_cycles"] = 1000.;
   auto reset = parse(std::move(changed));
-  check(bool(reset) && reset->estimateDMACycles(1024, false).value == 1080,
-        "isolated replay consumes source-derived fractional ready reset");
+  check(!reset, "bound refuses unsupported nonzero cold reset pacing debt");
   if (!reset) llvm::consumeError(reset.takeError());
   changed = fixture();
   changed.erase("dma_timing");
@@ -1292,7 +1312,19 @@ void testDMAEstimates() {
       {"unreviewed history semantics reject", "dma_timing/semantics/history_lifetime", "command_boundary"},
       {"inconsistent reciprocal pacing rejects", "dma_timing/curves/1/cycles_per_beat", 100.},
       {"point and unloaded latency disagreement rejects", "dma_timing/curves/1/unloaded_latency_cycles", 100.},
-      {"out of range numeric estimate rejects", "dma_timing/rounding_epsilon_cycles", 2.}});
+      {"out of range numeric estimate rejects", "dma_timing/rounding_epsilon_cycles", 2.},
+      {"service quantum must agree with all mixtures", "dma_timing/proposal_contract/per_beat_bound_cycles", 5},
+      {"unrecognized wait visibility rejects", "dma_timing/proposal_contract/retire_to_wait_issue_cycles", 2},
+      {"missing proposal contract rejects", "dma_timing/proposal_contract", nullptr, true}});
+  auto isolated = baseline->proposeDMA(193, 10, std::nullopt);
+  auto queued = baseline->proposeDMA(193, 11, isolated.value.queueEnd);
+  check(isolated.error.empty() && isolated.value.queueEnd == 203 && isolated.value.waitIssue == 204 &&
+        queued.error.empty() && queued.value.queueEnd == 397 && queued.value.waitIssue == 398,
+        "one shared proposal interpreter applies derived visibility and explicit serialized policy");
+  check(!baseline->proposeDMA(193, INT_MAX, std::nullopt).error.empty(), "proposal arithmetic refuses overflow");
+  auto old = builtin.dmaProposal(781, 10, std::nullopt);
+  check(old.error.empty() && old.value.queueEnd == 790 && old.value.waitIssue == 792,
+        "builtin retains old queue coordinate and wait-priority offsets");
 }
 
 int main(int argc, char **argv) {
@@ -1323,7 +1355,7 @@ int main(int argc, char **argv) {
   RegValues dmaRegs = unknownRegs();
   dmaRegs[1] = 0x20000 / 4; dmaRegs[2] = 0; dmaRegs[3] = 1024;
   Footprint dma = provider.footprint({findOp("dma.load.ch0"), 1, 2, 3}, dmaRegs);
-  check(dma.error.empty() && dma.dmaCycles == 84 && dma.doneAge == 0,
+  check(dma.error.empty() && dma.dmaCycles == 193 && dma.doneAge == 0,
         "DMA duration guides scheduling while completion still requires a wait");
   Instr move{findOp("vmov"), 4, 0, 0};
   Footprint first = provider.footprint(move, unknownRegs());

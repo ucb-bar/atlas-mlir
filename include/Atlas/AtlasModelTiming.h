@@ -36,13 +36,14 @@ struct ModelTimingBlock {
   std::map<std::string, ModelReservationRelease> releases;
 };
 
-// Reviewed cold isolated transfers, with pure read/store history and no VMEM grant denial.
-// These fields are proposal inputs and make no completion or overlap claim.
+// Source-checked all-mixture service bound under explicit drained/no-denial
+// proposal preconditions. This is not completion or overlap authorization.
 struct ModelDMATiming {
-  int beatBytes, maxBytes, maxInFlight, queueDepth, issueInterval;
+  int beatBytes, maxBytes;
   int loadStartup, storeStartup;
-  double readLatency, writeLatency, readSpacing, writeSpacing, epsilon, resetReady;
+  int perBeatBound, retireToWait, serializationGap;
   TimingRuleResult<int> estimate(int64_t bytes, bool store) const;
+  TimingRuleResult<DMAProposal> propose(int latency, int issue, std::optional<int> previousEnd) const;
 };
 
 struct ModelFrontendAccess {
@@ -84,6 +85,7 @@ public:
     return admission ? &*admission : nullptr;
   }
   TimingRuleResult<int> estimateDMACycles(int64_t bytes, bool store) const;
+  TimingRuleResult<DMAProposal> proposeDMA(int latency, int issue, std::optional<int> previousEnd) const;
   TimingRuleResult<int> issueGap(const Instr &in) const;
   const ModelTimingBlock *block(llvm::StringRef name) const {
     auto found = blocks.find(name.str());

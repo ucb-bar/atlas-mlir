@@ -152,8 +152,12 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     for (int e : g.out[i]) {
       const Edge &ed = g.edges[e];
       int64_t distance = ed.distance;
-      if (nodes[ed.to].op->opClass == OpClass::DmaWait && nodes[ed.to].op->channel == nodes[i].op->channel)
-        distance = std::max(distance, int64_t(g.footprints[i].dmaCycles) + 2);
+      if (nodes[ed.to].op->opClass == OpClass::DmaWait && nodes[ed.to].op->channel == nodes[i].op->channel) {
+        if (p.dmaProposal)
+          distance = std::max(distance, int64_t(rule(p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt)).waitIssue));
+        else if (g.footprints[i].dmaCycles > 0)
+          note("timing provider lacks DMA proposal policy");
+      }
       height[i] = std::max(height[i], distance + height[ed.to]);
     }
   }
@@ -165,7 +169,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
   int channelRelease[kAtlasDMAChannels] = {};
-  int dmaQueueEnd = 0;
+  std::optional<int> dmaQueueEnd;
   auto release = [&](int i) { return channelRelease[nodes[i].op->channel]; };
   auto isWait = [&](int i) {
     return nodes[i].op->opClass == OpClass::DmaWait;
@@ -291,12 +295,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     issue[best] = cycle;
     reserve(*table, best, cycle);
     if (g.footprints[best].dmaCycles > 0) {
-      // Transfers run one at a time, in issue order.
-      int latency = g.footprints[best].dmaCycles;
-      dmaQueueEnd = std::max(
-          add(cycle, latency - 1, "DMA queue estimate exceeds cycle domain"),
-          add(dmaQueueEnd, latency, "DMA queue estimate exceeds cycle domain"));
-      channelRelease[nodes[best].op->channel] = add(dmaQueueEnd, 2, "DMA queue estimate exceeds cycle domain");
+      if (!p.dmaProposal)
+        return op(best)->emitOpError("timing provider lacks DMA proposal policy");
+      auto proposal = rule(p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd));
+      dmaQueueEnd = proposal.queueEnd;
+      channelRelease[nodes[best].op->channel] = proposal.waitIssue;
     }
     for (int e : g.out[best]) {
       const Edge &ed = g.edges[e];

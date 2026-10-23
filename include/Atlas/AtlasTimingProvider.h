@@ -7,6 +7,7 @@
 #include "llvm/ADT/StringRef.h"
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace mlir::atlas {
@@ -25,6 +26,12 @@ template <typename T> struct TimingRuleResult {
 struct DMACompletionConflict {
   bool conflict = false;
   EdgeKind kind = EdgeKind::Order;
+};
+
+// Proposal coordinates only; neither field establishes DMA completion.
+// queueEnd belongs to the provider's versioned serialization policy.
+struct DMAProposal {
+  int queueEnd = 0, waitIssue = 0;
 };
 
 // A fresh instance belongs to one emitted basic block. The implementation owns
@@ -100,6 +107,10 @@ struct TimingProvider {
   // Proposal only: completion is still established by matching DMA waits.
   // Optional for providers that never estimate DMA; no consumer borrows another provider's policy.
   std::function<TimingRuleResult<int>(int64_t bytes, bool store)> dmaEstimate;
+  // Shared by critical-height ranking and physical wait placement. No fallback
+  // to another provider's offsets when a transfer has a positive estimate.
+  std::function<TimingRuleResult<DMAProposal>(
+      int latency, int issue, std::optional<int> previousEnd)> dmaProposal;
   bool fillPendingDelaySlots = false;
   // Optional fixed proposal cost; zero derives the scalar address/load/store sequence.
   int scalarSlotProposalCycles = 0;
