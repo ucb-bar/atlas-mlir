@@ -59,9 +59,13 @@ DMA completion requires matching waits. The eight-slot command ring, `kAtlasDMAC
 
 Default `full` search bounds initial/order/group attempts at 32/96/204, using deterministic batches of 12 and groups up to four nodes; `selection` allows 24 initial attempts without order search/PACK alternatives. Refused attempts consume budget. Native scoring chooses winners. `--guarded-pack` rewrites eligible PACKs to MXU operations. Remaining PACK scale codes are restricted to observed E8M0 codes 122..128: an empirical numerical target gate, not derived timing or universal numerical proof.
 
-## Updating for NPU Model changes
+## Scoring targets
 
-`curve` is the default objective and uses the evidence-checked model curve backend. Explicit `--profile fifo43` minimizes the synthetic fixed-latency target: latency 43, one cycle per beat, acceptance on absolute backend cycles 0–3 of every 11. These harness values are explicit compiler-owned choices, not extracted model defaults or RTL timing. Exact curve ties use FIFO43 as a secondary objective throughout selection and restarts; ties on both preserve canonical candidate order.
+Default `curve` uses the checked model's curve backend. `fifo43` selects `standalone-atlascore-fifo43` in `tools/model-scoring-targets.json`: fixed latency 43, one cycle/beat, acceptance on absolute backend cycles 0–3 of each 11. This explicitly synthetic harness target is neither model-default nor extracted RTL timing. A versioned adapter maps its complete periodic descriptor to the model's `accept_fn` hook.
+
+`selection.json` records every used native profile's effective configuration, source/numerical/base identity, synthetic provenance and canonical SHA-256 excluding `sha256` itself. Callback receipts contain the adapter/descriptor; curve receipts contain checked curve data. Workers share an invocation snapshot. Exact curve ties use FIFO43, retaining its receipt; double ties retain the earlier candidate. Explicit FIFO43 minimizes that profile alone. Thus default selection retains a synthetic secondary objective.
+
+## Updating for NPU Model changes
 
 For supported parameter changes, edit the selected configuration (for example, change `dma_memory_params["frequency_ghz"]` from `0.5` to `0.75`), regenerate into a new directory, and compile/score with that checkout and bundle. Operations, curve costs and overlap regenerate/revalidate together. Unused backend fields cannot change timing. Unsupported geometry, structures or refactors require reviewed extractor/consumer updates rather than pin changes.
 

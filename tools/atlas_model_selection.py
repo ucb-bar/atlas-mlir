@@ -453,6 +453,11 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     def cached_score(program: dict, scoring_profile: str) -> tuple[int | Future, bool]:
         key = scoring_profile, tuple(instruction["word_u32"] for instruction in program["instructions"])
         with score_lock:
+            if standard_scorer:
+                profiles = receipt.setdefault("scoring_configurations", {})
+                if scoring_profile not in profiles:
+                    profiles[scoring_profile] = score_executor.submit(
+                        scorer.profile_receipt, program, scoring_profile).result()
             hit = key in score_cache
             if not hit:
                 score_cache[key] = (score_executor.submit(scorer, program, scoring_profile)

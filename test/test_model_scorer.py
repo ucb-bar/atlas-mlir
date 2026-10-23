@@ -1,5 +1,7 @@
 """Selected-model identity, decoding and execution failures must fail closed."""
+from copy import deepcopy
 import json
+import pickle
 import os
 from pathlib import Path
 import sys
@@ -10,6 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from atlas_model_scorer import ModelScorer, bind_curve_configuration, model_instruction, selected_model, _model_content
+from atlas_model_profiles import PeriodicAcceptance
 from atlas_model_timing import configuration, configuration_values, encoded, sha256
 from check_program_decode import decode_binary
 from model_evidence import isolate_model_imports
@@ -41,6 +44,15 @@ class ScorerGuardsTest(unittest.TestCase):
         factory.assert_called_once_with()
         self.assertEqual(identity[:4], (Path("/tmp"), "source", "data", sha256(encoded(values))))
         self.assertIs(identity[4], cfg)
+
+    def test_periodic_acceptance_validates_and_preserves_absolute_phase_when_pickled(self):
+        acceptance = PeriodicAcceptance(7, 3)
+        restored = pickle.loads(pickle.dumps(acceptance))
+        self.assertEqual([restored(cycle) for cycle in range(20, 40)],
+                         [cycle % 7 < 3 for cycle in range(20, 40)])
+        for period, prefix in ((0, 0), (-1, 0), (3, -1), (3, 4), (True, 1), (3, 1.0)):
+            with self.subTest(period=period, prefix=prefix), self.assertRaises(ValueError):
+                PeriodicAcceptance(period, prefix)
 
     def test_selected_curve_bytes_are_bound_before_execution(self):
         raw = b'{"curves":{"100":[[100,20]]},"frequencyGHz":0.75}\n'
@@ -121,6 +133,48 @@ class ModelScorerTest(unittest.TestCase):
                 selected.write_bytes(raw + b"\n")
                 with self.assertRaisesRegex(ValueError, "DMA curve differs from provider evidence"):
                     self.scorer(program)
+
+    def test_fifo43_native_backend_matches_previous_callable_trajectories(self):
+        from atlas_validate_curve import _stream
+        from npu_model.hardware.memory_backend import make_memory_backend
+        old, _ = configuration()
+        # Historical behavior is an independent regression oracle, not profile input.
+        old.dma_memory_backend = "fixed"
+        old.dma_memory_params = dict(latency=43, cycles_per_beat=1, accept_fn=lambda cycle: cycle % 11 < 4)
+        current, receipt = self.scorer.configured_profile(self.program([]), "fifo43")
+        self.assertEqual(current.dma_memory_backend, "fixed")
+        self.assertEqual(receipt["provenance"], "synthetic-rtl-harness-target")
+        for stores in ([False] * 65, [True] * 65, [False, True] * 65):
+            for gap, stalls in ((0, False), (0, True), (13, True)):
+                with self.subTest(stores=stores[:4], gap=gap, stalls=stalls):
+                    before, after = make_memory_backend(old), make_memory_backend(current)
+                    expected = _stream(before, stores, gap=gap, stalls=stalls)
+                    self.assertEqual(expected, _stream(after, stores, gap=gap, stalls=stalls))
+                    after.reset()
+                    self.assertEqual(expected, _stream(after, stores, gap=gap, stalls=stalls))
+
+    def test_profile_receipts_bind_effective_inputs_without_changing_base_identity(self):
+        document = self.program([])
+        receipts = {profile: self.scorer.profile_receipt(document, profile) for profile in ("curve", "fifo43")}
+        for profile, receipt in receipts.items():
+            payload = dict(receipt)
+            self.assertEqual(payload.pop("sha256"), sha256(encoded(payload)))
+            self.assertEqual(json.loads(json.dumps(receipt)), receipt)
+            self.assertEqual(receipt["model_identity"], self.evidence)
+            self.assertEqual(receipt, pickle.loads(pickle.dumps(self.scorer)).profile_receipt(document, profile))
+        self.assertNotEqual(receipts["curve"]["sha256"], receipts["fifo43"]["sha256"])
+        self.assertIsInstance(receipts["curve"]["configuration"]["dma_memory_params"]["curves"], dict)
+        self.assertEqual(selected_model(self.scorer.model)[-1], self.evidence["configuration_sha256"])
+        for group, field in (("dma_memory_params", "latency"), ("dma_memory_params", "cycles_per_beat"),
+                             ("accept_pattern", "period_cycles"), ("accept_pattern", "accepted_prefix_cycles")):
+            target = deepcopy(self.scorer._targets)
+            target["fifo43"][group][field] += 1
+            with self.subTest(field=field), patch("atlas_model_scorer.synthetic_targets", return_value=target):
+                changed = ModelScorer(self.scorer.model)
+                self.assertNotEqual(changed.profile_receipt(document, "fifo43")["sha256"], receipts["fifo43"]["sha256"])
+                self.assertEqual(self.scorer.profile_receipt(document, "fifo43"), receipts["fifo43"])
+        _, values = configuration()
+        self.assertNotEqual(sha256(encoded(values)), receipts["fifo43"]["sha256"])
 
     def test_default_curve_materialization_preserves_backend_state_and_trajectories(self):
         from atlas_validate_curve import _stream
