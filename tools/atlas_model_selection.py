@@ -119,6 +119,47 @@ def order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...]):
         yield orders[:block] + (tuple(moved),) + orders[block + 1:]
 
 
+def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...], max_nodes: int = 4):
+    """Move a node together with the dependencies crossed by its insertion."""
+    moves = []
+    seen = set()
+    for block, (graph, order) in enumerate(zip(graphs, orders)):
+        positions = {node: index for index, node in enumerate(order)}
+        successors = [[] for _ in order]
+        for node, preds in enumerate(graph["preds"]):
+            for pred in preds:
+                successors[pred].append(node)
+        for origin, node in enumerate(order):
+            for target in range(len(order)):
+                if origin == target:
+                    continue
+                backward = target < origin
+                edges = graph["preds"] if backward else successors
+                members, pending = {node}, [node]
+                while pending and len(members) <= max_nodes:
+                    for related in edges[pending.pop()]:
+                        crosses = positions[related] >= target if backward else positions[related] <= target
+                        if crosses and related not in members:
+                            members.add(related)
+                            pending.append(related)
+                if not 2 <= len(members) <= max_nodes:
+                    continue
+                remaining = [other for other in order if other not in members]
+                boundary = target if backward else target + 1
+                insertion = sum(positions[other] < boundary for other in remaining)
+                group = [other for other in order if other in members]
+                moved = tuple(remaining[:insertion] + group + remaining[insertion:])
+                rank = {other: index for index, other in enumerate(moved)}
+                if any(rank[pred] >= rank[other] for other in moved for pred in graph["preds"][other]):
+                    continue
+                candidate = orders[:block] + (moved,) + orders[block + 1:]
+                if moved != order and candidate not in seen:
+                    seen.add(candidate)
+                    moves.append(candidate)
+    random.Random(0).shuffle(moves)
+    yield from moves
+
+
 def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = "model",
                    profile: str = "fifo43", model: Path | None = None, model_regions: tuple[Path, ...] = (),
                    spill: bool = True, spill_mxu: bool = True, boundary: str = "boundary",
@@ -129,7 +170,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    max_candidates: int = 32, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
-                   search_evaluations: int = 0,
+                   search_evaluations: int = 0, search_group_evaluations: int = 0,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
@@ -146,6 +187,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("MREG candidates require the model provider")
     if search_evaluations < 0 or (search_evaluations and provider != "model"):
         raise ValueError("search-evaluations must be nonnegative and requires the model provider")
+    if search_group_evaluations < 0 or (search_group_evaluations and provider != "model"):
+        raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
     source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
@@ -156,6 +199,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
                "guarded_pack": guarded_pack,
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
+               "search_group_evaluations": search_group_evaluations,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                "candidates": []}
 
@@ -209,7 +253,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if candidate.virtual_orders:
                 (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
             command([str(binaries / "atlas-opt"), str(prepared),
-                     *candidate_options(candidate, provider, spill, graph_output=bool(search_evaluations)),
+                     *candidate_options(candidate, provider, spill,
+                                        graph_output=bool(search_evaluations or search_group_evaluations)),
                      "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                          directory, directory / "program.json"))
@@ -285,18 +330,22 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 mreg_candidates = tuple(tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8))
             receipt["mreg_pool_size"] = len(mreg_candidates)
             evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks") for ranks in mreg_candidates])
-            if search_evaluations:
+            for field, budget, neighbors, category in (
+                    ("search", search_evaluations, order_neighbors, "local-order"),
+                    ("group_search", search_group_evaluations, group_order_neighbors, "group-order")):
+                if not budget:
+                    continue
                 search_started = time.monotonic()
                 initial_count = len(receipt["candidates"])
-                limit = initial_count + search_evaluations
-                receipt["search"] = {"start_index": best["index"], "accepted_indices": []}
+                limit = initial_count + budget
+                receipt[field] = {"start_index": best["index"], "accepted_indices": []}
                 while len(receipt["candidates"]) < limit:
                     parent = best
                     graphs = json.loads((output / parent["directory"] / "graph.json").read_text())
                     orders = tuple(tuple(graph["order"]) for graph in graphs)
                     base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
                     seen.add(base)
-                    pending = (replace(base, virtual_orders=order) for order in order_neighbors(graphs, orders))
+                    pending = (replace(base, virtual_orders=order) for order in neighbors(graphs, orders))
                     # Fixed batches keep the explored path independent of worker count.
                     while len(receipt["candidates"]) < limit:
                         batch = []
@@ -308,16 +357,16 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                         if not batch:
                             break
                         before = len(receipt["candidates"])
-                        evaluate_batch([(candidate, "local-order") for candidate in batch], limit)
+                        evaluate_batch([(candidate, category) for candidate in batch], limit)
                         for row in receipt["candidates"][before:]:
                             row["parent_index"] = parent["index"]
                         if best["index"] != parent["index"]:
-                            receipt["search"]["accepted_indices"].append(best["index"])
+                            receipt[field]["accepted_indices"].append(best["index"])
                             break
                     if best["index"] == parent["index"]:
                         break
-                receipt["search"].update(evaluations=len(receipt["candidates"]) - initial_count,
-                                         elapsed_seconds=time.monotonic() - search_started)
+                receipt[field].update(evaluations=len(receipt["candidates"]) - initial_count,
+                                      elapsed_seconds=time.monotonic() - search_started)
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
@@ -346,6 +395,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bank-candidates", action="store_true", help="score eight legal MREG rank vectors (model only)")
     parser.add_argument("--search-evaluations", type=int, default=0,
                         help="additional verified local order attempts after knob selection (model only)")
+    parser.add_argument("--search-group-evaluations", type=int, default=0,
+                        help="additional verified dependency-group attempts after local search (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
@@ -357,6 +408,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,
             "composed_sha256": args.composed_sha256, "max_candidates": args.max_candidates,
             "workers": args.workers, "search_evaluations": args.search_evaluations,
+            "search_group_evaluations": args.search_group_evaluations,
             "mreg_candidates": None if args.bank_candidates else (),
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
