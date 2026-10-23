@@ -43,6 +43,16 @@ struct ModelDMATiming {
   TimingRuleResult<int> estimate(int64_t bytes, bool store) const;
 };
 
+struct ModelFrontendAccess {
+  std::string operand;
+  bool write, scale;
+};
+
+struct ModelFrontendTiming {
+  int ordinaryGap, delayBase, delayMask, readAge, writeAge, controlReadAge;
+  std::map<std::string, std::vector<ModelFrontendAccess>> instructions;
+};
+
 class ModelTimingFacts {
 public:
   Footprint resolve(const Instr &in, const RegValues &regs) const;
@@ -50,6 +60,7 @@ public:
   const std::map<std::string, std::string> &modelProvenance() const { return provenance; }
   bool dmaWait() const { return dma; }
   TimingRuleResult<int> estimateDMACycles(int64_t bytes, bool store) const;
+  TimingRuleResult<int> issueGap(const Instr &in) const;
   const ModelTimingBlock *block(llvm::StringRef name) const {
     auto found = blocks.find(name.str());
     return found == blocks.end() ? nullptr : &found->second;
@@ -61,6 +72,7 @@ private:
   std::string sha256;
   bool dma = false;
   std::optional<ModelDMATiming> dmaTiming;
+  std::optional<ModelFrontendTiming> frontend;
   static llvm::Expected<ModelTimingFacts> parseImpl(llvm::StringRef, llvm::StringRef, bool, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef, llvm::StringRef, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFactsForTesting(llvm::StringRef, llvm::StringRef, bool);
