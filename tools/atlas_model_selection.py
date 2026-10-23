@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Choose a fully verified Atlas program using cold cycles from the selected npu_model.
 
-The default is retained as candidate zero, ties retain the earlier candidate,
-and builtin compiles exactly once without importing the model. The bounded
+The default is retained as candidate zero, exact curve ties use FIFO43 cycles
+then candidate order, and builtin compiles once without importing the model. The bounded
 search exposes existing lowering choices and optional legal order mutations.
 """
 
@@ -436,9 +436,19 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             raise ValueError("model scoring requires --npu-model")
         scorer = ModelScorer(model, model_regions)
     seen: set[Candidate] = set()
-    score_cache: dict[tuple[int, ...], int | Future] = {}
+    # The scorer/model/regions are fixed for this invocation; profiles must not share scores.
+    score_cache: dict[tuple[str, tuple[int, ...]], int | Future] = {}
     score_executor: ProcessPoolExecutor | None = None
     best: dict | None = None
+
+    def cached_score(program: dict, scoring_profile: str) -> tuple[int | Future, bool]:
+        key = scoring_profile, tuple(instruction["word_u32"] for instruction in program["instructions"])
+        with score_lock:
+            hit = key in score_cache
+            if not hit:
+                score_cache[key] = (score_executor.submit(scorer, program, scoring_profile)
+                                    if score_executor else scorer(program, profile=scoring_profile))
+            return score_cache[key], hit
 
     def compile_candidate(candidate: Candidate, row: dict) -> None:
         directory = output / row["directory"]
@@ -458,12 +468,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if provider == "model":
                 stage = "score"
-                with score_lock:
-                    row["score_cache_hit"] = words in score_cache
-                    if words not in score_cache:
-                        score_cache[words] = (score_executor.submit(scorer, program, profile)
-                                              if score_executor else scorer(program, profile=profile))
-                    cached = score_cache[words]
+                cached, row["score_cache_hit"] = cached_score(program, profile)
                 row["cycles"] = cached.result() if isinstance(cached, Future) else cached
             row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
@@ -500,8 +505,28 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             # A verified program the model cannot score is an identity or soundness alarm.
             if row["status"] == "FAIL" and row["error_stage"] == "score":
                 fail(f"candidate {row['index']} failed model scoring: {row['error']}")
-        best = min((row for row in receipt["candidates"] if row["status"] == "PASS"),
-                   key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
+        passing = [row for row in receipt["candidates"] if row["status"] == "PASS"]
+        best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
+        if provider == "model" and profile == "curve" and best is not None:
+            tied = [row for row in passing if row["cycles"] == best["cycles"]]
+            if len(tied) > 1:
+                pending_scores = []
+                for row in tied:
+                    if "fifo43_cycles" not in row:
+                        program = json.loads((output / row["directory"] / "program.json").read_text())
+                        try:
+                            cached, row["fifo43_score_cache_hit"] = cached_score(program, "fifo43")
+                            pending_scores.append((row, cached))
+                        except Exception as error:
+                            row.update(status="FAIL", error=str(error), error_stage="score")
+                            fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
+                for row, cached in pending_scores:
+                    try:
+                        row["fifo43_cycles"] = cached.result() if isinstance(cached, Future) else cached
+                    except Exception as error:
+                        row.update(status="FAIL", error=str(error), error_stage="score")
+                        fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
+                best = min(tied, key=lambda row: (row["fifo43_cycles"], row["index"]))
 
     # Model imports, configuration and execution are isolated from compiler threads.
     with ExitStack() as stack:
@@ -614,7 +639,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     receipt.update(selected_index=best["index"], selected_class=best["class"],
                    default_cycles=receipt["candidates"][0].get("cycles"),
                    selected_cycles=best.get("cycles"),
-                   score_cache_entries=len(score_cache),
+                   score_cache_entries=sum(key[0] == profile for key in score_cache),
+                   fifo43_tiebreak_cache_entries=sum(key[0] == "fifo43" for key in score_cache) if profile == "curve" else 0,
                    score_cache_hits=sum(row.get("score_cache_hit", False) for row in receipt["candidates"]),
                    elapsed_seconds=time.monotonic() - started)
     (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")
