@@ -49,7 +49,8 @@ def write(directory, name, value):
 
 def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
-             "atlas_derive_memory.py", "atlas_model_schema.py", "model-timing.lock.json",
+             "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
+             "atlas_model_schema.py", "model-timing.lock.json",
              "model-timing-vocabulary.json"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
@@ -70,6 +71,8 @@ def regenerate(model, out):
     from atlas_derive_vpu import derive_vpu
     from atlas_derive_mxu import derive_mxu
     from atlas_derive_memory import derive_memory
+    from atlas_derive_curve import derive_curve
+    from atlas_validate_curve import validate_curve
 
     if safe_path(Path(npu_model.__file__).parent.parent) != model:
         raise ValueError("imported model does not match --npu-model")
@@ -87,6 +90,7 @@ def regenerate(model, out):
     memory, memory_releases = derive_memory(cfg)
     vpu, vpu_releases = derive_vpu(cfg)
     mxu, mxu_releases = derive_mxu(cfg)
+    dma_timing = derive_curve(cfg)
     blocks = vpu | mxu | memory
     releases = vpu_releases | mxu_releases | memory_releases
     if set(blocks) != {case["name"] for case in inputs} or set(releases) != set(blocks):
@@ -99,13 +103,20 @@ def regenerate(model, out):
     print(f"Derived {len(blocks)} blocks in {derive_seconds:.3f}s; validating numerical observations", flush=True)
     start = time.monotonic()
     report, _ = validate_derived(cfg, blocks, releases, out)
+    dma_report = validate_curve(cfg, dma_timing, out / "dma-validation")
+    dma_report_hash = sha256((out / "dma-validation" / "validation-report.json").read_bytes())
+    dma_timing["validation"] = dict(passed=True, report_sha256=dma_report_hash,
+                                    backend_streams=dma_report["backend_streams"],
+                                    isolated_dma_runs=dma_report["isolated_dma_runs"],
+                                    mixed_dma_runs=dma_report["mixed_dma_runs"])
+    report["dma_validation"] = dma_timing["validation"]
     validate_seconds = time.monotonic() - start
     if before != identity(model):
         raise ValueError("model source or numerical data changed during regeneration")
     if generator_sources != tool_manifest():
         raise ValueError("derivation or observer tools changed during regeneration")
     report.update(derive_seconds=derive_seconds, validation_seconds=validate_seconds,
-                  derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu"], measured_families=[])
+                  derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu", "dma"], measured_families=[])
     report_hash = write(out, "validation-report.json", report)
     source_identity, sources, data = before
     observer_sources = observer_manifest()
@@ -117,10 +128,12 @@ def regenerate(model, out):
                                  mreg_count=cfg.arch_state_config.num_m_registers),
                    age_convention="issue_edge_zero", observation=dict(accepted=True, drained=True),
                    op_timing=ordered, unresolved=[], reservation_releases=releases,
+                   dma_timing=dma_timing,
                    vocabulary_sha256=sha256(encoded(VOCABULARY)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
-                   limits=["Isolated disjoint operands only; no pair, capacity, RTL or DMA evidence.",
+                   limits=["Operation timings cover isolated disjoint operands; no pair, capacity or RTL evidence.",
+                           "DMA facts are proposal estimates validated against isolated native model probes only.",
                            "Unit releases are serialized lifetime envelopes, not overlap/throughput admissions.",
                            "VMEM releases describe physical port windows, not whole-operation reservations.",
                            "Logical MREG release requests take effect at the next begin_cycle.",

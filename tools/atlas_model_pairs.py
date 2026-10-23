@@ -451,9 +451,11 @@ def covered_chain(record, pair_index, blocks):
     return True
 
 
-def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=None, validation_sha256=None):
+def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=None, validation_sha256=None,
+            per_op_sha256=None):
     master_pin = master_sha256 or MASTER_SHA256
     validation_pin = validation_sha256 or VALIDATION_SHA256
+    per_op_pin = per_op_sha256 or PER_OP_SHA256
     if policy not in {POLICY, BASE_POLICY}:
         raise ValueError("unsupported projection policy")
     qualified = policy == POLICY
@@ -464,7 +466,7 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
     validation_value = read_pinned(validation, validation_pin)
     if validation_value.get("passed") is not True or validation_value.get("facts_sha256") != master_pin:
         raise ValueError("validation does not bind the selected master")
-    operations = read_pinned(per_op, PER_OP_SHA256)
+    operations = read_pinned(per_op, per_op_pin)
     if operations.get("schema") != "atlas.model_timing.v1" or operations.get("validation", {}).get("passed") is not True:
         raise ValueError("requires gated per-operation facts")
     blocks = {block["name"]: block for block in operations["op_timing"]}
@@ -508,7 +510,7 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
     result["projection"] = dict(version=2 if qualified else 1, policy=policy, master_sha256=master_pin,
                                 master_path=str(master.absolute()),
                                 validation_sha256=validation_pin, validation_path=str(validation.absolute()),
-                                per_op_sha256=PER_OP_SHA256, projector_sha256=source_sha,
+                                per_op_sha256=per_op_pin, projector_sha256=source_sha,
                                 counts=dict(source_pairs=seen["pairs"], source_chains=seen["chains"],
                                             pairs=len(result["pairs"]), chains=len(result["chains"])),
                                 excluded_reasons=dict(sorted(excluded.items())))
@@ -530,9 +532,11 @@ def main():
     parser.add_argument("--policy", choices=(POLICY, BASE_POLICY), default=POLICY)
     parser.add_argument("--master-sha256")
     parser.add_argument("--validation-sha256")
+    parser.add_argument("--per-op-sha256")
     args = parser.parse_args()
     print(json.dumps(project(args.master, args.validation, args.per_op, args.output, policy=args.policy,
-                             master_sha256=args.master_sha256, validation_sha256=args.validation_sha256), sort_keys=True))
+                             master_sha256=args.master_sha256, validation_sha256=args.validation_sha256,
+                             per_op_sha256=args.per_op_sha256), sort_keys=True))
     return 0
 
 

@@ -289,7 +289,8 @@ class ModelPairProjectionTest(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.select(changed, "chains")
 
-    def project_fixture(self, directory, *, change_master=None, change_validation=None, change_per_op=None):
+    def project_fixture(self, directory, *, change_master=None, change_validation=None, change_per_op=None,
+                        explicit_per_op=False):
         config = {"ignore_runtime_errors": False}
         names = list(BLOCKS) + ["unused." + str(i) for i in range(49 - len(BLOCKS))]
         operations = dict(schema="atlas.model_timing.v1", validation={"passed": True},
@@ -311,12 +312,24 @@ class ModelPairProjectionTest(unittest.TestCase):
         for name, data in (("master", master_bytes), ("per-op", per_op_bytes), ("validation", validation_bytes)):
             (directory / (name + ".json")).write_bytes(data)
         with ExitStack() as stack:
-            for key, value in (("MASTER_SHA256", master_sha), ("PER_OP_SHA256", per_op_sha),
+            for key, value in (("MASTER_SHA256", master_sha),
                                ("VALIDATION_SHA256", pairs.sha256(validation_bytes)),
                                ("CONFIGURATION_SHA256", pairs.sha256(pairs.canonical(config)))):
                 stack.enter_context(patch.object(pairs, key, value))
+            if not explicit_per_op:
+                stack.enter_context(patch.object(pairs, "PER_OP_SHA256", per_op_sha))
             return pairs.project(directory / "master.json", directory / "validation.json", directory / "per-op.json",
-                                 directory / "export")
+                                 directory / "export", per_op_sha256=per_op_sha if explicit_per_op else None)
+
+    def test_explicit_per_operation_digest_rebinds_projection_without_changing_default_lock(self):
+        original = pairs.PER_OP_SHA256
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            receipt = self.project_fixture(directory, explicit_per_op=True)
+            digest = pairs.sha256((directory / "per-op.json").read_bytes())
+            self.assertEqual(receipt["projection"]["per_op_sha256"], digest)
+            self.assertNotEqual(digest, original)
+            self.assertEqual(pairs.PER_OP_SHA256, original)
 
     def test_complete_projection_binds_receipt_source_records_and_owned_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
