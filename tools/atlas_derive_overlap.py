@@ -95,6 +95,9 @@ def _guard_ast(tree, name):
     if name == "vpu.py":
         reviewed.body = [n for n in reviewed.body if not (isinstance(n, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "VPU_OP_LATENCIES" for t in n.targets))]
+        if any(isinstance(n, ast.ClassDef) and n.name == "VectorExecutionUnit" for n in reviewed.body):
+            from atlas_derive_vpu import _normalize_slot_capacity
+            _normalize_slot_capacity(reviewed)
     if sha256(ast.dump(reviewed, include_attributes=False).encode()) != SOURCE_SHAPES[name]:
         raise ValueError("unsupported overlap control-flow semantics: " + name)
 
@@ -135,9 +138,10 @@ def extract_contract(model, facts):
     _, vpu, vpu_sha = _source(model, "vpu.py")
     checker_text, _, checker_sha = _source(model, "bank_conflict.py")
     _, lsu, lsu_sha = _source(model, "lsu.py")
+    _, xlu, xlu_sha = _source(model, "xlu.py")
     plans = _plan(mxu_text)
     _check_checker(checker_text)
-    for name, tree in (("vpu.py", vpu), ("lsu.py", lsu)):
+    for name, tree in (("vpu.py", vpu), ("lsu.py", lsu), ("xlu.py", xlu)):
         _guard_ast(tree, name)
     base = _named(mxu, "_MatrixExecutionUnit")
     accept = _method(base, "_accept")
@@ -185,7 +189,8 @@ def extract_contract(model, facts):
                                  mxu1_compute=depths["mxu1"], vpu_slots=busy_count),
         geometry=dict(mreg_count=geometry.num_m_registers, rows=geometry.mrf_depth,
                       row_bytes=geometry.mrf_width, vmem_bank_bytes=cfg.vmem_bank_bytes),
-        source_sha256={"mxu.py": mxu_sha, "vpu.py": vpu_sha, "bank_conflict.py": checker_sha, "lsu.py": lsu_sha},
+        source_sha256={"mxu.py": mxu_sha, "vpu.py": vpu_sha, "bank_conflict.py": checker_sha,
+                       "lsu.py": lsu_sha, "xlu.py": xlu_sha},
         vpu=dict(slot_ids=slots, logic_groups=groups, double=double,
                  live_before_issue="age_lt_final_write", read_coalescing="same_logical_register_and_row"),
         mxu=dict(compute_first={name: values["compute"]["first_age"] for name, values in plans.items()},
@@ -197,14 +202,19 @@ def extract_contract(model, facts):
                  acc_push_last=acc_push_last, mxu0_weight_drain_last=weight_drain_last,
                  accumulator_forward_gap=acc_forward),
         scalar_lsu=dict(load_response_gap=scalar_gap),
+        cross_unit=dict(engines=["vpu", "xlu"], shared_resources=["logical_mreg", "physical_mreg_ports"],
+                        read_coalescing="VPU_only", composition="pairs_only"),
         mreg=dict(logical_release="next_begin_cycle", bank="reg_mod_32", row="reg_div_32_times_32_plus_row",
                   ports="one_read_one_write_different_rows", vload_may_write_during_read=True),
         vocabulary_sha256=sha256(canonical(VOCABULARY)),
-        source_change_policy="reviewed_full_AST_for_structural_changes;normalized_MXU_timing_expressions_only",
-        operand_domain="consumer_aligned_BF16_pairs;complete_MXU_cross_command_relations;selected_VPU_aliases")
-    # The consumer deliberately retains its existing capacity implementation.
-    if contract["capacity"] != dict(sequencer_cycles=32, mxu0_compute=3, mxu1_compute=2, vpu_slots=2):
-        raise ValueError("derived capacity is incompatible with unchanged consumer")
+        source_change_policy="reviewed_full_AST;normalized_MXU_timing_and_tracker_literals;paired_VPU_slot_literals",
+        operand_domain="aligned_BF16_pairs;complete_legal_MXU_VPU_and_VPU_XLU_cross_command_relations")
+    # Row indexing and physical bank geometry remain explicitly supported only
+    # at 32. Tracker/slot literals above are source parameters, not config knobs.
+    if active != 32:
+        raise ValueError("unsupported MXU sequencer geometry (requires 32 cycles)")
+    if any(not 1 <= depth <= 64 for depth in depths.values()) or not 1 <= busy_count <= 3:
+        raise ValueError("unsupported source tracker/slot capacity")
     if source_digest(model)[0] != source_sha:
         raise ValueError("model source changed while deriving overlap")
     return contract
@@ -256,6 +266,8 @@ class SourceRules(RuleSet):
         a, b = engine(first), engine(second)
         x, y = first.split(".", 1)[1], second.split(".", 1)[1]
         bound = 1
+        if a == b == "vpu" and self.capacity(a) == 1:
+            bound = self.first_free_age(first) - 1
         if a == b == "vpu" and (x == y or x in self.double or y in self.double or
                                any(x in group and y in group for group in self.logic_groups)):
             bound = self.first_free_age(first) - 1
@@ -266,6 +278,8 @@ class SourceRules(RuleSet):
         ka, kb = self.kind(first), self.kind(second)
         same_acc, same_weight = relation.get("accumulator") == "same", relation.get("weight_slot") == "same"
         mxu, sequencer = self.contract["mxu"], self.contract["capacity"]["sequencer_cycles"]
+        if ka == kb == "compute" and self.capacity(a) == 1:
+            bound = max(bound, mxu["compute_last"][a] + 1)
         if ka == "compute" and kb != "weight" and same_acc:
             bound = max(bound, mxu["compute_first"][a] + 1)
         reads_a = ka in {"compute", "weight", "push_fp8", "push_bf16"}
@@ -352,8 +366,8 @@ def command(name, values, *, acc=0, weight=0):
 
 
 @lru_cache(maxsize=None)
-def mreg_domain(first, second):
-    """Complete MXU 1/adjacent-2 relations; source-selected legal VPU subset."""
+def mreg_domain(first, second, rules=None):
+    """Complete legal cross-command MREG equivalence relations."""
     result = {}
     if engine(first) != "vpu":
         ca, cb = len(operand_roles(first)), len(operand_roles(second))
@@ -373,38 +387,21 @@ def mreg_domain(first, second):
                 relation = actual_relation(ac, bc)
                 result.setdefault(relation["mreg_banks"], (av, bv, ac, bc, aa, ba))
     else:
-        # Distinct internal operand groups, translated as a whole for the second
-        # instruction, give a legal subset independent of any workload query.
-        av = dict(rs1=0, rs2=2, rd=4)
-        original = dict(rs1=8, rs2=10, rd=12)
-        variants = [original]
-        for role in operand_roles(second):
-            operand = role["operand"]
-            pair = max(r["offset"] + r["registers"] for r in operand_roles(second) if r["operand"] == operand)
-            for base in range(64 - pair + 1):
-                if pair == 2 and base % 2:
-                    continue
-                variant = dict(original, **{operand: base})
-                # Keep internal register-bank groups disjoint so each source
-                # sample is legal even for dual-input operations.
-                groups = []
-                for key in {r["operand"] for r in operand_roles(second)}:
-                    group = {variant[key] + r["offset"] + i for r in operand_roles(second)
-                             if r["operand"] == key for i in range(r["registers"])}
-                    groups.append({reg % 32 for reg in group})
-                if any(x & y for i, x in enumerate(groups) for y in groups[i+1:]):
-                    continue
-                variants.append(variant)
-        ac, aa = command(first, av)
-        for bv in variants:
+        if rules is None:
+            raise ValueError("complete VPU operand partition requires guarded source footprints")
+        from atlas_vpu_partition import operand_domain
+        for key, av, bv in operand_domain(operand_roles(first), operand_roles(second),
+                                          rules.registers(first), rules.registers(second)):
+            ac, aa = command(first, av)
             bc, ba = command(second, bv)
-            relation = actual_relation(ac, bc)
-            result.setdefault(relation["mreg_banks"], (av, bv, ac, bc, aa, ba))
+            if actual_relation(ac, bc)["mreg_banks"] != key:
+                raise ValueError("operand partition differs from command register roles")
+            result[key] = (av, bv, ac, bc, aa, ba)
     return result
 
 
-def pair_domain(first, second):
-    for _, (av, bv, ac, bc, _, _) in sorted(mreg_domain(first, second).items()):
+def pair_domain(first, second, rules=None):
+    for _, (av, bv, ac, bc, _, _) in sorted(mreg_domain(first, second, rules).items()):
         accs = (0, 1) if "accumulator" in ac and "accumulator" in bc else (0,)
         weights = (0, 1) if "weight_slot" in ac and "weight_slot" in bc else (0,)
         for acc, weight in itertools.product(accs, weights):
@@ -453,6 +450,26 @@ def scalar_domain():
                 yield "scalar_lsu." + first, "scalar_lsu." + second, relation, assembly, initial
 
 
+def cross_domain(rules):
+    """Complete legal VPU/XLU operands, under the guarded shared-bank model."""
+    from atlas_vpu_partition import operand_domain
+    transpose = "xlu.transpose"
+    xroles = [dict(operand=operand, offset=0, registers=1, write=write)
+              for operand, write in (("rs1", False), ("rd", True))]
+    def concrete(name, values):
+        if name == transpose:
+            return (dict(registers=[values["rs1"], values["rd"]]),
+                    f"vtrpose.xlu m{values['rd']}, m{values['rs1']}")
+        return command(name, values)
+    for vector in sorted(name for name in rules.blocks if engine(name) == "vpu"):
+        for first, second in ((vector, transpose), (transpose, vector)):
+            roles = [xroles if name == transpose else operand_roles(name) for name in (first, second)]
+            for _, av, bv in operand_domain(*roles, rules.registers(first), rules.registers(second)):
+                left, aa = concrete(first, av)
+                right, ba = concrete(second, bv)
+                yield first, second, actual_relation(left, right), [left, right], [aa, ba]
+
+
 def chain_samples(rules):
     """Source mechanism controls, independent of benchmark/catalog sequences."""
     result = []
@@ -484,14 +501,41 @@ def chain_samples(rules):
               [unit + ".matmul", unit + ".pop_acc_bf16", unit + ".push_weight"],
               [(dict(rs1=0), 0, 0), (dict(rd=4), 1, 0), (dict(rs1=0), 0, 1)],
               [1, cycle - 1], [1, cycle - 2], "nonadjacent", "nonadjacent_MREG_read_port")
+        # Exercise depth when it can bind before sequencer/accumulator limits.
+        # Two accumulators force alternating computes at least ceil(first/2)
+        # apart, and the read sequencer imposes its own minimum interval.
+        depth = rules.capacity(unit)
+        first, last = rules.contract["mxu"]["compute_first"][unit], rules.contract["mxu"]["compute_last"][unit]
+        interval = max(cycle, (first + 2) // 2)
+        if depth * interval <= last:
+            names = [unit + ".matmul"] * (depth + 1)
+            values = [(dict(rs1=4 * (index % 8)), index % 2, 0) for index in range(depth + 1)]
+            boundary = last + 1 - (depth - 1) * interval
+            chain(unit + "-tracker-boundary", unit, names, values,
+                  [interval] * (depth - 1) + [boundary],
+                  [interval] * (depth - 1) + [boundary - 1],
+                  "capacity", "source_compute_tracker_final_edge_reuse")
     final = rules.first_free_age("vpu.relu") - 1
-    chain("vpu-slot-boundary", "vpu", ["vpu.relu", "vpu.exp2", "vpu.fp8pack"],
-          [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=16, rd=20), 0, 0)],
-          [1, final - 1], [1, final - 2], "capacity", "two_slots_final_write_reuse")
-    release = rules.releases["vpu.relu"]["mreg_write"]["available_age"]
-    chain("vpu-nonadjacent-RAW", "vpu", ["vpu.relu", "vpu.exp2", "vpu.fp8pack"],
-          [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=4, rd=20), 0, 0)],
-          [1, release - 1], [1, release - 2], "nonadjacent", "nonadjacent_logical_write_release")
+    slots = rules.capacity("vpu")
+    if slots == 1:
+        names = ["vpu.relu", "vpu.exp2", "vpu.fp8pack"]
+        values = [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=16, rd=20), 0, 0)]
+        positive = [final, rules.first_free_age("vpu.exp2") - 1]
+    else:
+        names = ["vpu.relu", "vpu.exp2", *(["vpu.sin"] if slots == 3 else []), "vpu.fp8pack"]
+        values = [(dict(**{"rs2" if name == "vpu.fp8pack" else "rs1": 8 * index}, rd=8 * index + 4), 0, 0)
+                  for index, name in enumerate(names)]
+        positive = [1] * (slots - 1) + [final - slots + 1]
+    chain("vpu-slot-boundary", "vpu", names, values, positive,
+          [*positive[:-1], positive[-1] - 1], "capacity", "source_slots_final_write_reuse")
+    if slots > 1:
+        # One-slot issue admission serializes this nonadjacent RAW before its
+        # register lifetime can bind; do not label a slot rejection as RAW.
+        release = rules.releases["vpu.relu"]["mreg_write"]["available_age"]
+        chain("vpu-nonadjacent-RAW", "vpu", ["vpu.relu", "vpu.exp2", "vpu.fp8pack"],
+              [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=4, rd=20), 0, 0)],
+              [1, release - 1], [1, release - 2],
+              "nonadjacent", "nonadjacent_logical_write_release")
     return result
 
 
@@ -510,7 +554,7 @@ def generate(model_root, per_op_path, output_path, samples_path=None):
         pair = dict(first=first, second=second, relation=relation, minimum=minimum, high=high)
         index = len(pairs)
         pairs.append(pair)
-        unit = engine(first)
+        unit = engine(first) if engine(first) == engine(second) else "vpu_xlu"
         klass = relation_class(relation)
         if unit in engines:
             classes[(unit, canonical(klass))] = dict(engine=unit, relation=klass)
@@ -527,16 +571,18 @@ def generate(model_root, per_op_path, output_path, samples_path=None):
         samples.append(sample)
     for unit, names in engines.items():
         for first, second in itertools.product(names, repeat=2):
-            for relation, operands, assembly in pair_domain(first, second):
+            for relation, operands, assembly in pair_domain(first, second, rules):
                 add(first, second, relation, assembly, operands)
     for first, second, relation, assembly, initial in scalar_domain():
         add(first, second, relation, assembly, initial_xrf=initial)
+    for first, second, relation, operands, assembly in cross_domain(rules):
+        add(first, second, relation, assembly, operands)
     # Runtime composition still requires every exact live pair in this table.
     # Optional ACC/weight roles differ by opcode, so requiring one identical
     # class across every opcode Cartesian pair would discard valid classes.
     composition = [value for _, value in sorted(classes.items())]
     samples.extend(chain_samples(rules))
-    tool_names = ("atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_derive_mxu.py",
+    tool_names = ("atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_vpu_partition.py", "atlas_derive_mxu.py",
                   "atlas_derive_vpu.py", "atlas_derive_memory.py", "atlas_model_schema.py", "atlas_model_timing.py",
                   "atlas_model_observer.py", "model-timing.lock.json",
                   "model-timing-vocabulary.json")
@@ -546,19 +592,19 @@ def generate(model_root, per_op_path, output_path, samples_path=None):
         per_op_sha256=sha256(per_op.read_bytes()), model=facts["model"],
         derivation=dict(contract=CONTRACT, tool_sha256=sha256(canonical(tools)),
                         source_contract_sha256=sha256(canonical(contract)), source_contract=contract),
-        validation=dict(passed=False, report_sha256="0" * 64, sample_policy="source-mechanism-boundaries-v1",
+        validation=dict(passed=False, report_sha256="0" * 64, sample_policy="source-mechanism-boundaries-v2",
                         positive_runs=0, negative_runs=0, negative_rejections=0, numerical_checks=0,
                         engines={name: dict(positive_runs=0, negative_runs=0, negative_rejections=0,
                                             numerical_checks=0, chain_positive_runs=0, chain_negative_runs=0)
-                                 for name in (*engines, "scalar_lsu")}),
+                                 for name in (*engines, "scalar_lsu", "vpu_xlu")}),
         pairs=pairs, composition=dict(engines=engines, classes=composition))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(artifact, sort_keys=True, indent=2) + "\n")
     samples_out = safe_path(samples_path) if samples_path is not None else output.with_name("samples.json")
     samples_out.parent.mkdir(parents=True, exist_ok=True)
     samples_out.write_text(json.dumps(dict(schema="atlas.overlap_samples.v1", samples=samples,
-        exclusions=["No DMA or cross-engine overlap admission.",
-                    "VPU aliases cover legal source-selected operand assignments, not every possible alias relation.",
+        exclusions=["No DMA or mixed-engine chain overlap admission.",
+                    "Cross-engine pair coverage is limited to VPU/XLU.",
                     "Native validation is separate; this candidate has validation.passed=false."]), sort_keys=True, indent=2) + "\n")
     return artifact
 

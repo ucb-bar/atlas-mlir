@@ -130,6 +130,14 @@ def _plan(source):
         if not 0 <= firsts[engine] < 4095:
             raise UnsupportedMXU("unsupported MXU compute latency")
         value.value = _placeholder(engine + "_compute_first")
+        # Tracker depth changes admission, not isolated row timing. Normalize
+        # only this reviewed class constant; the complete admission predicate
+        # and all other control flow remain covered by the AST guard.
+        depth = _assignment(classes[name], "inflight_depth")
+        if (not isinstance(depth.value, ast.Constant) or type(depth.value.value) is not int
+                or not 1 <= depth.value.value <= 64):
+            raise UnsupportedMXU("unsupported MXU compute tracker depth (requires 1..64)")
+        depth.value = ast.Constant(value=3 if engine == "mxu0" else 2)
     _assignment(tree, "MXU_OP_LATENCIES").value = _placeholder("execute_delay_table")
     if _shape(tree.body) != SOURCE_SHAPES["mxu.py"]:
         raise UnsupportedMXU("unsupported MXU control-flow semantics")
