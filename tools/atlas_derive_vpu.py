@@ -1,6 +1,8 @@
 """Derive VectorFSM timing from its issue metadata and pure row planners."""
 from __future__ import annotations
 
+from atlas_model_diagnostics import UnsupportedModelTiming
+
 import ast
 from collections import defaultdict
 import inspect
@@ -12,7 +14,7 @@ from atlas_model_schema import (SOURCE_SHAPES, VPU_BLOCKS, ast_digest, mreg_even
 from atlas_model_timing import compress
 
 
-class UnsupportedVPU(ValueError):
+class UnsupportedVPU(UnsupportedModelTiming):
     """Selected source or geometry has no supported timing interpretation."""
 
 

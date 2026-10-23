@@ -134,7 +134,8 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
     const TimingProvider &p, const std::string &name, mlir::Operation *at,
     const ProbeContexts &contexts) {
   auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
-    return at->emitOpError("virtual cost of ") << name << ": " << why;
+    return at->emitOpError("virtual cost of ") << name << ": "
+        << (p.id == kModelTimingProviderId ? modelTimingDiagnostic(why) : why);
   };
   std::string missing = validateTimingProvider(p);
   if (!missing.empty()) return error(missing);

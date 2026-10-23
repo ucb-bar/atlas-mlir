@@ -137,7 +137,12 @@ void rejected(Object object, llvm::StringRef why) {
   std::string bytes = encode(std::move(object));
   auto parsed = parseModelTimingFacts(bytes, hash(bytes));
   check(!parsed, why);
-  if (!parsed) llvm::consumeError(parsed.takeError());
+  if (!parsed) {
+    std::string error = llvm::toString(parsed.takeError());
+    check(llvm::StringRef(error).ends_with("See docs/model-timing.md#updating-for-npu-model-changes."),
+          "facts refusal ends with model update guidance");
+    check(modelTimingDiagnostic(error) == error, "nested model refusals retain one guidance line");
+  }
 }
 
 struct InvalidFact {
@@ -906,7 +911,11 @@ int main(int argc, char **argv) {
     return TimingRuleResult<std::pair<Instr, Instr>>{{wrong, wrong}, {}};
   };
   check(failed(machineTimingOf(failing, "vmov", *module)), "cost probes cannot substitute another operation");
-  check(!lookupTimingProvider("model", *module).error.empty(), "registry rejects absent model selection");
+  auto absentSelection = lookupTimingProvider("model", *module);
+  check(!absentSelection.error.empty(), "registry rejects absent model selection");
+  check(llvm::StringRef(absentSelection.error).ends_with(
+      "See docs/model-timing.md#updating-for-npu-model-changes."),
+      "missing selection refusal ends with model update guidance");
   check(lookupTimingProvider("builtin").error.empty(), "model registration preserves builtin");
   auto badHash = parseModelTimingFacts(bytes, std::string(64, '0'));
   check(!badHash, "facts content replacement fails the pin");

@@ -11,6 +11,7 @@ import time
 
 sys.dont_write_bytecode = True
 
+from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK, VOCABULARY
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
@@ -41,6 +42,8 @@ def identity(root):
                 numerical_data_sha256=numerical), sources, data
 
 
+
+
 def write(directory, name, value):
     path = directory / name
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
@@ -50,7 +53,7 @@ def write(directory, name, value):
 def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
-             "atlas_model_schema.py", "model-timing.lock.json",
+             "atlas_model_schema.py", "atlas_model_diagnostics.py", "model-timing.lock.json",
              "model-timing-vocabulary.json"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
@@ -75,14 +78,14 @@ def regenerate(model, out):
     from atlas_validate_curve import validate_curve
 
     if safe_path(Path(npu_model.__file__).parent.parent) != model:
-        raise ValueError("imported model does not match --npu-model")
+        raise UnsupportedModelTiming("imported model does not match --npu-model")
     torch.set_num_threads(1)
     cfg, config = configuration()
     # Preserve the exporter's fatal runtime-error propagation check for every model.
     core = Core(config=cfg, logger=Mock(spec=Logger))
     try:
         if core.ignore_runtime_errors is not False:
-            raise ValueError("selected model Core does not propagate runtime errors")
+            raise UnsupportedModelTiming("selected model Core does not propagate runtime errors")
     finally:
         core.arch_state.close()
     inputs = [dict(name=name, engine=engine, assembly=assembly) for name, engine, assembly in isa_cases(cfg)]
@@ -94,7 +97,7 @@ def regenerate(model, out):
     blocks = vpu | mxu | memory
     releases = vpu_releases | mxu_releases | memory_releases
     if set(blocks) != {case["name"] for case in inputs} or set(releases) != set(blocks):
-        raise ValueError("source derivation does not cover the selected ISA probes")
+        raise UnsupportedModelTiming("source derivation does not cover the selected ISA probes")
     derive_seconds = time.monotonic() - start
     out.mkdir(parents=True)
     ordered = [blocks[case["name"]] for case in inputs]
@@ -112,9 +115,9 @@ def regenerate(model, out):
     report["dma_validation"] = dma_timing["validation"]
     validate_seconds = time.monotonic() - start
     if before != identity(model):
-        raise ValueError("model source or numerical data changed during regeneration")
+        raise ModelTimingValidationError("model source or numerical data changed during regeneration")
     if generator_sources != tool_manifest():
-        raise ValueError("derivation or observer tools changed during regeneration")
+        raise ModelTimingValidationError("derivation or observer tools changed during regeneration")
     report.update(derive_seconds=derive_seconds, validation_seconds=validate_seconds,
                   derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu", "dma"], measured_families=[])
     report_hash = write(out, "validation-report.json", report)
@@ -153,15 +156,13 @@ def regenerate(model, out):
     return payload
 
 
+@model_timing_cli
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npu-model", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
-    try:
-        regenerate(args.npu_model, args.out)
-    except (OSError, ValueError, RuntimeError) as error:
-        parser.exit(1, f"model facts regeneration failed: {error}\n")
+    regenerate(args.npu_model, args.out)
 
 
 if __name__ == "__main__":

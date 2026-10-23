@@ -6,6 +6,8 @@ its digest is a semantics whitelist, not a timing table or a source identity pin
 """
 from __future__ import annotations
 
+from atlas_model_diagnostics import UnsupportedModelTiming
+
 import ast
 from copy import deepcopy
 import inspect
@@ -19,7 +21,7 @@ _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic",
 _UNITS = {"mxu0": "MatrixExecutionUnitSystolic", "mxu1": "MatrixExecutionUnitInner"}
 
 
-class UnsupportedMXU(ValueError):
+class UnsupportedMXU(UnsupportedModelTiming):
     """Selected source or metadata has no supported MXU timing interpretation."""
 
 

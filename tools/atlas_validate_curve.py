@@ -6,6 +6,8 @@ with the unchanged backend and DMA engine under deliberately varied streams.
 """
 from __future__ import annotations
 
+from atlas_model_diagnostics import ModelTimingValidationError
+
 from collections import deque
 from copy import copy
 from io import StringIO
@@ -81,7 +83,7 @@ def _stream(backend, stores, *, translation=0, stalls=False, gap=0):
         if index == len(stores) and not backend.outstanding:
             return dict(issued=issued, completed=completed, blocked_cycles=blocked,
                         held_cycles=held, max_pending=max_pending)
-    raise RuntimeError("backend validation timed out")
+    raise ModelTimingValidationError("backend validation timed out")
 
 
 def _engine_prediction(facts, stores, beats, launch):
@@ -105,7 +107,7 @@ def _engine_prediction(facts, stores, beats, launch):
             in_flight += 1
         if index == beats and in_flight == 0:
             return dict(issued=issued, completed=completed, retired_cycle=cycle)
-    raise RuntimeError("DMA fact prediction timed out")
+    raise ModelTimingValidationError("DMA fact prediction timed out")
 
 
 def _engine_observation(cfg, *, store, beats):
@@ -143,11 +145,11 @@ def _engine_observation(cfg, *, store, beats):
             if age and not unit.has_in_flight:
                 result = state.dram[dram_address:dram_address + size] if store else state.read_vmem(0, 0, size)
                 if not torch.equal(result, data):
-                    raise RuntimeError("isolated DMA validation data mismatch")
+                    raise ModelTimingValidationError("isolated DMA validation data mismatch")
                 if unit.backend.outstanding or unit._in_flight or unit._ids_in_flight:
-                    raise RuntimeError("isolated DMA validation did not drain")
+                    raise ModelTimingValidationError("isolated DMA validation did not drain")
                 return dict(issued=issued, completed=completed, retired_cycle=unit.cycle)
-        raise RuntimeError("native isolated DMA validation timed out")
+        raise ModelTimingValidationError("native isolated DMA validation timed out")
     finally:
         state.close()
 
@@ -195,10 +197,10 @@ def _mixed_engine_observation(cfg, facts, *, fact_backend=False):
                                torch.equal(state.read_vmem(2 * bank, 0, size), read1),
                                torch.equal(state.dram[base + bank:base + bank + size], store))
                 if not all(comparisons) or unit.backend.outstanding or unit._in_flight:
-                    raise RuntimeError("mixed DMA bytes or drain validation failed")
+                    raise ModelTimingValidationError("mixed DMA bytes or drain validation failed")
                 return dict(trace=trace, retired_cycle=unit.cycle, bytes_per_command=size,
                             commands=len(commands), bytes_verified=True)
-        raise RuntimeError("mixed native DMA validation timed out")
+        raise ModelTimingValidationError("mixed native DMA validation timed out")
     finally:
         state.close()
 
@@ -231,7 +233,7 @@ def validate_curve(cfg, facts, out):
                 translated = _stream(make_memory_backend(selected), stores, translation=0x1000000080,
                                      stalls=stalls, gap=gap)
                 if native != expected or translated != native:
-                    raise RuntimeError("curve backend fact/native mismatch: " + key)
+                    raise ModelTimingValidationError("curve backend fact/native mismatch: " + key)
                 receipt = dict(name=key, passed=True, beats=len(stores), address_translation_invariant=True,
                                selected_curves=reference.selected, trace=native)
                 (out / (key + ".json")).write_bytes(canonical(receipt) + b"\n")
@@ -244,7 +246,7 @@ def validate_curve(cfg, facts, out):
                     native = _engine_observation(selected, store=store, beats=beats)
                     if native != expected:
                         (out / (key + "-mismatch.json")).write_bytes(canonical(dict(expected=expected, native=native)))
-                        raise RuntimeError("isolated DMA fact/native mismatch: " + key)
+                        raise ModelTimingValidationError("isolated DMA fact/native mismatch: " + key)
                     (out / (key + ".json")).write_bytes(canonical(dict(name=key, passed=True, trace=native)) + b"\n")
                     checks.append(dict(name=key, passed=True, beats=beats, bytes_verified=True,
                                        retired_cycle=native["retired_cycle"]))
@@ -252,7 +254,7 @@ def validate_curve(cfg, facts, out):
             native = _mixed_engine_observation(selected, derived)
             expected = _mixed_engine_observation(selected, derived, fact_backend=True)
             if native != expected:
-                raise RuntimeError("mixed native DMA fact/backend mismatch: " + key)
+                raise ModelTimingValidationError("mixed native DMA fact/backend mismatch: " + key)
             (out / (key + ".json")).write_bytes(canonical(dict(name=key, passed=True, **native)) + b"\n")
             checks.append(dict(name=key, passed=True, bytes_verified=True,
                                commands=native["commands"], retired_cycle=native["retired_cycle"]))

@@ -1,6 +1,8 @@
 """Extract LSU/XLU event predicates and reservation releases from their source AST."""
 from __future__ import annotations
 
+from atlas_model_diagnostics import UnsupportedModelTiming
+
 import ast
 from copy import deepcopy
 import inspect
@@ -10,7 +12,7 @@ from atlas_derive_vpu import UnsupportedVPU
 from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation as _reservation, timing_block
 
 
-class UnsupportedMemory(ValueError):
+class UnsupportedMemory(UnsupportedModelTiming):
     """The selected memory engine has no reviewed structural timing interpretation."""
 
 

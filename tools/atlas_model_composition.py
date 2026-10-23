@@ -6,6 +6,8 @@ is eligible only when every minimum agrees and every recorded negative rejects.
 """
 from __future__ import annotations
 
+from atlas_model_diagnostics import ModelTimingEvidenceError, model_timing_cli
+
 import argparse
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -56,12 +58,12 @@ class RuleSet:
 
     def __init__(self, per_op):
         if per_op.get("schema") != "atlas.model_timing.v1" or per_op.get("age_convention") != "issue_edge_zero":
-            raise ValueError("unsupported isolated footprint schema")
+            raise ModelTimingEvidenceError("unsupported isolated footprint schema")
         self.blocks = {block["name"]: block for block in per_op["op_timing"] if block.get("resolved")}
         self.model = per_op["model"]
         self.releases = per_op.get("reservation_releases", {})
         if not isinstance(self.releases, dict):
-            raise ValueError("invalid isolated reservation releases")
+            raise ModelTimingEvidenceError("invalid isolated reservation releases")
 
     def first_free_age(self, name):
         return self.blocks[name]["first_free_age"]
@@ -136,7 +138,7 @@ class RuleSet:
                     type(release.get("available_age")) is not int or
                     release["available_age"] != release["release_age"] + 1 or
                     not max(ages) < release["available_age"] <= self.first_free_age(name)):
-                raise ValueError(f"missing or invalid {direction} reservation release for {name}")
+                raise ModelTimingEvidenceError(f"missing or invalid {direction} reservation release for {name}")
             for bank in range(count):
                 requests = tuple((age, row % 32) for row, age in enumerate(ages) if (row // 32) % count == bank)
                 (writes if write else reads).append(Register(write, requests, release["available_age"]))
@@ -161,7 +163,7 @@ class RuleSet:
         elif unit == "vlsu":
             add("mreg_write" if part == "vload" else "mreg_read", part == "vload")
         elif unit != "scalar_lsu":
-            raise ValueError("unmodelled engine: " + unit)
+            raise ModelTimingEvidenceError("unmodelled engine: " + unit)
         return tuple(reads + writes)
 
     def _structural_bound(self, first, second, relation):
@@ -214,26 +216,26 @@ class RuleSet:
     def bounds(self, first, second, relation_items):
         relation = dict(relation_items)
         if first not in self.blocks or second not in self.blocks:
-            raise ValueError("operation lacks isolated footprint")
+            raise ModelTimingEvidenceError("operation lacks isolated footprint")
         unknown = set(relation) - {"mreg_banks", "accumulator", "weight_slot", "vmem_bank", "vmem_window",
             "vmem_word_window", "first_mnemonic", "second_mnemonic", "scalar_registers", "scalar_destination_file",
             "scalar_other_registers", "scalar_address_alignment", "first_scalar_byte_offset", "second_scalar_byte_offset"}
         if unknown:
-            raise ValueError("unsupported relation keys: " + ",".join(sorted(unknown)))
+            raise ModelTimingEvidenceError("unsupported relation keys: " + ",".join(sorted(unknown)))
         bounds = dict(structural_issue=self._structural_bound(first, second, relation),
                       logical_reservation=1, bank_or_row=1, vmem_bank=1)
         ra, rb = self.registers(first), self.registers(second)
         banks = relation.get("mreg_banks")
         if banks is None:
-            raise ValueError("missing complete MREG relation")
+            raise ModelTimingEvidenceError("missing complete MREG relation")
         if banks != "disjoint":
             for term in banks.split(","):
                 match = re.fullmatch(r"(\d+)([=~])(\d+)", term)
                 if not match:
-                    raise ValueError("unsupported MREG relation term")
+                    raise ModelTimingEvidenceError("unsupported MREG relation term")
                 i, sign, j = int(match[1]), match[2], int(match[3])
                 if i >= len(ra) or j >= len(rb):
-                    raise ValueError("MREG relation operand outside isolated footprint")
+                    raise ModelTimingEvidenceError("MREG relation operand outside isolated footprint")
                 left, right = ra[i], rb[j]
                 if sign == "=" and (left.write or right.write and second != "vlsu.vload"):
                     bounds["logical_reservation"] = max(bounds["logical_reservation"], left.release)
@@ -261,19 +263,19 @@ class RuleSet:
         address_keys = {"vmem_address_delta_bytes", "first_vmem_bank_byte_offset", "second_vmem_bank_byte_offset"}
         if address_keys & relation.keys():
             if not address_keys <= relation.keys() or engine(first) != "vlsu" or engine(second) != "vlsu":
-                raise ValueError("incomplete or unsupported vector-memory address relation")
+                raise ModelTimingEvidenceError("incomplete or unsupported vector-memory address relation")
             if any(not isinstance(relation[key], str) or not re.fullmatch(r"-?\d+", relation[key]) for key in address_keys):
-                raise ValueError("invalid vector-memory address qualifier")
+                raise ModelTimingEvidenceError("invalid vector-memory address qualifier")
             delta, a, b = (int(relation[key]) for key in
                            ("vmem_address_delta_bytes", "first_vmem_bank_byte_offset", "second_vmem_bank_byte_offset"))
             bank_delta = delta - (b-a)
             if any(offset < 0 or offset + 1024 > 262144 or offset % 1024 for offset in (a, b)) or \
                     bank_delta % 262144 or abs(bank_delta) > 5 * 262144 or \
                     relation.get("vmem_bank") != ("same" if bank_delta == 0 else "other"):
-                raise ValueError("inconsistent vector-memory bank addresses")
+                raise ModelTimingEvidenceError("inconsistent vector-memory bank addresses")
             if any(key in relation and relation[key] != ("same" if delta == 0 else "disjoint")
                    for key in ("vmem_window", "vmem_word_window")):
-                raise ValueError("inconsistent vector-memory windows")
+                raise ModelTimingEvidenceError("inconsistent vector-memory windows")
             for key in address_keys:
                 del derived_relation[key]
         validate_relation(derived_relation)
@@ -388,6 +390,7 @@ def replay(master, per_op, output, per_op_sha256):
     return result
 
 
+@model_timing_cli
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--master", required=True)
