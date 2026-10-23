@@ -9,10 +9,12 @@ search only exposes existing scheduling and free DMA-window choices.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shlex
@@ -154,7 +156,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             raise ValueError("model scoring requires --npu-model")
         scorer = ModelScorer(model, model_regions)
     seen: set[Candidate] = set()
-    score_cache: dict[tuple[int, ...], int] = {}
+    score_cache: dict[tuple[int, ...], int | Future] = {}
+    score_executor: ProcessPoolExecutor | None = None
     best: dict | None = None
 
     def compile_candidate(candidate: Candidate, row: dict) -> None:
@@ -170,8 +173,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if provider == "model":
                 with score_lock:
                     if words not in score_cache:
-                        score_cache[words] = scorer(program, profile=profile)
-                    row["cycles"] = score_cache[words]
+                        score_cache[words] = (score_executor.submit(scorer, program, profile)
+                                              if score_executor else scorer(program, profile=profile))
+                    cached = score_cache[words]
+                row["cycles"] = cached.result() if isinstance(cached, Future) else cached
             row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
         except Exception as error:
@@ -201,28 +206,33 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         best = min((row for row in receipt["candidates"] if row["status"] == "PASS"),
                    key=lambda row: (row.get("cycles", 0), row["index"]))
 
-    evaluate_batch([(Candidate(), "default")])
-    if provider == "model":
-        evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in (1, 2, 4)] +
-                       [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds])
-        def winner() -> Candidate:
-            options = dict(best["options"])
-            options["store_windows"] = tuple(options["store_windows"])
-            return Candidate(**options)
+    # Model imports, configuration and execution are isolated from compiler threads.
+    with ExitStack() as stack:
+        if standard_scorer and provider == "model":
+            score_executor = stack.enter_context(ProcessPoolExecutor(
+                max_workers=workers, mp_context=multiprocessing.get_context("spawn")))
+        evaluate_batch([(Candidate(), "default")])
+        if provider == "model":
+            evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in (1, 2, 4)] +
+                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds])
+            def winner() -> Candidate:
+                options = dict(best["options"])
+                options["store_windows"] = tuple(options["store_windows"])
+                return Candidate(**options)
 
-        program = json.loads((output / best["directory"] / "program.json").read_text())
-        store_count = sum(instruction.get("operation") == "atlas.dma" and
-                          instruction.get("fields", {}).get("direction") == "store"
-                          for instruction in program["instructions"])
-        # All legal per-store free ranks are expressible; allocation maps ranks
-        # modulo that store's actual free set and never claims a held window.
-        window_base = winner()
-        placements = [(replace(window_base, wait_placement="source"), "wait-placement")]
-        placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
-                       for ranks in store_window_candidates]
-        placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
-                       for rank in range(1, 8) if store_count]
-        evaluate_batch(placements)
+            program = json.loads((output / best["directory"] / "program.json").read_text())
+            store_count = sum(instruction.get("operation") == "atlas.dma" and
+                              instruction.get("fields", {}).get("direction") == "store"
+                              for instruction in program["instructions"])
+            # All legal per-store free ranks are expressible; allocation maps ranks
+            # modulo that store's actual free set and never claims a held window.
+            window_base = winner()
+            placements = [(replace(window_base, wait_placement="source"), "wait-placement")]
+            placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
+                           for ranks in store_window_candidates]
+            placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
+                           for rank in range(1, 8) if store_count]
+            evaluate_batch(placements)
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
