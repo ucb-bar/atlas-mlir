@@ -635,6 +635,192 @@ void testOverlap(const std::shared_ptr<const ModelTimingFacts> &facts) {
   reject(std::move(omitted), "nonadjacent chain relations cannot be omitted");
 }
 
+Object derivedFixture(const ModelTimingFacts &facts) {
+  Object contract{{"capacity", Object{{"sequencer_cycles", 32}, {"mxu0_compute", 3},
+                                      {"mxu1_compute", 2}, {"vpu_slots", 2}}}};
+  auto perOp = fixture();
+  return Object{{"schema", "atlas.model_overlap_derived.v1"}, {"age_convention", "issue_edge_zero"},
+      {"per_op_sha256", facts.factsSha256()}, {"model", std::move(*perOp.get("model"))},
+      {"derivation", Object{{"contract", "source-resource-occupancy-v1"}, {"tool_sha256", std::string(64, 'a')},
+          {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(contract))))},
+          {"source_contract", std::move(contract)}}},
+      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'b')},
+          {"sample_policy", "source-mechanism-boundaries-v1"}, {"positive_runs", 2}, {"negative_runs", 3},
+          {"negative_rejections", 1}, {"numerical_checks", 2}, {"engines", Object{{"vpu", Object{
+              {"positive_runs", 2}, {"negative_runs", 3}, {"negative_rejections", 1}, {"numerical_checks", 2},
+              {"chain_positive_runs", 1}, {"chain_negative_runs", 1}}}}}}},
+      {"pairs", Array{Object{{"first", "vpu.mov"}, {"second", "vpu.mov"},
+          {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 73}}}},
+      {"composition", Object{{"engines", Object{{"vpu", Array{"vpu.mov"}}}},
+          {"classes", Array{Object{{"engine", "vpu"}, {"relation", Object{{"mreg_banks", "disjoint"}}}}}}}}};
+}
+
+void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
+  auto original = derivedFixture(*facts);
+  std::string bytes = encode(original);
+  auto loaded = parseModelOverlapFacts(bytes, hash(bytes), *facts);
+  check(bool(loaded), "source-derived evidence with bounded native gate loads");
+  if (!loaded) { llvm::errs() << llvm::toString(loaded.takeError()) << '\n'; return; }
+  check(loaded->metadata().count("derived_sha256") && !loaded->metadata().count("composed_sha256"),
+        "source-derived evidence preserves truthful distinct provenance");
+  std::vector<ModelOverlapCommand> commands{
+      {"vpu.mov", Engine::Vpu, {0, 1, 4, 5}, {}, {}, 0, 73},
+      {"vpu.mov", Engine::Vpu, {8, 9, 12, 13}, {}, {}, 40, 73},
+      {"vpu.mov", Engine::Vpu, {16, 17, 20, 21}, {}, {}, 73, 73}};
+  check(loaded->admits({commands[0], commands[1]}, false), "source pair uses exact relation and bounded gap");
+  auto second = commands[1]; second.issue = 0;
+  check(!loaded->admits({commands[0], second}, false), "source pair refuses zero gap");
+  second.issue = 74;
+  check(!loaded->admits({commands[0], second}, false), "source pair cannot exceed selected live domain");
+  second = commands[1]; second.registers[0] = 32;
+  check(!loaded->admits({commands[0], second}, false), "source disjoint pair cannot waive a bank alias");
+  check(loaded->admits(commands, true), "source composition uses supported complete pair domain");
+  check(!loaded->admits(commands, false), "source composition retains explicit chains option");
+  commands[1].issue = 1; commands[2].issue = 71;
+  check(!loaded->admits(commands, true), "source composition preserves VPU structural tracker capacity");
+  commands[2].issue = 72;
+  check(loaded->admits(commands, true), "source composition preserves completed-edge slot release");
+  commands[2].registers[0] = 32;
+  check(!loaded->admits(commands, true), "source composition checks every exact live pair");
+  auto provider = modelTimingProvider(facts, std::make_shared<ModelOverlapFacts>(*loaded), true);
+  Instr a{findOp("vmov"), 4, 0, 0}, b{findOp("vmov"), 12, 8, 0};
+  auto state = provider.createReservations();
+  auto fa = facts->resolve(a, unknownRegs()), fb = facts->resolve(b, unknownRegs());
+  check(state.value->reserve(a, fa, 0).empty() && state.value->conflict(b, fb, 10).value.empty(),
+        "source proof enables the existing reservation waiver");
+  check(state.value->onWait({findOp("dma.wait.ch0")}, 1).empty() &&
+        !state.value->conflict(b, fb, 10).value.empty(), "source proof retains runtime wait invalidation");
+  auto mixed = loaded->addComposedFacts("{}", hash("{}"), *facts);
+  check(bool(mixed), "catalog composition cannot extend source-derived evidence");
+  if (mixed) llvm::consumeError(std::move(mixed));
+  auto reject = [&](Object object, const char *why) {
+    std::string contents = encode(std::move(object));
+    auto result = parseModelOverlapFacts(contents, hash(contents), *facts);
+    check(!result, why);
+    if (!result) llvm::consumeError(result.takeError());
+  };
+  invalidFacts(original, {
+      {"source artifact hash cannot be bypassed", "schema", "unknown"},
+      {"source artifact must bind exact operation facts", "per_op_sha256", std::string(64, '0')},
+      {"source model identity cannot change", "model/source_sha256", std::string(64, '0')},
+      {"source numerical identity cannot change", "model/numerical_data_sha256", std::string(64, '0')},
+      {"source explicit configuration cannot change", "model/configuration/fetch_width", 2},
+      {"unknown source claim rejects", "verilator", Object{{"confirmed", true}}},
+      {"source contract version must be reviewed", "derivation/contract", "unreviewed"},
+      {"source contract contents must match their digest", "derivation/source_contract_sha256", std::string(64, '0')},
+      {"source tool digest is required", "derivation/tool_sha256", "bad"},
+      {"unvalidated candidate cannot be selected", "validation/passed", false},
+      {"source validation report hash must be well formed", "validation/report_sha256", "bad"},
+      {"source sample policy must be recognized", "validation/sample_policy", "unreviewed"},
+      {"source validation numerical checks are mandatory", "validation/engines/vpu/numerical_checks", 0},
+      {"source native rejections are mandatory", "validation/engines/vpu/negative_rejections", 0},
+      {"source root totals must aggregate the engine probes", "validation/positive_runs", 3},
+      {"source composition needs native chain positives", "validation/engines/vpu/chain_positive_runs", 0},
+      {"source composition needs native chain rejections", "validation/engines/vpu/chain_negative_runs", 0},
+      {"source chain rejects cannot exceed native rejects", "validation/engines/vpu/chain_negative_runs", 2},
+      {"source pair lower bound must be positive", "pairs/0/minimum", 0},
+      {"source pair lower bound cannot exceed upper bound", "pairs/0/minimum", 74},
+      {"source pair high must equal live boundary", "pairs/0/high", 74},
+      {"source pair relation must be complete", "pairs/0/relation/mreg_banks", nullptr, true},
+      {"source pair unknown relation rejects", "pairs/0/relation/unknown", "other"},
+      {"source pair unknown fields reject", "pairs/0/unknown", true},
+      {"source composition cannot expand operation domain", "composition/engines/vpu", Array{"vpu.add"}},
+      {"source composition cannot expand relation classes", "composition/classes/0/relation/mreg_banks", "bank_alias"},
+      {"source scalar engine cannot claim general composition", "composition/engines/scalar_lsu", Array{"scalar_lsu.load"}}
+  }, reject);
+  for (const char *key : {"sequencer_cycles", "mxu0_compute", "mxu1_compute", "vpu_slots"}) {
+    auto changed = original;
+    auto *derivation = changed.getObject("derivation");
+    auto *contract = derivation->getObject("source_contract");
+    (*contract->getObject("capacity"))[key] = 99;
+    (*derivation)["source_contract_sha256"] = hash(canonicalJson(llvm::json::Value(Object(*contract))));
+    reject(std::move(changed), "even a rehashed contract cannot alter compiled structural capacities");
+  }
+  auto duplicate = original;
+  duplicate.getArray("pairs")->push_back((*duplicate.getArray("pairs"))[0]);
+  reject(std::move(duplicate), "duplicate exact source pair rejects");
+  duplicate = original;
+  auto *classes = duplicate.getObject("composition")->getArray("classes");
+  classes->push_back((*classes)[0]);
+  reject(std::move(duplicate), "duplicate source composition class rejects");
+  auto wrongHash = parseModelOverlapFacts(bytes, std::string(64, '0'), *facts);
+  check(!wrongHash, "source artifact must match selected file digest");
+  if (!wrongHash) llvm::consumeError(wrongHash.takeError());
+
+  auto scalarSource = fixture();
+  scalarSource.getArray("op_timing")->push_back(block("scalar_lsu.load", "scalar_lsu", 4,
+      Object{{"vmem_read", group(0, 1)}, {"load_write", group(3, 1)}}));
+  scalarSource.getArray("op_timing")->push_back(block("scalar_lsu.store", "scalar_lsu", 2,
+      Object{{"vmem_write", group(0, 1)}}));
+  std::string scalarBytes = encode(std::move(scalarSource));
+  auto scalarFacts = parseModelTimingFactsForTesting(scalarBytes, hash(scalarBytes));
+  check(bool(scalarFacts), "source scalar operation fixture loads");
+  if (!scalarFacts) { llvm::consumeError(scalarFacts.takeError()); return; }
+  auto scalar = derivedFixture(*scalarFacts);
+  auto *scalarValidation = scalar.getObject("validation");
+  Object scalarRuns(*scalarValidation->getObject("engines")->getObject("vpu"));
+  scalarRuns.erase("chain_positive_runs"); scalarRuns.erase("chain_negative_runs");
+  (*scalarValidation)["engines"] = Object{{"scalar_lsu", std::move(scalarRuns)}};
+  scalar["composition"] = Object{{"engines", Object{}}, {"classes", Array{}}};
+  scalar["pairs"] = Array{Object{{"first", "scalar_lsu.load"}, {"second", "scalar_lsu.store"},
+      {"minimum", 1}, {"high", 4}, {"relation", Object{{"mreg_banks", "disjoint"},
+          {"first_mnemonic", "lw"}, {"second_mnemonic", "sw"}, {"scalar_registers", "independent"},
+          {"scalar_address_alignment", "word"}, {"vmem_bank", "same"}, {"vmem_window", "disjoint"}}}}};
+  scalarBytes = encode(scalar);
+  auto scalarOverlap = parseModelOverlapFacts(scalarBytes, hash(scalarBytes), *scalarFacts);
+  check(bool(scalarOverlap), "source scalar pairs load with complete immutable-context predicates");
+  if (!scalarOverlap) { llvm::consumeError(scalarOverlap.takeError()); return; }
+  check(!scalarOverlap->admits({{"scalar_lsu.load", Engine::Scalar, {}, {}, {}, 0, 4},
+                                {"scalar_lsu.store", Engine::Scalar, {}, {}, {}, 1, 2}}, false),
+        "source scalar evidence cannot admit absent replay contexts");
+  (*scalar.getArray("pairs"))[0].getAsObject()->getObject("relation")->erase("scalar_registers");
+  scalarBytes = encode(std::move(scalar));
+  auto incompleteScalar = parseModelOverlapFacts(scalarBytes, hash(scalarBytes), *scalarFacts);
+  check(!incompleteScalar, "source scalar relation must retain all context predicates");
+  if (!incompleteScalar) llvm::consumeError(incompleteScalar.takeError());
+
+  auto mxuSource = fixture();
+  mxuSource.getArray("op_timing")->push_back(block("mxu0.push_acc_fp8", "mxu0", 33,
+      Object{{"mreg_read1", group(0, 32)}, {"acc_load", group(1, 32)}, {"data_busy", group(0, 32)}}));
+  std::string mxuFactsBytes = encode(std::move(mxuSource));
+  auto mxuParsed = parseModelTimingFactsForTesting(mxuFactsBytes, hash(mxuFactsBytes));
+  if (!mxuParsed) { llvm::consumeError(mxuParsed.takeError()); check(false, "derived MXU fixture loads"); return; }
+  auto mxuFacts = std::make_shared<ModelTimingFacts>(std::move(*mxuParsed));
+  auto object = derivedFixture(*mxuFacts);
+  auto *validation = object.getObject("validation");
+  Object runs(*validation->getObject("engines")->getObject("vpu"));
+  (*validation)["engines"] = Object{{"mxu0", std::move(runs)}};
+  object["pairs"] = Array{};
+  auto addPair = [&](const char *first, const char *second, Object rel) {
+    object.getArray("pairs")->push_back(Object{{"first", first}, {"second", second},
+        {"relation", std::move(rel)}, {"minimum", 1}, {"high", mxuFacts->block(first)->firstFreeAge}});
+  };
+  addPair("mxu0.push_acc_fp8", "mxu0.push_weight", Object{{"mreg_banks", "disjoint"}});
+  addPair("mxu0.push_acc_fp8", "mxu0.matmul", Object{{"mreg_banks", "disjoint"}, {"accumulator", "other"}});
+  addPair("mxu0.push_weight", "mxu0.matmul", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "other"}});
+  object["composition"] = Object{{"engines", Object{{"mxu0", Array{
+      "mxu0.push_acc_fp8", "mxu0.push_weight", "mxu0.matmul"}}}}, {"classes", Array{
+          Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}}}},
+          Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}, {"accumulator", "other"}}}},
+          Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "other"}}}}}}};
+  bytes = encode(std::move(object));
+  auto mxu = parseModelOverlapFacts(bytes, hash(bytes), *mxuFacts);
+  check(bool(mxu), "source-derived MXU composition fixture loads");
+  if (!mxu) { llvm::errs() << llvm::toString(mxu.takeError()) << '\n'; return; }
+  auto mxuProvider = modelTimingProvider(mxuFacts, std::make_shared<ModelOverlapFacts>(*mxu), true);
+  Instr accumulator{findOp("vmatpush.acc.fp8.mxu0"), 0, 4, 0};
+  Instr weight{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
+  Instr compute{findOp("vmatmul.mxu0"), 1, 8, 1};
+  state = mxuProvider.createReservations();
+  check(state.value->reserve(accumulator, mxuFacts->resolve(accumulator, unknownRegs()), 0).empty() &&
+        state.value->reserve(weight, mxuFacts->resolve(weight, unknownRegs()), 2).empty(),
+        "source retired-prefix regression starts with an admitted pair");
+  check(!state.value->conflict(compute, mxuFacts->resolve(compute, unknownRegs()), 33).value.empty(),
+        "source-derived provenance activates retired-command MXU port-history check");
+  check(state.value->conflict(compute, mxuFacts->resolve(compute, unknownRegs()), 34).value.empty(),
+        "source-derived retired-prefix check releases at the existing port boundary");
+}
+
 void testComposed() {
   auto source = fixture();
   (*source.getObject("model"))["revision"] = "9e6313bddecb8ba936206eb347f5cd4e5335282c";
@@ -1086,6 +1272,7 @@ int main(int argc, char **argv) {
   }
   auto facts = std::make_shared<ModelTimingFacts>(std::move(*loaded));
   testOverlap(facts);
+  testDerivedOverlap(facts);
   testComposed();
   testStreamedWeights(facts);
   testVloadWriteDuringRead(facts);
