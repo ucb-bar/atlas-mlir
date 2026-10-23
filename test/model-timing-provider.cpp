@@ -343,6 +343,125 @@ void testOverlap(const std::shared_ptr<const ModelTimingFacts> &facts) {
   (*omitted.getArray("chains"))[0].getAsObject()->getArray("all_pair_relations")->pop_back();
   reject(std::move(omitted), "nonadjacent chain relations cannot be omitted");
 }
+
+void testComposed() {
+  auto source = fixture();
+  (*source.getObject("model"))["revision"] = "9e6313bddecb8ba936206eb347f5cd4e5335282c";
+  (*source.getObject("model"))["source_sha256"] = "a9a919c3d118af94e2783c8969e05ad19f8d2523ec093922c4f9957641b54426";
+  source.getArray("op_timing")->push_back(block("mxu0.push_acc_fp8", "mxu0", 33,
+      Object{{"mreg_read1", group(0, 32)}, {"acc_load", group(1, 32)}, {"data_busy", group(0, 32)}}));
+  std::string sourceBytes = encode(std::move(source));
+  auto parsed = parseModelTimingFacts(sourceBytes, hash(sourceBytes));
+  check(bool(parsed), "composition model fixture loads");
+  if (!parsed) { llvm::consumeError(parsed.takeError()); return; }
+  auto facts = std::make_shared<ModelTimingFacts>(std::move(*parsed));
+  auto original = overlapFixture(*facts);
+  for (const char *key : {"revision", "source_sha256"})
+    (*original.getObject("model"))[key] = facts->modelProvenance().at(key);
+  original["chains"] = Array{};
+  std::string base = encode(std::move(original));
+  auto loaded = parseModelOverlapFacts(base, hash(base), *facts);
+  check(bool(loaded), "composition base loads");
+  if (!loaded) { llvm::consumeError(loaded.takeError()); return; }
+  auto side = [&] {
+    return Object{{"schema", "atlas.model_composed.v1"}, {"rule", "row-footprints-and-structural-capacity-v1"},
+        {"age_convention", "issue_edge_zero"},
+        {"provenance", Object{{"per_op_sha256", facts->factsSha256()}, {"base_pairs_sha256", hash(base)},
+            {"master_sha256", std::string(64, 'a')}, {"deriver_sha256", std::string(64, 'b')},
+            {"pair_replay_sha256", std::string(64, 'c')}, {"chain_replay_sha256", std::string(64, 'd')},
+            {"holdouts_sha256", std::string(64, 'e')}, {"revision", facts->modelProvenance().at("revision")},
+            {"configuration_sha256", facts->modelProvenance().at("configuration_sha256")}}},
+        {"engines", Object{{"vpu", Object{{"operations", Array{"vpu.mov"}}, {"chains", 1},
+            {"confirmed_chains", 1}, {"accepted_chains", 1}, {"negative_points", 1}, {"rejected_negatives", 1},
+            {"holdout_chains", 1}, {"holdout_pairs", 0}, {"holdout_failures", 0}}}}},
+        {"pair_classes", Array{Object{{"engine", "vpu"}, {"relation", Object{{"mreg_banks", "disjoint"}}},
+            {"pairs", 1}, {"confirmed", 1}, {"equal", 1}, {"negative_points", 1}, {"negative_violations", 0}}}},
+        {"pairs", Array{}}, {"chains", Array{}}};
+  };
+  std::vector<ModelOverlapCommand> commands{
+      {"vpu.mov", Engine::Vpu, {0, 1, 4, 5}, {}, {}, 0, 73},
+      {"vpu.mov", Engine::Vpu, {8, 9, 12, 13}, {}, {}, 40, 73},
+      {"vpu.mov", Engine::Vpu, {16, 17, 20, 21}, {}, {}, 73, 73}};
+  check(!loaded->admits(commands, true), "unmeasured vector refuses without side evidence");
+  std::string bytes = encode(side());
+  auto composed = *loaded;
+  auto error = composed.addComposedFacts(bytes, hash(bytes), *facts);
+  check(!error, "validated composition side loads");
+  if (error) { llvm::consumeError(std::move(error)); return; }
+  check(composed.admits(commands, true), "validated pair composition admits a new exact vector");
+  check(!composed.admits(commands, false), "composition still requires explicit chains selection");
+  commands[1].issue = 1; commands[2].issue = 71;
+  check(!composed.admits(commands, true), "three live VPU slots refuse despite individually admitted pairs");
+  commands[2].issue = 72;
+  check(composed.admits(commands, true), "final write edge frees slot while retaining pair coverage");
+  commands[2].registers = {32, 33, 36, 37};
+  check(!composed.admits(commands, true), "unwitnessed relation class remains refused");
+  commands[2].registers = {16, 17, 20, 21}; commands[2].block = "vpu.add";
+  check(!composed.admits(commands, true), "operation outside selected composition domain remains refused");
+  auto reject = [&](Object object, const char *message) {
+    auto candidate = *loaded;
+    std::string contents = encode(std::move(object));
+    auto error = candidate.addComposedFacts(contents, hash(contents), *facts);
+    check(bool(error), message);
+    if (error) llvm::consumeError(std::move(error));
+  };
+  for (const char *key : {"equal", "confirmed"})
+    invalidFacts(side(), {{"class requires full equality and a confirmed witness",
+                           std::string("pair_classes/0/") + key, 0}}, reject);
+  for (const char *key : {"accepted_chains", "rejected_negatives", "holdout_chains"})
+    invalidFacts(side(), {{"chain class requires complete replay and holdouts",
+                           std::string("engines/vpu/") + key, 0}}, reject);
+  invalidFacts(side(), {
+      {"any negative violation rejects class", "pair_classes/0/negative_violations", 1},
+      {"failed holdout rejects class", "engines/vpu/holdout_failures", 1},
+      {"side cannot select different footprints", "provenance/per_op_sha256", std::string(64, '0')},
+      {"side cannot omit master provenance", "provenance/master_sha256", nullptr, true},
+      {"unknown composition policy fails closed", "unknown_policy", true},
+      {"confirmed chain count cannot exceed replay count", "engines/vpu/confirmed_chains", 2},
+      {"negative holdout count rejects", "engines/vpu/holdout_pairs", -1},
+      {"confirmed pair count cannot exceed replay count", "pair_classes/0/confirmed", 2}}, reject);
+  auto wrongHash = loaded->addComposedFacts(bytes, std::string(64, '0'), *facts);
+  check(bool(wrongHash), "side replacement fails the selected hash");
+  if (wrongHash) llvm::consumeError(std::move(wrongHash));
+  auto object = side();
+  Object mxuAudit(*object.getObject("engines")->getObject("vpu"));
+  mxuAudit["operations"] = Array{"mxu0.push_weight", "mxu0.push_acc_fp8", "mxu0.matmul"};
+  (*object.getObject("engines"))["mxu0"] = std::move(mxuAudit);
+  auto addPair = [&](const char *first, const char *second, Object relation) {
+    object.getArray("pair_classes")->push_back(Object{{"engine", "mxu0"}, {"relation", Object(relation)},
+        {"pairs", 1}, {"confirmed", 1}, {"equal", 1}, {"negative_points", 1}, {"negative_violations", 0}});
+    object.getArray("pairs")->push_back(Object{{"first", first}, {"second", second},
+        {"relation", std::move(relation)}, {"minimum", 1}, {"high", facts->block(first)->firstFreeAge}});
+  };
+  addPair("mxu0.push_weight", "mxu0.push_acc_fp8", Object{{"mreg_banks", "disjoint"}});
+  addPair("mxu0.push_weight", "mxu0.matmul", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "other"}});
+  addPair("mxu0.push_acc_fp8", "mxu0.matmul", Object{{"mreg_banks", "disjoint"}, {"accumulator", "other"}});
+  object.getArray("pairs")->push_back(Object{{"first", "mxu0.push_acc_fp8"}, {"second", "mxu0.push_weight"},
+      {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 33}});
+  std::string mxuBytes = encode(std::move(object));
+  auto mxu = *loaded;
+  auto mxuError = mxu.addComposedFacts(mxuBytes, hash(mxuBytes), *facts);
+  check(!mxuError, "MXU composition fixture loads");
+  if (mxuError) { llvm::consumeError(std::move(mxuError)); return; }
+  commands = {{"mxu0.push_weight", Engine::Mxu0, {0}, {}, 0, 0, 40},
+              {"mxu0.push_acc_fp8", Engine::Mxu0, {4}, 0, {}, 1, 33},
+              {"mxu0.matmul", Engine::Mxu0, {8}, 1, 1, 2, 95}};
+  check(!mxu.admits(commands, true), "pair-safe triple refuses when P1 preference moves accumulator push onto P0");
+  commands[2].issue = 33;
+  check(mxu.admits(commands, true), "same triple admits once allocated P0 finishes");
+  auto provider = modelTimingProvider(facts, std::make_shared<ModelOverlapFacts>(mxu), true);
+  Instr accumulator{findOp("vmatpush.acc.fp8.mxu0"), 0, 4, 0};
+  Instr weight{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
+  Instr compute{findOp("vmatmul.mxu0"), 1, 8, 1};
+  auto state = provider.createReservations();
+  check(state.value->reserve(accumulator, facts->resolve(accumulator, unknownRegs()), 0).empty() &&
+        state.value->reserve(weight, facts->resolve(weight, unknownRegs()), 2).empty(),
+        "retired-prefix regression begins with an admitted accumulator/weight pair");
+  check(!state.value->conflict(compute, facts->resolve(compute, unknownRegs()), 33).value.empty(),
+        "retired prefix still determines the live weight push port");
+  check(state.value->conflict(compute, facts->resolve(compute, unknownRegs()), 34).value.empty(),
+        "retired-prefix chain admits after its P0 request window ends");
+}
 void testStreamedWeights(const std::shared_ptr<ModelTimingFacts> &facts) {
   Instr push{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
   Instr compute{findOp("vmatmul.mxu0"), 0, 2, 0};
@@ -506,6 +625,7 @@ int main(int argc, char **argv) {
   }
   auto facts = std::make_shared<ModelTimingFacts>(std::move(*loaded));
   testOverlap(facts);
+  testComposed();
   testStreamedWeights(facts);
   testVloadWriteDuringRead(facts);
   failures += testScalarOverlap(fixture());
