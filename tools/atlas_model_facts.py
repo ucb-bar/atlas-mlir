@@ -73,7 +73,9 @@ def tool_manifest():
              "atlas_model_semantics.py", "model-semantics.json", "atlas_validate_runtime.py",
              "atlas_derive_replay.py",
              "atlas_model_replay.py", "atlas_validate_replay.py", "atlas_derive_costs.py",
-             "atlas_search_policy.py", "model-search-policy.json"]
+             "atlas_search_policy.py", "model-search-policy.json",
+             "atlas_derive_admission.py", "atlas_validate_admission.py",
+             "atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -128,6 +130,10 @@ def regenerate(model, out):
     from atlas_validate_runtime import validate_runtime
     from atlas_derive_arch import derive_arch
     from atlas_derive_vocabulary import validate_vocabulary, derive_isa_metadata
+    from atlas_derive_admission import derive_admission
+    from atlas_validate_admission import validate_admission
+    from atlas_derive_dma_admission import derive_dma_admission
+    from atlas_validate_dma_admission import validate_dma_admission
 
     if safe_path(Path(npu_model.__file__).parent.parent) != model:
         raise UnsupportedModelTiming("imported model does not match --npu-model")
@@ -201,9 +207,9 @@ def regenerate(model, out):
                    vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
-                   limits=["Operation timings cover isolated disjoint operands; no pair, capacity or RTL evidence.",
-                           "DMA facts are proposal estimates validated against isolated native model probes only.",
-                           "Unit releases are serialized lifetime envelopes, not overlap/throughput admissions.",
+                   limits=["Operation timing blocks describe isolated disjoint operands; admission has separate source contracts.",
+                           "DMA costs are cold proposal estimates; dynamic completion still requires matching waits.",
+                           "Unit releases are isolated lifetime envelopes; engine_admission and overlap rules govern initiation.",
                            "VMEM releases describe physical port windows, not whole-operation reservations.",
                            "Logical MREG release requests take effect at the next begin_cycle.",
                            "ACC row events retain conservative provider lifetime policies.",
@@ -213,6 +219,19 @@ def regenerate(model, out):
                                 numerical_data_manifest_sha256=sha256(encoded(data)), observer_sources=observer_sources,
                                 generator_sources=generator_sources, contract_lock=LOCK))
     payload["validation"]["mxu_weight_validation"] = report["mxu_weight_validation"]
+    # Derive both contracts before any new native validation. Observations may
+    # reject a contract but never fit its initiation or resource predicates.
+    payload["engine_admission"] = derive_admission(model, payload)
+    payload["dma_admission"] = derive_dma_admission(model, payload)
+    admission_start = time.monotonic()
+    for field, validator in (("engine_admission", validate_admission),
+                             ("dma_admission", validate_dma_admission)):
+        print("Validating frozen source-derived " + field, flush=True)
+        qualified, admission_report = validator(model, payload, payload[field])
+        payload[field] = qualified
+        report_digest = write(out, field.replace("_", "-") + "-validation.json", admission_report)
+        payload[field]["validation"]["report_sha256"] = report_digest
+    admission_seconds = time.monotonic() - admission_start
     # Freeze rule semantics before sealing operation facts. The native gate then
     # validates a proposal bound to those final facts bytes; publish the bundle
     # lock only after it succeeds. This avoids a circular file-hash dependency.
@@ -239,7 +258,8 @@ def regenerate(model, out):
     write(out, "timing-receipt.json", dict(schema="atlas.model_derivation_receipt.v1",
                                          facts_sha256=facts_hash, semantic_payload_sha256=semantic_hash,
                                          validation_sha256=report_hash, derive_seconds=derive_seconds,
-                                         validation_seconds=validate_seconds, **overlap))
+                                         validation_seconds=validate_seconds,
+                                         admission_validation_seconds=admission_seconds, **overlap))
     print(json.dumps(dict(passed=True, operations=len(blocks), facts_sha256=facts_hash,
                           derive_seconds=derive_seconds, validation_seconds=validate_seconds,
                           **overlap)), flush=True)

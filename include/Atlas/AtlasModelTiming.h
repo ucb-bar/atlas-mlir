@@ -7,6 +7,7 @@
 #include "llvm/Support/JSON.h"
 #include <map>
 #include <optional>
+#include <set>
 
 namespace mlir::atlas {
 
@@ -55,6 +56,15 @@ struct ModelFrontendTiming {
   std::map<std::string, std::vector<ModelFrontendAccess>> instructions;
 };
 
+// Engine issue predicates are relational; isolated lifetimes remain envelopes.
+struct ModelEngineAdmission {
+  int vpuCapacity = 0;
+  int scalarLoadGap = 0;
+  std::map<std::string, int> vpuFinalWrite;
+  std::set<std::string> vpuDouble;
+  std::vector<std::set<std::string>> vpuLogicGroups;
+};
+
 class ModelTimingFacts {
 public:
   Footprint resolve(const Instr &in, const RegValues &regs) const;
@@ -70,6 +80,9 @@ public:
   bool dmaWait() const { return dma; }
   const std::string &overlapRulesSha256() const { return overlapRules; }
   bool allowsUnboundTestOverlap() const { return testOverlap; }
+  const ModelEngineAdmission *engineAdmission() const {
+    return admission ? &*admission : nullptr;
+  }
   TimingRuleResult<int> estimateDMACycles(int64_t bytes, bool store) const;
   TimingRuleResult<int> issueGap(const Instr &in) const;
   const ModelTimingBlock *block(llvm::StringRef name) const {
@@ -91,6 +104,7 @@ private:
   int dmaChannels = kAtlasDMAChannels;
   std::optional<ModelReplayProgram> replay;
   std::map<std::string, std::pair<Instr, Instr>> probes;
+  std::optional<ModelEngineAdmission> admission;
   static llvm::Expected<ModelTimingFacts> parseImpl(llvm::StringRef, llvm::StringRef, bool, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef, llvm::StringRef, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFactsForTesting(llvm::StringRef, llvm::StringRef, bool);

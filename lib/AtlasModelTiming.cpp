@@ -522,6 +522,15 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
     deterministic.erase("validation");
     semantic["dma_timing"] = std::move(deterministic);
   }
+  for (const char *key : {"engine_admission", "dma_admission"})
+    if (const auto *value = root.get(key)) {
+      const Object *document = value->getAsObject();
+      if (!document) return factsError(std::string(key) + " must be an object");
+      Object deterministic(*document);
+      deterministic.erase("validation");
+      deterministic.erase("producer_sources");
+      semantic[key] = std::move(deterministic);
+    }
   auto decoded = llvm::json::parse(*payloadJson);
   if (!decoded) return factsError(llvm::toString(decoded.takeError()));
   if (canonicalJson(*decoded) != canonicalJson(llvm::json::Value(std::move(semantic))))
@@ -789,6 +798,195 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   for (bool store : {false, true}) {
     auto checked = result.estimate(result.maxBytes, store);
     if (!checked.error.empty()) return error(checked.error);
+  }
+  return result;
+}
+// No scheduling state is added: this qualifies the existing asynchronous policy.
+llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::StringRef payloadHash) {
+  auto error = [](const std::string &why) { return factsError("DMA admission: " + why); };
+  const Object *d = root.getObject("dma_admission");
+  if (!d || !exactKeys(*d, {"schema", "age_convention", "contract", "source_sha256", "source_shapes",
+                             "configuration", "issue", "semantics", "producer_sources", "validation"}) ||
+      d->getString("schema") != "atlas.dma_admission.v1" ||
+      d->getString("age_convention") != "issue_edge_zero" ||
+      d->getString("contract") != "source-asynchronous-dma-admission-v1")
+    return error("requires source-derived asynchronous DMA issue contract");
+  const Object *sources = d->getObject("source_sha256"), *shapes = d->getObject("source_shapes");
+  if (!sources || !shapes ||
+      !exactKeys(*sources, {"core.py", "dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py"}) ||
+      !exactKeys(*shapes, {"core.py", "dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py"}))
+    return error("missing complete source identity");
+  for (const auto &[name, value] : *sources)
+    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed source hash");
+  if (shapes->getString("core.py") != "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5" ||
+      shapes->getString("lsu.py") != "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722" ||
+      shapes->getString("bank_conflict.py") != "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467")
+    return error("unreviewed Core/LSU/grant source shapes");
+  for (const auto &[key, value] : model_schema::dmaIdentity()) {
+    llvm::StringRef name(key);
+    if (name == "curve_sha256") continue;
+    auto actual = name.starts_with("shape:") ? shapes->getString(name.drop_front(6)) : sources->getString(name);
+    if (!actual || *actual != value) return error("DMA/backend source differs from reviewed identity");
+  }
+  const Object *engine = root.getObject("engine_admission");
+  const Object *contract = engine ? engine->getObject("source_contract") : nullptr;
+  const Object *engineSources = contract ? contract->getObject("source_sha256") : nullptr;
+  if (!engineSources) return error("missing source-qualified engine routing");
+  for (const char *name : {"core.py", "lsu.py", "bank_conflict.py"})
+    if (sources->getString(name) != engineSources->getString(name)) return error("engine source identities differ");
+  const Object *configuration = d->getObject("configuration"), *issue = d->getObject("issue");
+  if (!configuration || !exactKeys(*configuration, {"num_channels", "beat_bytes", "max_in_flight", "max_transfer_bytes", "vmem_bank_bytes"}) ||
+      !issue || !exactKeys(*issue, {"ordinary_gap", "first_engine_age", "store_read_to_request_cycles"}) ||
+      issue->getInteger("ordinary_gap") != 1 || issue->getInteger("first_engine_age") != 1 ||
+      issue->getInteger("store_read_to_request_cycles") != 2)
+    return error("unsupported launch/staging policy");
+  for (auto [key, config] : std::initializer_list<std::pair<const char *, const char *>>{
+      {"num_channels", "dma_num_channels"}, {"beat_bytes", "dma_beat_bytes"},
+      {"max_in_flight", "dma_max_in_flight"}, {"max_transfer_bytes", "dma_max_transfer_bytes"},
+      {"vmem_bank_bytes", "vmem_bank_bytes"}})
+    if (!configuration->getInteger(key) || *configuration->getInteger(key) < 1 ||
+        configuration->getInteger(key) != cfg.getInteger(config)) return error("configuration mismatch");
+  const Object *semantics = d->getObject("semantics");
+  if (!semantics || !exactKeys(*semantics, {"operands", "launch", "requests", "vmem_grants", "completion", "wait",
+                                            "channel_reuse", "aliases", "curve_history", "fixed_dma_windows", "command_ring"}))
+    return error("missing dynamic completion policy");
+  for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
+      {"operands", "captured_at_issue"}, {"launch", "enqueue_after_registered_progress"},
+      {"requests", "oldest_undispatched_slot"},
+      {"vmem_grants", "lsu_priority_then_dma_load_write_then_dma_store_read"},
+      {"completion", "all_beats_dispatched_and_acknowledged"},
+      {"wait", "busy_flag_checked_before_engine_progress"}, {"channel_reuse", "matching_wait_required"},
+      {"aliases", "existing_completion_conflict_policy"}, {"curve_history", "persists_across_wait_and_engine_drain"},
+      {"fixed_dma_windows", "none"}, {"command_ring", "separate_unchanged_rtl_contract"}})
+    if (semantics->getString(key) != value) return error("unsupported dynamic completion policy");
+  const Object *producers = d->getObject("producer_sources");
+  if (!producers || !exactKeys(*producers, {"atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py"}))
+    return error("missing producer traceability");
+  for (const auto &[key, value] : *producers)
+    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed producer hash");
+  const Object *gate = d->getObject("validation");
+  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
+  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
+      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
+    return error("requires successful native validation bound to derived payload");
+  for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
+    if (!gate->getInteger(key) || *gate->getInteger(key) < 1) return error("missing native mechanism coverage");
+  return llvm::Error::success();
+}
+
+
+llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
+    const Object &document, const Object &model,
+    const std::map<std::string, ModelTimingBlock> &blocks, llvm::StringRef payloadHash) {
+  auto error = [](const std::string &why) { return factsError("engine admission: " + why); };
+  if (!exactKeys(document, {"schema", "age_convention", "contract", "model", "source_contract",
+                             "vpu", "xlu", "vlsu", "scalar_lsu", "policy", "validation"}) ||
+      document.getString("schema") != "atlas.engine_admission.v1" ||
+      document.getString("age_convention") != "issue_edge_zero" ||
+      document.getString("contract") != "source-engine-initiation-v1")
+    return error("unsupported schema or source contract");
+  const Object *identity = document.getObject("model"), *source = document.getObject("source_contract");
+  if (!identity || !exactKeys(*identity, {"source_sha256", "configuration_sha256", "numerical_data_sha256"}))
+    return error("missing model identity");
+  for (const auto &[key, value] : *identity)
+    if (!model.get(key) || value != *model.get(key)) return error("model identity mismatch");
+  const Object *units = source ? source->getObject("execution_units") : nullptr;
+  const Object *config = model.getObject("configuration");
+  const Object *hashes = source ? source->getObject("source_sha256") : nullptr;
+  if (!source || !exactKeys(*source, {"source_sha256", "core_init_shape", "execution_units"}) ||
+      source->getString("core_init_shape") != "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9" ||
+      !units || !config || !config->getObject("execution_units") ||
+      *units != *config->getObject("execution_units") || !hashes ||
+      !exactKeys(*hashes, {"mxu.py", "vpu.py", "bank_conflict.py", "lsu.py", "core.py", "xlu.py"}))
+    return error("missing reviewed source/engine routing identity");
+  for (const auto &[key, value] : *hashes)
+    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed source hash");
+  const Object *xlu = document.getObject("xlu"), *vlsu = document.getObject("vlsu"), *policy = document.getObject("policy");
+  const Object *scalar = document.getObject("scalar_lsu");
+  const Object *paths = vlsu ? vlsu->getObject("initiation_ages") : nullptr;
+  auto xblock = blocks.find("xlu.transpose"), load = blocks.find("vlsu.vload"), store = blocks.find("vlsu.vstore");
+  if (!xlu || !exactKeys(*xlu, {"independent_from_vpu", "initiation", "initiation_age"}) ||
+      xlu->getBoolean("independent_from_vpu") != true || xlu->getString("initiation") != "prior_first_free" ||
+      !xlu->getInteger("initiation_age") || *xlu->getInteger("initiation_age") < 1 ||
+      *xlu->getInteger("initiation_age") > 4096 ||
+      (xblock != blocks.end() && xlu->getInteger("initiation_age") != xblock->second.firstFreeAge) ||
+      !vlsu || !exactKeys(*vlsu, {"independent_load_store_paths", "initiation", "initiation_ages"}) ||
+      vlsu->getBoolean("independent_load_store_paths") != true ||
+      vlsu->getString("initiation") != "same_path_prior_first_free" ||
+      !paths || !exactKeys(*paths, {"vlsu.vload", "vlsu.vstore"}) ||
+      !paths->getInteger("vlsu.vload") || !paths->getInteger("vlsu.vstore") ||
+      *paths->getInteger("vlsu.vload") < 1 || *paths->getInteger("vlsu.vload") > 4096 ||
+      *paths->getInteger("vlsu.vstore") < 1 || *paths->getInteger("vlsu.vstore") > 4096 ||
+      (load != blocks.end() && paths->getInteger("vlsu.vload") != load->second.firstFreeAge) ||
+      (store != blocks.end() && paths->getInteger("vlsu.vstore") != store->second.firstFreeAge) ||
+      !scalar || !exactKeys(*scalar, {"load_response_gap", "store_busy", "independent_vector_paths"}) ||
+      !scalar->getInteger("load_response_gap") || *scalar->getInteger("load_response_gap") < 1 ||
+      *scalar->getInteger("load_response_gap") > 4096 || scalar->getString("store_busy") != "none" ||
+      scalar->getBoolean("independent_vector_paths") != true ||
+      !policy || !exactKeys(*policy, {"mreg_ports", "unknown_vmem", "scalar_lsu", "mxu", "waits"}) ||
+      policy->getString("mreg_ports") != "vpu_same_logical_register_row_read_coalescing" ||
+      policy->getString("unknown_vmem") != "aliases_all_banks" ||
+      policy->getString("scalar_lsu") != "existing_alias_dependency_and_writeback_checks" ||
+      policy->getString("mxu") != "existing_source_overlap_rules" ||
+      policy->getString("waits") != "invalidate_live_admission")
+    return error("unsupported engine/resource policy");
+  const Object *gate = document.getObject("validation");
+  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
+  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
+      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
+    return error("requires successful native validation bound to derived payload");
+  for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
+    if (!gate->getInteger(key) || *gate->getInteger(key) < 1) return error("missing native mechanism coverage");
+  const Object *vpu = document.getObject("vpu");
+  const Object *final = vpu ? vpu->getObject("final_write_age") : nullptr;
+  const Array *doubles = vpu ? vpu->getArray("double") : nullptr;
+  const Array *groups = vpu ? vpu->getArray("logic_groups") : nullptr;
+  if (!vpu || !exactKeys(*vpu, {"capacity", "live", "final_write_age", "logic_groups", "double"}) ||
+      vpu->getInteger("capacity") != 2 || vpu->getString("live") != "age_lt_final_write" ||
+      !final || final->empty() || !doubles || !groups)
+    return error("unsupported VPU live-set predicate");
+  ModelEngineAdmission result;
+  result.vpuCapacity = int(*vpu->getInteger("capacity"));
+  result.scalarLoadGap = int(*scalar->getInteger("load_response_gap"));
+  for (const auto &[name, event] : {std::pair<const char *, const char *>{"scalar_lsu.load", "load_write"},
+                                   {"scalar_lsu.scale_load", "scale_write"}}) {
+    auto block = blocks.find(name);
+    if (block != blocks.end()) {
+      auto response = block->second.events.find(event);
+      if (response == block->second.events.end() || response->second.firstAge != result.scalarLoadGap)
+        return error("scalar load issue gap differs from source-derived response event");
+    }
+  }
+  for (const auto &[name, block] : blocks)
+    if (block.engine == "vpu") {
+      auto age = final->getInteger(name);
+      int lastWrite = -1;
+      for (const auto &[event, sweep] : block.events)
+        if (llvm::StringRef(event).starts_with("write")) lastWrite = std::max(lastWrite, sweep.lastAge);
+      if (!age || *age != lastWrite || *age != block.firstFreeAge - 1)
+        return error("VPU final write differs from selected operation events");
+      result.vpuFinalWrite[name] = int(*age);
+    }
+  if (result.vpuFinalWrite.size() != final->size()) return error("VPU operation coverage mismatch");
+  auto names = [&](const Array &array, std::set<std::string> &out) {
+    for (const auto &value : array) {
+      auto name = value.getAsString();
+      if (!name || !result.vpuFinalWrite.count(name->str()) || !out.insert(name->str()).second) return false;
+    }
+    return true;
+  };
+  if (!names(*doubles, result.vpuDouble)) return error("invalid VPU double-input domain");
+  for (const auto &[mnemonic, name] : vpuBlocks())
+    if (result.vpuFinalWrite.count(name)) {
+      const auto *op = findOp(mnemonic);
+      bool expected = op && (op->twoInput || op->opClass == OpClass::VpuRowReduce);
+      if (bool(result.vpuDouble.count(name)) != expected) return error("VPU double-input domain differs from operand vocabulary");
+    }
+  for (const auto &value : *groups) {
+    const Array *group = value.getAsArray();
+    std::set<std::string> members;
+    if (!group || group->empty() || !names(*group, members)) return error("invalid VPU shared-logic group");
+    result.vpuLogicGroups.push_back(std::move(members));
   }
   return result;
 }
@@ -1069,6 +1267,15 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     if (!result.blocks.emplace(name->str(), std::move(block)).second)
       return factsError("duplicate operation " + name->str());
   }
+  if (!testObservations || root->get("engine_admission")) {
+    const Object *document = root->getObject("engine_admission");
+    if (!document) return factsError("missing source-derived engine admission");
+    auto admission = parseEngineAdmission(*document, *model, result.blocks, payloadHash);
+    if (!admission) return admission.takeError();
+    result.admission = std::move(*admission);
+  }
+  if (!testObservations || root->get("dma_admission"))
+    if (auto error = parseDMAAdmission(*root, *configuration, payloadHash)) return error;
   if (const auto *dmaFacts = root->get("dma_timing")) {
     const Object *document = dmaFacts->getAsObject();
     if (!document) return factsError("dma_timing must be an object");
@@ -1227,7 +1434,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
       f.holds.push_back({Unit::ScalarWriteback, 0, fill.first(write), fill.first(write)});
     }
     int busy = fill.busyEnd();
-    f.holds.push_back({Unit::ScalarLoad, 0, 0, busy});
+    if (!admission) f.holds.push_back({Unit::ScalarLoad, 0, 0, busy});
     for (Access &access : f.accesses)
       if (access.res == Res::Vmem) access.anywhere = !line;
     return fill.done(busy);
@@ -1318,7 +1525,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
                     std::to_string(reg & 31));
     }
     int busy = fill.busyEnd();
-    fill.hold({Unit::Xlu}, 0, busy);
+    if (!admission) fill.hold({Unit::Xlu}, 0, busy);
     return fill.done(busy);
   }
 
@@ -1378,7 +1585,12 @@ Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &
   return best;
 }
 
-bool sameEngine(const OpInfo &a, const OpInfo &b) {
+bool sameEngine(const OpInfo &a, const OpInfo &b, const ModelTimingFacts *facts = nullptr) {
+  if (facts && facts->engineAdmission()) {
+    // LSU's scalar response and separate vector paths have their own predicates.
+    if (a.engine == Engine::Lsu && b.engine == Engine::Lsu) return false;
+    return a.engine == b.engine;
+  }
   auto vector = [](Engine engine) { return engine == Engine::Vpu || engine == Engine::Xlu; };
   return a.engine == b.engine || (vector(a.engine) && vector(b.engine));
 }
@@ -1422,21 +1634,40 @@ public:
       const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const override {
     if (cycle < 0 || cycle > INT_MAX - f.doneAge - 1)
       return {{}, "model reservation exceeds cycle domain"};
+    const auto *admission = facts->engineAdmission();
     std::vector<Port> ports = requests(f, cycle, in.op->engine == Engine::Vpu);
     for (size_t i = 0; i < ports.size(); ++i)
       for (size_t j = 0; j < i; ++j)
         if (portConflict(ports[i], ports[j])) return {{}, "instruction has conflicting MREG port requests"};
-    bool waiver = overlap && admitsInsertion(in, f, cycle, context);
+    if (admission) {
+      std::string structural = admissionConflict(in, cycle);
+      if (!structural.empty()) return {structural, {}};
+    }
+    bool directVpu = admission && in.op->engine == Engine::Vpu;
+    bool waiver = !directVpu && overlap && admitsInsertion(in, f, cycle, context);
     for (const Issued &prior : issued) {
       if (prior.cycle + prior.f.doneAge < cycle || cycle + f.doneAge < prior.cycle) continue;
-      if (sameEngine(*in.op, *prior.in.op) && cycle <= prior.cycle + prior.f.doneAge &&
+      if (admission) {
+        const Footprint &older = prior.cycle < cycle ? prior.f : f;
+        const Footprint &newer = prior.cycle < cycle ? f : prior.f;
+        int gap = std::abs(int64_t(cycle) - prior.cycle);
+        auto intersects = [](const std::vector<int> &a, const std::vector<int> &b) {
+          for (int reg : a) if (std::find(b.begin(), b.end(), reg) != b.end()) return true;
+          return false;
+        };
+        if ((gap <= older.writeRelease && (intersects(older.mregWrites, newer.mregReads) ||
+                                          intersects(older.mregWrites, newer.mregWrites))) ||
+            (gap <= older.readRelease && !newer.writeDuringRead && intersects(older.mregReads, newer.mregWrites)))
+          return {"source-derived logical MREG reservation remains live", {}};
+      }
+      if (sameEngine(*in.op, *prior.in.op, facts.get()) && !directVpu && cycle <= prior.cycle + prior.f.doneAge &&
           prior.cycle <= cycle + f.doneAge && !waiver)
         return {"model isolated engine window remains live", {}};
       for (const Hold &a : prior.f.holds)
         for (const Hold &b : f.holds)
           if (a.unit == b.unit && a.index == b.index && prior.cycle + a.from <= cycle + b.to &&
               cycle + b.from <= prior.cycle + a.to)
-            if (!(waiver && sameEngine(*in.op, *prior.in.op) &&
+            if (!(waiver && sameEngine(*in.op, *prior.in.op, facts.get()) &&
                   (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu ||
                    (a.unit == Unit::ScalarLoad && scalarContext(in, context) &&
                     scalarContext(prior.in, prior.context)))))
@@ -1479,6 +1710,57 @@ private:
   static bool scalarContext(const Instr &in, const TimingContext &context) {
     return context && context->matches(in) && (in.op->name == "lw" || in.op->name == "sw");
   }
+  std::string admissionConflict(const Instr &in, int cycle) const {
+    const auto &admission = *facts->engineAdmission();
+    for (const Issued &prior : issued)
+      if (prior.cycle == cycle) return "source-derived frontend has one issue slot per edge";
+    auto scalarLoad = [](const Instr &command) {
+      return command.op->name == "lw" || command.op->name == "seld";
+    };
+    if (scalarLoad(in))
+      for (const Issued &prior : issued)
+        if (scalarLoad(prior.in) && std::abs(int64_t(cycle) - prior.cycle) < admission.scalarLoadGap)
+          return "source-derived scalar load response remains pending";
+    if (in.op->engine != Engine::Vpu) return {};
+    struct Command { std::string name; int cycle; bool eligible, candidate; };
+    std::vector<Command> commands;
+    auto name = [](const Instr &command) { return std::string(vpuBlocks().at(command.op->name)); };
+    commands.push_back({name(in), cycle, true, true});
+    for (const Issued &prior : issued)
+      if (prior.in.op->engine == Engine::Vpu) commands.push_back({name(prior.in), prior.cycle, prior.eligible, false});
+    std::sort(commands.begin(), commands.end(), [](const Command &a, const Command &b) { return a.cycle < b.cycle; });
+    // A wait invalidates only the live epoch containing this insertion.
+    // Retired epochs cannot prevent independently drained work from restarting.
+    std::vector<Command> affected;
+    int end = -1;
+    bool contains = false;
+    for (const auto &command : commands) {
+      if (command.cycle > end) {
+        if (contains) break;
+        affected.clear();
+      }
+      affected.push_back(command);
+      contains |= command.candidate;
+      end = std::max(end, command.cycle + facts->block(command.name)->firstFreeAge - 1);
+    }
+    commands = std::move(affected);
+    for (size_t j = 0; j < commands.size(); ++j) {
+      const auto &current = commands[j];
+      size_t live = 0;
+      for (size_t i = 0; i < j; ++i) {
+        const auto &prior = commands[i];
+        if (current.cycle - prior.cycle >= admission.vpuFinalWrite.at(prior.name)) continue;
+        if (!current.eligible || !prior.eligible) return "wait invalidates source-derived VPU live admission";
+        if (++live >= size_t(admission.vpuCapacity)) return "source-derived VPU issue slots occupied";
+        bool shared = current.name == prior.name;
+        for (const auto &group : admission.vpuLogicGroups)
+          shared |= group.count(current.name) && group.count(prior.name);
+        if (shared || admission.vpuDouble.count(current.name) || admission.vpuDouble.count(prior.name))
+          return "source-derived VPU issue logic occupied";
+      }
+    }
+    return {};
+  }
   bool admitsInsertion(const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const {
     auto candidate = overlapCommand(in, f, cycle, *facts);
     if (!candidate) return false;
@@ -1489,7 +1771,7 @@ private:
     struct Entry { ModelOverlapCommand command; int end; bool eligible, candidate; };
     std::vector<Entry> entries{{*candidate, cycle + f.doneAge, true, true}};
     for (const Issued &prior : issued) {
-      if (!sameEngine(*in.op, *prior.in.op)) continue;
+      if (!sameEngine(*in.op, *prior.in.op, facts.get())) continue;
       auto command = overlapCommand(prior.in, prior.f, prior.cycle, *facts);
       if (!command) {
         if (prior.cycle <= cycle + f.doneAge && cycle <= prior.cycle + prior.f.doneAge) return false;

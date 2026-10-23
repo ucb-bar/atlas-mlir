@@ -99,7 +99,7 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
 
-add_llvm_executable(atlas-model-timing-test model-timing-provider.cpp model-scalar-overlap.cpp PARTIAL_SOURCES_INTENDED)
+add_llvm_executable(atlas-model-timing-test model-timing-provider.cpp model-scalar-overlap.cpp model-engine-admission.cpp PARTIAL_SOURCES_INTENDED)
 llvm_update_compile_flags(atlas-model-timing-test)
 target_link_libraries(atlas-model-timing-test PRIVATE MLIRAtlas MLIRParser MLIRIR)
 mlir_check_all_link_libraries(atlas-model-timing-test)
