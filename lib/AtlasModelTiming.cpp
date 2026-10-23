@@ -15,6 +15,7 @@
 #include <cmath>
 #include <deque>
 #include <set>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -472,7 +473,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
     if (!value) return factsError(std::string("missing derived semantic ") + key);
     semantic[key] = *value;
   }
-  for (const char *key : {"scratchpad_contract"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract"})
     if (const auto *value = root.get(key)) semantic[key] = *value;
   if (const auto *value = root.get("dma_timing")) {
     const Object *dma = value->getAsObject();
@@ -512,6 +513,66 @@ bool completeReleaseCoverage(const ModelTimingBlock &block) {
   for (const auto &key : expected)
     if (!block.releases.count(key)) return false;
   return true;
+}
+
+llvm::Expected<ModelFrontendTiming> parseFrontend(const Object &f) {
+  auto error = [](const char *why) -> llvm::Expected<ModelFrontendTiming> { return factsError(why); };
+  const Object *delay = f.getObject("delay"), *scalar = f.getObject("scalar"), *control = f.getObject("control");
+  if (!exactKeys(f, {"schema", "ordinary_issue_gap", "delay", "scalar", "control", "instructions"}) ||
+      f.getString("schema") != "atlas.model_frontend.v1" || !delay || !scalar || !control ||
+      !exactKeys(*delay, {"base_gap", "immediate_mask", "decrement_per_tick"}) ||
+      !exactKeys(*scalar, {"read_age", "write_age", "completion_delay"}) ||
+      !exactKeys(*control, {"delay_slots", "operand_read_age", "jal_link_pc_offset"}))
+    return error("requires complete source-derived frontend timing schema");
+  auto bounded = [](const Object &object, const char *key, int minimum = 0) {
+    auto value = object.getInteger(key);
+    return value && *value >= minimum && *value < 65536;
+  };
+  if (!bounded(f, "ordinary_issue_gap", 1) || !bounded(*delay, "base_gap", 1) ||
+      !bounded(*delay, "immediate_mask") || delay->getInteger("decrement_per_tick") != 1 ||
+      !bounded(*scalar, "read_age") || !bounded(*scalar, "write_age") ||
+      !bounded(*scalar, "completion_delay", 1) || !bounded(*control, "operand_read_age") ||
+      control->getInteger("delay_slots") != 1 || control->getInteger("jal_link_pc_offset") != 1)
+    return error("unsupported frontend issue, scalar timing or control-flow encoding capability");
+  // These are compiler capabilities, separately checked after source extraction:
+  // delay insertion encodes 12-bit chunks and the CFG scheduler has one slot.
+  if (f.getInteger("ordinary_issue_gap") != 1 || delay->getInteger("base_gap") != 1 ||
+      delay->getInteger("immediate_mask") != 4095)
+    return error("unsupported compiler scheduling/encoding capability: ordinary_issue_gap=1, delay base_gap=1 and immediate_mask=4095 are required");
+  // completion_delay schedules deferred execution-log callbacks. The reviewed
+  // scalar source commits register effects during exec at read_age/write_age.
+  ModelFrontendTiming result{int(*f.getInteger("ordinary_issue_gap")), int(*delay->getInteger("base_gap")),
+      int(*delay->getInteger("immediate_mask")), int(*scalar->getInteger("read_age")),
+      int(*scalar->getInteger("write_age")), int(*control->getInteger("operand_read_age")), {}};
+  const Object *instructions = f.getObject("instructions");
+  if (!instructions || instructions->empty()) return error("missing frontend instruction access coverage");
+  for (const auto &[name, value] : *instructions) {
+    const Object *entry = value.getAsObject();
+    auto kind = entry ? entry->getString("kind") : std::nullopt;
+    if (!entry || !exactKeys(*entry, {"kind", "reads", "writes"}) || !kind ||
+        (*kind != "scalar" && *kind != "branch" && *kind != "jump" && *kind != "halt" &&
+         *kind != "delay" && *kind != "control"))
+      return error("unsupported frontend instruction access record");
+    std::vector<ModelFrontendAccess> accesses;
+    std::set<std::tuple<bool, std::string, std::string>> unique;
+    for (bool write : {false, true}) {
+      const Array *records = entry->getArray(write ? "writes" : "reads");
+      if (!records) return error("missing frontend instruction read/write roles");
+      for (const auto &record : *records) {
+        const Object *access = record.getAsObject();
+        auto resource = access ? access->getString("resource") : std::nullopt;
+        auto operand = access ? access->getString("operand") : std::nullopt;
+        if (!access || !exactKeys(*access, {"resource", "operand"}) || !resource || !operand ||
+            (*resource != "xreg" && *resource != "ereg") ||
+            (*operand != "rd" && *operand != "rs1" && *operand != "rs2") ||
+            !unique.emplace(write, resource->str(), operand->str()).second)
+          return error("unsupported frontend instruction register mapping");
+        accesses.push_back({operand->str(), write, *resource == "ereg"});
+      }
+    }
+    result.instructions[name.str()] = std::move(accesses);
+  }
+  return result;
 }
 
 llvm::Expected<int> parseScratchpadContract(const Object &root) {
@@ -750,6 +811,13 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
   if (!model) return factsError("missing model provenance");
   ModelTimingFacts result;
   int readLatency = 1;
+  if (!testObservations || root->get("frontend_timing")) {
+    const Object *document = root->getObject("frontend_timing");
+    if (!document) return factsError("missing source-derived frontend timing contract");
+    auto parsedFrontend = parseFrontend(*document);
+    if (!parsedFrontend) return parsedFrontend.takeError();
+    result.frontend = std::move(*parsedFrontend);
+  }
   if (!testObservations || root->get("scratchpad_contract")) {
     auto parsedScratchpad = parseScratchpadContract(*root);
     if (!parsedScratchpad) return parsedScratchpad.takeError();
@@ -912,6 +980,13 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::loadModelTimingFacts(
   return parseModelTimingFacts((*buffer)->getBuffer(), expectedSha256, dmaWait);
 }
 
+TimingRuleResult<int> ModelTimingFacts::issueGap(const Instr &in) const {
+  if (!in.op) return {0, modelTimingDiagnostic("invalid instruction for frontend issue gap")};
+  if (!frontend) return {naturalGap(in), {}}; // Explicit raw-observation test API only.
+  return {in.op->opClass == OpClass::Delay ? frontend->delayBase + int(in.imm & frontend->delayMask) :
+                                            frontend->ordinaryGap, {}};
+}
+
 Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) const {
   Footprint f;
   auto reject = [&](const char *why) {
@@ -927,6 +1002,24 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
   auto x = [&](int reg, bool write) {
     if (reg) f.accesses.push_back({Res::XReg, write, reg, 1, 0, 1});
   };
+  auto synchronous = [&]() {
+    if (!frontend) return f; // Explicit raw-observation test API only.
+    auto found = frontend->instructions.find(name);
+    if (found == frontend->instructions.end()) return reject("missing frontend instruction access coverage");
+    f.accesses.clear();
+    f.holds.clear();
+    for (const auto &access : found->second) {
+      int reg = access.operand == "rd" ? in.rd : access.operand == "rs1" ? in.rs1 : in.rs2;
+      if (!xreg(reg)) return reject("unsupported frontend register operand");
+      if (!access.scale && reg == 0) continue;
+      bool control = op.opClass == OpClass::Branch || op.opClass == OpClass::Jump || op.opClass == OpClass::Csr;
+      int age = access.write ? frontend->writeAge : control ? frontend->controlReadAge : frontend->readAge;
+      f.accesses.push_back({access.scale ? Res::EReg : Res::XReg, access.write, reg, 1, age, 1});
+      f.doneAge = std::max(f.doneAge, age);
+      if (access.write) f.holds.push_back({Unit::ScalarWriteback, 0, age, age});
+    }
+    return f;
+  };
   if (in.release && op.opClass != OpClass::Csr) return reject("unsupported completion annotation");
 
   if (op.opClass == OpClass::Alu && name != "auipc") {
@@ -935,30 +1028,30 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     if (hasOperand(op, "x2")) x(in.rs2, false);
     x(in.rd, true);
     if (in.rd) f.holds.push_back({Unit::ScalarWriteback, 0, 0, 0});
-    return f;
+    return synchronous();
   }
   if (op.opClass == OpClass::ScaleImm) {
     if (!xreg(in.rd)) return reject("unsupported scale register");
     f.accesses.push_back({Res::EReg, true, in.rd, 1, 0, 1});
     f.holds.push_back({Unit::ScalarWriteback, 0, 0, 0});
-    return f;
+    return synchronous();
   }
-  if (name == "delay" || name == "ecall") return f;
+  if (name == "delay" || name == "ecall") return synchronous();
   // The verifier drains every engine before a successor starts, so redirect
   // latency need only cover the delay slot; operands are read at issue.
   if (op.opClass == OpClass::Branch) {
     if (!xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported branch operands");
     x(in.rs1, false);
     x(in.rs2, false);
-    return f;
+    return synchronous();
   }
   if (name == "jal") {
     if (in.rd != 0 || in.rs1 != 0) return reject("JAL must not link");
-    return f;
+    return synchronous();
   }
   if (name == "csrrw" && in.rd == 0 && in.imm == 0xC10 && xreg(in.rs1)) {
     x(in.rs1, false);
-    return f;
+    return synchronous();
   }
 
   if (op.engine == Engine::Dma) {
@@ -1516,7 +1609,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   };
   provider.fillPendingDelaySlots = true;
   provider.waitReusedDMASlots = true;
-  provider.issueGap = [](const Instr &in) { return TimingRuleResult<int>{naturalGap(in), {}}; };
+  provider.issueGap = [facts](const Instr &in) { return facts->issueGap(in); };
   provider.createReservations = [facts, overlap, chains] {
     return TimingRuleResult<std::unique_ptr<TimingReservations>>{
         std::make_unique<ObservedReservations>(facts, overlap, chains), {}};

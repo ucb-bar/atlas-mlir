@@ -217,7 +217,7 @@ void sealContractFixture(Object &object) {
   for (const char *key : {"geometry", "age_convention", "op_timing", "reservation_releases", "vocabulary_sha256",
                           "architecture", "operand_vocabulary", "isa_metadata"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
-  for (const char *key : {"scratchpad_contract"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
   if (auto *dma = object.getObject("dma_timing")) {
     Object deterministic(*dma);
@@ -251,6 +251,15 @@ Object contractFixture() {
   object["reservation_releases"] = Object{{"vpu.mov", Object{
       {"unit", release(72)}, {"mreg_read", release(64, Array{0, 1})},
       {"mreg_write", release(72, Array{4, 5})}}}};
+  object["frontend_timing"] = Object{{"schema", "atlas.model_frontend.v1"}, {"ordinary_issue_gap", 1},
+      {"delay", Object{{"base_gap", 1}, {"immediate_mask", 4095}, {"decrement_per_tick", 1}}},
+      {"scalar", Object{{"read_age", 0}, {"write_age", 0}, {"completion_delay", 1}}},
+      {"control", Object{{"delay_slots", 1}, {"operand_read_age", 0}, {"jal_link_pc_offset", 1}}},
+      {"instructions", Object{
+          {"addi", Object{{"kind", "scalar"},
+              {"reads", Array{Object{{"resource", "xreg"}, {"operand", "rs1"}}}},
+              {"writes", Array{Object{{"resource", "xreg"}, {"operand", "rd"}}}}}},
+          {"delay", Object{{"kind", "delay"}, {"reads", Array{}}, {"writes", Array{}}}}}}};
   object["scratchpad_contract"] = Object{{"schema", "atlas.scratchpad_contract.v1"},
       {"status", "explicit-target-assumption"}, {"assumptions", Object{{"scratchpad_read_latency", 1}}},
       {"response_latency_derived", false}, {"dma_store_read_to_request_cycles", 2},
@@ -370,6 +379,29 @@ void testDerivedContract() {
   check(bool(rebound) && rebound->estimateDMACycles(1024, false).value == 91,
         "rebound derived operands propagate through production contract parser");
   if (!rebound) llvm::consumeError(rebound.takeError());
+  changed = contractFixture();
+  (*changed.getObject("frontend_timing")->getObject("scalar"))["write_age"] = 3;
+  sealContractFixture(changed);
+  rebound = parse(std::move(changed));
+  check(bool(rebound), "supported source-derived frontend operands load");
+  if (rebound) {
+    auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*rebound)));
+    auto scalar = provider.footprint({findOp("addi"), 1, 2, 0}, unknownRegs());
+    check(provider.issueGap({findOp("addi")}).value == 1 &&
+          provider.issueGap({findOp("delay"), 0, 0, 0, 511}).value == 512,
+          "ordinary issue gap and DELAY mask consume supported derived frontend inputs");
+    check(scalar.error.empty() && scalar.doneAge == 3 && scalar.accesses.back().age == 3,
+          "synchronous register write age comes from derived frontend inputs");
+  } else llvm::consumeError(rebound.takeError());
+  for (const char *field : {"ordinary_issue_gap", "base_gap", "immediate_mask"}) {
+    changed = contractFixture();
+    Object *record = changed.getObject("frontend_timing");
+    if (llvm::StringRef(field) != "ordinary_issue_gap") record = record->getObject("delay");
+    (*record)[field] = llvm::StringRef(field) == "immediate_mask" ? 255 : 2;
+    sealContractFixture(changed);
+    rejects(std::move(changed), "source frontend change outside compiler encoding capability refuses precisely",
+            "compiler scheduling/encoding capability");
+  }
   changed = contractFixture();
   (*changed.getObject("scratchpad_contract")->getObject("assumptions"))["scratchpad_read_latency"] = 2;
   sealContractFixture(changed);

@@ -66,7 +66,7 @@ def tool_manifest():
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",
-             "atlas_derive_scratchpad.py"]
+             "atlas_derive_scratchpad.py", "atlas_derive_frontend.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -88,6 +88,7 @@ def regenerate(model, out):
     from atlas_derive_memory import derive_memory
     from atlas_derive_curve import derive_curve
     from atlas_derive_scratchpad import derive_scratchpad
+    from atlas_derive_frontend import derive_frontend
     from atlas_validate_curve import validate_curve
     from atlas_derive_arch import derive_arch
     from atlas_derive_vocabulary import validate_vocabulary, derive_isa_metadata
@@ -115,6 +116,7 @@ def regenerate(model, out):
     mxu, mxu_releases = derive_mxu(cfg)
     dma_timing = derive_curve(cfg)
     scratchpad_contract = derive_scratchpad(cfg)
+    frontend_timing = derive_frontend(cfg)
     blocks = vpu | mxu | memory
     releases = vpu_releases | mxu_releases | memory_releases
     if set(blocks) != {case["name"] for case in inputs} or set(releases) != set(blocks):
@@ -153,7 +155,7 @@ def regenerate(model, out):
                    age_convention="issue_edge_zero", observation=dict(accepted=True, drained=True),
                    op_timing=ordered, unresolved=[], reservation_releases=releases,
                    dma_timing=dma_timing,
-                   scratchpad_contract=scratchpad_contract,
+                   scratchpad_contract=scratchpad_contract, frontend_timing=frontend_timing,
                    vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
