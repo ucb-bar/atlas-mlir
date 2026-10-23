@@ -1070,8 +1070,10 @@ llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
       int lastWrite = -1;
       for (const auto &[event, sweep] : block.events)
         if (llvm::StringRef(event).starts_with("write")) lastWrite = std::max(lastWrite, sweep.lastAge);
-      if (!age || *age != lastWrite || *age != block.firstFreeAge - 1)
-        return error("VPU final write differs from selected operation events");
+      // Native write_last is the issue-live/retirement endpoint selected by
+      // latency; the guarded row planner may finish physical writes earlier.
+      if (!age || lastWrite < 0 || lastWrite > *age || *age != block.firstFreeAge - 1)
+        return error("VPU source live endpoint differs from lifetime or precedes row writes");
       result.vpuFinalWrite[name] = int(*age);
     }
   if (result.vpuFinalWrite.size() != final->size()) return error("VPU operation coverage mismatch");

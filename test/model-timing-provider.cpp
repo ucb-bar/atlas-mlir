@@ -542,6 +542,18 @@ void testDerivedContract() {
     check(bool(result), "VPU metadata accepts supported capacities before selected overlap cross-check");
     if (!result) llvm::consumeError(result.takeError());
   }
+  auto paddedLifetime = contractFixture();
+  auto *write = (*paddedLifetime.getArray("op_timing"))[0].getAsObject()->getObject("events")->getObject("write0");
+  (*write)["first_age"] = 8;
+  (*write)["last_age"] = 71;
+  sealContractFixture(paddedLifetime);
+  auto padded = parse(paddedLifetime);
+  check(bool(padded) && padded->engineAdmission()->vpuFinalWrite.at("vpu.mov") == 72,
+        "source live endpoint may follow the final physical row-write event");
+  if (!padded) llvm::consumeError(padded.takeError());
+  (*paddedLifetime.getObject("engine_admission")->getObject("vpu")->getObject("final_write_age"))["vpu.mov"] = 71;
+  sealContractFixture(paddedLifetime);
+  rejects(std::move(paddedLifetime), "physical row-write maximum cannot shorten native issue liveness", "source live endpoint");
   auto receiptOnly = contractFixture();
   (*receiptOnly.getObject("dma_timing"))["producer_sources"] = Object{{"receipt", "not a semantic rule"}};
   // Parser schema remains exact; this field is not a supported DMA extension,

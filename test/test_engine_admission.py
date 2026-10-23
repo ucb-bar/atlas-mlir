@@ -2,6 +2,7 @@
 from copy import deepcopy
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import unittest
 from unittest.mock import patch
@@ -34,6 +35,21 @@ class RelationalPredicateTest(unittest.TestCase):
         self.assertEqual(derive.semantic_admission(changed), semantic)
         changed["vpu"]["double"] = []
         self.assertNotEqual(derive.semantic_admission(changed), semantic)
+
+    def test_native_live_endpoint_may_follow_the_last_row_write(self):
+        blocks = {"vpu.rsum": dict(engine="vpu", first_free_age=40,
+            events=dict(write0=dict(last_age=38), write1=dict(last_age=38)))}
+        plans = [("vpu.rsum", "vredsum.row.bf16", None, SimpleNamespace(write_last=39))]
+        with patch("atlas_derive_vpu._plans", return_value=plans):
+            final = derive._vpu_live_ages(None, blocks)
+        self.assertEqual(final, {"vpu.rsum": 39})
+        admission = dict(vpu=dict(capacity=2, final_write_age=final, double=["vpu.rsum"], logic_groups=[]))
+        self.assertTrue(derive.vpu_blocked(admission, [("vpu.rsum", 0)], "vpu.vliOne", 38))
+        self.assertFalse(derive.vpu_blocked(admission, [("vpu.rsum", 0)], "vpu.vliOne", 39))
+        for changed in (dict(blocks["vpu.rsum"], first_free_age=41),
+                        dict(blocks["vpu.rsum"], events=dict(write0=dict(last_age=40)))):
+            with patch("atlas_derive_vpu._plans", return_value=plans), self.assertRaises(derive.UnsupportedAdmission):
+                derive._vpu_live_ages(None, {"vpu.rsum": changed})
 
 
 class AdmissionSamplePlanTest(unittest.TestCase):

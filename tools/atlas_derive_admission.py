@@ -28,6 +28,25 @@ def semantic_admission(admission):
             if key not in {"validation", "producer_sources"}}
 
 
+def _vpu_live_ages(cfg, blocks):
+    """Read native write_last, which controls issue liveness and retirement.
+
+    The guarded issue planner sets this field from the selected latency. Row
+    writes may finish earlier; their maximum is not an issue-admission bound.
+    """
+    from atlas_derive_vpu import _plans
+    final = {name: operation.write_last for name, _, _, operation in _plans(cfg)}
+    if set(final) != {name for name, block in blocks.items() if block["engine"] == "vpu"}:
+        raise UnsupportedAdmission("VPU source live endpoint coverage differs from selected operations")
+    for name, endpoint in final.items():
+        block = blocks[name]
+        writes = [value["last_age"] for key, value in block["events"].items()
+                  if key.startswith("write")]
+        if not writes or max(writes) > endpoint or block["first_free_age"] != endpoint + 1:
+            raise UnsupportedAdmission("VPU source live endpoint differs from lifetime or precedes row writes")
+    return final
+
+
 def derive_admission(model, per_op):
     """Pure source derivation; native validation never supplies a predicate."""
     model = safe_path(model)
@@ -50,14 +69,7 @@ def derive_admission(model, per_op):
     if any(list(units.values()).count(name) != 1 for name in required):
         raise UnsupportedAdmission("engine admission requires unique independent native units")
     blocks = {block["name"]: block for block in per_op["op_timing"]}
-    final = {}
-    for name, block in sorted(blocks.items()):
-        if block["engine"] == "vpu":
-            writes = [value["last_age"] for key, value in block["events"].items()
-                      if key.startswith("write")]
-            if not writes or max(writes) != block["first_free_age"] - 1:
-                raise UnsupportedAdmission("VPU final write differs from isolated completion")
-            final[name] = max(writes)
+    final = _vpu_live_ages(cfg, blocks)
     if not final:
         raise UnsupportedAdmission("missing VPU admission coverage")
     source = dict(structural["source_sha256"])
