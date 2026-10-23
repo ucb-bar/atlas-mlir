@@ -39,6 +39,7 @@ class Candidate:
     virtual_orders: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
     pack_reload_after_weight: bool = False
+    pack_weight_before_pack: bool = False
 
     def __post_init__(self) -> None:
         if self.lookahead not in (0, 1, 2, 4, 8):
@@ -51,8 +52,12 @@ class Candidate:
             raise ValueError("explicit virtual orders exclude lookahead and random-seed")
         if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.mreg_ranks):
             raise ValueError("MREG ranks must be unsigned 32-bit integers")
-        if self.wait_placement not in ("default", "source"):
-            raise ValueError("wait-placement must be default or source")
+        if self.wait_placement not in ("default", "source", "preloaded"):
+            raise ValueError("wait-placement must be default, source or preloaded")
+        if self.pack_reload_after_weight and self.pack_weight_before_pack:
+            raise ValueError("PACK weight placement options are mutually exclusive")
+        if self.wait_placement == "preloaded" and not self.pack_weight_before_pack:
+            raise ValueError("preloaded wait placement requires PACK weight preloading")
 
 
 def _option_path(path: Path) -> str:
@@ -94,6 +99,8 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
         options.append("mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'")
     if candidate.pack_reload_after_weight:
         options.append("pack-reload-after-weight=true")
+    if candidate.pack_weight_before_pack:
+        options.append("pack-weight-before-pack=true")
     if candidate.wait_placement != "default":
         options.append("wait-placement=" + candidate.wait_placement)
     return ["--atlas-compile-candidate=" + " ".join(options)]
@@ -174,7 +181,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_evaluations: int = 0, search_group_evaluations: int = 0,
-                   pack_reload_candidates: bool = False,
+                   pack_reload_candidates: bool = False, pack_preload_candidates: bool = False,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
@@ -195,6 +202,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
     if pack_reload_candidates and provider != "model":
         raise ValueError("pack-reload-candidates requires the model provider")
+    if pack_preload_candidates and provider != "model":
+        raise ValueError("pack-preload-candidates requires the model provider")
     source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
@@ -207,6 +216,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "search_group_evaluations": search_group_evaluations,
                "pack_reload_candidates": pack_reload_candidates,
+               "pack_preload_candidates": pack_preload_candidates,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                "candidates": []}
 
@@ -377,6 +387,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if pack_reload_candidates:
                 evaluate_batch([(replace(winner(), pack_reload_after_weight=True), "pack-reload-order")],
                                len(receipt["candidates"]) + 1)
+            if pack_preload_candidates:
+                preloaded = replace(winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
+                evaluate_batch([(replace(preloaded, wait_placement="preloaded"), "pack-preload-waits")],
+                               len(receipt["candidates"]) + 1)
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
@@ -409,6 +423,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="additional verified dependency-group attempts after local search (model only)")
     parser.add_argument("--pack-reload-candidates", action="store_true",
                         help="score loading a pending weight before an adjacent PACK reload (model only)")
+    parser.add_argument("--pack-preload-candidates", action="store_true",
+                        help="score preloading disjoint weights before PACK with selective source waits (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
@@ -422,6 +438,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
             "workers": args.workers, "search_evaluations": args.search_evaluations,
             "search_group_evaluations": args.search_group_evaluations,
             "pack_reload_candidates": args.pack_reload_candidates,
+            "pack_preload_candidates": args.pack_preload_candidates,
             "mreg_candidates": None if args.bank_candidates else (),
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
