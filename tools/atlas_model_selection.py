@@ -3,7 +3,7 @@
 
 The default is retained as candidate zero, ties retain the earlier candidate,
 and builtin compiles exactly once without importing the model. The bounded
-search only exposes existing scheduling and free DMA-window choices.
+search exposes existing lowering choices and optional legal order mutations.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import random
 import shlex
 import shutil
 import subprocess
@@ -35,6 +36,7 @@ class Candidate:
     random_seed: int | None = None
     store_windows: tuple[int, ...] = ()
     wait_placement: str = "default"
+    virtual_orders: tuple[tuple[int, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if self.lookahead not in (0, 1, 2, 4, 8):
@@ -43,6 +45,8 @@ class Candidate:
             raise ValueError("random-seed must be nonnegative and excludes lookahead")
         if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.store_windows):
             raise ValueError("store-window ranks must be unsigned 32-bit integers")
+        if self.virtual_orders and (self.lookahead or self.random_seed is not None):
+            raise ValueError("explicit virtual orders exclude lookahead and random-seed")
         if self.wait_placement not in ("default", "source"):
             raise ValueError("wait-placement must be default or source")
 
@@ -70,8 +74,12 @@ def evidence_option(op_timing: Path | None = None, op_timing_sha256: str | None 
     return ["--select-atlas-model-evidence=" + options]
 
 
-def candidate_options(candidate: Candidate, provider: str, spill: bool) -> list[str]:
+def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
     options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json"]
+    if candidate.virtual_orders:
+        options.append("order-file=order.json")
+    if graph_output:
+        options.append("graph-output=graph.json")
     if candidate.lookahead:
         options.append(f"lookahead={candidate.lookahead}")
     if candidate.random_seed is not None:
@@ -83,6 +91,29 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool) -> list[
     return ["--atlas-compile-candidate=" + " ".join(options)]
 
 
+def order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...]):
+    """Enumerate single insertions within each node's dependency window."""
+    moves = []
+    for block, (graph, order) in enumerate(zip(graphs, orders)):
+        positions = {node: index for index, node in enumerate(order)}
+        successors = [[] for _ in order]
+        for node, preds in enumerate(graph["preds"]):
+            for pred in preds:
+                successors[pred].append(node)
+        for origin, node in enumerate(order):
+            first = max((positions[pred] + 1 for pred in graph["preds"][node]), default=0)
+            last = min((positions[succ] - 1 for succ in successors[node]), default=len(order) - 1)
+            for target in range(first, last + 1):
+                if origin == target:
+                    continue
+                moves.append((block, origin, target))
+    random.Random(0).shuffle(moves)
+    for block, origin, target in moves:
+        moved = list(orders[block])
+        moved.insert(target, moved.pop(origin))
+        yield orders[:block] + (tuple(moved),) + orders[block + 1:]
+
+
 def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = "model",
                    profile: str = "fifo43", model: Path | None = None, model_regions: tuple[Path, ...] = (),
                    spill: bool = True, spill_mxu: bool = True, boundary: str = "boundary",
@@ -92,6 +123,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    composed: Path | None = None, composed_sha256: str | None = None,
                    max_candidates: int = 24, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
+                   search_evaluations: int = 0,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
@@ -104,6 +136,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("unsupported provider or memory profile")
     if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
+    if search_evaluations < 0 or (search_evaluations and provider != "model"):
+        raise ValueError("search-evaluations must be nonnegative and requires the model provider")
     source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
@@ -113,7 +147,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     log_lock, score_lock = threading.Lock(), threading.Lock()
     receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
                "guarded_pack": guarded_pack,
-               "max_candidates": max_candidates, "workers": workers,
+               "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                "candidates": []}
 
@@ -164,7 +198,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         directory = output / row["directory"]
         before = time.monotonic()
         try:
-            command([str(binaries / "atlas-opt"), str(prepared), *candidate_options(candidate, provider, spill),
+            if candidate.virtual_orders:
+                (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
+            command([str(binaries / "atlas-opt"), str(prepared),
+                     *candidate_options(candidate, provider, spill, graph_output=bool(search_evaluations)),
                      "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                          directory, directory / "program.json"))
@@ -185,11 +222,11 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 raise ValueError("default candidate failed: " + str(error)) from error
         finally:
             row["elapsed_seconds"] = time.monotonic() - before
-    def evaluate_batch(specifications: list[tuple[Candidate, str]]) -> None:
+    def evaluate_batch(specifications: list[tuple[Candidate, str]], limit: int = max_candidates) -> None:
         nonlocal best
         pending = []
         for candidate, category in specifications:
-            if candidate in seen or len(receipt["candidates"]) >= (max_candidates if provider == "model" else 1):
+            if candidate in seen or len(receipt["candidates"]) >= (limit if provider == "model" else 1):
                 continue
             seen.add(candidate)
             index = len(receipt["candidates"])
@@ -218,6 +255,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             def winner() -> Candidate:
                 options = dict(best["options"])
                 options["store_windows"] = tuple(options["store_windows"])
+                options["virtual_orders"] = tuple(tuple(order) for order in options["virtual_orders"])
                 return Candidate(**options)
 
             program = json.loads((output / best["directory"] / "program.json").read_text())
@@ -233,6 +271,39 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
                            for rank in range(1, 8) if store_count]
             evaluate_batch(placements)
+            if search_evaluations:
+                search_started = time.monotonic()
+                initial_count = len(receipt["candidates"])
+                limit = initial_count + search_evaluations
+                receipt["search"] = {"start_index": best["index"], "accepted_indices": []}
+                while len(receipt["candidates"]) < limit:
+                    parent = best
+                    graphs = json.loads((output / parent["directory"] / "graph.json").read_text())
+                    orders = tuple(tuple(graph["order"]) for graph in graphs)
+                    base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
+                    seen.add(base)
+                    pending = (replace(base, virtual_orders=order) for order in order_neighbors(graphs, orders))
+                    # Fixed batches keep the explored path independent of worker count.
+                    while len(receipt["candidates"]) < limit:
+                        batch = []
+                        for candidate in pending:
+                            if candidate not in seen and candidate not in batch:
+                                batch.append(candidate)
+                            if len(batch) == min(12, limit - len(receipt["candidates"])):
+                                break
+                        if not batch:
+                            break
+                        before = len(receipt["candidates"])
+                        evaluate_batch([(candidate, "local-order") for candidate in batch], limit)
+                        for row in receipt["candidates"][before:]:
+                            row["parent_index"] = parent["index"]
+                        if best["index"] != parent["index"]:
+                            receipt["search"]["accepted_indices"].append(best["index"])
+                            break
+                    if best["index"] == parent["index"]:
+                        break
+                receipt["search"].update(evaluations=len(receipt["candidates"]) - initial_count,
+                                         elapsed_seconds=time.monotonic() - search_started)
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
@@ -258,6 +329,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--composed-sha256")
     parser.add_argument("--max-candidates", type=int, default=24)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--search-evaluations", type=int, default=0,
+                        help="additional verified local order attempts after knob selection (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
@@ -268,7 +341,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
             "op_timing_sha256": args.op_timing_sha256, "pairs": args.pairs,
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,
             "composed_sha256": args.composed_sha256, "max_candidates": args.max_candidates,
-            "workers": args.workers,
+            "workers": args.workers, "search_evaluations": args.search_evaluations,
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
 

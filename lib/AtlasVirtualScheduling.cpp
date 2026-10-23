@@ -24,6 +24,9 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -1034,6 +1037,14 @@ struct ScheduleAtlasVirtualPass
       *this, "lookahead", llvm::cl::desc("Force an existing list schedule (0, 1, 2, 4, or 8; model only)"),
       llvm::cl::init(0)};
 
+  Option<std::string> orderFile{
+      *this, "order-file", llvm::cl::desc("Explicit per-block topological orders as JSON (model only)"),
+      llvm::cl::init("")};
+
+  Option<std::string> graphOutput{
+      *this, "graph-output", llvm::cl::desc("Write dependence graphs and selected orders as JSON (model only)"),
+      llvm::cl::init("")};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
@@ -1053,6 +1064,34 @@ struct ScheduleAtlasVirtualPass
       module.emitError("lookahead and random-seed are mutually exclusive");
       return signalPassFailure();
     }
+    if ((!orderFile.empty() || !graphOutput.empty()) && selected->id != timing::kModelTimingProviderId) {
+      module.emitError("explicit orders and graph output require the model timing provider");
+      return signalPassFailure();
+    }
+    if (!orderFile.empty() && (lookahead || randomSeed >= 0)) {
+      module.emitError("order-file excludes lookahead and random-seed");
+      return signalPassFailure();
+    }
+    std::optional<llvm::json::Value> requested;
+    if (!orderFile.empty()) {
+      auto file = llvm::MemoryBuffer::getFile(orderFile);
+      if (!file) {
+        module.emitError("cannot read order-file: ") << file.getError().message();
+        return signalPassFailure();
+      }
+      auto parsed = llvm::json::parse((*file)->getBuffer());
+      if (!parsed) {
+        module.emitError("invalid order-file JSON: ") << llvm::toString(parsed.takeError());
+        return signalPassFailure();
+      }
+      requested = std::move(*parsed);
+      if (!requested->getAsArray()) {
+        module.emitError("order-file must contain an array of block permutations");
+        return signalPassFailure();
+      }
+    }
+    llvm::json::Array graphs;
+    unsigned blockIndex = 0;
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
@@ -1064,9 +1103,64 @@ struct ScheduleAtlasVirtualPass
         capacity[indexOf(kind)] = capacities[indexOf(kind)];
       Liveness liveness(function);
       unsigned index = 0;
-      for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed, lookahead, *selected)))
+      for (Block &block : function.getBody()) {
+        std::optional<BlockGraph> graph;
+        if (requested || !graphOutput.empty()) {
+          auto built = buildGraph(block);
+          if (failed(built))
+            return signalPassFailure();
+          graph = std::move(*built);
+        }
+        if (requested) {
+          const auto &blocks = *requested->getAsArray();
+          const auto *order = blockIndex < blocks.size() ? blocks[blockIndex].getAsArray() : nullptr;
+          if (!order || order->size() != graph->nodes.size()) {
+            module.emitError("order-file must contain one complete permutation per block");
+            return signalPassFailure();
+          }
+          SmallVector<Operation *> ops;
+          std::vector<bool> placed(graph->nodes.size(), false);
+          for (const auto &value : *order) {
+            auto node = value.getAsInteger();
+            if (!node || *node < 0 || static_cast<uint64_t>(*node) >= placed.size() || placed[*node]) {
+              module.emitError("order-file contains an invalid or duplicate node");
+              return signalPassFailure();
+            }
+            for (unsigned pred : graph->preds[*node])
+              if (!placed[pred]) {
+                module.emitError("order-file violates a dependence");
+                return signalPassFailure();
+              }
+            placed[*node] = true;
+            ops.push_back(graph->nodes[*node]);
+          }
+          reorder(block, ops);
+        } else if (failed(scheduleBlock(block, index, liveness, capacity, seed, lookahead, *selected))) {
           return signalPassFailure();
+        }
+        if (!graphOutput.empty()) {
+          llvm::json::Array preds, names, order;
+          llvm::DenseMap<Operation *, unsigned> ids;
+          for (unsigned node = 0; node < graph->nodes.size(); ++node) {
+            ids[graph->nodes[node]] = node;
+            llvm::json::Array incoming;
+            for (unsigned pred : graph->preds[node])
+              incoming.push_back(pred);
+            preds.push_back(std::move(incoming));
+            names.push_back(graph->nodes[node]->getName().getStringRef());
+          }
+          for (Operation *op : freeOperations(block))
+            order.push_back(ids.lookup(op));
+          graphs.push_back(llvm::json::Object{{"preds", std::move(preds)}, {"operations", std::move(names)},
+                                             {"order", std::move(order)}});
+        }
+        ++index;
+        ++blockIndex;
+      }
+    }
+    if (requested && requested->getAsArray()->size() != blockIndex) {
+      module.emitError("order-file has extra block permutations");
+      return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
     // is a dependence the graph is missing.
@@ -1074,6 +1168,20 @@ struct ScheduleAtlasVirtualPass
       module.emitError("schedule-atlas-virtual produced an order that does "
                        "not verify");
       return signalPassFailure();
+    }
+    if (!graphOutput.empty()) {
+      std::error_code error;
+      llvm::raw_fd_ostream output(graphOutput, error);
+      if (error) {
+        module.emitError("cannot write graph-output: ") << error.message();
+        return signalPassFailure();
+      }
+      output << llvm::json::Value(std::move(graphs)) << "\n";
+      output.flush();
+      if (output.has_error()) {
+        module.emitError("cannot write graph-output");
+        return signalPassFailure();
+      }
     }
   }
 };
@@ -1084,10 +1192,13 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider, unsigned lookahead, int randomSeed) {
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider, unsigned lookahead, int randomSeed,
+                                                                   StringRef orderFile, StringRef graphOutput) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
   pass->lookahead = lookahead;
   pass->randomSeed = randomSeed;
+  pass->orderFile = orderFile.str();
+  pass->graphOutput = graphOutput.str();
   return pass;
 }
