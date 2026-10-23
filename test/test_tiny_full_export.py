@@ -23,6 +23,8 @@ class FullExportTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "host layout changed"):
                 exporter.checked_layout()
 
+    @unittest.skipUnless(os.environ.get("TINY_MODEL_ROOT") and os.environ.get("TINY_FULL_CAPTURE"),
+                         "set explicit model and full capture fixtures")
     def test_vector_codec_selected_rtl_boundaries_and_actual_weight(self):
         root = exporter.checked(os.environ["TINY_MODEL_ROOT"])
         _, torch, _, _ = exporter.configure_model(root)
