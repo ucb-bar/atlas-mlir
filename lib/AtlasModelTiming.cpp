@@ -12,6 +12,8 @@
 #include "llvm/Support/SHA256.h"
 #include <algorithm>
 #include <climits>
+#include <cmath>
+#include <deque>
 #include <set>
 
 using namespace mlir;
@@ -35,7 +37,7 @@ bool supportedConfiguration(const Object &cfg) {
   if (!arch || !units || cfg.getBoolean("ignore_runtime_errors") != false ||
       arch->getString("numerics") != "rtl" || arch->getBoolean("randomize_init") != false)
     return false;
-  // The DMA estimate is independently qualified for this profile, not derived from isolated engine facts.
+  // DMA proposal facts below bind the reviewed curve backend and engine separately.
   if (cfg.getString("dma_memory_backend") != "curve" || !memory || memory->size() != 1 ||
       memory->getString("curves") != "ee290sim_vcs_probe.json" || !memoryLatency || !memoryBeat ||
       memoryLatency->kind() != llvm::json::Value::Null || memoryBeat->kind() != llvm::json::Value::Null)
@@ -260,6 +262,169 @@ std::string mlir::atlas::timing::canonicalJson(const llvm::json::Value &value) {
   return bytes;
 }
 
+namespace {
+bool exactKeys(const Object &object, std::initializer_list<const char *> keys) {
+  if (object.size() != keys.size()) return false;
+  for (const char *key : keys)
+    if (!object.get(key)) return false;
+  return true;
+}
+
+llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg) {
+  auto error = [](const std::string &why) -> llvm::Expected<ModelDMATiming> {
+    return factsError("dma_timing: " + why);
+  };
+  if (!exactKeys(d, {"schema", "backend", "resolved", "estimate_only", "curve_sha256", "source_sha256",
+      "source_shapes", "beat_bytes", "max_in_flight", "num_channels", "max_transfer_bytes", "queue_depth",
+      "window_beats", "frequency_ghz", "channels", "measured_channels", "access_bytes", "latency_mode",
+      "converge", "knee", "enforce_peak", "min_latency", "startup_cycles", "issue_interval_cycles",
+      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation"}) ||
+      d.getString("schema") != "atlas.dma_timing.v1" || d.getString("backend") != "curve" ||
+      d.getBoolean("resolved") != true || d.getBoolean("estimate_only") != true)
+    return error("requires the complete resolved proposal-only curve schema");
+  const auto &identity = model_schema::dmaIdentity();
+  const Object *sources = d.getObject("source_sha256"), *shapes = d.getObject("source_shapes");
+  if (identity.size() != 5 || !sources || !shapes || !exactKeys(*sources, {"memory_backend.py", "dma.py"}) ||
+      !exactKeys(*shapes, {"memory_backend.py", "dma.py"}))
+    return error("requires compiled DMA source, shape and curve identities");
+  for (const auto &[key, pin] : identity) {
+    auto actual = key == "curve_sha256" ? d.getString(key) :
+        llvm::StringRef(key).starts_with("shape:") ? shapes->getString(llvm::StringRef(key).drop_front(6)) :
+        sources->getString(key);
+    if (!actual || !hashSyntax(*actual) || *actual != pin)
+      return error("unreviewed source, shape or curve: " + key);
+  }
+  const Object *validation = d.getObject("validation");
+  auto reportHash = validation ? validation->getString("report_sha256") : std::nullopt;
+  if (!validation || !exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs"}) ||
+      validation->getBoolean("passed") != true || !reportHash || !hashSyntax(*reportHash) ||
+      !validation->getInteger("backend_streams") || *validation->getInteger("backend_streams") < 1 ||
+      !validation->getInteger("isolated_dma_runs") || *validation->getInteger("isolated_dma_runs") < 1 ||
+      !validation->getInteger("mixed_dma_runs") || *validation->getInteger("mixed_dma_runs") < 1)
+    return error("requires successful backend/isolated/mixed validation and its report SHA-256");
+  const Object *semantics = d.getObject("semantics");
+  if (!semantics || semantics->size() != 8) return error("missing reviewed backend/engine semantics");
+  for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
+      {"history", "last_window_beats_issued_including_current_beat"},
+      {"curve_selection", "nearest_read_percentage_tie_lower"},
+      {"acceptance", "pending_count_below_queue_depth_including_presented_response"},
+      {"ready", "max_issue_plus_unloaded_latency_and_previous_fractional_ready_plus_curve_spacing"},
+      {"response", "oldest_ready_then_issue_order_held_until_pop"},
+      {"history_lifetime", "reset_only_not_command_boundary"}, {"address_dependence", "none"},
+      {"engine", "registered_slots_and_in_flight;D_before_A;retire_after_last_ack"}})
+    if (semantics->getString(key) != value) return error("unsupported semantics: " + std::string(key));
+  auto integer = [&](const char *key) {
+    auto value = d.getInteger(key);
+    return value && *value > 0 && *value <= INT_MAX ? int(*value) : 0;
+  };
+  auto number = [&](const char *key) {
+    auto value = d.getNumber(key);
+    return value && std::isfinite(*value) ? *value : -1.;
+  };
+  int beat = integer("beat_bytes"), maxBytes = integer("max_transfer_bytes");
+  int inFlight = integer("max_in_flight"), queue = integer("queue_depth"), interval = integer("issue_interval_cycles");
+  if (!beat || !maxBytes || !inFlight || !queue || !interval || !integer("window_beats") ||
+      cfg.getInteger("dma_beat_bytes") != beat || cfg.getInteger("dma_max_transfer_bytes") != maxBytes ||
+      cfg.getInteger("dma_max_in_flight") != inFlight || cfg.getInteger("dma_max_in_flight") != queue ||
+      cfg.getInteger("dma_num_channels") != integer("num_channels") ||
+      maxBytes % beat || !integer("access_bytes") || !integer("measured_channels") ||
+      number("frequency_ghz") <= 0 || number("frequency_ghz") > INT_MAX ||
+      !integer("channels"))
+    return error("invalid numeric geometry or mismatch with selected configuration");
+  double minimum = integer("min_latency"), epsilon = number("rounding_epsilon_cycles"), reset = number("reset_last_ready_cycles");
+  if (d.getString("latency_mode") != "unloaded" || number("converge") != 1. ||
+      d.getBoolean("enforce_peak") != true || minimum < 1 || minimum > INT_MAX ||
+      number("knee") <= 0 || number("knee") > 1 || epsilon < 0 || epsilon >= 1 || reset < 0 || reset > INT_MAX)
+    return error("unsupported controller mode, rounding or reset state");
+  const Object *startup = d.getObject("startup_cycles");
+  auto load = startup ? startup->getInteger("load") : std::nullopt;
+  auto store = startup ? startup->getInteger("store") : std::nullopt;
+  if (!startup || !exactKeys(*startup, {"load", "store"}) || !load || !store ||
+      *load < 1 || *store < 1 || *load > INT_MAX || *store > INT_MAX)
+    return error("requires bounded source-derived launch startup");
+  ModelDMATiming result{beat, maxBytes, inFlight, queue, interval, int(*load), int(*store),
+                        0., 0., 0., 0., epsilon, reset};
+  const Array *curves = d.getArray("curves");
+  if (!curves || curves->empty() || curves->size() > 101) return error("missing bounded curve coverage");
+  int previous = -1;
+  bool reads = false, writes = false;
+  for (const auto &value : *curves) {
+    const Object *curve = value.getAsObject();
+    auto pct = curve ? curve->getInteger("read_percentage") : std::nullopt;
+    if (!curve || !exactKeys(*curve, {"read_percentage", "unloaded_latency_cycles", "peak_beats_per_cycle", "cycles_per_beat", "points"}) ||
+        !pct || *pct < 0 || *pct > 100 || *pct <= previous)
+      return error("curve percentages must be sorted, unique and in range");
+    previous = int(*pct);
+    const Array *points = curve->getArray("points");
+    auto latency = curve->getNumber("unloaded_latency_cycles"), peak = curve->getNumber("peak_beats_per_cycle");
+    auto spacing = curve->getNumber("cycles_per_beat");
+    if (!points || points->empty() || points->size() > 4096 || !latency || !peak || !spacing ||
+        !std::isfinite(*latency) || !std::isfinite(*peak) || !std::isfinite(*spacing) ||
+        *latency < minimum || *latency > INT_MAX || *peak <= 0 || *spacing <= 0 || *spacing > INT_MAX)
+      return error("invalid finite curve coordinates");
+    double previousBW = 0, firstLatency = 0;
+    for (const auto &point : *points) {
+      const Array *pair = point.getAsArray();
+      auto bw = pair && pair->size() == 2 ? (*pair)[0].getAsNumber() : std::nullopt;
+      auto lat = pair && pair->size() == 2 ? (*pair)[1].getAsNumber() : std::nullopt;
+      if (!bw || !lat || !std::isfinite(*bw) || !std::isfinite(*lat) || *bw <= previousBW || *lat <= 0 || *lat > INT_MAX)
+        return error("curve points must have finite positive coordinates and increasing bandwidth");
+      if (previousBW == 0) firstLatency = *lat;
+      previousBW = *bw;
+    }
+    // Both values are computed directly by the reviewed converter from these points.
+    if (*latency != std::max(minimum, firstLatency) || *peak != previousBW || *spacing != 1. / *peak)
+      return error("unloaded latency or peak pacing disagrees with curve points");
+    if (*pct == 0) { result.writeLatency = *latency; result.writeSpacing = *spacing; writes = true; }
+    if (*pct == 100) { result.readLatency = *latency; result.readSpacing = *spacing; reads = true; }
+  }
+  const Array *limits = d.getArray("limits");
+  if (!reads || !writes || !limits || limits->empty()) return error("requires pure read/store endpoints and explicit scope limits");
+  for (const auto &limit : *limits)
+    if (!limit.getAsString() || limit.getAsString()->empty()) return error("invalid proposal scope limit");
+  // Reject facts whose largest supported transfer cannot be represented by consumer arithmetic.
+  for (bool store : {false, true}) {
+    auto checked = result.estimate(result.maxBytes, store);
+    if (!checked.error.empty()) return error(checked.error);
+  }
+  return result;
+}
+} // namespace
+
+TimingRuleResult<int> ModelDMATiming::estimate(int64_t bytes, bool store) const {
+  auto error = [](const char *why) -> TimingRuleResult<int> { return {0, std::string("model DMA estimate: ") + why}; };
+  if (bytes < beatBytes || bytes > maxBytes || bytes % beatBytes)
+    return error("transfer is outside the derived aligned geometry");
+  // Cold single-command replay: pure history selects an endpoint on every beat.
+  // Completion is the last acknowledgement age relative to the command launch.
+  // Capacity uses registered in-flight state; backend acceptance observes D-before-A.
+  std::deque<int64_t> pending;
+  int64_t issue = store ? storeStartup : loadStartup, last = 0;
+  double ready = resetReady, latency = store ? writeLatency : readLatency;
+  double spacing = store ? writeSpacing : readSpacing;
+  for (int64_t beat = 0; beat < bytes / beatBytes; ++beat) {
+    while (!pending.empty() && pending.front() < issue) pending.pop_front();
+    if (pending.size() >= size_t(maxInFlight)) issue = std::max(issue, pending.front() + issueInterval);
+    if (pending.size() >= size_t(queueDepth)) issue = std::max(issue, pending.front());
+    while (!pending.empty() && pending.front() <= issue) pending.pop_front();
+    ready = std::max(double(issue) + latency, ready + spacing);
+    double rounded = std::ceil(ready - epsilon);
+    if (!std::isfinite(rounded) || rounded < 0 || rounded > INT_MAX)
+      return error("isolated completion exceeds the nonnegative cycle domain");
+    // One response per engine edge, including when several ready values round together.
+    last = std::max(int64_t(rounded), last + issueInterval);
+    if (last > INT_MAX) return error("isolated completion exceeds the nonnegative cycle domain");
+    pending.push_back(last);
+    issue += issueInterval;
+  }
+  return {int(last), {}};
+}
+
+TimingRuleResult<int> ModelTimingFacts::estimateDMACycles(int64_t bytes, bool store) const {
+  if (!dmaTiming) return {0, "model: DMA proposal requires validated dma_timing facts"};
+  return dmaTiming->estimate(bytes, store);
+}
+
 llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait) {
   if (!hashSyntax(expectedSha256)) return factsError("facts SHA-256 is required");
@@ -391,6 +556,13 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     if (!result.blocks.emplace(name->str(), std::move(block)).second)
       return factsError("duplicate operation " + name->str());
   }
+  if (const auto *dmaFacts = root->get("dma_timing")) {
+    const Object *document = dmaFacts->getAsObject();
+    if (!document) return factsError("dma_timing must be an object");
+    auto parsedDMA = parseDMATiming(*document, *configuration);
+    if (!parsedDMA) return parsedDMA.takeError();
+    result.dmaTiming = std::move(*parsedDMA);
+  }
   result.sha256 = expectedSha256.str();
   result.dma = dmaWait;
   return result;
@@ -454,6 +626,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
 
   if (op.engine == Engine::Dma) {
     if (!dma) return reject("DMA requires the dma=wait selection");
+    if (!dmaTiming) return reject("DMA requires validated dma_timing facts");
     if (op.channel < 0 || op.channel >= int(kAtlasDMAChannels)) return reject("unsupported DMA channel");
     if (op.opClass == OpClass::DmaWait) return f; // Pairing is checked by the stream verifier.
     if (op.opClass == OpClass::DmaConfig) {
@@ -473,7 +646,9 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
         offset % 32 || offset + bytes > (uint64_t(1) << 32))
       return reject("DMA transfer is unaligned, out of range, oversized, or crosses a bank/address boundary");
     x(in.rd, false); x(in.rs1, false); x(in.rs2, false);
-    f.dmaCycles = dmaTransferCycles(bytes, !load);
+    auto estimate = estimateDMACycles(bytes, !load);
+    if (!estimate.error.empty()) return reject(estimate.error.c_str());
+    f.dmaCycles = estimate.value;
     f.accesses.push_back({Res::DmaBase, false, 0, 1, 0, 1});
     f.accesses.push_back({Res::Vmem, load, int(words / 8), int(bytes / 32), 0, 0, false, true});
     return f;
@@ -905,6 +1080,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
                                                       std::shared_ptr<const ModelOverlapFacts> overlap, bool chains) {
   TimingProvider provider;
   provider.id = kModelTimingProviderId.str();
+  provider.dmaEstimate = [facts](int64_t bytes, bool store) { return facts->estimateDMACycles(bytes, store); };
   provider.costProbes = [](const OpInfo &op) {
     Instr first{&op, 0, 2, 4}, second{&op, 6, 8, 10};
     if (op.engine == Engine::Scalar) {

@@ -68,6 +68,9 @@ struct TimingProvider {
   std::function<TimingRuleResult<int>(const Instr &)> issueGap;
   std::function<TimingRuleResult<std::unique_ptr<TimingReservations>>()>
       createReservations;
+  // Proposal only: completion is still established by matching DMA waits.
+  // Optional for providers that never estimate DMA; no consumer borrows another provider's policy.
+  std::function<TimingRuleResult<int>(int64_t bytes, bool store)> dmaEstimate;
   bool fillPendingDelaySlots = false;
   // DMA wait insertion completes launch n-8 before launch n reuses its command slot.
   bool waitReusedDMASlots = false;

@@ -374,21 +374,34 @@ constexpr int kScalarSlotCycles = 8;
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
 FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
-  static const int registerLoad = timing::dmaTransferCycles(kAtlasRegisterBytes, false);
-  static const int registerStore = timing::dmaTransferCycles(kAtlasRegisterBytes, true);
+  auto transferCycles = [&](int64_t bytes, bool store) -> FailureOr<int> {
+    if (provider.dmaEstimate) {
+      auto estimate = provider.dmaEstimate(bytes, store);
+      if (!estimate.error.empty()) return op->emitOpError(estimate.error);
+      if (estimate.value < 1) return op->emitOpError("provider returned a nonpositive DMA proposal estimate");
+      return estimate.value;
+    }
+    if (provider.id == timing::kBuiltinTimingProviderId)
+      return timing::dmaTransferCycles(bytes, store);
+    return op->emitOpError("timing provider has no DMA proposal estimator");
+  };
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
   if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op)) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload))
       return failure();
-    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) * (int64_t(registerLoad) + vload->latency));
+    auto transfer = transferCycles(kAtlasRegisterBytes, false);
+    if (failed(transfer)) return failure();
+    return blocking(op, Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) * (int64_t(*transfer) + vload->latency));
   }
   if (isa<VirtualOutputBF16Op>(op)) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
     if (failed(vstore))
       return failure();
-    return blocking(op, Unit::Dma, registersOf(false) * (int64_t(vstore->latency) + registerStore));
+    auto transfer = transferCycles(kAtlasRegisterBytes, true);
+    if (failed(transfer)) return failure();
+    return blocking(op, Unit::Dma, registersOf(false) * (int64_t(vstore->latency) + *transfer));
   }
   // An atomic load's tile is ready once its transfer lands and its VLOADs
   // (one per register) finish. A consumer cannot start before then, so the
@@ -399,9 +412,10 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     if (failed(vload))
       return failure();
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, false);
+    auto cycles = transferCycles(registers * kAtlasRegisterBytes, false);
+    if (failed(cycles)) return failure();
     int64_t loaded = int64_t(registers - 1) * vload->interval + vload->latency;
-    return checkedCost(op, Unit::Dma, cycles, cycles + loaded, 1, true);
+    return checkedCost(op, Unit::Dma, *cycles, *cycles + loaded, 1, true);
   }
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
@@ -410,8 +424,9 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int64_t staged = int64_t(registers - 1) * vstore->interval + vstore->latency;
-    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, true);
-    return checkedCost(op, Unit::Dma, cycles, cycles, staged + 1, true);
+    auto cycles = transferCycles(registers * kAtlasRegisterBytes, true);
+    if (failed(cycles)) return failure();
+    return checkedCost(op, Unit::Dma, *cycles, *cycles, staged + 1, true);
   }
   if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
     Operation *writer = atlasSpillSaved(op).getDefiningOp();

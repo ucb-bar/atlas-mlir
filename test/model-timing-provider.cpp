@@ -1,4 +1,5 @@
 #include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelVocabulary.h"
 #include "Atlas/AtlasModelPairs.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasStream.h"
@@ -10,6 +11,7 @@
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <tuple>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -40,6 +42,39 @@ Object block(const char *name, const char *engine, int free, Object events) {
           {"next_issue_age", free}, {"events", std::move(events)},
           {"assumptions", Object{{"scratchpad_read_latency", 1}}},
           {"observation", Object{{"accepted", true}, {"drained", true}}}};
+}
+Object dmaFixture() {
+  Object sources, shapes;
+  for (const auto &[key, value] : model_schema::dmaIdentity()) {
+    if (key == "curve_sha256") continue;
+    if (llvm::StringRef(key).starts_with("shape:")) shapes[llvm::StringRef(key).drop_front(6)] = value;
+    else sources[key] = value;
+  }
+  // Synthetic points intentionally differ from the pinned production values.
+  Array curves;
+  for (auto [pct, latency, peak] : {std::tuple<int, double, double>{0, 3., .5}, {100, 5., .4}})
+    curves.push_back(Object{{"read_percentage", pct}, {"unloaded_latency_cycles", latency},
+        {"peak_beats_per_cycle", peak}, {"cycles_per_beat", 1. / peak},
+        {"points", Array{Array{peak / 2, latency}, Array{peak, latency * 2}}}});
+  return Object{{"schema", "atlas.dma_timing.v1"}, {"backend", "curve"}, {"resolved", true}, {"estimate_only", true},
+      {"curve_sha256", model_schema::dmaIdentity().at("curve_sha256")},
+      {"source_sha256", std::move(sources)}, {"source_shapes", std::move(shapes)},
+      {"beat_bytes", 32}, {"max_in_flight", 64}, {"num_channels", 8}, {"max_transfer_bytes", 4096},
+      {"queue_depth", 64}, {"window_beats", 32}, {"frequency_ghz", .5}, {"channels", 1},
+      {"measured_channels", 1}, {"access_bytes", 32}, {"latency_mode", "unloaded"}, {"converge", 1.},
+      {"knee", .9}, {"enforce_peak", true}, {"min_latency", 1},
+      {"startup_cycles", Object{{"load", 1}, {"store", 3}}}, {"issue_interval_cycles", 1},
+      {"rounding_epsilon_cycles", 1e-9}, {"reset_last_ready_cycles", 0.}, {"curves", std::move(curves)},
+      {"semantics", Object{{"history", "last_window_beats_issued_including_current_beat"},
+          {"curve_selection", "nearest_read_percentage_tie_lower"},
+          {"acceptance", "pending_count_below_queue_depth_including_presented_response"},
+          {"ready", "max_issue_plus_unloaded_latency_and_previous_fractional_ready_plus_curve_spacing"},
+          {"response", "oldest_ready_then_issue_order_held_until_pop"},
+          {"history_lifetime", "reset_only_not_command_boundary"}, {"address_dependence", "none"},
+          {"engine", "registered_slots_and_in_flight;D_before_A;retire_after_last_ack"}}},
+      {"limits", Array{"Cold isolated proposal; completion waits remain required."}},
+      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
+                            {"backend_streams", 2}, {"isolated_dma_runs", 2}, {"mixed_dma_runs", 2}}}};
 }
 Object fixture() {
   static const llvm::StringRef configuration =
@@ -90,7 +125,7 @@ Object fixture() {
                                        {"numerical_data_sha256", std::string(64, '7')}}},
           {"geometry", Object{{"rows", 32}, {"columns", 32}, {"mreg_count", 64}}},
           {"observation", Object{{"accepted", true}, {"drained", true}}},
-          {"op_timing", std::move(operations)}};
+          {"op_timing", std::move(operations)}, {"dma_timing", dmaFixture()}};
 }
 std::string encode(Object object) {
   std::string bytes;
@@ -642,12 +677,103 @@ void testExplicitReleases() {
   rejectConfiguration("ignore_runtime_errors", true, "even a correctly hashed configuration cannot suppress model runtime errors");
 }
 
+void testDMAEstimates() {
+  auto parse = [](Object object) {
+    std::string bytes = encode(std::move(object));
+    return parseModelTimingFacts(bytes, hash(bytes), true);
+  };
+  auto baseline = parse(fixture());
+  check(bool(baseline), "synthetic source-pinned DMA proposal facts load");
+  if (!baseline) { llvm::consumeError(baseline.takeError()); return; }
+  check(baseline->estimateDMACycles(32, false).value == 6 && baseline->estimateDMACycles(1024, false).value == 84 &&
+        baseline->estimateDMACycles(32, true).value == 6 && baseline->estimateDMACycles(1024, true).value == 68,
+        "cold estimates replay synthetic endpoint startup, latency and fractional pacing");
+  check(!baseline->estimateDMACycles(0, false).error.empty() && !baseline->estimateDMACycles(33, true).error.empty() &&
+        !baseline->estimateDMACycles(8192, false).error.empty(), "DMA proposals reject invalid transfer geometry");
+  Object changed = fixture();
+  changed.getObject("dma_timing")->getObject("startup_cycles")->operator[]("load") = 8;
+  auto startup = parse(std::move(changed));
+  check(bool(startup) && startup->estimateDMACycles(1024, false).value == 91,
+        "DMA proposal consumes derived launch startup");
+  if (!startup) llvm::consumeError(startup.takeError());
+  changed = fixture();
+  Object &read = *(*changed.getObject("dma_timing")->getArray("curves"))[1].getAsObject();
+  read["peak_beats_per_cycle"] = .2;
+  read["cycles_per_beat"] = 5.;
+  (*(*read.getArray("points"))[0].getAsArray())[0] = .1;
+  (*(*read.getArray("points"))[1].getAsArray())[0] = .2;
+  auto slower = parse(std::move(changed));
+  check(bool(slower) && slower->estimateDMACycles(1024, false).value == 161,
+        "DMA proposal responds to derived curve pacing, not builtin calibration");
+  if (!slower) llvm::consumeError(slower.takeError());
+  changed = fixture();
+  Object &longRead = *(*changed.getObject("dma_timing")->getArray("curves"))[1].getAsObject();
+  longRead["unloaded_latency_cycles"] = 1000.;
+  (*(*longRead.getArray("points"))[0].getAsArray())[1] = 1000.;
+  (*(*longRead.getArray("points"))[1].getAsArray())[1] = 2000.;
+  auto bounded = parse(std::move(changed));
+  check(bool(bounded) && bounded->estimateDMACycles(4096, false).value == 2160,
+        "isolated replay observes registered in-flight capacity before same-cycle response");
+  if (!bounded) llvm::consumeError(bounded.takeError());
+  changed = fixture();
+  (*changed.getObject("dma_timing"))["reset_last_ready_cycles"] = 1000.;
+  auto reset = parse(std::move(changed));
+  check(bool(reset) && reset->estimateDMACycles(1024, false).value == 1080,
+        "isolated replay consumes source-derived fractional ready reset");
+  if (!reset) llvm::consumeError(reset.takeError());
+  changed = fixture();
+  changed.erase("dma_timing");
+  auto legacy = parse(std::move(changed));
+  check(bool(legacy), "old per-operation facts can still parse without DMA proposal coverage");
+  if (legacy) {
+    auto facts = std::make_shared<ModelTimingFacts>(std::move(*legacy));
+    auto provider = modelTimingProvider(facts);
+    check(facts->resolve({findOp("vmov"), 4, 0, 0}, unknownRegs()).error.empty(), "legacy non-DMA facts remain usable");
+    check(!provider.dmaEstimate(1024, false).error.empty(), "missing DMA proposal coverage has no generic fallback");
+    check(!facts->resolve({findOp("dma.wait.ch0"), 0, 0, 0}, unknownRegs()).error.empty(),
+          "DMA resolution fails closed without dma_timing even for waits");
+  } else llvm::consumeError(legacy.takeError());
+  auto builtin = builtinTimingProvider();
+  check(!builtin.dmaEstimate && dmaTransferCycles(1024, false) == 781 && dmaTransferCycles(1024, true) == 724,
+        "builtin retains its exact existing DMA proposal behavior");
+  check(baseline->estimateDMACycles(1024, false).value != dmaTransferCycles(1024, false),
+        "model proposals use their own facts independently of builtin");
+  for (const char *field : {"resolved", "estimate_only"})
+    rejectedFacts(fixture(), {{"unresolved or non-proposal DMA facts reject",
+                               std::string("dma_timing/") + field, false}});
+  for (const char *field : {"beat_bytes", "max_transfer_bytes", "max_in_flight", "num_channels", "queue_depth"})
+    rejectedFacts(fixture(), {{"DMA geometry must match explicit model configuration",
+                               std::string("dma_timing/") + field, 1}});
+  rejectedFacts(fixture(), {
+      {"unreviewed DMA raw source rejects", "dma_timing/source_sha256/dma.py", std::string(64, '0')},
+      {"unreviewed DMA source shape rejects", "dma_timing/source_shapes/memory_backend.py", std::string(64, '0')},
+      {"unreviewed DMA curve rejects", "dma_timing/curve_sha256", std::string(64, '0')}});
+  rejectedFacts(fixture(), {{"missing validation rejects", "dma_timing/validation", nullptr, true}});
+  rejectedFacts(fixture(), {
+      {"failed validation rejects", "dma_timing/validation/passed", false},
+      {"malformed validation report pin rejects", "dma_timing/validation/report_sha256", "stale"},
+      {"missing successful isolated probes reject", "dma_timing/validation/isolated_dma_runs", 0}});
+  rejectedFacts(fixture(), {{"missing successful mixed probes reject", "dma_timing/validation/mixed_dma_runs", nullptr, true}});
+  rejectedFacts(fixture(), {
+      {"non-integer backend channel scaling rejects", "dma_timing/channels", .5},
+      {"non-integer minimum latency rejects", "dma_timing/min_latency", 1.5},
+      {"unknown DMA fact fields reject", "dma_timing/completion_proof", true}});
+  rejectedFacts(fixture(), {{"missing DMA cost field rejects", "dma_timing/issue_interval_cycles", nullptr, true}});
+  rejectedFacts(fixture(), {
+      {"unsupported controller mode rejects", "dma_timing/latency_mode", "loaded"},
+      {"unreviewed history semantics reject", "dma_timing/semantics/history_lifetime", "command_boundary"},
+      {"inconsistent reciprocal pacing rejects", "dma_timing/curves/1/cycles_per_beat", 100.},
+      {"point and unloaded latency disagreement rejects", "dma_timing/curves/1/unloaded_latency_cycles", 100.},
+      {"out of range numeric estimate rejects", "dma_timing/rounding_epsilon_cycles", 2.}});
+}
+
 int main(int argc, char **argv) {
   if (argc == 2 && llvm::StringRef(argv[1]) == "--fixture") {
     llvm::outs() << encode(fixture()) << '\n';
     return 0;
   }
   if (argc != 1) return 2;
+  testDMAEstimates();
   testExplicitReleases();
   std::string bytes = encode(fixture());
   auto loaded = parseModelTimingFacts(bytes, hash(bytes), true);
@@ -666,7 +792,7 @@ int main(int argc, char **argv) {
   RegValues dmaRegs = unknownRegs();
   dmaRegs[1] = 0x20000 / 4; dmaRegs[2] = 0; dmaRegs[3] = 1024;
   Footprint dma = provider.footprint({findOp("dma.load.ch0"), 1, 2, 3}, dmaRegs);
-  check(dma.error.empty() && dma.dmaCycles == 781 && dma.doneAge == 0,
+  check(dma.error.empty() && dma.dmaCycles == 84 && dma.doneAge == 0,
         "DMA duration guides scheduling while completion still requires a wait");
   Instr move{findOp("vmov"), 4, 0, 0};
   Footprint first = provider.footprint(move, unknownRegs());
