@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from atlas_derive_curve import resolve_curve_path
 from atlas_model_facts import safe_path
+from atlas_model_profiles import bind_synthetic_configuration, scoring_configuration_receipt, synthetic_targets
 from atlas_model_schema import LOCK
 from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
 from check_program_decode import decode_binary
@@ -94,15 +95,34 @@ class ModelScorer:
     def __post_init__(self):
         object.__setattr__(self, "model", safe_path(self.model))
         object.__setattr__(self, "regions", tuple(json.loads(safe_path(path).read_text()) for path in self.regions))
+        # Snapshot named targets once, including when this scorer is pickled for workers.
+        object.__setattr__(self, "_targets", synthetic_targets())
 
-    def __call__(self, document, profile="curve"):
-        if sys.flags.optimize:
-            raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
+    def configured_profile(self, document, profile):
+        """Bind and identify the exact configuration used for native scoring."""
         root, source, numerical, config_hash, cfg = selected_model(self.model, include_configuration=True)
         evidence = document.get("model_evidence", {})
         expected = (evidence.get("source_sha256"), evidence.get("numerical_data_sha256"), evidence.get("configuration_sha256"))
         if (source, numerical, config_hash) != expected:
             raise ValueError("scoring model source, numerical data or configuration differs from provider evidence")
+        target = self._targets.get(profile)
+        if target is not None:
+            bind_synthetic_configuration(cfg, target)
+        elif profile == "curve":
+            bind_curve_configuration(cfg, evidence)
+        else:
+            raise ValueError("unsupported memory profile")
+        identity = dict(source_sha256=source, numerical_data_sha256=numerical, configuration_sha256=config_hash)
+        receipt = scoring_configuration_receipt(cfg, profile, identity, synthetic_target=target)
+        return cfg, receipt
+
+    def profile_receipt(self, document, profile):
+        return self.configured_profile(document, profile)[1]
+
+    def __call__(self, document, profile="curve"):
+        if sys.flags.optimize:
+            raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
+        cfg, _ = self.configured_profile(document, profile)
         import torch
         from npu_model.configs import isa_definition as isa
         from npu_model.hardware.core import Core
@@ -113,13 +133,6 @@ class ModelScorer:
         inventory = json.loads((Path(__file__).parents[1] / "docs/selected-variant-inventory.json").read_text())
         decoded = decode_binary(inventory, b"".join(word.to_bytes(4, "little") for word in words))
         program = InstantiableProgram([model_instruction(row, inventory, isa) for row in decoded["instructions"]])
-        if profile == "fifo43":
-            cfg.dma_memory_backend = "fixed"
-            cfg.dma_memory_params = dict(latency=43, cycles_per_beat=1, accept_fn=lambda cycle: cycle % 11 < 4)
-        elif profile == "curve":
-            bind_curve_configuration(cfg, evidence)
-        else:
-            raise ValueError("unsupported memory profile")
         logger = SimpleNamespace(**{name: lambda *args, **kwargs: None for name in dir(Logger) if name.startswith("log_")})
         core = Core(cfg, logger)
         try:

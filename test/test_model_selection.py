@@ -9,7 +9,7 @@ import os
 import random
 import re
 from collections import Counter
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import permutations
 from pathlib import Path
 import subprocess
@@ -355,6 +355,38 @@ with TemporaryDirectory() as directory:
                     self.select(name=name, runner=tied_run, profile="curve", curve_candidates=False,
                                 max_candidates=5, workers=1, scorer=scorer)
                 self.assertIs(raised.exception, error)
+
+    def test_native_profile_receipts_follow_primary_and_lazy_tie_scores(self):
+        class NativeScorer:
+            def __call__(self, program, profile):
+                return program["cycles"]
+
+            def profile_receipt(self, program, profile):
+                return {"profile": profile, "sha256": profile + "-configuration-digest"}
+
+        def executor(*, max_workers, **_):
+            return ThreadPoolExecutor(max_workers=max_workers)
+
+        def tied_run(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
+                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+            return result
+
+        for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve", "fifo43"}),
+                                       ("fifo43", 5, {"fifo43"})):
+            with self.subTest(profile=profile, cap=cap), \
+                    patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
+                    patch("atlas_model_selection.ProcessPoolExecutor", side_effect=executor), \
+                    patch("atlas_model_selection.evidence_option", side_effect=lambda *_: ["--select-atlas-model-evidence=facts=synthetic-test"]), \
+                    patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
+                output = self.directory / f"native-{profile}-{cap}"
+                receipt = select_program(self.source, output, self.directory, model=self.directory,
+                                         profile=profile, model_facts=self.directory, curve_candidates=False, max_candidates=cap, workers=2)
+            self.assertEqual(set(receipt["scoring_configurations"]), expected)
+            self.assertEqual(json.loads((output / "selection.json").read_text())["scoring_configurations"],
+                             {name: {"profile": name, "sha256": name + "-configuration-digest"} for name in expected})
+        self.assertNotIn("scoring_configurations", self.select(name="custom", max_candidates=1))
 
     def test_unique_curve_minimum_never_scores_fifo43(self):
         def scorer(program, profile):
