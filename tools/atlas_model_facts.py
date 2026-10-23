@@ -12,7 +12,8 @@ import time
 sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
-from atlas_model_schema import LOCK, VOCABULARY
+from atlas_model_schema import LOCK
+
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
 
@@ -61,7 +62,8 @@ def write(directory, name, value):
 def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
-             "atlas_model_schema.py", "atlas_model_diagnostics.py", "model-timing.lock.json",
+             "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
+             "atlas_derive_vocabulary.py", "model-timing.lock.json",
              "model-timing-vocabulary.json"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
@@ -84,12 +86,17 @@ def regenerate(model, out):
     from atlas_derive_memory import derive_memory
     from atlas_derive_curve import derive_curve
     from atlas_validate_curve import validate_curve
+    from atlas_derive_arch import derive_arch
+    from atlas_derive_vocabulary import validate_vocabulary, derive_isa_metadata
 
     if safe_path(Path(npu_model.__file__).parent.parent) != model:
         raise UnsupportedModelTiming("imported model does not match --npu-model")
     torch.set_num_threads(1)
     cfg, config = configuration()
     note_unqualified_model(before[0]["source_sha256"], sha256(encoded(config)))
+    architecture = derive_arch(cfg)
+    vocabulary = validate_vocabulary(cfg)
+    isa_metadata = derive_isa_metadata(cfg)
     # Preserve the exporter's fatal runtime-error propagation check for every model.
     core = Core(config=cfg, logger=Mock(spec=Logger))
     try:
@@ -138,10 +145,11 @@ def regenerate(model, out):
     payload = dict(schema="atlas.model_timing.v1", model=model_values,
                    geometry=dict(rows=cfg.arch_state_config.mrf_depth, columns=cfg.arch_state_config.mrf_width,
                                  mreg_count=cfg.arch_state_config.num_m_registers),
+                   architecture=architecture, operand_vocabulary=vocabulary, isa_metadata=isa_metadata,
                    age_convention="issue_edge_zero", observation=dict(accepted=True, drained=True),
                    op_timing=ordered, unresolved=[], reservation_releases=releases,
                    dma_timing=dma_timing,
-                   vocabulary_sha256=sha256(encoded(VOCABULARY)),
+                   vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
                    limits=["Operation timings cover isolated disjoint operands; no pair, capacity or RTL evidence.",

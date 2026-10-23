@@ -76,6 +76,77 @@ Object dmaFixture() {
       {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
                             {"backend_streams", 2}, {"isolated_dma_runs", 2}, {"mixed_dma_runs", 2}}}};
 }
+// Snapshot of derive_arch(configuration()) on the pinned model, used only by
+// synthetic provider tests. Production facts are always derived by the driver.
+Object architectureFixture() {
+  return Object{
+      {"bf16_element_bytes", 2},
+      {"bf16_pair_stride", 1},
+      {"bf16_registers_per_tile", 2},
+      {"bf16_tile_bytes", 2048},
+      {"csr_count", 4096},
+      {"dma_beat_bytes", 32},
+      {"dma_channels", 8},
+      {"dma_max_in_flight", 64},
+      {"dma_max_transfer_bytes", 4096},
+      {"dma_offchip_command_words", 2},
+      {"dram_base", 2147483648LL},
+      {"dram_bytes", 68719476736LL},
+      {"ereg_count", 32},
+      {"fetch_width", 1},
+      {"mreg_bank_modulus", 32},
+      {"mreg_bytes", 1024},
+      {"mreg_count", 64},
+      {"mreg_logical_limit", 64},
+      {"mreg_physical_bank_count", 32},
+      {"mreg_physical_row_stride", 32},
+      {"mreg_registers_per_bank", 2},
+      {"mreg_row_bytes", 32},
+      {"mreg_rows", 32},
+      {"offchip_link_core_cycles_per_beat", 2},
+      {"offchip_link_width_bits", 32},
+      {"scalar_word_bytes", 4},
+      {"schema", "atlas.architecture.v1"},
+      {"vmem_bank_bytes", 262144},
+      {"vmem_bank_count", 6},
+      {"vmem_bus_core_cycles_per_beat", 1},
+      {"vmem_bus_width_bits", 512},
+      {"vmem_bytes", 1572864},
+      {"vmem_bytes_per_cycle", 64},
+      {"weight_buffer_bytes", 1024},
+      {"weight_buffer_count", 2},
+      {"xreg_count", 32}};
+}
+Object isaFixture() {
+  Object metadata;
+  auto add = [&](const std::string &name, const char *engine) {
+    metadata[name] = Object{{"compiler_operands", findOp(name)->operands}, {"engine", engine}};
+  };
+  for (const auto &[name, block] : model_schema::vpuBlocks()) add(name, "vpu");
+  for (int m = 0; m < 2; ++m)
+    for (const char *name : {"vmatpush.weight", "vmatpush.acc.fp8", "vmatpush.acc.bf16", "vmatpop.fp8.acc",
+                             "vmatpop.bf16.acc", "vmatmul", "vmatmul.acc"})
+      add(std::string(name) + ".mxu" + std::to_string(m), m == 0 ? "mxu0" : "mxu1");
+  for (const char *name : {"vload", "vstore"}) add(name, "vlsu");
+  for (const char *name : {"lw", "sw", "seld"}) add(name, "scalar_lsu");
+  add("vtrpose.xlu", "xlu");
+  auto roles = [&](const char *name, const char *destinationType, const char *destinationResource,
+                   const char *destinationField, bool destinationWrite, bool sourceMatrix = false) {
+    Array operands;
+    operands.push_back(Object{{"type", destinationType}, {"resource", destinationResource},
+        {"compiler_operand", destinationField}, {"read", !destinationWrite}, {"write", destinationWrite}});
+    operands.push_back(Object{{"type", sourceMatrix ? "MatrixReg" : "ScalarReg"},
+        {"resource", sourceMatrix ? "MReg" : "XReg"}, {"compiler_operand", "rs1"}, {"read", true}, {"write", false}});
+    (*metadata.getObject(name))["operands"] = std::move(operands);
+  };
+  roles("lw", "ScalarReg", "XReg", "rd", true);
+  roles("sw", "ScalarReg", "XReg", "rs2", false);
+  roles("seld", "ExponentReg", "EReg", "rd", true);
+  roles("vload", "MatrixReg", "MReg", "rd", true);
+  roles("vstore", "MatrixReg", "MReg", "rd", false);
+  roles("vtrpose.xlu", "MatrixReg", "MReg", "rd", true, true);
+  return metadata;
+}
 Object fixture() {
   static const llvm::StringRef configuration =
       "{\"arch_state_config\":{\"dram_base\":2147483648,\"dram_size\":68719476736,\"init_seed\":42,"
@@ -124,6 +195,8 @@ Object fixture() {
                                        {"input_sha256", std::string(64, '6')},
                                        {"numerical_data_sha256", std::string(64, '7')}}},
           {"geometry", Object{{"rows", 32}, {"columns", 32}, {"mreg_count", 64}}},
+          {"architecture", architectureFixture()}, {"isa_metadata", isaFixture()},
+          {"operand_vocabulary", llvm::cantFail(llvm::json::parse(model_schema::vocabularyJson()))},
           {"observation", Object{{"accepted", true}, {"drained", true}}},
           {"op_timing", std::move(operations)}, {"dma_timing", dmaFixture()}};
 }
@@ -678,6 +751,8 @@ void testExplicitReleases() {
     (*model)["configuration_sha256"] = hash(canonical);
     rejected(std::move(changed), why);
   };
+  rejectConfiguration("vmem_bank_bytes", 131072, "rehashed VMEM configuration must agree with derived architecture");
+  rejectConfiguration("dma_num_channels", 4, "rehashed DMA configuration must agree with derived architecture");
   rejectConfiguration("dma_memory_backend", "fifo", "isolated facts do not qualify a changed DMA estimate profile");
   rejectConfiguration("ignore_runtime_errors", true, "even a correctly hashed configuration cannot suppress model runtime errors");
 }
@@ -932,9 +1007,31 @@ int main(int argc, char **argv) {
       {"RTL provenance rejects", "hw_ir", Object{}},
       {"pair admission rejects", "pairs", Array{}},
       {"unsupported geometry rejects", "geometry/rows", 16},
+      {"architecture schema checked", "architecture/schema", "unrecognized"},
+      {"architecture integer type checked", "architecture/vmem_bytes", "1572864"},
+      {"architecture metadata required", "architecture", nullptr, true},
+      {"derived vocabulary required", "operand_vocabulary", nullptr, true},
+      {"derived vocabulary direction checked", "operand_vocabulary/vpu_operand_roles/VpuElementwise/0/write", true},
+      {"ISA metadata required", "isa_metadata", nullptr, true},
+      {"ISA operand type checked", "isa_metadata/vmov/compiler_operands", "md x1"},
+      {"ISA engine checked", "isa_metadata/vmov/engine", "mxu0"},
+      {"ISA memory directions checked", "isa_metadata/vstore/operands/0/write", true},
+      {"ISA memory resource types checked", "isa_metadata/lw/operands/0/type", "MatrixReg"},
+      {"ISA memory operand coverage checked", "isa_metadata/vload/operands", Array{}},
+      {"ISA coverage checked", "isa_metadata/vmov", nullptr, true},
       {"unconfirmed overlap rejects", "op_timing/0/next_issue_age", 1},
       {"inconsistent event shape rejects", "op_timing/0/events/read0/count", 1},
       {"unknown fact operation rejects", "op_timing/0/name", "unknown.operation"}});
+  for (const auto &[key, value] : architectureFixture()) {
+    if (auto number = value.getAsInteger()) {
+      Object changed = fixture();
+      (*changed.getObject("architecture"))[key] = *number + 1;
+      rejected(std::move(changed), "every derived architecture capability is checked");
+      Object missing = fixture();
+      missing.getObject("architecture")->erase(key);
+      rejected(std::move(missing), "every derived architecture capability is required");
+    }
+  }
   llvm::outs() << "model timing synthetic checks, " << failures << " failures\n";
   return failures != 0;
 }

@@ -51,23 +51,145 @@ bool supportedConfiguration(const Object &cfg) {
       memory->getString("curves") != "ee290sim_vcs_probe.json" || !memoryLatency || !memoryBeat ||
       memoryLatency->kind() != llvm::json::Value::Null || memoryBeat->kind() != llvm::json::Value::Null)
     return false;
-  for (auto [key, value] : std::initializer_list<std::pair<const char *, int64_t>>{
-           {"mrf_depth", 32}, {"mrf_width", 32}, {"num_m_registers", 64}, {"num_wb_registers", 2},
-           {"wb_width", 1024}, {"num_x_registers", 32}, {"num_e_registers", 32}, {"num_csrs", 4096},
-           {"vmem_size", kAtlasVmemBytes}, {"dram_base", 0x80000000LL}, {"dram_size", 0x1000000000LL}})
-    if (arch->getInteger(key) != value) return false;
-  for (auto [key, value] : std::initializer_list<std::pair<const char *, int64_t>>{
-           {"fetch_width", 1}, {"dma_num_channels", 8}, {"dma_beat_bytes", 32}, {"dma_max_transfer_bytes", 4096},
-           {"dma_max_in_flight", 64}, {"vmem_bank_bytes", kVmemBankBytes}, {"offchip_link_width_bits", 32},
-           {"offchip_link_core_cycles_per_beat", 2}, {"dma_offchip_command_words", 2},
-           {"vmem_bus_width_bits", 512}, {"vmem_bus_core_cycles_per_beat", 1}, {"vmem_bytes_per_cycle", 64}})
-    if (cfg.getInteger(key) != value) return false;
+  // Model-owned geometry is checked against derived architecture facts below.
   for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
            {"Scalar0", "ScalarExecutionUnit"}, {"Matrix0", "MatrixExecutionUnitSystolic"},
            {"Matrix1", "MatrixExecutionUnitInner"}, {"Vector0", "VectorExecutionUnit"},
            {"XLU", "CrossLaneExecutionUnit"}, {"DMA0", "DmaExecutionUnit"}, {"LSU", "LoadStoreUnit"}})
     if (units->getString(key) != value) return false;
   return cfg.getString("isa") == "npu_model.isa.IsaSpec";
+}
+
+// Fixed-layout compiler capabilities, including the layout used by overlap
+// consumers. Extraction is independent: selected facts must establish all these
+// values before any provider or overlap rule may use this compiled layout.
+llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
+  const Object *facts = root.getObject("architecture");
+  if (!facts || facts->getString("schema") != "atlas.architecture.v1")
+    return factsError("requires source-derived architecture facts (atlas.architecture.v1)");
+  struct Capability { const char *key; int64_t value; const char *config; bool arch; };
+  for (const auto &cap : std::initializer_list<Capability>{
+      {"mreg_count", kAtlasTensorRegisters, "num_m_registers", true},
+      {"mreg_rows", kAtlasMregRows, "mrf_depth", true},
+      {"mreg_row_bytes", kAtlasMregRowBytes, "mrf_width", true},
+      {"mreg_bytes", kAtlasRegisterBytes, nullptr, false},
+      {"mreg_physical_bank_count", kAtlasMregBanks, nullptr, false},
+      {"mreg_bank_modulus", kAtlasMregBanks, nullptr, false},
+      {"mreg_registers_per_bank", kAtlasTensorRegisters / kAtlasMregBanks, nullptr, false},
+      {"mreg_physical_row_stride", kAtlasMregRows, nullptr, false},
+      {"mreg_logical_limit", kAtlasTensorRegisters, nullptr, false},
+      {"bf16_registers_per_tile", kAtlasBF16Registers, nullptr, false},
+      {"bf16_pair_stride", 1, nullptr, false},
+      {"bf16_tile_bytes", kAtlasBF16TileBytes, nullptr, false},
+      {"bf16_element_bytes", 2, nullptr, false},
+      {"vmem_bytes", kAtlasVmemBytes, "vmem_size", true},
+      {"vmem_bank_bytes", kVmemBankBytes, "vmem_bank_bytes", false},
+      {"vmem_bank_count", kVmemBanks, nullptr, false},
+      {"weight_buffer_count", 2, "num_wb_registers", true},
+      {"weight_buffer_bytes", kAtlasRegisterBytes, "wb_width", true},
+      {"xreg_count", 32, "num_x_registers", true},
+      {"ereg_count", 32, "num_e_registers", true},
+      {"csr_count", 4096, "num_csrs", true},
+      {"scalar_word_bytes", 4, nullptr, false},
+      {"dma_channels", kAtlasDMAChannels, "dma_num_channels", false},
+      {"dma_beat_bytes", 32, "dma_beat_bytes", false},
+      {"dma_max_in_flight", 64, "dma_max_in_flight", false},
+      {"dma_max_transfer_bytes", 4096, "dma_max_transfer_bytes", false},
+      {"fetch_width", 1, "fetch_width", false},
+      {"dram_base", 0x80000000LL, "dram_base", true},
+      {"dram_bytes", 0x1000000000LL, "dram_size", true},
+      {"offchip_link_width_bits", 32, "offchip_link_width_bits", false},
+      {"offchip_link_core_cycles_per_beat", 2, "offchip_link_core_cycles_per_beat", false},
+      {"dma_offchip_command_words", 2, "dma_offchip_command_words", false},
+      {"vmem_bus_width_bits", 512, "vmem_bus_width_bits", false},
+      {"vmem_bus_core_cycles_per_beat", 1, "vmem_bus_core_cycles_per_beat", false},
+      {"vmem_bytes_per_cycle", 64, "vmem_bytes_per_cycle", false}}) {
+    auto value = facts->getInteger(cap.key);
+    if (!value || *value != cap.value)
+      return factsError(std::string("unsupported architecture capability ") + cap.key +
+                        ": compiler requires " + std::to_string(cap.value));
+    const Object *config = cap.arch ? cfg.getObject("arch_state_config") : &cfg;
+    if (cap.config && (!config || config->getInteger(cap.config) != value))
+      return factsError(std::string("derived architecture differs from configuration: ") + cap.key);
+  }
+  return llvm::Error::success();
+}
+
+// Memory instruction roles are checked against the existing compiler footprint,
+// so this compatibility boundary does not introduce a second direction table.
+llvm::Error checkMemoryOperandRoles(const OpInfo &op, const Object &entry) {
+  const Array *operands = entry.getArray("operands");
+  if (!operands) return factsError("missing ISA resource operands for " + op.name);
+  Instr probe{&op, 4, 8, 12};
+  Footprint expected = footprintOf(probe, unknownRegs());
+  std::set<std::pair<Res, int>> covered;
+  for (const auto &value : *operands) {
+    const Object *operand = value.getAsObject();
+    if (!operand) return factsError("invalid ISA resource operand for " + op.name);
+    const auto *resource = operand->get("resource");
+    if (resource && resource->kind() == llvm::json::Value::Null) continue; // Immediate.
+    auto type = operand->getString("type"), field = operand->getString("compiler_operand");
+    auto name = operand->getString("resource");
+    Res res;
+    if (name == "MReg" && type == "MatrixReg") res = Res::MReg;
+    else if (name == "XReg" && type == "ScalarReg") res = Res::XReg;
+    else if (name == "EReg" && type == "ExponentReg") res = Res::EReg;
+    else return factsError("unsupported ISA memory operand resource for " + op.name);
+    int reg = field == "rd" ? probe.rd : field == "rs1" ? probe.rs1 : field == "rs2" ? probe.rs2 : -1;
+    if (reg < 0 || !covered.emplace(res, reg).second)
+      return factsError("invalid or duplicate ISA memory operand role for " + op.name);
+    bool read = false, write = false;
+    int index = reg * (res == Res::MReg ? kAtlasMregRows : 1);
+    for (const Access &access : expected.accesses)
+      if (access.res == res && index >= access.first && index < access.first + access.count)
+        (access.write ? write : read) = true;
+    if ((!read && !write) || operand->getBoolean("read") != read || operand->getBoolean("write") != write)
+      return factsError("ISA memory operand direction differs from compiler footprint: " + op.name);
+  }
+  for (const Access &access : expected.accesses) {
+    if (access.res != Res::MReg && access.res != Res::XReg && access.res != Res::EReg) continue;
+    int scale = access.res == Res::MReg ? kAtlasMregRows : 1;
+    for (int index = access.first; index < access.first + access.count; index += scale)
+      if (!covered.count({access.res, index / scale}))
+        return factsError("incomplete ISA memory operand roles for " + op.name);
+  }
+  return llvm::Error::success();
+}
+
+// The model supplies operand types and assembly roles. Tokens are the small
+// compiler syntax adapter; comparing them also checks the builtin ISA table.
+llvm::Error checkIsaMetadata(const Object &root) {
+  const Object *metadata = root.getObject("isa_metadata");
+  if (!metadata) return factsError("requires source-derived ISA operand metadata");
+  std::set<std::string> vectors;
+  std::set<std::pair<int, OpClass>> matrices;
+  std::set<std::string> memory;
+  for (const auto &[name, value] : *metadata) {
+    const OpInfo *op = findOp(name.str());
+    const Object *entry = value.getAsObject();
+    if (!op || !entry || entry->getString("compiler_operands") != op->operands)
+      return factsError("ISA operands differ from compiler-op adapter: " + name.str());
+    std::string engine;
+    if (op->engine == Engine::Vpu && model_schema::vpuBlocks().count(name.str())) {
+      engine = "vpu";
+      vectors.insert(name.str());
+    } else if ((op->engine == Engine::Mxu0 || op->engine == Engine::Mxu1) &&
+               model_schema::mxuBlocks().count(op->opClass)) {
+      engine = "mxu" + std::to_string(op->mxu);
+      matrices.emplace(op->mxu, op->opClass);
+    } else if (name == "vload" || name == "vstore" || name == "vtrpose.xlu" ||
+               name == "lw" || name == "sw" || name == "seld") {
+      engine = name == "vtrpose.xlu" ? "xlu" : name == "vload" || name == "vstore" ? "vlsu" : "scalar_lsu";
+      memory.insert(name.str());
+      if (auto error = checkMemoryOperandRoles(*op, *entry)) return error;
+    } else return factsError("ISA metadata is outside the supported compiler-op adapter: " + name.str());
+    if (entry->getString("engine") != engine)
+      return factsError("ISA engine differs from compiler-op adapter: " + name.str());
+  }
+  if (vectors.size() != model_schema::vpuBlocks().size() ||
+      matrices.size() != 2 * model_schema::mxuBlocks().size() || memory.size() != 6)
+    return factsError("source-derived ISA metadata has incomplete compiler-op coverage");
+  return llvm::Error::success();
 }
 
 using model_schema::RegisterEvent;
@@ -130,7 +252,7 @@ struct Fill {
     return release ? release->releaseAge : legacy;
   }
   int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1, bool mergeRelease = true) {
-    access(key, Res::MReg, write, reg * 32, registers * 32, passes);
+    access(key, Res::MReg, write, reg * kAtlasMregRows, registers * kAtlasMregRows, passes);
     auto &list = write ? f.mregWrites : f.mregReads;
     for (int i = 0; i < registers; ++i) list.push_back(reg + i);
     int end = releaseEnd(write ? "mreg_write" : "mreg_read", last(key) + (write ? 0 : latency));
@@ -196,12 +318,12 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingB
   int busy = fill.busyEnd();
   auto track = [&](int end) { busy = std::max(busy, end); };
   auto mregRows = [&](const char *key, int reg, bool write) {
-    if (reg < 0 || reg > 63) fill.fail("register operand out of range");
+    if (reg < 0 || reg >= kAtlasTensorRegisters) fill.fail("register operand out of range");
     track(fill.mreg(key, reg, write));
   };
   auto slotRows = [&](const char *key, Res res, int slot, bool write) {
     if (slot < 0 || slot > 1) fill.fail("accumulator and weight slots are 0 or 1");
-    fill.access(key, res, write, (m * 2 + slot) * 32, 32);
+    fill.access(key, res, write, (m * 2 + slot) * kAtlasMregRows, kAtlasMregRows);
     if (write) f.writeRelease = std::max(f.writeRelease, fill.last(key));
     track(fill.last(key));
   };
@@ -225,7 +347,7 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingB
   if (!push && !pop) {
     if (in.rs2 < 0 || in.rs2 > 1) fill.fail("accumulator and weight slots are 0 or 1");
     for (int age : {0, busy})
-      f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * 32, 32, age, 0});
+      f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * kAtlasMregRows, kAtlasMregRows, age, 0});
   }
   f.holds.push_back({Unit::MxuCompute, m, 0, busy});
   return fill.done(busy);
@@ -464,6 +586,12 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   auto configurationJson = model->getString("configuration_json");
   if (!configuration || !configurationJson || !supportedConfiguration(*configuration))
     return factsError("unsupported or missing explicit model configuration profile");
+  if (auto error = checkArchitecture(*root, *configuration)) return std::move(error);
+  const Object *vocabulary = root->getObject("operand_vocabulary");
+  if (!vocabulary || modelSha256(canonicalJson(llvm::json::Value(Object(*vocabulary)))) !=
+                         model_schema::vocabularySha256())
+    return factsError("source-derived operand vocabulary differs from the compiled compiler-op adapter");
+  if (auto error = checkIsaMetadata(*root)) return std::move(error);
   auto decodedConfiguration = llvm::json::parse(*configurationJson);
   if (!decodedConfiguration) return factsError(llvm::toString(decodedConfiguration.takeError()));
   if (*decodedConfiguration != llvm::json::Value(Object(*configuration)) ||
@@ -479,8 +607,8 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     result.provenance[key.str()] = text->str();
   }
   const Object *geometry = root->getObject("geometry");
-  if (!geometry || geometry->getInteger("rows") != 32 || geometry->getInteger("columns") != 32 ||
-      geometry->getInteger("mreg_count") != 64)
+  if (!geometry || geometry->getInteger("rows") != kAtlasMregRows || geometry->getInteger("columns") != kAtlasMregRowBytes ||
+      geometry->getInteger("mreg_count") != kAtlasTensorRegisters)
     return factsError("only 32x32 geometry with 64 MREGs is supported");
   auto accepted = [](const Object *object) {
     return object && object->getBoolean("accepted") == true && object->getBoolean("drained") == true;
@@ -549,7 +677,7 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
           int previous = -1;
           for (const auto &bank : *banks) {
             auto index = bank.getAsInteger();
-            if (!index || *index <= previous || *index >= (mreg ? 64 : kVmemBanks))
+            if (!index || *index <= previous || *index >= (mreg ? kAtlasTensorRegisters : kVmemBanks))
               return factsError("reservation banks must be sorted, unique and in range");
             resource.banks.push_back(previous = int(*index));
           }

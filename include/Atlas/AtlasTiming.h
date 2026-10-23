@@ -90,9 +90,9 @@ struct ScalarAccess {
 };
 ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
-const int kVmemBankBytes = 256 * 1024;
+const int kVmemBankBytes = kAtlasVmemBankBytes;
 const int kVmemBanks = kAtlasVmemBytes / kVmemBankBytes;
-const int kLineBytes = 32;
+const int kLineBytes = kAtlasMregRowBytes;
 
 enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase };
 
