@@ -12,6 +12,12 @@ from tools.atlas_path_guard import checked
 
 
 class PathAdmission(unittest.TestCase):
+    def test_restricted_component_is_never_inspected(self):
+        with patch.object(Path, "lstat", side_effect=AssertionError("must not inspect")):
+            for value in ("/safe/HaMmEr-copy/file", "/safe/vLsI.json"):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "restricted"):
+                    checked(value)
+
     def test_parent_component_is_never_inspected(self):
         with patch.object(Path, "lstat", side_effect=AssertionError("must not inspect")):
             with self.assertRaises(ValueError):

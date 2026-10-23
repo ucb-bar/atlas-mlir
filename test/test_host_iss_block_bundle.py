@@ -131,7 +131,7 @@ class DeviceLaunchTest(unittest.TestCase):
         paths = dict(initial="initial", expected="expected", dram_base=0x100000000,
             output_offset=16, requested_dma=dict(load_bytes=0, store_bytes=32))
         device.programs = [(object(), words, paths)]
-        device.bundle = Mock()
+        device.bundle = Mock(spec=["read"])
         device.bundle.read.side_effect = {"initial": initial, "expected": expected}.__getitem__
         device.remote = Mock()
         device.remote.read.return_value = initial
@@ -164,6 +164,16 @@ class DeviceLaunchTest(unittest.TestCase):
         self.assertFalse(device.written)
         with self.assertRaises(AssertionError):
             device.start()
+
+    def test_shared_initial_hook_keeps_real_execution_and_checks(self):
+        device, initial, expected = self.device()
+        device.bundle = SimpleNamespace(read=device.bundle.read, initial_dram=Mock(return_value=initial))
+        del device.programs[0][2]["initial"]
+        device.start()
+        device.bundle.initial_dram.assert_called_once_with(0)
+        device.core.tick.assert_called_once_with()
+        device.remote.write.assert_called_once_with(0x100000000, initial[:16] + expected + initial[48:])
+        self.assertTrue(device.completed[0]["exact"])
 
     def test_actual_program_input_output_guards_and_dma_refused(self):
         def bad_imem(device):

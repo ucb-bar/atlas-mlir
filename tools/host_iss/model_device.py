@@ -108,7 +108,8 @@ class Device:
         assert self.written == set(range(len(words) // 4))
         assert self.imem[: len(words)] == words, "actual host IMEM does not match admitted program"
         assert state.read_csrf(0xC10) == 0 and state.read_csrf(0xC11) == index + 1
-        initial = self.payload(paths["initial"])
+        initial = (self.bundle.initial_dram(index) if hasattr(self.bundle, "initial_dram")
+            else self.payload(paths["initial"]))
         expected = self.payload(paths["expected"])
         dram_base = paths["dram_base"]
         actual_host_input = self.remote.read(dram_base, len(initial))

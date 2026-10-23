@@ -1,12 +1,15 @@
 """Admit physical paths without parent traversal or symbolic links."""
 
 from pathlib import Path
+import re
 import stat
 
 
 def lexical_path(value, *, absolute=False):
     text = str(value)
     path = Path(text)
+    if any(re.search(r"hammer|vlsi", part, re.IGNORECASE) for part in path.parts):
+        raise ValueError("restricted path component")
     if (absolute and not path.is_absolute() or ".." in path.parts or "\\" in text
         or any(ord(c) < 32 or ord(c) == 127 for c in text)):
         raise ValueError("invalid lexical path")

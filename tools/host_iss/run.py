@@ -1,8 +1,7 @@
 """Run an unchanged RV64 graph ELF in generic QEMU with a diagnostic device.
 
-Portable adaptation of the validated diagnostic bridge sources.
-This adaptation itself has not executed a whole ELF. QEMU is all-stop while
-npu_model ticks; npu_model is idle while QEMU runs. No SoC/FPGA binding.
+QEMU is all-stop while npu_model ticks; npu_model is idle while QEMU runs.
+Whole-model qualification requires a final live receipt. No SoC/FPGA binding.
 """
 
 import argparse
@@ -24,6 +23,15 @@ from elf_image import Image, mmio_sites
 from gdb_remote import Remote
 from model_device import Device, checked
 from bundle import Bundle, sha, verify_completion
+
+FULL_CONTRACTS = {"tiny-full": "tiny_full_contract", "smol-full": "smol_full_contract"}
+
+
+def mmio_access_cap(device, workload):
+    if workload not in FULL_CONTRACTS:
+        return 100000
+    # Count actual admitted IMEM writes plus bounded CSR traffic per launch.
+    return 100000 + sum(len(words) // 4 + 64 for _, words, _ in device.programs)
 
 
 def interrupted(signum, frame):
@@ -59,6 +67,10 @@ def run(args):
         contract = None
         if workload == "resnet":
             bundle = Bundle(Path(args.bundle_root).absolute())
+        elif workload in FULL_CONTRACTS:
+            from full_bundle import FullBundle
+            bundle = FullBundle(Path(args.bundle_root).absolute(), workload)
+            contract = importlib.import_module(FULL_CONTRACTS[workload])
         else:
             from block_bundle import BlockBundle
             bundle = BlockBundle(Path(args.bundle_root).absolute(), workload)
@@ -79,6 +91,8 @@ def run(args):
         helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py"]
         if contract is not None:
             helpers.append("block_bundle.py")
+            if workload in FULL_CONTRACTS:
+                helpers.append("full_bundle.py")
             path = checked(Path(contract.__file__).absolute())
             pins[str(path)] = sha(path)
         for name in helpers:
@@ -119,7 +133,9 @@ def run(args):
             cycle_cap = getattr(args, "kernel_cycle_cap", None) or (
                 contract.CYCLE_CAP if contract is not None else 20000000)
             device = Device(remote, out, deadline, bundle, model_root, cycle_cap=cycle_cap)
+            access_cap = mmio_access_cap(device, workload)
             receipt["kernel_cycle_cap"] = cycle_cap
+            receipt["mmio_access_cap"] = access_cap
             receipt["memory_backend"] = device.memory_backend
             accesses = 0
             while time.monotonic() < deadline:
@@ -140,7 +156,7 @@ def run(args):
                     remote.set_reg(access["reg"], value)
                 remote.set_reg(32, pc + access["length"])
                 accesses += 1
-                assert accesses < 100000, "MMIO access cap"
+                assert accesses < access_cap, "MMIO access cap"
             else:
                 raise TimeoutError("host graph wall cap")
             completion = (resnet_completion(remote, image, device, out) if contract is None
@@ -191,17 +207,29 @@ def run(args):
     return 0 if receipt["status"].startswith("PASS_") else 1
 
 
-if __name__ == "__main__":
-    if not __debug__:
-        raise SystemExit("Python -O is unsupported: strict runtime checks require assertions")
+def arguments(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
-    parser.add_argument("--wall-seconds", type=int, default=21600)
-    parser.add_argument("--workload", choices=("resnet", "tiny", "smol"), default="resnet")
+    parser.add_argument("--wall-seconds", type=int)
+    parser.add_argument("--workload", choices=("resnet", "tiny", "smol", *FULL_CONTRACTS), default="resnet")
     parser.add_argument("--kernel-cycle-cap", type=int)
     for name in ("elf", "bundle-root", "model-root", "qemu"):
         parser.add_argument("--" + name, required=True)
-    args = parser.parse_args()
-    assert 0 < args.wall_seconds <= 86400
-    assert args.kernel_cycle_cap is None or args.kernel_cycle_cap > 0
+    args = parser.parse_args(argv)
+    if args.wall_seconds is None:
+        if args.workload in FULL_CONTRACTS:
+            parser.error("full models require an explicit forecasted --wall-seconds budget")
+        args.wall_seconds = 21600
+    limit = 30 * 86400 if args.workload in FULL_CONTRACTS else 86400
+    if not 0 < args.wall_seconds <= limit:
+        parser.error(f"--wall-seconds must be between 1 and {limit}")
+    if args.kernel_cycle_cap is not None and args.kernel_cycle_cap <= 0:
+        parser.error("--kernel-cycle-cap must be positive")
+    return args
+
+
+if __name__ == "__main__":
+    if not __debug__:
+        raise SystemExit("Python -O is unsupported: strict runtime checks require assertions")
+    args = arguments()
     raise SystemExit(run(args))
