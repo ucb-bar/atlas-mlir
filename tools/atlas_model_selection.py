@@ -28,6 +28,14 @@ from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SEARCH_BUDGETS = {
+    "selection": dict(max_candidates=24, search_evaluations=0, search_group_evaluations=0,
+                      search_patience=0, bank_candidates=False,
+                      pack_reload_candidates=False, pack_preload_candidates=False),
+    "full": dict(max_candidates=32, search_evaluations=96, search_group_evaluations=204,
+                 search_patience=96, bank_candidates=True,
+                 pack_reload_candidates=True, pack_preload_candidates=True),
+}
 
 
 @dataclass(frozen=True)
@@ -181,6 +189,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_evaluations: int = 0, search_group_evaluations: int = 0,
+                   search_patience: int = 0,
                    pack_reload_candidates: bool = False, pack_preload_candidates: bool = False,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
@@ -188,7 +197,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     All candidates run allocation, timing and generated-schedule verification
     before scoring. Failed alternatives remain in the receipt and cannot win;
     a failed default or mismatched model identity fails the compilation.
-    max_candidates is a deterministic bound, including rejected candidates.
+    max_candidates bounds initial attempts, including compiler rejections. Search
+    budgets count every attempted candidate, including compiler refusals.
     """
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
         raise ValueError("unsupported provider or memory profile")
@@ -200,6 +210,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("search-evaluations must be nonnegative and requires the model provider")
     if search_group_evaluations < 0 or (search_group_evaluations and provider != "model"):
         raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
+    if search_patience < 0 or (search_patience and provider != "model"):
+        raise ValueError("search-patience must be nonnegative and requires the model provider")
     if pack_reload_candidates and provider != "model":
         raise ValueError("pack-reload-candidates requires the model provider")
     if pack_preload_candidates and provider != "model":
@@ -215,6 +227,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "guarded_pack": guarded_pack,
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "search_group_evaluations": search_group_evaluations,
+               "search_patience": search_patience,
                "pack_reload_candidates": pack_reload_candidates,
                "pack_preload_candidates": pack_preload_candidates,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -279,6 +292,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if provider == "model":
                 with score_lock:
+                    row["score_cache_hit"] = words in score_cache
                     if words not in score_cache:
                         score_cache[words] = (score_executor.submit(scorer, program, profile)
                                               if score_executor else scorer(program, profile=profile))
@@ -298,14 +312,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         for candidate, category in specifications:
             if candidate in seen or len(receipt["candidates"]) >= (limit if provider == "model" else 1):
                 continue
-            seen.add(candidate)
             index = len(receipt["candidates"])
             directory = output / "candidates" / f"{index:03d}-{category}"
             directory.mkdir(parents=True)
             row = {"index": index, "class": category, "options": asdict(candidate),
                    "directory": str(directory.relative_to(output))}
-            receipt["candidates"].append(row)
             pending.append((candidate, row))
+            seen.add(candidate)
+            receipt["candidates"].append(row)
         with ThreadPoolExecutor(max_workers=min(workers, max(1, len(pending)))) as executor:
             futures = [executor.submit(compile_candidate, candidate, row) for candidate, row in pending]
             for future in futures:
@@ -355,22 +369,24 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 search_started = time.monotonic()
                 initial_count = len(receipt["candidates"])
                 limit = initial_count + budget
-                receipt[field] = {"start_index": best["index"], "accepted_indices": []}
+                receipt[field] = {"start_index": best["index"], "accepted_indices": [], "stopped_for_patience": False}
                 while len(receipt["candidates"]) < limit:
                     parent = best
+                    nonimproving = 0
                     graphs = json.loads((output / parent["directory"] / "graph.json").read_text())
                     orders = tuple(tuple(graph["order"]) for graph in graphs)
                     base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
                     seen.add(base)
                     pending = (replace(base, virtual_orders=order) for order in neighbors(graphs, orders))
-                    # Fixed batches keep the explored path independent of worker count.
                     while len(receipt["candidates"]) < limit:
                         batch = []
-                        for candidate in pending:
+                        width = min(12, limit - len(receipt["candidates"]))
+                        while len(batch) < width:
+                            candidate = next(pending, None)
+                            if candidate is None:
+                                break
                             if candidate not in seen and candidate not in batch:
                                 batch.append(candidate)
-                            if len(batch) == min(12, limit - len(receipt["candidates"])):
-                                break
                         if not batch:
                             break
                         before = len(receipt["candidates"])
@@ -379,6 +395,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                             row["parent_index"] = parent["index"]
                         if best["index"] != parent["index"]:
                             receipt[field]["accepted_indices"].append(best["index"])
+                            break
+                        nonimproving += len(receipt["candidates"]) - before
+                        if search_patience and nonimproving >= search_patience:
+                            receipt[field]["stopped_for_patience"] = True
                             break
                     if best["index"] == parent["index"]:
                         break
@@ -397,6 +417,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     receipt.update(selected_index=best["index"], selected_class=best["class"],
                    default_cycles=receipt["candidates"][0].get("cycles"),
                    selected_cycles=best.get("cycles"),
+                   score_cache_entries=len(score_cache),
+                   score_cache_hits=sum(row.get("score_cache_hit", False) for row in receipt["candidates"]),
                    elapsed_seconds=time.monotonic() - started)
     (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
@@ -414,32 +436,36 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pairs-sha256")
     parser.add_argument("--composed", type=Path)
     parser.add_argument("--composed-sha256")
-    parser.add_argument("--max-candidates", type=int, default=32)
-    parser.add_argument("--workers", type=int, default=12)
-    parser.add_argument("--bank-candidates", action="store_true", help="score eight legal MREG rank vectors (model only)")
-    parser.add_argument("--search-evaluations", type=int, default=0,
+    parser.add_argument("--search-budget", choices=tuple(SEARCH_BUDGETS), default="full",
+                        help="selection knobs only or bounded full search (default)")
+    parser.add_argument("--max-candidates", type=int)
+    parser.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1))
+    parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=None,
+                        help="score eight legal MREG rank vectors (model only)")
+    parser.add_argument("--search-evaluations", type=int,
                         help="additional verified local order attempts after knob selection (model only)")
-    parser.add_argument("--search-group-evaluations", type=int, default=0,
+    parser.add_argument("--search-group-evaluations", type=int,
                         help="additional verified dependency-group attempts after local search (model only)")
-    parser.add_argument("--pack-reload-candidates", action="store_true",
+    parser.add_argument("--search-patience", type=int,
+                        help="stop a phase after this many nonimproving attempts, checked after each batch; zero disables")
+    parser.add_argument("--pack-reload-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score loading a pending weight before an adjacent PACK reload (model only)")
-    parser.add_argument("--pack-preload-candidates", action="store_true",
+    parser.add_argument("--pack-preload-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score preloading disjoint weights before PACK with selective source waits (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:
+    preset = SEARCH_BUDGETS[args.search_budget if args.provider == "model" else "selection"]
+    budget = {name: getattr(args, name) if getattr(args, name) is not None else value for name, value in preset.items()}
+    banks = budget.pop("bank_candidates")
     return {"provider": args.provider, "profile": args.profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "op_timing": args.op_timing,
             "op_timing_sha256": args.op_timing_sha256, "pairs": args.pairs,
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,
-            "composed_sha256": args.composed_sha256, "max_candidates": args.max_candidates,
-            "workers": args.workers, "search_evaluations": args.search_evaluations,
-            "search_group_evaluations": args.search_group_evaluations,
-            "pack_reload_candidates": args.pack_reload_candidates,
-            "pack_preload_candidates": args.pack_preload_candidates,
-            "mreg_candidates": None if args.bank_candidates else (),
+            "composed_sha256": args.composed_sha256, "workers": args.workers,
+            "mreg_candidates": None if banks else (), **budget,
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
 
