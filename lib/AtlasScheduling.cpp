@@ -1,6 +1,8 @@
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
+#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Pass/Pass.h"
@@ -18,7 +20,8 @@ constexpr int kMaxIdle = 100000;
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
-LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated, bool sourceWaitPlacement,
+LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
+                            bool sourceWaitPlacement, ArrayRef<int32_t> sourceWaitTransfers,
                             const TimingProvider &p, bool fillSlots, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before, int &tailIdle) {
   size_t begin = s.starts[block];
@@ -63,20 +66,23 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated, 
   if (!built.error.empty())
     return op(0)->emitOpError(built.error);
   DepGraph g = std::move(built.value);
-  if (sourceWaitPlacement) {
+  if (sourceWaitPlacement || !sourceWaitTransfers.empty()) {
     auto edge = [&](int from, int to) {
       int index = static_cast<int>(g.edges.size());
       g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
       g.out[from].push_back(index);
       g.in[to].push_back(index);
     };
-    for (int wait = 0; wait < n; ++wait)
-      if (nodes[wait].op->opClass == OpClass::DmaWait) {
+    for (int wait = 0; wait < n; ++wait) {
+      auto transfer = op(wait)->getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
+      if (nodes[wait].op->opClass == OpClass::DmaWait &&
+          (sourceWaitPlacement || (transfer && llvm::is_contained(sourceWaitTransfers, transfer.getInt())))) {
         for (int i = 0; i < wait; ++i)
           edge(i, wait);
         for (int i = wait + 1; i < n; ++i)
           edge(wait, i);
       }
+    }
   }
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
@@ -447,13 +453,30 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
   if (failed(provider))
     return failure();
-  if (waitPlacement != "default" && waitPlacement != "source")
-    return module.emitError("wait-placement must be default or source");
-  if (waitPlacement == "source" && provider->id != "model")
-    return module.emitError("wait-placement=source requires the model timing provider");
+  if (waitPlacement != "default" && waitPlacement != "source" && waitPlacement != "preloaded")
+    return module.emitError("wait-placement must be default, source or preloaded");
+  if (waitPlacement != "default" && provider->id != kModelTimingProviderId)
+    return module.emitError() << "wait-placement=" << waitPlacement << " requires the model timing provider";
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();
+  SmallVector<int32_t> sourceWaitTransfers;
+  if (waitPlacement == "preloaded") {
+    auto transfers = module->getAttrOfType<DenseI32ArrayAttr>("atlas.model_preloaded_weights");
+    if (!transfers)
+      return module.emitError("wait-placement=preloaded requires preloaded weight transfer IDs");
+    for (int32_t id : transfers.asArrayRef()) {
+      if (id < 0 || llvm::is_contained(sourceWaitTransfers, id))
+        return module.emitError("preloaded weight transfer IDs must be unique and nonnegative");
+      bool found = llvm::any_of(stream->ops, [&](Operation *op) {
+        auto tag = op->getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
+        return isa<DMAWaitOp>(op) && tag && tag.getInt() == id;
+      });
+      if (!found)
+        return module.emitError("preloaded weight transfer ID has no DMA wait: ") << id;
+      sourceWaitTransfers.push_back(id);
+    }
+  }
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
@@ -461,7 +484,8 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<DelayInsertion> before(stream->ops.size());
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
-    if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated, waitPlacement == "source",
+    if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
+                             waitPlacement == "source", sourceWaitTransfers,
                              *provider, insertDelays && fillsDelaySlots(*provider),
                              order, before, tailIdle[b])))
       return failure();
@@ -498,7 +522,7 @@ struct ScheduleAtlasStreamPass
                                llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
   Option<std::string> waitPlacement{
-      *this, "wait-placement", llvm::cl::desc("DMA wait placement: default or source (model only)"),
+      *this, "wait-placement", llvm::cl::desc("DMA wait placement: default, source or preloaded (model only)"),
       llvm::cl::init("default")};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }
