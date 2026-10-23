@@ -9,11 +9,12 @@ import re
 
 from atlas_host_embed import _cover_span, _mapped_regions, check_host_elf
 from atlas_path_guard import checked
+from atlas_host_layout import (ATLAS_IMEM_BASE as IMEM_BASE, ATLAS_IMEM_BYTES as IMEM_BYTES,
+                               ATLAS_CSR_BASE as CSR_BASE, ATLAS_VMEM_BASE,
+                               ATLAS_DRAM_BASE, HEADER_SHA256)
 from host_iss.elf_image import Image
 
-IMEM_BASE = 0x20000
-IMEM_BYTES = 0x20000
-CSR_BASE = 0x40000
+DEFAULT_PLATFORM = Path(__file__).absolute().parents[1] / "runtime/ee290-model-platform.json"
 
 
 def physical(value):
@@ -29,6 +30,23 @@ def digest(raw):
 
 def overlaps(left, left_size, right, right_size):
     return left < right + right_size and right < left + left_size
+
+
+def platform_map(profile):
+    if (profile.get("schema") != "atlas.model-platform.v1"
+            or not isinstance(profile.get("name"), str) or not profile["name"]
+            or profile.get("completion") != "HTIF"
+            or type(profile.get("vmem_base")) is not int or profile["vmem_base"] != ATLAS_VMEM_BASE
+            or profile.get("host_vmem_access_required") is not False
+            or type(profile.get("dma_arena_base")) is not int
+            or profile["dma_arena_base"] != ATLAS_DRAM_BASE):
+        raise ValueError("unsupported model platform contract")
+    rows = _mapped_regions(profile)
+    for name, base, size in (("atlas-imem", IMEM_BASE, IMEM_BYTES), ("atlas-csr", CSR_BASE, 0x1c)):
+        matching = [row for row in rows if name in row["names"]]
+        if len(matching) != 1 or matching[0]["base"] != base or matching[0]["size"] != size:
+            raise ValueError("platform MMIO differs from compiled host layout; rebuild the host first")
+    return profile
 
 
 def describe(raw, dma_base, dma_bytes, *, memmap=None, observe=()):
@@ -98,23 +116,38 @@ def describe(raw, dma_base, dma_bytes, *, memmap=None, observe=()):
 
 
 def package(*, elf, name, dma_base, dma_bytes, out, soc_memmap=None,
-            target_identity=None, observe=()):
+            target_identity=None, observe=(), platform=None):
     if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", name)
             or re.search(r"hammer|vlsi", name, re.I)):
         raise ValueError("invalid workload name")
-    if bool(soc_memmap) != bool(target_identity):
+    if (soc_memmap and not target_identity
+            or not platform and bool(soc_memmap) != bool(target_identity)):
         raise ValueError("supply both the target memory map and target identity")
     source, destination = physical(elf), physical(out)
     map_path = physical(soc_memmap) if soc_memmap else None
+    platform_path = physical(platform) if platform else None
     raw = source.read_bytes()
     map_raw = map_path.read_bytes() if map_path else None
+    profile_raw = platform_path.read_bytes() if platform_path else None
+    profile = platform_map(json.loads(profile_raw)) if profile_raw is not None else None
+    if profile is not None:
+        if dma_base is None:
+            dma_base = profile["dma_arena_base"]
+        if dma_base != profile["dma_arena_base"]:
+            raise ValueError("DMA arena differs from selected platform")
+        target_identity = target_identity or profile["name"]
+    memmap = json.loads(map_raw) if map_raw is not None else profile
     footprint = describe(raw, dma_base, dma_bytes,
-                         memmap=json.loads(map_raw) if map_raw is not None else None,
-                         observe=observe)
+                         memmap=memmap, observe=observe)
     manifest = {"schema": "atlas.model-handoff.v1", "name": name,
                 "status": "PREPARATION_ONLY", "numerical_evidence": None,
                 "elf_sha256": digest(raw), "target_identity": target_identity,
                 "soc_memmap_sha256": digest(map_raw) if map_raw is not None else None,
+                "platform_sha256": digest(profile_raw) if profile_raw is not None else None,
+                "compiled_host_layout_sha256": HEADER_SHA256,
+                "memory_map_origin": "generated_target_map" if map_raw is not None else
+                                     "selected_platform_contract" if profile is not None else None,
+                "platform": profile,
                 "hardware_execution": False, "cache_coherence_qualified": False,
                 "completion": {"protocol": "HTIF", "success_tohost": 1,
                                "failure_tohost": "(exit_code << 1) | 1"},
@@ -130,6 +163,8 @@ def package(*, elf, name, dma_base, dma_bytes, out, soc_memmap=None,
     (destination / "workload.json").write_text(json.dumps(workload, indent=2) + "\n")
     if map_raw is not None:
         (destination / "soc-memmap.json").write_bytes(map_raw)
+    if profile_raw is not None:
+        (destination / "platform.json").write_bytes(profile_raw)
     return manifest
 
 
@@ -137,7 +172,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--elf", required=True)
     parser.add_argument("--name", required=True)
-    parser.add_argument("--dma-base", type=lambda value: int(value, 0), default=0x100000000)
+    parser.add_argument("--platform", default=str(DEFAULT_PLATFORM))
+    parser.add_argument("--dma-base", type=lambda value: int(value, 0))
     parser.add_argument("--dma-bytes", type=lambda value: int(value, 0), required=True)
     parser.add_argument("--observe-symbol", action="append", default=[])
     parser.add_argument("--soc-memmap")
@@ -146,7 +182,7 @@ def main():
     args = parser.parse_args()
     package(elf=args.elf, name=args.name, dma_base=args.dma_base, dma_bytes=args.dma_bytes,
             out=args.out, soc_memmap=args.soc_memmap, target_identity=args.target_identity,
-            observe=args.observe_symbol)
+            observe=args.observe_symbol, platform=args.platform)
 
 
 if __name__ == "__main__":

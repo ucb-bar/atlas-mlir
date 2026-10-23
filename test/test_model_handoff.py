@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / "tools"))
-from atlas_model_handoff import describe, package, physical
+from atlas_model_handoff import DEFAULT_PLATFORM, describe, package, physical, platform_map
 
 
 def elf():
@@ -47,6 +47,32 @@ def memmap():
 
 
 class ModelHandoffTest(unittest.TestCase):
+    def test_selected_vcs_platform_binds_host_and_high_dma(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.elf"
+            source.write_bytes(elf())
+            result = package(elf=source, name="selected-vcs", dma_base=None,
+                             dma_bytes=4096, out=root / "handoff", platform=DEFAULT_PLATFORM)
+            self.assertEqual(result["target_identity"], "EE290GenericIOSimConfig")
+            self.assertEqual(result["memory_map_origin"], "selected_platform_contract")
+            self.assertTrue(result["footprint"]["memory_map_checked"])
+            self.assertEqual(result["footprint"]["dma"]["address"], 0x100000000)
+            self.assertEqual(result["platform"]["mapping"][-1]["base"], [0x80000000])
+            self.assertEqual((root / "handoff/platform.json").read_bytes(), DEFAULT_PLATFORM.read_bytes())
+            self.assertFalse(result["hardware_execution"])
+            self.assertIsNone(result["platform"]["bitstream_identity"])
+
+    def test_platform_changes_need_matching_compiled_layout(self):
+        profile = json.loads(DEFAULT_PLATFORM.read_bytes())
+        profile["mapping"][0]["base"] = [0x60000]
+        with self.assertRaisesRegex(ValueError, "rebuild"):
+            platform_map(profile)
+        profile = json.loads(DEFAULT_PLATFORM.read_bytes())
+        profile["dma_arena_base"] = 0x200000000
+        with self.assertRaisesRegex(ValueError, "platform contract"):
+            platform_map(profile)
+
     def test_high_dma_zero_fill_and_union_footprint(self):
         value = describe(elf(), 0x100000000, 4096, observe=["mailbox"])
         self.assertEqual(value["resident_union_bytes"], 4356)
@@ -119,6 +145,10 @@ class ModelHandoffTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "both"):
                 package(elf=source, name="smol", dma_base=0x100000000,
                         dma_bytes=4096, out=root / "bad", soc_memmap=mapping)
+            with self.assertRaisesRegex(ValueError, "both"):
+                package(elf=source, name="smol", dma_base=0x100000000,
+                        dma_bytes=4096, out=root / "bad-platform", soc_memmap=mapping,
+                        platform=DEFAULT_PLATFORM)
             result = package(elf=source, name="smol", dma_base=0x100000000,
                              dma_bytes=4096, out=root / "good", soc_memmap=mapping,
                              target_identity="local-target-id")
