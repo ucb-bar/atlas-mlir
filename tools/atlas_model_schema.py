@@ -194,6 +194,7 @@ def generate(vocabulary):
              "namespace mlir::atlas::timing::model_schema {"]
     digest = sha256(canonical(vocabulary))
     lines.append('inline const char *vocabularySha256() { return "' + digest + '"; }')
+    lines.append('inline const char *vocabularyJson() { return ' + json.dumps(canonical(vocabulary).decode()) + '; }')
 
     def table(signature, entries):
         lines.extend(["inline const " + signature + " {", "  static const " + signature.split(" &")[0] + " table = {"])
