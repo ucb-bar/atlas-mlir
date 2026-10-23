@@ -81,6 +81,9 @@ Object dmaFixture() {
 Object architectureFixture() {
   return Object{
       {"bf16_element_bytes", 2},
+      {"fp8_element_bytes", 1},
+      {"fp8_registers_per_tile", 1},
+      {"fp8_tile_bytes", 1024},
       {"bf16_pair_stride", 1},
       {"bf16_registers_per_tile", 2},
       {"bf16_tile_bytes", 2048},
@@ -232,7 +235,7 @@ void sealContractFixture(Object &object) {
   for (const char *key : {"geometry", "age_convention", "op_timing", "reservation_releases", "vocabulary_sha256",
                           "architecture", "operand_vocabulary", "isa_metadata"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
-  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing", "replay_timing", "proposal_costs"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
   if (auto *dma = object.getObject("dma_timing")) {
     Object deterministic(*dma);
@@ -252,6 +255,37 @@ void sealContractFixture(Object &object) {
     (*object.getObject("validation"))["mxu_weight_validation"] = Object{{"passed", true}};
   if (auto *dma = object.getObject("dma_timing"))
     (*dma->getObject("validation"))["payload_sha256"] = payloadHash;
+}
+
+Object replayFixture() {
+  auto parsed = llvm::json::parse(search_policy::kReplayProjectionJson);
+  assert(parsed && parsed->getAsObject());
+  Object result(*parsed->getAsObject());
+  result["schema"] = "atlas.projected_core_replay.v1";
+  result["source"] = Object{{"schema", "atlas.core_edges.v1"}, {"clock_step", 1},
+      {"dma_wait_observes", "previous_edge_flags"}, {"implicit_exu_stalls", false},
+      {"source_contract", "atlas.model_frontend.v1"},
+      {"phases", Array{"s1_previous_state", "execution_units", "fetch"}},
+      {"checked_methods", Array{"Core.tick", "Core._tick_s1"}}};
+  (*result.getObject("projection_policy"))["template_sha256"] = search_policy::kReplayProjectionSHA256;
+  for (const char *stage : {"start", "place"})
+    for (auto &assignment : *result.getArray(stage))
+      for (auto &token : *(*assignment.getAsArray())[1].getAsArray())
+        if (token.getAsString() == "$clock_step") token = 1;
+  return result;
+}
+
+Object costsFixture() {
+  Object probes;
+  for (const char *name : {"vmov", "addi"})
+    probes[name] = Array{Object{{"rd", 0}, {"rs1", 2}, {"rs2", 0}, {"imm", 0}},
+                         Object{{"rd", 6}, {"rs1", 8}, {"rs2", 0}, {"imm", 0}}};
+  return Object{{"schema", "atlas.proposal_costs.v1"},
+      {"placement_policy", search_policy::kProposalOperandPlacement}, {"probes", std::move(probes)},
+      {"timing_class", Object{{"kind", "guarded_operand_independent_isolated_ages"},
+          {"vpu", "mnemonic_latency_and_register_independent_row_predicates"},
+          {"mxu", "guarded_age_geometry_expressions"}, {"memory", "guarded_age_geometry_predicates"},
+          {"interval_scope", "selected_representative_pair_only"}}}};
 }
 
 Object contractFixture() {
@@ -282,6 +316,8 @@ Object contractFixture() {
       {"response_latency_derived", false}, {"dma_store_read_to_request_cycles", 2},
       {"limitation", "Synthetic parser fixture; response latency remains an explicit target assumption."},
       {"checked_source_methods", Array{"synthetic:read"}}};
+  object["replay_timing"] = replayFixture();
+  object["proposal_costs"] = costsFixture();
   sealContractFixture(object);
   return object;
 }
@@ -347,6 +383,18 @@ void testDerivedContract() {
   auto strict = parse(contractFixture());
   check(bool(strict), "production parser accepts a complete payload-bound derived contract fixture");
   if (!strict) llvm::errs() << llvm::toString(strict.takeError()) << '\n';
+  if (strict) {
+    auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(*strict));
+    check(provider.proposalGeometry.registerBytes == 1024 && provider.proposalGeometry.bf16Registers == 2 &&
+          provider.proposalGeometry.fp8Registers() == 1 && provider.proposalGeometry.packRowWords() == 8 &&
+          provider.proposalGeometry.rows == 32, "model proposal geometry retains source-derived architecture");
+    check(provider.frontendSpacing.successorGap() == 2, "branch successor spacing uses derived slot count and issue gap");
+    auto probes = provider.costProbes(*findOp("vmov"));
+    check(probes.error.empty() && probes.value.second.rd == 6 && probes.value.second.rs1 == 8,
+          "model costs use sealed generated operand probes");
+    auto missing = provider.costProbes(*findOp("vadd.bf16"));
+    check(!missing.error.empty(), "missing production cost probes refuse instead of using fixture defaults");
+  }
   auto raw = parse(fixture());
   check(!raw, "production parser refuses test-only raw measured fixtures");
   if (!raw) llvm::consumeError(raw.takeError());
@@ -381,6 +429,22 @@ void testDerivedContract() {
     rejects(std::move(stale), "stale metadata is rejected by the semantic payload binding",
             "derived semantic payload differs");
   }
+  for (const char *field : {"replay_timing", "proposal_costs"}) {
+    auto missing = contractFixture();
+    missing.erase(field);
+    sealContractFixture(missing);
+    rejects(std::move(missing), "production proposal facts refuse missing derived extensions", "missing source-derived");
+  }
+  for (const char *field : {"replay_timing_sha256", "proposal_costs_sha256"}) {
+    auto spoofed = contractFixture();
+    (*spoofed.getObject("model"))[field] = std::string(64, 'b');
+    sealContractFixture(spoofed);
+    rejects(std::move(spoofed), "model metadata cannot override computed proposal identity", "reserved derived provenance");
+  }
+  auto alteredProof = contractFixture();
+  (*alteredProof.getObject("proposal_costs")->getObject("timing_class"))["interval_scope"] = "all_operands";
+  sealContractFixture(alteredProof);
+  rejects(std::move(alteredProof), "representative intervals cannot claim universal operand coverage", "timing-class proof");
   auto missingRelease = contractFixture();
   missingRelease.getObject("reservation_releases")->getObject("vpu.mov")->erase("mreg_read");
   sealContractFixture(missingRelease);

@@ -2,6 +2,7 @@
 #define ATLAS_TIMING_PROVIDER_H
 
 #include "Atlas/AtlasTiming.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <functional>
@@ -12,6 +13,7 @@ namespace mlir::atlas {
 struct AtlasStream;
 
 namespace timing {
+struct ModelReplayProgram;
 
 // Missing coverage is an error, distinct from a covered rule that reports no
 // dependence or no resource conflict. No generic consumer fills missing rules.
@@ -44,6 +46,27 @@ public:
   }
 };
 
+// Geometry consumed by compiler lowering templates. Model providers populate
+// this from checked architecture facts; defaults describe builtin's target.
+struct ProposalGeometry {
+  int registerBytes = kAtlasRegisterBytes;
+  int rowBytes = kAtlasMregRowBytes;
+  int rows = kAtlasMregRows;
+  int scalarBytes = 4;
+  int bf16Registers = kAtlasBF16Registers;
+  int bf16ElementBytes = 2;
+  int fp8RegisterCount = 1, fp8ElementBytes = 1;
+  int fp8Registers() const { return fp8RegisterCount; }
+  int packRowWords() const { return rowBytes / scalarBytes; }
+};
+
+// Model values come from the reviewed frontend ordering contract. Consumers
+// currently support one ordinary cycle and one slot, checked on fact load.
+struct FrontendSpacing {
+  int ordinaryGap = 1, delaySlots = 1;
+  int successorGap() const { return (delaySlots + 1) * ordinaryGap; }
+};
+
 // Complete inputs to final timing verification; scope validation runs first.
 // CFG and host-release obligations stay in the common verifier. A provider id
 // names policy, not RTL qualification.
@@ -51,6 +74,10 @@ struct TimingProvider {
   std::string id;
   // Identity of model-owned proposal operands, separate from timing admissions.
   std::string proposalFactsSha256;
+  ProposalGeometry proposalGeometry;
+  FrontendSpacing frontendSpacing;
+  std::shared_ptr<const ModelReplayProgram> proposalReplay;
+  int proposalDMACapacity = 0; // builtin retains its existing policy bound.
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
@@ -92,6 +119,10 @@ TimingRuleResult<DepGraph> buildTimingGraph(
 struct MachineOpTiming {
   int latency, interval;
 };
+// Isolated latency uses the inclusive final event/release age plus one.
+// Source-reviewed planners make those ages operand invariant within an accepted
+// operation class. Interval uses only the selected representative relation:
+// different aliases/banks still require actual reservation/overlap queries.
 // Cost probes retain representative operands and unknown bases; they are not verified instructions.
 // `contexts`, when given, proves the two probes as the instructions their lowering issues.
 using ProbeContexts = std::function<std::pair<TimingContext, TimingContext>(const Instr &, const Instr &)>;

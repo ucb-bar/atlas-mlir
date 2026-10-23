@@ -13,6 +13,7 @@ from atlas_model_profiles import bind_synthetic_configuration, scoring_configura
 from atlas_model_schema import LOCK
 from atlas_model_semantics import check_model_semantics
 from atlas_model_capabilities import check_configuration
+from atlas_search_policy import POLICY
 from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
 from check_program_decode import decode_binary
 
@@ -26,7 +27,7 @@ def _model_content(root):
     import torch
     if safe_path(Path(npu_model.__file__).parent.parent) != root:
         raise ValueError("imported npu_model differs from --npu-model")
-    torch.set_num_threads(1)
+    torch.set_num_threads(POLICY["engineering"]["scorer"]["torch_threads"])
     source, _ = source_digest(root)
     numerical, _ = numerical_data(root)
     return root, source, numerical
@@ -101,6 +102,7 @@ class ModelScorer:
         object.__setattr__(self, "regions", tuple(json.loads(safe_path(path).read_text()) for path in self.regions))
         # Snapshot named targets once, including when this scorer is pickled for workers.
         object.__setattr__(self, "_targets", synthetic_targets())
+        object.__setattr__(self, "_scorer_policy", dict(POLICY["engineering"]["scorer"]))
 
     def configured_profile(self, document, profile):
         """Bind and identify the exact configuration used for native scoring."""
@@ -143,10 +145,11 @@ class ModelScorer:
                 "curve_path": str(curve), "configuration": values}
 
     def __call__(self, document, profile="curve"):
-        if sys.flags.optimize:
+        if self._scorer_policy["assertions_required"] and sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
         cfg, _ = self.configured_profile(document, profile)
         import torch
+        torch.set_num_threads(self._scorer_policy["torch_threads"])
         from npu_model.configs import isa_definition as isa
         from npu_model.hardware.core import Core
         from npu_model.logging.logger import Logger
@@ -166,14 +169,14 @@ class ModelScorer:
             for region in self.regions:
                 state.write_dram(region["address"], torch.tensor(list(bytes.fromhex(region["initial_hex"])), dtype=torch.uint8))
             first = None
-            while not state.halted and core.cycle_count < 200000:
+            while not state.halted and core.cycle_count < self._scorer_policy["max_cycles"]:
                 if core.is_finished():
                     raise ValueError("program exhausted before ECALL")
                 core.tick()
                 if first is None and core.issued_uop is not None:
                     first = core.cycle_count
             if first is None or not state.halted or state.halt_reason != "ecall":
-                raise ValueError("model did not reach ECALL within 200000 cycles")
+                raise ValueError(f'model did not reach ECALL within {self._scorer_policy["max_cycles"]} cycles')
             if any(unit.has_in_flight for unit in core.exus) or any(state.flags):
                 raise ValueError("ECALL before engines and DMA drained")
             for region in self.regions:

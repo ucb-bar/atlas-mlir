@@ -200,6 +200,20 @@ def _bf16_mapping(bank_tree, arch_tree):
     return count, stride
 
 
+def _fp8_mapping(tree):
+    read = _method(tree, "ArchState", "read_mrf_fp8")
+    _body_contract(read, "return self.mrf[vs].view(torch.float8_e4m3fn).reshape("
+                   "self.cfg.mrf_depth, self.cfg.mrf_width // torch.float8_e4m3fn.itemsize)",
+                   "FP8 register read mapping")
+    write = _method(tree, "ArchState", "write_mrf_fp8")
+    _body_contract(write, "assert value.dtype == torch.float8_e4m3fn\n"
+                   "assert value.numel() == self.cfg.mrf_depth * self.cfg.mrf_width // torch.float8_e4m3fn.itemsize\n"
+                   "self.mrf[vd].view(torch.float8_e4m3fn)[:] = value.flatten()",
+                   "FP8 register write mapping")
+    return len([node for node in ast.walk(read) if isinstance(node, ast.Subscript)
+                and _same(node.value, "self.mrf")])
+
+
 def _scalar_bytes(tree):
     method = _method(tree, "ArchState", "write_xrf")
     masks = [n for n in method.body if isinstance(n, ast.AugAssign) and _same(n.target, "value")]
@@ -234,6 +248,7 @@ def derive_arch(cfg):
     _vmem_mapping(_source(lsu), _source(dma))
     banks, row_stride, logical_limit = _mreg_mapping(bank_tree)
     pair_count, pair_stride = _bf16_mapping(bank_tree, arch_tree)
+    fp8_count = _fp8_mapping(arch_tree)
     arch = cfg.arch_state_config
     fields = {
         "mreg_count": (arch, "num_m_registers"), "mreg_rows": (arch, "mrf_depth"),
@@ -269,6 +284,9 @@ def derive_arch(cfg):
         raise UnsupportedArchitecture("MREG row bytes do not contain whole BF16 elements")
     if pair_stride >= facts["mreg_count"]:
         raise UnsupportedArchitecture("BF16 pair stride exceeds the configured MREG range")
+    fp8_element_bytes = torch.float8_e4m3fn.itemsize
+    if type(fp8_element_bytes) is not int or fp8_element_bytes <= 0 or facts["mreg_row_bytes"] % fp8_element_bytes:
+        raise UnsupportedArchitecture("MREG row bytes do not contain whole FP8 elements")
     register_bytes = facts["mreg_rows"] * facts["mreg_row_bytes"]
     facts.update(schema="atlas.architecture.v1", dram_base=base,
                  mreg_bytes=register_bytes, mreg_physical_bank_count=banks,
@@ -276,6 +294,8 @@ def derive_arch(cfg):
                  mreg_physical_row_stride=row_stride, mreg_logical_limit=logical_limit,
                  bf16_registers_per_tile=pair_count, bf16_pair_stride=pair_stride,
                  bf16_element_bytes=element_bytes, bf16_tile_bytes=pair_count * register_bytes,
+                 fp8_element_bytes=fp8_element_bytes, fp8_registers_per_tile=fp8_count,
+                 fp8_tile_bytes=fp8_count * register_bytes,
                  vmem_bank_count=facts["vmem_bytes"] // facts["vmem_bank_bytes"],
                  scalar_word_bytes=_scalar_bytes(arch_tree))
     return facts

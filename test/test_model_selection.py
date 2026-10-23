@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from model_evidence import requires_model_evidence
+from atlas_search_policy import COMPILER_POLICY_SHA256
 from atlas_model_selection import (Candidate, add_model_arguments, candidate_options, evidence_option,
                                    group_order_neighbors, model_arguments, order_neighbors, select_program,
                                    order_candidates, proposal_estimate, rank_order_neighbors, validate_proposal_graphs)
@@ -33,6 +34,9 @@ def candidate_command(argv):
 
 PROPOSAL_ID = "a" * 64
 
+from model_replay_fixture import replay_fixture, replay_identity
+from atlas_model_replay import semantic_digest
+
 
 def proposal_graph(preds, order, latency=100):
     costs = [{"unit": 1, "busy": latency, "latency": latency, "frontend": 1,
@@ -41,7 +45,7 @@ def proposal_graph(preds, order, latency=100):
                "frontend": 20 if node == 2 else 1, "queued_dma": False, "drains": False}
               for node in range(1, len(preds))]
     graph = {"preds": preds, "order": list(order), "operations": ["test.work"] * len(preds),
-             "proposal": {"schema": "atlas.virtual_proposal.v1", "facts_sha256": PROPOSAL_ID,
+             "proposal": {"schema": "atlas.virtual_proposal.v2", "facts_sha256": PROPOSAL_ID, "replay": replay_fixture(),
                           "units": 2, "dma_capacity": 8, "costs": costs, "estimate": {}}}
     makespan, waiting = proposal_estimate(graph, tuple(order))
     graph["proposal"]["estimate"] = {"makespan": makespan, "exposed_waiting": waiting}
@@ -68,7 +72,7 @@ class ModelSelectionTest(unittest.TestCase):
         if candidate_command(argv):
             (cwd / "allocation.json").write_text('{"fits": true}')
             lookahead = next((rank for rank in (1, 2, 8) if f"lookahead={rank}" in " ".join(argv)), 0)
-            self.programs[cwd] = {"instructions": [{"word_u32": lookahead, "operation": "atlas.dma",
+            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": lookahead, "operation": "atlas.dma",
                                                     "fields": {"direction": "store"}}],
                                   "cycles": {0: 10, 1: 20, 2: 5, 8: 5}[lookahead]}
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -181,7 +185,7 @@ class ModelSelectionTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 1, "", "refused")
         # Order replays score below every knob candidate, so both search phases accept moves.
         cycles = 1000 + key % 97 + (0 if "order-file" in option else 100)
-        self.programs[cwd] = {"instructions": [{"word_u32": key}], "cycles": cycles}
+        self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": key}], "cycles": cycles}
         return result
 
     def test_full_preset_trajectory_is_deterministic_and_bounded(self):
@@ -314,7 +318,8 @@ with TemporaryDirectory() as directory:
         def tied_run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
             if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
+                                               "instructions": [{"word_u32": 8}], "cycles": 5}
             return result
 
         with patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
@@ -335,7 +340,8 @@ with TemporaryDirectory() as directory:
         def tied_run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
             if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
+                                               "instructions": [{"word_u32": 8}], "cycles": 5}
             return result
 
         for deferred in (False, True):
@@ -373,7 +379,8 @@ with TemporaryDirectory() as directory:
         def tied_run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
             if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
+                                               "instructions": [{"word_u32": 8}], "cycles": 5}
             return result
 
         for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve", "fifo43"}),
@@ -484,7 +491,7 @@ with TemporaryDirectory() as directory:
                 self.write_graph(cwd, [[], [], []])
                 if "mreg-ranks=" in " ".join(argv):
                     local = "order-file=" in " ".join(argv)
-                    self.programs[cwd] = {"instructions": [{"word_u32": 101 if local else 100}], "cycles": 2 if local else 3}
+                    self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": 101 if local else 100}], "cycles": 2 if local else 3}
             return result
 
         receipt = self.select(runner=compile_bank, max_candidates=25, mreg_candidates=((31, 7),),
@@ -624,7 +631,7 @@ with TemporaryDirectory() as directory:
                     return subprocess.CompletedProcess(argv, 1, "", "dependence rejected")
                 cycles = 4
                 word = 100 + sum((node + 1) * 10 ** i for i, node in enumerate(order))
-                self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": cycles}
+                self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}], "cycles": cycles}
             else:
                 order = initial if "lookahead=2" in " ".join(argv) else (0, 1, 2, 3)
             (cwd / "graph.json").write_text(json.dumps([{"preds": [[], [], [], []], "order": order}]))
@@ -685,7 +692,7 @@ with TemporaryDirectory() as directory:
 
         def compile_order(argv, cwd, order):
             word = sum((node + 1) * 10 ** i for i, node in enumerate(order))
-            self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": 4 if order == winner else 10}
+            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}], "cycles": 4 if order == winner else 10}
 
         receipts = []
         for workers in (1, 4):
@@ -844,7 +851,7 @@ with TemporaryDirectory() as directory:
         current_first = (0, 2, 1)
         slow = proposal_graph([[], [0], []], initial)
         fast = proposal_graph([[], [0], []], initial, latency=1)
-        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}}
         for graph in (slow, fast):
             validate_proposal_graphs([graph], program)
         orders = [(initial,), (current_first,)]
@@ -902,7 +909,7 @@ with TemporaryDirectory() as directory:
                 costs.append(dict(unit=rng.randrange(4), busy=rng.randrange(100),
                                   latency=rng.randrange(100), frontend=rng.randrange(1 if queued else 0, 10),
                                   queued_dma=queued, drains=rng.choice((False, True))))
-            graph = dict(preds=preds, proposal=dict(costs=costs, dma_capacity=rng.randrange(1, 9)))
+            graph = dict(preds=preds, proposal=dict(costs=costs, dma_capacity=rng.randrange(1, 9), replay=replay_fixture()))
             self.assertEqual(proposal_estimate(graph, tuple(order)), reference(graph, order))
 
     def test_curve_bounded_ranking_preserves_exhaustive_attempt_prefix(self):
@@ -943,7 +950,7 @@ with TemporaryDirectory() as directory:
     def test_curve_metadata_requires_schema_identity_costs_and_native_parity(self):
         from copy import deepcopy
         graph = proposal_graph([[], [0], []], (0, 1, 2))
-        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}}
         mutations = (
             lambda g: g.pop("proposal"),
             lambda g: g["proposal"].update(schema="future"),
@@ -983,8 +990,8 @@ with TemporaryDirectory() as directory:
             flags = " ".join(argv)
             source_waits = "wait-placement=source" in flags
             word = sum((node + 1) * 9 ** i for i, node in enumerate(order)) * 2 + int(source_waits)
-            self.programs[cwd] = {"instructions": [{"word_u32": word}],
-                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID},
+            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}],
+                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()},
                                   "cycles": 5 if order == target and source_waits else 10}
             if order == ranked[0][0] and not source_waits:
                 return subprocess.CompletedProcess(argv, 1, "", "dependence refused")
@@ -1022,8 +1029,8 @@ with TemporaryDirectory() as directory:
                 source = "wait-placement=source" in flags
                 word = 100 + 2 * int(bank) + int(source)
                 cycles = (9 if source == parent_source else 5) if bank else (10 if source == parent_source else 11)
-                self.programs[cwd] = {"instructions": [{"word_u32": word}],
-                                      "model_evidence": {"op_timing_sha256": PROPOSAL_ID}, "cycles": cycles}
+                self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}],
+                                      "model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}, "cycles": cycles}
             runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
             receipt = self.select(name=f"curve-bank-sibling-{parent_source}", runner=runner, profile="curve",
                                   max_candidates=32, random_seeds=(), mreg_candidates=((1,),),
@@ -1043,8 +1050,8 @@ with TemporaryDirectory() as directory:
         preds = [[], [0], [], [], [], [], [], []]
         def compile_order(argv, cwd, order):
             word = sum((node + 1) * 9 ** i for i, node in enumerate(order))
-            self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": 10,
-                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}], "cycles": 10,
+                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}}
         runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
         receipt = self.select(name="curve-group", runner=runner, profile="curve", max_candidates=1,
                               search_group_evaluations=5)
@@ -1348,7 +1355,8 @@ class ModelOrderReplayTest(unittest.TestCase):
     def test_native_proposal_metadata_matches_explicit_order_replay(self):
         graphs, _ = self.graph()
         identity = re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)
-        program = {"model_evidence": {"op_timing_sha256": identity}}
+        program = {"model_evidence": {"op_timing_sha256": identity,
+            "replay_timing_sha256": semantic_digest(graphs[0]["proposal"]["replay"])}}
         validate_proposal_graphs(graphs, program)
         self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
         replay_path = self.directory / "replayed-graph.json"
@@ -1385,7 +1393,8 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.assertTrue(costs[load]["queued_dma"])
         self.assertEqual(costs[load]["frontend"], 1)
         validate_proposal_graphs(graphs, {"model_evidence": {
-            "op_timing_sha256": re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)}})
+            "op_timing_sha256": re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1),
+            "replay_timing_sha256": semantic_digest(graphs[0]["proposal"]["replay"])}})
 
     def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
         graphs, scheduled = self.graph()

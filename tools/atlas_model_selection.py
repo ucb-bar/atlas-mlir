@@ -10,8 +10,10 @@ from __future__ import annotations
 
 if __package__:
     from .atlas_model_diagnostics import ModelTimingEvidenceError
+    from .atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
 else:
     from atlas_model_diagnostics import ModelTimingEvidenceError
+    from atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
 
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -52,7 +54,7 @@ def capture_selection_inputs(source, output, binaries, model, regions, search_po
             revisions[role] = result.stdout.strip() if result.returncode == 0 else None
     return capture_run_provenance(
         source, regions=regions, archive_dir=output / "provenance", revisions=revisions,
-        search_policy=search_policy, selector=Path(__file__),
+        search_policy=search_policy,
         files={"compiler_build_definition": ROOT / "CMakeLists.txt",
                "instruction_inventory": ROOT / "docs/selected-variant-inventory.json",
                **{name: binaries / name for name in ("atlas-opt", "atlas-emit")}},
@@ -74,14 +76,10 @@ def bind_selection_facts(capture, model_facts):
     return provider_digest
 
 
-SEARCH_BUDGETS = {
-    "selection": dict(max_candidates=24, search_evaluations=0, search_group_evaluations=0,
-                      search_patience=0, bank_candidates=False,
-                      pack_reload_candidates=False, pack_preload_candidates=False),
-    "full": dict(max_candidates=32, search_evaluations=96, search_group_evaluations=204,
-                 search_patience=96, bank_candidates=True,
-                 pack_reload_candidates=True, pack_preload_candidates=True),
-}
+SEARCH_BUDGETS = POLICY["presets"]
+POOLS = POLICY["pools"]
+CANDIDATES = POLICY["candidates"]
+DEFAULTS = POLICY["defaults"]
 
 
 @dataclass(frozen=True)
@@ -96,7 +94,7 @@ class Candidate:
     pack_weight_before_pack: bool = False
 
     def __post_init__(self) -> None:
-        if self.lookahead not in (0, 1, 2, 4, 8):
+        if self.lookahead not in POOLS["supported_lookaheads"]:
             raise ValueError("lookahead must be 0, 1, 2, 4, or 8")
         if self.random_seed is not None and (self.random_seed < 0 or self.lookahead):
             raise ValueError("random-seed must be nonnegative and excludes lookahead")
@@ -179,14 +177,14 @@ def order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...]):
                 if origin == target:
                     continue
                 moves.append((block, origin, target))
-    random.Random(0).shuffle(moves)
+    random.Random(POOLS["neighbor_shuffle_seed"]).shuffle(moves)
     for block, origin, target in moves:
         moved = list(orders[block])
         moved.insert(target, moved.pop(origin))
         yield orders[:block] + (tuple(moved),) + orders[block + 1:]
 
 
-def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...], max_nodes: int = 4):
+def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...], max_nodes: int = POOLS["group_max_nodes"]):
     """Move a node together with the dependencies crossed by its insertion."""
     moves = []
     seen = set()
@@ -227,7 +225,7 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
                 if moved != order and signature not in seen:
                     seen.add(signature)
                     moves.append((block, tuple(group), insertion))
-    random.Random(0).shuffle(moves)
+    random.Random(POOLS["neighbor_shuffle_seed"]).shuffle(moves)
     for block, group, insertion in moves:
         members = set(group)
         remaining = [node for node in orders[block] if node not in members]
@@ -236,41 +234,9 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
 
 
 def proposal_estimate(graph: dict, order: tuple[int, ...]) -> tuple[int, int]:
-    """Replay the native virtual Machine; this priority never establishes completion."""
-    proposal = graph["proposal"]
-    costs = proposal["costs"]
-    free = {}
-    finished = [0] * len(costs)
-    transfers = []
-    transfer_end = 0
-    frontend = makespan = waiting = 0
-    for node in order:
-        cost = costs[node]
-        unit = cost["unit"]
-        cycle = frontend if cost["queued_dma"] else max(frontend, free.get(unit, 0))
-        if cost["drains"]:
-            cycle = max(cycle, transfer_end)
-        for pred in graph["preds"][node]:
-            cycle = max(cycle, finished[pred])
-        if cost["queued_dma"]:
-            # Frontend cycles never decrease. Retire completed transfers once;
-            # the active completion heap stays bounded by DMA capacity.
-            while transfers and transfers[0] <= cycle:
-                heapq.heappop(transfers)
-            capacity = proposal["dma_capacity"]
-            while len(transfers) >= capacity:
-                cycle = heapq.heappop(transfers)
-        work = max(cycle + cost["frontend"] - 1, free.get(unit, 0)) if cost["queued_dma"] else cycle
-        finished[node] = work + cost["latency"]
-        free[unit] = work + cost["busy"]
-        if cost["queued_dma"]:
-            end = work + cost["busy"]
-            heapq.heappush(transfers, end)
-            transfer_end = max(transfer_end, end)
-        waiting += cycle - frontend
-        frontend = cycle + cost["frontend"]
-        makespan = max(makespan, finished[node])
-    return makespan, waiting
+    """Interpret the selected common projected-Core program; proposal policy only."""
+    from atlas_model_replay import replay
+    return replay(graph, order)
 
 
 def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
@@ -298,10 +264,17 @@ def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
             if len(set(preds)) != len(preds) or any(positions[pred] >= positions[node] for pred in preds):
                 reject("parent order violates its graph")
         proposal = graph.get("proposal")
-        if not isinstance(proposal, dict) or set(proposal) != {"schema", "facts_sha256", "units", "dma_capacity", "costs", "estimate"}:
+        if not isinstance(proposal, dict) or set(proposal) != {"schema", "facts_sha256", "units", "dma_capacity", "costs", "estimate", "replay"}:
             reject("missing or unsupported proposal schema")
-        if proposal["schema"] != "atlas.virtual_proposal.v1" or proposal["facts_sha256"] != identity:
+        if proposal["schema"] != "atlas.virtual_proposal.v2" or proposal["facts_sha256"] != identity:
             reject("proposal identity differs from parent model evidence")
+        from atlas_model_replay import validate_program, semantic_digest
+        try:
+            validate_program(proposal["replay"])
+            if semantic_digest(proposal["replay"]) != evidence.get("replay_timing_sha256"):
+                reject("replay program identity differs from parent model evidence")
+        except (ValueError, TypeError) as error:
+            reject(str(error))
         for key in ("units", "dma_capacity"):
             if type(proposal[key]) is not int or not 0 < proposal[key] <= 2**31 - 1:
                 reject("invalid " + key)
@@ -363,7 +336,8 @@ def rank_order_neighbors(graphs: list[dict], neighbors, max_orders: int | None =
     def key(orders):
         estimates = [estimates_at_parent[block] if order == baseline[block] else proposal_estimate(graph, order)
                      for block, (graph, order) in enumerate(zip(graphs, orders))]
-        return tuple(sum(estimate[index] for estimate in estimates) for index in (0, 1))
+        return tuple(sum(estimate[index] for estimate in estimates) for index in [
+            ("makespan", "exposed_waiting").index(field) for field in CANDIDATES["curve_ranking_fields"]])
     if max_orders is None:
         return iter(sorted(unique_neighbors(), key=key))
     return iter(heapq.nsmallest(max_orders, unique_neighbors(), key=key))
@@ -375,24 +349,28 @@ def order_candidates(base: Candidate, orders, curve_candidates: bool):
         if curve_candidates:
             # Local search precedes PACK-placement trials. Reset preloaded state
             # defensively so inherited options cannot suppress either wait sibling.
-            for placement in ("default", "source"):
+            for placement in CANDIDATES["curve_wait_placements"]:
                 yield replace(base, virtual_orders=order, wait_placement=placement,
                               pack_weight_before_pack=False)
         else:
             yield replace(base, virtual_orders=order)
 
 
-def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = "model",
+def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = DEFAULTS["selection_provider"],
                    profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
-                   spill: bool = True, spill_mxu: bool = True, boundary: str = "boundary",
-                   guarded_pack: bool = False,
+                   spill: bool = DEFAULTS["spill"], spill_mxu: bool = DEFAULTS["spill_mxu"],
+                   boundary: str = DEFAULTS["boundary"],
+                   guarded_pack: bool = DEFAULTS["guarded_pack"],
                    model_facts: Path | None = None,
-                   max_candidates: int = 32, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
+                   max_candidates: int = DEFAULTS["api_max_candidates"],
+                   random_seeds: tuple[int, ...] = tuple(POOLS["random_seeds"]), workers: int = DEFAULTS["workers"],
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
-                   search_evaluations: int = 0, search_group_evaluations: int = 0,
-                   search_patience: int = 0,
-                   pack_reload_candidates: bool = False, pack_preload_candidates: bool = False,
+                   search_evaluations: int = DEFAULTS["api_search_evaluations"],
+                   search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
+                   search_patience: int = DEFAULTS["api_search_patience"],
+                   pack_reload_candidates: bool = DEFAULTS["api_pack_reload_candidates"],
+                   pack_preload_candidates: bool = DEFAULTS["api_pack_preload_candidates"],
                    curve_candidates: bool | None = None, scorer: Callable | None = None,
                    search_policy=None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
@@ -405,7 +383,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     budgets count every attempted candidate, including compiler refusals.
     """
     if profile is None:
-        profile = "curve" if provider == "model" else "fifo43"
+        profile = DEFAULTS["model_profile"] if provider == "model" else DEFAULTS["builtin_profile"]
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
         raise ValueError("unsupported provider or memory profile")
     if curve_candidates is None:
@@ -426,10 +404,31 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("pack-reload-candidates requires the model provider")
     if pack_preload_candidates and provider != "model":
         raise ValueError("pack-preload-candidates requires the model provider")
-    if __package__:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from atlas_run_provenance import safe_path
-    source, output, binaries = map(safe_path, (source, output_dir, atlas_bin_dir))
+    if mreg_candidates is None:
+        mreg_candidates = tuple(tuple(random.Random(seed).choices(POOLS["mreg_rank_choices"],
+                                                                k=POOLS["mreg_vector_length"]))
+                                for seed in POOLS["mreg_seeds"])
+    effective_policy = policy_receipt(dict(
+        provider=provider, profile=profile, spill=spill, spill_mxu=spill_mxu,
+        boundary=boundary, guarded_pack=guarded_pack, max_candidates=max_candidates,
+        random_seeds=list(random_seeds), workers=workers,
+        store_window_candidates=[list(ranks) for ranks in store_window_candidates],
+        mreg_candidates=[list(ranks) for ranks in mreg_candidates],
+        search_evaluations=search_evaluations, search_group_evaluations=search_group_evaluations,
+        search_patience=search_patience, pack_reload_candidates=pack_reload_candidates,
+        pack_preload_candidates=pack_preload_candidates, curve_candidates=curve_candidates,
+        objective=POLICY["objectives"][profile],
+        scoring_implementation=("none" if provider == "builtin" else
+                                "native_model" if scorer is None else "caller_callback")))
+    if search_policy is not None and search_policy != effective_policy:
+        raise ValueError("search policy override does not match the versioned effective policy")
+    if provider == "model":
+        if __package__:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from atlas_run_provenance import safe_path
+        source, output, binaries = map(safe_path, (source, output_dir, atlas_bin_dir))
+    else:
+        source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
     output.mkdir(parents=True, exist_ok=True)
@@ -444,13 +443,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "pack_reload_candidates": pack_reload_candidates,
                "pack_preload_candidates": pack_preload_candidates,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+               "search_policy": effective_policy,
                "candidates": []}
     standard_scorer = scorer is None
     capture = None
     if standard_scorer and provider == "model":
         if model is None:
             raise ValueError("model scoring requires --npu-model")
-        capture = capture_selection_inputs(source, output, binaries, model, model_regions, search_policy)
+        capture = capture_selection_inputs(source, output, binaries, model, model_regions, effective_policy)
         capture.bind(semantic={"invocation": {
             key: value for key, value in receipt.items() if key not in ("candidates", "source_sha256", "workers")
         } | dict(boundary=boundary, spill=spill, spill_mxu=spill_mxu,
@@ -535,12 +535,20 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             stage = "emit"
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                          directory, directory / "program.json"))
+            if provider == "model" and (standard_scorer or "compiler_search_policy_sha256" in program):
+                stage = "policy"
+                if program.get("compiler_search_policy_sha256") != COMPILER_POLICY_SHA256:
+                    raise ValueError("compiler search policy differs from driver; rebuild the selected compiler")
             words = tuple(instruction["word_u32"] for instruction in program["instructions"])
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if provider == "model":
                 stage = "score"
                 cached, row["score_cache_hit"] = cached_score(program, profile)
                 row["cycles"] = cached.result() if isinstance(cached, Future) else cached
+                if (directory / "graph.json").is_file():
+                    from atlas_model_replay import prediction_error
+                    graphs = json.loads((directory / "graph.json").read_text())
+                    row["proposal_prediction_error"] = prediction_error(graphs, row["cycles"], profile)
             row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
         except (OSError, ValueError, RuntimeError) as error:
@@ -574,11 +582,11 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if row["status"] == "FAIL" and provider != "model":
                 fail("default candidate failed: " + row["error"])
             # A verified program the model cannot score is an identity or soundness alarm.
-            if row["status"] == "FAIL" and row["error_stage"] == "score":
+            if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
                 fail(f"candidate {row['index']} failed model scoring: {row['error']}")
         passing = [row for row in receipt["candidates"] if row["status"] == "PASS"]
         best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
-        if provider == "model" and profile == "curve" and best is not None:
+        if provider == "model" and "fifo43_cycles" in POLICY["objectives"][profile] and best is not None:
             tied = [row for row in passing if row["cycles"] == best["cycles"]]
             if len(tied) > 1:
                 pending_scores = []
@@ -606,8 +614,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 max_workers=workers, mp_context=multiprocessing.get_context("spawn")))
         evaluate_batch([(Candidate(), "default")])
         if provider == "model":
-            evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in (1, 2, 4)] +
-                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(24, max_candidates))
+            evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in POOLS["initial_lookaheads"]] +
+                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(CANDIDATES["initial_knob_cap"], max_candidates))
             if best is None:
                 fail("no legal candidate: every initial candidate was refused")
             def winner() -> Candidate:
@@ -624,15 +632,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             # All legal per-store free ranks are expressible; allocation maps ranks
             # modulo that store's actual free set and never claims a held window.
             window_base = winner()
-            placements = [(replace(window_base, wait_placement="source"), "wait-placement")]
+            placements = [(replace(window_base, wait_placement=CANDIDATES["initial_wait_placement"]), "wait-placement")]
             placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
                            for ranks in store_window_candidates]
             placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
-                           for rank in range(1, 8) if store_count]
-            evaluate_batch(placements, limit=min(24, max_candidates))
+                           for rank in POOLS["uniform_store_ranks"] if store_count]
+            evaluate_batch(placements, limit=min(CANDIDATES["initial_knob_cap"], max_candidates))
             register_base = winner()
-            if mreg_candidates is None:
-                mreg_candidates = tuple(tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8))
             receipt["mreg_pool_size"] = len(mreg_candidates)
             evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks") for ranks in mreg_candidates])
             for field, budget, neighbors, category in (
@@ -673,7 +679,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                     pending = order_candidates(base, proposed, curve_candidates)
                     while len(receipt["candidates"]) < limit:
                         batch = []
-                        width = min(12, limit - len(receipt["candidates"]))
+                        width = min(CANDIDATES["batch_width"], limit - len(receipt["candidates"]))
                         while len(batch) < width:
                             candidate = next(pending, None)
                             if candidate is None:
@@ -702,7 +708,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                                len(receipt["candidates"]) + 1)
             if pack_preload_candidates:
                 preloaded = replace(winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
-                evaluate_batch([(replace(preloaded, wait_placement="preloaded"), "pack-preload-waits")],
+                evaluate_batch([(replace(preloaded, wait_placement=CANDIDATES["pack_preload_wait_placement"]), "pack-preload-waits")],
                                len(receipt["candidates"]) + 1)
     if capture is not None:
         try:
@@ -727,7 +733,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
 
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--provider", choices=("builtin", "model"), default="builtin")
+    parser.add_argument("--provider", choices=("builtin", "model"), default=DEFAULTS["lower_provider"])
     parser.add_argument("--profile", choices=("fifo43", "curve"),
                         help="memory scoring profile (model default: curve)")
     parser.add_argument("--npu-model", type=Path, help="selected npu_model source tree; must match provider evidence")
@@ -735,10 +741,10 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="DRAM region JSON with address, initial_hex and optional expected_hex")
     parser.add_argument("--model-facts", type=Path,
                         help="qualified model facts bundle (default: regenerate from --npu-model)")
-    parser.add_argument("--search-budget", choices=tuple(SEARCH_BUDGETS), default="full",
+    parser.add_argument("--search-budget", choices=tuple(SEARCH_BUDGETS), default=DEFAULTS["search_budget"],
                         help="selection knobs only or bounded full search (default)")
     parser.add_argument("--max-candidates", type=int)
-    parser.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1))
+    parser.add_argument("--workers", type=int, default=min(DEFAULTS["workers"], os.cpu_count() or 1))
     parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score eight legal MREG rank vectors (model only)")
     parser.add_argument("--search-evaluations", type=int,
@@ -761,7 +767,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
     preset = SEARCH_BUDGETS[args.search_budget if args.provider == "model" else "selection"]
     budget = {name: getattr(args, name) if getattr(args, name) is not None else value for name, value in preset.items()}
     banks = budget.pop("bank_candidates")
-    profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
+    profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model" else DEFAULTS["builtin_profile"])
     return {"provider": args.provider, "profile": profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "model_facts": args.model_facts,
             "curve_candidates": args.curve_candidates,
@@ -776,11 +782,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--boundary", choices=("boundary", "none"), default="boundary")
-    parser.add_argument("--no-spill", action="store_true")
-    parser.add_argument("--guarded-pack", action="store_true")
+    parser.add_argument("--boundary", choices=("boundary", "none"), default=DEFAULTS["boundary"])
+    parser.add_argument("--no-spill", action="store_true", default=not DEFAULTS["spill"])
+    parser.add_argument("--guarded-pack", action="store_true", default=DEFAULTS["guarded_pack"])
     add_model_arguments(parser)
-    parser.set_defaults(provider="model")
+    parser.set_defaults(provider=DEFAULTS["selection_provider"])
     args = parser.parse_args()
     try:
         receipt = select_program(args.source, args.output_dir, args.atlas_bin_dir,

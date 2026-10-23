@@ -53,6 +53,14 @@ class ArchState:
     def read_mrf_bf16_tile(self, vs):
         return torch.cat((self.read_mrf_bf16(vs), self.read_mrf_bf16(vs + 1)), dim=1)
 
+    def read_mrf_fp8(self, vs):
+        return self.mrf[vs].view(torch.float8_e4m3fn).reshape(self.cfg.mrf_depth, self.cfg.mrf_width // torch.float8_e4m3fn.itemsize)
+
+    def write_mrf_fp8(self, vd, value):
+        assert value.dtype == torch.float8_e4m3fn
+        assert value.numel() == self.cfg.mrf_depth * self.cfg.mrf_width // torch.float8_e4m3fn.itemsize
+        self.mrf[vd].view(torch.float8_e4m3fn)[:] = value.flatten()
+
     def write_xrf(self, rd, value):
         value &= 0xFFFFFFFF
         if rd == 0:
@@ -112,7 +120,7 @@ class ArchitectureDerivationTest(unittest.TestCase):
         bank_module, arch_module, lsu_module, dma_module = object(), object(), object(), object()
         modules = {"npu_model": SimpleNamespace(), "npu_model.hardware":
                    SimpleNamespace(bank_conflict=bank_module, arch_state=arch_module, lsu=lsu_module, dma=dma_module),
-                   "torch": SimpleNamespace(bfloat16=SimpleNamespace(itemsize=2))}
+                   "torch": SimpleNamespace(bfloat16=SimpleNamespace(itemsize=2), float8_e4m3fn=SimpleNamespace(itemsize=1))}
         def source(module):
             return ast.parse({bank_module: bank, arch_module: arch, lsu_module: lsu, dma_module: dma}[module])
         with patch.dict(sys.modules, modules), patch.object(derive, "_source", side_effect=source):
@@ -125,6 +133,8 @@ class ArchitectureDerivationTest(unittest.TestCase):
                           facts["mreg_bytes"]), (64, 32, 32, 1024))
         self.assertEqual((facts["bf16_registers_per_tile"], facts["bf16_pair_stride"],
                           facts["bf16_tile_bytes"], facts["bf16_element_bytes"]), (2, 1, 2048, 2))
+        self.assertEqual((facts["fp8_registers_per_tile"], facts["fp8_tile_bytes"],
+                          facts["fp8_element_bytes"]), (1, 1024, 1))
         self.assertEqual((facts["mreg_bank_modulus"], facts["mreg_registers_per_bank"],
                           facts["mreg_physical_row_stride"]), (32, 2, 32))
         self.assertEqual((facts["vmem_bytes"], facts["vmem_bank_bytes"], facts["vmem_bank_count"]),
@@ -178,6 +188,14 @@ class ArchitectureDerivationTest(unittest.TestCase):
             self.derive(bank=bank)
         with self.assertRaisesRegex(derive.UnsupportedArchitecture, "BF16 tile write mapping"):
             self.derive(arch=ARCH_SOURCE.replace("vd + 1", "vd + 2"))
+
+    def test_fp8_layout_mutations_fail_precisely(self):
+        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "FP8 register read mapping"):
+            self.derive(arch=ARCH_SOURCE.replace("self.mrf[vs].view(torch.float8_e4m3fn)",
+                                                "self.mrf[vs + 1].view(torch.float8_e4m3fn)"))
+        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "FP8 register write mapping"):
+            self.derive(arch=ARCH_SOURCE.replace("value.numel() == self.cfg.mrf_depth",
+                                                "value.numel() == 2 * self.cfg.mrf_depth"))
 
     def test_scalar_source_mask_controls_word_bytes(self):
         self.assertEqual(self.derive(arch=ARCH_SOURCE.replace("0xFFFFFFFF", "0xFFFF"))["scalar_word_bytes"], 2)

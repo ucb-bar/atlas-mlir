@@ -1,3 +1,4 @@
+#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasTarget.h"
@@ -481,7 +482,7 @@ struct SpillAtlasVirtualPass
   StringRef getDescription() const final {
     return "Spill MXU state, tensor and scalar values through shared VMEM temporaries";
   }
-  Option<unsigned> maxSpills{*this, "max-spills", llvm::cl::init(256),
+  Option<unsigned> maxSpills{*this, "max-spills", llvm::cl::init(search_policy::kSpillRewriteLimit),
       llvm::cl::desc("Bound pressure-driven spill rewrites")};
   Option<unsigned> frameWords{*this, "vmem-words", llvm::cl::init(0),
       llvm::cl::desc("Temporary VMEM word budget; zero uses the selected pool")};

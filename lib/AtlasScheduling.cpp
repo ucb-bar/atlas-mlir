@@ -1,3 +1,4 @@
+#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
@@ -16,7 +17,7 @@ using namespace mlir::atlas::timing;
 
 namespace {
 
-constexpr int kMaxIdle = 100000;
+constexpr int kMaxIdle = search_policy::kTimingSearchCycles;
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
@@ -136,8 +137,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       return op(i)->emitOpError("can never issue: ") << conflict;
   }
   // Branch, delay slot and successor issue one cycle apart.
-  if (slot >= 0 && (gaps[term] != 1 || gaps[slot] != 1))
-    return op(gaps[term] != 1 ? term : slot)->emitOpError(
+  if (slot >= 0 && (gaps[term] != p.frontendSpacing.ordinaryGap || gaps[slot] != p.frontendSpacing.ordinaryGap))
+    return op(gaps[term] != p.frontendSpacing.ordinaryGap ? term : slot)->emitOpError(
         "timing provider issue gap does not fit the single-cycle delay slot");
   if (slot >= 0)
     for (int e : g.out[term])
@@ -323,7 +324,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     // depends on: it still runs after the rest of the block, on both paths.
     auto filler = llvm::find_if(llvm::reverse(body), [&](int i) {
       return isAtlasDelaySlotWork(op(i)) && g.out[i].empty() &&
-             g.footprints[i].doneAge == 0 && gaps[i] == 1;
+             g.footprints[i].doneAge == 0 && gaps[i] == p.frontendSpacing.ordinaryGap;
     });
     if (filler != body.rend()) {
       slot = *filler;
@@ -362,6 +363,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   }
 
   placedOrder = body;
+  // Inclusive issue-edge-zero last events are visible to Core S1 only
+  // on the next edge (S1 precedes this edge's EXUs, including for ECALL).
   int drain = 0;
   for (int i : body)
     drain = std::max(drain, add(add(issue[i], g.footprints[i].doneAge,
@@ -380,11 +383,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     };
     raise(earliest[term], why[term]);
     // With a delay slot, the next block starts two cycles after the branch.
-    raise(halt ? drain : drain - 2,
+    raise(halt ? drain : drain - p.frontendSpacing.successorGap(),
           halt ? "halt waits for this block to finish"
                : "this block finishes before the branch's successors start");
     if (slot >= 0)
-      raise(earliest[slot] - 1, "delay slot: " + why[slot]);
+      raise(earliest[slot] - p.frontendSpacing.ordinaryGap, "delay slot: " + why[slot]);
     for (;;) {
       std::string held = busy(term, termCycle);
       if (held.empty() && slot >= 0 && fault.empty()) {

@@ -2,6 +2,7 @@
 #define ATLAS_VIRTUAL_ALLOCATION_H
 
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -34,7 +35,7 @@ struct DMATransferPlacement {
 // A PACK relayout row is 32 FP8 bytes: two 16-byte halves of four words,
 // which lowerPack copies one word at a time. It is fixed by the selected PACK
 // layout, not a parameter: lowerPack's loop is written for exactly this row.
-constexpr unsigned kPackRelayoutRowWords = 8;
+constexpr unsigned kPackRelayoutRowWords = kAtlasMregRowBytes / sizeof(uint32_t);
 
 struct FixedResourcePlacement {
   unsigned tensorTemporary;

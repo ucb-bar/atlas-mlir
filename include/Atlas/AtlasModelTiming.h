@@ -2,6 +2,7 @@
 #define ATLAS_MODEL_TIMING_H
 
 #include "Atlas/AtlasTimingProvider.h"
+#include "Atlas/AtlasModelReplay.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include <map>
@@ -50,6 +51,7 @@ struct ModelFrontendAccess {
 
 struct ModelFrontendTiming {
   int ordinaryGap, delayBase, delayMask, readAge, writeAge, controlReadAge;
+  int delaySlots;
   std::map<std::string, std::vector<ModelFrontendAccess>> instructions;
 };
 
@@ -57,6 +59,13 @@ class ModelTimingFacts {
 public:
   Footprint resolve(const Instr &in, const RegValues &regs) const;
   const std::string &factsSha256() const { return sha256; }
+  const ProposalGeometry &proposalGeometry() const { return geometry; }
+  int dmaCapacity() const { return dmaChannels; }
+  const ModelReplayProgram *replayProgram() const { return replay ? &*replay : nullptr; }
+  TimingRuleResult<std::pair<Instr, Instr>> costProbes(const OpInfo &op) const;
+  FrontendSpacing frontendSpacing() const {
+    return frontend ? FrontendSpacing{frontend->ordinaryGap, frontend->delaySlots} : FrontendSpacing{};
+  }
   const std::map<std::string, std::string> &modelProvenance() const { return provenance; }
   bool dmaWait() const { return dma; }
   const std::string &overlapRulesSha256() const { return overlapRules; }
@@ -78,6 +87,10 @@ private:
   std::string overlapRules;
   std::optional<ModelDMATiming> dmaTiming;
   std::optional<ModelFrontendTiming> frontend;
+  ProposalGeometry geometry;
+  int dmaChannels = kAtlasDMAChannels;
+  std::optional<ModelReplayProgram> replay;
+  std::map<std::string, std::pair<Instr, Instr>> probes;
   static llvm::Expected<ModelTimingFacts> parseImpl(llvm::StringRef, llvm::StringRef, bool, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef, llvm::StringRef, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFactsForTesting(llvm::StringRef, llvm::StringRef, bool);

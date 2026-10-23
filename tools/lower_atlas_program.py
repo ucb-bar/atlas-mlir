@@ -33,14 +33,16 @@ from pathlib import Path
 
 
 if __package__:
+    from .atlas_search_policy import POLICY
     from .atlas_model_selection import add_model_arguments, model_arguments, select_program
 else:
+    from atlas_search_policy import POLICY
     from atlas_model_selection import add_model_arguments, model_arguments, select_program
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def stages(source: Path, guarded_pack: bool = False) -> list[tuple[str, str, Path | str, list[str]]]:
+def stages(source: Path, guarded_pack: bool = POLICY["defaults"]["guarded_pack"]) -> list[tuple[str, str, Path | str, list[str]]]:
     """(artifact, tool, input, options) for each command, in order."""
     return [
         ("1-virtual.mlir", "atlas-opt", source, ["--atlas-compile-verify" + ("=guarded-pack=true" if guarded_pack else "")]),
@@ -62,14 +64,14 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--guarded-pack", action="store_true",
+    parser.add_argument("--guarded-pack", action="store_true", default=POLICY["defaults"]["guarded_pack"],
                         help="opt in to bit-exact PACK via MXU0 for proven-finite sources")
     add_model_arguments(parser)
     args = parser.parse_args()
     if args.provider == "model":
         try:
             select_program(args.source, args.output_dir, args.atlas_bin_dir,
-                           spill=True, spill_mxu=True, guarded_pack=args.guarded_pack, **model_arguments(args))
+                           spill=POLICY["defaults"]["spill"], spill_mxu=POLICY["defaults"]["spill_mxu"], guarded_pack=args.guarded_pack, **model_arguments(args))
         except (OSError, ValueError) as error:
             print(error, file=sys.stderr)
             return 1
