@@ -118,7 +118,9 @@ class RunCapture:
     """
     def __init__(self, source, *, regions=(), files=None, trees=None,
                  evidence_files=None, configuration=None, search_policy=None,
-                 selector=None, revisions=None, archive_dir=None):
+                 revisions=None, archive_dir=None):
+        if search_policy is None:
+            raise ValueError("run provenance requires the versioned effective search policy")
         self._files = {}
         self._trees = {}
         self._semantic = {"source": None, "regions": [], "files": {}, "trees": {}}
@@ -128,10 +130,6 @@ class RunCapture:
         self._semantic["source"] = self._capture_file("source", source)
         if configuration is not None:
             self._semantic["configuration"] = _json_copy(configuration)
-        if search_policy is None:
-            selector = Path(selector) if selector is not None else Path(__file__).with_name("atlas_model_selection.py")
-            content = self._capture_file("legacy_search_selector", selector)
-            search_policy = {"kind": "legacy_selector_source_sha256", "sha256": content["sha256"]}
         self._semantic["search_policy"] = _json_copy(search_policy)
         for index, region_path in enumerate(regions):
             role = f"region:{index}"

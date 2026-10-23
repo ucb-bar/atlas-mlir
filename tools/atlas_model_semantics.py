@@ -11,6 +11,7 @@ import ast
 from copy import deepcopy
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from atlas_derive_scratchpad import read_source
@@ -142,6 +143,10 @@ def check_model_semantics(model):
 The emitted inventory is provenance, bound by the existing model source digest
 in atlas.derived_facts.v1; it adds no scheduling value or measured timing fact.
 """
+    if sys.version_info[:2] != (3, 14):
+        raise UnsupportedModelSemantics(
+            "model timing requires Python 3.14 for reviewed AST fingerprints; "
+            f"running {sys.version_info.major}.{sys.version_info.minor}")
     contract = json.loads(read_source(CONTRACT))
     checked = {}
     for filename, expected in contract["files"].items():

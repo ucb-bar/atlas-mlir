@@ -307,6 +307,19 @@ with TemporaryDirectory() as directory:
         self.assertIsNone(receipt["selected_cycles"])
         self.assertEqual(receipt["profile"], "fifo43")
 
+    def test_builtin_accepts_symlinked_source_and_binary_directory(self):
+        linked_source = self.directory / "linked.mlir"
+        linked_source.symlink_to(self.source)
+        linked_binaries = self.directory / "linked-bin"
+        linked_binaries.symlink_to(self.directory, target_is_directory=True)
+        with patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
+            receipt = select_program(linked_source, self.directory / "builtin-linked", linked_binaries,
+                                     provider="builtin", scorer=lambda *_: self.fail("builtin was scored"))
+        self.assertEqual(receipt["selected_index"], 0)
+        with self.assertRaisesRegex(ValueError, "symlinks"):
+            select_program(linked_source, self.directory / "model-linked", linked_binaries,
+                           provider="model", scorer=lambda *_: 1)
+
     def test_curve_ties_score_fifo43_lazily_and_cache_by_profile_and_words(self):
         calls = Counter()
 
@@ -388,7 +401,7 @@ with TemporaryDirectory() as directory:
             with self.subTest(profile=profile, cap=cap), \
                     patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
                     patch("atlas_model_selection.capture_selection_inputs", return_value=Mock(
-                        complete=Mock(return_value={"schema": "test-only"}))), \
+                        complete=Mock(return_value={"schema": "test-only"}))) as capture_inputs, \
                     patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
                     patch("atlas_model_selection.ProcessPoolExecutor", side_effect=executor), \
                     patch("atlas_model_selection.evidence_option", side_effect=lambda *_: ["--select-atlas-model-evidence=facts=synthetic-test"]), \
@@ -397,6 +410,7 @@ with TemporaryDirectory() as directory:
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
                                          profile=profile, model_facts=self.directory, curve_candidates=False, max_candidates=cap, workers=2)
             self.assertEqual(set(receipt["scoring_configurations"]), expected)
+            self.assertEqual(capture_inputs.call_args.args[-1], receipt["search_policy"])
             self.assertEqual(json.loads((output / "selection.json").read_text())["scoring_configurations"],
                              {name: {"profile": name, "sha256": name + "-configuration-digest"} for name in expected})
         self.assertNotIn("scoring_configurations", self.select(name="custom", max_candidates=1))
@@ -404,7 +418,7 @@ with TemporaryDirectory() as directory:
     def test_changed_input_refuses_publication_after_search(self):
         from atlas_run_provenance import capture_run_provenance
 
-        capture = capture_run_provenance(self.source)
+        capture = capture_run_provenance(self.source, search_policy={"test_policy": "mutation-control"})
 
         class NativeScorer:
             def runtime_receipt(self):
