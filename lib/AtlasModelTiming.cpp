@@ -989,6 +989,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
           }
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };
+  provider.fillPendingDelaySlots = true;
   provider.waitReusedDMASlots = true;
   provider.issueGap = [](const Instr &in) { return TimingRuleResult<int>{naturalGap(in), {}}; };
   provider.createReservations = [facts, overlap, chains] {

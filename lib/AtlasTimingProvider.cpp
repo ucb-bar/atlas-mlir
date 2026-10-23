@@ -213,6 +213,7 @@ llvm::StringRef mlir::atlas::timing::canonicalTimingProviderId(llvm::StringRef i
 TimingProvider mlir::atlas::timing::builtinTimingProvider() {
   TimingProvider p;
   p.id = kBuiltinTimingProviderId.str();
+  p.fillPendingDelaySlots = true;
   p.validateScope = [](const mlir::atlas::AtlasStream &) { return std::string{}; };
   p.footprint = footprintOf;
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b,

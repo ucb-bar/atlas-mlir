@@ -323,7 +323,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     // depends on: it still runs after the rest of the block, on both paths.
     auto filler = llvm::find_if(llvm::reverse(body), [&](int i) {
       return isAtlasDelaySlotWork(op(i)) && g.out[i].empty() &&
-             g.footprints[i].doneAge == 0;
+             g.footprints[i].doneAge == 0 && gaps[i] == 1;
     });
     if (filler != body.rend()) {
       slot = *filler;
@@ -338,7 +338,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
-          std::string busy = rule(table->conflict(nodes[i], g.footprints[i], cycle));
+          std::string busy = rule(table->conflictWithContext(nodes[i], g.footprints[i], cycle, contexts[i]));
           if (busy.empty())
             break;
           cycle++;
