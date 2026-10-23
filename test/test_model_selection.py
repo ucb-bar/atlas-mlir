@@ -164,6 +164,40 @@ class ModelSelectionTest(unittest.TestCase):
         self.programs[cwd] = {"instructions": [{"word_u32": key}], "cycles": cycles}
         return result
 
+    def test_full_preset_trajectory_is_deterministic_and_bounded(self):
+        parser = argparse.ArgumentParser()
+        add_model_arguments(parser)
+        expected = None
+        for workers in (1, 4):
+            arguments = model_arguments(parser.parse_args(["--provider", "model", "--workers", str(workers), "--profile", "fifo43"]))
+            with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
+                receipt = select_program(self.source, self.directory / str(workers), self.directory,
+                                         scorer=lambda program, **_: program["cycles"], **arguments)
+            rows = receipt["candidates"]
+            phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
+                      for field in ("search", "group_search")]
+            trajectory = ([(row["class"], row["options"], row["status"], row.get("cycles"), row.get("parent_index"))
+                           for row in rows], phases, receipt["selected_index"])
+            if expected is None:
+                expected = trajectory
+            self.assertEqual(trajectory, expected)
+            self.assertEqual(hashlib.sha256(json.dumps(trajectory, sort_keys=True).encode()).hexdigest(),
+                             "3b889839358bc91f33015945f3b4639613f84c10dd064113cf75641df95b88fc")
+            self.assertEqual([row["class"] for row in rows[:12]], ["default"] + ["lookahead"] * 3 + ["random-seed"] * 8)
+            self.assertEqual([row["options"]["lookahead"] for row in rows[1:4]], [1, 2, 4])
+            self.assertEqual(sum(row["class"] == "mreg-ranks" for row in rows), 8)
+            self.assertFalse(any(row["class"] in ("coordinate-store-windows", "pack-preload-order") for row in rows))
+            for field, budget in (("search", 96), ("group_search", 204)):
+                phase = receipt[field]
+                self.assertGreater(phase["evaluations"], 0)
+                self.assertLessEqual(phase["evaluations"], budget)
+                self.assertTrue(phase["accepted_indices"])
+                for index in phase["accepted_indices"]:
+                    self.assertLess(rows[index]["cycles"], rows[rows[index]["parent_index"]]["cycles"])
+            winner = min((row for row in rows if row["status"] == "PASS"), key=lambda row: (row["cycles"], row["index"]))
+            self.assertEqual(receipt["selected_index"], winner["index"])
+            self.assertTrue(any(row["status"] == "FAIL" for row in rows))
+            self.assertEqual([row["class"] for row in rows[-2:]], ["pack-reload-order", "pack-preload-waits"])
 
     def test_mreg_pool_is_eight_seeds_at_every_cap(self):
         vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
@@ -307,20 +341,49 @@ with TemporaryDirectory() as directory:
         receipt = self.select(runner=reordered, max_candidates=5, workers=4)
         self.assertEqual(receipt["selected_index"], 2)
 
+    def refuse(self, refused):
+        """Refuse every candidate compile whose option string satisfies refused."""
+        def run(argv, **kwargs):
+            if (option := candidate_command(argv)) and refused(option):
+                self.invocations.append(argv)
+                return subprocess.CompletedProcess(argv, 1, "", "error: model DMA command slot is still pending")
+            return self.fake_run(argv, **kwargs)
+        return run
 
-    def test_default_failure_stops_without_trying_alternatives(self) -> None:
-        original = self.fake_run
+    def test_default_compile_refusal_continues_and_records_failure(self) -> None:
+        default = candidate_options(Candidate(), "model", True)[0]
+        receipt = self.select(runner=self.refuse(lambda option: option == default), max_candidates=5)
+        failed = receipt["candidates"][0]
+        self.assertEqual((failed["status"], failed["error_stage"]), ("FAIL", "compile"))
+        self.assertIsNone(receipt["default_cycles"])
+        self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
+        self.assertTrue((self.directory / "compiled/program.json").exists())
 
-        def fail_default(argv, **kwargs):
-            if candidate_command(argv):
-                return subprocess.CompletedProcess(argv, 1, "", "invalid default")
-            return original(argv, **kwargs)
+    def test_default_score_failure_remains_fatal(self) -> None:
+        def scorer(program, **_):
+            if program["cycles"] == fatal:
+                raise RuntimeError("bank conflict")
+            return program["cycles"]
 
-        with patch("atlas_model_selection.subprocess.run", side_effect=fail_default):
-            with self.assertRaisesRegex(ValueError, "default candidate failed: invalid default"):
-                select_program(self.source, self.directory / "compiled", self.directory, scorer=lambda *args: 0)
+        for fatal, index in ((10, 0), (20, 1)):
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(ValueError, f"candidate {index} failed model scoring: bank conflict"):
+                    self.select(name=str(index), max_candidates=5, scorer=scorer)
+            self.assertFalse((self.directory / str(index) / "program.json").exists())
+            receipt = json.loads((self.directory / str(index) / "selection.json").read_text())
+            self.assertEqual(receipt["candidates"][index]["error_stage"], "score")
+
+    def test_all_refusals_raise_no_legal_candidate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no legal candidate"):
+            self.select(runner=self.refuse(lambda option: True), max_candidates=5)
         self.assertFalse((self.directory / "compiled/program.json").exists())
+        receipt = json.loads((self.directory / "compiled/selection.json").read_text())
+        self.assertEqual({row["status"] for row in receipt["candidates"]}, {"FAIL"})
 
+    def test_builtin_failure_still_stops_after_one_compile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "default candidate failed"):
+            self.select(runner=self.refuse(lambda option: True), provider="builtin")
+        self.assertEqual(sum(bool(candidate_command(argv)) for argv in self.invocations), 1)
 
     def test_candidate_choices_only_use_exposed_existing_knobs(self) -> None:
         options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source", mreg_ranks=(31, 0, 7)),
