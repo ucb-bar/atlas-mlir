@@ -51,13 +51,24 @@ def load_lock(path):
     lock = _load(path)
     names = set("model_revision source_sha256 reference_configuration_sha256 configuration_sha256 "
                 "numerical_data_sha256 reference_sha256 master_sha256 validation_sha256 per_op_sha256".split())
-    if (not isinstance(lock, dict) or set(lock) != names | {"schema", "source_shapes", "qualified_constraint_hashes"}
+    # Older locks predate the optional DMA curve contract.
+    optional = {"curve_sha256", "dma_source_sha256"}
+    if (not isinstance(lock, dict) or set(lock) - optional != names | {"schema", "source_shapes", "qualified_constraint_hashes"}
             or lock["schema"] != "atlas.model_timing.lock.v1"):
         raise ValueError("invalid model timing lock schema")
     for name in names:
         length = 40 if name == "model_revision" else 64
         if not isinstance(lock[name], str) or not re.fullmatch(r"[0-9a-f]{%d}" % length, lock[name]):
             raise ValueError("invalid model timing pin: " + name)
+    if "curve_sha256" in lock and (not isinstance(lock["curve_sha256"], str) or
+                                   not re.fullmatch(r"[0-9a-f]{64}", lock["curve_sha256"])):
+        raise ValueError("invalid model timing pin: curve_sha256")
+    if "dma_source_sha256" in lock:
+        pins = lock["dma_source_sha256"]
+        if (not isinstance(pins, dict) or set(pins) != {"memory_backend.py", "dma.py"} or
+                any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in pins.values())):
+            raise ValueError("invalid DMA source pins")
     shapes = lock["source_shapes"]
     if not isinstance(shapes, dict) or not shapes:
         raise ValueError("invalid model source shapes")
@@ -200,6 +211,11 @@ def generate(vocabulary):
         "{" + quote(key) + ", " + quote(LOCK[pin]) + "}"
         for key, pin in (("revision", "model_revision"), ("source_sha256", "source_sha256"),
                          ("configuration_sha256", "configuration_sha256"))))
+    dma_identity = ({"curve_sha256": LOCK["curve_sha256"]} | LOCK["dma_source_sha256"] |
+                    {"shape:" + name: LOCK["source_shapes"][name] for name in LOCK["dma_source_sha256"]}
+                    if "curve_sha256" in LOCK and "dma_source_sha256" in LOCK else {})
+    table("std::map<std::string, std::string> &dmaIdentity()", (
+        "{" + quote(key) + ", " + quote(value) + "}" for key, value in dma_identity.items()))
     table("std::map<std::string, const char *> &vpuBlocks()", (
         "{" + quote(entry["mnemonic"]) + ", " + quote("vpu." + entry["block"]) + "}"
         for entry in vocabulary["vpu_blocks"]))
