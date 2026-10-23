@@ -11,14 +11,14 @@ from __future__ import annotations
 import copy
 import json
 
-from atlas_model_schema import canonical, sha256
+from atlas_model_schema import canonical, sha256, validate_mxu_weight_timing
 
 
 MODEL_FIELDS = ("revision", "revision_kind", "source_sha256", "numerical_data_sha256",
                 "configuration", "configuration_sha256")
 PAYLOAD_FIELDS = ("geometry", "age_convention", "op_timing", "reservation_releases",
                   "vocabulary_sha256", "architecture", "operand_vocabulary", "isa_metadata")
-EXTENSIONS = ("frontend_timing", "scratchpad_contract", "overlap_rules_sha256")
+EXTENSIONS = ("frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing")
 
 
 def overlap_semantics(artifact):
@@ -57,6 +57,10 @@ def seal_derived(facts):
         raise ValueError("derived facts require complete reservation release coverage")
     if "dma_timing" in facts and facts["dma_timing"].get("validation", {}).get("passed") is not True:
         raise ValueError("derived facts require successful DMA validation")
+    if "mxu_weight_timing" in facts and validation.get("mxu_weight_validation", {}).get("passed") is not True:
+        raise ValueError("derived facts require successful MXU weight validation")
+    if "mxu_weight_timing" in facts:
+        validate_mxu_weight_timing(facts["mxu_weight_timing"])
     encoded = canonical(semantic_payload(facts))
     digest = sha256(encoded)
     facts["derivation_contract"] = dict(
@@ -88,4 +92,8 @@ def verify_derived(facts):
                                                 if "dma_timing" in facts else [])):
         if record.get("passed") is not True or record.get("payload_sha256") != digest:
             raise ValueError("validation is not bound to the derived payload")
+    if "mxu_weight_timing" in facts:
+        validate_mxu_weight_timing(facts["mxu_weight_timing"])
+        if facts["validation"].get("mxu_weight_validation", {}).get("passed") is not True:
+            raise ValueError("derived facts require successful MXU weight validation")
     return digest

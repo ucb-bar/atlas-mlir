@@ -325,7 +325,8 @@ std::string mxuBlockName(const OpInfo &op) {
   return "mxu" + std::to_string(op.mxu) + "." + it->second;
 }
 
-Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingBlock> &blocks) {
+Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingBlock> &blocks,
+                       const std::map<std::string, std::vector<ModelTimingGroup>> &weightUses) {
   Footprint f;
   const OpInfo &op = *in.op;
   std::string blockName = mxuBlockName(op);
@@ -366,8 +367,19 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingB
   track(fill.last(push || pop ? "data_busy" : "compute_busy"));
   if (!push && !pop) {
     if (in.rs2 < 0 || in.rs2 > 1) fill.fail("accumulator and weight slots are 0 or 1");
-    for (int age : {0, busy})
-      f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * kAtlasMregRows, kAtlasMregRows, age, 0});
+    auto uses = weightUses.find("mxu" + std::to_string(m));
+    if (uses == weightUses.end()) fill.fail("missing source-derived weight-use windows");
+    else {
+      // Pushes replace whole weight rows. Their dependencies need the first and
+      // last use across all PEs in each row, rather than the compute envelope.
+      const auto &rows = uses->second;
+      if (rows.back().lastAge > busy) fill.fail("weight use exceeds compute lifetime");
+      // The parser checks affine row projection. Two sweeps preserve every
+      // row endpoint without quadratic comparisons between scalar PE groups.
+      for (int age : {rows.front().firstAge, rows.front().lastAge})
+        f.accesses.push_back({Res::Weight, false, (m * 2 + in.rs2) * kAtlasMregRows, kAtlasMregRows,
+                              age, rows[1].firstAge - rows[0].firstAge});
+    }
   }
   f.holds.push_back({Unit::MxuCompute, m, 0, busy});
   return fill.done(busy);
@@ -421,6 +433,42 @@ bool exactKeys(const Object &object, std::initializer_list<const char *> keys) {
   return true;
 }
 
+llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeightUses(const Object &document) {
+  const Object *engines = document.getObject("engines");
+  if (!exactKeys(document, {"schema", "engines"}) ||
+      document.getString("schema") != "atlas.mxu_weight_timing.v1" || !engines ||
+      !exactKeys(*engines, {"mxu0", "mxu1"}))
+    return factsError("requires source-derived MXU weight-use windows (atlas.mxu_weight_timing.v1)");
+  std::map<std::string, std::vector<ModelTimingGroup>> result;
+  for (const char *engine : {"mxu0", "mxu1"}) {
+    const Object *entry = engines->getObject(engine);
+    if (!entry || !exactKeys(*entry, {"use_window", "use_rows", "reads_before_writes", "resource_row_axis"}) ||
+        entry->getBoolean("reads_before_writes") != true || entry->getString("resource_row_axis") != "output_column")
+      return factsError("unsupported MXU weight resource mapping or edge order");
+    const Object *window = entry->getObject("use_window");
+    const Array *rows = entry->getArray("use_rows");
+    if (!window || !exactKeys(*window, {"first_age", "last_age", "row_step", "column_step"}) ||
+        !rows || rows->size() != kAtlasMregRows)
+      return factsError("incomplete MXU weight-use geometry");
+    auto first = window->getInteger("first_age"), last = window->getInteger("last_age");
+    auto rowStep = window->getInteger("row_step"), columnStep = window->getInteger("column_step");
+    if (!first || !last || !rowStep || !columnStep || *first < 0 || *last < *first ||
+        *rowStep < 0 || *columnStep < 0 || *last >= 4095 || *rowStep >= 4095 || *columnStep >= 4095 ||
+        *last + (kAtlasMregRows - 1) * (*rowStep + *columnStep) >= 4095)
+      return factsError("unsupported MXU weight-use bounds");
+    for (int row = 0; row < kAtlasMregRows; ++row) {
+      const Object *use = (*rows)[row].getAsObject();
+      int begin = *first + row * *rowStep;
+      int end = *last + row * *rowStep + (kAtlasMregRows - 1) * *columnStep;
+      if (!use || !exactKeys(*use, {"first_age", "last_age"}) ||
+          use->getInteger("first_age") != begin || use->getInteger("last_age") != end)
+        return factsError("MXU weight row projection differs from PE use windows");
+      result[engine].push_back({begin, end, end - begin + 1, 1});
+    }
+  }
+  return result;
+}
+
 // The selected file carries an explicit serialization of its deterministic
 // semantic inputs. Hash those exact bytes (Python and LLVM render floats
 // differently), then compare both decoded objects using one canonicalizer.
@@ -462,7 +510,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
     if (!value) return factsError(std::string("missing derived semantic ") + key);
     semantic[key] = *value;
   }
-  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing"})
     if (const auto *value = root.get(key)) semantic[key] = *value;
   if (const auto *value = root.get("dma_timing")) {
     const Object *dma = value->getAsObject();
@@ -483,6 +531,11 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
       !gate->getInteger("observed_runs") || *gate->getInteger("observed_runs") < 1 ||
       !gate->getInteger("unobserved_runs") || *gate->getInteger("unobserved_runs") < 1 || !reportHash || !hashSyntax(*reportHash))
     return factsError("requires successful operation validation bound to the deterministic payload");
+  if (root.get("mxu_weight_timing")) {
+    const Object *weights = gate->getObject("mxu_weight_validation");
+    if (!weights || weights->getBoolean("passed") != true)
+      return factsError("requires successful MXU weight validation bound to the deterministic payload");
+  }
   return payloadHash->str();
 }
 
@@ -806,6 +859,13 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     result.overlapRules = hash->str();
   }
   int readLatency = 1;
+  if (!testObservations || root->get("mxu_weight_timing")) {
+    const Object *document = root->getObject("mxu_weight_timing");
+    if (!document) return factsError("missing source-derived MXU weight-use windows");
+    auto parsedWeights = parseWeightUses(*document);
+    if (!parsedWeights) return parsedWeights.takeError();
+    result.weightUses = std::move(*parsedWeights);
+  }
   if (!testObservations || root->get("frontend_timing")) {
     const Object *document = root->getObject("frontend_timing");
     if (!document) return factsError("missing source-derived frontend timing contract");
@@ -1197,7 +1257,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     return fill.done(busy);
   }
 
-  if (op.mxu >= 0) return mxuFootprint(in, blocks);
+  if (op.mxu >= 0) return mxuFootprint(in, blocks, weightUses);
 
   return reject("operation is outside the selected bounded scope");
 }
@@ -1210,8 +1270,7 @@ bool overlaps(const Access &a, const Access &b) {
 std::optional<ModelOverlapCommand> overlapCommand(const Instr &in, const Footprint &f, int cycle,
                                                   const ModelTimingFacts &facts);
 
-Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb,
-                              const ModelTimingFacts *facts = nullptr, const ModelOverlapFacts *overlap = nullptr) {
+Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
   Dependence best;
   auto consider = [&](int distance, EdgeKind kind, const std::string &reason) {
     if (distance > best.distance) best = {distance, kind, reason};
@@ -1223,33 +1282,10 @@ Dependence observedDependence(const Instr &a, const Footprint &fa, const Instr &
     if ((!aw && !bw) || a.op->channel == b.op->channel || (aw && !bw))
       consider(1, EdgeKind::Order, "DMA launch/wait order");
   }
-  // Exact confirmed push-to-matmul (RAW) or matmul-to-push (WAR) evidence
-  // replaces the synthetic whole-window weight lifetime.
-  auto isMatMul = [](const Instr &in) {
-    return in.op->opClass == OpClass::MatMul || in.op->opClass == OpClass::MatMulAcc;
-  };
-  bool weightRAW = a.op->opClass == OpClass::WeightPush && isMatMul(b);
-  bool weightWAR = isMatMul(a) && b.op->opClass == OpClass::WeightPush;
-  std::optional<int> streamedWeightGap;
-  if (facts && overlap && (weightRAW || weightWAR) && a.op->mxu == b.op->mxu) {
-    auto first = overlapCommand(a, fa, 0, *facts), second = overlapCommand(b, fb, 0, *facts);
-    if (first && second)
-      for (int gap = 1; gap <= first->firstFreeAge; ++gap) {
-        second->issue = gap;
-        if (overlap->admits({*first, *second}, false)) {
-          streamedWeightGap = gap;
-          break;
-        }
-      }
-  }
   for (const Access &x : fa.accesses) {
     if (x.atCompletion) continue;
     for (const Access &y : fb.accesses) {
       if (!overlaps(x, y) || (!x.write && !y.write)) continue;
-      if (streamedWeightGap && x.res == Res::Weight && x.write != y.write && x.write == weightRAW) {
-        consider(*streamedWeightGap, weightRAW ? EdgeKind::RAW : EdgeKind::WAR, "confirmed streamed weight dependency");
-        continue;
-      }
       int distance;
       if (x.anywhere || y.anywhere) {
         distance = x.lastAge() - (y.atCompletion ? 0 : y.age) + 1;
@@ -1567,8 +1603,8 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
     if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
     return result;
   };
-  provider.dependence = [facts, overlap](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
-    return TimingRuleResult<Dependence>{observedDependence(a, fa, b, fb, facts.get(), overlap.get()), {}};
+  provider.dependence = [](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
+    return TimingRuleResult<Dependence>{observedDependence(a, fa, b, fb), {}};
   };
   provider.contextualDependence = [base = provider.dependence](
       const Instr &a, const Footprint &fa, const TimingContext &ca,

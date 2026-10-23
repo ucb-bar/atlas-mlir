@@ -70,6 +70,7 @@ public:
 
 private:
   std::map<std::string, ModelTimingBlock> blocks;
+  std::map<std::string, std::vector<ModelTimingGroup>> weightUses;
   std::map<std::string, std::string> provenance;
   std::string sha256;
   bool dma = false;

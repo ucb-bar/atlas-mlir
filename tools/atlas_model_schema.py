@@ -36,6 +36,31 @@ def reservation(last, *, first=0, banks=None):
     return value
 
 
+def validate_mxu_weight_timing(value):
+    """Check explicit resource-row projection of the PE weight-use contract."""
+    if (not isinstance(value, dict) or set(value) != {"schema", "engines"} or
+            value["schema"] != "atlas.mxu_weight_timing.v1" or
+            not isinstance(value["engines"], dict) or set(value["engines"]) != {"mxu0", "mxu1"}):
+        raise ValueError("invalid MXU weight timing schema")
+    for engine in value["engines"].values():
+        if (not isinstance(engine, dict) or set(engine) != {"use_window", "use_rows", "reads_before_writes", "resource_row_axis"} or
+                engine["reads_before_writes"] is not True or engine["resource_row_axis"] != "output_column"):
+            raise ValueError("invalid MXU weight resource mapping")
+        window, rows = engine["use_window"], engine["use_rows"]
+        if (not isinstance(window, dict) or set(window) != {"first_age", "last_age", "row_step", "column_step"} or
+                any(type(v) is not int or not 0 <= v < 4095 for v in window.values()) or
+                window["first_age"] > window["last_age"] or not isinstance(rows, list) or len(rows) != 32):
+            raise ValueError("invalid MXU weight PE use window")
+        expected = [dict(first_age=window["first_age"] + i * window["row_step"],
+                         last_age=window["last_age"] + i * window["row_step"] + 31 * window["column_step"])
+                    for i in range(32)]
+        if (rows != expected or any(set(row) != {"first_age", "last_age"} or
+                                   any(type(v) is not int or not 0 <= v < 4095 for v in row.values())
+                                   for row in rows)):
+            raise ValueError("invalid MXU weight output-column row projection")
+    return value
+
+
 def _object(pairs):
     result = {}
     for key, value in pairs:

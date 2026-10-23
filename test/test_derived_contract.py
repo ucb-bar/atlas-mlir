@@ -32,6 +32,33 @@ def contract_format_fixture():
 
 
 class DerivedContractTest(unittest.TestCase):
+    def test_weight_rows_pe_bounds_and_order_are_bound_to_semantic_digest(self):
+        from test_derived_mxu_weights import weight_fixture
+        facts = contract_format_fixture()
+        facts["mxu_weight_timing"] = weight_fixture()
+        facts["overlap_rules_sha256"] = "a" * 64
+        with self.assertRaisesRegex(ValueError, "successful MXU weight validation"):
+            seal_derived(facts)
+        facts["validation"]["mxu_weight_validation"] = dict(passed=True)
+        seal_derived(facts)
+        self.assertEqual(semantic_payload(facts)["mxu_weight_timing"], facts["mxu_weight_timing"])
+        self.assertEqual(semantic_payload(facts)["overlap_rules_sha256"], "a" * 64)
+        changed = copy.deepcopy(facts)
+        changed["overlap_rules_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
+            verify_derived(changed)
+        for change in (lambda x: x["use_rows"][0].update(last_age=62),
+                       lambda x: x["use_window"].update(column_step=0),
+                       lambda x: x.update(reads_before_writes=False),
+                       lambda x: x.update(resource_row_axis="inner")):
+            changed = copy.deepcopy(facts)
+            change(changed["mxu_weight_timing"]["engines"]["mxu0"])
+            with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
+                verify_derived(changed)
+        facts["validation"]["mxu_weight_validation"]["passed"] = False
+        with self.assertRaisesRegex(ValueError, "successful MXU weight validation"):
+            verify_derived(facts)
+
     def test_test_only_and_raw_observations_cannot_enter_production(self):
         facts = fixture()
         with self.assertRaisesRegex(ValueError, "test-only"):

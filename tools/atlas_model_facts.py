@@ -67,7 +67,7 @@ def tool_manifest():
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",
-             "atlas_derive_scratchpad.py", "atlas_derive_frontend.py"]
+             "atlas_derive_scratchpad.py", "atlas_derive_frontend.py", "atlas_validate_mxu_weights.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -111,7 +111,8 @@ def regenerate(model, out):
     from npu_model.logging.logger import Logger
     from unittest.mock import Mock
     from atlas_derive_vpu import derive_vpu
-    from atlas_derive_mxu import derive_mxu
+    from atlas_derive_mxu import derive_mxu, derive_weight_timing
+    from atlas_validate_mxu_weights import validate_weight_timing
     from atlas_derive_memory import derive_memory
     from atlas_derive_curve import derive_curve
     from atlas_derive_scratchpad import derive_scratchpad
@@ -141,6 +142,7 @@ def regenerate(model, out):
     memory, memory_releases = derive_memory(cfg)
     vpu, vpu_releases = derive_vpu(cfg)
     mxu, mxu_releases = derive_mxu(cfg)
+    mxu_weight_timing = derive_weight_timing(cfg)
     dma_timing = derive_curve(cfg)
     scratchpad_contract = derive_scratchpad(cfg)
     frontend_timing = derive_frontend(cfg)
@@ -156,6 +158,7 @@ def regenerate(model, out):
     print(f"Derived {len(blocks)} blocks in {derive_seconds:.3f}s; validating numerical observations", flush=True)
     start = time.monotonic()
     report, _ = validate_derived(cfg, blocks, releases, out)
+    report["mxu_weight_validation"] = validate_weight_timing(cfg, mxu_weight_timing)
     dma_report = validate_curve(cfg, dma_timing, out / "dma-validation")
     dma_report_hash = sha256((out / "dma-validation" / "validation-report.json").read_bytes())
     dma_timing["validation"] = dict(passed=True, report_sha256=dma_report_hash,
@@ -182,6 +185,7 @@ def regenerate(model, out):
                    age_convention="issue_edge_zero", observation=dict(accepted=True, drained=True),
                    op_timing=ordered, unresolved=[], reservation_releases=releases,
                    dma_timing=dma_timing,
+                   mxu_weight_timing=mxu_weight_timing,
                    scratchpad_contract=scratchpad_contract, frontend_timing=frontend_timing,
                    vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
@@ -191,10 +195,12 @@ def regenerate(model, out):
                            "Unit releases are serialized lifetime envelopes, not overlap/throughput admissions.",
                            "VMEM releases describe physical port windows, not whole-operation reservations.",
                            "Logical MREG release requests take effect at the next begin_cycle.",
-                           "ACC/weight row events retain conservative provider lifetime policies."],
+                           "ACC row events retain conservative provider lifetime policies.",
+                           "Weight windows describe isolated native model uses; they do not admit operation overlap."],
                    lineage=dict(source_manifest_sha256=sha256(encoded(sources)), inputs=inputs,
                                 numerical_data_manifest_sha256=sha256(encoded(data)), observer_sources=observer_sources,
                                 generator_sources=generator_sources, contract_lock=LOCK))
+    payload["validation"]["mxu_weight_validation"] = report["mxu_weight_validation"]
     # Freeze rule semantics before sealing operation facts. The native gate then
     # validates a proposal bound to those final facts bytes; publish the bundle
     # lock only after it succeeds. This avoids a circular file-hash dependency.
