@@ -65,7 +65,7 @@ def write(directory, name, value):
 def tool_manifest():
     names = ["atlas_model_facts.py", "atlas_derive_vpu.py", "atlas_derive_mxu.py",
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
-             "atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_validate_overlap.py",
+             "atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_vpu_partition.py", "atlas_validate_overlap.py",
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",

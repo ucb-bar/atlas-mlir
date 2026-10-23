@@ -32,9 +32,11 @@ private:
     std::string source = "source-derived";
   };
   std::vector<Pair> pairs;
+  std::map<std::pair<std::string, std::string>, std::vector<size_t>> pairIndices;
   std::map<std::string, std::set<Relation>> compositionClasses;
   std::set<std::string> composedOperations;
   bool structuralCapacity = false;
+  int sequencerCycles = 0, mxu0Compute = 0, mxu1Compute = 0, vpuSlots = 0;
   std::map<std::string, std::string> provenance;
   mutable std::set<std::string> loggedQueries;
   static llvm::Expected<ModelOverlapFacts> parseDerivedFacts(const llvm::json::Object &, llvm::StringRef,

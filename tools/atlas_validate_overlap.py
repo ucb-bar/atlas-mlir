@@ -22,8 +22,17 @@ import time
 from unittest.mock import Mock
 
 sys.dont_write_bytecode = True
-POLICY = 'source-mechanism-boundaries-v1'
-ENGINES = {'mxu0', 'mxu1', 'vpu', 'scalar_lsu'}
+POLICY = 'source-mechanism-boundaries-v2'
+ENGINES = {'mxu0', 'mxu1', 'vpu', 'scalar_lsu', 'vpu_xlu'}
+
+
+def pair_engine(first, second):
+    left, right = first.split('.')[0], second.split('.')[0]
+    if left == right:
+        return left
+    if {left, right} == {'vpu', 'xlu'}:
+        return 'vpu_xlu'
+    raise ValueError('unsupported cross-engine pair')
 
 
 def safe_path(value):
@@ -103,8 +112,7 @@ def validate_candidate(candidate, per_op, per_op_bytes):
         seen.add(key)
         if row['first'] not in blocks or row['second'] not in blocks:
             raise ValueError('pair references unknown operation')
-        if row['first'].split('.')[0] != row['second'].split('.')[0]:
-            raise ValueError('unsupported cross-engine pair')
+        pair_engine(row['first'], row['second'])
         if (type(row['minimum']) is not int or type(row['high']) is not int or
                 not 1 <= row['minimum'] <= row['high'] or
                 row['high'] != blocks[row['first']]['first_free_age']):
@@ -136,7 +144,9 @@ def sample_plan(document, candidate, max_samples=128):
         names = sample['operations']
         if (not isinstance(names, list) or len(names) < 2 or len(names) > 16 or
                 len(sample['assembly']) != len(names) or len(sample['gaps']) != len(names)-1 or
-                any(n.split('.')[0] != sample['engine'] for n in names)):
+                (sample['engine'] == 'vpu_xlu' and
+                 (len(names) != 2 or pair_engine(*names) != 'vpu_xlu')) or
+                (sample['engine'] != 'vpu_xlu' and any(n.split('.')[0] != sample['engine'] for n in names))):
             raise ValueError('invalid sample operations/assembly/gaps')
         issues(sample['gaps'])
         if sample['expectation'] not in {'positive', 'reject'}:
@@ -170,6 +180,8 @@ def sample_plan(document, candidate, max_samples=128):
         result.update(('relation',unit,key,value) for key,value in relation_class(sample.get('relation',{})).items())
         if sample['category']=='pair':
             result.add(('threshold',unit,str(sample['minimum'])))
+            if unit == 'vpu_xlu':
+                result.add(('direction', sample['operations'][0].split('.')[0]))
         return result
 
     # Cover independent source obligations, not their Cartesian product. The
@@ -188,7 +200,7 @@ def sample_plan(document, candidate, max_samples=128):
             raise ValueError(f'source mechanism coverage exceeds sample bound {max_samples}')
     picked=sorted(picked,key=lambda r:r['id'])
     represented_engines = {r['engine'] for r in picked if r['expectation'] == 'positive'}
-    candidate_engines = {r['first'].split('.')[0] for r in candidate['pairs']}
+    candidate_engines = {pair_engine(r['first'], r['second']) for r in candidate['pairs']}
     if not candidate_engines <= represented_engines:
         raise ValueError('source samples omit candidate engine coverage')
     return picked
@@ -207,8 +219,6 @@ class NativeFault(Exception):
 
 def resource_fault(fault):
     """Only reviewed native resource conflicts can satisfy a negative control."""
-    if fault.kind == 'NativeCapacityError':
-        return fault.message == 'VPU two issue slots occupied'
     if fault.kind == 'BankConflictError':
         return fault.message.startswith(('MRF bank conflict:', 'Undefined MRF same-row read/write collision', 'VMEM bank conflict:'))
     if fault.kind != 'RuntimeError':
@@ -283,6 +293,13 @@ def decoded_operand(name, insn):
     from atlas_model_schema import VOCABULARY
     engine, kind = name.split('.', 1)
     result = {'registers': []}
+    if engine == 'xlu':
+        if kind != 'transpose' or insn.mnemonic != 'vtrpose.xlu':
+            raise ValueError('unsupported/mismatched XLU assembly')
+        result['registers'] = [int(insn.vs1), int(insn.vd)]
+        if any(not 0 <= value < 64 for value in result['registers']):
+            raise ValueError('sample XLU operand exceeds selected geometry')
+        return result
     if engine == 'scalar_lsu':
         expected = {'load': 'lw', 'store': 'sw'}.get(kind)
         if expected is None or insn.mnemonic != expected:
@@ -415,6 +432,7 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
     from npu_model.hardware.lsu import LoadStoreUnit
     from npu_model.hardware.mxu import MatrixExecutionUnitInner, MatrixExecutionUnitSystolic
     from npu_model.hardware.vpu import VectorExecutionUnit
+    from npu_model.hardware.xlu import CrossLaneExecutionUnit
     from npu_model.logging.logger import Logger
     from npu_model.software.instruction import Uop
     from npu_model.util.converter import stream_to_instrs
@@ -422,11 +440,23 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
     cfg, _ = configuration()
     state = ArchState(cfg.arch_state_config)
     classes = {'vpu': VectorExecutionUnit, 'mxu0': MatrixExecutionUnitSystolic,
-               'mxu1': MatrixExecutionUnitInner, 'scalar_lsu': LoadStoreUnit}
+               'mxu1': MatrixExecutionUnitInner, 'scalar_lsu': LoadStoreUnit,
+               'xlu': CrossLaneExecutionUnit}
     try:
         initialize_state(state, nonzero, initial_xrf)
         initial = digest(encoded(state_snapshot(state)))
-        unit = classes[engine](engine, Mock(spec=Logger), state, config=cfg)
+        if engine == 'vpu_xlu':
+            # Preserve the Core's configuration order. Both units tick every
+            # edge against one ArchState/checker, even when only one issues.
+            selected = {'VectorExecutionUnit': ('vpu', VectorExecutionUnit),
+                        'CrossLaneExecutionUnit': ('xlu', CrossLaneExecutionUnit)}
+            units = [cls(name, Mock(spec=Logger), state, config=cfg)
+                     for configured in cfg.execution_units.values() if configured in selected
+                     for name, cls in [selected[configured]]]
+            if len(units) != 2:
+                raise ValueError('cross-unit validation requires exactly one VPU and XLU')
+        else:
+            units = [classes[engine](engine, Mock(spec=Logger), state, config=cfg)]
         instructions = list(stream_to_instrs(StringIO('\n'.join(assembly))))
         if len(instructions) != len(assembly):
             raise ValueError('assembly instruction count differs')
@@ -436,31 +466,26 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
         for age in range(max_cycles):
             issue = None
             if next_index < len(uops):
-                ready = (age == expected[next_index]) if not serial else (next_index == 0 or not unit.has_in_flight)
+                ready = (age == expected[next_index]) if not serial else (next_index == 0 or not any(u.has_in_flight for u in units))
                 if ready:
                     issue = uops[next_index]
             try:
-                before = unit.total_instructions
-                unit.tick(issue)
-                completed += unit.complete_count
+                before = sum(u.total_instructions for u in units)
+                for unit in units:
+                    unit.tick(issue if issue is not None and unit.can_handle(issue) else None)
+                    completed += unit.complete_count
                 if issue is not None:
-                    if unit.total_instructions != before + 1:
+                    if sum(u.total_instructions for u in units) != before + 1:
                         raise RuntimeError('native unit did not accept exact scheduled issue')
                     accepted.append(age)
                     next_index += 1
             except Exception as exc:
-                # The reviewed native VPU uses next(free_slot) without a
-                # default. Classify its exact exhausted-slot state; unrelated
-                # StopIteration exceptions remain fatal implementation errors.
-                if isinstance(exc,StopIteration) and engine=='vpu' and issue is not None:
-                    live=[op for op in unit.operations if unit.cycle-op.issued < op.write_last]
-                    if {op.slot for op in live}=={0,1}:
-                        raise NativeFault('NativeCapacityError','VPU two issue slots occupied',age,accepted) from exc
                 raise NativeFault(type(exc).__name__, str(exc), age, accepted) from exc
-            if next_index == len(uops) and not unit.has_in_flight:
+            if next_index == len(uops) and not any(u.has_in_flight for u in units):
                 # One begin-cycle applies deferred release requests after drain.
-                unit.tick(None)
-                completed += unit.complete_count
+                for unit in units:
+                    unit.tick(None)
+                    completed += unit.complete_count
                 checker = state.conflict_checker
                 if checker._mreg_reservations or checker._mreg_releases:
                     raise NativeFault('RuntimeError', 'MREG reservations remain at drain', age+1, accepted)
@@ -469,14 +494,91 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
             raise NativeFault('RuntimeError', 'native sequence did not drain within cycle bound', max_cycles, accepted)
         if not serial and accepted != expected:
             raise RuntimeError('observed issue ages differ from exact requested ages')
-        if unit.total_instructions != len(uops) or completed != len(uops):
+        total = sum(u.total_instructions for u in units)
+        if total != len(uops) or completed != len(uops):
             raise RuntimeError('accepted/completed counts do not equal sequence length')
         final = state_snapshot(state)
         return dict(initial_sha256=initial, final_sha256=digest(encoded(final)), final_state=final,
-                    issued_ages=accepted, drained_age=age+1, accepted=unit.total_instructions,
+                    issued_ages=accepted, drained_age=age+1, accepted=total,
                     completed=completed, instruction_words=[i.to_bytecode() for i in instructions])
     finally:
         state.close()
+
+
+def standalone_operand_validation(per_op):
+    """Check every legal internal VPU/XLU class against atomic Instruction.exec.
+
+    Classes and issue ages come exclusively from guarded source facts. Native
+    results certify correctness; they never select a class or fit a timing.
+    """
+    from atlas_derive_overlap import command, operand_roles
+    from atlas_derive_vpu import derive_vpu
+    from atlas_derive_memory import derive_memory
+    from atlas_model_timing import configuration
+    from atlas_overlap_rules import RuleSet
+    from atlas_vpu_partition import standalone_domain, require_preserved_inputs
+    from npu_model.hardware.arch_state import ArchState
+    from npu_model.util.converter import stream_to_instrs
+    cfg, config = configuration()
+    if config != per_op['model']['configuration']:
+        raise ValueError('standalone VPU configuration differs from selected facts')
+    blocks, releases = derive_vpu(cfg)
+    memory, memory_releases = derive_memory(cfg)
+    blocks['xlu.transpose'] = memory['xlu.transpose']
+    releases['xlu.transpose'] = memory_releases['xlu.transpose']
+    selected = {entry['name']: entry for entry in per_op['op_timing']}
+    if any(selected.get(name) != entry or per_op.get('reservation_releases', {}).get(name) != releases[name]
+           for name, entry in blocks.items()):
+        raise ValueError('standalone VPU facts differ from guarded source derivation')
+    rules = RuleSet(per_op)
+    descriptors = []
+    for name in sorted(blocks):
+        roles = ([dict(operand=operand, offset=0, registers=1, write=write)
+                  for operand, write in (('rs1', False), ('rd', True))]
+                 if name == 'xlu.transpose' else operand_roles(name))
+        plans = rules.registers(name)
+        for relation, values in standalone_domain(roles, plans):
+            if name == 'xlu.transpose':
+                assembly = f"vtrpose.xlu m{values['rd']}, m{values['rs1']}"
+            else:
+                _, assembly = command(name, values)
+            descriptors.append(dict(operation=name, relation=relation, operands=values,
+                                    assembly=assembly, input_rows_preserved=require_preserved_inputs(roles, plans, values)))
+    if not descriptors or len(descriptors) > 512:
+        raise ValueError('standalone VPU alias coverage exceeds reviewed bound')
+    results = []
+    for descriptor in descriptors:
+        for nonzero in (False, True):
+            state = ArchState(cfg.arch_state_config)
+            try:
+                initialize_state(state, nonzero)
+                initial = digest(encoded(state_snapshot(state)))
+                insn, = stream_to_instrs(StringIO(descriptor['assembly']))
+                insn.exec(state)
+                expected = digest(encoded(state_snapshot(state)))
+            finally:
+                state.close()
+            actual = native_run(descriptor['operation'].split('.')[0], [descriptor['assembly']], [], nonzero)
+            passed = (descriptor['input_rows_preserved'] and initial == actual['initial_sha256']
+                      and expected == actual['final_sha256'])
+            results.append(dict(operation=descriptor['operation'], relation=descriptor['relation'],
+                nonzero=nonzero, passed=passed, initial_sha256=initial, atomic_isa_sha256=expected,
+                native_sha256=actual['final_sha256']))
+    sources = {name: digest(safe_path(Path(__file__).with_name(name)).read_bytes())
+               for name in ('atlas_validate_overlap.py', 'atlas_vpu_partition.py',
+                            'atlas_derive_vpu.py', 'atlas_derive_memory.py')}
+    engines = {unit: dict(operation_count=sum(name.split('.')[0] == unit for name in blocks),
+                         alias_class_count=sum(row['operation'].split('.')[0] == unit for row in descriptors),
+                         numerical_checks=sum(row['operation'].split('.')[0] == unit for row in results))
+               for unit in ('vpu', 'xlu')}
+    return dict(schema='atlas.operand_validation.v1', passed=all(row['passed'] for row in results),
+        model=per_op['model'], source_tools=sources, descriptors_sha256=digest(encoded(descriptors)),
+        engines=engines,
+        operation_count=len(blocks), alias_class_count=len(descriptors), numerical_checks=len(results),
+        static_input_preservation=all(row['input_rows_preserved'] for row in descriptors),
+        descriptors=descriptors, results=results,
+        limitations=['All legal internal operand classes; zero and distinct finite nonzero inputs.',
+                     'Numerical samples certify these inputs, not every floating-point bit pattern or RTL behavior.'])
 
 
 def run_sample(sample):
@@ -557,7 +659,8 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
         raise ValueError('workers must be in [1,4]')
     per_op_path, candidate_path, samples_path = map(safe_path, (per_op_path, candidate_path, samples_path))
     original = {str(p):digest(p.read_bytes()) for p in (per_op_path, candidate_path, samples_path, Path(__file__))}
-    tool_names=('atlas_validate_overlap.py','atlas_model_facts.py','atlas_model_timing.py',
+    tool_names=('atlas_validate_overlap.py','atlas_vpu_partition.py','atlas_derive_vpu.py','atlas_derive_memory.py',
+                'atlas_derive_overlap.py','atlas_overlap_rules.py','atlas_model_facts.py','atlas_model_timing.py',
                 'atlas_model_schema.py','atlas_model_observer.py','model-timing.lock.json','model-timing-vocabulary.json')
     tool_paths=[safe_path(Path(__file__).with_name(name)) for name in tool_names]
     tool_sources={str(path):digest(path.read_bytes()) for path in tool_paths}
@@ -585,6 +688,10 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
     finally:
         core.arch_state.close()
     output_dir.mkdir(parents=True)
+    standalone = standalone_operand_validation(per_op)
+    standalone_hash = write(output_dir/'standalone-operands-report.json', standalone)
+    if not standalone['passed']:
+        raise RuntimeError('standalone operand classes differ from atomic ISA semantics')
     write(output_dir/'sample-plan.json', dict(schema=descriptor['schema'], policy=POLICY, samples=planned, exclusions=descriptor.get('exclusions', [])))
     results=[]
     try:
@@ -605,12 +712,16 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
     engines=summarize_runs(flattened)
     unchanged=(before==identity(model) and all(digest(safe_path(p).read_bytes())==h for p,h in original.items())
                and all(digest(safe_path(p).read_bytes())==h for p,h in tool_sources.items()))
-    required_engines={r['first'].split('.')[0] for r in candidate['pairs']}
+    required_engines={pair_engine(r['first'], r['second']) for r in candidate['pairs']}
     coverage=all(engines.get(e,{}).get('positive_runs',0)>0 and engines.get(e,{}).get('negative_rejections',0)>0 and engines.get(e,{}).get('numerical_checks',0)>0 for e in required_engines)
     composed_engines=candidate.get('composition',{}).get('engines',{})
     coverage &= all(engines.get(e,{}).get('chain_positive_runs',0)>0 and engines.get(e,{}).get('chain_negative_runs',0)>0 for e in composed_engines)
     passed=unchanged and coverage and all(r['passed'] for r in results)
     report=dict(schema='atlas.model_overlap_validation.v1',passed=passed,sample_policy=POLICY,
+                standalone_operands=dict(passed=standalone['passed'],report_sha256=standalone_hash,
+                    engines=standalone['engines'],
+                    operation_count=standalone['operation_count'],alias_class_count=standalone['alias_class_count'],
+                    numerical_checks=standalone['numerical_checks'],static_input_preservation=standalone['static_input_preservation']),
                 candidate_sha256=original[str(candidate_path)],per_op_sha256=digest(per_op_bytes),
                 sample_descriptors_sha256=original[str(samples_path)],tool_sha256=original[str(Path(__file__))],
                 tool_sources=tool_sources,serial_reference_runs=sum(2 for s in planned if s['numerical_equivalent']),

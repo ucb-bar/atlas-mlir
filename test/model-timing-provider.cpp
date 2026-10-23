@@ -520,7 +520,7 @@ Object derivedFixture(const ModelTimingFacts &facts) {
           {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(contract))))},
           {"source_contract", std::move(contract)}}},
       {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'b')},
-          {"sample_policy", "source-mechanism-boundaries-v1"}, {"positive_runs", 2}, {"negative_runs", 3},
+          {"sample_policy", "source-mechanism-boundaries-v2"}, {"positive_runs", 2}, {"negative_runs", 3},
           {"negative_rejections", 1}, {"numerical_checks", 2}, {"engines", Object{{"vpu", Object{
               {"positive_runs", 2}, {"negative_runs", 3}, {"negative_rejections", 1}, {"numerical_checks", 2},
               {"chain_positive_runs", 1}, {"chain_negative_runs", 1}}}}}}},
@@ -553,6 +553,22 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
   check(!loaded->admits(commands, false), "source composition retains explicit chains option");
   commands[1].issue = 1; commands[2].issue = 71;
   check(!loaded->admits(commands, true), "source composition preserves VPU structural tracker capacity");
+  for (int slots : {1, 3}) {
+    // Private synthetic artifacts isolate consumption of the selected source
+    // parameter; production rules also bind the slot-dependent pair minima.
+    auto changed = original;
+    auto *derivation = changed.getObject("derivation");
+    auto *contract = derivation->getObject("source_contract");
+    (*contract->getObject("capacity"))["vpu_slots"] = slots;
+    (*derivation)["source_contract_sha256"] = hash(canonicalJson(llvm::json::Value(Object(*contract))));
+    auto capacityBytes = encode(std::move(changed));
+    auto selected = parseModelOverlapFacts(capacityBytes, hash(capacityBytes), *facts);
+    check(bool(selected), "supported source VPU slot parameter loads");
+    if (selected)
+      check(selected->admits(commands, true) == (slots == 3),
+            "source VPU slot parameter drives live composition admission");
+    else llvm::consumeError(selected.takeError());
+  }
   commands[2].issue = 72;
   check(loaded->admits(commands, true), "source composition preserves completed-edge slot release");
   commands[2].registers[0] = 32;
@@ -565,6 +581,66 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
         "source proof enables the existing reservation waiver");
   check(state.value->onWait({findOp("dma.wait.ch0")}, 1).empty() &&
         !state.value->conflict(b, fb, 10).value.empty(), "source proof retains runtime wait invalidation");
+  Instr duplicateRead{findOp("vadd.bf16"), 4, 0, 0};
+  auto duplicateFootprint = facts->resolve(duplicateRead, unknownRegs());
+  check(duplicateFootprint.error.empty(), "VPU identical source reads are legal");
+  state = provider.createReservations();
+  check(state.value->conflict(duplicateRead, duplicateFootprint, 0).error.empty(),
+        "VPU identical source rows use the source read cache");
+  Instr bankAliasRead{findOp("vadd.bf16"), 4, 0, 32};
+  check(!facts->resolve(bankAliasRead, unknownRegs()).error.empty(),
+        "VPU distinct logical sources sharing a physical bank remain illegal");
+
+  auto crossOperations = fixture();
+  crossOperations.getArray("op_timing")->push_back(block("xlu.transpose", "xlu", 66,
+      Object{{"read", group(1, 32)}, {"write", group(34, 32)}}));
+  auto crossBytes = encode(std::move(crossOperations));
+  auto crossFacts = parseModelTimingFactsForTesting(crossBytes, hash(crossBytes));
+  check(bool(crossFacts), "cross-unit operation fixture loads");
+  if (crossFacts) {
+    auto cross = derivedFixture(*crossFacts);
+    auto *validation = cross.getObject("validation");
+    (*validation->getObject("engines"))["vpu_xlu"] = Object{
+        {"positive_runs", 2}, {"negative_runs", 2}, {"negative_rejections", 1},
+        {"numerical_checks", 2}, {"chain_positive_runs", 0}, {"chain_negative_runs", 0}};
+    (*validation)["positive_runs"] = 4;
+    (*validation)["negative_runs"] = 5;
+    (*validation)["negative_rejections"] = 2;
+    (*validation)["numerical_checks"] = 4;
+    cross.getArray("pairs")->push_back(Object{{"first", "vpu.mov"}, {"second", "xlu.transpose"},
+        {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 73}});
+    cross.getArray("pairs")->push_back(Object{{"first", "xlu.transpose"}, {"second", "vpu.mov"},
+        {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 66}});
+    auto bytes = encode(cross);
+    auto overlap = parseModelOverlapFacts(bytes, hash(bytes), *crossFacts);
+    check(bool(overlap), "validated VPU/XLU pairs load");
+    if (overlap) {
+      auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(*crossFacts),
+                                         std::make_shared<ModelOverlapFacts>(*overlap), true);
+      Instr transpose{findOp("vtrpose.xlu"), 24, 22, 0};
+      auto ft = crossFacts->resolve(transpose, unknownRegs());
+      for (bool reverse : {false, true}) {
+        auto reservations = provider.createReservations();
+        auto first = reverse ? transpose : a, second = reverse ? a : transpose;
+        auto left = reverse ? ft : fa, right = reverse ? fa : ft;
+        check(reservations.value->reserve(first, left, 0).empty() &&
+              reservations.value->conflict(second, right, 1).value.empty(),
+              "disjoint cross-unit pair waives only the isolated engine window");
+      }
+      ModelOverlapCommand xlu{"xlu.transpose", Engine::Xlu, {22, 24}, {}, {}, 1, 66};
+      check(!overlap->admits({commands[0], xlu, commands[1]}, true),
+            "mixed-unit chains retain conservative admission");
+    } else llvm::consumeError(overlap.takeError());
+    validation->getObject("engines")->erase("vpu_xlu");
+    (*validation)["positive_runs"] = 2;
+    (*validation)["negative_runs"] = 3;
+    (*validation)["negative_rejections"] = 1;
+    (*validation)["numerical_checks"] = 2;
+    bytes = encode(cross);
+    auto unvalidated = parseModelOverlapFacts(bytes, hash(bytes), *crossFacts);
+    check(!unvalidated, "same-unit validation cannot qualify a cross-unit pair");
+    if (!unvalidated) llvm::consumeError(unvalidated.takeError());
+  } else llvm::consumeError(crossFacts.takeError());
   auto reject = [&](Object object, const char *why) {
     std::string contents = encode(std::move(object));
     auto result = parseModelOverlapFacts(contents, hash(contents), *facts);
@@ -606,7 +682,7 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
     auto *contract = derivation->getObject("source_contract");
     (*contract->getObject("capacity"))[key] = 99;
     (*derivation)["source_contract_sha256"] = hash(canonicalJson(llvm::json::Value(Object(*contract))));
-    reject(std::move(changed), "even a rehashed contract cannot alter compiled structural capacities");
+    reject(std::move(changed), "rehashed structural capacity outside supported source bounds rejects");
   }
   auto duplicate = original;
   duplicate.getArray("pairs")->push_back((*duplicate.getArray("pairs"))[0]);
@@ -675,10 +751,29 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
           Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}}}},
           Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}, {"accumulator", "other"}}}},
           Object{{"engine", "mxu0"}, {"relation", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "other"}}}}}}};
-  bytes = encode(std::move(object));
+  bytes = encode(object);
   auto mxu = parseModelOverlapFacts(bytes, hash(bytes), *mxuFacts);
   check(bool(mxu), "source-derived MXU composition fixture loads");
   if (!mxu) { llvm::errs() << llvm::toString(mxu.takeError()) << '\n'; return; }
+  std::vector<ModelOverlapCommand> computes{
+      {"mxu0.matmul", Engine::Mxu0, {0}, 0, 0, 0, 95},
+      {"mxu0.matmul", Engine::Mxu0, {4}, 1, 0, 32, 95},
+      {"mxu0.matmul", Engine::Mxu0, {8}, 0, 0, 64, 95}};
+  check(!mxu->rejectsPortHistory(computes), "three source compute trackers preserve the default legal capacity");
+  for (int depth : {1, 2, 4}) {
+    auto changed = object;
+    auto *derivation = changed.getObject("derivation");
+    auto *contract = derivation->getObject("source_contract");
+    (*contract->getObject("capacity"))["mxu0_compute"] = depth;
+    (*derivation)["source_contract_sha256"] = hash(canonicalJson(llvm::json::Value(Object(*contract))));
+    auto capacityBytes = encode(std::move(changed));
+    auto selected = parseModelOverlapFacts(capacityBytes, hash(capacityBytes), *mxuFacts);
+    check(bool(selected), "supported source compute tracker parameter loads");
+    if (selected)
+      check(selected->rejectsPortHistory(computes) == (depth < 3),
+            "selected source compute tracker depth drives retained issue history");
+    else llvm::consumeError(selected.takeError());
+  }
   auto mxuProvider = modelTimingProvider(mxuFacts, std::make_shared<ModelOverlapFacts>(*mxu), true);
   Instr accumulator{findOp("vmatpush.acc.fp8.mxu0"), 0, 4, 0};
   Instr weight{findOp("vmatpush.weight.mxu0"), 0, 0, 0};

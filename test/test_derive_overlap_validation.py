@@ -101,6 +101,12 @@ class NativeValidationTests(unittest.TestCase):
     def test_duplicate_json_keys_rejected(self):
         with self.assertRaises(ValueError):json.loads('{"a":1,"a":2}',object_pairs_hook=v._object)
 
+    def test_cross_unit_scope_is_explicit_and_direction_independent(self):
+        for first, second in [('vpu.relu', 'xlu.transpose'), ('xlu.transpose', 'vpu.sub')]:
+            self.assertEqual(v.pair_engine(first, second), 'vpu_xlu')
+        with self.assertRaisesRegex(ValueError, 'unsupported cross-engine'):
+            v.pair_engine('vpu.relu', 'mxu0.matmul')
+
     def test_chain_counters_only_count_actual_rejections(self):
         runs=[dict(engine='vpu',category='chain',expected='positive',passed=True,outcome='accepted_equal',numerical_checked=True,numerical_equal=True),
               dict(engine='vpu',category='capacity',expected='reject',passed=True,outcome='native_rejected',numerical_checked=False),
@@ -159,6 +165,26 @@ class NativeInitializerObservabilityTests(unittest.TestCase):
         for source,destination in ((0,8),(1,9)):
             self.assertEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(source)))
             self.assertNotEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(destination)))
+
+    def test_cross_unit_prototype_points_and_source_minima(self):
+        for assembly, gap in [
+                (['vredmax.row.bf16 m4, m0', 'vtrpose.xlu m12, m10'], 1),
+                (['vtrpose.xlu m12, m10', 'vsub.bf16 m16, m20, m24'], 1),
+                (['vtrpose.xlu m12, m10', 'vsub.bf16 m16, m20, m24'], 33)]:
+            with self.subTest(assembly=assembly, gap=gap):
+                actual = v.native_run('vpu_xlu', assembly, [gap], True)
+                serial = v.native_run('vpu_xlu', assembly, [gap], True, serial=True)
+                self.assertEqual(actual['final_sha256'], serial['final_sha256'])
+                self.assertEqual(actual['issued_ages'], [0, gap])
+
+    def test_cross_unit_read_alias_has_no_vpu_cache_waiver(self):
+        assembly = ['vtrpose.xlu m12, m0', 'vmov m8, m0']
+        actual = v.native_run('vpu_xlu', assembly, [33], True)
+        serial = v.native_run('vpu_xlu', assembly, [33], True, serial=True)
+        self.assertEqual(actual['final_sha256'], serial['final_sha256'])
+        with self.assertRaises(v.NativeFault) as caught:
+            v.native_run('vpu_xlu', assembly, [32], True)
+        self.assertTrue(v.resource_fault(caught.exception))
 
     def test_initialized_matrices_remain_finite_without_fp8_saturation(self):
         import torch

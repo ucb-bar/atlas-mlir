@@ -209,7 +209,8 @@ int peak(const std::vector<ModelOverlapCommand> &commands) {
   }
   return result;
 }
-bool composedCapacity(const std::vector<ModelOverlapCommand> &commands) {
+bool composedCapacity(const std::vector<ModelOverlapCommand> &commands,
+                      int sequencerCycles, int mxu0Compute, int mxu1Compute, int vpuSlots) {
   std::vector<std::set<int>> ports(commands.size());
   for (size_t j = 0; j < commands.size(); ++j) {
     const auto &next = commands[j];
@@ -218,18 +219,18 @@ bool composedCapacity(const std::vector<ModelOverlapCommand> &commands) {
       int live = 0;
       for (size_t i = 0; i < j; ++i)
         live += next.issue - commands[i].issue < commands[i].firstFreeAge - 1;
-      if (live >= 2) return false;
+      if (live >= vpuSlots) return false;
       continue;
     }
     std::set<int> busy;
     int computes = 0;
     for (size_t i = 0; i < j; ++i) {
       int gap = next.issue - commands[i].issue;
-      if (gap < 32) busy.insert(ports[i].begin(), ports[i].end());
+      if (gap < sequencerCycles) busy.insert(ports[i].begin(), ports[i].end());
       computes += llvm::StringRef(commands[i].block).contains(".matmul") && gap <= commands[i].firstFreeAge - 1;
     }
     if (name.contains(".matmul")) {
-      if (computes >= (name.starts_with("mxu0.") ? 3 : 2)) return false;
+      if (computes >= (name.starts_with("mxu0.") ? mxu0Compute : mxu1Compute)) return false;
       ports[j] = {0};
     } else if (name.ends_with("push_acc_bf16")) ports[j] = {0, 1};
     else if (name.ends_with("pop_acc_bf16")) ports[j] = {2, 3};
@@ -252,7 +253,7 @@ bool ModelOverlapFacts::rejectsPortHistory(const std::vector<ModelOverlapCommand
         kind != "push_acc_fp8" && kind != "push_acc_bf16" && kind != "pop_acc_fp8" && kind != "pop_acc_bf16"))
       return true;
   }
-  return !composedCapacity(commands);
+  return !composedCapacity(commands, sequencerCycles, mxu0Compute, mxu1Compute, vpuSlots);
 }
 
 bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
@@ -299,9 +300,13 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
   };
   auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) -> const Pair * {
     int gap = second.issue - first.issue;
-    for (const Pair &pair : pairs)
-      if (pair.first == first.block && pair.second == second.block && pair.minimum <= gap && gap <= pair.high &&
+    auto domain = pairIndices.find({first.block, second.block});
+    if (domain == pairIndices.end()) return nullptr;
+    for (size_t index : domain->second) {
+      const Pair &pair = pairs[index];
+      if (pair.minimum <= gap && gap <= pair.high &&
           matchesRelation(pair.relation, first, second)) return &pair;
+    }
     return nullptr;
   };
   if (commands.size() == 2) {
@@ -316,7 +321,7 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
   std::string engine = llvm::StringRef(commands.front().block).split('.').first.str();
   auto scope = compositionClasses.find(engine);
   if (scope != compositionClasses.end()) {
-    bool covered = composedCapacity(commands);
+    bool covered = composedCapacity(commands, sequencerCycles, mxu0Compute, mxu1Compute, vpuSlots);
     for (size_t i = 0; i < commands.size(); ++i) {
       covered &= llvm::StringRef(commands[i].block).split('.').first == engine;
       covered &= composedOperations.count(commands[i].block);
@@ -359,14 +364,18 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   }
   const Object *contract = derivation->getObject("source_contract");
   const Object *capacity = contract ? contract->getObject("capacity") : nullptr;
+  auto boundedCapacity = [&](llvm::StringRef key, int maximum) {
+    auto value = capacity ? capacity->getInteger(key) : std::nullopt;
+    return value && *value >= 1 && *value <= maximum;
+  };
   auto toolHash = derivation->getString("tool_sha256"), contractHash = derivation->getString("source_contract_sha256");
   if (!keys(*derivation, {"contract", "tool_sha256", "source_contract_sha256", "source_contract"}) ||
       derivation->getString("contract") != "source-resource-occupancy-v1" ||
       !toolHash || !hashSyntax(*toolHash) || !contractHash || !hashSyntax(*contractHash) || !contract ||
       modelSha256(canonicalJson(llvm::json::Value(Object(*contract)))) != *contractHash ||
       !capacity || !keys(*capacity, {"sequencer_cycles", "mxu0_compute", "mxu1_compute", "vpu_slots"}) ||
-      capacity->getInteger("sequencer_cycles") != 32 || capacity->getInteger("mxu0_compute") != 3 ||
-      capacity->getInteger("mxu1_compute") != 2 || capacity->getInteger("vpu_slots") != 2)
+      capacity->getInteger("sequencer_cycles") != 32 || !boundedCapacity("mxu0_compute", 64) ||
+      !boundedCapacity("mxu1_compute", 64) || !boundedCapacity("vpu_slots", 3))
     return invalid("source contract is missing, changed or incompatible with structural capacity");
   Object semanticContract(*contract);
   semanticContract.erase("producer_sources");
@@ -388,7 +397,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   };
   if (!keys(*validation, {"passed", "report_sha256", "sample_policy", "positive_runs", "negative_runs", "negative_rejections",
                           "numerical_checks", "engines"}) || validation->getBoolean("passed") != true ||
-      validation->getString("sample_policy") != "source-mechanism-boundaries-v1" ||
+      validation->getString("sample_policy") != "source-mechanism-boundaries-v2" ||
       !reportHash || !hashSyntax(*reportHash) || !engineRuns || engineRuns->empty() ||
       !positive(*validation, "positive_runs") || !positive(*validation, "negative_runs") ||
       !positive(*validation, "negative_rejections") ||
@@ -398,7 +407,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   std::set<std::string> validated;
   for (const auto &[engine, value] : *engineRuns) {
     const Object *runs = value.getAsObject();
-    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu" && engine != "scalar_lsu") ||
+    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu" && engine != "scalar_lsu" && engine != "vpu_xlu") ||
         !runs || !keys(*runs, {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks",
                                "chain_positive_runs", "chain_negative_runs"}))
       return invalid("unsupported source validation engine or counter");
@@ -419,6 +428,10 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     if (*validation->getInteger(key) != total)
       return invalid("source validation totals do not cover engine probes");
   ModelOverlapFacts result;
+  result.sequencerCycles = *capacity->getInteger("sequencer_cycles");
+  result.mxu0Compute = *capacity->getInteger("mxu0_compute");
+  result.mxu1Compute = *capacity->getInteger("mxu1_compute");
+  result.vpuSlots = *capacity->getInteger("vpu_slots");
   const Array *pairs = root.getArray("pairs");
   if (!pairs || pairs->empty()) return invalid("source-derived facts require nonempty pair coverage");
   std::set<std::tuple<std::string, std::string, Relation>> seen;
@@ -429,9 +442,12 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     auto minimum = record ? record->getInteger("minimum") : std::nullopt;
     auto high = record ? record->getInteger("high") : std::nullopt;
     const auto *a = first ? operations.block(*first) : nullptr, *b = second ? operations.block(*second) : nullptr;
+    bool crossVector = a && b && ((a->engine == "vpu" && b->engine == "xlu") ||
+                                 (a->engine == "xlu" && b->engine == "vpu"));
     Relation rel;
     if (!record || !keys(*record, {"first", "second", "relation", "minimum", "high"}) ||
-        !a || !b || a->engine != b->engine || !validated.count(a->engine) ||
+        !a || !b || (!crossVector && a->engine != b->engine) ||
+        !validated.count(crossVector ? "vpu_xlu" : a->engine) ||
         !minimum || !high || *minimum < 1 || *minimum > *high || *high != a->firstFreeAge ||
         !relation(record->getObject("relation"), rel) ||
         !seen.emplace(first->str(), second->str(), rel).second)
@@ -444,6 +460,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
         if (key != "mreg_banks" && key != "accumulator" && key != "weight_slot")
           return invalid("source-derived vector pair carries unsupported semantic qualifiers");
     }
+    result.pairIndices[{first->str(), second->str()}].push_back(result.pairs.size());
     result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high), "source-derived"});
   }
   const Object *engines = composition->getObject("engines");
@@ -494,7 +511,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   result.provenance = {{"pairs_sha256", expectedSha256.str()}, {"derived_sha256", expectedSha256.str()},
       {"derived_policy", "source-resource-occupancy-v1"}, {"derived_per_op_sha256", operations.factsSha256()},
       {"derived_tool_sha256", toolHash->str()}, {"derived_source_contract_sha256", contractHash->str()},
-      {"derived_validation_sha256", reportHash->str()}, {"derived_sample_policy", "source-mechanism-boundaries-v1"}};
+      {"derived_validation_sha256", reportHash->str()}, {"derived_sample_policy", "source-mechanism-boundaries-v2"}};
   for (const char *key : {"revision", "source_sha256", "numerical_data_sha256", "configuration_sha256"})
     result.provenance[std::string("derived_") + key] = identity.at(key);
   return result;

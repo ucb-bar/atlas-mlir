@@ -18,6 +18,39 @@ class UnsupportedVPU(UnsupportedModelTiming):
     """Selected source or geometry has no supported timing interpretation."""
 
 
+def _normalize_slot_capacity(tree):
+    """Extract paired source slot literals and normalize only their AST sites.
+
+    The bounded native saturation fixtures currently cover one through three
+    slots. Geometry, logic sharing, and the slot admission predicate stay
+    guarded in full; a config attribute or a refactored predicate needs review.
+    """
+    from atlas_derive_mxu import _assignment, _method, _one
+    cls = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
+                and n.name == "VectorExecutionUnit"), "VPU class")
+    slot = _assignment(_method(cls, "_accept"), "slot")
+    try:
+        generator = slot.value.args[0]
+        iterator = generator.generators[0].iter
+        slots = ast.literal_eval(iterator)
+    except (AttributeError, IndexError, TypeError, ValueError) as error:
+        raise UnsupportedVPU("unsupported VPU source slot generator") from error
+    if (not isinstance(generator, ast.GeneratorExp) or not isinstance(slots, tuple)
+            or any(type(value) is not int for value in slots)
+            or slots != tuple(range(len(slots))) or not 1 <= len(slots) <= 3):
+        raise UnsupportedVPU("unsupported VPU source slot identifiers (requires 1..3 consecutive slots)")
+    count = _one((n for n in ast.walk(_method(cls, "_issue_blocked"))
+                  if isinstance(n, ast.Compare) and isinstance(n.left, ast.Call)
+                  and isinstance(n.left.func, ast.Name) and n.left.func.id == "len"), "VPU slot count")
+    if (len(count.ops) != 1 or not isinstance(count.ops[0], ast.Eq) or len(count.comparators) != 1
+            or not isinstance(count.comparators[0], ast.Constant)
+            or type(count.comparators[0].value) is not int or count.comparators[0].value != len(slots)):
+        raise UnsupportedVPU("VPU issue capacity differs from its source slots")
+    count.comparators[0] = ast.Constant(value=2)
+    generator.generators[0].iter = ast.Tuple(elts=[ast.Constant(value=0), ast.Constant(value=1)], ctx=ast.Load())
+    return list(slots)
+
+
 def _check_source(module, *, latency_table=False):
     path = Path(inspect.getsourcefile(module))
     if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
@@ -31,6 +64,8 @@ def _check_source(module, *, latency_table=False):
         tree.body = [node for node in tree.body if not (
             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "VPU_OP_LATENCIES"
                                                for target in node.targets))]
+        if any(isinstance(n, ast.ClassDef) and n.name == "VectorExecutionUnit" for n in tree.body):
+            _normalize_slot_capacity(tree)
     digest = ast_digest(tree)
     if digest != SOURCE_SHAPES.get(path.name):
         raise UnsupportedVPU(f"unsupported VPU timing semantics in {path.name}")

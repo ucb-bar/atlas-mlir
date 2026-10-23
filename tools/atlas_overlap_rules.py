@@ -31,6 +31,26 @@ class Register:
     requests: tuple[tuple[int, int], ...]
     release: int
 
+
+@lru_cache(maxsize=None)
+def bank_bound(left, right, sign, coalescing):
+    """Suffix-safe bank bound for immutable source event shapes.
+
+    Many opcodes share the same row planners. Cache their event algebra, not
+    a measured gap or a concrete benchmark relation.
+    """
+    bound = 1
+    for age, row in left.requests:
+        for later, later_row in right.requests:
+            if left.write == right.write:
+                shared = not left.write and coalescing and sign == '=' and row == later_row
+                collision = not shared
+            else:
+                collision = sign == '=' and row == later_row
+            if collision and age >= later:
+                bound = max(bound, age - later + 1)
+    return bound
+
 def validate_relation(relation):
     if not isinstance(relation, dict) or not set(relation) <= RELATION_KEYS or 'mreg_banks' not in relation:
         raise ModelTimingEvidenceError('unsupported or missing relation constraint')
@@ -156,15 +176,8 @@ class RuleSet:
                 left, right = (ra[i], rb[j])
                 if sign == '=' and (left.write or (right.write and second != 'vlsu.vload')):
                     bounds['logical_reservation'] = max(bounds['logical_reservation'], left.release)
-                for age, row in left.requests:
-                    for later, later_row in right.requests:
-                        if left.write == right.write:
-                            coalesced = not left.write and engine(first) == engine(second) == 'vpu' and (sign == '=') and (row == later_row)
-                            collision = not coalesced
-                        else:
-                            collision = sign == '=' and row == later_row
-                        if collision and age >= later:
-                            bounds['bank_or_row'] = max(bounds['bank_or_row'], age - later + 1)
+                bounds['bank_or_row'] = max(bounds['bank_or_row'],
+                    bank_bound(left, right, sign, engine(first) == engine(second) == 'vpu'))
         if relation.get('vmem_bank') == 'same':
             ea, eb = (self.blocks[first]['events'], self.blocks[second]['events'])
             aa = [age for key in ('vmem_read', 'vmem_write') if key in ea for age in self.ages(first, key)]

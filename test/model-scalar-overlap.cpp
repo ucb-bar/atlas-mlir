@@ -57,7 +57,7 @@ Object projection(const ModelTimingFacts &facts, const Object &model, Array pair
           {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(contract))))},
           {"source_contract", std::move(contract)}}},
       {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'b')},
-          {"sample_policy", "source-mechanism-boundaries-v1"}, {"positive_runs", 2}, {"negative_runs", 3},
+          {"sample_policy", "source-mechanism-boundaries-v2"}, {"positive_runs", 2}, {"negative_runs", 3},
           {"negative_rejections", 1}, {"numerical_checks", 2}, {"engines", Object{{"scalar_lsu", Object{
               {"positive_runs", 2}, {"negative_runs", 3}, {"negative_rejections", 1}, {"numerical_checks", 2}}}}}}},
       {"composition", Object{{"engines", Object{}}, {"classes", Array{}}}}};

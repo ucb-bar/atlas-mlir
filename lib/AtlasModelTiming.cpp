@@ -1311,7 +1311,8 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     for (const std::vector<int> *group : {&f.mregReads, &f.mregWrites}) {
       std::map<int, int> banks;
       for (int reg : *group)
-        if (auto [at, inserted] = banks.emplace(reg & 31, reg); !inserted)
+        if (auto [at, inserted] = banks.emplace(reg & 31, reg);
+            !inserted && !(group == &f.mregReads && at->second == reg))
           fill.fail("VPU register operands must occupy distinct physical banks (register mod 32): m" +
                     std::to_string(at->second) + " and m" + std::to_string(reg) + " share bank " +
                     std::to_string(reg & 31));
@@ -1421,7 +1422,7 @@ public:
       const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const override {
     if (cycle < 0 || cycle > INT_MAX - f.doneAge - 1)
       return {{}, "model reservation exceeds cycle domain"};
-    std::vector<Port> ports = requests(f, cycle);
+    std::vector<Port> ports = requests(f, cycle, in.op->engine == Engine::Vpu);
     for (size_t i = 0; i < ports.size(); ++i)
       for (size_t j = 0; j < i; ++j)
         if (portConflict(ports[i], ports[j])) return {{}, "instruction has conflicting MREG port requests"};
@@ -1454,7 +1455,7 @@ public:
     auto checked = conflictWithContext(in, f, cycle, context);
     if (!checked.error.empty()) return checked.error;
     if (!checked.value.empty()) return checked.value;
-    issued.push_back({in, f, cycle, requests(f, cycle), true, context});
+    issued.push_back({in, f, cycle, requests(f, cycle, in.op->engine == Engine::Vpu), true, context});
     return {};
   }
   std::string onWait(const Instr &, int cycle) override {
@@ -1470,7 +1471,7 @@ public:
   }
 
 private:
-  struct Port { int bank, reg, row, from, cycle; bool write; };
+  struct Port { int bank, reg, row, from, cycle; bool write, vpu; };
   struct Issued {
     Instr in; Footprint f; int cycle; std::vector<Port> ports; bool eligible;
     TimingContext context;
@@ -1536,17 +1537,23 @@ private:
     }
     return true;
   }
-  static std::vector<Port> requests(const Footprint &f, int cycle) {
+  static std::vector<Port> requests(const Footprint &f, int cycle, bool vpu) {
     std::vector<Port> ports;
     for (const Access &a : f.accesses)
       if (a.res == Res::MReg)
         for (int i = 0; i < a.count; ++i) {
           int element = a.first + i, at = cycle + a.age + i * a.step;
-          ports.push_back({element / 32 % 32, element / 32, element % 32, at, at, a.write});
+          ports.push_back({element / 32 % 32, element / 32, element % 32, at, at, a.write, vpu});
         }
     return ports;
   }
   static bool portConflict(const Port &a, const Port &b) {
+    // The guarded VPU _read cache coalesces identical logical register/row
+    // requests on one edge, including duplicate sources in one instruction.
+    // XLU has no such cache; wait-expanded uncertain requests remain strict.
+    if (!a.write && !b.write && a.vpu && b.vpu && a.reg == b.reg && a.row == b.row &&
+        a.from == a.cycle && b.from == b.cycle && a.cycle == b.cycle)
+      return false;
     return a.bank == b.bank && a.from <= b.cycle && b.from <= a.cycle &&
         (a.write == b.write || (a.reg == b.reg && a.row == b.row));
   }
