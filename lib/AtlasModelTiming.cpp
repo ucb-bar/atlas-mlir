@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <deque>
 #include <set>
 #include <tuple>
 
@@ -658,7 +657,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
       "source_shapes", "beat_bytes", "max_in_flight", "num_channels", "max_transfer_bytes", "queue_depth",
       "window_beats", "frequency_ghz", "channels", "measured_channels", "access_bytes", "latency_mode",
       "converge", "knee", "enforce_peak", "min_latency", "startup_cycles", "issue_interval_cycles",
-      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation"}) ||
+      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation", "proposal_contract"}) ||
       d.getString("schema") != "atlas.dma_timing.v1" || d.getString("backend") != "curve" ||
       d.getBoolean("resolved") != true || d.getBoolean("estimate_only") != true)
     return error("requires the complete resolved proposal-only curve schema");
@@ -746,7 +745,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   double minimum = integer("min_latency"), epsilon = number("rounding_epsilon_cycles"), reset = number("reset_last_ready_cycles");
   if (d.getString("latency_mode") != "unloaded" || number("converge") != 1. ||
       d.getBoolean("enforce_peak") != true || minimum < 1 || minimum > INT_MAX ||
-      number("knee") <= 0 || number("knee") > 1 || epsilon < 0 || epsilon >= 1 || reset < 0 || reset > INT_MAX)
+      number("knee") <= 0 || number("knee") > 1 || epsilon < 0 || epsilon >= 1 || reset != 0)
     return error("unsupported controller mode, rounding or reset state");
   const Object *startup = d.getObject("startup_cycles");
   auto load = startup ? startup->getInteger("load") : std::nullopt;
@@ -754,8 +753,8 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   if (!startup || !exactKeys(*startup, {"load", "store"}) || !load || !store ||
       *load < 1 || *store < 1 || *load > INT_MAX || *store > INT_MAX)
     return error("requires bounded source-derived launch startup");
-  ModelDMATiming result{beat, maxBytes, inFlight, queue, interval, int(*load), int(*store),
-                        0., 0., 0., 0., epsilon, reset};
+  ModelDMATiming result{beat, maxBytes, int(*load), int(*store), 0, 0, 0};
+  double maximumService = minimum;
   const Array *curves = d.getArray("curves");
   if (!curves || curves->empty() || curves->size() > 101) return error("missing bounded curve coverage");
   int previous = -1;
@@ -787,13 +786,65 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
     // Both values are computed directly by the reviewed converter from these points.
     if (*latency != std::max(minimum, firstLatency) || *peak != previousBW || *spacing != 1. / *peak)
       return error("unloaded latency or peak pacing disagrees with curve points");
-    if (*pct == 0) { result.writeLatency = *latency; result.writeSpacing = *spacing; writes = true; }
-    if (*pct == 100) { result.readLatency = *latency; result.readSpacing = *spacing; reads = true; }
+    maximumService = std::max({maximumService, *latency, *spacing});
+    reads |= *pct == 100;
+    writes |= *pct == 0;
   }
   const Array *limits = d.getArray("limits");
   if (!reads || !writes || !limits || limits->empty()) return error("requires pure read/store endpoints and explicit scope limits");
   for (const auto &limit : *limits)
     if (!limit.getAsString() || limit.getAsString()->empty()) return error("invalid proposal scope limit");
+  const Object *proposal = d.getObject("proposal_contract");
+  if (!proposal || !exactKeys(*proposal, {"schema", "kind", "response_to_retire_cycles",
+          "retire_to_wait_issue_cycles", "per_beat_bound_cycles", "preconditions", "policy",
+          "recurrence", "source_evidence", "proof", "limitations"}) ||
+      proposal->getString("schema") != "atlas.dma_proposal.v1" ||
+      proposal->getString("kind") != "serialized_all_mix_upper_bound" ||
+      proposal->getInteger("response_to_retire_cycles") != 0 || interval != 1 ||
+      proposal->getInteger("retire_to_wait_issue_cycles") != interval)
+    return error("requires supported source-derived DMA proposal/edge contract");
+  const Object *preconditions = proposal->getObject("preconditions"), *policy = proposal->getObject("policy");
+  const Object *recurrence = proposal->getObject("recurrence"), *evidence = proposal->getObject("source_evidence");
+  if (!preconditions || !exactKeys(*preconditions, {"engine_backend_drained_at_launch", "vmem_grant_denials", "history", "maximum_cycle", "maximum_arithmetic_operand"}) ||
+      preconditions->getBoolean("engine_backend_drained_at_launch") != true ||
+      preconditions->getInteger("vmem_grant_denials") != 0 ||
+      preconditions->getInteger("maximum_cycle") != INT_MAX ||
+      preconditions->getInteger("maximum_arithmetic_operand") != INT_MAX ||
+      preconditions->getString("history") != "arbitrary_retained_issue_history" ||
+      !policy || !exactKeys(*policy, {"classification", "intercommand_serialization_cycles"}) ||
+      policy->getString("classification") != "compiler_policy" ||
+      policy->getInteger("intercommand_serialization_cycles") != 1 ||
+      !recurrence || !exactKeys(*recurrence, {"retire", "wait"}) ||
+      recurrence->getString("retire") != "launch+startup[direction]+beats*per_beat_bound_cycles" ||
+      recurrence->getString("wait") != "retire+retire_to_wait_issue_cycles")
+    return error("unsupported DMA proposal preconditions, recurrence or serialization policy");
+  if (!evidence || !exactKeys(*evidence, {"core_tick_shape", "core_s1_shape", "expressions", "edge_order",
+          "service_maximum_cycles", "service_quantum"}) ||
+      !evidence->getString("core_tick_shape") || !hashSyntax(*evidence->getString("core_tick_shape")) ||
+      !evidence->getString("core_s1_shape") || !hashSyntax(*evidence->getString("core_s1_shape")) ||
+      !evidence->getObject("expressions") || evidence->getObject("expressions")->empty() ||
+      evidence->getNumber("service_maximum_cycles") != maximumService ||
+      evidence->getString("service_quantum") !=
+          "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval")
+    return error("missing DMA source proof premises or inconsistent service maximum");
+  const Array *order = evidence->getArray("edge_order");
+  const char *phases[] = {"Core.S1", "DMA.D", "DMA.store_read", "DMA.A", "DMA.retire_clear_flag", "DMA.enqueue_launch"};
+  if (!order || order->size() != std::size(phases)) return error("unsupported DMA edge order");
+  for (size_t i = 0; i < std::size(phases); ++i)
+    if ((*order)[i].getAsString() != phases[i]) return error("unsupported DMA edge order");
+  for (const char *key : {"proof", "limitations"}) {
+    const Array *text = proposal->getArray(key);
+    if (!text || text->empty()) return error("missing DMA proof scope");
+    for (const auto &line : *text)
+      if (!line.getAsString() || line.getAsString()->empty()) return error("invalid DMA proof scope");
+  }
+  double quantum = std::ceil(maximumService) + interval;
+  auto bound = proposal->getInteger("per_beat_bound_cycles");
+  if (!std::isfinite(quantum) || quantum > INT_MAX || !bound || *bound != quantum)
+    return error("DMA service bound disagrees with source-derived all-mixture operands");
+  result.perBeatBound = int(*bound);
+  result.retireToWait = interval;
+  result.serializationGap = int(*policy->getInteger("intercommand_serialization_cycles"));
   // Reject facts whose largest supported transfer cannot be represented by consumer arithmetic.
   for (bool store : {false, true}) {
     auto checked = result.estimate(result.maxBytes, store);
@@ -996,29 +1047,32 @@ TimingRuleResult<int> ModelDMATiming::estimate(int64_t bytes, bool store) const 
   auto error = [](const char *why) -> TimingRuleResult<int> { return {0, std::string("model DMA estimate: ") + why}; };
   if (bytes < beatBytes || bytes > maxBytes || bytes % beatBytes)
     return error("transfer is outside the derived aligned geometry");
-  // Cold single-command replay: pure history selects an endpoint on every beat.
-  // Completion is the last acknowledgement age relative to the command launch.
-  // Capacity uses registered in-flight state; backend acceptance observes D-before-A.
-  std::deque<int64_t> pending;
-  int64_t issue = store ? storeStartup : loadStartup, last = 0;
-  double ready = resetReady, latency = store ? writeLatency : readLatency;
-  double spacing = store ? writeSpacing : readSpacing;
-  for (int64_t beat = 0; beat < bytes / beatBytes; ++beat) {
-    while (!pending.empty() && pending.front() < issue) pending.pop_front();
-    if (pending.size() >= size_t(maxInFlight)) issue = std::max(issue, pending.front() + issueInterval);
-    if (pending.size() >= size_t(queueDepth)) issue = std::max(issue, pending.front());
-    while (!pending.empty() && pending.front() <= issue) pending.pop_front();
-    ready = std::max(double(issue) + latency, ready + spacing);
-    double rounded = std::ceil(ready - epsilon);
-    if (!std::isfinite(rounded) || rounded < 0 || rounded > INT_MAX)
-      return error("isolated completion exceeds the nonnegative cycle domain");
-    // One response per engine edge, including when several ready values round together.
-    last = std::max(int64_t(rounded), last + issueInterval);
-    if (last > INT_MAX) return error("isolated completion exceeds the nonnegative cycle domain");
-    pending.push_back(last);
-    issue += issueInterval;
-  }
-  return {int(last), {}};
+  // Analytic all-mixture envelope under the contract's drained/no-denial
+  // preconditions. The source proof accounts for registered capacity and one
+  // response per edge; there is no hand-written queue simulator here.
+  int64_t completion = int64_t(store ? storeStartup : loadStartup) +
+                       (bytes / beatBytes) * perBeatBound;
+  if (completion > INT_MAX)
+    return error("service bound exceeds the nonnegative cycle domain");
+  return {int(completion), {}};
+}
+
+TimingRuleResult<DMAProposal> ModelDMATiming::propose(
+    int latency, int issue, std::optional<int> previousEnd) const {
+  // Versioned compiler policy: serialize proposals after the previous retire
+  // edge. Actual commands may overlap; this never discharges a wait.
+  int64_t launch = issue;
+  if (previousEnd) launch = std::max(launch, int64_t(*previousEnd) + serializationGap);
+  int64_t retire = launch + latency, visible = retire + retireToWait;
+  if (latency < 0 || issue < 0 || (previousEnd && *previousEnd < 0) || visible > INT_MAX)
+    return {{}, "model DMA proposal exceeds the nonnegative cycle domain"};
+  return {{int(retire), int(visible)}, {}};
+}
+
+TimingRuleResult<DMAProposal> ModelTimingFacts::proposeDMA(
+    int latency, int issue, std::optional<int> previousEnd) const {
+  if (!dmaTiming) return {{}, "model: DMA proposal requires validated dma_timing facts"};
+  return dmaTiming->propose(latency, issue, previousEnd);
 }
 
 TimingRuleResult<int> ModelTimingFacts::estimateDMACycles(int64_t bytes, bool store) const {
@@ -1957,6 +2011,11 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
     return result;
   };
   provider.costProbes = [facts](const OpInfo &op) { return facts->costProbes(op); };
+  provider.dmaProposal = [facts](int latency, int issue, std::optional<int> previousEnd) {
+    auto result = facts->proposeDMA(latency, issue, previousEnd);
+    if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
+    return result;
+  };
   provider.validateScope = [](const AtlasStream &stream) {
     auto error = modelScope(stream);
     return error.empty() ? error : modelTimingDiagnostic(error);

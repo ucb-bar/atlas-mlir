@@ -96,6 +96,26 @@ class DerivedContractTest(unittest.TestCase):
             self.assertEqual(receipt["semantic_payload_sha256"], sha256(canonical(semantic_payload(facts))))
         self.assertEqual(seal_derived(copy.deepcopy(facts)), facts)
 
+    def test_dma_proposal_edges_bound_policy_and_proof_are_semantic(self):
+        facts = contract_format_fixture()
+        facts["dma_timing"]["proposal_contract"] = dict(
+            retire_to_wait_issue_cycles=1, per_beat_bound_cycles=47,
+            preconditions={"vmem_grant_denials": 0}, policy={"intercommand_serialization_cycles": 1},
+            source_evidence={"ready_base": "request.cycle + latency"})
+        seal_derived(facts)
+        digest = verify_derived(facts)
+        for change in (lambda c: c.update(retire_to_wait_issue_cycles=2),
+                       lambda c: c.update(per_beat_bound_cycles=46),
+                       lambda c: c["preconditions"].update(vmem_grant_denials=1),
+                       lambda c: c["policy"].update(intercommand_serialization_cycles=0),
+                       lambda c: c["source_evidence"].update(ready_base="other")):
+            altered = copy.deepcopy(facts)
+            change(altered["dma_timing"]["proposal_contract"])
+            with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
+                verify_derived(altered)
+            seal_derived(altered)
+            self.assertNotEqual(verify_derived(altered), digest)
+
     def test_validation_records_are_bound_to_actual_semantics(self):
         for target in ("validation", "dma_timing"):
             facts = contract_format_fixture()

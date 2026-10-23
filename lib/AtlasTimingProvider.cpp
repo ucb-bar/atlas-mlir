@@ -238,6 +238,15 @@ TimingProvider mlir::atlas::timing::builtinTimingProvider() {
     result.value = std::make_unique<ModelReservations>();
     return result;
   };
+  p.dmaProposal = [](int latency, int issue, std::optional<int> previousEnd) {
+    // Legacy builtin priority/serialization policy, preserved byte-for-byte in
+    // its schedules. These offsets are not model-derived facts.
+    int64_t end = std::max(int64_t(issue) + latency - 1,
+                          int64_t(previousEnd.value_or(0)) + latency);
+    if (latency < 0 || issue < 0 || end < 0 || end > std::numeric_limits<int>::max() - 2)
+      return TimingRuleResult<DMAProposal>{{}, "DMA queue estimate exceeds cycle domain"};
+    return TimingRuleResult<DMAProposal>{{int(end), int(end + 2)}, {}};
+  };
   return p;
 }
 
