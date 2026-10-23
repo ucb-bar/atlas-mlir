@@ -431,7 +431,110 @@ bool exactKeys(const Object &object, std::initializer_list<const char *> keys) {
   return true;
 }
 
-llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg) {
+// The selected file carries an explicit serialization of its deterministic
+// semantic inputs. Hash those exact bytes (Python and LLVM render floats
+// differently), then compare both decoded objects using one canonicalizer.
+llvm::Expected<std::string> validateDerivedContract(const Object &root) {
+  if (root.getBoolean("test_only") == true)
+    return factsError("test-only observations cannot select a production provider");
+  const Object *contract = root.getObject("derivation_contract");
+  if (!contract || !exactKeys(*contract, {"schema", "payload_json", "payload_sha256", "derivation", "validation"}) ||
+      contract->getString("schema") != "atlas.derived_facts.v1")
+    return factsError("requires versioned source-derived facts contract atlas.derived_facts.v1; raw observations are validation/test-only");
+  auto payloadJson = contract->getString("payload_json"), payloadHash = contract->getString("payload_sha256");
+  if (!payloadJson || !payloadHash || !hashSyntax(*payloadHash) || modelSha256(*payloadJson) != *payloadHash)
+    return factsError("derived semantic payload hash mismatch");
+  const Object *derivation = contract->getObject("derivation"), *validation = contract->getObject("validation");
+  if (!derivation || !exactKeys(*derivation, {"schema", "kind", "payload_sha256"}) ||
+      derivation->getString("schema") != "atlas.derivation.v1" ||
+      derivation->getString("kind") != "source_derived" || derivation->getString("payload_sha256") != payloadHash)
+    return factsError("requires a source-derived derivation record bound to the semantic payload");
+  if (!validation || !exactKeys(*validation, {"schema", "passed", "payload_sha256"}) ||
+      validation->getString("schema") != "atlas.validation.v1" || validation->getBoolean("passed") != true ||
+      validation->getString("payload_sha256") != payloadHash)
+    return factsError("requires a successful validation record bound to the semantic payload");
+  const Object *model = root.getObject("model");
+  if (!model) return factsError("missing model provenance in derived semantic payload");
+  Object semanticModel;
+  for (const char *key : {"revision", "revision_kind", "source_sha256", "numerical_data_sha256",
+                          "configuration", "configuration_sha256"}) {
+    const auto *value = model->get(key);
+    if (!value) return factsError(std::string("missing derived semantic model.") + key);
+    semanticModel[key] = *value;
+  }
+  auto revisionKind = model->getString("revision_kind");
+  if (!revisionKind || (*revisionKind != "locked_source" && *revisionKind != "source_sha256_prefix"))
+    return factsError("unsupported model revision identity kind");
+  Object semantic{{"model", std::move(semanticModel)}};
+  for (const char *key : {"geometry", "age_convention", "op_timing", "reservation_releases", "vocabulary_sha256",
+                          "architecture", "operand_vocabulary", "isa_metadata"}) {
+    const auto *value = root.get(key);
+    if (!value) return factsError(std::string("missing derived semantic ") + key);
+    semantic[key] = *value;
+  }
+  for (const char *key : {"scratchpad_contract"})
+    if (const auto *value = root.get(key)) semantic[key] = *value;
+  if (const auto *value = root.get("dma_timing")) {
+    const Object *dma = value->getAsObject();
+    if (!dma) return factsError("dma_timing must be an object");
+    Object deterministic(*dma);
+    deterministic.erase("validation");
+    semantic["dma_timing"] = std::move(deterministic);
+  }
+  auto decoded = llvm::json::parse(*payloadJson);
+  if (!decoded) return factsError(llvm::toString(decoded.takeError()));
+  if (canonicalJson(*decoded) != canonicalJson(llvm::json::Value(std::move(semantic))))
+    return factsError("derived semantic payload differs from selected timing inputs");
+  const Object *gate = root.getObject("validation");
+  const Array *operations = root.getArray("op_timing");
+  auto reportHash = gate ? gate->getString("gate_report_sha256") : std::nullopt;
+  if (!gate || gate->getBoolean("passed") != true || gate->getString("payload_sha256") != payloadHash ||
+      !operations || gate->getInteger("operation_count") != int64_t(operations->size()) ||
+      !gate->getInteger("observed_runs") || *gate->getInteger("observed_runs") < 1 ||
+      !gate->getInteger("unobserved_runs") || *gate->getInteger("unobserved_runs") < 1 || !reportHash || !hashSyntax(*reportHash))
+    return factsError("requires successful operation validation bound to the deterministic payload");
+  return payloadHash->str();
+}
+
+bool completeReleaseCoverage(const ModelTimingBlock &block) {
+  std::set<std::string> expected{"unit"};
+  for (const auto &[event, group] : block.events) {
+    llvm::StringRef key(event);
+    if (key == "vmem_read" || key == "vmem_write") expected.insert(event);
+    if (key.starts_with("mreg_read") ||
+        ((block.engine == "vpu" || block.engine == "xlu") && key.starts_with("read")))
+      expected.insert("mreg_read");
+    if (key.starts_with("mreg_write") ||
+        ((block.engine == "vpu" || block.engine == "xlu") && key.starts_with("write")))
+      expected.insert("mreg_write");
+  }
+  if (expected.size() != block.releases.size()) return false;
+  for (const auto &key : expected)
+    if (!block.releases.count(key)) return false;
+  return true;
+}
+
+llvm::Expected<int> parseScratchpadContract(const Object &root) {
+  const Object *contract = root.getObject("scratchpad_contract");
+  const Object *assumptions = contract ? contract->getObject("assumptions") : nullptr;
+  auto pipeline = contract ? contract->getInteger("dma_store_read_to_request_cycles") : std::nullopt;
+  auto limitation = contract ? contract->getString("limitation") : std::nullopt;
+  const Array *checked = contract ? contract->getArray("checked_source_methods") : nullptr;
+  if (!contract || !exactKeys(*contract, {"schema", "status", "assumptions", "response_latency_derived",
+          "dma_store_read_to_request_cycles", "limitation", "checked_source_methods"}) ||
+      contract->getString("schema") != "atlas.scratchpad_contract.v1" ||
+      contract->getString("status") != "explicit-target-assumption" ||
+      contract->getBoolean("response_latency_derived") != false || !assumptions ||
+      !exactKeys(*assumptions, {"scratchpad_read_latency"}) || assumptions->getInteger("scratchpad_read_latency") != 1 ||
+      !pipeline || *pipeline < 1 || *pipeline >= 4096 || !limitation || limitation->empty() || !checked || checked->empty())
+    return factsError("requires explicit supported scratchpad target assumption; model response latency is not derived");
+  for (const auto &method : *checked)
+    if (!method.getAsString() || method.getAsString()->empty())
+      return factsError("invalid scratchpad source-method coverage");
+  return int(*assumptions->getInteger("scratchpad_read_latency"));
+}
+
+llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg, llvm::StringRef payloadHash) {
   auto error = [](const std::string &why) -> llvm::Expected<ModelDMATiming> {
     return factsError("dma_timing: " + why);
   };
@@ -457,12 +560,16 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   }
   const Object *validation = d.getObject("validation");
   auto reportHash = validation ? validation->getString("report_sha256") : std::nullopt;
-  if (!validation || !exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs"}) ||
+  if (!validation || !(payloadHash.empty() ?
+          exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs"}) :
+          exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs", "payload_sha256"})) ||
       validation->getBoolean("passed") != true || !reportHash || !hashSyntax(*reportHash) ||
       !validation->getInteger("backend_streams") || *validation->getInteger("backend_streams") < 1 ||
       !validation->getInteger("isolated_dma_runs") || *validation->getInteger("isolated_dma_runs") < 1 ||
       !validation->getInteger("mixed_dma_runs") || *validation->getInteger("mixed_dma_runs") < 1)
     return error("requires successful backend/isolated/mixed validation and its report SHA-256");
+  if (!payloadHash.empty() && validation->getString("payload_sha256") != payloadHash)
+    return error("validation does not bind the selected deterministic payload");
   const Object *semantics = d.getObject("semantics");
   if (!semantics || semantics->size() != 8) return error("missing reviewed backend/engine semantics");
   for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
@@ -614,8 +721,8 @@ TimingRuleResult<int> ModelTimingFacts::estimateDMACycles(int64_t bytes, bool st
   return dmaTiming->estimate(bytes, store);
 }
 
-llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
-    llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait) {
+llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
+    llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait, bool testObservations) {
   if (!hashSyntax(expectedSha256)) return factsError("facts SHA-256 is required");
   if (modelSha256(bytes) != expectedSha256)
     return factsError("selected facts hash mismatch");
@@ -624,13 +731,30 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   const Object *root = parsed->getAsObject();
   if (!root || root->getString("schema") != "atlas.model_timing.v1")
     return factsError("expected schema atlas.model_timing.v1");
-  if (root->get("vocabulary_sha256") && root->getString("vocabulary_sha256") != model_schema::vocabularySha256())
-    return factsError("facts vocabulary differs from the compiled operand and relation schema");
+  if (!testObservations && root->getBoolean("test_only") == true)
+    return factsError("test-only observations cannot select a production provider");
+  if (testObservations && !root->get("derivation_contract") && root->getBoolean("test_only") != true)
+    return factsError("raw observation fixtures require the explicit test_only marker");
   for (const char *key : {"hw_ir", "assertions", "op_pairs", "pairs", "chains", "capacity"})
     if (root->get(key)) return factsError("per-operation model facts cannot carry RTL or overlap claims");
+  std::string payloadHash;
+  if (!testObservations) {
+    auto contract = validateDerivedContract(*root);
+    if (!contract) return contract.takeError();
+    payloadHash = std::move(*contract);
+  }
+  if ((!testObservations || root->get("vocabulary_sha256")) &&
+      root->getString("vocabulary_sha256") != model_schema::vocabularySha256())
+    return factsError("facts vocabulary differs from the compiled operand and relation schema");
   const Object *model = root->getObject("model");
   if (!model) return factsError("missing model provenance");
   ModelTimingFacts result;
+  int readLatency = 1;
+  if (!testObservations || root->get("scratchpad_contract")) {
+    auto parsedScratchpad = parseScratchpadContract(*root);
+    if (!parsedScratchpad) return parsedScratchpad.takeError();
+    readLatency = *parsedScratchpad;
+  }
   for (const char *key : {"revision", "source_sha256", "configuration_sha256", "observer_sha256",
                           "exporter_sha256", "input_sha256", "numerical_data_sha256"}) {
     auto value = model->getString(key);
@@ -680,7 +804,8 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   const Array *timing = root->getArray("op_timing");
   if (!timing || timing->empty()) return factsError("missing op_timing coverage");
   const Object *releases = root->getObject("reservation_releases");
-  if (root->get("reservation_releases") && (!releases || releases->size() != timing->size()))
+  if ((!testObservations || root->get("reservation_releases")) &&
+      (!releases || releases->size() != timing->size()))
     return factsError("reservation release coverage differs from op_timing");
   for (const auto &value : *timing) {
     const Object *entry = value.getAsObject();
@@ -702,9 +827,9 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     if (!free || *free < 1 || *free > 4096 || next != free)
       return factsError("requires bounded serialized next_issue_age=first_free_age");
     const Object *assumptions = entry->getObject("assumptions");
-    if (!assumptions || assumptions->getInteger("scratchpad_read_latency") != 1)
-      return factsError("only scratchpad_read_latency=1 is supported");
-    ModelTimingBlock block{engine->str(), {}, int(*free), 1};
+    if (!assumptions || assumptions->getInteger("scratchpad_read_latency") != readLatency)
+      return factsError("operation scratchpad latency differs from its explicit target assumption");
+    ModelTimingBlock block{engine->str(), {}, int(*free), readLatency};
     const Object *events = entry->getObject("events");
     if (!events || events->empty()) return factsError("model timing block needs observed events");
     for (const auto &[key, value] : *events) {
@@ -752,13 +877,15 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
         block.releases[key.str()] = std::move(resource);
       }
     }
+    if (!testObservations && !completeReleaseCoverage(block))
+      return factsError("reservation resource coverage differs from operation events: " + name->str());
     if (!result.blocks.emplace(name->str(), std::move(block)).second)
       return factsError("duplicate operation " + name->str());
   }
   if (const auto *dmaFacts = root->get("dma_timing")) {
     const Object *document = dmaFacts->getAsObject();
     if (!document) return factsError("dma_timing must be an object");
-    auto parsedDMA = parseDMATiming(*document, *configuration);
+    auto parsedDMA = parseDMATiming(*document, *configuration, payloadHash);
     if (!parsedDMA) return parsedDMA.takeError();
     result.dmaTiming = std::move(*parsedDMA);
     result.provenance["dma_curve_sha256"] = document->getString("curve_sha256")->str();
@@ -766,6 +893,16 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   result.sha256 = expectedSha256.str();
   result.dma = dmaWait;
   return result;
+}
+
+llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
+    llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait) {
+  return ModelTimingFacts::parseImpl(bytes, expectedSha256, dmaWait, false);
+}
+
+llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFactsForTesting(
+    llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait) {
+  return ModelTimingFacts::parseImpl(bytes, expectedSha256, dmaWait, true);
 }
 
 llvm::Expected<ModelTimingFacts> mlir::atlas::timing::loadModelTimingFacts(

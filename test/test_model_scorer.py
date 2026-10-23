@@ -9,9 +9,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from atlas_model_scorer import ModelScorer, bind_curve_configuration, model_instruction, selected_model
+from atlas_model_scorer import ModelScorer, bind_curve_configuration, model_instruction, selected_model, _model_content
 from atlas_model_timing import configuration, configuration_values, encoded, sha256
 from check_program_decode import decode_binary
+from model_evidence import isolate_model_imports
 
 
 class ScorerGuardsTest(unittest.TestCase):
@@ -69,6 +70,9 @@ class ModelScorerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+        isolate_model_imports(cls, str(root))
+        _model_content.cache_clear()
+        cls.addClassCleanup(_model_content.cache_clear)
         _, source, data, config = selected_model(root)
         cls.scorer = ModelScorer(root)
         cls.evidence = dict(source_sha256=source, numerical_data_sha256=data, configuration_sha256=config)

@@ -1,4 +1,4 @@
-"""Replay the supplied pinned catalog against freshly regenerated facts bytes."""
+"""Check deterministic regeneration and replay overlap evidence against its facts."""
 import hashlib
 import json
 import os
@@ -10,7 +10,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 VARIABLES = ("ATLAS_REPROJECT_FACTS", "ATLAS_REPROJECT_CATALOG",
-             "ATLAS_REPROJECT_QUERIES", "ATLAS_REPROJECT_HOLDOUTS")
+             "ATLAS_REPROJECT_QUERIES", "ATLAS_REPROJECT_HOLDOUTS", "ATLAS_REGENERATED_FACTS")
+
+sys.path.insert(0, str(ROOT / "tools"))
+from atlas_derived_contract import verify_derived
 
 
 def load(path):
@@ -27,9 +30,10 @@ def sha(path):
 
 @unittest.skipUnless(any(name in os.environ for name in VARIABLES),
                      "set ATLAS_REPROJECT_FACTS, ATLAS_REPROJECT_CATALOG, "
-                     "ATLAS_REPROJECT_QUERIES and ATLAS_REPROJECT_HOLDOUTS for pinned catalog replay")
+                     "ATLAS_REPROJECT_QUERIES, ATLAS_REPROJECT_HOLDOUTS and "
+                     "ATLAS_REGENERATED_FACTS for deterministic pinned catalog replay")
 class PinnedCatalogReprojectionTest(unittest.TestCase):
-    def test_fresh_digest_rebinds_base_and_composed_catalog_without_changing_admissions(self):
+    def test_deterministic_facts_bind_replayed_catalog_without_changing_admissions(self):
         paths = {}
         for name in VARIABLES:
             value = os.environ.get(name)
@@ -42,10 +46,21 @@ class PinnedCatalogReprojectionTest(unittest.TestCase):
             self.assertEqual(sha(catalog[kind]), catalog[kind + "_sha256"])
         before, fresh = load(catalog["op"]), load(fresh_path)
         fresh_sha = sha(fresh_path)
-        self.assertNotEqual(fresh_sha, catalog["op_sha256"], "supply freshly regenerated facts")
+        regenerated_path = paths["ATLAS_REGENERATED_FACTS"]
+        self.assertNotEqual(fresh_path.resolve(), regenerated_path.resolve(),
+                            "supply two independently regenerated facts files")
+        self.assertEqual(fresh_path.read_bytes(), regenerated_path.read_bytes(),
+                         "fresh generations must produce identical facts bytes")
+        self.assertEqual(fresh_sha, sha(regenerated_path))
+        semantic_sha = verify_derived(fresh)
+        self.assertEqual(semantic_sha, verify_derived(load(regenerated_path)))
         for key in ("schema", "age_convention", "geometry", "observation", "op_timing",
-                    "reservation_releases", "dma_timing", "vocabulary_sha256"):
+                    "reservation_releases", "vocabulary_sha256"):
             self.assertEqual(before[key], fresh[key], key)
+        # Older catalog facts predate payload-bound validation records. Compare
+        # the DMA scheduling inputs independently of those producer receipts.
+        self.assertEqual({key: value for key, value in before["dma_timing"].items() if key != "validation"},
+                         {key: value for key, value in fresh["dma_timing"].items() if key != "validation"})
         for key in ("revision", "source_sha256", "numerical_data_sha256",
                     "configuration_sha256", "configuration"):
             self.assertEqual(before["model"][key], fresh["model"][key], key)
@@ -64,6 +79,26 @@ class PinnedCatalogReprojectionTest(unittest.TestCase):
         queries, holdouts = paths["ATLAS_REPROJECT_QUERIES"], paths["ATLAS_REPROJECT_HOLDOUTS"]
         self.assertEqual(sha(queries), heldout_receipt["queries_sha256"])
         self.assertEqual(sha(holdouts), heldout_receipt["provenance"]["holdouts_sha256"])
+
+        # Explicit fixtures allow the compiler verifier to supply already
+        # rebound evidence while preserving the immutable catalog admissions.
+        rebound_paths = {}
+        for kind, variable in (("pairs", "ATLAS_REPROJECT_PAIRS"), ("composed", "ATLAS_REPROJECT_COMPOSED")):
+            if variable in os.environ:
+                rebound_paths[kind] = Path(os.environ[variable])
+                self.assertTrue(rebound_paths[kind].is_file(), f"{variable} must name an existing file")
+        self.assertEqual(bool(rebound_paths.get("pairs")), bool(rebound_paths.get("composed")),
+                         "ATLAS_REPROJECT_PAIRS and ATLAS_REPROJECT_COMPOSED are required together")
+        for kind, path in rebound_paths.items():
+            rebound = load(path)
+            binding = rebound["projection" if kind == "pairs" else "provenance"]
+            self.assertEqual(binding["per_op_sha256"], fresh_sha, kind + " facts binding")
+            self.assertEqual(binding["master_sha256"], source["master_sha256"], kind + " master binding")
+            for records in ("pairs", "chains"):
+                self.assertEqual(rebound[records], load(catalog[kind])[records], kind + " " + records)
+        if rebound_paths:
+            self.assertEqual(load(rebound_paths["composed"])["provenance"]["base_pairs_sha256"],
+                             sha(rebound_paths["pairs"]))
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(os.environ.get("ATLAS_REPROJECT_OUTPUT", temporary + "/reprojection"))
@@ -86,7 +121,8 @@ class PinnedCatalogReprojectionTest(unittest.TestCase):
             project_args = ("--master", master, "--validation", validation, "--per-op", fresh_path,
                             "--master-sha256", source["master_sha256"],
                             "--validation-sha256", source["validation_sha256"])
-            run("atlas_model_pairs.py", *project_args, "--output", output / "refused", succeeds=False)
+            run("atlas_model_pairs.py", *project_args, "--per-op-sha256", "0" * 64,
+                "--output", output / "refused", succeeds=False)
             self.assertFalse((output / "refused").exists())
             run("atlas_model_pairs.py", *project_args, "--per-op-sha256", fresh_sha,
                 "--output", output / "base")
@@ -115,6 +151,8 @@ class PinnedCatalogReprojectionTest(unittest.TestCase):
                 self.assertEqual(sha(catalog[kind]), catalog[kind + "_sha256"], "input changed")
             (output / "regression-summary.json").write_text(json.dumps(dict(
                 passed=True, original_facts_sha256=catalog["op_sha256"], fresh_facts_sha256=fresh_sha,
+                regenerated_facts_sha256=sha(regenerated_path), semantic_payload_sha256=semantic_sha,
+                deterministic_facts=True, rebound_evidence={kind: str(path) for kind, path in rebound_paths.items()},
                 model_revision=fresh["model"]["revision"], admissions_unchanged=True,
                 base_counts={kind: len(base[kind]) for kind in ("pairs", "chains")},
                 composed_counts={kind: len(composed[kind]) for kind in ("pairs", "chains")},

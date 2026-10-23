@@ -5,11 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 
-from test_dma_ring_waits import fixture_evidence
+from model_evidence import requires_model_evidence
 from test_virtual_ssa import run
 from test_virtual_scheduling import S, T, const, function, inp, outp, start
 
@@ -29,28 +30,15 @@ def scalar_slots(word=-1):
         outp("s4", "s5", "tile", 0), f"return %s5 : {S}"])
 
 
+@requires_model_evidence
 class ScalarSlotProposalTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        fixture_evidence(self.directory)
-        self.facts = json.loads((self.directory / "facts.json").read_text())
-        # Include explicit reservation releases, as the derived facts do. A
-        # longer unit release must affect costs even with unchanged events.
-        releases = self.facts["reservation_releases"] = {}
-        for block in self.facts["op_timing"]:
-            end = block["first_free_age"] - 1
-            resources = releases[block["name"]] = {
-                "unit": dict(first_age=0, release_age=end, available_age=end + 1)}
-            for key, event in block["events"].items():
-                if key in ("vmem_read", "vmem_write"):
-                    resources[key] = dict(first_age=event["first_age"], release_age=event["last_age"],
-                                          available_age=event["last_age"] + 1, banks=[0])
-                if key.startswith(("mreg_read", "mreg_write")):
-                    resource = "mreg_write" if key.startswith("mreg_write") else "mreg_read"
-                    resources[resource] = dict(first_age=0, release_age=end, available_age=end + 1,
-                                               banks=[4 if resource == "mreg_write" else 0])
+        self.facts = json.loads(Path(os.environ["ATLAS_TEST_OP_TIMING"]).read_text())
+        # CLI integration consumes genuinely derived facts. Synthetic lifetime
+        # mutation/cost propagation is covered by the explicit C++ test API.
 
     def schedule(self, facts=None, source=None):
         facts = self.facts if facts is None else facts
@@ -75,15 +63,18 @@ class ScalarSlotProposalTest(unittest.TestCase):
 
     def test_save_restore_copy_follow_operation_facts_and_releases(self):
         self.assertEqual(self.costs(), dict(save=4, restore=6, slot_copy=10))
-        for operation, free, expected in (("load", 11, dict(save=4, restore=13, slot_copy=17)),
-                                           ("store", 7, dict(save=9, restore=6, slot_copy=15))):
+
+    def test_scalar_lifetime_changes_require_rederivation(self):
+        for operation, free in (("load", 11), ("store", 7)):
             with self.subTest(operation=operation):
                 changed = deepcopy(self.facts)
                 name = "scalar_lsu." + operation
                 block = next(block for block in changed["op_timing"] if block["name"] == name)
                 block["first_free_age"] = block["next_issue_age"] = free
                 changed["reservation_releases"][name]["unit"].update(release_age=free - 1, available_age=free)
-                self.assertEqual(self.costs(changed), expected)
+                result = self.schedule(changed)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("derived semantic payload differs from selected timing inputs", result.stderr)
 
     def test_allocated_addresses_use_lowering_zero_part_elision(self):
         # Both addresses are page aligned: materializeScalar emits LUI only.
@@ -98,7 +89,7 @@ class ScalarSlotProposalTest(unittest.TestCase):
                 del missing["reservation_releases"][name]
                 result = self.schedule(missing)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(name + ": facts block is missing", result.stderr)
+                self.assertIn("derived semantic payload differs from selected timing inputs", result.stderr)
 
     def test_missing_scalar_reservation_releases_refuse(self):
         for name, resource in (("scalar_lsu.load", "vmem_read"), ("scalar_lsu.store", "vmem_write")):
@@ -107,7 +98,7 @@ class ScalarSlotProposalTest(unittest.TestCase):
                 del missing["reservation_releases"][name][resource]
                 result = self.schedule(missing)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(name + ": missing reservation release " + resource, result.stderr)
+                self.assertIn("derived semantic payload differs from selected timing inputs", result.stderr)
 
     def test_missing_scalar_facts_also_refuse_pressure_spill_penalties(self):
         source = function("pressure", [start(), inp("io0", "s1", "tile", 0),
@@ -119,7 +110,7 @@ class ScalarSlotProposalTest(unittest.TestCase):
         del missing["reservation_releases"]["scalar_lsu.store"]
         result = self.schedule(missing, source)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("scalar_lsu.store: facts block is missing", result.stderr)
+        self.assertIn("derived semantic payload differs from selected timing inputs", result.stderr)
 
 
 if __name__ == "__main__":

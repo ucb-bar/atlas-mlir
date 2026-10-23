@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 
+from atlas_derive_scratchpad import scratchpad_assumptions
+
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -24,7 +26,7 @@ def ast_digest(tree):
 def timing_block(name, engine, events, last):
     return dict(name=name, engine=engine, resolved=True, events=dict(sorted(events.items())),
                 first_free_age=last + 1, next_issue_age=last + 1,
-                assumptions={"scratchpad_read_latency": 1}, observation={"accepted": True, "drained": True})
+                assumptions=scratchpad_assumptions(), observation={"accepted": True, "drained": True})
 
 
 def reservation(last, *, first=0, banks=None):

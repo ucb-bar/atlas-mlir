@@ -61,7 +61,9 @@ private:
   std::string sha256;
   bool dma = false;
   std::optional<ModelDMATiming> dmaTiming;
+  static llvm::Expected<ModelTimingFacts> parseImpl(llvm::StringRef, llvm::StringRef, bool, bool);
   friend llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef, llvm::StringRef, bool);
+  friend llvm::Expected<ModelTimingFacts> parseModelTimingFactsForTesting(llvm::StringRef, llvm::StringRef, bool);
 };
 
 bool hashSyntax(llvm::StringRef value);
@@ -69,6 +71,10 @@ std::string modelSha256(llvm::StringRef bytes);
 std::string canonicalJson(const llvm::json::Value &value);
 llvm::Expected<ModelTimingFacts> parseModelTimingFacts(llvm::StringRef bytes, llvm::StringRef expectedSha256,
                                                        bool dmaWait = false);
+// Explicit unit-test boundary for raw observations and synthetic timing operands.
+// Production loaders and command-line selectors always use parseModelTimingFacts.
+llvm::Expected<ModelTimingFacts> parseModelTimingFactsForTesting(llvm::StringRef bytes, llvm::StringRef expectedSha256,
+                                                                 bool dmaWait = false);
 llvm::Expected<ModelTimingFacts> loadModelTimingFacts(llvm::StringRef path, llvm::StringRef expectedSha256,
                                                       bool dmaWait = false);
 TimingProvider modelTimingProvider(std::shared_ptr<const ModelTimingFacts> facts,

@@ -1,28 +1,43 @@
-"""Configuration capabilities and non-default isolated fallback at compiler entry."""
+"""Configuration capabilities using private mutations of opted-in derived facts.
+
+Resealed configuration variants are synthetic test data, written only to each
+test's temporary directory. They are not model derivation or production exports.
+"""
+from copy import deepcopy
 import hashlib
 import json
-import subprocess
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from test_delay_insertion import BIN, OPT, run, program
+from model_evidence import requires_model_evidence
+from test_delay_insertion import OPT, ROOT, run, program
+
+sys.path.insert(0, str(ROOT / "tools"))
+from atlas_derived_contract import seal_derived, verify_derived
 
 
+@requires_model_evidence
 class ModelConfigContractTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.facts = json.loads(subprocess.run(
-            [str(BIN / "atlas-model-timing-test"), "--fixture"],
-            capture_output=True, check=True).stdout)
+        self.facts = json.loads(Path(os.environ["ATLAS_TEST_OP_TIMING"]).read_text())
+        # Check the genuine input before creating any private synthetic variants.
+        # Raw observer fixtures must never be promoted to derived facts here.
+        verify_derived(self.facts)
 
     def select(self, *, pairs=False):
         model = self.facts["model"]
         model["configuration_json"] = json.dumps(model["configuration"], sort_keys=True, separators=(",", ":"))
         model["configuration_sha256"] = hashlib.sha256(model["configuration_json"].encode()).hexdigest()
-        path = self.directory / "facts.json"
+        # These mutations isolate compiler capability checks from derivation.
+        # Resealing is a private test operation, never a production bypass.
+        seal_derived(self.facts)
+        path = self.directory / "synthetic-config-test-only.json"
         path.write_text(json.dumps(self.facts))
         option = (f"--select-atlas-model-evidence=op-timing={path} "
                   f"op-timing-sha256={hashlib.sha256(path.read_bytes()).hexdigest()} dma=wait")
@@ -74,14 +89,15 @@ class ModelConfigContractTest(unittest.TestCase):
         self.assertIn("frequency_ghz mismatch with selected configuration", result.stderr)
 
     def test_null_and_unknown_backend_settings_refuse(self):
+        baseline = deepcopy(self.facts)
         for key in ("window_beats", "queue_depth", "min_latency", "converge", "knee", "enforce_peak", "unknown"):
             with self.subTest(key=key):
+                self.facts = deepcopy(baseline)
                 params = self.facts["model"]["configuration"]["dma_memory_params"]
                 params[key] = None
                 result = self.select()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("unsupported capability: dma_memory_params." + key, result.stderr)
-                del params[key]
 
     def test_nullable_backend_defaults_are_supported(self):
         self.facts["model"]["configuration"]["dma_memory_params"].update(
@@ -111,6 +127,7 @@ class ModelConfigContractTest(unittest.TestCase):
         self.facts["architecture"]["dma_max_in_flight"] = 16
         self.facts["dma_timing"]["max_in_flight"] = 16
         self.facts["model"]["configuration"]["dma_memory_params"]["queue_depth"] = 64
+        self.facts["dma_timing"]["queue_depth"] = 64
         result = self.select()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.facts["architecture"]["dma_max_in_flight"] = 64

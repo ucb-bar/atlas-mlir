@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -11,20 +12,13 @@ import tempfile
 import unittest
 
 from test_delay_insertion import BIN, OPT, run
+from model_evidence import requires_model_evidence
 from test_virtual_scheduling import F, S, T, add, const, dma_load, dma_store, function, inp, outp, start
 
 
 def fixture_evidence(directory: pathlib.Path) -> str:
-    """Write the provider test fixture plus scalar LSU facts; return the evidence selection flag."""
-    document = json.loads(subprocess.run([str(BIN / "atlas-model-timing-test"), "--fixture"],
-                                         capture_output=True, check=True).stdout)
-    for name, free, events in (("load", 4, {"vmem_read": 0, "load_write": 3}), ("store", 2, {"vmem_write": 0})):
-        document["op_timing"].append(dict(
-            name="scalar_lsu." + name, engine="scalar_lsu", resolved=True, first_free_age=free, next_issue_age=free,
-            events={key: dict(first_age=age, last_age=age, count=1, step=1) for key, age in events.items()},
-            assumptions=dict(scratchpad_read_latency=1), observation=dict(accepted=True, drained=True)))
-    facts = directory / "facts.json"
-    facts.write_text(json.dumps(document))
+    """Select genuinely derived production facts for CLI integration tests."""
+    facts = pathlib.Path(os.environ["ATLAS_TEST_OP_TIMING"])
     return (f"--select-atlas-model-evidence=op-timing={facts} "
             f"op-timing-sha256={hashlib.sha256(facts.read_bytes()).hexdigest()} dma=wait")
 
@@ -64,6 +58,7 @@ def dma_sequence(text: str) -> list[tuple[str, int | None]]:
     return sequence
 
 
+@requires_model_evidence
 class DMARingWaitTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()

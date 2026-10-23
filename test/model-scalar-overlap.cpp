@@ -124,7 +124,7 @@ int testScalarOverlap(Object perOp) {
   perOp.getArray("op_timing")->push_back(scalarBlock("scalar_lsu.store", true));
   Object model(*perOp.getObject("model"));
   std::string bytes = encode(std::move(perOp));
-  auto facts = parseModelTimingFacts(bytes, hash(bytes));
+  auto facts = parseModelTimingFactsForTesting(bytes, hash(bytes));
   check(bool(facts), "scalar relation fixture loads");
   if (!facts) { llvm::errs() << llvm::toString(facts.takeError()) << '\n'; return failures; }
   DialectRegistry registry; registry.insert<AtlasDialect>();

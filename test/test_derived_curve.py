@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_curve as curve
 import atlas_model_schema as schema
+from model_evidence import isolate_model_imports
 
 
 class CurveContractTest(unittest.TestCase):
@@ -52,7 +53,7 @@ class CurveContractTest(unittest.TestCase):
 class NativeCurveTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        sys.path.insert(0, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
         from atlas_model_timing import configuration
         cls.cfg, _ = configuration()
 
