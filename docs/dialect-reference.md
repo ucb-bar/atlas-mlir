@@ -180,7 +180,7 @@ unchanged. Missing coverage, unsupported operands/configurations, stale hashes a
 replacement of timed evidence fail. Verification, emission and LLVM handoff retain
 the selection. See [model timing](model-timing.md) for source derivation, numerical
 validation, exact pair/chain admission, scalar PACK proofs, regeneration and
-model-scored schedule selection.
+model-scored schedule/allocation search.
 
 ## Machine operations
 

@@ -42,9 +42,10 @@ namespace {
 
 class VirtualPlanner {
 public:
-  VirtualPlanner(ModuleOp module, func::FuncOp function, ArrayRef<unsigned> storeWindowRanks = {})
+  VirtualPlanner(ModuleOp module, func::FuncOp function, ArrayRef<unsigned> storeWindowRanks = {},
+                 ArrayRef<unsigned> mregRanks = {})
       : module(module), function(function), attrs(module.getContext()),
-        emitter(module.getContext()), allocation(storeWindowRanks) {}
+        emitter(module.getContext()), allocation(storeWindowRanks, mregRanks) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
@@ -988,6 +989,9 @@ struct LowerAtlasVirtualToMachinePass
       *this, "store-windows", llvm::cl::desc("Comma-separated free staging window ranks per DMA store (model only)"),
       llvm::cl::init("")};
 
+  Option<std::string> mregRanks{
+      *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks (model only)"), llvm::cl::init("")};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
@@ -1021,8 +1025,28 @@ struct LowerAtlasVirtualToMachinePass
         storeWindowRanks.push_back(rank);
       }
     }
+    SmallVector<unsigned> registerRanks;
+    if (!mregRanks.empty()) {
+      SmallVector<StringRef> ranks;
+      StringRef(mregRanks.getValue()).split(ranks, ',', -1, true);
+      for (StringRef text : ranks) {
+        unsigned rank;
+        if (text.empty() || text.getAsInteger(10, rank)) {
+          module.emitError("mreg-ranks must contain comma-separated unsigned integers");
+          return signalPassFailure();
+        }
+        registerRanks.push_back(rank);
+      }
+      auto selected = selectAtlasTimingProvider(module, provider.getValue());
+      if (failed(selected))
+        return signalPassFailure();
+      if (selected->id != timing::kModelTimingProviderId) {
+        module.emitError("mreg-ranks requires the model timing provider");
+        return signalPassFailure();
+      }
+    }
     reuseAtlasImmutableWeights(function);
-    VirtualPlanner planner(module, function, storeWindowRanks);
+    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1075,10 +1099,12 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 }
 
 std::unique_ptr<Pass>
-mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, StringRef provider, StringRef storeWindows) {
+mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, StringRef provider,
+                                                                   StringRef storeWindows, StringRef mregRanks) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
   pass->storeWindows = storeWindows.str();
+  pass->mregRanks = mregRanks.str();
   return pass;
 }

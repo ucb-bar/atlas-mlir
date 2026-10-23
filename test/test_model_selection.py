@@ -101,6 +101,18 @@ class ModelSelectionTest(unittest.TestCase):
         self.assertTrue(select.call_args.kwargs["guarded_pack"])
 
 
+    def test_mreg_pool_is_eight_seeds_at_every_cap(self):
+        vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
+        for cap, evaluated in ((32, 8), (64, 8), (25, 2)):
+            with self.subTest(cap=cap), patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
+                receipt = select_program(self.source, self.directory / str(cap), self.directory,
+                    max_candidates=cap, mreg_candidates=None,
+                    store_window_candidates=((0, 1), (0, 2), (0, 3)), scorer=lambda program, **_: program["cycles"])
+            ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
+            self.assertEqual((receipt["mreg_pool_size"], len(ranks)), (8, evaluated))
+            self.assertEqual(ranks, vectors[:evaluated])
+
+
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
             ({"provider": "builtin", "search_evaluations": 1}, "search-evaluations"),
@@ -166,6 +178,40 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 0)
         self.assertIn("uniform-store-windows", {row["class"] for row in receipt["candidates"]})
 
+    def test_register_candidates_follow_existing_bounded_search(self):
+        receipt = self.select(max_candidates=22, mreg_candidates=((31, 0), (7, 3)))
+        self.assertEqual([row["class"] for row in receipt["candidates"]][-2:], ["mreg-ranks", "mreg-ranks"])
+        self.assertEqual(receipt["candidates"][-1]["options"]["mreg_ranks"], (7, 3))
+        self.assertEqual(receipt["selected_index"], 2)
+
+    def test_local_search_starts_from_best_bank_candidate(self):
+        def compile_bank(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            cwd = kwargs["cwd"]
+            if result.returncode == 0 and candidate_command(argv):
+                self.write_graph(cwd, [[], [], []])
+                if "mreg-ranks=" in " ".join(argv):
+                    local = "order-file=" in " ".join(argv)
+                    self.programs[cwd] = {"instructions": [{"word_u32": 101 if local else 100}], "cycles": 2 if local else 3}
+            return result
+
+        receipt = self.select(runner=compile_bank, max_candidates=25, mreg_candidates=((31, 7),),
+                              search_evaluations=4)
+        start = receipt["candidates"][receipt["search"]["start_index"]]
+        self.assertEqual(start["class"], "mreg-ranks")
+        self.assertEqual(receipt["selected_cycles"], 2)
+        self.assertEqual(receipt["search"]["evaluations"], 4)
+        for row in receipt["candidates"]:
+            if row["class"] == "local-order":
+                self.assertEqual(row["options"]["mreg_ranks"], (31, 7))
+
+    def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
+        common = dict(scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
+        prefix = self.select(name="prefix", max_candidates=24, **common)
+        extended = self.select(name="extended", max_candidates=32, mreg_candidates=None, **common)
+        self.assertEqual([row["options"] for row in prefix["candidates"]],
+                         [row["options"] for row in extended["candidates"][:len(prefix["candidates"])]])
+        self.assertEqual(sum(row["class"] == "mreg-ranks" for row in extended["candidates"]), 8)
 
     def test_parallel_completion_order_does_not_change_a_tied_winner(self) -> None:
         later_finished = threading.Event()
@@ -199,7 +245,7 @@ with TemporaryDirectory() as directory:
 
 
     def test_candidate_choices_only_use_exposed_existing_knobs(self) -> None:
-        options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source"), "model", True)
+        options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source", mreg_ranks=(31, 0, 7)), "model", True)
         self.assertEqual(len(options), 1)
         self.assertTrue(options[0].startswith("--atlas-compile-candidate="))
         self.assertIn("provider=model", options[0])
@@ -207,10 +253,11 @@ with TemporaryDirectory() as directory:
         self.assertIn("allocation-report=allocation.json", options[0])
         self.assertTrue(any("store-windows='7,3,0'" in option for option in options))
         self.assertTrue(any("wait-placement=source" in option for option in options))
+        self.assertTrue(any("mreg-ranks='31,0,7'" in option for option in options))
         with self.assertRaisesRegex(ValueError, "explicit virtual orders"):
             Candidate(lookahead=1, virtual_orders=((0,),))
         for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
-                        {"store_windows": (-1,)}, {"wait_placement": "other"}):
+                        {"store_windows": (-1,)}, {"mreg_ranks": (-1,)}, {"wait_placement": "other"}):
             with self.assertRaises(ValueError):
                 Candidate(**invalid)
 
@@ -287,6 +334,12 @@ with TemporaryDirectory() as directory:
             receipts.append([row["options"] for row in receipt["candidates"]])
         self.assertEqual(*receipts)
 
+    def test_bank_candidates_are_opt_in_and_provider_gated(self):
+        receipt = self.select()
+        self.assertFalse(any(row["class"] == "mreg-ranks" for row in receipt["candidates"]))
+        with self.assertRaisesRegex(ValueError, "MREG candidates require"):
+            self.select(name="other", provider="builtin", mreg_candidates=None)
+
 
     def test_model_evidence_requires_explicit_pins(self) -> None:
         with self.assertRaisesRegex(ValueError, "SHA-256"):
@@ -349,6 +402,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
             ("--schedule-atlas-virtual=order-file=missing.json", "require the model"),
             ("--schedule-atlas-virtual=graph-output=unused.json", "require the model"),
             ("--lower-atlas-virtual-to-machine=store-windows=1", "store-windows requires the model"),
+            ("--lower-atlas-virtual-to-machine=mreg-ranks=1", "mreg-ranks requires the model"),
             ("--schedule-atlas-stream=wait-placement=source", "wait-placement=source requires the model"),
         ):
             with self.subTest(option=option):
@@ -367,6 +421,14 @@ class ModelSelectionKnobsTest(unittest.TestCase):
                 result = run("atlas-opt", source, option)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(diagnostic, result.stderr)
+
+    def test_invalid_register_ranks_fail(self):
+        for ranks in ("-1", "1,,2", "4294967296", "unknown"):
+            with self.subTest(ranks=ranks):
+                result = run("atlas-opt", EXAMPLE.read_text(),
+                             "--lower-atlas-virtual-to-machine=provider=model mreg-ranks='" + ranks + "'")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("mreg-ranks must contain", result.stderr)
 
     def test_explicit_defaults_preserve_builtin_ir(self):
         source = EXAMPLE.read_text()
