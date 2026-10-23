@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Choose a fully verified Atlas program using cold cycles from the selected npu_model.
 
-The default is retained as candidate zero, exact curve ties use FIFO43 cycles
-then candidate order, and builtin compiles once without importing the model. The bounded
+The default is retained as candidate zero, exact cycle ties use canonical candidate
+order, and builtin compiles once without importing the model. The bounded
 search exposes existing lowering choices and optional legal order mutations.
 """
 
@@ -80,6 +80,23 @@ SEARCH_BUDGETS = POLICY["presets"]
 POOLS = POLICY["pools"]
 CANDIDATES = POLICY["candidates"]
 DEFAULTS = POLICY["defaults"]
+
+
+def objective_receipt(provider: str, profile: str, standard_scorer: bool,
+                      configuration_sha256: str | None = None) -> dict:
+    """Identify selection policy separately from model-derived timing facts."""
+    model = provider == "model"
+    payload = {
+        "schema": "atlas.model_selection_objective.v1",
+        "policy": POLICY["algorithms"]["selection_objective"] if model else "builtin-default-v1",
+        "scoring": ("native-model" if standard_scorer else "injected-scorer") if model else "none",
+        "profile": profile if model else None,
+        "minimize": list(POLICY["objectives"][profile]) if model else ["index"],
+        "tie_rule": POLICY["algorithms"]["selection_tie"],
+        "scoring_configuration_sha256": configuration_sha256,
+    }
+    return dict(payload, sha256=hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -436,6 +453,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     commands, logs = [], []
     log_lock, score_lock = threading.Lock(), threading.Lock()
     receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
+               "objective": objective_receipt(provider, profile, scorer is None),
                "guarded_pack": guarded_pack, "curve_candidates": curve_candidates,
                "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
                "search_group_evaluations": search_group_evaluations,
@@ -516,6 +534,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 if scoring_profile not in profiles:
                     profiles[scoring_profile] = score_executor.submit(
                         scorer.profile_receipt, program, scoring_profile).result()
+                    receipt["objective"] = objective_receipt(
+                        provider, profile, standard_scorer, profiles[scoring_profile]["sha256"])
             hit = key in score_cache
             if not hit:
                 score_cache[key] = (score_executor.submit(scorer, program, scoring_profile)
@@ -586,27 +606,9 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
                 fail(f"candidate {row['index']} failed model scoring: {row['error']}")
         passing = [row for row in receipt["candidates"] if row["status"] == "PASS"]
+        # One objective governs every incumbent, including search restarts.
+        # Canonical indices are assigned before parallel compilation/scoring.
         best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
-        if provider == "model" and "fifo43_cycles" in POLICY["objectives"][profile] and best is not None:
-            tied = [row for row in passing if row["cycles"] == best["cycles"]]
-            if len(tied) > 1:
-                pending_scores = []
-                for row in tied:
-                    if "fifo43_cycles" not in row:
-                        program = json.loads((output / row["directory"] / "program.json").read_text())
-                        try:
-                            cached, row["fifo43_score_cache_hit"] = cached_score(program, "fifo43")
-                            pending_scores.append((row, cached))
-                        except (OSError, ValueError, RuntimeError) as error:
-                            row.update(status="FAIL", error=str(error), error_stage="score")
-                            fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
-                for row, cached in pending_scores:
-                    try:
-                        row["fifo43_cycles"] = cached.result() if isinstance(cached, Future) else cached
-                    except (OSError, ValueError, RuntimeError) as error:
-                        row.update(status="FAIL", error=str(error), error_stage="score")
-                        fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
-                best = min(tied, key=lambda row: (row["fifo43_cycles"], row["index"]))
 
     # Model imports, configuration and execution are isolated from compiler threads.
     with ExitStack() as stack:
@@ -726,7 +728,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    default_cycles=receipt["candidates"][0].get("cycles"),
                    selected_cycles=best.get("cycles"),
                    score_cache_entries=sum(key[0] == profile for key in score_cache),
-                   fifo43_tiebreak_cache_entries=sum(key[0] == "fifo43" for key in score_cache) if profile == "curve" else 0,
                    score_cache_hits=sum(row.get("score_cache_hit", False) for row in receipt["candidates"]),
                    elapsed_seconds=time.monotonic() - started)
     (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")

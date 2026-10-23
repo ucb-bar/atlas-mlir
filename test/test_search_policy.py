@@ -187,13 +187,13 @@ class SearchPolicyTest(unittest.TestCase):
             self.assertEqual(effective["random_seeds"], [19])
             self.assertEqual(effective["mreg_candidates"], [[7] * 64])
             self.assertEqual(effective["store_window_candidates"], [[3]])
-            self.assertEqual(effective["objective"], ["cycles", "fifo43_cycles", "index"])
+            self.assertEqual(effective["objective"], ["cycles", "index"])
             self.assertEqual(effective["max_candidates"], 5)
             self.assertEqual(len(receipt["candidates"]), 5)
             self.assertEqual(receipt["search_policy"], json.loads((root / "output/selection.json").read_text())["search_policy"])
             self.assertNotIn("op_timing_sha256", receipt["search_policy"])
 
-    def test_objective_policy_controls_lazy_secondary_scoring(self):
+    def test_objective_policy_is_native_only_and_fifo43_is_explicit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.mlir"
@@ -214,19 +214,26 @@ class SearchPolicyTest(unittest.TestCase):
                 profiles.append(profile)
                 return 10 if profile == "curve" else 100 - program["instructions"][0]["word_u32"]
             with patch.object(selection.subprocess, "run", side_effect=command):
-                tied = selection.select_program(source, root / "tied", root, scorer=score,
-                                                max_candidates=2, workers=2, curve_candidates=False)
-                self.assertEqual(tied["selected_index"], 1)
-                self.assertIn("fifo43", profiles)
-                profiles.clear()
-                changed = deepcopy(selection.POLICY)
-                changed["objectives"]["curve"] = ["cycles", "index"]
-                with patch.object(selection, "POLICY", changed), patch.object(policy, "POLICY", changed):
-                    primary = selection.select_program(source, root / "primary", root, scorer=score,
-                                                       max_candidates=2, workers=2, curve_candidates=False)
-                self.assertEqual(primary["selected_index"], 0)
-                self.assertNotIn("fifo43", profiles)
-                self.assertEqual(primary["search_policy"]["effective"]["objective"], ["cycles", "index"])
+                for profile in ("curve", "fifo43"):
+                    profiles.clear()
+                    receipt = selection.select_program(source, root / profile, root, scorer=score,
+                                                       profile=profile, max_candidates=2, workers=2,
+                                                       curve_candidates=False)
+                    self.assertEqual(receipt["selected_index"], 0 if profile == "curve" else 1)
+                    self.assertEqual(set(profiles), {profile})
+                    self.assertEqual(receipt["search_policy"]["effective"]["objective"], ["cycles", "index"])
+                    self.assertEqual(receipt["objective"]["minimize"], policy.POLICY["objectives"][profile])
+                    self.assertEqual(receipt["objective"]["policy"], policy.POLICY["algorithms"]["selection_objective"])
+                    self.assertEqual(receipt["objective"]["tie_rule"], policy.POLICY["algorithms"]["selection_tie"])
+
+    def test_legacy_synthetic_secondary_objective_is_refused(self):
+        changed = deepcopy(policy.POLICY)
+        changed["objectives"]["curve"] = ["cycles", "fifo43_cycles", "index"]
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "policy.json"
+            source.write_text(json.dumps(changed))
+            with patch.object(policy, "POLICY_PATH", source), self.assertRaisesRegex(ValueError, "selection objective"):
+                policy.load_policy()
 
     def test_compiler_policy_mismatch_is_fatal_even_with_a_custom_scorer(self):
         with tempfile.TemporaryDirectory() as temporary:

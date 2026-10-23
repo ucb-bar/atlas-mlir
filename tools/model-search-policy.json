@@ -1,6 +1,6 @@
 {
   "schema": "atlas.search_policy.v1",
-  "revision": "bounded-native-selection-v1",
+  "revision": "bounded-native-selection-v2",
   "algorithms": {
     "proposal_replay": "atlas.projected_core_replay.v1",
     "order_neighbors": "dependency-window-insertion-v1",
@@ -11,10 +11,11 @@
     "score_cache": "invocation-profile-exact-word-stream-v1",
     "virtual_scheduler": "start-plus-spill-frontend-negative-height-source-index-v1",
     "lowering_alternatives": "compiler-verified-pack-wait-placement-v1",
-    "selection_objective": "exact-cycles-lazy-secondary-canonical-index-v1",
+    "selection_objective": "selected-profile-cycles-then-index-v1",
     "curve_candidates_default": "model-curve-profile-only-v1",
     "proposal_cost_adapter": "representative-disjoint-copy-serial-pack-setup-omitted-optimistic-filled-slot-v1",
-    "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride"
+    "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride",
+    "selection_tie": "canonical-candidate-index-v1"
   },
   "presets": {
     "selection": {
@@ -157,7 +158,6 @@
   "objectives": {
     "curve": [
       "cycles",
-      "fifo43_cycles",
       "index"
     ],
     "fifo43": [

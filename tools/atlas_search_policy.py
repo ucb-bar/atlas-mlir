@@ -41,7 +41,8 @@ def load_policy() -> dict:
     algorithms = {
         "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride",
         "proposal_cost_adapter": "representative-disjoint-copy-serial-pack-setup-omitted-optimistic-filled-slot-v1",
-        "selection_objective": "exact-cycles-lazy-secondary-canonical-index-v1",
+        "selection_objective": "selected-profile-cycles-then-index-v1",
+        "selection_tie": "canonical-candidate-index-v1",
         "curve_candidates_default": "model-curve-profile-only-v1",
         "proposal_replay": "atlas.projected_core_replay.v1",
         "order_neighbors": "dependency-window-insertion-v1",
@@ -133,7 +134,7 @@ def load_policy() -> dict:
         raise ValueError("unsupported wait siblings")
     if candidates["initial_wait_placement"] not in ("default", "source") or candidates["pack_preload_wait_placement"] != "preloaded":
         raise ValueError("unsupported placement policy")
-    if policy["objectives"]["curve"] not in (["cycles", "fifo43_cycles", "index"], ["cycles", "index"]) or policy["objectives"]["fifo43"] != ["cycles", "index"]:
+    if policy["objectives"]["curve"] != ["cycles", "index"] or policy["objectives"]["fifo43"] != ["cycles", "index"]:
         raise ValueError("unsupported selection objective")
     for section in policy["engineering"].values():
         for name, value in section.items():
