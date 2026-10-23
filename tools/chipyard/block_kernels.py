@@ -37,6 +37,69 @@ def integer(value):
     return value
 
 
+def full_bundle(root, workload):
+    """Use the existing checksum/image provider without importing a model."""
+    directory = safe_path(ROOT / "tools/host_iss")
+    sys.path.insert(0, str(directory))
+    import full_bundle as provider
+    if safe_path(provider.__file__) != directory / "full_bundle.py":
+        raise ValueError("full bundle provider imported from another source")
+    return provider.FullBundle(safe_path(root), workload)
+
+
+def prepare_full(bundle_root, workload, out):
+    """Adapt the existing fixture-freeze layout to full shared-asset bundles."""
+    bundle_root, out = safe_path(bundle_root), safe_path(out)
+    if out.exists():
+        raise ValueError("fresh preparation directory required")
+    sources = [Path(__file__), *(ROOT / "tools/host_iss" / filename for filename in
+               ("full_bundle.py", "bundle.py", "block_bundle.py")),
+               ROOT / "tools/atlas_path_guard.py", ROOT / "tools/atlas_tooling.py"]
+    pins = {str(safe_path(path)): sha(safe_path(path).read_bytes()) for path in sources}
+    bundle = full_bundle(bundle_root, workload)
+    out.mkdir(parents=True)
+    receipt = dict(status="FAILED", workload=workload, kernel_count=bundle.kernel_count,
+                   bundle_root=str(bundle_root), source_sha256=pins,
+                   bundle_sha256sums_sha256=bundle.checksums_sha256,
+                   hardware_execution=False, full_host_execution=False)
+    try:
+        rows = []
+        for index in range(bundle.kernel_count):
+            descriptor = bundle.kernel_paths(index)
+            program = bundle.read(descriptor["original"])
+            initial = bundle.initial_dram(index)
+            output = bundle.read(descriptor["expected"])
+            offset = descriptor["output_offset"]
+            expected = bytearray(initial)
+            expected[offset:offset + len(output)] = output
+            item = name(f"{workload}-{index:05d}")
+            directory = out / item
+            directory.mkdir()
+            row = dict(id=item, dram_base=descriptor["dram_base"],
+                       output_ranges=[dict(offset=offset, size=len(output))],
+                       source_bundle=str(bundle_root), source_index=index,
+                       source_bundle_sha256sums_sha256=bundle.checksums_sha256,
+                       source_descriptor=descriptor)
+            for key, raw in (("program", program), ("initial_dram", initial), ("expected_dram", expected)):
+                path = directory / (key + ".bin")
+                path.write_bytes(raw)
+                row[key + "_bin"], row[key + "_sha256"] = str(path), sha(raw)
+            rows.append(row)
+        bundle.verify_bookends()
+        if any(sha(safe_path(path).read_bytes()) != digest for path, digest in pins.items()):
+            raise ValueError("preparation source changed")
+        manifest = out / "manifest.json"
+        write_json(manifest, dict(schema=SCHEMA, programs=rows))
+        receipt.update(status="PASS_PREPARED_INPUTS_ONLY", source_bookends_equal=True,
+                       manifest=str(manifest), manifest_sha256=sha(manifest.read_bytes()))
+        return receipt
+    except Exception as error:
+        receipt["error"] = dict(type=type(error).__name__, message=str(error))
+        raise
+    finally:
+        write_json(out / "preparation.json", receipt)
+
+
 def read_manifest(path):
     """Resolve explicitly hashed assets without executing any producer or simulator."""
     path = safe_path(path)
@@ -259,6 +322,10 @@ def collect_results(build_root, runs_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
+    prepare = actions.add_parser("prepare-full")
+    prepare.add_argument("--bundle-root", required=True, type=Path)
+    prepare.add_argument("--workload", choices=("tiny-full", "smol-full"), required=True)
+    prepare.add_argument("--out", required=True, type=Path)
     build = actions.add_parser("build")
     build.add_argument("--manifest", required=True, type=Path)
     build.add_argument("--cc", default=os.environ.get("RISCV_CC", "riscv64-unknown-elf-gcc"))
@@ -276,6 +343,9 @@ def main():
     results.add_argument("--runs-root", required=True, type=Path)
     results.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
+    if args.action == "prepare-full":
+        print(json.dumps(prepare_full(args.bundle_root, args.workload, args.out), sort_keys=True))
+        return 0
     if args.action == "build":
         rows, out = read_manifest(args.manifest), safe_path(args.out)
         compiler = shutil.which(args.cc)

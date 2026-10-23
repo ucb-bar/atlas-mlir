@@ -175,5 +175,87 @@ class BlockKernelsTest(unittest.TestCase):
         with self.assertRaises(ValueError): kernels.load_batch(out)
 
 
+class FullPreparationTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='atlas-full-soc-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def bundle(self, name='bundle', mutate=None):
+        root = self.root / name
+        program = struct.pack('<2I', 0x13, 0x73)
+        initial = b'a' * 1024 + b'w' * 1024 + b'\xa5' * 256 + b'\xcd' * 2048 + b'\x5a' * 256
+        descriptor = dict(source='assets/program.S', original='assets/program.bin',
+                          activation='assets/a.bin', weights='assets/w.bin', expected='assets/out.bin',
+                          physical_mkn=[32, 32, 32], output_offset=2304, total_dram_bytes=len(initial),
+                          initial_sha256=sha(initial), dram_base=0x100000000,
+                          requested_dma=dict(load_bytes=2048, store_bytes=2048))
+        provenance = dict(schema='atlas.full_bundle.v1', workload='tiny-full', kernel_count=2,
+                          kernels=[descriptor, dict(descriptor)], contract='contract.json',
+                          contract_sha256=sha(b'{}'))
+        if mutate:
+            mutate(provenance)
+        files = {'host/host.elf': b'not executed', 'host/build.json': b'{}', 'contract.json': b'{}',
+                 'provenance.json': json.dumps(provenance).encode(),
+                 'assets/program.S': b'nop\necall\n', 'assets/program.bin': program,
+                 'assets/a.bin': b'a' * 1024, 'assets/w.bin': b'w' * 1024, 'assets/out.bin': b'e' * 2048}
+        for filename, raw in files.items():
+            path = root / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        (root / 'SHA256SUMS').write_text(''.join(sha(raw) + '  ' + filename + '\n'
+                                               for filename, raw in files.items()))
+        return root, program, initial
+
+    def test_full_images_preserve_program_inputs_guards_and_duplicate_launches(self):
+        root, program, initial = self.bundle()
+        receipt = kernels.prepare_full(root, 'tiny-full', self.root / 'prepared')
+        self.assertEqual(receipt['status'], 'PASS_PREPARED_INPUTS_ONLY')
+        self.assertTrue(receipt['source_bookends_equal'])
+        self.assertFalse(receipt['hardware_execution'])
+        rows = kernels.read_manifest(Path(receipt['manifest']))
+        self.assertEqual([row['id'] for row in rows], ['tiny-full-00000', 'tiny-full-00001'])
+        for index, row in enumerate(rows):
+            original, _, before, after, base, ranges = kernels.admit(row, Admission())
+            self.assertEqual(original, program)
+            self.assertEqual(before, initial)
+            self.assertEqual(after, initial[:2304] + b'e' * 2048 + initial[4352:])
+            self.assertEqual((base, ranges), (0x100000000, [(2304, 2048)]))
+            self.assertEqual(row['source_index'], index)
+
+    def test_changed_shared_asset_or_image_contract_fails_before_output(self):
+        root, _, _ = self.bundle()
+        (root / 'assets/w.bin').write_bytes(b'x' * 1024)
+        out = self.root / 'changed'
+        with self.assertRaises(ValueError):
+            kernels.prepare_full(root, 'tiny-full', out)
+        self.assertFalse(out.exists())
+        root, _, _ = self.bundle('bad-image', lambda p: p['kernels'][0].update(initial_sha256='0' * 64))
+        with self.assertRaises(ValueError):
+            kernels.prepare_full(root, 'tiny-full', out)
+        self.assertFalse(out.exists())
+
+    def test_late_bookend_failure_retains_failed_evidence_without_manifest(self):
+        root, _, _ = self.bundle()
+        provider = kernels.full_bundle(root, 'tiny-full')
+        out = self.root / 'partial'
+        with mock.patch.object(kernels, 'full_bundle', return_value=provider), \
+             mock.patch.object(provider, 'verify_bookends', side_effect=ValueError('changed source')):
+            with self.assertRaises(ValueError):
+                kernels.prepare_full(root, 'tiny-full', out)
+        self.assertFalse((out / 'manifest.json').exists())
+        self.assertEqual(json.loads((out / 'preparation.json').read_text())['status'], 'FAILED')
+        self.assertTrue((out / 'tiny-full-00000/program.bin').is_file())
+
+    def test_existing_and_restricted_outputs_are_refused_before_bundle_read(self):
+        out = self.root / 'exists'
+        out.mkdir()
+        with mock.patch.object(kernels, 'full_bundle') as provider:
+            for path in (out, self.root / 'forbidden-HaMmEr-copy'):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    kernels.prepare_full(self.root / 'absent', 'tiny-full', path)
+            provider.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
