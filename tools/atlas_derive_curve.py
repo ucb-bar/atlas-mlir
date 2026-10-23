@@ -6,6 +6,8 @@ in atlas_validate_curve.py and cannot supply values to this extractor.
 """
 from __future__ import annotations
 
+from atlas_model_diagnostics import UnsupportedModelTiming
+
 import ast
 import hashlib
 import inspect
@@ -17,7 +19,7 @@ from atlas_derive_mxu import _read, _one, _method
 from atlas_model_schema import LOCK, SOURCE_SHAPES, ast_digest
 
 
-class UnsupportedCurve(ValueError):
+class UnsupportedCurve(UnsupportedModelTiming):
     """Source, curve or configuration has no reviewed DMA interpretation."""
 
 

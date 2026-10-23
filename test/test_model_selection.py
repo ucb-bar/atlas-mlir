@@ -9,6 +9,7 @@ import os
 import random
 import re
 from collections import Counter
+from concurrent.futures import Future
 from itertools import permutations
 from pathlib import Path
 import subprocess
@@ -330,6 +331,31 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["fifo43_tiebreak_cache_entries"], 2)
         self.assertEqual(json.loads((self.directory / "compiled/selection.json").read_text())["candidates"][4]["fifo43_cycles"], 8)
 
+    def test_programming_errors_during_fifo43_tie_scoring_propagate(self):
+        def tied_run(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
+                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 8}], "cycles": 5}
+            return result
+
+        for deferred in (False, True):
+            for error_type in (TypeError, KeyError):
+                error = error_type("unexpected tie scorer bug")
+                def scorer(program, profile):
+                    if profile == "curve":
+                        return program["cycles"]
+                    if deferred:
+                        future = Future()
+                        future.set_exception(error)
+                        return future
+                    raise error
+                name = f"tie-bug-{deferred}-{error_type.__name__}"
+                with self.subTest(deferred=deferred, error_type=error_type), \
+                        self.assertRaises(error_type) as raised:
+                    self.select(name=name, runner=tied_run, profile="curve", curve_candidates=False,
+                                max_candidates=5, workers=1, scorer=scorer)
+                self.assertIs(raised.exception, error)
+
     def test_unique_curve_minimum_never_scores_fifo43(self):
         def scorer(program, profile):
             self.assertEqual(profile, "curve")
@@ -454,6 +480,14 @@ with TemporaryDirectory() as directory:
             self.assertFalse((self.directory / str(index) / "program.json").exists())
             receipt = json.loads((self.directory / str(index) / "selection.json").read_text())
             self.assertEqual(receipt["candidates"][index]["error_stage"], "score")
+
+    def test_programming_errors_during_candidate_scoring_propagate(self) -> None:
+        for index, error in enumerate((TypeError("scorer bug"), KeyError("scorer bug"))):
+            def scorer(program, **_):
+                raise error
+            with self.subTest(error=error), self.assertRaises(type(error)) as raised:
+                self.select(name="unexpected-" + str(index), max_candidates=1, scorer=scorer)
+            self.assertIs(raised.exception, error)
 
     def test_all_refusals_raise_no_legal_candidate(self) -> None:
         with self.assertRaisesRegex(ValueError, "no legal candidate"):

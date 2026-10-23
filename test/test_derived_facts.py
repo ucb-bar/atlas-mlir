@@ -15,6 +15,9 @@ import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
 from atlas_model_facts import safe_path, identity
+from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingEvidenceError, with_update_guidance
+from atlas_model_selection import evidence_option
+import atlas_model_pairs as pairs
 
 
 def retained_probe_cases():
@@ -51,6 +54,49 @@ def retained_probe_cases():
 
 
 class DerivationGateTest(unittest.TestCase):
+
+    def test_refusals_end_with_one_shared_model_update_guidance_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "vpu.py"
+            source.write_text("def changed_timing():\n    return 0\n")
+            cfg = SimpleNamespace(arch_state_config=SimpleNamespace(mrf_depth=16, mrf_width=32,
+                                                                   wb_width=1024, num_wb_registers=2))
+            raw = {key: [] for key in ("architectural_states", "control_states", "pre_edges")}
+            raw.update(initial_state_sha256="a", final_state_sha256="b", first_free_age=2,
+                       complete_count=1, total_instructions=1, busy_cycles=2, instruction_word=0,
+                       configuration={}, reservations=[])
+            block = dict(name="xlu.transpose", first_free_age=2, events={})
+            def validate():
+                with patch.object(timing, "isa_cases", return_value=[("xlu.transpose", "xlu", "probe")]), \
+                     patch.object(timing, "observe_case", side_effect=[(block, raw), (block, dict(raw, final_state_sha256="changed"))] * 2):
+                    timing.validate_derived(object(), {"xlu.transpose": block}, {}, Path(directory))
+            def missing_operation():
+                with patch.dict(sys.modules, {"npu_model.isa": SimpleNamespace(EXU=SimpleNamespace(VECTOR="vector"))}):
+                    derive._instruction(SimpleNamespace(isa=SimpleNamespace(operations={})), "vmov", None)
+            def invalid_overlap():
+                with patch.object(pairs, "project", side_effect=ModelTimingEvidenceError("selected facts hash mismatch")), \
+                     patch.object(sys, "argv", ["atlas_model_pairs.py", "--master", str(source),
+                                                "--validation", str(source), "--per-op", str(source),
+                                                "--output", str(Path(directory) / "out")]):
+                    pairs.main()
+            cases = [
+                ("source shape", lambda: derive._check_source(SimpleNamespace())),
+                ("unsupported semantics", lambda: mxu._plan("class DifferentEngine: pass")),
+                ("missing operation", missing_operation),
+                ("configuration mismatch", lambda: mxu.derive_mxu(cfg)),
+                ("validation failure", validate),
+                ("overlap validation CLI", invalid_overlap),
+            ]
+            with patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
+                for name, refuse in cases:
+                    with self.subTest(path=name):
+                        with self.assertRaises((ValueError, RuntimeError, SystemExit)) as raised:
+                            refuse()
+                        message = str(raised.exception)
+                        self.assertEqual(message.splitlines()[-1], UPDATE_GUIDANCE)
+                        self.assertEqual(message.count(UPDATE_GUIDANCE), 1)
+                        self.assertEqual(with_update_guidance(message), message)
+
     def test_manifest_rejects_symlink_root_before_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

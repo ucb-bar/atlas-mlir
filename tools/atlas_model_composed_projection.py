@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Project validated footprint rules and exact new pairs without modifying measured evidence."""
+from atlas_model_diagnostics import ModelTimingEvidenceError, model_timing_cli
+
 import argparse
 from collections import Counter, defaultdict
 import hashlib
@@ -38,7 +40,7 @@ def complete_relations(query):
     if "all_pair_relations" in query:
         supplied = sorted(query["all_pair_relations"], key=lambda entry: (entry["first_index"], entry["second_index"]))
         if supplied != result["all_pair_relations"]:
-            raise ValueError("query relation matrix differs from its actual operands")
+            raise ModelTimingEvidenceError("query relation matrix differs from its actual operands")
     return result
 
 
@@ -50,22 +52,22 @@ def project(per_op, base_pairs, pair_audit, chain_audit, queries, holdouts, outp
     operations, pairs, pa, ca, qs, hs = map(load, (per_op, base_pairs, pair_audit, chain_audit, queries, holdouts))
     if sha(per_op) != per_op_sha256 or operations["model"]["revision"] != MODEL_REVISION or \
             operations["model"]["configuration_sha256"] != CONFIGURATION_SHA256:
-        raise ValueError("unsupported per-operation evidence")
+        raise ModelTimingEvidenceError("unsupported per-operation evidence")
     if pa["master_sha256"] != ca["master_sha256"] or \
             pairs["projection"]["master_sha256"] != pa["master_sha256"] or \
             pa["per_operation_sha256"] != sha(per_op) or \
             ca["per_op_sha256"] != sha(per_op) or pairs["projection"]["per_op_sha256"] != sha(per_op):
-        raise ValueError("replay does not bind selected observations")
+        raise ModelTimingEvidenceError("replay does not bind selected observations")
     if pa.get("rule_source_sha256") != rule_source_sha256() or ca.get("rule_source_sha256") != rule_source_sha256():
-        raise ValueError("replay does not bind the current derivation rules")
+        raise ModelTimingEvidenceError("replay does not bind the current derivation rules")
     if hs.get("passed") is not True or not hs.get("results"):
-        raise ValueError("successful holdouts are required")
+        raise ModelTimingEvidenceError("successful holdouts are required")
     rules = RuleSet(operations)
     coverage, domains, counts = set(), defaultdict(set), defaultdict(Counter)
     for item in hs["results"]:
         result_path = safe_path(item["path"])
         if sha(result_path) != item["sha256"]:
-            raise ValueError("holdout receipt changed")
+            raise ModelTimingEvidenceError("holdout receipt changed")
         result = load(result_path)
         model = result.get("current_model", {})
         identity = model.get("model_identity", {})
@@ -77,16 +79,16 @@ def project(per_op, base_pairs, pair_audit, chain_audit, queries, holdouts, outp
                 identity.get("source_sha256") != operations["model"]["source_sha256"] or \
                 identity.get("numerical_data_sha256") != operations["model"]["numerical_data_sha256"] or \
                 model.get("engines_drained") is not True or model.get("completion_marker") != 1:
-            raise ValueError("holdout did not pass exact model and RTL checks")
+            raise ModelTimingEvidenceError("holdout did not pass exact model and RTL checks")
         query = complete_relations(result["query"])
         if result.get("measured_gaps") != query["gaps"] or model.get("measured_gaps") != query["gaps"] or \
                 type(result.get("full_memory_checked_bytes")) is not int or result["full_memory_checked_bytes"] <= 0:
-            raise ValueError("holdout query differs from checked RTL/model issue gaps or memory coverage")
+            raise ModelTimingEvidenceError("holdout query differs from checked RTL/model issue gaps or memory coverage")
         engine = query["operations"][0].split(".")[0]
         if engine not in ("mxu0", "mxu1", "vpu") or any(op.split(".")[0] != engine for op in query["operations"]):
-            raise ValueError("holdout crosses supported engine groups")
+            raise ModelTimingEvidenceError("holdout crosses supported engine groups")
         if not compose(query, query["gaps"], rules, rules)["admitted"]:
-            raise ValueError("holdout is outside the derived rule")
+            raise ModelTimingEvidenceError("holdout is outside the derived rule")
         domains[engine].update(query["operations"])
         counts[engine]["holdout_chains" if len(query["operations"]) > 2 else "holdout_pairs"] += 1
         for first, second, rel, gap in live_pairs(query, rules):
@@ -99,7 +101,7 @@ def project(per_op, base_pairs, pair_audit, chain_audit, queries, holdouts, outp
         negatives = sum(entry.get("negative_descriptors", 0) for entry in entries)
         rejected = sum(entry.get("rejected_negatives", 0) for entry in entries)
         if total != accepted or negatives != rejected or not total or not negatives or not entries[0].get("positives"):
-            raise ValueError("engine did not achieve complete positive/negative replay agreement")
+            raise ModelTimingEvidenceError("engine did not achieve complete positive/negative replay agreement")
         engines[engine] = dict(operations=sorted(domains[engine]), chains=total, accepted_chains=accepted,
                                confirmed_chains=entries[0]["positives"], negative_points=negatives,
                                rejected_negatives=rejected, holdout_chains=counts[engine]["holdout_chains"],
@@ -152,7 +154,7 @@ def project(per_op, base_pairs, pair_audit, chain_audit, queries, holdouts, outp
             continue
         verdict = compose(query, query["gaps"], rules, PairCoverage())
         if not verdict["admitted"]:
-            raise ValueError("projected chain lacks a live admitted pair")
+            raise ModelTimingEvidenceError("projected chain lacks a live admitted pair")
         record = {key: query[key] for key in ("operations", "gaps", "all_pair_relations")}
         record["in_flight_count"] = verdict["peak_post_progress"]
         chains[canonical(record)] = record
@@ -179,6 +181,7 @@ def project(per_op, base_pairs, pair_audit, chain_audit, queries, holdouts, outp
     return receipt
 
 
+@model_timing_cli
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("per-op", "base-pairs", "pair-audit", "chain-audit", "queries", "holdouts", "output"):

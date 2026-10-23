@@ -20,6 +20,15 @@ using namespace mlir;
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
+std::string mlir::atlas::timing::modelTimingDiagnostic(llvm::StringRef message) {
+  constexpr llvm::StringLiteral guidance =
+      "See docs/model-timing.md#updating-for-npu-model-changes.";
+  std::string result = message.str();
+  for (size_t at; (at = result.find(guidance.str())) != std::string::npos;)
+    result.erase(at, guidance.size());
+  return llvm::StringRef(result).rtrim().str() + "\n" + guidance.str();
+}
+
 namespace {
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
@@ -27,7 +36,7 @@ using Array = llvm::json::Array;
 constexpr int kLinesPerBank = kVmemBankBytes / kLineBytes;
 
 llvm::Error factsError(const std::string &message) {
-  return llvm::createStringError(llvm::inconvertibleErrorCode(), "model timing facts: " + message);
+  return llvm::createStringError(llvm::inconvertibleErrorCode(), modelTimingDiagnostic("model timing facts: " + message));
 }
 
 bool supportedConfiguration(const Object &cfg) {
@@ -1081,7 +1090,11 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   TimingProvider provider;
   provider.id = kModelTimingProviderId.str();
   provider.proposalFactsSha256 = facts->factsSha256();
-  provider.dmaEstimate = [facts](int64_t bytes, bool store) { return facts->estimateDMACycles(bytes, store); };
+  provider.dmaEstimate = [facts](int64_t bytes, bool store) {
+    auto result = facts->estimateDMACycles(bytes, store);
+    if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
+    return result;
+  };
   provider.costProbes = [](const OpInfo &op) {
     Instr first{&op, 0, 2, 4}, second{&op, 6, 8, 10};
     if (op.engine == Engine::Scalar) {
@@ -1129,8 +1142,15 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
     }
     return TimingRuleResult<std::pair<Instr, Instr>>{{first, second}, {}};
   };
-  provider.validateScope = modelScope;
-  provider.footprint = [facts](const Instr &in, const RegValues &regs) { return facts->resolve(in, regs); };
+  provider.validateScope = [](const AtlasStream &stream) {
+    auto error = modelScope(stream);
+    return error.empty() ? error : modelTimingDiagnostic(error);
+  };
+  provider.footprint = [facts](const Instr &in, const RegValues &regs) {
+    auto result = facts->resolve(in, regs);
+    if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
+    return result;
+  };
   provider.dependence = [facts, overlap](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     return TimingRuleResult<Dependence>{observedDependence(a, fa, b, fb, facts.get(), overlap.get()), {}};
   };
@@ -1176,7 +1196,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   return provider;
 }
 
-TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory(ModuleOp module) {
+static TimingRuleResult<TimingProvider> modelTimingProviderFactoryImpl(ModuleOp module) {
   if (!module) return {{}, "model requires selected atlas.model_evidence"};
   auto selection = module->getAttrOfType<DictionaryAttr>(kAtlasModelEvidence);
   if (!selection) return {{}, "model requires selected atlas.model_evidence"};
@@ -1216,6 +1236,12 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory
                               chains && chains.getValue() == "true"), {}};
 }
 
+TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory(ModuleOp module) {
+  auto result = modelTimingProviderFactoryImpl(module);
+  if (!result.error.empty()) result.error = modelTimingDiagnostic(result.error);
+  return result;
+}
+
 namespace {
 struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectAtlasModelEvidencePass)
@@ -1233,7 +1259,7 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
   StringRef getDescription() const final { return "Pin model observations; timing passes select provider=model"; }
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    auto fail = [&](const std::string &why) { module.emitError(why); signalPassFailure(); };
+    auto fail = [&](const std::string &why) { module.emitError(modelTimingDiagnostic(why)); signalPassFailure(); };
     if (auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState); state && state.getValue() == "timed")
       return fail("select model evidence before timing; already timed input must be retimed");
     if (module->hasAttr(kAtlasTimingProvider)) return fail("model selection cannot replace a retained timing provider");

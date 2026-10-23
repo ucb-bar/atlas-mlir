@@ -15,6 +15,9 @@ namespace timing {
 constexpr llvm::StringLiteral kModelTimingProviderId = "model";
 class ModelOverlapFacts;
 
+// Shared recovery line for model derivation/evidence refusals; nesting is idempotent.
+std::string modelTimingDiagnostic(llvm::StringRef message);
+
 struct ModelTimingGroup {
   int firstAge = 0, lastAge = 0, count = 0, step = 1;
 };

@@ -2,6 +2,8 @@
 """Observe isolated operation timing from an explicitly selected model."""
 from __future__ import annotations
 
+from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError
+
 from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import asdict, replace
@@ -79,11 +81,11 @@ def isa_cases(cfg):
     for mnemonic, operation in cfg.isa.operations.items():
         if mnemonic not in names:
             if operation.exu in engines:
-                raise RuntimeError(f"ISA operation has no timing vocabulary: {mnemonic}")
+                raise UnsupportedModelTiming(f"ISA operation has no timing vocabulary: {mnemonic}")
             continue
         name, engine = names[mnemonic]
         if operation.exu in engines and engines[operation.exu] != engine:
-            raise RuntimeError(f"ISA execution unit differs for {mnemonic}")
+            raise UnsupportedModelTiming(f"ISA execution unit differs for {mnemonic}")
         def operand(param):
             if isinstance(param, Bundled):
                 return f"{operand(param.imm)}({operand(param.reg)})"
@@ -101,11 +103,11 @@ def isa_cases(cfg):
                 return "acc0"
             if issubclass(typ, int) and role == "imm":
                 return "0"
-            raise RuntimeError(f"unsupported ISA operand {mnemonic}: {typ.__name__}/{role}")
+            raise UnsupportedModelTiming(f"unsupported ISA operand {mnemonic}: {typ.__name__}/{role}")
         assembly = mnemonic + " " + ", ".join(operand(param) for param in operation.params)
         found[name] = (name, engine, assembly)
     if len(found) != len(names):
-        raise RuntimeError("selected ISA is missing supported timing operations")
+        raise UnsupportedModelTiming("selected ISA is missing supported timing operations")
     return [found[name] for name, _ in names.values()]
 
 
@@ -364,7 +366,7 @@ def validate_derived(cfg, candidates, releases, output_dir):
                     raise RuntimeError("source-derived reservation releases differ from model calls")
                 check.update(passed=True, releases_equal=True, result_sha256=sha256(encoded(result_signature(raw))))
                 accepted.append(block)
-            except Exception as error:
+            except (ValueError, RuntimeError) as error:
                 check["error"] = f"{type(error).__name__}: {error}"
         if len(accepted) == 2 and accepted[0] == accepted[1]:
             observed_blocks.append(accepted[0])
@@ -376,5 +378,5 @@ def validate_derived(cfg, candidates, releases, output_dir):
                             ("observed-blocks.json", observed_blocks)):
         (output_dir / filename).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
     if not passed:
-        raise RuntimeError(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
+        raise ModelTimingValidationError(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
     return report, runs

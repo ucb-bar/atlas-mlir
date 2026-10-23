@@ -71,7 +71,7 @@ def main() -> int:
             select_program(args.source, args.output_dir, args.atlas_bin_dir,
                            spill=True, spill_mxu=True, guarded_pack=args.guarded_pack, **model_arguments(args))
         except (OSError, ValueError) as error:
-            print(str(error), file=sys.stderr)
+            print(error, file=sys.stderr)
             return 1
         return 0
     try:

@@ -8,6 +8,11 @@ search exposes existing lowering choices and optional legal order mutations.
 
 from __future__ import annotations
 
+if __package__:
+    from .atlas_model_diagnostics import ModelTimingEvidenceError
+else:
+    from atlas_model_diagnostics import ModelTimingEvidenceError
+
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
@@ -229,7 +234,7 @@ def proposal_estimate(graph: dict, order: tuple[int, ...]) -> tuple[int, int]:
 def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
     """Fail closed before ranking if metadata differs from the scored parent's facts."""
     def reject(why):
-        raise ValueError("curve proposal metadata: " + why)
+        raise ModelTimingEvidenceError("curve proposal metadata: " + why)
 
     evidence = program.get("model_evidence") if isinstance(program, dict) else None
     identity = evidence.get("op_timing_sha256") if isinstance(evidence, dict) else None
@@ -472,7 +477,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 row["cycles"] = cached.result() if isinstance(cached, Future) else cached
             row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
-        except Exception as error:
+        except (OSError, ValueError, RuntimeError) as error:
             row.update(status="FAIL", error=str(error), error_stage=stage)
         finally:
             row["elapsed_seconds"] = time.monotonic() - before
@@ -517,13 +522,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                         try:
                             cached, row["fifo43_score_cache_hit"] = cached_score(program, "fifo43")
                             pending_scores.append((row, cached))
-                        except Exception as error:
+                        except (OSError, ValueError, RuntimeError) as error:
                             row.update(status="FAIL", error=str(error), error_stage="score")
                             fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
                 for row, cached in pending_scores:
                     try:
                         row["fifo43_cycles"] = cached.result() if isinstance(cached, Future) else cached
-                    except Exception as error:
+                    except (OSError, ValueError, RuntimeError) as error:
                         row.update(status="FAIL", error=str(error), error_stage="score")
                         fail(f"candidate {row['index']} failed FIFO43 tie scoring: {error}")
                 best = min(tied, key=lambda row: (row["fifo43_cycles"], row["index"]))
@@ -714,7 +719,7 @@ def main() -> int:
                                  boundary=args.boundary, spill=not args.no_spill,
                                  guarded_pack=args.guarded_pack, **model_arguments(args))
     except (OSError, ValueError) as error:
-        print(str(error), file=sys.stderr)
+        print(error, file=sys.stderr)
         return 1
     print(json.dumps({key: receipt[key] for key in ("selected_index", "selected_class", "default_cycles",
                                                   "selected_cycles", "elapsed_seconds")}))

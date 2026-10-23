@@ -2,6 +2,8 @@
 """Replay measured-pair composition and explicit structural capacity; emit no admissions."""
 from __future__ import annotations
 
+from atlas_model_diagnostics import model_timing_cli
+
 import argparse
 from collections import Counter, defaultdict
 import hashlib
@@ -187,6 +189,7 @@ def replay(data, per_op, output, per_op_sha256):
     return summary
 
 
+@model_timing_cli
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--master', type=Path)

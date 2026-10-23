@@ -7,6 +7,8 @@ the immutable producer master; this projection creates no confirmation claim.
 """
 from __future__ import annotations
 
+from atlas_model_diagnostics import ModelTimingEvidenceError, model_timing_cli
+
 import argparse
 import codecs
 from collections import Counter, defaultdict
@@ -154,7 +156,7 @@ def safe_path(path):
 def read_pinned(path, expected):
     data = safe_path(path).read_bytes()
     if not re.fullmatch("[0-9a-f]{64}", expected) or sha256(data) != expected:
-        raise ValueError("artifact SHA-256 mismatch")
+        raise ModelTimingEvidenceError("artifact SHA-256 mismatch")
     return json.loads(data)
 
 
@@ -169,7 +171,7 @@ class RecordReader:
 
     def more(self):
         if self.eof:
-            raise ValueError("truncated master JSON")
+            raise ModelTimingEvidenceError("truncated master JSON")
         data = self.stream.read(65536)
         self.digest.update(data)
         self.eof = not data
@@ -186,7 +188,7 @@ class RecordReader:
 
     def take(self, expected):
         if self.peek() != expected:
-            raise ValueError("unexpected master JSON delimiter")
+            raise ModelTimingEvidenceError("unexpected master JSON delimiter")
         self.position += 1
 
     def value(self):
@@ -205,7 +207,7 @@ class RecordReader:
         while self.peek() != "}":
             key = self.value()
             if not isinstance(key, str) or key in seen:
-                raise ValueError("duplicate or invalid master root key")
+                raise ModelTimingEvidenceError("duplicate or invalid master root key")
             seen.add(key)
             self.take(":")
             if key in {"pairs", "chains"}:
@@ -217,30 +219,30 @@ class RecordReader:
                     if self.peek() == ",":
                         self.take(",")
                         if self.peek() == "]":
-                            raise ValueError("trailing master array comma")
+                            raise ModelTimingEvidenceError("trailing master array comma")
                     elif self.peek() != "]":
-                        raise ValueError("invalid master array")
+                        raise ModelTimingEvidenceError("invalid master array")
                 self.take("]")
             else:
                 yield key, None, self.value()
             if self.peek() == ",":
                 self.take(",")
                 if self.peek() == "}":
-                    raise ValueError("trailing master object comma")
+                    raise ModelTimingEvidenceError("trailing master object comma")
             elif self.peek() != "}":
-                raise ValueError("invalid master object")
+                raise ModelTimingEvidenceError("invalid master object")
         self.take("}")
         if self.buffer[self.position:].strip():
-            raise ValueError("trailing master JSON content")
+            raise ModelTimingEvidenceError("trailing master JSON content")
         while True:
             data = self.stream.read(65536)
             self.digest.update(data)
             if self.utf8.decode(data, final=not data).strip():
-                raise ValueError("trailing master JSON content")
+                raise ModelTimingEvidenceError("trailing master JSON content")
             if not data:
                 break
         if not {"schema", "model", "age_convention", "pairs", "chains"} <= seen:
-            raise ValueError("incomplete master root")
+            raise ModelTimingEvidenceError("incomplete master root")
 
 
 def integer(value, minimum=0):
@@ -269,50 +271,50 @@ def relations(record, kind):
 
 def validate_relation(relation):
     if not isinstance(relation, dict) or not set(relation) <= RELATION_KEYS or "mreg_banks" not in relation:
-        raise ValueError("unsupported or missing relation constraint")
+        raise ModelTimingEvidenceError("unsupported or missing relation constraint")
     for key, value in relation.items():
         if key == "mreg_banks":
             if value != "disjoint" and (not isinstance(value, str) or not re.fullmatch(r"\d+[=~]\d+(,\d+[=~]\d+)*", value)):
-                raise ValueError("invalid MREG relation")
+                raise ModelTimingEvidenceError("invalid MREG relation")
         elif not isinstance(value, str) or value not in RELATION_VALUES[key]:
-            raise ValueError("invalid relation qualifier")
+            raise ModelTimingEvidenceError("invalid relation qualifier")
     mode = relation.get("scalar_registers")
     if mode is None:
         if set(relation) & {"scalar_destination_file", "scalar_other_registers"}:
-            raise ValueError("scalar roles lack a joint register mode")
+            raise ModelTimingEvidenceError("scalar roles lack a joint register mode")
     elif mode == "independent":
         if "scalar_destination_file" in relation:
-            raise ValueError("independent roles cannot specify a destination alias")
+            raise ModelTimingEvidenceError("independent roles cannot specify a destination alias")
     else:
         if relation.get("scalar_other_registers") != "independent":
-            raise ValueError("scalar alias must constrain other registers")
+            raise ModelTimingEvidenceError("scalar alias must constrain other registers")
         if mode == "shared_base_read_only":
             if "scalar_destination_file" in relation:
-                raise ValueError("shared read-only base has no destination alias")
+                raise ModelTimingEvidenceError("shared read-only base has no destination alias")
         elif relation.get("scalar_destination_file") not in ({"xrf", "erf"} if mode == "same_load_destination" else {"xrf"}):
-            raise ValueError("scalar alias has an invalid destination file")
+            raise ModelTimingEvidenceError("scalar alias has an invalid destination file")
     if relation.get("scalar_address_alignment") == "explicit_byte_offsets":
         for side in ("first", "second"):
             if relation.get(side + "_mnemonic") not in {"vload", "vstore"} and side + "_scalar_byte_offset" not in relation:
-                raise ValueError("explicit alignment lacks scalar byte offset")
+                raise ModelTimingEvidenceError("explicit alignment lacks scalar byte offset")
     elif any(key.endswith("scalar_byte_offset") for key in relation):
-        raise ValueError("scalar byte offsets require explicit alignment")
+        raise ModelTimingEvidenceError("scalar byte offsets require explicit alignment")
 
 
 def boundary(record):
     forms = set(record) & {"live_window", "first_completion_age", "first_live_window_end"}
     if len(forms) != 1:
-        raise ValueError("ambiguous pair live window")
+        raise ModelTimingEvidenceError("ambiguous pair live window")
     if "live_window" in forms:
         live = record["live_window"]
         if not isinstance(live, dict) or set(live) != {"first_completion_age", "high_includes_idle_boundary"}:
-            raise ValueError("unsupported nested live window")
+            raise ModelTimingEvidenceError("unsupported nested live window")
         if live["high_includes_idle_boundary"] is not True or not integer(live["first_completion_age"]):
-            raise ValueError("invalid nested live window")
+            raise ModelTimingEvidenceError("invalid nested live window")
         return live["first_completion_age"] + 1
     key = next(iter(forms))
     if not integer(record[key], 1 if key == "first_live_window_end" else 0):
-        raise ValueError("invalid pair live window")
+        raise ModelTimingEvidenceError("invalid pair live window")
     return record[key] + (key == "first_completion_age")
 
 
@@ -320,90 +322,90 @@ def validate_pair(record, blocks):
     validate_relation(record["relation"])
     swept, minimum = record["swept"], record["min_gap"]
     if not isinstance(swept, list) or len(swept) != 2 or not all(integer(v, 1) for v in swept):
-        raise ValueError("invalid pair sweep")
+        raise ModelTimingEvidenceError("invalid pair sweep")
     if swept[0] != 1 or not integer(minimum, 1) or not swept[0] <= minimum <= swept[1]:
-        raise ValueError("invalid stable pair minimum")
+        raise ModelTimingEvidenceError("invalid stable pair minimum")
     first_free = boundary(record)
     if first_free != blocks[record["first"]]["first_free_age"] or swept[1] < first_free:
-        raise ValueError("pair/per-operation live boundary mismatch")
+        raise ModelTimingEvidenceError("pair/per-operation live boundary mismatch")
     negative = record["negative"]
     if not isinstance(negative, dict) or not integer(negative.get("gap")) or negative.get("gap") != minimum - 1:
-        raise ValueError("missing exact one-short negative")
+        raise ModelTimingEvidenceError("missing exact one-short negative")
     if minimum == 1:
         if negative.get("result") != "inexpressible":
-            raise ValueError("gap zero must be inexpressible")
+            raise ModelTimingEvidenceError("gap zero must be inexpressible")
     elif (negative.get("result") != "conflict" or not isinstance(negative.get("error"), dict)
           or not negative["error"].get("message")):
-        raise ValueError("one-short negative must name a resource conflict")
+        raise ModelTimingEvidenceError("one-short negative must name a resource conflict")
 
 
 def validate_chain(record, blocks):
     names, gaps, matrix = record["operations"], record["gaps"], record["all_pair_relations"]
     if len(names) < 3 or len(gaps) != len(names) - 1 or not all(integer(gap, 1) for gap in gaps):
-        raise ValueError("invalid exact chain gaps")
+        raise ModelTimingEvidenceError("invalid exact chain gaps")
     if record.get("result") != "accepted" or record.get("relation_scope") != "adjacent":
-        raise ValueError("unsupported chain result or relation scope")
+        raise ModelTimingEvidenceError("unsupported chain result or relation scope")
     expected = {(i, j) for i in range(len(names)) for j in range(i + 1, len(names))}
     actual = set()
     for entry in matrix:
         if not isinstance(entry, dict) or set(entry) != {"first_index", "second_index", "relation"}:
-            raise ValueError("invalid chain relation entry")
+            raise ModelTimingEvidenceError("invalid chain relation entry")
         key = (entry["first_index"], entry["second_index"])
         if not all(type(v) is int for v in key) or key not in expected or key in actual:
-            raise ValueError("duplicate or invalid chain relation indices")
+            raise ModelTimingEvidenceError("duplicate or invalid chain relation indices")
         actual.add(key)
         validate_relation(entry["relation"])
     first_relation = next((entry["relation"] for entry in matrix
                            if (entry["first_index"], entry["second_index"]) == (0, 1)), None)
     if actual != expected or record["relation"] != first_relation:
-        raise ValueError("chain needs the complete exact relation matrix")
+        raise ModelTimingEvidenceError("chain needs the complete exact relation matrix")
     issues = issue_ages(gaps)
     peak = max(sum(start <= now < start + blocks[name]["first_free_age"] - 1
                    for start, name in zip(issues, names)) for now in issues)
     if not integer(record["in_flight_count"], 1) or peak != record["in_flight_count"]:
-        raise ValueError("chain post-progress peak mismatch")
+        raise ModelTimingEvidenceError("chain post-progress peak mismatch")
     for key in ("witness_only", "no_stable_suffix_claim"):
         if key in record and record[key] is not True:
-            raise ValueError("unsupported chain witness flag")
+            raise ModelTimingEvidenceError("unsupported chain witness flag")
     if record.get("witness_only") is True and record.get("no_stable_suffix_claim") is not True:
-        raise ValueError("witness chain must not claim a suffix")
+        raise ModelTimingEvidenceError("witness chain must not claim a suffix")
     if "fixed_prefix_gaps" in record and record["fixed_prefix_gaps"] != gaps[:-1]:
-        raise ValueError("chain fixed prefix differs from witnessed gaps")
+        raise ModelTimingEvidenceError("chain fixed prefix differs from witnessed gaps")
     for key in ("swept", "swept_last_gap", "swept_gap_range", "searched_final_gap"):
         if key in record:
             axis = record[key]
             if not isinstance(axis, list) or len(axis) != 2 or not all(integer(v, 1) for v in axis) or axis[0] > axis[1]:
-                raise ValueError("invalid chain axis bounds")
+                raise ModelTimingEvidenceError("invalid chain axis bounds")
     if "swept_last_gap" in record:
         lo, hi = record["swept_last_gap"]
         minimum = record.get("minimum_last_gap")
         if not integer(minimum, 1) or not lo <= minimum <= gaps[-1] <= hi:
-            raise ValueError("chain last gap differs from its evidence domain")
+            raise ModelTimingEvidenceError("chain last gap differs from its evidence domain")
     if "swept" in record:
         lo, hi = record["swept"]
         if len(set(gaps)) != 1 or not integer(record.get("min_gap"), 1) or not lo <= record["min_gap"] <= gaps[0] <= hi:
-            raise ValueError("uniform chain axis differs from exact vector")
+            raise ModelTimingEvidenceError("uniform chain axis differs from exact vector")
 
 
 def select_record(record, kind, index, blocks, qualified=True):
     if not isinstance(record, dict):
-        raise ValueError("invalid producer record")
+        raise ModelTimingEvidenceError("invalid producer record")
     proof = record.get("verilator")
     if not isinstance(proof, dict) or proof.get("confirmed") is False or "confirmed" not in proof:
         return None, "unconfirmed"
     if proof["confirmed"] is not True:
-        raise ValueError("confirmation must be literal boolean true")
+        raise ModelTimingEvidenceError("confirmation must be literal boolean true")
     if ("evidence_tier" in record or set(proof) - PROOF_FIELDS - PROOF_EVIDENCE_FIELDS or
             any("qualified" in str(proof.get(key, "")) for key in ("scope", "classification"))):
         return None, "unsupported_protocol"
     if "relation" in proof and proof["relation"] != record.get("relation"):
-        raise ValueError("proof relation differs from complete record relation")
+        raise ModelTimingEvidenceError("proof relation differs from complete record relation")
     if "result_sha256" in proof and (not isinstance(proof["result_sha256"], str)
                                      or not re.fullmatch("[0-9a-f]{64}", proof["result_sha256"])):
-        raise ValueError("invalid original result SHA-256")
+        raise ModelTimingEvidenceError("invalid original result SHA-256")
     if "same_accumulator" in proof and (type(proof["same_accumulator"]) is not bool or
             (record.get("relation", {}).get("accumulator") == "same") != proof["same_accumulator"]):
-        raise ValueError("proof accumulator alias differs from record")
+        raise ModelTimingEvidenceError("proof accumulator alias differs from record")
     names = [record.get("first"), record.get("second")] if kind == "pairs" else record.get("operations")
     if (not isinstance(names, list) or not names
             or any(not isinstance(n, str) or n not in blocks or group(n) is None for n in names)):
@@ -465,13 +467,13 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
         raise ValueError("output directory must be new")
     validation_value = read_pinned(validation, validation_pin)
     if validation_value.get("passed") is not True or validation_value.get("facts_sha256") != master_pin:
-        raise ValueError("validation does not bind the selected master")
+        raise ModelTimingEvidenceError("validation does not bind the selected master")
     operations = read_pinned(per_op, per_op_pin)
     if operations.get("schema") != "atlas.model_timing.v1" or operations.get("validation", {}).get("passed") is not True:
-        raise ValueError("requires gated per-operation facts")
+        raise ModelTimingEvidenceError("requires gated per-operation facts")
     blocks = {block["name"]: block for block in operations["op_timing"]}
     if len(blocks) != 49:
-        raise ValueError("requires all 49 gated operations")
+        raise ModelTimingEvidenceError("requires all 49 gated operations")
     result = dict(schema="atlas.model_pairs.v1", pairs=[], chains=[])
     seen, excluded = Counter(), Counter()
     with master.open("rb") as stream:
@@ -489,7 +491,7 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
             else:
                 result[key].append(selected)
         if reader.digest.hexdigest() != master_pin:
-            raise ValueError("master SHA-256 mismatch")
+            raise ModelTimingEvidenceError("master SHA-256 mismatch")
     pair_index = MeasuredPairs(result["pairs"], False).index
     chains = result["chains"]
     result["chains"] = [chain for chain in chains if covered_chain(chain, pair_index, blocks)]
@@ -497,16 +499,16 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
         excluded["chains:missing_live_pair"] += len(chains) - len(result["chains"])
     model = result.get("model", {})
     if result["schema"] != "atlas.model_pairs.v1" or result.get("age_convention") != "issue_edge_zero":
-        raise ValueError("unsupported master schema or ages")
+        raise ModelTimingEvidenceError("unsupported master schema or ages")
     if model.get("revision") != MODEL_REVISION or model.get("configuration_sha256") != CONFIGURATION_SHA256:
-        raise ValueError("unsupported model revision/configuration")
+        raise ModelTimingEvidenceError("unsupported model revision/configuration")
     if (model.get("revision") != operations["model"]["revision"]
             or model.get("configuration") != operations["model"]["configuration"]):
-        raise ValueError("pair and per-operation effective model identity differ")
+        raise ModelTimingEvidenceError("pair and per-operation effective model identity differ")
     if sha256(canonical(model["configuration"])) != CONFIGURATION_SHA256:
-        raise ValueError("effective model configuration hash mismatch")
+        raise ModelTimingEvidenceError("effective model configuration hash mismatch")
     if any(seen[key] != validation_value.get(key) for key in ("pairs", "chains")):
-        raise ValueError("validation counts do not match master")
+        raise ModelTimingEvidenceError("validation counts do not match master")
     result["projection"] = dict(version=2 if qualified else 1, policy=policy, master_sha256=master_pin,
                                 master_path=str(master.absolute()),
                                 validation_sha256=validation_pin, validation_path=str(validation.absolute()),
@@ -525,6 +527,7 @@ def project(master, validation, per_op, output, *, policy=POLICY, master_sha256=
     return receipt
 
 
+@model_timing_cli
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("master", "validation", "per-op", "output"):

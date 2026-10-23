@@ -20,7 +20,7 @@ using Array = llvm::json::Array;
 using Relation = std::map<std::string, std::string>;
 
 llvm::Error invalid(const std::string &why) {
-  return llvm::createStringError(llvm::inconvertibleErrorCode(), "model overlap facts: " + why);
+  return llvm::createStringError(llvm::inconvertibleErrorCode(), modelTimingDiagnostic("model overlap facts: " + why));
 }
 bool keys(const Object &object, std::initializer_list<llvm::StringRef> allowed) {
   for (const auto &[key, value] : object)
