@@ -829,6 +829,8 @@ private:
       eligible &= entry.eligible;
       if (live.size() == 1 && (!entry.eligible || !live[0]->eligible ||
                               !overlap->admits({live[0]->command, entry.command}, false))) return false;
+      // A retired MXU command can determine the port held by the remaining live push.
+      if (live.size() == 1 && epoch.size() >= 3 && overlap->rejectsPortHistory(epoch)) return false;
       if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains))) return false;
       history.push_back(&entry);
     }
@@ -1013,13 +1015,19 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory
   }
   std::shared_ptr<const ModelOverlapFacts> overlap;
   auto pairs = selection.getAs<StringAttr>("pairs"), pairsHash = selection.getAs<StringAttr>("pairs_sha256");
+  auto composed = selection.getAs<StringAttr>("composed"), composedHash = selection.getAs<StringAttr>("composed_sha256");
   auto chains = selection.getAs<StringAttr>("chains");
   if ((selection.get("pairs") && !pairs) || (selection.get("pairs_sha256") && !pairsHash) ||
       (selection.get("chains") && (!chains || (chains.getValue() != "true" && chains.getValue() != "false"))) ||
+      (selection.get("composed") && !composed) || (selection.get("composed_sha256") && !composedHash) ||
+      bool(composed) != bool(composedHash) || (composed && !pairs) ||
       bool(pairs) != bool(pairsHash) || (chains && !pairs)) return {{}, "incomplete model overlap selection"};
   if (pairs) {
     auto loaded = loadModelOverlapFacts(pairs.getValue(), pairsHash.getValue(), *facts);
     if (!loaded) return {{}, llvm::toString(loaded.takeError())};
+    if (composed)
+      if (auto error = loaded->loadComposedFacts(composed.getValue(), composedHash.getValue(), *facts))
+        return {{}, llvm::toString(std::move(error))};
     for (const auto &[key, value] : loaded->metadata()) {
       auto retained = selection.getAs<StringAttr>(key);
       if (!retained || retained.getValue() != value) return {{}, "model overlap provenance mismatch: " + key};
@@ -1040,6 +1048,8 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
   Option<std::string> dmaPolicy{*this, "dma", llvm::cl::desc("Optional DMA completion policy: wait")};
   Option<std::string> pairsPath{*this, "pairs", llvm::cl::desc("Optional confirmed compact atlas.model_pairs.v1 facts")};
   Option<std::string> pairsHash{*this, "pairs-sha256", llvm::cl::desc("Expected compact overlap facts SHA-256")};
+  Option<std::string> composedPath{*this, "composed", llvm::cl::desc("Optional validated derived overlap side projection")};
+  Option<std::string> composedHash{*this, "composed-sha256", llvm::cl::desc("Expected derived side projection SHA-256")};
   Option<bool> chains{*this, "chains", llvm::cl::desc("Enable exact confirmed chain witnesses"), llvm::cl::init(false)};
   StringRef getArgument() const final { return "select-atlas-model-evidence"; }
   StringRef getDescription() const final { return "Pin model observations; timing passes select provider=model"; }
@@ -1054,10 +1064,15 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     if (!facts) return fail(llvm::toString(facts.takeError()));
     if (pairsPath.empty() != pairsHash.empty() || (chains && pairsPath.empty()))
       return fail("pairs and pairs-sha256 are required together; chains requires pairs");
+    if (composedPath.empty() != composedHash.empty() || (!composedPath.empty() && pairsPath.empty()))
+      return fail("composed and composed-sha256 are required together and require pairs");
     std::shared_ptr<const ModelOverlapFacts> overlap;
     if (!pairsPath.empty()) {
       auto loaded = loadModelOverlapFacts(pairsPath, pairsHash, *facts);
       if (!loaded) return fail(llvm::toString(loaded.takeError()));
+      if (!composedPath.empty())
+        if (auto error = loaded->loadComposedFacts(composedPath, composedHash, *facts))
+          return fail(llvm::toString(std::move(error)));
       overlap = std::make_shared<ModelOverlapFacts>(std::move(*loaded));
     }
     Builder builder(module.getContext());
@@ -1069,6 +1084,7 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     for (const auto &[key, value] : facts->modelProvenance()) selection.set(key, builder.getStringAttr(value));
     if (overlap) {
       selection.set("pairs", builder.getStringAttr(pairsPath));
+      if (!composedPath.empty()) selection.set("composed", builder.getStringAttr(composedPath));
       selection.set("chains", builder.getStringAttr(chains ? "true" : "false"));
       for (const auto &[key, value] : overlap->metadata()) selection.set(key, builder.getStringAttr(value));
     }

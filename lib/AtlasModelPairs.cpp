@@ -7,6 +7,7 @@
 #include "llvm/Support/SHA256.h"
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <iterator>
 #include <set>
 
@@ -88,6 +89,14 @@ Relation actualRelation(const ModelOverlapCommand &first, const ModelOverlapComm
       result["weight_slot"] = first.weightSlot == second.weightSlot ? "same" : "other";
   }
   return result;
+}
+Relation relationClass(Relation relation) {
+  auto &banks = relation["mreg_banks"];
+  if (banks != "disjoint") {
+    bool equal = banks.find('=') != std::string::npos, shared = banks.find('~') != std::string::npos;
+    banks = equal && shared ? "mixed_alias" : equal ? "register_alias" : "bank_alias";
+  }
+  return relation;
 }
 // Match the complete producer relation. Optional qualifiers are predicates;
 // absent qualifiers never acquire invented constraints or resource capacity.
@@ -206,6 +215,37 @@ bool sameGroup(llvm::StringRef first, llvm::StringRef second) {
     return first == "scalar_lsu" && second == "scalar_lsu";
   auto vector = [](llvm::StringRef engine) { return engine == "vpu" || engine == "xlu"; };
   return first == second || (vector(first) && vector(second));
+}
+
+bool composedCapacity(const std::vector<ModelOverlapCommand> &commands) {
+  std::vector<std::set<int>> ports(commands.size());
+  for (size_t j = 0; j < commands.size(); ++j) {
+    const auto &next = commands[j];
+    llvm::StringRef name(next.block);
+    if (name.starts_with("vpu.")) {
+      int live = 0;
+      for (size_t i = 0; i < j; ++i)
+        live += next.issue - commands[i].issue < commands[i].firstFreeAge - 1;
+      if (live >= 2) return false;
+      continue;
+    }
+    std::set<int> busy;
+    int computes = 0;
+    for (size_t i = 0; i < j; ++i) {
+      int gap = next.issue - commands[i].issue;
+      if (gap < 32) busy.insert(ports[i].begin(), ports[i].end());
+      computes += llvm::StringRef(commands[i].block).contains(".matmul") && gap <= commands[i].firstFreeAge - 1;
+    }
+    if (name.contains(".matmul")) {
+      if (computes >= (name.starts_with("mxu0.") ? 3 : 2)) return false;
+      ports[j] = {0};
+    } else if (name.ends_with("push_acc_bf16")) ports[j] = {0, 1};
+    else if (name.ends_with("pop_acc_bf16")) ports[j] = {2, 3};
+    else if (name.ends_with("pop_acc_fp8")) ports[j] = {2};
+    else ports[j] = {busy.count(1) ? 0 : 1};
+    for (int port : ports[j]) if (busy.count(port)) return false;
+  }
+  return true;
 }
 
 bool qualifiedConstraint(llvm::StringRef key, const llvm::json::Value &value) {
@@ -332,7 +372,47 @@ bool proofGaps(const Object &record, const std::vector<int> &expected) {
 }
 } // namespace
 
+bool ModelOverlapFacts::rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const {
+  if (!provenance.count("composed_sha256") || commands.empty()) return false;
+  auto engine = llvm::StringRef(commands.front().block).split('.').first;
+  if (engine != "mxu0" && engine != "mxu1") return false;
+  for (const auto &command : commands) {
+    auto [unit, kind] = llvm::StringRef(command.block).split('.');
+    if (unit != engine || (kind != "matmul" && kind != "matmul_acc" && kind != "push_weight" &&
+        kind != "push_acc_fp8" && kind != "push_acc_bf16" && kind != "pop_acc_fp8" && kind != "pop_acc_bf16"))
+      return true;
+  }
+  return !composedCapacity(commands);
+}
+
 bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const {
+  auto reportQuery = [&](llvm::StringRef reason, bool admitted = false) {
+    if (!std::getenv("ATLAS_MODEL_LOG_UNMATCHED")) return admitted;
+    Array operations, gaps, operands, matrix;
+    for (size_t i = 0; i < commands.size(); ++i) {
+      const auto &command = commands[i];
+      operations.push_back(command.block);
+      if (i) gaps.push_back(command.issue - commands[i - 1].issue);
+      Array registers;
+      for (int reg : command.registers) registers.push_back(reg);
+      Object operand{{"registers", std::move(registers)}};
+      if (command.accumulator) operand["accumulator"] = *command.accumulator;
+      if (command.weightSlot) operand["weight_slot"] = *command.weightSlot;
+      operands.push_back(std::move(operand));
+      for (size_t j = 0; j < i; ++j) {
+        Object relation;
+        for (const auto &[key, value] : actualRelation(commands[j], command)) relation[key] = value;
+        matrix.push_back(Object{{"first_index", int64_t(j)}, {"second_index", int64_t(i)},
+                               {"relation", std::move(relation)}});
+      }
+    }
+    std::string query = canonicalJson(Object{{"reason", reason.str()}, {"operations", std::move(operations)},
+        {"gaps", std::move(gaps)}, {"operands", std::move(operands)}, {"all_pair_relations", std::move(matrix)},
+        {"in_flight_count", peak(commands)}});
+    std::string message = (admitted ? "ATLAS_MODEL_COMPOSED " : "ATLAS_MODEL_UNMATCHED ") + query;
+    if (loggedQueries.insert(message).second) llvm::errs() << message << "\n";
+    return admitted;
+  };
   auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) {
     int gap = second.issue - first.issue;
     for (const Pair &pair : pairs)
@@ -340,12 +420,25 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
           matchesRelation(pair.relation, first, second)) return true;
     return false;
   };
-  if (commands.size() == 2) return admitsPair(commands[0], commands[1]);
+  if (commands.size() == 2) return admitsPair(commands[0], commands[1]) || reportQuery("pair");
   if (!chains || commands.size() < 3) return false;
   for (size_t i = 0; i < commands.size(); ++i)
     for (size_t j = i + 1; j < commands.size(); ++j)
       if (commands[j].issue - commands[i].issue < commands[i].firstFreeAge &&
-          !admitsPair(commands[i], commands[j])) return false;
+          !admitsPair(commands[i], commands[j])) return reportQuery("chain_live_pair");
+  std::string engine = llvm::StringRef(commands.front().block).split('.').first.str();
+  auto scope = compositionClasses.find(engine);
+  if (scope != compositionClasses.end()) {
+    bool covered = composedCapacity(commands);
+    for (size_t i = 0; i < commands.size(); ++i) {
+      covered &= llvm::StringRef(commands[i].block).split('.').first == engine;
+      covered &= composedOperations.count(commands[i].block);
+      for (size_t j = 0; j < i; ++j)
+        if (commands[i].issue - commands[j].issue < commands[j].firstFreeAge)
+          covered &= scope->second.count(relationClass(actualRelation(commands[j], commands[i])));
+    }
+    if (covered) return reportQuery("chain", true);
+  }
   for (const Chain &chain : sequences) {
     if (chain.operations.size() != commands.size() || chain.inFlight != peak(commands)) continue;
     bool matched = true;
@@ -357,7 +450,7 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
     }
     if (matched) return true;
   }
-  return false;
+  return reportQuery("chain");
 }
 
 llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
@@ -603,4 +696,188 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::loadModelOverlapFacts(
   auto buffer = llvm::MemoryBuffer::getFile(path);
   if (!buffer) return invalid("cannot read selected compact facts: " + path.str());
   return parseModelOverlapFacts((*buffer)->getBuffer(), expectedSha256, operations);
+}
+
+llvm::Error ModelOverlapFacts::loadComposedFacts(
+    llvm::StringRef path, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
+  auto buffer = llvm::MemoryBuffer::getFile(path);
+  if (!buffer) return invalid("cannot read selected composed facts: " + path.str());
+  return addComposedFacts((*buffer)->getBuffer(), expectedSha256, operations);
+}
+
+llvm::Error ModelOverlapFacts::addComposedFacts(
+    llvm::StringRef bytes, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
+  const auto &model = operations.modelProvenance();
+  if (model.at("revision") != "9e6313bddecb8ba936206eb347f5cd4e5335282c" ||
+      model.at("source_sha256") != "a9a919c3d118af94e2783c8969e05ad19f8d2523ec093922c4f9957641b54426" ||
+      model.at("configuration_sha256") != "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a")
+    return invalid("composition capacity rules require the audited model source and configuration");
+  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
+      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
+  if (!hashSyntax(expectedSha256) || llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true) != expectedSha256)
+    return invalid("selected composed facts hash mismatch");
+  auto decoded = llvm::json::parse(bytes);
+  if (!decoded) return invalid(llvm::toString(decoded.takeError()));
+  const Object *root = decoded->getAsObject();
+  if (!root || !keys(*root, {"schema", "rule", "age_convention", "provenance", "pair_classes", "engines",
+                            "pairs", "chains"}) ||
+      root->getString("schema") != "atlas.model_composed.v1" ||
+      root->getString("rule") != "row-footprints-and-structural-capacity-v1" ||
+      root->getString("age_convention") != "issue_edge_zero")
+    return invalid("unsupported composed facts schema or rule");
+  const Object *pins = root->getObject("provenance"), *engines = root->getObject("engines");
+  const Array *classes = root->getArray("pair_classes"), *derivedPairs = root->getArray("pairs");
+  const Array *derivedChains = root->getArray("chains");
+  if (!pins || !engines || !classes || !derivedPairs || !derivedChains ||
+      !keys(*pins, {"per_op_sha256", "base_pairs_sha256", "master_sha256", "deriver_sha256",
+                    "pair_replay_sha256", "chain_replay_sha256", "holdouts_sha256", "revision",
+                    "configuration_sha256"}) ||
+      pins->getString("per_op_sha256") != operations.factsSha256() ||
+      pins->getString("base_pairs_sha256") != provenance["pairs_sha256"])
+    return invalid("composed facts do not bind selected observations and pairs");
+  ModelOverlapFacts result = *this;
+  for (const auto &[key, value] : *pins) {
+    auto text = value.getAsString();
+    if (!text || (key != "revision" && !hashSyntax(*text))) return invalid("invalid composed provenance");
+    if (key == "revision" || key == "configuration_sha256") {
+      auto expected = operations.modelProvenance().find(key.str());
+      if (expected == operations.modelProvenance().end() || *text != expected->second)
+        return invalid("incompatible composed model identity");
+    }
+    result.provenance["composed_" + key.str()] = text->str();
+  }
+  if (pins->size() != 9) return invalid("incomplete composed provenance");
+  auto positive = [](const Object &object, llvm::StringRef key) {
+    auto value = object.getInteger(key);
+    return value && *value > 0 && *value <= INT_MAX;
+  };
+  std::set<std::string> supported;
+  for (const auto &[name, value] : *engines) {
+    const Object *audit = value.getAsObject();
+    if ((name != "mxu0" && name != "mxu1" && name != "vpu") || !audit ||
+        !keys(*audit, {"operations", "chains", "confirmed_chains", "accepted_chains", "negative_points", "rejected_negatives",
+                       "holdout_chains", "holdout_pairs", "holdout_failures"}) ||
+        !positive(*audit, "chains") || !positive(*audit, "confirmed_chains") ||
+        audit->getInteger("confirmed_chains") > audit->getInteger("chains") ||
+        audit->getInteger("accepted_chains") != audit->getInteger("chains") ||
+        !positive(*audit, "negative_points") ||
+        audit->getInteger("rejected_negatives") != audit->getInteger("negative_points") ||
+        audit->getInteger("holdout_failures") != 0 ||
+        !audit->getInteger("holdout_chains") || *audit->getInteger("holdout_chains") < 0 ||
+        !audit->getInteger("holdout_pairs") || *audit->getInteger("holdout_pairs") < 0 ||
+        (!positive(*audit, "holdout_chains") && !positive(*audit, "holdout_pairs")))
+      return invalid("composed engine lacks complete agreement and holdouts");
+    const Array *names = audit->getArray("operations");
+    if (!names || names->empty()) return invalid("composed engine lacks an operation domain");
+    for (const auto &entry : *names) {
+      auto operation = entry.getAsString();
+      const auto *block = operation ? operations.block(*operation) : nullptr;
+      if (!block || block->engine != name || !result.composedOperations.insert(operation->str()).second)
+        return invalid("invalid composed operation domain");
+    }
+    supported.insert(name.str());
+  }
+  std::set<std::pair<std::string, Relation>> admittedClasses;
+  for (const auto &entry : *classes) {
+    const Object *audit = entry.getAsObject();
+    auto engine = audit ? audit->getString("engine") : std::nullopt;
+    Relation rel;
+    const Object *category = audit ? audit->getObject("relation") : nullptr;
+    if (category && keys(*category, {"mreg_banks", "accumulator", "weight_slot"}))
+      for (const auto &[key, value] : *category)
+        if (auto text = value.getAsString()) rel[key.str()] = text->str();
+    bool validClass = category && rel.size() == category->size() &&
+        (rel["mreg_banks"] == "disjoint" || rel["mreg_banks"] == "register_alias" ||
+         rel["mreg_banks"] == "bank_alias" || rel["mreg_banks"] == "mixed_alias");
+    for (const auto &[key, value] : rel)
+      if (key != "mreg_banks" && value != "same" && value != "other") validClass = false;
+    if (!audit || !keys(*audit, {"engine", "relation", "pairs", "confirmed", "equal", "negative_points",
+                                 "negative_violations"}) ||
+        !engine || !supported.count(engine->str()) || !validClass ||
+        !positive(*audit, "pairs") || !positive(*audit, "confirmed") ||
+        audit->getInteger("confirmed") > audit->getInteger("pairs") ||
+        audit->getInteger("equal") != audit->getInteger("pairs") ||
+        !positive(*audit, "negative_points") || audit->getInteger("negative_violations") != 0 ||
+        !admittedClasses.emplace(engine->str(), std::move(rel)).second)
+      return invalid("composed pair class lacks complete agreement and witnessed negatives");
+  }
+  auto operationEngine = [&](llvm::StringRef name) {
+    const auto *block = operations.block(name);
+    return block && supported.count(block->engine) && result.composedOperations.count(name.str())
+        ? block->engine : std::string();
+  };
+  for (const auto &entry : *derivedPairs) {
+    const Object *record = entry.getAsObject();
+    auto first = record ? record->getString("first") : std::nullopt;
+    auto second = record ? record->getString("second") : std::nullopt;
+    auto minimum = record ? record->getInteger("minimum") : std::nullopt;
+    auto high = record ? record->getInteger("high") : std::nullopt;
+    Relation rel;
+    if (!record || !keys(*record, {"first", "second", "relation", "minimum", "high"}) || !first || !second ||
+        !minimum || !high || *minimum < 1 || *minimum > *high || *high > INT_MAX ||
+        operationEngine(*first).empty() || operationEngine(*first) != operationEngine(*second) ||
+        !relation(record->getObject("relation"), rel, false) ||
+        !admittedClasses.count({operationEngine(*first), relationClass(rel)}) ||
+        *high != operations.block(*first)->firstFreeAge)
+      return invalid("derived pair is outside validated class or bounded live domain");
+    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high)});
+  }
+  for (const auto &entry : *derivedChains) {
+    const Object *record = entry.getAsObject();
+    const Array *names = record ? record->getArray("operations") : nullptr;
+    const Array *gaps = record ? record->getArray("gaps") : nullptr;
+    const Array *matrix = record ? record->getArray("all_pair_relations") : nullptr;
+    auto count = record ? record->getInteger("in_flight_count") : std::nullopt;
+    if (!record || !keys(*record, {"operations", "gaps", "all_pair_relations", "in_flight_count"}) ||
+        !names || names->size() < 3 || names->size() > 64 || !gaps || gaps->size() + 1 != names->size() ||
+        !matrix || matrix->size() != names->size() * (names->size() - 1) / 2 || !count)
+      return invalid("incomplete derived chain");
+    Chain chain;
+    std::vector<ModelOverlapCommand> commands;
+    std::string engine;
+    int64_t issue = 0;
+    for (size_t i = 0; i < names->size(); ++i) {
+      auto name = (*names)[i].getAsString();
+      if (!name || operationEngine(*name).empty() || (i && operationEngine(*name) != engine))
+        return invalid("derived chain crosses validated engine class");
+      engine = operationEngine(*name);
+      if (i) {
+        auto gap = (*gaps)[i - 1].getAsInteger();
+        if (!gap || *gap < 1 || *gap > INT_MAX || issue + *gap > INT_MAX)
+          return invalid("invalid derived chain gaps");
+        chain.gaps.push_back(int(*gap)); issue += *gap;
+      }
+      chain.operations.push_back(name->str());
+      commands.push_back({name->str(), Engine::Scalar, {}, {}, {}, int(issue), operations.block(*name)->firstFreeAge});
+    }
+    if (!positive(*engines->getObject(engine), "holdout_chains"))
+      return invalid("derived chain engine lacks chain holdouts");
+    for (const auto &value : *matrix) {
+      const Object *pair = value.getAsObject();
+      auto i = pair ? pair->getInteger("first_index") : std::nullopt;
+      auto j = pair ? pair->getInteger("second_index") : std::nullopt;
+      Relation rel;
+      if (!pair || !keys(*pair, {"first_index", "second_index", "relation"}) || !i || !j || *i < 0 ||
+          *i >= *j || uint64_t(*j) >= names->size() || !relation(pair->getObject("relation"), rel, false) ||
+          !chain.relations.emplace(std::make_pair(*i, *j), rel).second)
+        return invalid("derived chain relation is outside validated class");
+      int gap = commands[*j].issue - commands[*i].issue;
+      if (gap < commands[*i].firstFreeAge && !admittedClasses.count({engine, relationClass(rel)}))
+        return invalid("derived live pair relation is outside validated class");
+      if (gap < commands[*i].firstFreeAge &&
+          !std::any_of(result.pairs.begin(), result.pairs.end(), [&](const Pair &witness) {
+            return witness.first == commands[*i].block && witness.second == commands[*j].block &&
+                witness.relation == rel && witness.minimum <= gap && gap <= witness.high;
+          })) return invalid("derived chain lacks an admitted live pair");
+    }
+    if (peak(commands) != *count || !composedCapacity(commands))
+      return invalid("derived chain violates structural capacity or post-progress count");
+    chain.inFlight = int(*count);
+    result.sequences.push_back(std::move(chain));
+  }
+  for (const auto &[engine, rel] : admittedClasses)
+    if (positive(*engines->getObject(engine), "holdout_chains")) result.compositionClasses[engine].insert(rel);
+  result.provenance["composed_sha256"] = expectedSha256.str();
+  *this = std::move(result);
+  return llvm::Error::success();
 }

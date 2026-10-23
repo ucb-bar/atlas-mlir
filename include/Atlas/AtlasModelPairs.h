@@ -2,6 +2,7 @@
 #define ATLAS_MODEL_PAIRS_H
 
 #include "Atlas/AtlasModelTiming.h"
+#include <set>
 
 namespace mlir::atlas::timing {
 
@@ -18,6 +19,11 @@ struct ModelOverlapCommand {
 class ModelOverlapFacts {
 public:
   bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const;
+  bool rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const;
+  llvm::Error addComposedFacts(llvm::StringRef bytes, llvm::StringRef expectedSha256,
+                              const ModelTimingFacts &operations);
+  llvm::Error loadComposedFacts(llvm::StringRef path, llvm::StringRef expectedSha256,
+                               const ModelTimingFacts &operations);
   const std::map<std::string, std::string> &metadata() const { return provenance; }
 
 private:
@@ -35,7 +41,10 @@ private:
   };
   std::vector<Pair> pairs;
   std::vector<Chain> sequences;
+  std::map<std::string, std::set<Relation>> compositionClasses;
+  std::set<std::string> composedOperations;
   std::map<std::string, std::string> provenance;
+  mutable std::set<std::string> loggedQueries;
   friend llvm::Expected<ModelOverlapFacts> parseModelOverlapFacts(llvm::StringRef, llvm::StringRef,
                                                                   const ModelTimingFacts &);
 };
