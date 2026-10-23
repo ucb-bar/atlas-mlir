@@ -13,6 +13,7 @@ sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
+from atlas_search_policy import POLICY
 from atlas_model_capabilities import check_configuration
 from atlas_model_semantics import check_model_semantics
 from atlas_derived_contract import seal_derived, verify_derived, overlap_semantics
@@ -130,7 +131,7 @@ def regenerate(model, out):
 
     if safe_path(Path(npu_model.__file__).parent.parent) != model:
         raise UnsupportedModelTiming("imported model does not match --npu-model")
-    torch.set_num_threads(1)
+    torch.set_num_threads(POLICY["engineering"]["scorer"]["torch_threads"])
     cfg, config = configuration()
     check_configuration(cfg)
     note_unqualified_model(before[0]["source_sha256"], sha256(encoded(config)))
@@ -179,6 +180,7 @@ def regenerate(model, out):
         raise ModelTimingValidationError("model source or numerical data changed during regeneration")
     if generator_sources != tool_manifest():
         raise ModelTimingValidationError("derivation or observer tools changed during regeneration")
+    report["reviewed_validation_suite"] = POLICY["validation"]["reviewed_suite"]
     report.update(derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu", "dma"], measured_families=[])
     report_hash = write(out, "validation-report.json", report)
     source_identity, sources, data = before

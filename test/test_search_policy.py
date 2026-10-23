@@ -1,5 +1,7 @@
 """Optimization policy identity and active knobs remain separate from model facts."""
 from copy import deepcopy
+from dataclasses import dataclass
+from types import SimpleNamespace
 import argparse
 import json
 from pathlib import Path
@@ -17,6 +19,34 @@ import atlas_search_policy as policy
 
 
 class SearchPolicyTest(unittest.TestCase):
+    def test_fixed_execution_contract_preserves_effective_configuration(self):
+        from atlas_model_timing import configuration
+        @dataclass
+        class Architecture:
+            numerics: str = "default"
+            randomize_init: bool = True
+            example_capacity: int = 32
+        cfg = SimpleNamespace(arch_state_config=Architecture(), example_latency=7)
+        model_module = SimpleNamespace(DefaultHardwareConfig=lambda: cfg)
+        with patch.dict(sys.modules, {"npu_model.configs.hardware.default": model_module}):
+            actual, values = configuration()
+        self.assertIs(actual, cfg)
+        self.assertEqual(values, {"arch_state_config": {"numerics": "rtl", "randomize_init": False,
+                                                       "example_capacity": 32},
+                                  "example_latency": 7, "ignore_runtime_errors": False})
+
+    def test_execution_safety_contract_mutations_refuse(self):
+        for name, value in (("numerics", "float"), ("randomize_init", True),
+                            ("ignore_runtime_errors", True), ("ignore_runtime_errors", 0),
+                            ("schema", "unimplemented-v2")):
+            changed = deepcopy(policy.POLICY)
+            changed["execution_contract"][name] = value
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary) / "policy.json"
+                source.write_text(json.dumps(changed))
+                with patch.object(policy, "POLICY_PATH", source), self.assertRaisesRegex(ValueError, "execution contract"):
+                    policy.load_policy()
+
     def test_canonical_identity_and_effective_overrides(self):
         effective = {"random_seeds": [9], "workers": 2, "search_evaluations": 3}
         receipt = policy.policy_receipt(effective)

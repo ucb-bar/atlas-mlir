@@ -19,6 +19,17 @@ def canonical_hash(value: dict) -> str:
                                      allow_nan=False).encode()).hexdigest()
 
 
+def fixed_execution_contract(contract: dict) -> dict:
+    """This target experiment supports exactly RTL numerics and fatal errors."""
+    if (not isinstance(contract, dict) or set(contract) != {
+            "schema", "numerics", "randomize_init", "ignore_runtime_errors"}
+            or contract["schema"] != "atlas.model_execution_contract.v1"
+            or contract["numerics"] != "rtl" or contract["randomize_init"] is not False
+            or contract["ignore_runtime_errors"] is not False):
+        raise ValueError("unsupported model execution contract; RTL numerics, deterministic initialization and fatal errors are required")
+    return dict(contract)
+
+
 def load_policy() -> dict:
     policy = json.loads(POLICY_PATH.read_text())
     if not isinstance(policy, dict) or policy.get("schema") != "atlas.search_policy.v1":
@@ -49,7 +60,7 @@ def load_policy() -> dict:
     def keys(value, expected, label):
         if not isinstance(value, dict) or set(value) != set(expected.split()):
             raise ValueError("unsupported search policy fields: " + label)
-    keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering replay_projection validation", "definition")
+    keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering replay_projection validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
         keys(preset, "max_candidates search_evaluations search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
@@ -71,7 +82,15 @@ def load_policy() -> dict:
             or defaults["model_profile"] not in ("curve", "fifo43") or defaults["builtin_profile"] not in ("curve", "fifo43")
             or defaults["search_budget"] not in policy["presets"] or defaults["boundary"] not in ("boundary", "none")):
         raise ValueError("invalid driver default")
-    keys(policy["validation"], "core_edges", "validation suites")
+    fixed_execution_contract(policy["execution_contract"])
+    keys(policy["validation"], "core_edges reviewed_suite", "validation suites")
+    suite = policy["validation"]["reviewed_suite"]
+    keys(suite, "revision scope limits", "reviewed validation suite")
+    if suite["revision"] != "atlas.reviewed_model_validation.v1":
+        raise ValueError("unsupported reviewed validation suite revision")
+    for name in ("scope", "limits"):
+        if not isinstance(suite[name], list) or not suite[name] or not all(isinstance(row, str) and row for row in suite[name]):
+            raise ValueError("missing reviewed validation suite " + name)
     edges = policy["validation"]["core_edges"]
     keys(edges, "schema algorithm delay_immediates ordinary_max_cycles dma_wait_max_cycles", "Core edge validation")
     if edges["schema"] != "atlas.core_edge_validation_policy.v1" or edges["algorithm"] != "native-phase-delay-prior-flag-boundaries-v1":
