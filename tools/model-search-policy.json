@@ -300,6 +300,26 @@
       ],
       "ordinary_max_cycles": 64,
       "dma_wait_max_cycles": 4096
+    },
+    "reviewed_suite": {
+      "revision": "atlas.reviewed_model_validation.v1",
+      "scope": [
+        "isolated operation age/release and zero/nonzero numerical observation gates",
+        "curve backend streams plus isolated/mixed DMA reference checks",
+        "source-derived overlap pair/composition boundary and drain checks",
+        "Core phase order, ordinary/DELAY issue gaps and prior-edge DMA.WAIT visibility"
+      ],
+      "limits": [
+        "Finite reviewed validator suites; case constants remain in their versioned validator implementations except explicit Core-edge knobs.",
+        "Native observations validate extracted facts; no fitting of timing or projection policy.",
+        "No arbitrary-program, complete operand partition, numerical-domain or RTL-equivalence proof."
+      ]
     }
+  },
+  "execution_contract": {
+    "schema": "atlas.model_execution_contract.v1",
+    "numerics": "rtl",
+    "randomize_init": false,
+    "ignore_runtime_errors": false
   }
 }

@@ -13,7 +13,7 @@ from atlas_model_profiles import bind_synthetic_configuration, scoring_configura
 from atlas_model_schema import LOCK
 from atlas_model_semantics import check_model_semantics
 from atlas_model_capabilities import check_configuration
-from atlas_search_policy import POLICY
+from atlas_search_policy import POLICY, fixed_execution_contract
 from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
 from check_program_decode import decode_binary
 
@@ -103,6 +103,7 @@ class ModelScorer:
         # Snapshot named targets once, including when this scorer is pickled for workers.
         object.__setattr__(self, "_targets", synthetic_targets())
         object.__setattr__(self, "_scorer_policy", dict(POLICY["engineering"]["scorer"]))
+        object.__setattr__(self, "_execution_contract", fixed_execution_contract(POLICY["execution_contract"]))
 
     def configured_profile(self, document, profile):
         """Bind and identify the exact configuration used for native scoring."""
@@ -162,7 +163,7 @@ class ModelScorer:
         logger = SimpleNamespace(**{name: lambda *args, **kwargs: None for name in dir(Logger) if name.startswith("log_")})
         core = Core(cfg, logger)
         try:
-            if core.ignore_runtime_errors is not False:
+            if core.ignore_runtime_errors is not self._execution_contract["ignore_runtime_errors"]:
                 raise ValueError("model must propagate runtime errors")
             core.load_program(program)
             state = core.arch_state
