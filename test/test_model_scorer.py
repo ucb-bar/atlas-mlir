@@ -104,6 +104,21 @@ class ModelScorerTest(unittest.TestCase):
                 self.assertEqual(instruction.to_bytecode(), word)
                 self.assertEqual(instruction.imm & 31, 1)
 
+    def test_runtime_receipt_records_imported_versions_and_curve_content(self):
+        import platform
+        import numpy
+        import torch
+
+        before = selected_model(self.scorer.model)
+        receipt = self.scorer.runtime_receipt()
+        self.assertEqual(receipt["python"], platform.python_version())
+        self.assertEqual(receipt["torch"], str(torch.__version__))
+        self.assertEqual(receipt["numpy"], str(numpy.__version__))
+        self.assertEqual(receipt["python_optimization"], 0)
+        self.assertEqual(receipt["configuration"]["dma_memory_params"]["curves"],
+                         {"sha256": sha256(Path(receipt["curve_path"]).read_bytes())})
+        self.assertEqual(selected_model(self.scorer.model), before)
+
     def test_cold_cycles_profiles_and_exhaustion(self):
         # ADDI x1, x0, 1; CSRRW x0, completion, x1; ECALL.
         program = self.program([0x00100093, 0xc1009073, 0x00000073])

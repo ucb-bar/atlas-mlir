@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -364,6 +364,9 @@ with TemporaryDirectory() as directory:
             def profile_receipt(self, program, profile):
                 return {"profile": profile, "sha256": profile + "-configuration-digest"}
 
+            def runtime_receipt(self):
+                return {"curve_path": "/tmp/test-curve.json", "configuration": {}, "python": "test"}
+
         def executor(*, max_workers, **_):
             return ThreadPoolExecutor(max_workers=max_workers)
 
@@ -377,6 +380,9 @@ with TemporaryDirectory() as directory:
                                        ("fifo43", 5, {"fifo43"})):
             with self.subTest(profile=profile, cap=cap), \
                     patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
+                    patch("atlas_model_selection.capture_selection_inputs", return_value=Mock(
+                        complete=Mock(return_value={"schema": "test-only"}))), \
+                    patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
                     patch("atlas_model_selection.ProcessPoolExecutor", side_effect=executor), \
                     patch("atlas_model_selection.evidence_option", side_effect=lambda *_: ["--select-atlas-model-evidence=facts=synthetic-test"]), \
                     patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
@@ -387,6 +393,40 @@ with TemporaryDirectory() as directory:
             self.assertEqual(json.loads((output / "selection.json").read_text())["scoring_configurations"],
                              {name: {"profile": name, "sha256": name + "-configuration-digest"} for name in expected})
         self.assertNotIn("scoring_configurations", self.select(name="custom", max_candidates=1))
+
+    def test_changed_input_refuses_publication_after_search(self):
+        from atlas_run_provenance import capture_run_provenance
+
+        capture = capture_run_provenance(self.source)
+
+        class NativeScorer:
+            def runtime_receipt(self):
+                return {"curve_path": str(self_source), "configuration": {}, "python": "test"}
+
+            def profile_receipt(self, program, profile):
+                return {"profile": profile}
+
+            def __call__(self, program, profile):
+                self_source.write_text("module { /* changed while scoring */ }")
+                return program["cycles"]
+
+        self_source = self.source
+        output = self.directory / "mutation"
+        with patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
+                patch("atlas_model_selection.capture_selection_inputs", return_value=capture), \
+                patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
+                patch("atlas_model_selection.ProcessPoolExecutor", side_effect=lambda **_: ThreadPoolExecutor(1)), \
+                patch("atlas_model_selection.evidence_option", return_value=[]), \
+                patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run), \
+                self.assertRaisesRegex(ValueError, "changed during selection"):
+            select_program(self.source, output, self.directory, model=self.directory,
+                           model_facts=self.directory, max_candidates=1, workers=1)
+        receipt = json.loads((output / "selection.json").read_text())
+        self.assertEqual(receipt["publication_status"], "REFUSED")
+        self.assertNotIn("selected_index", receipt)
+        self.assertEqual(receipt["candidates"][0]["status"], "PASS")
+        for name in ("program.json", "program.hex", "final.mlir", "allocation.json"):
+            self.assertFalse((output / name).exists())
 
     def test_unique_curve_minimum_never_scores_fifo43(self):
         def scorer(program, profile):

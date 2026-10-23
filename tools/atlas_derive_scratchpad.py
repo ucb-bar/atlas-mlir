@@ -1,7 +1,8 @@
 """Explicit SRAM contract boundary; source exposes samples, not response events.
 
 No response latency can be recovered from synchronous tensor reads. The legacy
-one-edge target assumption is retained once, and is never observed validation.
+one-edge target assumption is inactive in production: complete derived releases
+override the test-only fallback. It is never observed validation.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ class UnsupportedScratchpad(UnsupportedModelTiming):
 
 
 def scratchpad_assumptions():
-    # Target policy, not a model-derived latency. Do not count this as observed.
+    # Inactive production compatibility metadata; only legacy test facts use the
+    # fallback arithmetic. Production requires complete derived releases.
     return {"scratchpad_read_latency": 1}
 
 
@@ -95,7 +97,9 @@ def derive_scratchpad_sources(sources):
                 assumptions=scratchpad_assumptions(), response_latency_derived=False,
                 dma_store_read_to_request_cycles=pipeline,
                 limitation="VPU/MXU/LSU/XLU sample tensors on request edges; DMA combines SRAM and store-queue staging. "
-                           "No model-owned executable field separates SRAM response latency from that pipeline.",
+                           "No model-owned executable field separates SRAM response latency from that pipeline. "
+                           "scratchpad_read_latency is inactive production compatibility metadata; "
+                           "complete derived reservation releases override the legacy test-only fallback.",
                 checked_source_methods=checked)
 
 
