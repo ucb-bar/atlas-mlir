@@ -59,8 +59,10 @@ struct ModelFrontendTiming {
 
 // Engine issue predicates are relational; isolated lifetimes remain envelopes.
 struct ModelEngineAdmission {
+  // VPU fields are cross-checked metadata; overlap facts own VPU admission.
   int vpuCapacity = 0;
   int scalarLoadGap = 0;
+  std::map<std::string, std::string> sourceHashes;
   std::map<std::string, int> vpuFinalWrite;
   std::set<std::string> vpuDouble;
   std::vector<std::set<std::string>> vpuLogicGroups;

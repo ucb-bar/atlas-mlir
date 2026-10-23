@@ -45,13 +45,30 @@ Object block(const std::string &name, const std::string &engine, int free, Objec
           {"assumptions", Object{{"scratchpad_read_latency", 1}}},
           {"observation", Object{{"accepted", true}, {"drained", true}}}};
 }
+Object dmaSourceFixture() {
+  Object sources, shapes;
+  for (const auto &[key, value] : model_schema::dmaIdentity())
+    if (key != "curve_sha256" && !llvm::StringRef(key).starts_with("shape:")) sources[key] = value;
+  for (const auto &[name, shape] : model_schema::dmaSourceShapes()) {
+    shapes[name] = shape;
+    if (!sources.get(name)) sources[name] = std::string(64, 'a');
+  }
+  Array phases;
+  for (const auto &phase : model_schema::dmaEdgeOrder()) phases.push_back(phase);
+  return Object{{"schema", "atlas.dma_source.v1"}, {"source_sha256", std::move(sources)},
+      {"source_shapes", std::move(shapes)}, {"core_tick_shape", std::string(64, 'a')},
+      {"core_s1_shape", std::string(64, 'b')}, {"edge_order", std::move(phases)},
+      {"issue", Object{{"ordinary_gap", 1}, {"first_engine_age", 1}, {"store_read_to_request_cycles", 2}}}};
+}
 Object proposalFixture(double maximum = 5., int quantum = 6) {
+  auto policy = llvm::json::parse(search_policy::kDMAProposalPolicyJson);
+  assert(policy && policy->getAsObject());
   return Object{{"schema", "atlas.dma_proposal.v1"}, {"kind", "serialized_all_mix_upper_bound"},
       {"response_to_retire_cycles", 0}, {"retire_to_wait_issue_cycles", 1}, {"per_beat_bound_cycles", quantum},
       {"preconditions", Object{{"engine_backend_drained_at_launch", true}, {"vmem_grant_denials", 0},
                                {"history", "arbitrary_retained_issue_history"},
                                {"maximum_cycle", INT_MAX}, {"maximum_arithmetic_operand", INT_MAX}}},
-      {"policy", Object{{"classification", "compiler_policy"}, {"intercommand_serialization_cycles", 1}}},
+      {"policy", std::move(*policy)},
       {"recurrence", Object{{"retire", "launch+startup[direction]+beats*per_beat_bound_cycles"},
                             {"wait", "retire+retire_to_wait_issue_cycles"}}},
       {"source_evidence", Object{{"core_tick_shape", std::string(64, 'a')}, {"core_s1_shape", std::string(64, 'b')},
@@ -83,6 +100,7 @@ Object dmaFixture() {
       {"measured_channels", 1}, {"access_bytes", 32}, {"latency_mode", "unloaded"}, {"converge", 1.},
       {"knee", .9}, {"enforce_peak", true}, {"min_latency", 1},
       {"proposal_contract", proposalFixture()},
+      {"source_contract", dmaSourceFixture()},
       {"startup_cycles", Object{{"load", 1}, {"store", 3}}}, {"issue_interval_cycles", 1},
       {"rounding_epsilon_cycles", 1e-9}, {"reset_last_ready_cycles", 0.}, {"curves", std::move(curves)},
       {"semantics", Object{{"history", "last_window_beats_issued_including_current_beat"},
@@ -257,12 +275,7 @@ void sealContractFixture(Object &object) {
     if (const auto *value = object.get(key)) semantic[key] = *value;
   for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing", "replay_timing", "proposal_costs"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
-  if (auto *dma = object.getObject("dma_timing")) {
-    Object deterministic(*dma);
-    deterministic.erase("validation");
-    semantic["dma_timing"] = std::move(deterministic);
-  }
-  for (const char *key : {"engine_admission", "dma_admission"})
+  for (const char *key : {"dma_timing", "engine_admission", "dma_admission"})
     if (auto *document = object.getObject(key)) {
       Object deterministic(*document);
       deterministic.erase("validation");
@@ -345,26 +358,18 @@ Object admissionFixture(const Object &object) {
 }
 
 Object dmaAdmissionFixture(const Object &object) {
-  Object sources, shapes, geometry;
-  for (const auto &[key, value] : model_schema::dmaIdentity()) {
-    if (key == "curve_sha256") continue;
-    if (llvm::StringRef(key).starts_with("shape:")) shapes[llvm::StringRef(key).drop_front(6)] = value;
-    else sources[key] = value;
-  }
-  const auto &engineSources = *object.getObject("engine_admission")->getObject("source_contract")->getObject("source_sha256");
-  for (const char *name : {"core.py", "lsu.py", "bank_conflict.py"}) sources[name] = *engineSources.get(name);
-  shapes["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5";
-  shapes["lsu.py"] = "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722";
-  shapes["bank_conflict.py"] = "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467";
+  Object geometry;
+  const auto &shared = *object.getObject("dma_timing")->getObject("source_contract");
   const auto &config = *object.getObject("model")->getObject("configuration");
   for (auto [key, field] : std::initializer_list<std::pair<const char *, const char *>>{
       {"num_channels", "dma_num_channels"}, {"beat_bytes", "dma_beat_bytes"}, {"max_in_flight", "dma_max_in_flight"},
       {"max_transfer_bytes", "dma_max_transfer_bytes"}, {"vmem_bank_bytes", "vmem_bank_bytes"}})
     geometry[key] = *config.get(field);
   return Object{{"schema", "atlas.dma_admission.v1"}, {"age_convention", "issue_edge_zero"},
-      {"contract", "source-asynchronous-dma-admission-v1"}, {"source_sha256", std::move(sources)},
-      {"source_shapes", std::move(shapes)}, {"configuration", std::move(geometry)},
-      {"issue", Object{{"ordinary_gap", 1}, {"first_engine_age", 1}, {"store_read_to_request_cycles", 2}}},
+      {"contract", "source-asynchronous-dma-admission-v1"}, {"source_sha256", *shared.get("source_sha256")},
+      {"source_shapes", *shared.get("source_shapes")}, {"configuration", std::move(geometry)},
+      {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(shared))))},
+      {"issue", *shared.get("issue")},
       {"semantics", Object{{"operands", "captured_at_issue"}, {"launch", "enqueue_after_registered_progress"},
           {"requests", "oldest_undispatched_slot"}, {"vmem_grants", "lsu_priority_then_dma_load_write_then_dma_store_read"},
           {"completion", "all_beats_dispatched_and_acknowledged"}, {"wait", "busy_flag_checked_before_engine_progress"},
@@ -515,6 +520,33 @@ void testDerivedContract() {
         check(!result, why);
         if (!result) llvm::consumeError(result.takeError());
       });
+  invalidFacts(contractFixture(), {
+      {"DMA source reference must bind its authoritative record", "dma_admission/source_contract_sha256", std::string(64, 'b')},
+      {"DMA source copies cannot disagree", "dma_admission/source_sha256/core.py", std::string(64, 'b')},
+      {"DMA staging copies cannot disagree", "dma_admission/issue/store_read_to_request_cycles", 1},
+      {"DMA proposal Core phase copies cannot disagree", "dma_timing/proposal_contract/source_evidence/core_tick_shape", std::string(64, 'b')},
+      {"DMA shared source cannot change supported phase semantics", "dma_timing/source_contract/source_shapes/core.py", std::string(64, 'b')},
+      {"DMA frontend issue copy cannot disagree", "dma_timing/source_contract/issue/ordinary_gap", 2},
+      {"VPU metadata capacity is bounded", "engine_admission/vpu/capacity", 4}},
+      [&](Object object, const char *why) {
+        sealContractFixture(object);
+        auto result = parse(std::move(object));
+        check(!result, why);
+        if (!result) llvm::consumeError(result.takeError());
+      });
+  for (int capacity : {1, 3}) {
+    auto metadata = contractFixture();
+    (*metadata.getObject("engine_admission")->getObject("vpu"))["capacity"] = capacity;
+    sealContractFixture(metadata);
+    auto result = parse(std::move(metadata));
+    check(bool(result), "VPU metadata accepts supported capacities before selected overlap cross-check");
+    if (!result) llvm::consumeError(result.takeError());
+  }
+  auto receiptOnly = contractFixture();
+  (*receiptOnly.getObject("dma_timing"))["producer_sources"] = Object{{"receipt", "not a semantic rule"}};
+  // Parser schema remains exact; this field is not a supported DMA extension,
+  // even though all validated-record digest exclusions use the same helper.
+  rejects(std::move(receiptOnly), "unknown DMA producer field does not change semantic binding", "resolved proposal-only curve schema");
   for (const char *key : {"architecture", "operand_vocabulary", "isa_metadata", "mxu_weight_timing"}) {
     auto stale = contractFixture();
     (*stale.getObject(key))["stale_metadata"] = true;
@@ -548,9 +580,8 @@ void testDerivedContract() {
   auto changed = contractFixture();
   (*changed.getObject("dma_timing")->getObject("startup_cycles"))["load"] = 8;
   sealContractFixture(changed);
-  auto rebound = parse(std::move(changed));
-  check(bool(rebound) && rebound->estimateDMACycles(1024, false).value == 200,
-        "rebound derived operands propagate through production contract parser");
+  rejects(std::move(changed), "rebound startup cannot disagree with its source contract", "launch/staging/issue");
+  llvm::Expected<ModelTimingFacts> rebound = parse(contractFixture());
   if (!rebound) llvm::consumeError(rebound.takeError());
   changed = contractFixture();
   (*changed.getObject("frontend_timing")->getObject("scalar"))["write_age"] = 3;
@@ -1240,8 +1271,7 @@ void testDMAEstimates() {
   Object changed = fixture();
   changed.getObject("dma_timing")->getObject("startup_cycles")->operator[]("load") = 8;
   auto startup = parse(std::move(changed));
-  check(bool(startup) && startup->estimateDMACycles(1024, false).value == 200,
-        "DMA proposal consumes derived launch startup");
+  check(!startup, "DMA proposal rejects startup that disagrees with its shared source contract");
   if (!startup) llvm::consumeError(startup.takeError());
   changed = fixture();
   Object &read = *(*changed.getObject("dma_timing")->getArray("curves"))[1].getAsObject();

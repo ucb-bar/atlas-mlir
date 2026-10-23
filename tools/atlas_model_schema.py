@@ -166,6 +166,13 @@ def load_vocabulary(path):
 _DIRECTORY = Path(__file__).resolve().parent
 LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
 SOURCE_SHAPES = LOCK["source_shapes"]
+# Shared DMA admission/proposal source schema. Both producers use the same
+# review helper; consumers receive these pins from this generated vocabulary.
+DMA_SOURCE_SHAPES = {name: SOURCE_SHAPES[name] for name in
+                     ("dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py")}
+DMA_SOURCE_SHAPES["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5"
+DMA_EDGE_ORDER = ("Core.S1", "DMA.D", "DMA.store_read", "DMA.A",
+                  "DMA.retire_clear_flag", "DMA.enqueue_launch")
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
 MODEL_REVISION = LOCK["model_revision"]
 CONFIGURATION_SHA256 = LOCK["configuration_sha256"]
@@ -225,6 +232,9 @@ def generate(vocabulary):
                     if "curve_sha256" in LOCK and "dma_source_sha256" in LOCK else {})
     table("std::map<std::string, std::string> &dmaIdentity()", (
         "{" + quote(key) + ", " + quote(value) + "}" for key, value in dma_identity.items()))
+    table("std::map<std::string, std::string> &dmaSourceShapes()", (
+        "{" + quote(key) + ", " + quote(value) + "}" for key, value in DMA_SOURCE_SHAPES.items()))
+    table("std::vector<std::string> &dmaEdgeOrder()", map(quote, DMA_EDGE_ORDER))
     table("std::map<std::string, const char *> &vpuBlocks()", (
         "{" + quote(entry["mnemonic"]) + ", " + quote("vpu." + entry["block"]) + "}"
         for entry in vocabulary["vpu_blocks"]))

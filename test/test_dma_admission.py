@@ -58,8 +58,23 @@ class DMAAdmissionTest(unittest.TestCase):
         candidate = derive_dma_admission(self.model, self.facts)
         changed = deepcopy(self.facts)
         changed["model"]["configuration"]["dma_max_in_flight"] += 1
+        with self.assertRaisesRegex(UnsupportedDMAAdmission, "authoritative geometry"):
+            derive_dma_admission(self.model, changed)
+        changed["dma_timing"]["max_in_flight"] += 1
         other = derive_dma_admission(self.model, changed)
         self.assertNotEqual(_semantics(candidate), _semantics(other))
+
+    def test_shared_source_phase_and_startup_disagreement_refuse(self):
+        for field, value in (("source_contract", {}), ("startup_cycles", dict(load=2, store=3)),
+                             ("issue_interval_cycles", 2)):
+            changed = deepcopy(self.facts)
+            changed["dma_timing"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(UnsupportedDMAAdmission, "authoritative"):
+                derive_dma_admission(self.model, changed)
+        changed = deepcopy(self.facts)
+        changed["dma_timing"]["proposal_contract"]["source_evidence"]["edge_order"].reverse()
+        with self.assertRaisesRegex(UnsupportedDMAAdmission, "phase fields"):
+            derive_dma_admission(self.model, changed)
 
     def test_serial_state_failure_cannot_publish_validation(self):
         candidate = derive_dma_admission(self.model, self.facts)

@@ -306,7 +306,12 @@ struct Fill {
         if (!usedReleases.count(key)) fail("reservation release " + key + " is outside the mapped domain");
         if (key == "mreg_read" || key == "mreg_write") {
           const auto &regs = key == "mreg_read" ? f.mregReads : f.mregWrites;
-          if (std::set<int>(regs.begin(), regs.end()).size() != release.banks.size())
+          // VPU reference facts describe disjoint operand roles. Identical
+          // source roles may name the same logical pair and coalesce at the
+          // exact row/edge; retain their role count here, then check ports.
+          size_t banks = key == "mreg_read" && llvm::StringRef(name).starts_with("vpu.") ?
+              regs.size() : std::set<int>(regs.begin(), regs.end()).size();
+          if (banks != release.banks.size())
             fail("MREG reservation bank count differs from operand roles");
         }
       }
@@ -514,14 +519,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
   }
   for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing", "replay_timing", "proposal_costs"})
     if (const auto *value = root.get(key)) semantic[key] = *value;
-  if (const auto *value = root.get("dma_timing")) {
-    const Object *dma = value->getAsObject();
-    if (!dma) return factsError("dma_timing must be an object");
-    Object deterministic(*dma);
-    deterministic.erase("validation");
-    semantic["dma_timing"] = std::move(deterministic);
-  }
-  for (const char *key : {"engine_admission", "dma_admission"})
+  for (const char *key : {"dma_timing", "engine_admission", "dma_admission"})
     if (const auto *value = root.get(key)) {
       const Object *document = value->getAsObject();
       if (!document) return factsError(std::string(key) + " must be an object");
@@ -649,6 +647,51 @@ llvm::Expected<int> parseScratchpadContract(const Object &root) {
   return int(*assumptions->getInteger("scratchpad_read_latency"));
 }
 
+llvm::Error validateDMASourceContract(const Object &d) {
+  auto error = [](const std::string &why) { return factsError("DMA source contract: " + why); };
+  const Object *shared = d.getObject("source_contract");
+  if (!shared || !exactKeys(*shared, {"schema", "source_sha256", "source_shapes", "issue", "edge_order",
+                                     "core_tick_shape", "core_s1_shape"}) ||
+      shared->getString("schema") != "atlas.dma_source.v1")
+    return error("requires authoritative source/phase record");
+  const Object *sources = shared->getObject("source_sha256"), *shapes = shared->getObject("source_shapes");
+  if (!sources || !shapes || sources->size() != model_schema::dmaSourceShapes().size() ||
+      shapes->size() != model_schema::dmaSourceShapes().size()) return error("incomplete source identities");
+  for (const auto &[name, expected] : model_schema::dmaSourceShapes()) {
+    auto hash = sources->getString(name);
+    if (!hash || !hashSyntax(*hash) || shapes->getString(name) != expected)
+      return error("unreviewed source identity or shape: " + name);
+  }
+  const Object *dmaSources = d.getObject("source_sha256"), *dmaShapes = d.getObject("source_shapes");
+  if (!dmaSources || !dmaShapes) return error("missing DMA/backend identities");
+  for (const char *name : {"dma.py", "memory_backend.py"})
+    if (sources->getString(name) != dmaSources->getString(name) || shapes->getString(name) != dmaShapes->getString(name))
+      return error("DMA/backend identity copies disagree");
+  const Object *issue = shared->getObject("issue"), *startup = d.getObject("startup_cycles");
+  if (!issue || !exactKeys(*issue, {"ordinary_gap", "first_engine_age", "store_read_to_request_cycles"}) ||
+      issue->getInteger("ordinary_gap") != 1 || issue->getInteger("first_engine_age") != 1 ||
+      issue->getInteger("store_read_to_request_cycles") != 2 || !startup ||
+      startup->getInteger("load") != issue->getInteger("first_engine_age") ||
+      startup->getInteger("store") != *issue->getInteger("first_engine_age") + *issue->getInteger("store_read_to_request_cycles") ||
+      d.getInteger("issue_interval_cycles") != issue->getInteger("ordinary_gap"))
+    return error("launch/staging/issue fields disagree");
+  const Object *proposal = d.getObject("proposal_contract");
+  const Object *evidence = proposal ? proposal->getObject("source_evidence") : nullptr;
+  if (!evidence) return error("missing proposal phase evidence");
+  for (const char *key : {"core_tick_shape", "core_s1_shape"}) {
+    auto hash = shared->getString(key);
+    if (!hash || !hashSyntax(*hash) || evidence->getString(key) != hash)
+      return error("Core phase identities disagree");
+  }
+  const Array *order = shared->getArray("edge_order"), *proposalOrder = evidence->getArray("edge_order");
+  const auto &phases = model_schema::dmaEdgeOrder();
+  if (!order || !proposalOrder || *order != *proposalOrder || order->size() != phases.size())
+    return error("proposal phase order disagrees");
+  for (size_t i = 0; i < phases.size(); ++i)
+    if ((*order)[i].getAsString() != phases[i]) return error("unsupported phase order");
+  return llvm::Error::success();
+}
+
 llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg, llvm::StringRef payloadHash) {
   auto error = [](const std::string &why) -> llvm::Expected<ModelDMATiming> {
     return factsError("dma_timing: " + why);
@@ -657,10 +700,11 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
       "source_shapes", "beat_bytes", "max_in_flight", "num_channels", "max_transfer_bytes", "queue_depth",
       "window_beats", "frequency_ghz", "channels", "measured_channels", "access_bytes", "latency_mode",
       "converge", "knee", "enforce_peak", "min_latency", "startup_cycles", "issue_interval_cycles",
-      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation", "proposal_contract"}) ||
+      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation", "proposal_contract", "source_contract"}) ||
       d.getString("schema") != "atlas.dma_timing.v1" || d.getString("backend") != "curve" ||
       d.getBoolean("resolved") != true || d.getBoolean("estimate_only") != true)
     return error("requires the complete resolved proposal-only curve schema");
+  if (auto refusal = validateDMASourceContract(d)) return std::move(refusal);
   const auto &identity = model_schema::dmaIdentity();
   const Object *sources = d.getObject("source_sha256"), *shapes = d.getObject("source_shapes");
   if (identity.size() != 5 || !sources || !shapes || !exactKeys(*sources, {"memory_backend.py", "dma.py"}) ||
@@ -812,8 +856,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
       preconditions->getInteger("maximum_arithmetic_operand") != INT_MAX ||
       preconditions->getString("history") != "arbitrary_retained_issue_history" ||
       !policy || !exactKeys(*policy, {"classification", "intercommand_serialization_cycles"}) ||
-      policy->getString("classification") != "compiler_policy" ||
-      policy->getInteger("intercommand_serialization_cycles") != 1 ||
+      canonicalJson(llvm::json::Value(Object(*policy))) != search_policy::kDMAProposalPolicyJson ||
       !recurrence || !exactKeys(*recurrence, {"retire", "wait"}) ||
       recurrence->getString("retire") != "launch+startup[direction]+beats*per_beat_bound_cycles" ||
       recurrence->getString("wait") != "retire+retire_to_wait_issue_cycles")
@@ -828,9 +871,9 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
           "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval")
     return error("missing DMA source proof premises or inconsistent service maximum");
   const Array *order = evidence->getArray("edge_order");
-  const char *phases[] = {"Core.S1", "DMA.D", "DMA.store_read", "DMA.A", "DMA.retire_clear_flag", "DMA.enqueue_launch"};
-  if (!order || order->size() != std::size(phases)) return error("unsupported DMA edge order");
-  for (size_t i = 0; i < std::size(phases); ++i)
+  const auto &phases = model_schema::dmaEdgeOrder();
+  if (!order || order->size() != phases.size()) return error("unsupported DMA edge order");
+  for (size_t i = 0; i < phases.size(); ++i)
     if ((*order)[i].getAsString() != phases[i]) return error("unsupported DMA edge order");
   for (const char *key : {"proof", "limitations"}) {
     const Array *text = proposal->getArray(key);
@@ -857,7 +900,7 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
   auto error = [](const std::string &why) { return factsError("DMA admission: " + why); };
   const Object *d = root.getObject("dma_admission");
   if (!d || !exactKeys(*d, {"schema", "age_convention", "contract", "source_sha256", "source_shapes",
-                             "configuration", "issue", "semantics", "producer_sources", "validation"}) ||
+                             "configuration", "issue", "source_contract_sha256", "semantics", "producer_sources", "validation"}) ||
       d->getString("schema") != "atlas.dma_admission.v1" ||
       d->getString("age_convention") != "issue_edge_zero" ||
       d->getString("contract") != "source-asynchronous-dma-admission-v1")
@@ -869,10 +912,12 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
     return error("missing complete source identity");
   for (const auto &[name, value] : *sources)
     if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed source hash");
-  if (shapes->getString("core.py") != "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5" ||
-      shapes->getString("lsu.py") != "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722" ||
-      shapes->getString("bank_conflict.py") != "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467")
-    return error("unreviewed Core/LSU/grant source shapes");
+  const Object *timing = root.getObject("dma_timing");
+  const Object *shared = timing ? timing->getObject("source_contract") : nullptr;
+  if (!shared || d->getString("source_contract_sha256") != modelSha256(canonicalJson(llvm::json::Value(Object(*shared)))) ||
+      !shared->getObject("source_sha256") || *sources != *shared->getObject("source_sha256") ||
+      !shared->getObject("source_shapes") || *shapes != *shared->getObject("source_shapes"))
+    return error("differs from authoritative DMA source/phase contract");
   for (const auto &[key, value] : model_schema::dmaIdentity()) {
     llvm::StringRef name(key);
     if (name == "curve_sha256") continue;
@@ -891,12 +936,21 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
       issue->getInteger("ordinary_gap") != 1 || issue->getInteger("first_engine_age") != 1 ||
       issue->getInteger("store_read_to_request_cycles") != 2)
     return error("unsupported launch/staging policy");
+  if (!shared->getObject("issue") || *issue != *shared->getObject("issue"))
+    return error("launch/staging fields differ from authoritative DMA source contract");
+  const Object *frontend = root.getObject("frontend_timing"), *scratchpad = root.getObject("scratchpad_contract");
+  if (!frontend || frontend->getInteger("ordinary_issue_gap") != issue->getInteger("ordinary_gap") ||
+      !scratchpad || scratchpad->getInteger("dma_store_read_to_request_cycles") != issue->getInteger("store_read_to_request_cycles"))
+    return error("frontend or scratchpad phase fields disagree");
   for (auto [key, config] : std::initializer_list<std::pair<const char *, const char *>>{
       {"num_channels", "dma_num_channels"}, {"beat_bytes", "dma_beat_bytes"},
       {"max_in_flight", "dma_max_in_flight"}, {"max_transfer_bytes", "dma_max_transfer_bytes"},
       {"vmem_bank_bytes", "vmem_bank_bytes"}})
     if (!configuration->getInteger(key) || *configuration->getInteger(key) < 1 ||
         configuration->getInteger(key) != cfg.getInteger(config)) return error("configuration mismatch");
+  for (const char *key : {"num_channels", "beat_bytes", "max_in_flight", "max_transfer_bytes"})
+    if (configuration->getInteger(key) != timing->getInteger(key))
+      return error("geometry differs from authoritative DMA timing");
   const Object *semantics = d->getObject("semantics");
   if (!semantics || !exactKeys(*semantics, {"operands", "launch", "requests", "vmem_grants", "completion", "wait",
                                             "channel_reuse", "aliases", "curve_history", "fixed_dma_windows", "command_ring"}))
@@ -993,10 +1047,12 @@ llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
   const Array *doubles = vpu ? vpu->getArray("double") : nullptr;
   const Array *groups = vpu ? vpu->getArray("logic_groups") : nullptr;
   if (!vpu || !exactKeys(*vpu, {"capacity", "live", "final_write_age", "logic_groups", "double"}) ||
-      vpu->getInteger("capacity") != 2 || vpu->getString("live") != "age_lt_final_write" ||
+      !vpu->getInteger("capacity") || *vpu->getInteger("capacity") < 1 || *vpu->getInteger("capacity") > 3 ||
+      vpu->getString("live") != "age_lt_final_write" ||
       !final || final->empty() || !doubles || !groups)
     return error("unsupported VPU live-set predicate");
   ModelEngineAdmission result;
+  for (const auto &[name, value] : *hashes) result.sourceHashes[name.str()] = value.getAsString()->str();
   result.vpuCapacity = int(*vpu->getInteger("capacity"));
   result.scalarLoadGap = int(*scalar->getInteger("load_response_gap"));
   for (const auto &[name, event] : {std::pair<const char *, const char *>{"scalar_lsu.load", "load_write"},
@@ -1579,7 +1635,8 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
                     std::to_string(reg & 31));
     }
     int busy = fill.busyEnd();
-    if (!admission) fill.hold({Unit::Xlu}, 0, busy);
+    // VPU/XLU overlap is authorized by the shared pair/composition contract.
+    fill.hold({Unit::Xlu}, 0, busy);
     return fill.done(busy);
   }
 
@@ -1643,7 +1700,6 @@ bool sameEngine(const OpInfo &a, const OpInfo &b, const ModelTimingFacts *facts 
   if (facts && facts->engineAdmission()) {
     // LSU's scalar response and separate vector paths have their own predicates.
     if (a.engine == Engine::Lsu && b.engine == Engine::Lsu) return false;
-    return a.engine == b.engine;
   }
   auto vector = [](Engine engine) { return engine == Engine::Vpu || engine == Engine::Xlu; };
   return a.engine == b.engine || (vector(a.engine) && vector(b.engine));
@@ -1697,8 +1753,7 @@ public:
       std::string structural = admissionConflict(in, cycle);
       if (!structural.empty()) return {structural, {}};
     }
-    bool directVpu = admission && in.op->engine == Engine::Vpu;
-    bool waiver = !directVpu && overlap && admitsInsertion(in, f, cycle, context);
+    bool waiver = overlap && admitsInsertion(in, f, cycle, context);
     for (const Issued &prior : issued) {
       if (prior.cycle + prior.f.doneAge < cycle || cycle + f.doneAge < prior.cycle) continue;
       if (admission) {
@@ -1714,7 +1769,7 @@ public:
             (gap <= older.readRelease && !newer.writeDuringRead && intersects(older.mregReads, newer.mregWrites)))
           return {"source-derived logical MREG reservation remains live", {}};
       }
-      if (sameEngine(*in.op, *prior.in.op, facts.get()) && !directVpu && cycle <= prior.cycle + prior.f.doneAge &&
+      if (sameEngine(*in.op, *prior.in.op, facts.get()) && cycle <= prior.cycle + prior.f.doneAge &&
           prior.cycle <= cycle + f.doneAge && !waiver)
         return {"model isolated engine window remains live", {}};
       for (const Hold &a : prior.f.holds)
@@ -1775,44 +1830,8 @@ private:
       for (const Issued &prior : issued)
         if (scalarLoad(prior.in) && std::abs(int64_t(cycle) - prior.cycle) < admission.scalarLoadGap)
           return "source-derived scalar load response remains pending";
-    if (in.op->engine != Engine::Vpu) return {};
-    struct Command { std::string name; int cycle; bool eligible, candidate; };
-    std::vector<Command> commands;
-    auto name = [](const Instr &command) { return std::string(vpuBlocks().at(command.op->name)); };
-    commands.push_back({name(in), cycle, true, true});
-    for (const Issued &prior : issued)
-      if (prior.in.op->engine == Engine::Vpu) commands.push_back({name(prior.in), prior.cycle, prior.eligible, false});
-    std::sort(commands.begin(), commands.end(), [](const Command &a, const Command &b) { return a.cycle < b.cycle; });
-    // A wait invalidates only the live epoch containing this insertion.
-    // Retired epochs cannot prevent independently drained work from restarting.
-    std::vector<Command> affected;
-    int end = -1;
-    bool contains = false;
-    for (const auto &command : commands) {
-      if (command.cycle > end) {
-        if (contains) break;
-        affected.clear();
-      }
-      affected.push_back(command);
-      contains |= command.candidate;
-      end = std::max(end, command.cycle + facts->block(command.name)->firstFreeAge - 1);
-    }
-    commands = std::move(affected);
-    for (size_t j = 0; j < commands.size(); ++j) {
-      const auto &current = commands[j];
-      size_t live = 0;
-      for (size_t i = 0; i < j; ++i) {
-        const auto &prior = commands[i];
-        if (current.cycle - prior.cycle >= admission.vpuFinalWrite.at(prior.name)) continue;
-        if (!current.eligible || !prior.eligible) return "wait invalidates source-derived VPU live admission";
-        if (++live >= size_t(admission.vpuCapacity)) return "source-derived VPU issue slots occupied";
-        bool shared = current.name == prior.name;
-        for (const auto &group : admission.vpuLogicGroups)
-          shared |= group.count(current.name) && group.count(prior.name);
-        if (shared || admission.vpuDouble.count(current.name) || admission.vpuDouble.count(prior.name))
-          return "source-derived VPU issue logic occupied";
-      }
-    }
+    // VPU predicates and mixed-unit support belong to the selected overlap
+    // contract, including its chains flag and conservative mixed live epochs.
     return {};
   }
   bool admitsInsertion(const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const {

@@ -15,9 +15,12 @@ import json
 import math
 import os
 from pathlib import Path
+from copy import deepcopy
 
 from atlas_derive_mxu import _read, _one, _method
-from atlas_model_schema import LOCK, SOURCE_SHAPES, ast_digest
+from atlas_model_schema import (LOCK, SOURCE_SHAPES, DMA_SOURCE_SHAPES, DMA_EDGE_ORDER,
+                                ast_digest, sha256)
+from atlas_search_policy import POLICY
 
 
 class UnsupportedCurve(UnsupportedModelTiming):
@@ -157,14 +160,7 @@ def _engine_values(tree):
     return dict(load=edge, store=edge + delay), edge
 
 
-def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsilon, interval):
-    """Checked analytic bound, with source expressions as its proof premises.
-
-    The bound is deliberately serialized. It covers retained history, but not
-    pre-existing live work or externally denied grants. No observed timing enters
-    this function. Full reviewed method guards also protect predicates that the
-    compact evidence below does not repeat.
-    """
+def _core_phase_contract(core_source):
     from copy import deepcopy
     from atlas_derive_frontend import _SHAPES as frontend_shapes
     from atlas_derive_scratchpad import method, shape
@@ -179,6 +175,46 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsil
     if (shape(core_tick) != frontend_shapes[("core.py", "Core", "tick")] or
             shape(normalized) != frontend_shapes[("core.py", "Core", "_tick_s1")]):
         raise UnsupportedCurve("unsupported DMA/Core completion visibility semantics")
+    return core_tick, s1, shape(core_tick), shape(normalized)
+
+
+def review_dma_sources(sources):
+    """One source/phase contract shared by DMA admission and proposals."""
+    if set(sources) != set(DMA_SOURCE_SHAPES):
+        raise UnsupportedCurve("missing DMA source/phase contract source")
+    trees, shapes = {}, {}
+    for name, expected in DMA_SOURCE_SHAPES.items():
+        tree = ast.parse(sources[name])
+        digest = ast_digest(tree)
+        if digest != expected:
+            raise UnsupportedCurve("unsupported DMA/Core completion visibility or admission semantics: " + name)
+        trees[name], shapes[name] = tree, digest
+    startup, interval = _engine_values(trees["dma.py"])
+    cls = _one((n for n in trees["core.py"].body if isinstance(n, ast.ClassDef) and n.name == "Core"), "Core class")
+    increments = [n.value.value for n in ast.walk(_method(cls, "tick"))
+                  if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute)
+                  and n.target.attr == "cycle_count" and isinstance(n.op, ast.Add)
+                  and isinstance(n.value, ast.Constant) and type(n.value.value) is int]
+    if increments != [1] or interval != 1:
+        raise UnsupportedCurve("unsupported DMA source/phase clock progression")
+    _, _, core_tick_shape, core_s1_shape = _core_phase_contract(sources["core.py"])
+    return dict(schema="atlas.dma_source.v1",
+                source_sha256={name: sha256(sources[name].encode()) for name in DMA_SOURCE_SHAPES},
+                source_shapes=shapes, core_tick_shape=core_tick_shape, core_s1_shape=core_s1_shape,
+                issue=dict(ordinary_gap=increments[0], first_engine_age=startup["load"],
+                           store_read_to_request_cycles=startup["store"] - startup["load"]),
+                edge_order=list(DMA_EDGE_ORDER))
+
+
+def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsilon, interval):
+    """Checked analytic bound, with source expressions as its proof premises.
+
+    The bound is deliberately serialized. It covers retained history, but not
+    pre-existing live work or externally denied grants. No observed timing enters
+    this function. Full reviewed method guards also protect predicates that the
+    compact evidence below does not repeat.
+    """
+    core_tick, s1, core_tick_shape, core_s1_shape = _core_phase_contract(core_source)
     dma_cls = _one((n for n in dma_tree.body if isinstance(n, ast.ClassDef)
                     and n.name == "DmaExecutionUnit"), "DMA class")
     tick = _method(dma_cls, "tick")
@@ -233,13 +269,12 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsil
                 preconditions=dict(engine_backend_drained_at_launch=True, vmem_grant_denials=0,
                                    history="arbitrary_retained_issue_history",
                                    maximum_cycle=maximum_cycle, maximum_arithmetic_operand=maximum_cycle),
-                policy=dict(classification="compiler_policy", intercommand_serialization_cycles=1),
+                policy=deepcopy(POLICY["dma_proposal"]),
                 recurrence=dict(retire="launch+startup[direction]+beats*per_beat_bound_cycles",
                                 wait="retire+retire_to_wait_issue_cycles"),
-                source_evidence=dict(core_tick_shape=shape(core_tick), core_s1_shape=shape(normalized),
+                source_evidence=dict(core_tick_shape=core_tick_shape, core_s1_shape=core_s1_shape,
                                      expressions=premises,
-                                     edge_order=["Core.S1", "DMA.D", "DMA.store_read", "DMA.A",
-                                                 "DMA.retire_clear_flag", "DMA.enqueue_launch"],
+                                     edge_order=list(DMA_EDGE_ORDER),
                                      service_maximum_cycles=maximum,
                                      service_quantum="ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval"),
                 proof=["Every retained-history mix selects a curve row; the maximum covers every row.",
@@ -263,7 +298,7 @@ def proposal_duration(facts, *, store, beats):
 
 
 def derive_curve(cfg):
-    from npu_model.hardware import core, dma, memory_backend
+    from npu_model.hardware import core, dma, memory_backend, lsu, bank_conflict
     from atlas_derive_mxu import UnsupportedMXU
     try:
         backend_tree, backend_sha = _review(memory_backend)
@@ -324,6 +359,9 @@ def derive_curve(cfg):
                          peak_beats_per_cycle=peak, cycles_per_beat=1.0 / peak,
                          points=[list(point) for point in points]))
     core_source = _read(_safe(inspect.getsourcefile(core)))
+    shared = review_dma_sources({module.__name__.rsplit(".", 1)[-1] + ".py":
+                                 _read(_safe(inspect.getsourcefile(module)))
+                                 for module in (core, dma, memory_backend, lsu, bank_conflict)})
     proposal = _proposal_contract(core_source, dma_tree, backend_tree, rows, backend.min_latency,
                                   epsilon, issue_interval)
     return dict(schema="atlas.dma_timing.v1", backend="curve", resolved=True, estimate_only=True,
@@ -339,6 +377,7 @@ def derive_curve(cfg):
                 startup_cycles=startup, issue_interval_cycles=issue_interval,
                 rounding_epsilon_cycles=epsilon, curves=rows,
                 reset_last_ready_cycles=reset_last_ready,
+                source_contract=shared,
                 proposal_contract=proposal,
                 semantics=dict(history="last_window_beats_issued_including_current_beat",
                                curve_selection="nearest_read_percentage_tie_lower",
