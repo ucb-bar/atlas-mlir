@@ -7,6 +7,8 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
+  Option<std::string> orderFile{*this, "order-file", llvm::cl::desc("Virtual order JSON"), llvm::cl::init("")};
+  Option<std::string> graphOutput{*this, "graph-output", llvm::cl::desc("Virtual graph JSON"), llvm::cl::init("")};
   Option<bool> spill{*this, "spill", llvm::cl::desc("Recover register pressure"), llvm::cl::init(true)};
   Option<bool> spillMXUState{*this, "spill-mxu-state", llvm::cl::desc("Recover MXU pressure"), llvm::cl::init(true)};
   enum class Boundary { All, None };

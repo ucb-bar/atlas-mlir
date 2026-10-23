@@ -19,7 +19,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_model_selection import Candidate, candidate_options, evidence_option, select_program
+from model_evidence import requires_model_evidence
+from atlas_model_selection import Candidate, candidate_options, evidence_option, order_neighbors, select_program
 
 
 def candidate_command(argv):
@@ -102,6 +103,8 @@ class ModelSelectionTest(unittest.TestCase):
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
+            ({"provider": "builtin", "search_evaluations": 1}, "search-evaluations"),
+            ({"search_evaluations": -1}, "search-evaluations"),
             ({"boundary": "inputs"}, "boundary must be boundary or none"),
         ):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, diagnostic):
@@ -204,10 +207,85 @@ with TemporaryDirectory() as directory:
         self.assertIn("allocation-report=allocation.json", options[0])
         self.assertTrue(any("store-windows='7,3,0'" in option for option in options))
         self.assertTrue(any("wait-placement=source" in option for option in options))
+        with self.assertRaisesRegex(ValueError, "explicit virtual orders"):
+            Candidate(lookahead=1, virtual_orders=((0,),))
         for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
                         {"store_windows": (-1,)}, {"wait_placement": "other"}):
             with self.assertRaises(ValueError):
                 Candidate(**invalid)
+
+    def test_order_neighbors_preserve_all_edges_and_only_move_one_node(self) -> None:
+        preds = [[], [], [0], [1, 2], []]
+        for order in permutations(range(5)):
+            positions = {node: i for i, node in enumerate(order)}
+            if any(positions[pred] >= positions[node] for node in order for pred in preds[node]):
+                continue
+            expected = set()
+            for origin in range(5):
+                for target in range(5):
+                    moved = list(order)
+                    moved.insert(target, moved.pop(origin))
+                    rank = {node: i for i, node in enumerate(moved)}
+                    if moved != list(order) and all(rank[pred] < rank[node] for node in moved for pred in preds[node]):
+                        expected.add((tuple(moved), (0,)))
+            actual = set(order_neighbors([{"preds": preds}, {"preds": [[]]}], (order, (0,))))
+            self.assertEqual(actual, expected)
+
+    def test_local_search_uses_selected_order_budget_and_strict_improvement(self) -> None:
+        initial = (1, 0, 2, 3)
+        attempted = []
+
+        def compile_order(argv, **kwargs):
+            cwd = kwargs["cwd"]
+            result = self.fake_run(argv, **kwargs)
+            if result.returncode or not candidate_command(argv):
+                return result
+            if "order-file=order.json" in " ".join(argv):
+                order = tuple(json.loads((cwd / "order.json").read_text())[0])
+                attempted.append(order)
+                if len(attempted) == 1:
+                    return subprocess.CompletedProcess(argv, 1, "", "dependence rejected")
+                cycles = 4
+                word = 100 + sum((node + 1) * 10 ** i for i, node in enumerate(order))
+                self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": cycles}
+            else:
+                order = initial if "lookahead=2" in " ".join(argv) else (0, 1, 2, 3)
+            (cwd / "graph.json").write_text(json.dumps([{"preds": [[], [], [], []], "order": order}]))
+            return result
+
+        receipt = self.select(runner=compile_order, max_candidates=3, search_evaluations=13, workers=1)
+        self.assertEqual(receipt["search"]["start_index"], 2)
+        self.assertEqual(receipt["search"]["evaluations"], 13)
+        self.assertEqual(receipt["selected_cycles"], 4)
+        self.assertEqual(receipt["search"]["accepted_indices"], [4])
+        local = receipt["candidates"][3:]
+        self.assertEqual(local[0]["status"], "FAIL")
+        self.assertEqual(local[0]["parent_index"], 2)
+        self.assertEqual(local[-1]["parent_index"], 4)
+        self.assertEqual(tuple(local[0]["options"]["virtual_orders"][0]),
+                         next(order_neighbors([{"preds": [[], [], [], []]}], (initial,)))[0])
+        for row in local:
+            self.assertEqual(row["options"]["lookahead"], 0)
+            self.assertIsNone(row["options"]["random_seed"])
+        replay = next(argv for argv in self.invocations if "order-file=order.json" in " ".join(argv))
+        option = candidate_command(replay)
+        self.assertIsNotNone(option)
+        self.assertIn("provider=model", option)
+        self.assertIn("spill=true", option)
+        self.assertIn("order-file=order.json", option)
+        self.assertIn("graph-output=graph.json", option)
+
+
+    def test_exhausted_tied_neighborhood_is_deterministic_across_worker_counts(self) -> None:
+        receipts = []
+        for workers in (1, 4):
+            receipt = self.select(name=str(workers), runner=self.graph_run([[], [], []]), max_candidates=1,
+                                  search_evaluations=20, workers=workers, scorer=lambda program, **_: 10)
+            self.assertEqual(receipt["selected_index"], 0)
+            self.assertEqual(receipt["search"]["accepted_indices"], [])
+            self.assertEqual(receipt["search"]["evaluations"], 4)
+            receipts.append([row["options"] for row in receipt["candidates"]])
+        self.assertEqual(*receipts)
 
 
     def test_model_evidence_requires_explicit_pins(self) -> None:
@@ -233,7 +311,8 @@ with TemporaryDirectory() as directory:
         self.assertIn("composed-sha256=cd", option)
 
 
-from test_virtual_ssa import ROOT, run
+from test_virtual_ssa import BIN, ROOT, run
+from test_virtual_scheduling import S, function, start, inp, const, dma_load, dma_store, outp
 
 EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
 
@@ -267,6 +346,8 @@ class ModelSelectionKnobsTest(unittest.TestCase):
     def test_candidate_controls_require_npu_model(self):
         for option, diagnostic in (
             ("--schedule-atlas-virtual=lookahead=1", "lookahead requires the model"),
+            ("--schedule-atlas-virtual=order-file=missing.json", "require the model"),
+            ("--schedule-atlas-virtual=graph-output=unused.json", "require the model"),
             ("--lower-atlas-virtual-to-machine=store-windows=1", "store-windows requires the model"),
             ("--schedule-atlas-stream=wait-placement=source", "wait-placement=source requires the model"),
         ):
@@ -299,6 +380,99 @@ class ModelSelectionKnobsTest(unittest.TestCase):
                 self.assertEqual(before.returncode, 0, before.stderr)
                 self.assertEqual(after.returncode, 0, after.stderr)
                 self.assertEqual(before.stdout, after.stdout)
+
+
+# External evidence is optional only when neither pin was configured.
+@requires_model_evidence
+class TiledSelectionTest(unittest.TestCase):
+    def test_mlp16_default_needs_and_receives_command_slot_waits(self):
+        source = ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir"
+        facts, pairs = Path(os.environ["ATLAS_TEST_OP_TIMING"]), Path(os.environ["ATLAS_TEST_PAIR_TIMING"])
+        digests = {"op_timing_sha256": hashlib.sha256(facts.read_bytes()).hexdigest(),
+                   "pairs_sha256": hashlib.sha256(pairs.read_bytes()).hexdigest()}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1, op_timing=facts,
+                                     pairs=pairs, scorer=lambda program, **_: len(program["instructions"]), **digests)
+        self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
+
+
+class ModelOrderReplayTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        fixture = subprocess.run([str(BIN / "atlas-model-timing-test"), "--fixture"], capture_output=True, check=True)
+        facts = self.directory / "facts.json"
+        facts.write_bytes(fixture.stdout)
+        self.evidence = (f"--select-atlas-model-evidence=op-timing={facts} "
+                         f"op-timing-sha256={hashlib.sha256(fixture.stdout).hexdigest()} dma=wait")
+        self.source = function("alias", [
+            start("s0"), inp("s0", "s1", "tile", 0), const("address", -2147481600), const("size", 2048),
+            dma_store("s1", "s2", "tile", "address"),
+            dma_load("s2", "s3", "loaded", "address", "size", "bf16"),
+            outp("s3", "s4", "loaded", 0), f"return %s4 : {S}"])
+        self.graph_path = self.directory / "graph.json"
+        self.order_path = self.directory / "order.json"
+
+    def schedule(self, source=None, **options):
+        option = "--schedule-atlas-virtual=provider=model " + " ".join(
+            f"{key.replace('_', '-')}={value}" for key, value in options.items())
+        return run("atlas-opt", source or self.source, self.evidence, option, "--verify-atlas-virtual-stream")
+
+    def graph(self):
+        result = self.schedule(graph_output=self.graph_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(self.graph_path.read_text()), result.stdout
+
+    def replay(self, orders):
+        self.order_path.write_text(json.dumps(orders))
+        return self.schedule(order_file=self.order_path)
+
+    def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
+        graphs, scheduled = self.graph()
+        replay = self.replay([graph["order"] for graph in graphs])
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(replay.stdout, scheduled)
+        self.source = function("loads", [start(), const("address", -2147481600), const("size", 2048),
+            dma_load("io0", "s1", "a", "address", "size", "bf16"),
+            dma_load("s1", "s2", "b", "address", "size", "bf16"),
+            outp("s2", "s3", "a", 0), outp("s3", "s4", "b", 1), f"return %s4 : {S}"])
+        graphs, _ = self.graph()
+        order = graphs[0]["order"]
+        loads = [i for i, name in enumerate(graphs[0]["operations"]) if name == "atlas.virtual_dma_load_bf16"]
+        left, right = (order.index(node) for node in loads)
+        order[left], order[right] = order[right], order[left]
+        replay = self.replay([order])
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+
+    def test_each_graph_edge_including_alias_order_is_mandatory(self):
+        graphs, _ = self.graph()
+        graph = graphs[0]
+        store = graph["operations"].index("atlas.virtual_dma_store_bf16")
+        load = graph["operations"].index("atlas.virtual_dma_load_bf16")
+        self.assertIn(store, graph["preds"][load])
+        for node, preds in enumerate(graph["preds"]):
+            for pred in preds:
+                with self.subTest(pred=pred, node=node):
+                    order = list(graph["order"])
+                    order.remove(node)
+                    order.insert(order.index(pred), node)
+                    rejected = self.replay([order])
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("violates a dependence", rejected.stderr)
+
+    def test_malformed_orders_and_conflicting_modes_reject(self):
+        graphs, _ = self.graph()
+        order = graphs[0]["order"]
+        for bad in (None, {}, [], [order, []], [order[:-1]], [[-1] + order[1:]],
+                    [[order[1]] + order[1:]], [[len(order)] + order[1:]], [[True] + order[1:]]):
+            with self.subTest(order=bad):
+                self.assertNotEqual(self.replay(bad).returncode, 0)
+        self.order_path.write_text(json.dumps([order]))
+        for option in ({"lookahead": 1}, {"random_seed": 1}):
+            result = self.schedule(order_file=self.order_path, **option)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("order-file excludes", result.stderr)
 
 
 if __name__ == "__main__":
