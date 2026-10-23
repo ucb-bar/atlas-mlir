@@ -16,6 +16,7 @@ def sample_plan(admission, per_op):
     result = []
     def add(label, assembly, issues, accepted=True):
         result.append(dict(id=label, assembly=assembly, issues=issues, accepted=accepted))
+    blocks = {block["name"]: block for block in per_op["op_timing"]}
     final = admission["vpu"]["final_write_age"]
     for name in sorted(final):
         _, insn = command(name, dict(rs1=0, rs2=2, rd=4))
@@ -57,10 +58,18 @@ def sample_plan(admission, per_op):
     add("xlu-vpu-physical-bank", ["vtrpose.xlu m4, m0", "vrelu.bf16 m12, m32"], [0, 1], False)
     add("vpu-xlu-physical-bank", ["vrelu.bf16 m4, m0", "vtrpose.xlu m12, m32"], [0, 1], False)
     # Column reduction wraps its pair and can share identical native VPU reads.
-    add("vpu-read-coalescing", ["vredmax.bf16 m4, m0", "vrelu.bf16 m12, m0"], [0, 64])
+    # Align RELU's first read with the reduction's next complete source-pair
+    # pass. One slot cannot overlap these commands, even with coalesced reads.
+    reduction = blocks["vpu.cmax"]["events"]["read0"]
+    elementwise = blocks["vpu.relu"]["events"]["read0"]
+    shared_read_age = reduction["first_age"] + elementwise["count"] * reduction["step"]
+    coalescing_gap = shared_read_age - elementwise["first_age"]
+    assembly = ["vredmax.bf16 m4, m0", "vrelu.bf16 m12, m0"]
+    add("vpu-read-coalescing", assembly, [0, coalescing_gap], capacity >= 2)
+    if capacity == 1:
+        add("vpu-read-coalescing-final-slot-reuse", assembly, [0, final["vpu.cmax"]])
     add("vls-paths-independent", ["vload m4, 0(x2)", "vstore m8, 0(x3)"], [0, 1])
     add("vls-paths-bank-conflict", ["vload m4, 0(x2)", "vstore m8, 0(x2)"], [0, 1], False)
-    blocks = {block["name"]: block for block in per_op["op_timing"]}
     for first, second, directions in (("vload", "vstore", ("read", "write")),
                                        ("vstore", "vload", ("write", "read"))):
         a = blocks["vlsu." + first]["events"]["vmem_" + directions[0]]
