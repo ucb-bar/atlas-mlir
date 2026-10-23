@@ -1,4 +1,5 @@
 #include "Atlas/AtlasTimingProvider.h"
+#include "Atlas/AtlasModelTiming.h"
 #include "llvm/ADT/StringMap.h"
 #include <limits>
 #include <mutex>
@@ -26,9 +27,13 @@ private:
 } // namespace
 
 TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
-    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma) {
+    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma,
+    const std::vector<TimingContext> *contexts) {
   std::string missing = validateTimingProvider(p);
   if (!missing.empty()) return {{}, missing};
+  if (contexts && contexts->size() != instrs.size())
+    return {{}, "timing context count differs from instruction count"};
+  auto context = [&](int i) { return contexts ? (*contexts)[i] : TimingContext{}; };
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
@@ -42,7 +47,6 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
     applyScalar(in, regs);
   }
 
-  // Match buildGraph's edge order and maximum distances.
   std::map<std::pair<int, int>, int> index;
   auto add = [&](int from, int to, int distance, EdgeKind kind, const std::string &reason) {
     auto it = index.find({from, to});
@@ -55,7 +59,7 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   };
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
-      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
+      auto d = p.dependenceFor(g.nodes[a], g.footprints[a], context(a), g.nodes[b], g.footprints[b], context(b));
       if (!d.error.empty()) return {{}, d.error};
       if (d.value.distance < 0) return {{}, "timing provider returned a negative dependence distance"};
       if (d.value.distance > 0)
@@ -127,7 +131,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
 }
 
 mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
-    const TimingProvider &p, const std::string &name, mlir::Operation *at) {
+    const TimingProvider &p, const std::string &name, mlir::Operation *at,
+    const ProbeContexts &contexts) {
   auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
     return at->emitOpError("virtual cost of ") << name << ": " << why;
   };
@@ -150,6 +155,15 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   default:
     break;
   }
+  if (p.costProbes) {
+    auto probes = p.costProbes(*op);
+    if (!probes.error.empty()) return error(probes.error);
+    if (probes.value.first.op != op || probes.value.second.op != op)
+      return error("virtual cost probes must name the requested operation");
+    first = probes.value.first;
+    second = probes.value.second;
+  }
+  auto [firstContext, secondContext] = contexts ? contexts(first, second) : std::pair<TimingContext, TimingContext>{};
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());
   for (const Footprint *f : {&a, &b}) {
@@ -163,14 +177,14 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   auto table = p.createReservations();
   if (!table.error.empty() || !table.value)
     return error(table.error.empty() ? "timing provider returned no reservation state" : table.error);
-  auto isolated = table.value->conflict(first, a, 0);
+  auto isolated = table.value->conflictWithContext(first, a, 0, firstContext);
   if (!isolated.error.empty()) return error(isolated.error);
   if (!isolated.value.empty()) return error("representative instruction can never issue: " + isolated.value);
-  std::string why = table.value->reserve(first, a, 0);
+  std::string why = table.value->reserveWithContext(first, a, 0, firstContext);
   if (!why.empty()) return error(why);
   constexpr int kMaximumInterval = 100000;
   for (int interval = gap.value; interval <= kMaximumInterval; ++interval) {
-    auto conflict = table.value->conflict(second, b, interval);
+    auto conflict = table.value->conflictWithContext(second, b, interval, secondContext);
     if (!conflict.error.empty()) return error(conflict.error);
     if (conflict.value.empty())
       return MachineOpTiming{a.doneAge + 1, interval};
@@ -221,10 +235,6 @@ TimingProvider mlir::atlas::timing::builtinTimingProvider() {
   return p;
 }
 
-TimingProvider mlir::atlas::timing::npuModelTimingProvider() {
-  return builtinTimingProvider();
-}
-
 namespace {
 struct Registry {
   std::mutex mutex;
@@ -237,6 +247,7 @@ Registry &registry() {
     r->factories[kBuiltinTimingProviderId] = [](mlir::ModuleOp) {
       return TimingRuleResult<TimingProvider>{builtinTimingProvider(), {}};
     };
+    r->factories[kModelTimingProviderId] = modelTimingProviderFactory;
     return r;
   }();
   return *table;

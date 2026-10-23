@@ -4,7 +4,9 @@
 #include "Atlas/AtlasTiming.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
+#include <functional>
 #include <memory>
+#include <utility>
 
 namespace mlir::atlas {
 struct AtlasStream;
@@ -33,6 +35,13 @@ public:
   virtual std::string reserve(const Instr &in, const Footprint &footprint,
                               int cycle) = 0;
   virtual std::string onWait(const Instr &in, int cycle) = 0;
+  virtual TimingRuleResult<std::string> conflictWithContext(
+      const Instr &in, const Footprint &f, int cycle, const TimingContext &) const {
+    return conflict(in, f, cycle);
+  }
+  virtual std::string reserveWithContext(const Instr &in, const Footprint &f, int cycle, const TimingContext &) {
+    return reserve(in, f, cycle);
+  }
 };
 
 // Complete inputs to final timing verification; scope validation runs first.
@@ -45,25 +54,42 @@ struct TimingProvider {
   std::function<TimingRuleResult<Dependence>(
       const Instr &, const Footprint &, const Instr &, const Footprint &)>
       dependence;
+  std::function<TimingRuleResult<Dependence>(
+      const Instr &, const Footprint &, const TimingContext &,
+      const Instr &, const Footprint &, const TimingContext &)>
+      contextualDependence;
+  TimingRuleResult<Dependence> dependenceFor(
+      const Instr &a, const Footprint &fa, const TimingContext &ca,
+      const Instr &b, const Footprint &fb, const TimingContext &cb) const {
+    return contextualDependence ? contextualDependence(a, fa, ca, b, fb, cb) : dependence(a, fa, b, fb);
+  }
   std::function<TimingRuleResult<DMACompletionConflict>(
       const Footprint &, const Footprint &)> dmaConflict;
   std::function<TimingRuleResult<int>(const Instr &)> issueGap;
   std::function<TimingRuleResult<std::unique_ptr<TimingReservations>>()>
       createReservations;
+  // DMA wait insertion completes launch n-8 before launch n reuses its command slot.
+  bool waitReusedDMASlots = false;
+  // Optional legal virtual-cost operands; absent uses the default probes.
+  std::function<TimingRuleResult<std::pair<Instr, Instr>>(const OpInfo &)> costProbes;
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
 // Provider graph; absent incoming DMA facts retain broad post-wait guards.
 TimingRuleResult<DepGraph> buildTimingGraph(
     const std::vector<Instr> &instrs, const RegValues &entry,
-    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
+    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr,
+    const std::vector<TimingContext> *contexts = nullptr);
 
 struct MachineOpTiming {
   int latency, interval;
 };
 // Cost probes retain representative operands and unknown bases; they are not verified instructions.
+// `contexts`, when given, proves the two probes as the instructions their lowering issues.
+using ProbeContexts = std::function<std::pair<TimingContext, TimingContext>(const Instr &, const Instr &)>;
 FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
-                                        const std::string &name, Operation *at);
+                                        const std::string &name, Operation *at,
+                                        const ProbeContexts &contexts = {});
 
 constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
 constexpr llvm::StringLiteral kLegacyBuiltinTimingProviderId = "npu-model-rtl-match-v1";
@@ -72,8 +98,6 @@ inline bool fillsDelaySlots(const TimingProvider &provider) { return provider.id
 llvm::StringRef canonicalTimingProviderId(llvm::StringRef id);
 // Built-in rules ported from npu_model's rtl-match mode.
 TimingProvider builtinTimingProvider();
-// Legacy C++ entry point.
-TimingProvider npuModelTimingProvider();
 // Module-scoped factory; its returned ID must match the canonical registered ID.
 using TimingProviderFactory =
     std::function<TimingRuleResult<TimingProvider>(mlir::ModuleOp module)>;

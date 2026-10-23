@@ -7,6 +7,8 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasStreamVerification.cpp
   AtlasTiming.cpp
   AtlasTimingProvider.cpp
+  AtlasModelTiming.cpp
+  AtlasModelPairs.cpp
   AtlasStream.cpp
   AtlasLoop.cpp
   AtlasPackLoop.cpp
@@ -36,7 +38,7 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasGeneratedArtifact.cpp
   AtlasGeneratedSchedule.cpp
   AtlasVerificationContext.cpp
-  DEPENDS MLIRAtlasOpsIncGen
+  DEPENDS MLIRAtlasOpsIncGen AtlasModelVocabularyGen
   LINK_LIBS PUBLIC MLIRIR MLIRAnalysis MLIRSideEffectInterfaces MLIRArithDialect
                    MLIRControlFlowDialect MLIRFuncDialect MLIRLLVMDialect
                    MLIRPass)
