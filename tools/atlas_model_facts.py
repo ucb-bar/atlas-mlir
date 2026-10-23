@@ -208,7 +208,7 @@ def regenerate(model, out):
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
                    limits=["Operation timing blocks describe isolated disjoint operands; admission has separate source contracts.",
-                           "DMA costs are cold proposal estimates; dynamic completion still requires matching waits.",
+                           "DMA costs are conditional drained/no-denial service bounds; dynamic completion still requires matching waits.",
                            "Unit releases are isolated lifetime envelopes; engine_admission and overlap rules govern initiation.",
                            "VMEM releases describe physical port windows, not whole-operation reservations.",
                            "Logical MREG release requests take effect at the next begin_cycle.",
@@ -248,16 +248,30 @@ def regenerate(model, out):
     overlap = overlap_bundle(model, out)
     if before != identity(model) or generator_sources != tool_manifest():
         raise ModelTimingValidationError("model or generator tools changed during overlap validation")
+    # The operation report precedes admission/overlap qualification. Record the
+    # complete reviewed suite only after every gate has actually succeeded.
+    suite_hash = write(out, "suite-validation.json", dict(
+        schema="atlas.model_validation_suite.v1", passed=True,
+        semantic_payload_sha256=semantic_hash,
+        policy=POLICY["validation"]["reviewed_suite"],
+        reports=dict(operations_and_weights=report_hash, runtime=runtime_report_hash,
+                     replay=report["replay_validation"]["report_sha256"],
+                     dma=dma_report_hash,
+                     engine_admission=payload["engine_admission"]["validation"]["report_sha256"],
+                     dma_admission=payload["dma_admission"]["validation"]["report_sha256"],
+                     overlap=overlap["overlap_validation_sha256"])))
     write(out, "facts.lock.json", dict(schema="atlas.model_facts.lock.v1", model=source_identity,
                                      configuration_sha256=model_values["configuration_sha256"],
                                      op_timing_sha256=facts_hash, validation_sha256=report_hash,
                                      semantic_payload_sha256=semantic_hash,
+                                     suite_validation_sha256=suite_hash,
                                      vocabulary_sha256=payload["vocabulary_sha256"],
                                      overlap_sha256=overlap["overlap_sha256"],
                                      overlap_validation_sha256=overlap["overlap_validation_sha256"]))
     write(out, "timing-receipt.json", dict(schema="atlas.model_derivation_receipt.v1",
                                          facts_sha256=facts_hash, semantic_payload_sha256=semantic_hash,
                                          validation_sha256=report_hash, derive_seconds=derive_seconds,
+                                         suite_validation_sha256=suite_hash,
                                          validation_seconds=validate_seconds,
                                          admission_validation_seconds=admission_seconds, **overlap))
     print(json.dumps(dict(passed=True, operations=len(blocks), facts_sha256=facts_hash,
