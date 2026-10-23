@@ -22,11 +22,29 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from model_evidence import requires_model_evidence
 from atlas_model_selection import (Candidate, add_model_arguments, candidate_options, evidence_option,
-                                   group_order_neighbors, model_arguments, order_neighbors, select_program)
+                                   group_order_neighbors, model_arguments, order_neighbors, select_program,
+                                   order_candidates, proposal_estimate, rank_order_neighbors, validate_proposal_graphs)
 
 
 def candidate_command(argv):
     return next((arg for arg in argv if arg.startswith("--atlas-compile-candidate=")), None)
+
+
+PROPOSAL_ID = "a" * 64
+
+
+def proposal_graph(preds, order, latency=100):
+    costs = [{"unit": 1, "busy": latency, "latency": latency, "frontend": 1,
+              "queued_dma": True, "drains": False}]
+    costs += [{"unit": 0, "busy": 20 if node == 2 else 1, "latency": 20 if node == 2 else 1,
+               "frontend": 20 if node == 2 else 1, "queued_dma": False, "drains": False}
+              for node in range(1, len(preds))]
+    graph = {"preds": preds, "order": list(order), "operations": ["test.work"] * len(preds),
+             "proposal": {"schema": "atlas.virtual_proposal.v1", "facts_sha256": PROPOSAL_ID,
+                          "units": 2, "dma_capacity": 8, "costs": costs, "estimate": {}}}
+    makespan, waiting = proposal_estimate(graph, tuple(order))
+    graph["proposal"]["estimate"] = {"makespan": makespan, "exposed_waiting": waiting}
+    return graph
 
 
 class ModelSelectionTest(unittest.TestCase):
@@ -55,6 +73,7 @@ class ModelSelectionTest(unittest.TestCase):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def select(self, *, name="compiled", runner=None, **kwargs):
+        kwargs.setdefault("curve_candidates", kwargs.get("profile") == "curve")
         kwargs.setdefault("scorer", lambda program, **_: program["cycles"])
         with patch("atlas_model_selection.subprocess.run", side_effect=runner or self.fake_run):
             return select_program(self.source, self.directory / name, self.directory, **kwargs)
@@ -63,7 +82,7 @@ class ModelSelectionTest(unittest.TestCase):
         path = cwd / "order.json"
         order = tuple(json.loads(path.read_text())[0]) if path.exists() else tuple(
             range(len(preds)) if initial is None else initial)
-        graph = {"preds": preds, "order": order}
+        graph = proposal_graph(preds, order) if curve else {"preds": preds, "order": order}
         (cwd / "graph.json").write_text(json.dumps([graph]))
         return order
 
@@ -125,7 +144,7 @@ class ModelSelectionTest(unittest.TestCase):
     def test_fixed_batches_keep_all_compiles_canonical(self):
         with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
             receipt = select_program(self.source, self.directory / "compiled", self.directory,
-                max_candidates=1, search_evaluations=13, workers=4,
+                curve_candidates=False, max_candidates=1, search_evaluations=13, workers=4,
                 scorer=lambda program, **_: program["cycles"])
         self.assertEqual(len(receipt["candidates"]), 14)
         self.assertEqual(receipt["search"]["evaluations"], 13)
@@ -204,7 +223,7 @@ class ModelSelectionTest(unittest.TestCase):
         for cap, evaluated in ((32, 8), (64, 8), (25, 2)):
             with self.subTest(cap=cap), patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
                 receipt = select_program(self.source, self.directory / str(cap), self.directory,
-                    max_candidates=cap, mreg_candidates=None,
+                    curve_candidates=False, max_candidates=cap, mreg_candidates=None,
                     store_window_candidates=((0, 1), (0, 2), (0, 3)), scorer=lambda program, **_: program["cycles"])
             ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
             self.assertEqual((receipt["mreg_pool_size"], len(ranks)), (8, evaluated))
@@ -320,7 +339,7 @@ with TemporaryDirectory() as directory:
                 self.assertEqual(row["options"]["mreg_ranks"], (31, 7))
 
     def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
-        common = dict(scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
+        common = dict(curve_candidates=False, scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
         prefix = self.select(name="prefix", max_candidates=24, **common)
         extended = self.select(name="extended", max_candidates=32, mreg_candidates=None, **common)
         self.assertEqual([row["options"] for row in prefix["candidates"]],
@@ -636,6 +655,248 @@ with TemporaryDirectory() as directory:
         self.assertIn("pairs-sha256=ef", option)
         self.assertIn("composed-sha256=cd", option)
 
+    def test_curve_priorities_preserve_all_neighbors_and_change_with_pacing(self):
+        initial = (0, 1, 2)
+        current_first = (0, 2, 1)
+        slow = proposal_graph([[], [0], []], initial)
+        fast = proposal_graph([[], [0], []], initial, latency=1)
+        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+        for graph in (slow, fast):
+            validate_proposal_graphs([graph], program)
+        orders = [(initial,), (current_first,)]
+        self.assertEqual(next(rank_order_neighbors([slow], orders)), (current_first,))
+        self.assertEqual(next(rank_order_neighbors([fast], orders)), (initial,))
+        preds = [[], [], [0], [1, 2], []]
+        graph = proposal_graph(preds, tuple(range(5)))
+        for neighbors in (order_neighbors, group_order_neighbors):
+            ordinary = list(neighbors([graph], (tuple(range(5)),)))
+            ranked = list(rank_order_neighbors([graph], ordinary))
+            self.assertEqual(set(ordinary), set(ranked))
+            self.assertEqual(len(set(ordinary)), len(ranked))
+            self.assertEqual([proposal_estimate(graph, order[0]) for order in ranked],
+                             sorted(proposal_estimate(graph, order[0]) for order in set(ordinary)))
+            self.assertEqual(ranked, list(rank_order_neighbors([graph], ordinary)))
+
+    def test_proposal_active_transfer_heap_matches_full_history_replay(self):
+        def reference(graph, order):
+            proposal = graph["proposal"]
+            free, finished, transfers = {}, [0] * len(order), []
+            frontend = makespan = waiting = 0
+            for node in order:
+                cost = proposal["costs"][node]
+                unit = cost["unit"]
+                cycle = frontend if cost["queued_dma"] else max(frontend, free.get(unit, 0))
+                if cost["drains"]:
+                    cycle = max([cycle, *transfers])
+                cycle = max([cycle, *(finished[pred] for pred in graph["preds"][node])])
+                if cost["queued_dma"]:
+                    busy = sorted(end for end in transfers if end > cycle)
+                    capacity = proposal["dma_capacity"]
+                    if len(busy) >= capacity:
+                        cycle = busy[len(busy) - capacity]
+                work = max(cycle + cost["frontend"] - 1, free.get(unit, 0)) if cost["queued_dma"] else cycle
+                finished[node] = work + cost["latency"]
+                free[unit] = work + cost["busy"]
+                if cost["queued_dma"]:
+                    transfers.append(work + cost["busy"])
+                waiting += cycle - frontend
+                frontend = cycle + cost["frontend"]
+                makespan = max(makespan, finished[node])
+            return makespan, waiting
+
+        rng = random.Random(71)
+        for _ in range(100):
+            count = rng.randrange(1, 60)
+            order = list(range(count))
+            rng.shuffle(order)
+            preds = [[] for _ in order]
+            costs = []
+            for position, node in enumerate(order):
+                preds[node] = [earlier for earlier in order[:position] if rng.random() < .08]
+            for node in range(count):
+                queued = rng.choice((False, True))
+                costs.append(dict(unit=rng.randrange(4), busy=rng.randrange(100),
+                                  latency=rng.randrange(100), frontend=rng.randrange(1 if queued else 0, 10),
+                                  queued_dma=queued, drains=rng.choice((False, True))))
+            graph = dict(preds=preds, proposal=dict(costs=costs, dma_capacity=rng.randrange(1, 9)))
+            self.assertEqual(proposal_estimate(graph, tuple(order)), reference(graph, order))
+
+    def test_curve_bounded_ranking_preserves_exhaustive_attempt_prefix(self):
+        initial = tuple(range(6))
+        graph = proposal_graph([[], [], [0], [], [1], []], initial)
+        base = Candidate(virtual_orders=(initial,))
+        for neighbors in (order_neighbors, group_order_neighbors):
+            ordinary = [(initial,), *neighbors([graph], (initial,))]
+            exhaustive = sorted(ordinary, key=lambda orders: proposal_estimate(graph, orders[0]))
+            all_candidates = list(dict.fromkeys(order_candidates(base, exhaustive, True)))
+            # Seen candidates can include one sibling, both siblings, or neither.
+            for stride in (2, 3, 5):
+                seen = set(all_candidates[::stride])
+                expected = [candidate for candidate in all_candidates if candidate not in seen]
+                for remaining in (1, 2, 7, len(expected) + 1):
+                    eligible = lambda order: any(candidate not in seen for candidate in
+                                                 order_candidates(base, (order,), True))
+                    ranked = rank_order_neighbors([graph], iter(ordinary), remaining, eligible)
+                    actual = [candidate for candidate in order_candidates(base, ranked, True)
+                              if candidate not in seen]
+                    self.assertEqual(actual[:remaining], expected[:remaining])
+
+    def test_curve_ranking_deduplicates_and_filters_before_replay(self):
+        graph = proposal_graph([[], [], []], (0, 1, 2))
+        first, second = ((1, 0, 2),), ((2, 0, 1),)
+        original = proposal_estimate
+        with patch("atlas_model_selection.proposal_estimate", wraps=original) as replay, \
+             patch("atlas_model_selection.heapq.nsmallest", wraps=__import__("heapq").nsmallest) as smallest:
+            ranked = list(rank_order_neighbors([graph], iter([first, second, first, second]), 1,
+                                               eligible=lambda orders: orders != second))
+        self.assertEqual(ranked, [first])
+        self.assertEqual(replay.call_count, 2)  # One parent and one eligible unique order.
+        self.assertEqual(smallest.call_args.args[0], 1)
+        self.assertEqual(list(rank_order_neighbors([graph], iter([first]), 0)), [])
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            rank_order_neighbors([graph], iter([first]), -1)
+
+    def test_curve_metadata_requires_schema_identity_costs_and_native_parity(self):
+        from copy import deepcopy
+        graph = proposal_graph([[], [0], []], (0, 1, 2))
+        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+        mutations = (
+            lambda g: g.pop("proposal"),
+            lambda g: g["proposal"].update(schema="future"),
+            lambda g: g["proposal"].update(facts_sha256="b" * 64),
+            lambda g: g["proposal"]["estimate"].update(makespan=0),
+            lambda g: g["proposal"]["costs"][0].update(busy=-1),
+            lambda g: g["proposal"]["costs"][0].update(queued_dma=1),
+            lambda g: g["proposal"]["costs"][0].update(frontend=0),
+            lambda g: g["proposal"]["costs"].pop(),
+            lambda g: g.update(order=[1, 0, 2]),
+        )
+        for mutate in mutations:
+            broken = deepcopy(graph)
+            mutate(broken)
+            with self.assertRaisesRegex(ValueError, "curve proposal metadata"):
+                validate_proposal_graphs([broken], program)
+        with self.assertRaisesRegex(ValueError, "selected op_timing_sha256"):
+            validate_proposal_graphs([graph], {})
+
+    def test_curve_wait_siblings_reset_preloaded_options(self):
+        base = Candidate(pack_weight_before_pack=True, wait_placement="preloaded")
+        siblings = list(order_candidates(base, [((0, 1),)], True))
+        self.assertEqual([candidate.wait_placement for candidate in siblings], ["default", "source"])
+        self.assertTrue(all(not candidate.pack_weight_before_pack for candidate in siblings))
+        self.assertEqual(list(order_candidates(base, [((0, 1),)], False)),
+                         [Candidate(pack_weight_before_pack=True, wait_placement="preloaded", virtual_orders=((0, 1),))])
+
+    def test_curve_search_bounds_wait_siblings_and_uses_native_scores(self):
+        initial = tuple(range(8))
+        preds = [[], [0], [], [], [], [], [], []]
+        graph = proposal_graph(preds, initial)
+        ranked = list(rank_order_neighbors([graph], order_neighbors([graph], (initial,))))
+        target = ranked[1][0]
+        self.assertGreaterEqual(proposal_estimate(graph, target), proposal_estimate(graph, ranked[0][0]))
+
+        def compile_order(argv, cwd, order):
+            flags = " ".join(argv)
+            source_waits = "wait-placement=source" in flags
+            word = sum((node + 1) * 9 ** i for i, node in enumerate(order)) * 2 + int(source_waits)
+            self.programs[cwd] = {"instructions": [{"word_u32": word}],
+                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID},
+                                  "cycles": 5 if order == target and source_waits else 10}
+            if order == ranked[0][0] and not source_waits:
+                return subprocess.CompletedProcess(argv, 1, "", "dependence refused")
+
+        expected = None
+        for workers in (1, 4):
+            runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
+            receipt = self.select(name=f"curve-{workers}", runner=runner, profile="curve",
+                                  max_candidates=1, search_evaluations=13,
+                                  workers=workers)
+            self.assertTrue(receipt["curve_candidates"])
+            self.assertEqual(receipt["search"]["evaluations"], 13)
+            self.assertEqual(receipt["selected_cycles"], 5)
+            self.assertEqual(receipt["selected_class"], "local-order")
+            self.assertEqual(receipt["search"]["proposal_facts_sha256"], PROPOSAL_ID)
+            local = receipt["candidates"][1:]
+            self.assertEqual(local[0]["status"], "FAIL")
+            self.assertEqual([row["options"]["wait_placement"] for row in local[:4]],
+                             ["default", "source", "default", "source"])
+            self.assertEqual(tuple(local[2]["options"]["virtual_orders"][0]), target)
+            self.assertEqual(receipt["candidates"][receipt["selected_index"]]["options"]["wait_placement"], "source")
+            canonical = [(row["options"], row["status"], row.get("cycles"), row.get("parent_index"))
+                         for row in receipt["candidates"]]
+            if expected is None:
+                expected = canonical
+            self.assertEqual(canonical, expected)
+
+    def test_curve_search_tests_unseen_wait_sibling_after_bank_choice(self):
+        initial = (0, 2, 1)
+        preds = [[], [0], []]
+        for parent_source in (False, True):
+            def compile_order(argv, cwd, order):
+                flags = " ".join(argv)
+                bank = "mreg-ranks=" in flags
+                source = "wait-placement=source" in flags
+                word = 100 + 2 * int(bank) + int(source)
+                cycles = (9 if source == parent_source else 5) if bank else (10 if source == parent_source else 11)
+                self.programs[cwd] = {"instructions": [{"word_u32": word}],
+                                      "model_evidence": {"op_timing_sha256": PROPOSAL_ID}, "cycles": cycles}
+            runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
+            receipt = self.select(name=f"curve-bank-sibling-{parent_source}", runner=runner, profile="curve",
+                                  max_candidates=32, random_seeds=(), mreg_candidates=((1,),),
+                                  search_evaluations=1, workers=1)
+            parent = receipt["candidates"][receipt["search"]["start_index"]]
+            self.assertEqual(parent["class"], "mreg-ranks")
+            self.assertEqual(parent["options"]["wait_placement"], "source" if parent_source else "default")
+            self.assertEqual(receipt["search"]["evaluations"], 1)
+            winner = receipt["candidates"][receipt["selected_index"]]
+            self.assertEqual(winner["cycles"], 5)
+            self.assertEqual(winner["options"]["wait_placement"], "default" if parent_source else "source")
+            self.assertEqual(tuple(winner["options"]["virtual_orders"][0]), initial)
+            self.assertEqual(tuple(winner["options"]["mreg_ranks"]), (1,))
+
+    def test_curve_group_search_charges_odd_budget_per_wait_sibling(self):
+        initial = tuple(range(8))
+        preds = [[], [0], [], [], [], [], [], []]
+        def compile_order(argv, cwd, order):
+            word = sum((node + 1) * 9 ** i for i, node in enumerate(order))
+            self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": 10,
+                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID}}
+        runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
+        receipt = self.select(name="curve-group", runner=runner, profile="curve", max_candidates=1,
+                              search_group_evaluations=5)
+        local = receipt["candidates"][1:]
+        self.assertEqual(receipt["group_search"]["evaluations"], 5)
+        self.assertEqual([row["options"]["wait_placement"] for row in local],
+                         ["source", "default", "source", "default", "source"])
+        self.assertEqual(tuple(local[0]["options"]["virtual_orders"][0]), initial)
+        self.assertEqual(len({Candidate(**{**row["options"], "virtual_orders": tuple(
+            tuple(order) for order in row["options"]["virtual_orders"])}) for row in local}), 5)
+        self.assertEqual(receipt["selected_index"], 0)
+
+    def test_curve_search_malformed_metadata_is_fatal_and_baseline_switch_bypasses_ranking(self):
+        def compile_order(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            if not result.returncode and candidate_command(argv):
+                (kwargs["cwd"] / "graph.json").write_text(json.dumps([{"preds": [[], []], "order": [0, 1]}]))
+            return result
+        with self.assertRaisesRegex(ValueError, "curve proposal metadata"):
+            self.select(name="curve-invalid", runner=compile_order, profile="curve", max_candidates=1,
+                        search_evaluations=1)
+        receipt = self.select(name="curve-disabled", runner=compile_order, profile="curve",
+                              curve_candidates=False, max_candidates=1, search_evaluations=1)
+        self.assertFalse(receipt["curve_candidates"])
+        self.assertEqual(receipt["search"]["evaluations"], 1)
+
+    def test_curve_candidate_switch_is_forwarded_and_rejects_other_profiles(self):
+        parser = argparse.ArgumentParser()
+        add_model_arguments(parser)
+        self.assertIsNone(model_arguments(parser.parse_args([]))["curve_candidates"])
+        self.assertFalse(model_arguments(parser.parse_args(["--no-curve-candidates"]))["curve_candidates"])
+        self.assertTrue(model_arguments(parser.parse_args(["--curve-candidates"]))["curve_candidates"])
+        for kwargs in ({"provider": "builtin", "profile": "curve"}, {"profile": "fifo43"}):
+            with self.assertRaisesRegex(ValueError, "curve-candidates requires"):
+                self.select(curve_candidates=True, **kwargs)
+
 
 from test_virtual_ssa import BIN, ROOT, run
 from test_virtual_scheduling import S, T, F, function, start, inp, const, dma_load, dma_store, outp
@@ -832,6 +1093,48 @@ class ModelOrderReplayTest(unittest.TestCase):
     def replay(self, orders):
         self.order_path.write_text(json.dumps(orders))
         return self.schedule(order_file=self.order_path)
+
+    def test_native_proposal_metadata_matches_explicit_order_replay(self):
+        graphs, _ = self.graph()
+        identity = re.search(r'op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)
+        program = {"model_evidence": {"op_timing_sha256": identity}}
+        validate_proposal_graphs(graphs, program)
+        self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
+        replay_path = self.directory / "replayed-graph.json"
+        replay = self.schedule(order_file=self.order_path, graph_output=replay_path)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        replayed = json.loads(replay_path.read_text())
+        validate_proposal_graphs(replayed, program)
+        self.assertEqual(graphs, replayed)
+        for graph in graphs:
+            self.assertEqual(len(graph["proposal"]["costs"]), len(graph["operations"]))
+            for name, cost in zip(graph["operations"], graph["proposal"]["costs"]):
+                if name in ("atlas.virtual_input_bf16", "atlas.virtual_output_bf16"):
+                    self.assertTrue(cost["drains"])
+                    self.assertEqual(cost["frontend"], cost["latency"])
+                if name in ("atlas.virtual_dma_load_bf16", "atlas.virtual_dma_store_bf16"):
+                    self.assertTrue(cost["queued_dma"])
+
+    def test_native_pack_proposal_is_frontend_blocking_beside_queued_load(self):
+        from test_dma_ring_waits import fixture_evidence
+        self.evidence = fixture_evidence(self.directory)
+        self.source = function("pack", [start(), inp("io0", "s1", "tile", 0),
+            const("address", -2147481600), const("size", 1024),
+            dma_load("s1", "s2", "weight", "address", "size", "fp8"),
+            f'%packed = "atlas.virtual_pack_fp8"(%tile) {{scale_code = 127 : i32}} : ({T}) -> {F}',
+            outp("s2", "s3", "tile", 0), f"return %s3 : {S}"])
+        graphs, _ = self.graph()
+        graph = graphs[0]
+        pack = graph["operations"].index("atlas.virtual_pack_fp8")
+        load = graph["operations"].index("atlas.virtual_dma_load_fp8")
+        costs = graph["proposal"]["costs"]
+        self.assertEqual(costs[pack]["frontend"], costs[pack]["latency"])
+        self.assertGreater(costs[pack]["frontend"], 1)
+        self.assertFalse(costs[pack]["drains"])
+        self.assertTrue(costs[load]["queued_dma"])
+        self.assertEqual(costs[load]["frontend"], 1)
+        validate_proposal_graphs(graphs, {"model_evidence": {
+            "op_timing_sha256": re.search(r'op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)}})
 
     def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
         graphs, scheduled = self.graph()

@@ -1080,6 +1080,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
                                                       std::shared_ptr<const ModelOverlapFacts> overlap, bool chains) {
   TimingProvider provider;
   provider.id = kModelTimingProviderId.str();
+  provider.proposalFactsSha256 = facts->factsSha256();
   provider.dmaEstimate = [facts](int64_t bytes, bool store) { return facts->estimateDMACycles(bytes, store); };
   provider.costProbes = [](const OpInfo &op) {
     Instr first{&op, 0, 2, 4}, second{&op, 6, 8, 10};

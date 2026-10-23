@@ -49,6 +49,8 @@ public:
 // names policy, not RTL qualification.
 struct TimingProvider {
   std::string id;
+  // Identity of model-owned proposal operands, separate from timing admissions.
+  std::string proposalFactsSha256;
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
@@ -72,6 +74,8 @@ struct TimingProvider {
   // Optional for providers that never estimate DMA; no consumer borrows another provider's policy.
   std::function<TimingRuleResult<int>(int64_t bytes, bool store)> dmaEstimate;
   bool fillPendingDelaySlots = false;
+  // Optional fixed proposal cost; zero derives the scalar address/load/store sequence.
+  int scalarSlotProposalCycles = 0;
   // DMA wait insertion completes launch n-8 before launch n reuses its command slot.
   bool waitReusedDMASlots = false;
   // Optional legal virtual-cost operands; absent uses the default probes.
