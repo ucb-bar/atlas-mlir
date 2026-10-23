@@ -21,6 +21,7 @@ from atlas_model_schema import LOCK
 from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingEvidenceError, with_update_guidance
 from atlas_model_selection import evidence_option
 import atlas_model_pairs as pairs
+from model_evidence import isolate_model_imports
 
 
 def retained_probe_cases():
@@ -186,7 +187,7 @@ class DerivationGateTest(unittest.TestCase):
 class NativeModelTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        sys.path.insert(0, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
         cls.cfg, _ = timing.configuration()
 
 

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from model_evidence import isolate_model_imports
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -73,7 +74,7 @@ class VocabularyContractTest(unittest.TestCase):
 class NativeVocabularyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        sys.path.insert(0, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
         from atlas_model_timing import configuration
         cls.cfg, _ = configuration()
 

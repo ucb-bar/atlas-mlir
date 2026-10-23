@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from atlas_model_observer import observe_mxu
+from atlas_derive_scratchpad import scratchpad_assumptions
 from atlas_model_schema import VPU_BLOCKS, MXU_BLOCKS, BINARY, mreg_event, canonical as encoded, sha256
 
 
@@ -287,7 +288,7 @@ def observe_case(block_name: str, engine: str, assembly: str, *, nonzero=False, 
         block = dict(name=block_name, engine=engine, resolved=True,
                      events={name: compress(ages) for name, ages in sorted(grouped.items())},
                      first_free_age=first_free, next_issue_age=first_free,
-                     assumptions={"scratchpad_read_latency": 1}, observation={"accepted": True, "drained": True})
+                     assumptions=scratchpad_assumptions(), observation={"accepted": True, "drained": True})
         raw = dict(name=block_name, assembly=assembly, instruction_word=instruction.to_bytecode(),
                    uop_id=uop.id, pc=uop.pc, initialization="nonzero-v1" if nonzero else "zero-v1",
                    initial_state_sha256=initial_digest, final_state_sha256=final_digest,
@@ -359,9 +360,12 @@ def validate_derived(cfg, candidates, releases, output_dir):
                 if result_signature(raw) != result_signature(plain):
                     raise RuntimeError("observer changed architectural data/control trace or unit progress")
                 check["noninterference"] = True
-                if encoded(block) != encoded(candidates[name]):
+                # SRAM response latency has no model response event. Compare
+                # observable fields only; copied target assumptions are not proof.
+                observable = lambda value: {key: item for key, item in value.items() if key != "assumptions"}
+                if encoded(observable(block)) != encoded(observable(candidates[name])):
                     raise RuntimeError("source-derived timing block differs from measured export")
-                check["byte_identical"] = True
+                check["observable_fields_byte_identical"] = True
                 if observed_releases(block, raw) != releases[name]:
                     raise RuntimeError("source-derived reservation releases differ from model calls")
                 check.update(passed=True, releases_equal=True, result_sha256=sha256(encoded(result_signature(raw))))
@@ -373,7 +377,8 @@ def validate_derived(cfg, candidates, releases, output_dir):
     passed = len(observed_blocks) == len(candidates) and all(check["passed"] for check in checks)
     report = dict(schema="atlas.model_derivation_validation.v1", passed=passed, operation_count=len(candidates),
                   observed_runs=sum(run["observer"] for run in runs), checks=checks,
-                  unobserved_runs=sum(not run["observer"] for run in runs))
+                  unobserved_runs=sum(not run["observer"] for run in runs),
+                  assumption_fields_not_observed=["scratchpad_read_latency"])
     for filename, value in (("validation-report.json", report), ("raw-observations.json", runs),
                             ("observed-blocks.json", observed_blocks)):
         (output_dir / filename).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")

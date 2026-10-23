@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+from model_evidence import isolate_model_imports
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -212,8 +213,11 @@ class ArchitectureDerivationTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for model source contracts")
 class NativeArchitectureTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+
     def test_selected_model_source_matches_derived_architecture(self):
-        sys.path.insert(0, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
         from atlas_model_timing import configuration as selected_configuration
         from npu_model.hardware import arch_state, bank_conflict
         cfg, _ = selected_configuration()
@@ -230,7 +234,6 @@ class NativeArchitectureTest(unittest.TestCase):
         self.assertEqual(facts["vmem_bank_count"], 6)
 
     def test_selected_model_source_mutations_propagate_or_refuse(self):
-        sys.path.insert(0, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
         from atlas_model_timing import configuration as selected_configuration
         from npu_model.hardware import arch_state, bank_conflict
         cfg, _ = selected_configuration()

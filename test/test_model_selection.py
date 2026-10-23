@@ -999,6 +999,7 @@ from test_virtual_scheduling import S, T, F, function, start, inp, const, dma_lo
 EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
 
 
+@requires_model_evidence
 class GuardedModelPreparationTest(unittest.TestCase):
     def test_guarded_model_preparation_converts_pack(self):
         from test_dialect import OPT
@@ -1008,10 +1009,8 @@ class GuardedModelPreparationTest(unittest.TestCase):
                     ': (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            facts, source_file = root / "facts.json", root / "guarded.mlir"
-            fixture = subprocess.run([str(OPT.parent / "atlas-model-timing-test"), "--fixture"],
-                                     capture_output=True, check=True)
-            facts.write_bytes(fixture.stdout)
+            facts = Path(os.environ["ATLAS_TEST_OP_TIMING"])
+            source_file = root / "guarded.mlir"
             source_file.write_text(source(after=consumer, value="%result"))
             evidence = evidence_option(facts, hashlib.sha256(facts.read_bytes()).hexdigest())
             for guarded in (False, True):
@@ -1103,16 +1102,14 @@ class TiledSelectionTest(unittest.TestCase):
         self.assertEqual(timed.returncode, 0, timed.stderr)
 
 
+@requires_model_evidence
 class ModelOrderReplayTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        fixture = subprocess.run([str(BIN / "atlas-model-timing-test"), "--fixture"], capture_output=True, check=True)
-        facts = self.directory / "facts.json"
-        facts.write_bytes(fixture.stdout)
-        self.evidence = (f"--select-atlas-model-evidence=op-timing={facts} "
-                         f"op-timing-sha256={hashlib.sha256(fixture.stdout).hexdigest()} dma=wait")
+        from test_dma_ring_waits import fixture_evidence
+        self.evidence = fixture_evidence(self.directory)
         self.source = function("alias", [
             start("s0"), inp("s0", "s1", "tile", 0), const("address", -2147481600), const("size", 2048),
             dma_store("s1", "s2", "tile", "address"),

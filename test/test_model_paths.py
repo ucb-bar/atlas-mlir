@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import atlas_derive_scratchpad as scratchpad
 import atlas_derive_mxu as mxu
 import atlas_derive_vpu as vpu
 import atlas_model_facts as facts
@@ -24,7 +25,7 @@ except ModuleNotFoundError:
 class AccessBoundaryTest(unittest.TestCase):
     def test_all_path_exclusions_precede_filesystem_access(self):
         for name in ("/tmp/HaMmEr-source/facts.json", "/tmp/vLsI/../facts.json"):
-            checks = [lambda: facts.safe_path(name), lambda: mxu._read(name),
+            checks = [lambda: scratchpad.read_source(name), lambda: facts.safe_path(name), lambda: mxu._read(name),
                       lambda: vpu._check_source(SimpleNamespace()),
                       lambda: timing.manifest(Path(name), "npu_model")]
             if pairs is not None:
@@ -39,6 +40,11 @@ class AccessBoundaryTest(unittest.TestCase):
                         patch.object(timing.os, "scandir", side_effect=AssertionError("traversed excluded path")):
                     with self.assertRaises((ValueError, RuntimeError)):
                         check()
+
+    def test_scratchpad_source_rejects_parent_traversal_before_lookup(self):
+        with patch.object(Path, "is_symlink", side_effect=AssertionError("premature lookup")):
+            with self.assertRaisesRegex(ValueError, "parent traversal"):
+                scratchpad.read_source("/tmp/model/../source.py")
 
     def test_manifest_refuses_mock_excluded_entries_before_metadata_or_reads(self):
         # These are synthetic directory entries only, never paths on disk.
@@ -69,7 +75,7 @@ class AccessBoundaryTest(unittest.TestCase):
             if path == leaf:
                 self.fail("looked through an unchecked ancestor symlink")
             return path == link
-        checks = [lambda: facts.safe_path(leaf), lambda: mxu._read(leaf),
+        checks = [lambda: scratchpad.read_source(leaf), lambda: facts.safe_path(leaf), lambda: mxu._read(leaf),
                   lambda: vpu._check_source(SimpleNamespace()),
                   lambda: timing.manifest(link.parent, "link/child.py")]
         if pairs is not None:

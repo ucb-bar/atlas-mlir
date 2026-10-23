@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
 from atlas_model_capabilities import check_configuration
+from atlas_derived_contract import seal_derived, verify_derived
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
 
@@ -64,7 +65,8 @@ def tool_manifest():
              "atlas_derive_memory.py", "atlas_derive_curve.py", "atlas_validate_curve.py",
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
-             "model-timing-vocabulary.json"]
+             "model-timing-vocabulary.json", "atlas_derived_contract.py",
+             "atlas_derive_scratchpad.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -85,6 +87,7 @@ def regenerate(model, out):
     from atlas_derive_mxu import derive_mxu
     from atlas_derive_memory import derive_memory
     from atlas_derive_curve import derive_curve
+    from atlas_derive_scratchpad import derive_scratchpad
     from atlas_validate_curve import validate_curve
     from atlas_derive_arch import derive_arch
     from atlas_derive_vocabulary import validate_vocabulary, derive_isa_metadata
@@ -111,6 +114,7 @@ def regenerate(model, out):
     vpu, vpu_releases = derive_vpu(cfg)
     mxu, mxu_releases = derive_mxu(cfg)
     dma_timing = derive_curve(cfg)
+    scratchpad_contract = derive_scratchpad(cfg)
     blocks = vpu | mxu | memory
     releases = vpu_releases | mxu_releases | memory_releases
     if set(blocks) != {case["name"] for case in inputs} or set(releases) != set(blocks):
@@ -135,8 +139,7 @@ def regenerate(model, out):
         raise ModelTimingValidationError("model source or numerical data changed during regeneration")
     if generator_sources != tool_manifest():
         raise ModelTimingValidationError("derivation or observer tools changed during regeneration")
-    report.update(derive_seconds=derive_seconds, validation_seconds=validate_seconds,
-                  derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu", "dma"], measured_families=[])
+    report.update(derived_families=["vpu", "mxu0", "mxu1", "vlsu", "xlu", "scalar_lsu", "dma"], measured_families=[])
     report_hash = write(out, "validation-report.json", report)
     source_identity, sources, data = before
     observer_sources = observer_manifest()
@@ -150,6 +153,7 @@ def regenerate(model, out):
                    age_convention="issue_edge_zero", observation=dict(accepted=True, drained=True),
                    op_timing=ordered, unresolved=[], reservation_releases=releases,
                    dma_timing=dma_timing,
+                   scratchpad_contract=scratchpad_contract,
                    vocabulary_sha256=sha256(encoded(vocabulary)),
                    validation=dict(passed=True, operation_count=len(blocks), observed_runs=report["observed_runs"],
                                    unobserved_runs=report["unobserved_runs"], gate_report_sha256=report_hash),
@@ -162,13 +166,20 @@ def regenerate(model, out):
                    lineage=dict(source_manifest_sha256=sha256(encoded(sources)), inputs=inputs,
                                 numerical_data_manifest_sha256=sha256(encoded(data)), observer_sources=observer_sources,
                                 generator_sources=generator_sources, contract_lock=LOCK))
+    seal_derived(payload)
+    semantic_hash = verify_derived(payload)
     facts_hash = write(out, "model-timing.json", payload)
     write(out, "source-manifest.json", sources)
     write(out, "numerical-data-manifest.json", data)
     write(out, "facts.lock.json", dict(schema="atlas.model_facts.lock.v1", model=source_identity,
                                      configuration_sha256=model_values["configuration_sha256"],
                                      op_timing_sha256=facts_hash, validation_sha256=report_hash,
+                                     semantic_payload_sha256=semantic_hash,
                                      vocabulary_sha256=payload["vocabulary_sha256"]))
+    write(out, "timing-receipt.json", dict(schema="atlas.model_derivation_receipt.v1",
+                                         facts_sha256=facts_hash, semantic_payload_sha256=semantic_hash,
+                                         validation_sha256=report_hash, derive_seconds=derive_seconds,
+                                         validation_seconds=validate_seconds))
     print(json.dumps(dict(passed=True, operations=len(blocks), facts_sha256=facts_hash,
                           derive_seconds=derive_seconds, validation_seconds=validate_seconds)), flush=True)
     return payload

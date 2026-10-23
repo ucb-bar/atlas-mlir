@@ -185,7 +185,7 @@ Object fixture() {
   operations.push_back(block("mxu0.matmul", "mxu0", 95,
                              Object{{"mreg_read0", group(0, 32)}, {"acc_write", group(32, 32)},
                                                 {"compute_busy", group(0, 95)}}));
-  return Object{{"schema", "atlas.model_timing.v1"}, {"age_convention", "issue_edge_zero"},
+  return Object{{"schema", "atlas.model_timing.v1"}, {"test_only", true}, {"age_convention", "issue_edge_zero"},
           {"model", Object{{"revision", std::string(40, '1')}, {"source_sha256", std::string(64, '2')},
                                        {"configuration_sha256", hash(configuration)},
                                        {"configuration", std::move(decodedConfiguration)},
@@ -206,9 +206,63 @@ std::string encode(Object object) {
   stream << llvm::json::Value(std::move(object));
   return bytes;
 }
+// Internal parser fixtures exercise the production validation code. They are
+// deliberately constructed test data and are never exported by --fixture.
+void sealContractFixture(Object &object) {
+  Object semanticModel;
+  for (const char *key : {"revision", "revision_kind", "source_sha256", "numerical_data_sha256",
+                          "configuration", "configuration_sha256"})
+    semanticModel[key] = *object.getObject("model")->get(key);
+  Object semantic{{"model", std::move(semanticModel)}};
+  for (const char *key : {"geometry", "age_convention", "op_timing", "reservation_releases", "vocabulary_sha256",
+                          "architecture", "operand_vocabulary", "isa_metadata"})
+    if (const auto *value = object.get(key)) semantic[key] = *value;
+  for (const char *key : {"scratchpad_contract"})
+    if (const auto *value = object.get(key)) semantic[key] = *value;
+  if (auto *dma = object.getObject("dma_timing")) {
+    Object deterministic(*dma);
+    deterministic.erase("validation");
+    semantic["dma_timing"] = std::move(deterministic);
+  }
+  auto bytes = canonicalJson(llvm::json::Value(std::move(semantic)));
+  auto payloadHash = hash(bytes);
+  object["derivation_contract"] = Object{{"schema", "atlas.derived_facts.v1"}, {"payload_json", bytes},
+      {"payload_sha256", payloadHash},
+      {"derivation", Object{{"schema", "atlas.derivation.v1"}, {"kind", "source_derived"}, {"payload_sha256", payloadHash}}},
+      {"validation", Object{{"schema", "atlas.validation.v1"}, {"passed", true}, {"payload_sha256", payloadHash}}}};
+  object["validation"] = Object{{"passed", true}, {"operation_count", int64_t(object.getArray("op_timing")->size())},
+      {"observed_runs", 1}, {"unobserved_runs", 1}, {"gate_report_sha256", std::string(64, 'a')},
+      {"payload_sha256", payloadHash}};
+  if (auto *dma = object.getObject("dma_timing"))
+    (*dma->getObject("validation"))["payload_sha256"] = payloadHash;
+}
+
+Object contractFixture() {
+  Object object = fixture();
+  object.erase("test_only");
+  (*object.getObject("model"))["revision_kind"] = "locked_source";
+  object["vocabulary_sha256"] = model_schema::vocabularySha256();
+  object["op_timing"] = Array{(*object.getArray("op_timing"))[0]};
+  auto release = [](int age, Array banks = {}) {
+    Object value{{"first_age", 0}, {"release_age", age}, {"available_age", age + 1}};
+    if (!banks.empty()) value["banks"] = std::move(banks);
+    return value;
+  };
+  object["reservation_releases"] = Object{{"vpu.mov", Object{
+      {"unit", release(72)}, {"mreg_read", release(64, Array{0, 1})},
+      {"mreg_write", release(72, Array{4, 5})}}}};
+  object["scratchpad_contract"] = Object{{"schema", "atlas.scratchpad_contract.v1"},
+      {"status", "explicit-target-assumption"}, {"assumptions", Object{{"scratchpad_read_latency", 1}}},
+      {"response_latency_derived", false}, {"dma_store_read_to_request_cycles", 2},
+      {"limitation", "Synthetic parser fixture; response latency remains an explicit target assumption."},
+      {"checked_source_methods", Array{"synthetic:read"}}};
+  sealContractFixture(object);
+  return object;
+}
+
 void rejected(Object object, llvm::StringRef why) {
   std::string bytes = encode(std::move(object));
-  auto parsed = parseModelTimingFacts(bytes, hash(bytes));
+  auto parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
   check(!parsed, why);
   if (!parsed) {
     std::string error = llvm::toString(parsed.takeError());
@@ -257,6 +311,69 @@ void rejectedFacts(Object original, std::initializer_list<InvalidFact> cases) {
   invalidFacts(std::move(original), cases, [](Object object, const char *why) {
     rejected(std::move(object), why);
   });
+}
+
+void testDerivedContract() {
+  auto parse = [](Object object) {
+    auto bytes = encode(std::move(object));
+    return parseModelTimingFacts(bytes, hash(bytes), true);
+  };
+  auto strict = parse(contractFixture());
+  check(bool(strict), "production parser accepts a complete payload-bound derived contract fixture");
+  if (!strict) llvm::errs() << llvm::toString(strict.takeError()) << '\n';
+  auto raw = parse(fixture());
+  check(!raw, "production parser refuses test-only raw measured fixtures");
+  if (!raw) llvm::consumeError(raw.takeError());
+  auto unmarked = fixture();
+  unmarked.erase("test_only");
+  raw = parse(std::move(unmarked));
+  check(!raw, "production parser refuses unmarked raw observations without a derivation contract");
+  if (!raw) llvm::consumeError(raw.takeError());
+  auto rejects = [&](Object object, const char *why, const char *diagnostic) {
+    auto result = parse(std::move(object));
+    check(!result, why);
+    if (!result) check(llvm::toString(result.takeError()).find(diagnostic) != std::string::npos, why);
+  };
+  invalidFacts(contractFixture(), {
+      {"versioned contract required", "derivation_contract/schema", "atlas.derived_facts.v0"},
+      {"measured derivation refuses production", "derivation_contract/derivation/kind", "measured"},
+      {"failed operation validation refuses production", "validation/passed", false},
+      {"missing validation-only run coverage refuses production", "validation/unobserved_runs", 0},
+      {"vocabulary is mandatory", "vocabulary_sha256", nullptr, true},
+      {"stale semantic input binding rejects", "dma_timing/startup_cycles/load", 8},
+      {"stale DMA validation payload rejects", "dma_timing/validation/payload_sha256", std::string(64, 'b')},
+      {"self-reported DMA report cannot replace payload binding", "dma_timing/validation/payload_sha256", nullptr, true},
+      {"test-only contract refuses production", "test_only", true}},
+      [&](Object object, const char *why) {
+        auto result = parse(std::move(object));
+        check(!result, why);
+        if (!result) llvm::consumeError(result.takeError());
+      });
+  for (const char *key : {"architecture", "operand_vocabulary", "isa_metadata"}) {
+    auto stale = contractFixture();
+    (*stale.getObject(key))["stale_metadata"] = true;
+    rejects(std::move(stale), "stale metadata is rejected by the semantic payload binding",
+            "derived semantic payload differs");
+  }
+  auto missingRelease = contractFixture();
+  missingRelease.getObject("reservation_releases")->getObject("vpu.mov")->erase("mreg_read");
+  sealContractFixture(missingRelease);
+  rejects(std::move(missingRelease), "missing resource coverage rejects even with rebound payload", "resource coverage");
+  auto missingReleases = contractFixture();
+  missingReleases.erase("reservation_releases");
+  sealContractFixture(missingReleases);
+  rejects(std::move(missingReleases), "missing releases reject even with rebound payload", "reservation_releases");
+  auto changed = contractFixture();
+  (*changed.getObject("dma_timing")->getObject("startup_cycles"))["load"] = 8;
+  sealContractFixture(changed);
+  auto rebound = parse(std::move(changed));
+  check(bool(rebound) && rebound->estimateDMACycles(1024, false).value == 91,
+        "rebound derived operands propagate through production contract parser");
+  if (!rebound) llvm::consumeError(rebound.takeError());
+  changed = contractFixture();
+  (*changed.getObject("scratchpad_contract")->getObject("assumptions"))["scratchpad_read_latency"] = 2;
+  sealContractFixture(changed);
+  rejects(std::move(changed), "changed target response assumption rejects with a precise capability diagnostic", "scratchpad target assumption");
 }
 
 Object overlapSource(llvm::StringRef pointer) {
@@ -493,7 +610,7 @@ void testComposed() {
   source.getArray("op_timing")->push_back(block("mxu0.push_acc_fp8", "mxu0", 33,
       Object{{"mreg_read1", group(0, 32)}, {"acc_load", group(1, 32)}, {"data_busy", group(0, 32)}}));
   std::string sourceBytes = encode(std::move(source));
-  auto parsed = parseModelTimingFacts(sourceBytes, hash(sourceBytes));
+  auto parsed = parseModelTimingFactsForTesting(sourceBytes, hash(sourceBytes));
   check(bool(parsed), "composition model fixture loads");
   if (!parsed) { llvm::consumeError(parsed.takeError()); return; }
   auto facts = std::make_shared<ModelTimingFacts>(std::move(*parsed));
@@ -699,7 +816,7 @@ void testExplicitReleases() {
       {"unit", release(72)}, {"mreg_read", release(64, Array{0, 1})},
       {"mreg_write", release(72, Array{4, 5})}}}};
   auto bytes = encode(Object(sample));
-  auto parsed = parseModelTimingFacts(bytes, hash(bytes));
+  auto parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
   check(bool(parsed), "explicit reservation releases load");
   if (!parsed) { llvm::consumeError(parsed.takeError()); return; }
   auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*parsed)));
@@ -727,7 +844,7 @@ void testExplicitReleases() {
   bad = Object(sample);
   (*bad.getObject("reservation_releases")->getObject("vpu.mov"))["mreg_read"] = release(63, Array{0, 1});
   bytes = encode(std::move(bad));
-  parsed = parseModelTimingFacts(bytes, hash(bytes));
+  parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
   check(bool(parsed), "early release is structurally bounded");
   if (parsed)
     check(!parsed->resolve(first, unknownRegs()).error.empty(), "reservation cannot end before the final MREG access");
@@ -739,7 +856,7 @@ void testExplicitReleases() {
   (*model)["configuration_json"] = canonical;
   (*model)["configuration_sha256"] = hash(canonical);
   bytes = encode(Object(config));
-  auto changed = parseModelTimingFacts(bytes, hash(bytes));
+  auto changed = parseModelTimingFactsForTesting(bytes, hash(bytes));
   check(bool(changed), "configuration identity is data; bounded latency-profile changes need no compiler rebuild");
   if (!changed) llvm::consumeError(changed.takeError());
   auto rejectConfiguration = [&](const char *key, llvm::json::Value value, const char *why) {
@@ -757,10 +874,81 @@ void testExplicitReleases() {
   rejectConfiguration("ignore_runtime_errors", true, "even a correctly hashed configuration cannot suppress model runtime errors");
 }
 
+void testScalarCosts() {
+  auto sample = fixture(); // Marked raw observations stay inside the test API.
+  sample["op_timing"] = Array{
+      block("scalar_lsu.load", "scalar_lsu", 4, Object{{"vmem_read", group(0, 1)}, {"load_write", group(3, 1)}}),
+      block("scalar_lsu.store", "scalar_lsu", 2, Object{{"vmem_write", group(0, 1)}}),
+      block("scalar_lsu.scale_load", "scalar_lsu", 4, Object{{"vmem_read", group(0, 1)}, {"scale_write", group(3, 1)}})};
+  auto unit = [](int free) {
+    return Object{{"first_age", 0}, {"release_age", free - 1}, {"available_age", free}};
+  };
+  auto port = []() {
+    return Object{{"first_age", 0}, {"release_age", 0}, {"available_age", 1}, {"banks", Array{0}}};
+  };
+  sample["reservation_releases"] = Object{
+      {"scalar_lsu.load", Object{{"unit", unit(4)}, {"vmem_read", port()}}},
+      {"scalar_lsu.store", Object{{"unit", unit(2)}, {"vmem_write", port()}}},
+      {"scalar_lsu.scale_load", Object{{"unit", unit(4)}, {"vmem_read", port()}}}};
+  auto parse = [](Object object) -> std::optional<TimingProvider> {
+    auto bytes = encode(std::move(object));
+    auto facts = parseModelTimingFactsForTesting(bytes, hash(bytes));
+    check(bool(facts), "synthetic scalar cost fixture loads through the explicit test API");
+    if (!facts) { llvm::consumeError(facts.takeError()); return std::nullopt; }
+    return modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*facts)));
+  };
+  MLIRContext context;
+  auto module = ModuleOp::create(UnknownLoc::get(&context));
+  auto costIs = [&](const TimingProvider &provider, const char *mnemonic, int expected, const char *why) {
+    auto cost = machineTimingOf(provider, mnemonic, module);
+    check(succeeded(cost) && cost->latency == expected && cost->interval == expected, why);
+  };
+  if (auto provider = parse(Object(sample))) {
+    costIs(*provider, "lw", 4, "scalar load cost consumes the selected release envelope");
+    costIs(*provider, "sw", 2, "scalar store cost consumes the selected release envelope");
+    costIs(*provider, "seld", 4, "scale load cost consumes the selected release envelope");
+  }
+  for (auto [name, mnemonic, free] : {std::tuple<const char *, const char *, int>{"scalar_lsu.load", "lw", 11},
+                                      {"scalar_lsu.store", "sw", 7}, {"scalar_lsu.scale_load", "seld", 9}}) {
+    Object changed(sample);
+    for (auto &value : *changed.getArray("op_timing")) {
+      Object &entry = *value.getAsObject();
+      if (entry.getString("name") == name) entry["first_free_age"] = entry["next_issue_age"] = free;
+    }
+    (*changed.getObject("reservation_releases")->getObject(name))["unit"] = unit(free);
+    if (auto provider = parse(std::move(changed)))
+      costIs(*provider, mnemonic, free, "longer scalar unit releases change costs with unchanged event ages");
+    for (bool missingBlock : {false, true}) {
+      Object missing(sample);
+      if (missingBlock) {
+        Array retained;
+        for (const auto &value : *missing.getArray("op_timing"))
+          if (value.getAsObject()->getString("name") != name) retained.push_back(value);
+        missing["op_timing"] = std::move(retained);
+        missing.getObject("reservation_releases")->erase(name);
+      } else {
+        missing.getObject("reservation_releases")->getObject(name)->erase(
+            llvm::StringRef(mnemonic) == "sw" ? "vmem_write" : "vmem_read");
+      }
+      if (auto provider = parse(std::move(missing))) {
+        auto instruction = provider->costProbes(*findOp(mnemonic)).value.first;
+        auto footprint = provider->footprint(instruction, unknownRegs());
+        const std::string expected = std::string(name) + (missingBlock ? ": facts block is missing" :
+            std::string(": missing reservation release ") + (llvm::StringRef(mnemonic) == "sw" ? "vmem_write" : "vmem_read"));
+        check(footprint.error.find(expected) != std::string::npos,
+              "missing scalar timing or release coverage refuses precisely in the test API");
+        check(failed(machineTimingOf(*provider, mnemonic, module)),
+              "missing scalar timing or release coverage has no cost fallback");
+      }
+    }
+  }
+  module.erase();
+}
+
 void testDMAEstimates() {
   auto parse = [](Object object) {
     std::string bytes = encode(std::move(object));
-    return parseModelTimingFacts(bytes, hash(bytes), true);
+    return parseModelTimingFactsForTesting(bytes, hash(bytes), true);
   };
   auto baseline = parse(fixture());
   check(bool(baseline), "synthetic source-pinned DMA proposal facts load");
@@ -853,10 +1041,12 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc != 1) return 2;
+  testDerivedContract();
+  testScalarCosts();
   testDMAEstimates();
   testExplicitReleases();
   std::string bytes = encode(fixture());
-  auto loaded = parseModelTimingFacts(bytes, hash(bytes), true);
+  auto loaded = parseModelTimingFactsForTesting(bytes, hash(bytes), true);
   check(bool(loaded), "synthetic observed facts load");
   if (!loaded) {
     llvm::errs() << llvm::toString(loaded.takeError()) << '\n';
@@ -992,7 +1182,7 @@ int main(int argc, char **argv) {
       "See docs/model-timing.md#updating-for-npu-model-changes."),
       "missing selection refusal ends with model update guidance");
   check(lookupTimingProvider("builtin").error.empty(), "model registration preserves builtin");
-  auto badHash = parseModelTimingFacts(bytes, std::string(64, '0'));
+  auto badHash = parseModelTimingFactsForTesting(bytes, std::string(64, '0'));
   check(!badHash, "facts content replacement fails the pin");
   if (!badHash) llvm::consumeError(badHash.takeError());
   for (const char *field : {"exporter_sha256", "input_sha256", "numerical_data_sha256"}) {

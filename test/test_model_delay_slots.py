@@ -11,10 +11,12 @@ import unittest
 from test_delay_insertion import OPT, addi, program, run, stream
 from model_evidence import requires_model_evidence
 from test_dma_ring_waits import fixture_evidence
+from model_evidence import requires_model_evidence
 from test_stream_scheduling import branch_target, issue_cycles
 from test_virtual_scheduling import F, S, T, function, inp, outp, start
 
 
+@requires_model_evidence
 class ModelDelaySlotTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
