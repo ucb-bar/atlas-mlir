@@ -20,7 +20,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from model_evidence import requires_model_evidence
-from atlas_model_selection import Candidate, candidate_options, evidence_option, order_neighbors, select_program
+from atlas_model_selection import (Candidate, candidate_options, evidence_option, group_order_neighbors,
+                                   order_neighbors, select_program)
 
 
 def candidate_command(argv):
@@ -115,6 +116,8 @@ class ModelSelectionTest(unittest.TestCase):
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
+            ({"provider": "builtin", "search_group_evaluations": 1}, "search-group-evaluations"),
+            ({"search_group_evaluations": -1}, "search-group-evaluations"),
             ({"provider": "builtin", "search_evaluations": 1}, "search-evaluations"),
             ({"search_evaluations": -1}, "search-evaluations"),
             ({"boundary": "inputs"}, "boundary must be boundary or none"),
@@ -322,6 +325,67 @@ with TemporaryDirectory() as directory:
         self.assertIn("order-file=order.json", option)
         self.assertIn("graph-output=graph.json", option)
 
+    def test_group_neighbors_preserve_dependencies_and_other_blocks(self) -> None:
+        preds = [[], [], [0], [1, 2], []]
+        for order in permutations(range(5)):
+            positions = {node: i for i, node in enumerate(order)}
+            if any(positions[pred] >= positions[node] for node in order for pred in preds[node]):
+                continue
+            neighbors = list(group_order_neighbors([{"preds": preds}, {"preds": [[]]}], (order, (0,))))
+            self.assertEqual(len(neighbors), len(set(neighbors)))
+            for moved, other in neighbors:
+                self.assertEqual(other, (0,))
+                self.assertEqual(sorted(moved), list(range(5)))
+                rank = {node: i for i, node in enumerate(moved)}
+                self.assertTrue(all(rank[pred] < rank[node] for node in moved for pred in preds[node]))
+
+    def test_group_neighbors_move_crossed_predecessors_and_successors(self) -> None:
+        graph = {"preds": [[], [0], [1], [], []]}
+        orders = ((0, 3, 1, 4, 2),)
+        neighbors = set(group_order_neighbors([graph], orders))
+        self.assertIn(((0, 1, 2, 3, 4),), neighbors)
+        self.assertIn(((3, 4, 0, 1, 2),), neighbors)
+        self.assertNotIn(((0, 1, 2, 3, 4),), set(order_neighbors([graph], orders)))
+        self.assertEqual(list(group_order_neighbors([graph], orders, max_nodes=1)), [])
+        chain = {"preds": [[], [0], [1], [2], [3], [], [], [], [], []]}
+        interleaved = ((5, 0, 6, 1, 7, 2, 8, 3, 9, 4),)
+        whole_chain = ((0, 1, 2, 3, 4, 5, 6, 7, 8, 9),)
+        self.assertIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=5)))
+        self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
+
+    def test_group_search_crosses_tied_orders_after_local_search(self) -> None:
+        initial, winner = (0, 3, 1, 4, 2), (0, 1, 2, 3, 4)
+
+        def compile_order(argv, cwd, order):
+            word = sum((node + 1) * 10 ** i for i, node in enumerate(order))
+            self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": 4 if order == winner else 10}
+
+        receipts = []
+        for workers in (1, 4):
+            runner = self.graph_run([[], [0], [1], [], []], initial, configure=compile_order)
+            receipt = self.select(name=str(workers), runner=runner, max_candidates=1, search_evaluations=100,
+                                  search_group_evaluations=100, workers=workers)
+            self.assertEqual(receipt["search"]["accepted_indices"], [])
+            self.assertEqual(receipt["group_search"]["start_index"], 0)
+            self.assertEqual(receipt["selected_cycles"], 4)
+            self.assertEqual(receipt["selected_class"], "group-order")
+            self.assertLessEqual(receipt["group_search"]["evaluations"], 100)
+            receipts.append([(row["options"], row["status"]) for row in receipt["candidates"]])
+        self.assertEqual(*receipts)
+
+    def test_group_search_counts_rejections_and_stops_on_exhausted_ties(self) -> None:
+        def compile_order(argv, cwd, order):
+            if order == (1, 2, 0):
+                return subprocess.CompletedProcess(argv, 1, "", "DMA command slot is still pending")
+
+        with patch("atlas_model_selection.group_order_neighbors", return_value=iter([((1, 2, 0),), ((2, 0, 1),)])):
+            runner = self.graph_run([[], [], []], configure=compile_order)
+            receipt = self.select(runner=runner, max_candidates=1, search_group_evaluations=8,
+                                  scorer=lambda program, **_: 10)
+        self.assertEqual(receipt["selected_index"], 0)
+        self.assertEqual(receipt["group_search"]["evaluations"], 2)
+        self.assertEqual(receipt["group_search"]["accepted_indices"], [])
+        self.assertEqual(receipt["candidates"][1]["status"], "FAIL")
 
     def test_exhausted_tied_neighborhood_is_deterministic_across_worker_counts(self) -> None:
         receipts = []
