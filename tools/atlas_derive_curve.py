@@ -11,6 +11,7 @@ from atlas_model_diagnostics import UnsupportedModelTiming
 import ast
 import hashlib
 import inspect
+import json
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,83 @@ from atlas_model_schema import LOCK, SOURCE_SHAPES, ast_digest
 
 class UnsupportedCurve(UnsupportedModelTiming):
     """Source, curve or configuration has no reviewed DMA interpretation."""
+
+
+def _unsupported(field):
+    raise UnsupportedCurve("unsupported capability: " + field)
+
+
+def resolve_curve_path(cfg):
+    """Resolve the selected file exactly as the native backend does, safely."""
+    from npu_model.hardware import memory_backend
+    params = cfg.dma_memory_params
+    if not isinstance(params, dict):
+        _unsupported("dma_memory_params")
+    curves = params.get("curves")
+    if not isinstance(curves, str) or not curves:
+        _unsupported("dma_memory_params.curves")
+    path = Path(curves)
+    if not path.is_absolute():
+        local = _safe(Path.cwd() / path)
+        if local.exists():
+            path = local
+        else:
+            path = Path(inspect.getsourcefile(memory_backend)).parent.parent / "configs" / "memory_curves" / path
+    return _safe(path)
+
+
+def _positive(value, field, *, integral=False):
+    valid_type = type(value) is int if integral else type(value) in (int, float)
+    if not valid_type or not math.isfinite(value) or value <= 0:
+        _unsupported(field)
+
+
+def _check_curve_configuration(cfg, params, data):
+    known = {"curves", "window_beats", "converge", "latency_mode", "knee", "frequency_ghz",
+             "beat_bytes", "channels", "enforce_peak", "queue_depth", "min_latency"}
+    for key in params:
+        if key not in known:
+            _unsupported("dma_memory_params." + str(key))
+    for field in ("window_beats", "beat_bytes", "channels", "queue_depth", "min_latency"):
+        if field in params and params[field] is not None:
+            _positive(params[field], "dma_memory_params." + field, integral=True)
+        elif field in params and field != "channels":
+            _unsupported("dma_memory_params." + field)
+    for field in ("frequency_ghz", "knee"):
+        if params.get(field) is not None:
+            _positive(params[field], "dma_memory_params." + field)
+    if params.get("knee", 0.9) is None or params.get("knee", 0.9) > 1:
+        _unsupported("dma_memory_params.knee")
+    if params.get("converge", 1.0) != 1.0 or type(params.get("converge", 1.0)) not in (int, float):
+        _unsupported("dma_memory_params.converge")
+    if params.get("enforce_peak", True) is not True:
+        _unsupported("dma_memory_params.enforce_peak")
+    mode = params.get("latency_mode")
+    if (data.get("latencyMode", "knee") if mode is None else mode) != "unloaded":
+        _unsupported("dma_memory_params.latency_mode")
+    if params.get("beat_bytes", cfg.dma_beat_bytes) != cfg.dma_beat_bytes:
+        _unsupported("dma_memory_params.beat_bytes")
+    for field in ("measuredChannels", "accessBytes"):
+        _positive(data.get(field, 1 if field == "measuredChannels" else 64), "curve." + field, integral=True)
+    if params.get("frequency_ghz") is None:
+        _positive(data.get("frequencyGHz", 1.0), "curve.frequencyGHz")
+    rows = data.get("curves")
+    if not isinstance(rows, dict) or not rows:
+        _unsupported("curve.curves")
+    for key, points in rows.items():
+        try:
+            pct = float(key)
+        except (TypeError, ValueError):
+            _unsupported("curve.read_percentage")
+        if not math.isfinite(pct) or not 0 <= pct <= 100:
+            _unsupported("curve.read_percentage")
+        if not isinstance(points, list) or not points:
+            _unsupported("curve.points")
+        for point in points:
+            if not isinstance(point, list) or len(point) != 2:
+                _unsupported("curve.points")
+            for value in point:
+                _positive(value, "curve.points")
 
 
 def _safe(path):
@@ -88,26 +166,18 @@ def derive_curve(cfg):
     except UnsupportedMXU as error:
         raise UnsupportedCurve(str(error)) from error
     if cfg.dma_memory_backend != "curve":
-        raise UnsupportedCurve("DMA facts require the curve backend")
-    params = dict(cfg.dma_memory_params or {})
-    curves = params.get("curves")
-    if not isinstance(curves, str):
-        raise UnsupportedCurve("DMA facts require a pinned curve file")
-    path = Path(curves)
-    if not path.is_absolute():
-        # Resolve by the same reviewed search order, with path checks before IO.
-        _read_path = _safe(Path.cwd() / path)
-        if _read_path.exists():
-            path = _read_path
-        else:
-            path = Path(inspect.getsourcefile(memory_backend)).parent.parent / "configs" / "memory_curves" / path
-    path = _safe(path)
-    curve_text = _read(path)
-    curve_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    if curve_sha != LOCK.get("curve_sha256"):
-        raise UnsupportedCurve("unsupported DMA curve bytes")
-    import json
-    data = json.loads(curve_text)
+        _unsupported("dma_memory_backend")
+    path = resolve_curve_path(cfg)
+    params = dict(cfg.dma_memory_params)
+    curve_bytes = path.read_bytes()
+    curve_sha = hashlib.sha256(curve_bytes).hexdigest()
+    try:
+        data = json.loads(curve_bytes)
+    except ValueError as error:
+        raise UnsupportedCurve("unsupported capability: dma_memory_params.curves") from error
+    if not isinstance(data, dict):
+        _unsupported("dma_memory_params.curves")
+    _check_curve_configuration(cfg, params, data)
     # Pass the already checked bytes to the converter: no second implicit file IO.
     params["curves"] = data
     params.setdefault("beat_bytes", cfg.dma_beat_bytes)

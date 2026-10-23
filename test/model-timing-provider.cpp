@@ -827,7 +827,7 @@ void testDMAEstimates() {
   rejectedFacts(fixture(), {
       {"unreviewed DMA raw source rejects", "dma_timing/source_sha256/dma.py", std::string(64, '0')},
       {"unreviewed DMA source shape rejects", "dma_timing/source_shapes/memory_backend.py", std::string(64, '0')},
-      {"unreviewed DMA curve rejects", "dma_timing/curve_sha256", std::string(64, '0')}});
+      {"malformed DMA curve hash rejects", "dma_timing/curve_sha256", "invalid"}});
   rejectedFacts(fixture(), {{"missing validation rejects", "dma_timing/validation", nullptr, true}});
   rejectedFacts(fixture(), {
       {"failed validation rejects", "dma_timing/validation/passed", false},

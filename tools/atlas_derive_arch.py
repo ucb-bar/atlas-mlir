@@ -239,10 +239,14 @@ def derive_arch(cfg):
         "dma_beat_bytes": (cfg, "dma_beat_bytes"), "dma_max_in_flight": (cfg, "dma_max_in_flight"),
         "dma_max_transfer_bytes": (cfg, "dma_max_transfer_bytes"), "fetch_width": (cfg, "fetch_width"),
     }
+    facts = {name: _positive(owner, attribute) for name, (owner, attribute) in fields.items()}
+    # Dormant legacy estimates are recorded, not fixed-layout capabilities.
     for name in ("offchip_link_width_bits", "offchip_link_core_cycles_per_beat", "dma_offchip_command_words",
                  "vmem_bus_width_bits", "vmem_bus_core_cycles_per_beat", "vmem_bytes_per_cycle"):
-        fields[name] = (cfg, name)
-    facts = {name: _positive(owner, attribute) for name, (owner, attribute) in fields.items()}
+        value = getattr(cfg, name, None)
+        if type(value) is not int:
+            raise UnsupportedArchitecture("architecture configuration " + name + " must be an integer")
+        facts[name] = value
     base = getattr(arch, "dram_base", None)
     if type(base) is not int or base < 0:
         raise UnsupportedArchitecture("architecture configuration dram_base must be a nonnegative integer")

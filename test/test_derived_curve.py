@@ -79,7 +79,7 @@ class NativeCurveTest(unittest.TestCase):
             self.assertEqual(second["cycles_per_beat"], first["cycles_per_beat"])
             self.assertEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 2)
 
-    def test_unknown_modes_or_curve_bytes_rejected(self):
+    def test_unknown_modes_or_malformed_curve_rejected(self):
         for values in ({"latency_mode": "mess"}, {"latency_mode": "knee"},
                        {"converge": 0.5}, {"enforce_peak": False}, {"curves": {}}, {"beat_bytes": 16},
                        {"min_latency": 0}, {"min_latency": -1}):
@@ -90,9 +90,59 @@ class NativeCurveTest(unittest.TestCase):
         cfg = copy(self.cfg)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "changed.json"
-            path.write_text('{"curves": {}}\n')
+            path.write_text('{"latencyMode": "unloaded", "curves": {}}\n')
             cfg.dma_memory_params = dict(self.cfg.dma_memory_params, curves=str(path))
-            with self.assertRaisesRegex(curve.UnsupportedCurve, "curve bytes"):
+            with self.assertRaisesRegex(curve.UnsupportedCurve, "unsupported capability: curve.curves"):
+                curve.derive_curve(cfg)
+
+    def test_frequency_queue_and_history_are_independent_configuration_inputs(self):
+        from atlas_validate_curve import FactBackend, _stream
+        from npu_model.hardware.memory_backend import make_memory_backend
+        original = curve.derive_curve(self.cfg)
+        cfg = copy(self.cfg)
+        cfg.dma_memory_params = dict(self.cfg.dma_memory_params, frequency_ghz=0.75,
+                                     queue_depth=13, window_beats=7)
+        facts = curve.derive_curve(cfg)
+        self.assertEqual(facts["queue_depth"], 13)
+        self.assertEqual(facts["window_beats"], 7)
+        self.assertEqual(facts["max_in_flight"], self.cfg.dma_max_in_flight)
+        for first, second in zip(original["curves"], facts["curves"]):
+            self.assertAlmostEqual(second["cycles_per_beat"], first["cycles_per_beat"] * 1.5)
+            self.assertAlmostEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 1.5)
+        stores = [False] * 11 + [True] * 17 + [False, True] * 9
+        self.assertEqual(_stream(FactBackend(facts), stores, stalls=True),
+                         _stream(make_memory_backend(cfg), stores, stalls=True))
+
+    def test_selected_curve_bytes_change_facts_and_bind_their_digest(self):
+        from atlas_model_schema import sha256
+        original = curve.derive_curve(self.cfg)
+        data = json.loads(curve.resolve_curve_path(self.cfg).read_text())
+        for points in data["curves"].values():
+            for point in points:
+                point[0] *= 0.8
+                point[1] *= 1.25
+        cfg = copy(self.cfg)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "selected.json"
+            path.write_text(json.dumps(data))
+            cfg.dma_memory_params = dict(self.cfg.dma_memory_params, curves=str(path))
+            changed = curve.derive_curve(cfg)
+            self.assertEqual(changed["curve_sha256"], sha256(path.read_bytes()))
+        self.assertNotEqual(changed["curve_sha256"], original["curve_sha256"])
+        for first, second in zip(original["curves"], changed["curves"]):
+            self.assertAlmostEqual(second["cycles_per_beat"], first["cycles_per_beat"] / 0.8)
+            self.assertAlmostEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 1.25)
+
+    def test_controller_capability_refusals_identify_the_field(self):
+        for field, value in (("latency_mode", "mess"), ("window_beats", 0),
+                             ("window_beats", 1.5), ("queue_depth", False),
+                             ("frequency_ghz", 0), ("converge", 0.5),
+                             ("enforce_peak", False), ("beat_bytes", 16),
+                             ("unknown_knob", 2)):
+            cfg = copy(self.cfg)
+            cfg.dma_memory_params = dict(self.cfg.dma_memory_params, **{field: value})
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    curve.UnsupportedCurve, "unsupported capability: dma_memory_params\\." + field):
                 curve.derive_curve(cfg)
 
     def test_unreviewed_source_mutation_rejected(self):
