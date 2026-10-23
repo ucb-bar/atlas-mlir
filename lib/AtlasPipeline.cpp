@@ -28,9 +28,9 @@ void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 
 // Boundary tiles become explicit DMA, which the scheduler can queue and
 // overlap with other work.
-void buildScheduleStage(OpPassManager &pm) {
+void buildScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createLowerAtlasVirtualBoundaryToDMAPass());
-  pm.addPass(createScheduleAtlasVirtualPass());
+  pm.addPass(createScheduleAtlasVirtualPass(options.provider));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -60,9 +60,9 @@ void verifyTimedStream(OpPassManager &pm) {
 
 // The stream scheduler reorders each block and inserts the delays its order
 // needs.
-void buildTimeStage(OpPassManager &pm) {
+void buildTimeStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   insertDMAWaits(pm);
-  pm.addPass(createScheduleAtlasStreamPass());
+  pm.addPass(createScheduleAtlasStreamPass(options.provider));
   verifyTimedStream(pm);
 }
 } // namespace
@@ -70,10 +70,10 @@ void buildTimeStage(OpPassManager &pm) {
 void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
                                             const AtlasCompileOptions &options) {
   buildVerifyStage(pm, options);
-  buildScheduleStage(pm);
+  buildScheduleStage(pm, options);
   buildSpillStage(pm);
   buildLowerStage(pm, options);
-  buildTimeStage(pm);
+  buildTimeStage(pm, options);
 }
 
 void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
@@ -103,7 +103,7 @@ void mlir::atlas::registerAtlasCompilePipelines() {
   PassPipelineRegistration<AtlasCompileOptions>("atlas-compile-verify",
                              "atlas-compile stage 1: spill MXU state and verify",
                              buildVerifyStage);
-  PassPipelineRegistration<>(
+  PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile-schedule",
       "atlas-compile stage 2: expose boundary DMA and schedule",
       buildScheduleStage);
@@ -114,7 +114,7 @@ void mlir::atlas::registerAtlasCompilePipelines() {
       "atlas-compile-lower",
       "atlas-compile stage 4: allocate and lower to machine IR",
       buildLowerStage);
-  PassPipelineRegistration<>(
+  PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile-time",
       "atlas-compile stage 5: insert DMA waits, stream-schedule and verify timing",
       buildTimeStage);

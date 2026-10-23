@@ -300,7 +300,7 @@ Editing words inside the final inline-assembly string skips every check.
   two accumulators per unit within a block.
 - Outside analyzed scalar loops, a DMA transfer is always completed before a
   branch, a branch target, or the halt, even when overlap would be safe.
-- Delays come from npu-model's `rtl-match` timing rules, not RTL
+- Delays come from NPU Model's `rtl-match` timing rules, not RTL
   measurements; a delay alone does not prove an MXU result or DMA is ready.
   The hand-written machine examples (`handoff_*_tile.mlir`) use hand-picked
   delays instead.

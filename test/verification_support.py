@@ -11,7 +11,7 @@ STATE = "!atlas.state"
 MARKER = 'atlas.generated_from_virtual = "resource-contract-v5"'
 TIMED = 'atlas.timing_state = "timed"'
 UNTIMED_STATE = 'atlas.timing_state = "untimed"'
-PROVIDER = 'atlas.timing_provider = "npu-model-rtl-match-v1"'
+PROVIDER = 'atlas.timing_provider = "builtin"'
 TRANSFER = "atlas.virtual_dma_transfer"
 NOP = ("alu_imm", 'kind = "addi", dst = 0 : i32, src = 0 : i32, immediate = 0 : i32')
 DELAY = ("delay", 'cycles = 256 : i32, atlas.delay_reason = "tensor_completion"')
