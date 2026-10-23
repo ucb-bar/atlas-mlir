@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <set>
+#include <tuple>
 
 using namespace mlir::atlas::timing;
 using mlir::atlas::kAtlasVmemBytes;
@@ -380,7 +381,7 @@ bool proofGaps(const Object &record, const std::vector<int> &expected) {
 } // namespace
 
 bool ModelOverlapFacts::rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const {
-  if (!provenance.count("composed_sha256") || commands.empty()) return false;
+  if (!structuralCapacity || commands.empty()) return false;
   auto engine = llvm::StringRef(commands.front().block).split('.').first;
   if (engine != "mxu0" && engine != "mxu1") return false;
   for (const auto &command : commands) {
@@ -392,9 +393,13 @@ bool ModelOverlapFacts::rejectsPortHistory(const std::vector<ModelOverlapCommand
   return !composedCapacity(commands);
 }
 
-bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const {
-  auto reportQuery = [&](llvm::StringRef reason, bool admitted = false) {
-    if (!std::getenv("ATLAS_MODEL_LOG_UNMATCHED")) return admitted;
+bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
+                              llvm::StringRef origin) const {
+  auto reportQuery = [&](llvm::StringRef reason, bool admitted = false, const Pair *witness = nullptr,
+                         const Chain *sequence = nullptr) {
+    bool admittedLog = admitted && std::getenv("ATLAS_MODEL_LOG_ADMITTED");
+    if (!admittedLog && !std::getenv("ATLAS_MODEL_LOG_UNMATCHED")) return admitted;
+    if (admitted && !admittedLog && reason != "chain") return admitted;
     Array operations, gaps, operands, matrix;
     for (size_t i = 0; i < commands.size(); ++i) {
       const auto &command = commands[i];
@@ -413,21 +418,37 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
                                {"relation", std::move(relation)}});
       }
     }
-    std::string query = canonicalJson(Object{{"reason", reason.str()}, {"operations", std::move(operations)},
+    Object document{{"reason", reason.str()}, {"origin", origin.str()}, {"operations", std::move(operations)},
         {"gaps", std::move(gaps)}, {"operands", std::move(operands)}, {"all_pair_relations", std::move(matrix)},
-        {"in_flight_count", peak(commands)}});
-    std::string message = (admitted ? "ATLAS_MODEL_COMPOSED " : "ATLAS_MODEL_UNMATCHED ") + query;
+        {"in_flight_count", peak(commands)}};
+    if (witness) {
+      Object matched;
+      for (const auto &[key, value] : witness->relation) matched[key] = value;
+      document["matched_relation"] = std::move(matched);
+      document["pair_index"] = int64_t(witness - pairs.data());
+      document["evidence_source"] = witness->source;
+    } else if (admitted) {
+      document["evidence_source"] = sequence ? "catalog-exact-chain" :
+          provenance.count("derived_sha256") ? "source-derived-composition" : "catalog-composed";
+      if (sequence) document["exact_chain_index"] = int64_t(sequence - sequences.data());
+    }
+    std::string query = canonicalJson(std::move(document));
+    std::string message = (admittedLog ? "ATLAS_MODEL_ADMITTED " :
+                           admitted ? "ATLAS_MODEL_COMPOSED " : "ATLAS_MODEL_UNMATCHED ") + query;
     if (loggedQueries.insert(message).second) llvm::errs() << message << "\n";
     return admitted;
   };
-  auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) {
+  auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) -> const Pair * {
     int gap = second.issue - first.issue;
     for (const Pair &pair : pairs)
       if (pair.first == first.block && pair.second == second.block && pair.minimum <= gap && gap <= pair.high &&
-          matchesRelation(pair.relation, first, second)) return true;
-    return false;
+          matchesRelation(pair.relation, first, second)) return &pair;
+    return nullptr;
   };
-  if (commands.size() == 2) return admitsPair(commands[0], commands[1]) || reportQuery("pair");
+  if (commands.size() == 2) {
+    const Pair *witness = admitsPair(commands[0], commands[1]);
+    return witness ? reportQuery("pair", true, witness) : reportQuery("pair");
+  }
   if (!chains || commands.size() < 3) return false;
   for (size_t i = 0; i < commands.size(); ++i)
     for (size_t j = i + 1; j < commands.size(); ++j)
@@ -455,9 +476,170 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
       for (size_t j = 0; j < i; ++j)
         matched &= matchesRelation(chain.relations.at({int(j), int(i)}), commands[j], commands[i]);
     }
-    if (matched) return true;
+    if (matched) return reportQuery("chain_exact", true, nullptr, &chain);
   }
   return reportQuery("chain");
+}
+
+llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
+    const Object &root, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
+  if (!keys(root, {"schema", "age_convention", "per_op_sha256", "model", "derivation", "validation",
+                   "pairs", "composition"}) || root.getString("age_convention") != "issue_edge_zero" ||
+      root.getString("per_op_sha256") != operations.factsSha256())
+    return invalid("source-derived facts do not bind selected operation facts and ages");
+  const Object *model = root.getObject("model"), *derivation = root.getObject("derivation");
+  const Object *validation = root.getObject("validation"), *composition = root.getObject("composition");
+  const auto &identity = operations.modelProvenance();
+  if (!model || !derivation || !validation || !composition)
+    return invalid("source-derived facts require model, derivation, validation and composition");
+  for (const char *key : {"revision", "source_sha256", "numerical_data_sha256", "configuration_sha256"}) {
+    auto found = identity.find(key);
+    if (found == identity.end() || model->getString(key) != found->second)
+      return invalid(std::string("incompatible source-derived model.") + key);
+  }
+  auto expectedConfiguration = llvm::json::parse(identity.at("configuration_json"));
+  if (!expectedConfiguration) return invalid(llvm::toString(expectedConfiguration.takeError()));
+  const Object *configuration = model->getObject("configuration");
+  if (!configuration || llvm::json::Value(Object(*configuration)) != *expectedConfiguration)
+    return invalid("incompatible source-derived explicit configuration");
+  for (const auto &[key, value] : *model) {
+    if (key == "configuration") continue;
+    auto text = value.getAsString();
+    auto found = identity.find(key.str());
+    if (!text || found == identity.end() || *text != found->second)
+      return invalid("source-derived model differs from selected operation provenance");
+  }
+  const Object *contract = derivation->getObject("source_contract");
+  const Object *capacity = contract ? contract->getObject("capacity") : nullptr;
+  auto toolHash = derivation->getString("tool_sha256"), contractHash = derivation->getString("source_contract_sha256");
+  if (!keys(*derivation, {"contract", "tool_sha256", "source_contract_sha256", "source_contract"}) ||
+      derivation->getString("contract") != "source-resource-occupancy-v1" ||
+      !toolHash || !hashSyntax(*toolHash) || !contractHash || !hashSyntax(*contractHash) || !contract ||
+      modelSha256(canonicalJson(llvm::json::Value(Object(*contract)))) != *contractHash ||
+      !capacity || !keys(*capacity, {"sequencer_cycles", "mxu0_compute", "mxu1_compute", "vpu_slots"}) ||
+      capacity->getInteger("sequencer_cycles") != 32 || capacity->getInteger("mxu0_compute") != 3 ||
+      capacity->getInteger("mxu1_compute") != 2 || capacity->getInteger("vpu_slots") != 2)
+    return invalid("source contract is missing, changed or incompatible with structural capacity");
+  auto reportHash = validation->getString("report_sha256");
+  // This is a bounded native gate for the source contract, not an observation
+  // claim for every generated pair or a claim about RTL execution.
+  const Object *engineRuns = validation->getObject("engines");
+  auto positive = [](const Object &object, llvm::StringRef key) {
+    auto value = object.getInteger(key);
+    return value && *value > 0 && *value <= INT_MAX;
+  };
+  if (!keys(*validation, {"passed", "report_sha256", "sample_policy", "positive_runs", "negative_runs", "negative_rejections",
+                          "numerical_checks", "engines"}) || validation->getBoolean("passed") != true ||
+      validation->getString("sample_policy") != "source-mechanism-boundaries-v1" ||
+      !reportHash || !hashSyntax(*reportHash) || !engineRuns || engineRuns->empty() ||
+      !positive(*validation, "positive_runs") || !positive(*validation, "negative_runs") ||
+      !positive(*validation, "negative_rejections") ||
+      !positive(*validation, "numerical_checks"))
+    return invalid("source-derived facts require successful bounded native numerical validation");
+  std::map<std::string, int64_t> totals;
+  std::set<std::string> validated;
+  for (const auto &[engine, value] : *engineRuns) {
+    const Object *runs = value.getAsObject();
+    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu" && engine != "scalar_lsu") ||
+        !runs || !keys(*runs, {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks",
+                               "chain_positive_runs", "chain_negative_runs"}))
+      return invalid("unsupported source validation engine or counter");
+    for (const char *key : {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks"}) {
+      if (!positive(*runs, key)) return invalid("source validation engine lacks positive, negative or numerical probes");
+      totals[key] += *runs->getInteger(key);
+    }
+    for (auto [chainKey, allKey] : {std::pair<const char *, const char *>{"chain_positive_runs", "positive_runs"},
+                                    {"chain_negative_runs", "negative_rejections"}})
+      if (runs->get(chainKey) && (!runs->getInteger(chainKey) || *runs->getInteger(chainKey) < 0 ||
+                                 runs->getInteger(chainKey) > runs->getInteger(allKey)))
+        return invalid("source chain validation counters exceed native engine probes");
+    if (runs->getInteger("negative_rejections") > runs->getInteger("negative_runs"))
+      return invalid("source native rejections exceed attempted controls");
+    validated.insert(engine.str());
+  }
+  for (const auto &[key, total] : totals)
+    if (*validation->getInteger(key) != total)
+      return invalid("source validation totals do not cover engine probes");
+  ModelOverlapFacts result;
+  const Array *pairs = root.getArray("pairs");
+  if (!pairs || pairs->empty()) return invalid("source-derived facts require nonempty pair coverage");
+  std::set<std::tuple<std::string, std::string, Relation>> seen;
+  for (const auto &value : *pairs) {
+    const Object *record = value.getAsObject();
+    auto first = record ? record->getString("first") : std::nullopt;
+    auto second = record ? record->getString("second") : std::nullopt;
+    auto minimum = record ? record->getInteger("minimum") : std::nullopt;
+    auto high = record ? record->getInteger("high") : std::nullopt;
+    const auto *a = first ? operations.block(*first) : nullptr, *b = second ? operations.block(*second) : nullptr;
+    Relation rel;
+    if (!record || !keys(*record, {"first", "second", "relation", "minimum", "high"}) ||
+        !a || !b || a->engine != b->engine || !validated.count(a->engine) ||
+        !minimum || !high || *minimum < 1 || *minimum > *high || *high != a->firstFreeAge ||
+        !relation(record->getObject("relation"), rel, true) ||
+        !seen.emplace(first->str(), second->str(), rel).second)
+      return invalid("invalid, duplicate, unvalidated or unbounded source-derived pair");
+    if (a->engine == "scalar_lsu") {
+      for (const char *key : {"first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"})
+        if (!rel.count(key)) return invalid("source-derived scalar pair lacks complete context predicates");
+    } else {
+      for (const auto &[key, value] : rel)
+        if (key != "mreg_banks" && key != "accumulator" && key != "weight_slot")
+          return invalid("source-derived vector pair carries unsupported semantic qualifiers");
+    }
+    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high), "source-derived"});
+  }
+  const Object *engines = composition->getObject("engines");
+  const Array *classes = composition->getArray("classes");
+  if (!keys(*composition, {"engines", "classes"}) || !engines || !classes)
+    return invalid("invalid source-derived composition descriptor");
+  std::set<std::string> composedEngines;
+  for (const auto &[engine, value] : *engines) {
+    const Array *names = value.getAsArray();
+    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu") ||
+        !validated.count(engine.str()) || !names || names->empty() ||
+        !positive(*engineRuns->getObject(engine), "chain_positive_runs") ||
+        !positive(*engineRuns->getObject(engine), "chain_negative_runs"))
+      return invalid("source composition lacks a supported validated operation domain");
+    composedEngines.insert(engine.str());
+    for (const auto &entry : *names) {
+      auto name = entry.getAsString();
+      const auto *block = name ? operations.block(*name) : nullptr;
+      if (!block || block->engine != engine || !result.composedOperations.insert(name->str()).second)
+        return invalid("invalid or duplicate source composition operation");
+    }
+  }
+  for (const auto &entry : *classes) {
+    const Object *category = entry.getAsObject();
+    auto engine = category ? category->getString("engine") : std::nullopt;
+    const Object *descriptor = category ? category->getObject("relation") : nullptr;
+    Relation rel;
+    if (!category || !keys(*category, {"engine", "relation"}) || !engine ||
+        !composedEngines.count(engine->str()) || !descriptor ||
+        !keys(*descriptor, {"mreg_banks", "accumulator", "weight_slot"}))
+      return invalid("unsupported source composition class");
+    for (const auto &[key, value] : *descriptor) {
+      auto text = value.getAsString();
+      if (!text || (key == "mreg_banks" ?
+          *text != "disjoint" && *text != "register_alias" && *text != "bank_alias" && *text != "mixed_alias" :
+          *text != "same" && *text != "other")) return invalid("invalid source composition relation class");
+      rel[key.str()] = text->str();
+    }
+    if (!rel.count("mreg_banks") || !std::any_of(result.pairs.begin(), result.pairs.end(), [&](const Pair &pair) {
+          return operations.block(pair.first)->engine == *engine && result.composedOperations.count(pair.first) &&
+              result.composedOperations.count(pair.second) && relationClass(pair.relation) == rel;
+        }) || !result.compositionClasses[engine->str()].insert(rel).second)
+      return invalid("duplicate source composition class or class outside exact pair domain");
+  }
+  for (const auto &engine : composedEngines)
+    if (result.compositionClasses[engine].empty()) return invalid("source composition engine lacks validated classes");
+  result.structuralCapacity = true;
+  result.provenance = {{"pairs_sha256", expectedSha256.str()}, {"derived_sha256", expectedSha256.str()},
+      {"derived_policy", "source-resource-occupancy-v1"}, {"derived_per_op_sha256", operations.factsSha256()},
+      {"derived_tool_sha256", toolHash->str()}, {"derived_source_contract_sha256", contractHash->str()},
+      {"derived_validation_sha256", reportHash->str()}, {"derived_sample_policy", "source-mechanism-boundaries-v1"}};
+  for (const char *key : {"revision", "source_sha256", "numerical_data_sha256", "configuration_sha256"})
+    result.provenance[std::string("derived_") + key] = identity.at(key);
+  return result;
 }
 
 llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
@@ -467,6 +649,8 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
   auto decoded = llvm::json::parse(bytes);
   if (!decoded) return invalid(llvm::toString(decoded.takeError()));
   const Object *root = decoded->getAsObject();
+  if (root && root->getString("schema") == "atlas.model_overlap_derived.v1")
+    return ModelOverlapFacts::parseDerivedFacts(*root, expectedSha256, operations);
   if (!root || root->getString("schema") != "atlas.model_pairs.v1" ||
       root->getString("age_convention") != "issue_edge_zero") return invalid("unsupported schema or age convention");
   if (!keys(*root, {"schema", "age_convention", "model", "projection", "pairs", "chains", "provenance",
@@ -718,6 +902,8 @@ llvm::Error ModelOverlapFacts::loadComposedFacts(
 
 llvm::Error ModelOverlapFacts::addComposedFacts(
     llvm::StringRef bytes, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
+  if (provenance.count("derived_sha256"))
+    return invalid("catalog composed facts cannot extend source-derived overlap facts");
   const auto &model = operations.modelProvenance();
   for (const auto &[key, expected] : model_schema::compositionIdentity())
     if (model.at(key) != expected)
@@ -828,7 +1014,7 @@ llvm::Error ModelOverlapFacts::addComposedFacts(
         !admittedClasses.count({operationEngine(*first), relationClass(rel)}) ||
         *high != operations.block(*first)->firstFreeAge)
       return invalid("derived pair is outside validated class or bounded live domain");
-    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high)});
+    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high), "catalog-composed"});
   }
   for (const auto &entry : *derivedChains) {
     const Object *record = entry.getAsObject();
@@ -883,6 +1069,7 @@ llvm::Error ModelOverlapFacts::addComposedFacts(
   for (const auto &[engine, rel] : admittedClasses)
     if (positive(*engines->getObject(engine), "holdout_chains")) result.compositionClasses[engine].insert(rel);
   result.provenance["composed_sha256"] = expectedSha256.str();
+  result.structuralCapacity = true;
   *this = std::move(result);
   return llvm::Error::success();
 }

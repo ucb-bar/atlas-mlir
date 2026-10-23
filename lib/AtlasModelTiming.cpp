@@ -1433,10 +1433,10 @@ private:
       epoch.push_back(entry.command);
       eligible &= entry.eligible;
       if (live.size() == 1 && (!entry.eligible || !live[0]->eligible ||
-                              !overlap->admits({live[0]->command, entry.command}, false))) return false;
+                              !overlap->admits({live[0]->command, entry.command}, false, "reservation"))) return false;
       // A retired MXU command can determine the port held by the remaining live push.
       if (live.size() == 1 && epoch.size() >= 3 && overlap->rejectsPortHistory(epoch)) return false;
-      if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains))) return false;
+      if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains, "reservation"))) return false;
       history.push_back(&entry);
     }
     return true;
@@ -1677,7 +1677,7 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
   Option<std::string> opTiming{*this, "op-timing", llvm::cl::desc("Observed atlas.model_timing.v1 facts")};
   Option<std::string> opTimingHash{*this, "op-timing-sha256", llvm::cl::desc("Expected facts SHA-256")};
   Option<std::string> dmaPolicy{*this, "dma", llvm::cl::desc("Optional DMA completion policy: wait")};
-  Option<std::string> pairsPath{*this, "pairs", llvm::cl::desc("Optional confirmed compact atlas.model_pairs.v1 facts")};
+  Option<std::string> pairsPath{*this, "pairs", llvm::cl::desc("Optional catalog or source-derived overlap facts")};
   Option<std::string> pairsHash{*this, "pairs-sha256", llvm::cl::desc("Expected compact overlap facts SHA-256")};
   Option<std::string> composedPath{*this, "composed", llvm::cl::desc("Optional validated derived overlap side projection")};
   Option<std::string> composedHash{*this, "composed-sha256", llvm::cl::desc("Expected derived side projection SHA-256")};

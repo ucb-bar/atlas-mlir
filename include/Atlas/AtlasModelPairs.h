@@ -18,7 +18,8 @@ struct ModelOverlapCommand {
 
 class ModelOverlapFacts {
 public:
-  bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const;
+  bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
+              llvm::StringRef origin = "dependence") const;
   bool rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const;
   llvm::Error addComposedFacts(llvm::StringRef bytes, llvm::StringRef expectedSha256,
                               const ModelTimingFacts &operations);
@@ -32,6 +33,7 @@ private:
     std::string first, second;
     Relation relation;
     int minimum = 0, high = 0;
+    std::string source = "catalog";
   };
   struct Chain {
     std::vector<std::string> operations;
@@ -43,8 +45,11 @@ private:
   std::vector<Chain> sequences;
   std::map<std::string, std::set<Relation>> compositionClasses;
   std::set<std::string> composedOperations;
+  bool structuralCapacity = false;
   std::map<std::string, std::string> provenance;
   mutable std::set<std::string> loggedQueries;
+  static llvm::Expected<ModelOverlapFacts> parseDerivedFacts(const llvm::json::Object &, llvm::StringRef,
+                                                            const ModelTimingFacts &);
   friend llvm::Expected<ModelOverlapFacts> parseModelOverlapFacts(llvm::StringRef, llvm::StringRef,
                                                                   const ModelTimingFacts &);
 };
