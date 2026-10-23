@@ -43,9 +43,9 @@ namespace {
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function, ArrayRef<unsigned> storeWindowRanks = {},
-                 ArrayRef<unsigned> mregRanks = {})
-      : module(module), function(function), attrs(module.getContext()),
-        emitter(module.getContext()), allocation(storeWindowRanks, mregRanks) {}
+                 ArrayRef<unsigned> mregRanks = {}, bool packReloadAfterWeight = false)
+      : module(module), function(function), attrs(module.getContext()), emitter(module.getContext()),
+        allocation(storeWindowRanks, mregRanks), packReloadAfterWeight(packReloadAfterWeight) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
@@ -85,6 +85,7 @@ public:
       stageScalarArguments(loc);
 
     for (Block &block : function.getBody()) {
+      packReload.reset();
       currentCFGBlock = cfgBlocks.lookup(&block);
       mark(labelFor(&block));
       for (Operation &op : block) {
@@ -94,6 +95,7 @@ public:
         if (op.hasTrait<OpTrait::IsTerminator>()) {
           flushLoads(op.getLoc());
         } else {
+          reorderPackReload(op);
           flushReusedWindow(op);
           for (Value operand : op.getOperands())
             flushLoad(operand, op.getLoc());
@@ -566,6 +568,28 @@ private:
       flushLoad(pendingOrder.front(), loc);
   }
 
+  void reorderPackReload(Operation &op) {
+    auto matmul = dyn_cast<VirtualMXUMatmulOp>(op);
+    if (!packReloadAfterWeight || !packReload || !matmul || packReload->block != op.getBlock() ||
+        matmul.getActivation() != packReload->value || planned.size() != packReload->end ||
+        !pendingLoads.count(matmul.getWeight()))
+      return;
+    size_t begin = packReload->begin;
+    if (llvm::any_of(labelPC, [&](const auto &label) { return label.second >= begin; }))
+      return;
+    // Preserve the completed PACK's tags while loading an independent weight before its trailing reload.
+    std::vector<Operation *> reload(planned.begin() + begin, planned.end());
+    planned.erase(planned.begin() + begin, planned.end());
+    packReload.reset();
+    state = reload.front()->getOperand(0);
+    emitter.setInsertionPoint(reload.front());
+    flushLoad(matmul.getWeight(), op.getLoc());
+    reload.front()->setOperand(0, state);
+    state = reload.back()->getResult(0);
+    emitter.setInsertionPointToEnd(emitted->getBody());
+    planned.insert(planned.end(), reload.begin(), reload.end());
+  }
+
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
     // Only the E8M0 scale codes observed on the selected RTL are admitted.
     if (pack.getScaleCode() < 122 || pack.getScaleCode() > 128)
@@ -623,11 +647,11 @@ private:
     copyStore(kPackRelayoutRowWords - 1);
     advance(fixed().packDestinationReg, 32);
     redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
-                            /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0),
-             loop);
+                            /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0), loop);
+    size_t reloadBegin = planned.size();
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
-    emit<VLoadOp>(loc, /*dst=*/fp8(pack.getResult()), /*base=*/fixed().inputBaseReg,
-        /*offset=*/0, "raw");
+    emit<VLoadOp>(loc, /*dst=*/fp8(pack.getResult()), /*base=*/fixed().inputBaseReg, /*offset=*/0, "raw");
+    packReload = PackReload{pack.getResult(), pack->getBlock(), reloadBegin, planned.size()};
     return success();
   }
 
@@ -942,6 +966,13 @@ private:
   std::vector<Operation *> planned;
   SmallVector<std::pair<size_t, unsigned>> redirects;
   VirtualAllocationPlan allocation;
+  bool packReloadAfterWeight;
+  struct PackReload {
+    Value value;
+    Block *block;
+    size_t begin, end;
+  };
+  std::optional<PackReload> packReload;
   llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
@@ -991,6 +1022,9 @@ struct LowerAtlasVirtualToMachinePass
 
   Option<std::string> mregRanks{
       *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks (model only)"), llvm::cl::init("")};
+  Option<bool> packReloadAfterWeight{
+      *this, "pack-reload-after-weight", llvm::cl::desc("Load a pending weight before an adjacent PACK reload (model only)"),
+      llvm::cl::init(false)};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -1004,6 +1038,15 @@ struct LowerAtlasVirtualToMachinePass
     if (!function) {
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
+    }
+    if (packReloadAfterWeight) {
+      auto selected = selectAtlasTimingProvider(module, provider.getValue());
+      if (failed(selected))
+        return signalPassFailure();
+      if (selected->id != timing::kModelTimingProviderId) {
+        module.emitError("pack-reload-after-weight requires the model timing provider");
+        return signalPassFailure();
+      }
     }
     SmallVector<unsigned> storeWindowRanks;
     if (!storeWindows.empty()) {
@@ -1046,7 +1089,7 @@ struct LowerAtlasVirtualToMachinePass
       }
     }
     reuseAtlasImmutableWeights(function);
-    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks);
+    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks, packReloadAfterWeight);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1100,11 +1143,13 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 
 std::unique_ptr<Pass>
 mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, StringRef provider,
-                                                                   StringRef storeWindows, StringRef mregRanks) {
+                                                                   StringRef storeWindows, StringRef mregRanks,
+                                                                   bool packReloadAfterWeight) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
   pass->storeWindows = storeWindows.str();
   pass->mregRanks = mregRanks.str();
+  pass->packReloadAfterWeight = packReloadAfterWeight;
   return pass;
 }

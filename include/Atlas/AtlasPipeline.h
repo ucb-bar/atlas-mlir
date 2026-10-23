@@ -7,6 +7,8 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
+  Option<bool> packReloadAfterWeight{
+      *this, "pack-reload-after-weight", llvm::cl::desc("Load pending weights before PACK reloads"), llvm::cl::init(false)};
   Option<std::string> mregRanks{*this, "mreg-ranks", llvm::cl::desc("Free MREG ranks"), llvm::cl::init("")};
   Option<std::string> orderFile{*this, "order-file", llvm::cl::desc("Virtual order JSON"), llvm::cl::init("")};
   Option<std::string> graphOutput{*this, "graph-output", llvm::cl::desc("Virtual graph JSON"), llvm::cl::init("")};
