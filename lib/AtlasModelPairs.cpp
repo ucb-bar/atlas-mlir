@@ -4,7 +4,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/SHA256.h"
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -73,6 +72,17 @@ bool relation(const Object *object, Relation &out, bool qualified) {
   }
   return true;
 }
+using Relations = std::map<std::pair<int, int>, Relation>;
+bool addRelation(Relations &relations, const llvm::json::Value &entry, size_t size, bool qualified) {
+  const Object *pair = entry.getAsObject();
+  auto first = pair ? pair->getInteger("first_index") : std::nullopt;
+  auto second = pair ? pair->getInteger("second_index") : std::nullopt;
+  Relation matched;
+  return pair && keys(*pair, {"first_index", "second_index", "relation"}) && first && second && *first >= 0 &&
+      *first < *second && uint64_t(*second) < size && relation(pair->getObject("relation"), matched, qualified) &&
+      relations.emplace(std::pair<int, int>{int(*first), int(*second)}, std::move(matched)).second;
+}
+
 Relation actualRelation(const ModelOverlapCommand &first, const ModelOverlapCommand &second) {
   Relation result;
   std::string banks;
@@ -252,10 +262,7 @@ bool qualifiedConstraint(llvm::StringRef key, const llvm::json::Value &value) {
   const auto &fingerprints = model_schema::qualifiedConstraintHashes();
   auto allowed = fingerprints.find(key.str());
   if (allowed == fingerprints.end()) return false;
-  std::string bytes = canonicalJson(value);
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  return allowed->second.count(llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true));
+  return allowed->second.count(modelSha256(canonicalJson(value)));
 }
 
 bool constraints(const Object &record, bool qualified) {
@@ -455,9 +462,7 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
 
 llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
     llvm::StringRef bytes, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  if (!hashSyntax(expectedSha256) || llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true) != expectedSha256)
+  if (!hashSyntax(expectedSha256) || modelSha256(bytes) != expectedSha256)
     return invalid("selected compact facts hash mismatch");
   auto decoded = llvm::json::parse(bytes);
   if (!decoded) return invalid(llvm::toString(decoded.takeError()));
@@ -670,17 +675,9 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::parseModelOverlapFacts(
           return invalid("uniform chain axis does not match exact vector");
       }
     }
-    for (const auto &entry : *matrix) {
-      const Object *pair = entry.getAsObject();
-      auto first = pair ? pair->getInteger("first_index") : std::nullopt;
-      auto second = pair ? pair->getInteger("second_index") : std::nullopt;
-      Relation matched;
-      if (!pair || !keys(*pair, {"first_index", "second_index", "relation"}) || !first || !second || *first < 0 ||
-          *first >= *second || uint64_t(*second) >= names->size() ||
-          !relation(pair->getObject("relation"), matched, qualified) ||
-          !chain.relations.emplace(std::pair<int, int>{int(*first), int(*second)}, std::move(matched)).second)
+    for (const auto &entry : *matrix)
+      if (!addRelation(chain.relations, entry, names->size(), qualified))
         return invalid("invalid complete chain relation matrix");
-    }
     Relation summary;
     if (!relation(record->getObject("relation"), summary, qualified) || summary != chain.relations.at({0, 1}) ||
         peak(commands) != *count || !proofGaps(*record, chain.gaps))
@@ -695,7 +692,21 @@ llvm::Expected<ModelOverlapFacts> mlir::atlas::timing::loadModelOverlapFacts(
     llvm::StringRef path, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
   auto buffer = llvm::MemoryBuffer::getFile(path);
   if (!buffer) return invalid("cannot read selected compact facts: " + path.str());
-  return parseModelOverlapFacts((*buffer)->getBuffer(), expectedSha256, operations);
+  llvm::StringRef bytes = (*buffer)->getBuffer();
+  if (!hashSyntax(expectedSha256) || modelSha256(bytes) != expectedSha256)
+    return invalid("selected compact facts hash mismatch");
+  // Recheck file contents on every load; only parsing and proof validation are cached.
+  static thread_local std::string cachedHash, cachedOperations;
+  static thread_local std::optional<ModelOverlapFacts> cached;
+  if (cached && cachedHash == expectedSha256 && cachedOperations == operations.factsSha256())
+    return *cached;
+  auto parsed = parseModelOverlapFacts(bytes, expectedSha256, operations);
+  if (!parsed)
+    return parsed.takeError();
+  cachedHash = expectedSha256.str();
+  cachedOperations = operations.factsSha256();
+  cached = *parsed;
+  return std::move(*parsed);
 }
 
 llvm::Error ModelOverlapFacts::loadComposedFacts(
@@ -708,13 +719,10 @@ llvm::Error ModelOverlapFacts::loadComposedFacts(
 llvm::Error ModelOverlapFacts::addComposedFacts(
     llvm::StringRef bytes, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
   const auto &model = operations.modelProvenance();
-  if (model.at("revision") != "9e6313bddecb8ba936206eb347f5cd4e5335282c" ||
-      model.at("source_sha256") != "a9a919c3d118af94e2783c8969e05ad19f8d2523ec093922c4f9957641b54426" ||
-      model.at("configuration_sha256") != "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a")
-    return invalid("composition capacity rules require the audited model source and configuration");
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  if (!hashSyntax(expectedSha256) || llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true) != expectedSha256)
+  for (const auto &[key, expected] : model_schema::compositionIdentity())
+    if (model.at(key) != expected)
+      return invalid("composition capacity rules require the audited model source and configuration");
+  if (!hashSyntax(expectedSha256) || modelSha256(bytes) != expectedSha256)
     return invalid("selected composed facts hash mismatch");
   auto decoded = llvm::json::parse(bytes);
   if (!decoded) return invalid(llvm::toString(decoded.takeError()));
@@ -853,14 +861,11 @@ llvm::Error ModelOverlapFacts::addComposedFacts(
     if (!positive(*engines->getObject(engine), "holdout_chains"))
       return invalid("derived chain engine lacks chain holdouts");
     for (const auto &value : *matrix) {
-      const Object *pair = value.getAsObject();
-      auto i = pair ? pair->getInteger("first_index") : std::nullopt;
-      auto j = pair ? pair->getInteger("second_index") : std::nullopt;
-      Relation rel;
-      if (!pair || !keys(*pair, {"first_index", "second_index", "relation"}) || !i || !j || *i < 0 ||
-          *i >= *j || uint64_t(*j) >= names->size() || !relation(pair->getObject("relation"), rel, false) ||
-          !chain.relations.emplace(std::make_pair(*i, *j), rel).second)
+      if (!addRelation(chain.relations, value, names->size(), false))
         return invalid("derived chain relation is outside validated class");
+      const Object *pair = value.getAsObject();
+      auto i = pair->getInteger("first_index"), j = pair->getInteger("second_index");
+      const Relation &rel = chain.relations.at({int(*i), int(*j)});
       int gap = commands[*j].issue - commands[*i].issue;
       if (gap < commands[*i].firstFreeAge && !admittedClasses.count({engine, relationClass(rel)}))
         return invalid("derived live pair relation is outside validated class");

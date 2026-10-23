@@ -129,7 +129,6 @@ struct Fill {
     return end;
   }
   int busyEnd() { return releaseEnd("unit", block ? block->firstFreeAge - 1 : 0); }
-  int nextIssue() { return block ? block->nextIssueAge : 0; }
   void bank(std::optional<int> line, const char *key) {
     const auto *release = reservation(key);
     int from = release ? release->firstAge : first(key), to = release ? release->releaseAge : last(key);
@@ -143,7 +142,6 @@ struct Fill {
     if (from <= to)
       for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
   }
-  void vpu(int busy) { hold({Unit::Xlu}, 0, busy); }
   Footprint done(int busy) {
     if (block)
       for (const auto &[key, event] : block->events)
@@ -224,6 +222,12 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingB
 
 } // namespace
 
+std::string mlir::atlas::timing::modelSha256(llvm::StringRef bytes) {
+  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
+      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
+  return llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
+}
+
 bool mlir::atlas::timing::hashSyntax(llvm::StringRef value) {
   return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
@@ -259,9 +263,7 @@ std::string mlir::atlas::timing::canonicalJson(const llvm::json::Value &value) {
 llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     llvm::StringRef bytes, llvm::StringRef expectedSha256, bool dmaWait) {
   if (!hashSyntax(expectedSha256)) return factsError("facts SHA-256 is required");
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  if (llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true) != expectedSha256)
+  if (modelSha256(bytes) != expectedSha256)
     return factsError("selected facts hash mismatch");
   auto parsed = llvm::json::parse(bytes);
   if (!parsed) return factsError(llvm::toString(parsed.takeError()));
@@ -293,9 +295,7 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
   if (*decodedConfiguration != llvm::json::Value(Object(*configuration)) ||
       *configurationJson != canonicalJson(llvm::json::Value(Object(*configuration))))
     return factsError("configuration_json is not the canonical explicit configuration");
-  auto configurationHash = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(configurationJson->data()), configurationJson->size()));
-  if (llvm::toHex(llvm::ArrayRef<uint8_t>(configurationHash), true) != *model->getString("configuration_sha256"))
+  if (modelSha256(*configurationJson) != *model->getString("configuration_sha256"))
     return factsError("configuration content hash mismatch");
   for (const auto &[key, value] : *model) {
     if (key == "configuration") continue;
@@ -340,7 +340,7 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
     const Object *assumptions = entry->getObject("assumptions");
     if (!assumptions || assumptions->getInteger("scratchpad_read_latency") != 1)
       return factsError("only scratchpad_read_latency=1 is supported");
-    ModelTimingBlock block{engine->str(), {}, int(*free), int(*next), 1};
+    ModelTimingBlock block{engine->str(), {}, int(*free), 1};
     const Object *events = entry->getObject("events");
     if (!events || events->empty()) return factsError("model timing block needs observed events");
     for (const auto &[key, value] : *events) {
@@ -368,7 +368,7 @@ llvm::Expected<ModelTimingFacts> mlir::atlas::timing::parseModelTimingFacts(
         if (!first || !last || !available || *first < 0 || *last < *first || *last >= *free ||
             *available != *last + 1 || ((unit || mreg) && *first != 0) || (unit && *available != *free))
           return factsError("reservation release is outside its isolated lifetime");
-        ModelReservationRelease resource{int(*first), int(*last), int(*available), {}};
+        ModelReservationRelease resource{int(*first), int(*last), {}};
         if (!unit) {
           const Array *banks = release->getArray("banks");
           if (!banks || banks->empty()) return factsError("reservation needs explicit probe banks");
@@ -593,7 +593,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
                     std::to_string(reg & 31));
     }
     int busy = fill.busyEnd();
-    fill.vpu(busy);
+    fill.hold({Unit::Xlu}, 0, busy);
     return fill.done(busy);
   }
 

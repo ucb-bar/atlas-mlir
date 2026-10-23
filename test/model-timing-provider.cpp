@@ -6,6 +6,7 @@
 #include "mlir/Parser/Parser.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -208,6 +209,34 @@ void testOverlap(const std::shared_ptr<const ModelTimingFacts> &facts) {
   auto parsed = parseModelOverlapFacts(bytes, hash(bytes), *facts);
   check(bool(parsed), "synthetic compact overlap facts load");
   if (!parsed) { llvm::errs() << llvm::toString(parsed.takeError()) << '\n'; return; }
+  llvm::SmallString<128> cachePath;
+  int descriptor;
+  auto created = llvm::sys::fs::createTemporaryFile("atlas-overlap-cache", "json", descriptor, cachePath);
+  check(!created, "create overlap cache fixture");
+  if (!created) {
+    {
+      llvm::raw_fd_ostream output(descriptor, true);
+      output << bytes;
+    }
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      auto loaded = loadModelOverlapFacts(cachePath, hash(bytes), *facts);
+      check(bool(loaded) && loaded->metadata() == parsed->metadata(), "repeated overlap load preserves proof metadata");
+      if (!loaded) llvm::consumeError(loaded.takeError());
+    }
+    std::error_code error;
+    {
+      llvm::raw_fd_ostream output(cachePath, error);
+      check(!error, "replace overlap cache fixture");
+      output << bytes << ' ';
+    }
+    auto corrupted = loadModelOverlapFacts(cachePath, hash(bytes), *facts);
+    check(!corrupted, "cached overlap facts still reject changed file contents");
+    if (!corrupted) llvm::consumeError(corrupted.takeError());
+    auto refreshed = loadModelOverlapFacts(cachePath, hash(bytes + " "), *facts);
+    check(bool(refreshed), "new content pin reloads overlap proof");
+    if (!refreshed) llvm::consumeError(refreshed.takeError());
+    llvm::sys::fs::remove(cachePath);
+  }
   auto overlap = std::make_shared<ModelOverlapFacts>(std::move(*parsed));
   auto replaced = parseModelOverlapFacts(bytes, std::string(64, '0'), *facts);
   check(!replaced, "compact content replacement fails the selected hash pin");
