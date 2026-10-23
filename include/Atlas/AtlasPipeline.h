@@ -7,6 +7,7 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
+  Option<std::string> provider{*this, "provider", llvm::cl::desc("Timing provider"), llvm::cl::init("")};
   Option<std::string> allocationReport{
       *this, "allocation-report",
       llvm::cl::desc("Write the allocation plan as JSON to this file, also "

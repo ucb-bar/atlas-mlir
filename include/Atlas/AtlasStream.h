@@ -73,7 +73,7 @@ LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
 // The provider a timing pass uses: `requested`, else the retained
-// atlas.timing_provider, else the npu-model provider. A request that differs
+// atlas.timing_provider, else the builtin provider. A request that differs
 // from the retained one, or an unregistered or incomplete provider, fails.
 FailureOr<timing::TimingProvider>
 selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
