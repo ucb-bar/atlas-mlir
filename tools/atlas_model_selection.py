@@ -35,6 +35,45 @@ from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def capture_selection_inputs(source, output, binaries, model, regions, search_policy):
+    """Capture production inputs without importing the model into compiler threads."""
+    from atlas_run_provenance import capture_run_provenance, safe_path
+
+    model = safe_path(model)
+    revisions = {}
+    for role, root in (("compiler", ROOT), ("model", model)):
+        revisions[role] = None
+        # A source-only model copy must not inherit an enclosing repository's HEAD.
+        if safe_path(root / ".git").exists():
+            result = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                                    capture_output=True, text=True)
+            revisions[role] = result.stdout.strip() if result.returncode == 0 else None
+    return capture_run_provenance(
+        source, regions=regions, archive_dir=output / "provenance", revisions=revisions,
+        search_policy=search_policy, selector=Path(__file__),
+        files={"compiler_build_definition": ROOT / "CMakeLists.txt",
+               "instruction_inventory": ROOT / "docs/selected-variant-inventory.json",
+               **{name: binaries / name for name in ("atlas-opt", "atlas-emit")}},
+        trees={"model_source": (model / "npu_model", (".py", ".json", ".yaml")),
+               "numerical_data": model / "npu_model/configs/data",
+               "compiler_lib": ROOT / "lib", "compiler_include": ROOT / "include",
+               "tools": (ROOT / "tools", (".py", ".json", ".yaml"))})
+
+
+def bind_selection_facts(capture, model_facts):
+    from atlas_run_provenance import safe_path, selection_facts_identity
+
+    directory = safe_path(model_facts)
+    capture.bind(evidence_files={"facts/" + name: directory / name
+                                 for name in ("facts.lock.json", "model-timing.json", "model-overlap.json")})
+    facts = json.loads((directory / "model-timing.json").read_text())
+    semantic_digest, provider_digest = selection_facts_identity(facts)
+    capture.bind(semantic={"derived_facts_sha256": semantic_digest})
+    return provider_digest
+
+
 SEARCH_BUDGETS = {
     "selection": dict(max_candidates=24, search_evaluations=0, search_group_evaluations=0,
                       search_patience=0, bank_candidates=False,
@@ -354,7 +393,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    search_evaluations: int = 0, search_group_evaluations: int = 0,
                    search_patience: int = 0,
                    pack_reload_candidates: bool = False, pack_preload_candidates: bool = False,
-                   curve_candidates: bool | None = None, scorer: Callable | None = None) -> dict:
+                   curve_candidates: bool | None = None, scorer: Callable | None = None,
+                   search_policy=None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
 
     All candidates run allocation, timing and generated-schedule verification
@@ -386,7 +426,10 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("pack-reload-candidates requires the model provider")
     if pack_preload_candidates and provider != "model":
         raise ValueError("pack-preload-candidates requires the model provider")
-    source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
+    if __package__:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from atlas_run_provenance import safe_path
+    source, output, binaries = map(safe_path, (source, output_dir, atlas_bin_dir))
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError("output directory must be empty to prevent stale artifacts")
     output.mkdir(parents=True, exist_ok=True)
@@ -402,6 +445,26 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "pack_preload_candidates": pack_preload_candidates,
                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                "candidates": []}
+    standard_scorer = scorer is None
+    capture = None
+    if standard_scorer and provider == "model":
+        if model is None:
+            raise ValueError("model scoring requires --npu-model")
+        capture = capture_selection_inputs(source, output, binaries, model, model_regions, search_policy)
+        capture.bind(semantic={"invocation": {
+            key: value for key, value in receipt.items() if key not in ("candidates", "source_sha256", "workers")
+        } | dict(boundary=boundary, spill=spill, spill_mxu=spill_mxu,
+                 random_seeds=random_seeds, store_window_candidates=store_window_candidates,
+                 mreg_candidates=mreg_candidates)})
+        from atlas_model_scorer import ModelScorer
+        scorer = ModelScorer(model, model_regions)
+        # Capture external configuration data before facts regeneration or compilation.
+        # A short-lived process preserves model import isolation on prepare failures.
+        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
+            runtime = executor.submit(scorer.runtime_receipt).result()
+        capture.bind(files={"selected_curve": runtime.pop("curve_path")},
+                     semantic={"base_configuration": runtime.pop("configuration")})
+        receipt["runtime_versions"] = runtime
 
     def command(argv: list[str], directory: Path, stdout: Path | None = None) -> str:
         rendered = f"cd {shlex.quote(str(directory))} && " + shlex.join(argv)
@@ -428,6 +491,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         model_facts = output / "model-facts"
         command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
                  "--npu-model", str(model), "--out", str(model_facts)], output)
+    if capture is not None:
+        receipt["provider_facts_sha256"] = bind_selection_facts(capture, model_facts)
     options = evidence_option(model_facts) if provider == "model" else []
     options.append("--atlas-compile-prepare=" +
                    f"spill-mxu-state={str(spill_mxu).lower()} boundary={boundary}")
@@ -436,14 +501,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     prepared = output / "1-virtual.mlir"
     command([str(binaries / "atlas-opt"), str(source), *options,
              "--mlir-print-op-on-diagnostic=false", "-o", str(prepared)], output)
-    standard_scorer = scorer is None
-    if standard_scorer and provider == "model":
-        if __package__:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from atlas_model_scorer import ModelScorer
-        if model is None:
-            raise ValueError("model scoring requires --npu-model")
-        scorer = ModelScorer(model, model_regions)
     seen: set[Candidate] = set()
     # The scorer/model/regions are fixed for this invocation; profiles must not share scores.
     score_cache: dict[tuple[str, tuple[int, ...]], int | Future] = {}
@@ -647,6 +704,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 preloaded = replace(winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
                 evaluate_batch([(replace(preloaded, wait_placement="preloaded"), "pack-preload-waits")],
                                len(receipt["candidates"]) + 1)
+    if capture is not None:
+        try:
+            receipt["provenance"] = capture.complete(
+                scoring_configurations=receipt.get("scoring_configurations", {}),
+                runtime_versions=receipt["runtime_versions"])
+        except (OSError, ValueError) as error:
+            receipt["publication_status"] = "REFUSED"
+            fail(str(error))
     selected = output / best["directory"]
     for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
         shutil.copyfile(selected / name, output / name)
