@@ -224,6 +224,10 @@ class FullPreparationTest(unittest.TestCase):
         self.assertEqual(receipt['status'], 'PASS_PREPARED_INPUTS_ONLY')
         self.assertTrue(receipt['source_bookends_equal'])
         self.assertFalse(receipt['hardware_execution'])
+        for relative in ('tools/atlas_host_layout.py', 'runtime/atlas_host_layout.h',
+                         'tools/chipyard/run_sim.py'):
+            source = kernels.ROOT / relative
+            self.assertEqual(receipt['source_sha256'][str(source)], sha(source.read_bytes()))
         rows = kernels.read_manifest(Path(receipt['manifest']))
         self.assertEqual([row['id'] for row in rows], ['tiny-full-00000', 'tiny-full-00001'])
         for index, row in enumerate(rows):
@@ -246,6 +250,21 @@ class FullPreparationTest(unittest.TestCase):
             kernels.prepare_full(root, 'tiny-full', out)
         self.assertFalse(out.exists())
 
+    def test_foreign_cached_helper_and_stale_layout_fail_before_output(self):
+        root, _, _ = self.bundle()
+        kernels.full_bundle(root, 'tiny-full')
+        for name in ('full_bundle', 'bundle', 'block_bundle', 'atlas_host_layout',
+                     'atlas_path_guard', 'atlas_tooling', 'run_sim'):
+            out = self.root / ('foreign-' + name)
+            with self.subTest(helper=name), mock.patch.object(
+                    sys.modules[name], '__file__', str(self.root / 'foreign.py')):
+                with self.assertRaisesRegex(ValueError, 'another source'):
+                    kernels.prepare_full(root, 'tiny-full', out)
+                self.assertFalse(out.exists())
+        with mock.patch.object(sys.modules['atlas_host_layout'], 'HEADER_SHA256', '0' * 64):
+            with self.assertRaisesRegex(ValueError, 'layout identity'):
+                kernels.prepare_full(root, 'tiny-full', self.root / 'stale-layout')
+        self.assertFalse((self.root / 'stale-layout').exists())
     def test_late_bookend_failure_retains_failed_evidence_without_manifest(self):
         root, _, _ = self.bundle()
         provider = kernels.full_bundle(root, 'tiny-full')

@@ -41,9 +41,25 @@ def full_bundle(root, workload):
     """Use the existing checksum/image provider without importing a model."""
     directory = safe_path(ROOT / "tools/host_iss")
     sys.path.insert(0, str(directory))
+    modules = {name: ROOT / "tools" / (name + ".py") for name in
+               ("atlas_host_layout", "atlas_path_guard", "atlas_tooling")}
+    modules.update({name: directory / (name + ".py") for name in
+                    ("full_bundle", "bundle", "block_bundle")})
+    modules["run_sim"] = ROOT / "tools/chipyard/run_sim.py"
+
+    def check_imports():
+        for name, expected in modules.items():
+            module = sys.modules.get(name)
+            if module is not None and safe_path(module.__file__) != expected:
+                raise ValueError("full bundle helper imported from another source: " + name)
+
+    check_imports()
     import full_bundle as provider
-    if safe_path(provider.__file__) != directory / "full_bundle.py":
-        raise ValueError("full bundle provider imported from another source")
+    check_imports()
+    layout = sys.modules["atlas_host_layout"]
+    if (safe_path(layout.HEADER) != ROOT / "runtime/atlas_host_layout.h"
+            or sha(safe_path(layout.HEADER).read_bytes()) != layout.HEADER_SHA256):
+        raise ValueError("imported host layout identity differs")
     root = safe_path(root)
     if safe_path(root / "kernels.json").exists():
         return provider.KernelAssets(root, workload)
@@ -57,7 +73,9 @@ def prepare_full(bundle_root, workload, out):
         raise ValueError("fresh preparation directory required")
     sources = [Path(__file__), *(ROOT / "tools/host_iss" / filename for filename in
                ("full_bundle.py", "bundle.py", "block_bundle.py")),
-               ROOT / "tools/atlas_path_guard.py", ROOT / "tools/atlas_tooling.py"]
+               *(ROOT / "tools" / filename for filename in
+                 ("atlas_path_guard.py", "atlas_tooling.py", "atlas_host_layout.py")),
+               ROOT / "tools/chipyard/run_sim.py", ROOT / "runtime/atlas_host_layout.h"]
     pins = {str(safe_path(path)): sha(safe_path(path).read_bytes()) for path in sources}
     bundle = full_bundle(bundle_root, workload)
     out.mkdir(parents=True)
