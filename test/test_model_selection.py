@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -20,8 +21,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from model_evidence import requires_model_evidence
-from atlas_model_selection import (Candidate, candidate_options, evidence_option, group_order_neighbors,
-                                   order_neighbors, select_program)
+from atlas_model_selection import (Candidate, add_model_arguments, candidate_options, evidence_option,
+                                   group_order_neighbors, model_arguments, order_neighbors, select_program)
 
 
 def candidate_command(argv):
@@ -101,6 +102,68 @@ class ModelSelectionTest(unittest.TestCase):
             self.assertEqual(lower_atlas_program.main(), 0)
         self.assertTrue(select.call_args.kwargs["guarded_pack"])
 
+    def test_search_presets_and_explicit_overrides(self):
+        parser = argparse.ArgumentParser()
+        add_model_arguments(parser)
+        full = model_arguments(parser.parse_args(["--provider", "model", "--workers", "36"]))
+        self.assertEqual((full["max_candidates"], full["search_evaluations"], full["search_group_evaluations"],
+                          full["search_patience"]), (32, 96, 204, 96))
+        self.assertIsNone(full["mreg_candidates"])
+        self.assertEqual(full["profile"], "fifo43")
+        selection = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", "selection"]))
+        self.assertEqual((selection["max_candidates"], selection["search_evaluations"],
+                          selection["search_group_evaluations"], selection["search_patience"]), (24, 0, 0, 0))
+        values = model_arguments(parser.parse_args(["--provider", "model", "--workers", "4",
+            "--search-group-evaluations", "72", "--profile", "fifo43", "--no-bank-candidates",
+            "--no-pack-reload-candidates", "--no-pack-preload-candidates"]))
+        self.assertEqual((values["search_group_evaluations"], values["profile"], values["mreg_candidates"]), (72, "fifo43", ()))
+        self.assertFalse(values["pack_reload_candidates"] or values["pack_preload_candidates"])
+        builtin = model_arguments(parser.parse_args([]))
+        self.assertEqual((builtin["profile"], builtin["search_evaluations"], builtin["search_group_evaluations"],
+                          builtin["mreg_candidates"]), ("fifo43", 0, 0, ()))
+
+    def test_fixed_batches_keep_all_compiles_canonical(self):
+        with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
+            receipt = select_program(self.source, self.directory / "compiled", self.directory,
+                max_candidates=1, search_evaluations=13, workers=4,
+                scorer=lambda program, **_: program["cycles"])
+        self.assertEqual(len(receipt["candidates"]), 14)
+        self.assertEqual(receipt["search"]["evaluations"], 13)
+        self.assertEqual([row["parent_index"] for row in receipt["candidates"][1:13]], [0] * 12)
+        self.assertEqual(len([argv for argv in self.invocations if candidate_command(argv)]), 14)
+        self.assertFalse((self.directory / "compiled/prefetch").exists())
+
+    def test_patience_stops_at_batch_boundary_and_still_checks_pack_alternatives(self):
+        receipt = self.select(runner=self.graph_run([[] for _ in range(8)]), max_candidates=1,
+                              search_evaluations=100, search_patience=12, workers=4,
+                              pack_reload_candidates=True, pack_preload_candidates=True)
+        self.assertEqual(receipt["search"]["evaluations"], 12)
+        self.assertTrue(receipt["search"]["stopped_for_patience"])
+        self.assertEqual([row["class"] for row in receipt["candidates"]][-2:],
+                         ["pack-reload-order", "pack-preload-waits"])
+        self.assertEqual(receipt["selected_index"], 0)
+        self.assertEqual(receipt["score_cache_entries"], 1)
+        self.assertEqual(receipt["score_cache_hits"], 14)
+
+    def search_run(self, argv, **kwargs):
+        """Give every option set and order distinct words and cycles on a graph with dependences."""
+        result = self.fake_run(argv, **kwargs)
+        option = candidate_command(argv)
+        if result.returncode or not option:
+            return result
+        cwd = kwargs["cwd"]
+        order = self.write_graph(cwd, [[], [0], [], [2], [], [], [5], []])
+        # Provider spelling is metadata, not part of the synthetic instruction stream.
+        word_options = " ".join(token for token in option.split() if not token.startswith("--atlas-compile-candidate=provider="))
+        # Fixed salt exercises accepted moves in both bounded search phases.
+        key = int(hashlib.sha256(repr((10, word_options, order)).encode()).hexdigest()[:8], 16)
+        if key % 11 == 0 and "order-file" in option:
+            return subprocess.CompletedProcess(argv, 1, "", "refused")
+        # Order replays score below every knob candidate, so both search phases accept moves.
+        cycles = 1000 + key % 97 + (0 if "order-file" in option else 100)
+        self.programs[cwd] = {"instructions": [{"word_u32": key}], "cycles": cycles}
+        return result
+
 
     def test_mreg_pool_is_eight_seeds_at_every_cap(self):
         vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
@@ -113,9 +176,20 @@ class ModelSelectionTest(unittest.TestCase):
             self.assertEqual((receipt["mreg_pool_size"], len(ranks)), (8, evaluated))
             self.assertEqual(ranks, vectors[:evaluated])
 
+    def test_removed_search_controls_are_rejected(self):
+        with self.assertRaises(TypeError):
+            self.select(search_prefetch_batches=1)
+        parser = argparse.ArgumentParser()
+        add_model_arguments(parser)
+        from contextlib import redirect_stderr
+        from io import StringIO
+        for options in (("--search-budget", "max"), ("--search-budget", "wide"), ("--search-prefetch-batches", "3")):
+            with self.subTest(options=options), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(options)
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
+            ({"search_patience": -1}, "search-patience"),
             ({"provider": "builtin", "search_group_evaluations": 1}, "search-group-evaluations"),
             ({"search_group_evaluations": -1}, "search-group-evaluations"),
             ({"provider": "builtin", "search_evaluations": 1}, "search-evaluations"),
@@ -178,6 +252,7 @@ with TemporaryDirectory() as directory:
         receipt = self.select(profile="fifo43", max_candidates=16,
                               scorer=lambda program, **_: scores.append(program["cycles"]) or 10)
         self.assertEqual(len(scores), 3)
+        self.assertEqual(receipt["score_cache_entries"], 3)
         self.assertEqual(receipt["selected_index"], 0)
         self.assertIn("uniform-store-windows", {row["class"] for row in receipt["candidates"]})
 
@@ -248,7 +323,8 @@ with TemporaryDirectory() as directory:
 
 
     def test_candidate_choices_only_use_exposed_existing_knobs(self) -> None:
-        options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source", mreg_ranks=(31, 0, 7)), "model", True)
+        options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source", mreg_ranks=(31, 0, 7)),
+                                    "model", True)
         self.assertEqual(len(options), 1)
         self.assertTrue(options[0].startswith("--atlas-compile-candidate="))
         self.assertIn("provider=model", options[0])
