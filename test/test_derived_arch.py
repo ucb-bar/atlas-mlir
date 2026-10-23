@@ -55,7 +55,13 @@ class ArchState:
 
     def write_xrf(self, rd, value):
         value &= 0xFFFFFFFF
+        if rd == 0:
+            return
+        if rd < len(self.xrf) and self.xrf[rd] == value:
+            return
         self.xrf[rd] = value
+        if self.logger:
+            self.logger.log_arch_value('xrf', rd, value)
 """
 
 
@@ -95,6 +101,13 @@ def configuration():
 
 
 class ArchitectureDerivationTest(unittest.TestCase):
+    def test_scalar_final_store_and_x0_control_flow_are_checked(self):
+        for old, new in (("self.xrf[rd] = value", "self.xrf[rd] = value & 0xFFFF"),
+                         ("if rd == 0:", "if rd == 1:")):
+            with self.subTest(mutation=new), self.assertRaisesRegex(
+                    derive.UnsupportedArchitecture, "scalar storage semantics in ArchState.write_xrf"):
+                self.derive(arch=ARCH_SOURCE.replace(old, new))
+
     def derive(self, cfg=None, bank=BANK_SOURCE, arch=ARCH_SOURCE, lsu=LSU_SOURCE, dma=DMA_SOURCE):
         bank_module, arch_module, lsu_module, dma_module = object(), object(), object(), object()
         modules = {"npu_model": SimpleNamespace(), "npu_model.hardware":

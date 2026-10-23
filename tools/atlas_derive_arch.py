@@ -210,6 +210,12 @@ def _scalar_bytes(tree):
     bits = value.bit_length()
     if value != (1 << bits) - 1 or bits % 8:
         raise UnsupportedArchitecture("scalar-register mask must cover a whole number of bytes")
+    _body_contract(method, f"value &= {value}\n"
+                   "if rd == 0:\n    return\n"
+                   "if rd < len(self.xrf) and self.xrf[rd] == value:\n    return\n"
+                   "self.xrf[rd] = value\n"
+                   "if self.logger:\n    self.logger.log_arch_value('xrf', rd, value)",
+                   "scalar storage semantics in ArchState.write_xrf")
     return bits // 8
 
 

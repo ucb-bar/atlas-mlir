@@ -39,9 +39,11 @@ class ScorerGuardsTest(unittest.TestCase):
         cfg, values = object(), {"timing": 0.75}
         factory = Mock(return_value=(cfg, values))
         with patch("atlas_model_scorer._model_content", return_value=(Path("/tmp"), "source", "data")), \
-                patch("atlas_model_scorer.configuration", factory):
+                patch("atlas_model_scorer.configuration", factory), \
+                patch("atlas_model_scorer.check_configuration") as check:
             identity = selected_model(Path("/tmp"), include_configuration=True)
         factory.assert_called_once_with()
+        check.assert_called_once_with(cfg)
         self.assertEqual(identity[:4], (Path("/tmp"), "source", "data", sha256(encoded(values))))
         self.assertIs(identity[4], cfg)
 

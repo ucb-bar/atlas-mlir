@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
 from atlas_model_capabilities import check_configuration
+from atlas_model_semantics import check_model_semantics
 from atlas_derived_contract import seal_derived, verify_derived, overlap_semantics
 from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data, observer_manifest,
                                 sha256, source_digest, validate_derived)
@@ -67,7 +68,8 @@ def tool_manifest():
              "atlas_model_schema.py", "atlas_model_diagnostics.py", "atlas_derive_arch.py",
              "atlas_derive_vocabulary.py", "atlas_model_capabilities.py", "model-timing.lock.json",
              "model-timing-vocabulary.json", "atlas_derived_contract.py",
-             "atlas_derive_scratchpad.py", "atlas_derive_frontend.py", "atlas_validate_mxu_weights.py"]
+             "atlas_derive_scratchpad.py", "atlas_derive_frontend.py", "atlas_validate_mxu_weights.py",
+             "atlas_model_semantics.py", "model-semantics.json", "atlas_validate_runtime.py"]
     return observer_manifest() + [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
                                   for name in names]
 
@@ -104,12 +106,10 @@ def regenerate(model, out):
         raise ValueError("--out must be a new directory")
     before = identity(model)
     generator_sources = tool_manifest()
+    semantics = check_model_semantics(model)
     sys.path.insert(0, str(model))
     import npu_model
     import torch
-    from npu_model.hardware.core import Core
-    from npu_model.logging.logger import Logger
-    from unittest.mock import Mock
     from atlas_derive_vpu import derive_vpu
     from atlas_derive_mxu import derive_mxu, derive_weight_timing
     from atlas_validate_mxu_weights import validate_weight_timing
@@ -118,6 +118,7 @@ def regenerate(model, out):
     from atlas_derive_scratchpad import derive_scratchpad
     from atlas_derive_frontend import derive_frontend
     from atlas_validate_curve import validate_curve
+    from atlas_validate_runtime import validate_runtime
     from atlas_derive_arch import derive_arch
     from atlas_derive_vocabulary import validate_vocabulary, derive_isa_metadata
 
@@ -130,13 +131,6 @@ def regenerate(model, out):
     architecture = derive_arch(cfg)
     vocabulary = validate_vocabulary(cfg)
     isa_metadata = derive_isa_metadata(cfg)
-    # Preserve the exporter's fatal runtime-error propagation check for every model.
-    core = Core(config=cfg, logger=Mock(spec=Logger))
-    try:
-        if core.ignore_runtime_errors is not False:
-            raise UnsupportedModelTiming("selected model Core does not propagate runtime errors")
-    finally:
-        core.arch_state.close()
     inputs = [dict(name=name, engine=engine, assembly=assembly) for name, engine, assembly in isa_cases(cfg)]
     start = time.monotonic()
     memory, memory_releases = derive_memory(cfg)
@@ -157,8 +151,11 @@ def regenerate(model, out):
     write(out, "reservation-releases.json", releases)
     print(f"Derived {len(blocks)} blocks in {derive_seconds:.3f}s; validating numerical observations", flush=True)
     start = time.monotonic()
+    runtime_report = validate_runtime(model)
+    runtime_report_hash = write(out, "runtime-validation.json", runtime_report)
     report, _ = validate_derived(cfg, blocks, releases, out)
     report["mxu_weight_validation"] = validate_weight_timing(cfg, mxu_weight_timing)
+    report["runtime_validation"] = dict(passed=True, report_sha256=runtime_report_hash)
     dma_report = validate_curve(cfg, dma_timing, out / "dma-validation")
     dma_report_hash = sha256((out / "dma-validation" / "validation-report.json").read_bytes())
     dma_timing["validation"] = dict(passed=True, report_sha256=dma_report_hash,
@@ -198,6 +195,7 @@ def regenerate(model, out):
                            "ACC row events retain conservative provider lifetime policies.",
                            "Weight windows describe isolated native model uses; they do not admit operation overlap."],
                    lineage=dict(source_manifest_sha256=sha256(encoded(sources)), inputs=inputs,
+                                semantic_dependencies=semantics,
                                 numerical_data_manifest_sha256=sha256(encoded(data)), observer_sources=observer_sources,
                                 generator_sources=generator_sources, contract_lock=LOCK))
     payload["validation"]["mxu_weight_validation"] = report["mxu_weight_validation"]
