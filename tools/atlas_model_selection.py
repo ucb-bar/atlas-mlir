@@ -195,8 +195,9 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     """Return a receipt; selected artifacts are also copied to output_dir.
 
     All candidates run allocation, timing and generated-schedule verification
-    before scoring. Failed alternatives remain in the receipt and cannot win;
-    a failed default or mismatched model identity fails the compilation.
+    before scoring. Compiler refusals remain in the receipt and cannot win. A
+    failed builtin default, a canonical scoring failure (including a mismatched
+    model identity) or no passing initial candidate fails the compilation.
     max_candidates bounds initial attempts, including compiler rejections. Search
     budgets count every attempted candidate, including compiler refusals.
     """
@@ -279,6 +280,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     def compile_candidate(candidate: Candidate, row: dict) -> None:
         directory = output / row["directory"]
         before = time.monotonic()
+        stage = "compile"
         try:
             if candidate.virtual_orders:
                 (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
@@ -286,11 +288,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                      *candidate_options(candidate, provider, spill,
                                         graph_output=bool(search_evaluations or search_group_evaluations)),
                      "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
+            stage = "emit"
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                          directory, directory / "program.json"))
             words = tuple(instruction["word_u32"] for instruction in program["instructions"])
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if provider == "model":
+                stage = "score"
                 with score_lock:
                     row["score_cache_hit"] = words in score_cache
                     if words not in score_cache:
@@ -301,14 +305,17 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
         except Exception as error:
-            row.update(status="FAIL", error=str(error))
-            if row["index"] == 0:
-                raise ValueError("default candidate failed: " + str(error)) from error
+            row.update(status="FAIL", error=str(error), error_stage=stage)
         finally:
             row["elapsed_seconds"] = time.monotonic() - before
+
+    def fail(message: str) -> None:
+        (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        raise ValueError(message)
+
     def evaluate_batch(specifications: list[tuple[Candidate, str]], limit: int = max_candidates) -> None:
         nonlocal best
-        pending = []
+        pending, before = [], len(receipt["candidates"])
         for candidate, category in specifications:
             if candidate in seen or len(receipt["candidates"]) >= (limit if provider == "model" else 1):
                 continue
@@ -324,8 +331,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             futures = [executor.submit(compile_candidate, candidate, row) for candidate, row in pending]
             for future in futures:
                 future.result()
+        for row in receipt["candidates"][before:]:
+            if row["status"] == "FAIL" and provider != "model":
+                fail("default candidate failed: " + row["error"])
+            # A verified program the model cannot score is an identity or soundness alarm.
+            if row["status"] == "FAIL" and row["error_stage"] == "score":
+                fail(f"candidate {row['index']} failed model scoring: {row['error']}")
         best = min((row for row in receipt["candidates"] if row["status"] == "PASS"),
-                   key=lambda row: (row.get("cycles", 0), row["index"]))
+                   key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
 
     # Model imports, configuration and execution are isolated from compiler threads.
     with ExitStack() as stack:
@@ -336,6 +349,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         if provider == "model":
             evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in (1, 2, 4)] +
                            [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(24, max_candidates))
+            if best is None:
+                fail("no legal candidate: every initial candidate was refused")
             def winner() -> Candidate:
                 options = dict(best["options"])
                 options["store_windows"] = tuple(options["store_windows"])
