@@ -59,7 +59,8 @@ void buildSpillStage(OpPassManager &pm) {
 }
 
 void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport, options.provider, options.storeWindows));
+  pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport, options.provider, options.storeWindows,
+                                                     options.mregRanks));
 }
 
 // Each transfer's wait goes before what needs it done; the generated-schedule

@@ -37,6 +37,7 @@ class Candidate:
     store_windows: tuple[int, ...] = ()
     wait_placement: str = "default"
     virtual_orders: tuple[tuple[int, ...], ...] = ()
+    mreg_ranks: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.lookahead not in (0, 1, 2, 4, 8):
@@ -47,6 +48,8 @@ class Candidate:
             raise ValueError("store-window ranks must be unsigned 32-bit integers")
         if self.virtual_orders and (self.lookahead or self.random_seed is not None):
             raise ValueError("explicit virtual orders exclude lookahead and random-seed")
+        if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.mreg_ranks):
+            raise ValueError("MREG ranks must be unsigned 32-bit integers")
         if self.wait_placement not in ("default", "source"):
             raise ValueError("wait-placement must be default or source")
 
@@ -86,6 +89,8 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
         options.append(f"random-seed={candidate.random_seed}")
     if candidate.store_windows:
         options.append("store-windows='" + ",".join(map(str, candidate.store_windows)) + "'")
+    if candidate.mreg_ranks:
+        options.append("mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'")
     if candidate.wait_placement != "default":
         options.append("wait-placement=" + candidate.wait_placement)
     return ["--atlas-compile-candidate=" + " ".join(options)]
@@ -121,8 +126,9 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    op_timing: Path | None = None, op_timing_sha256: str | None = None,
                    pairs: Path | None = None, pairs_sha256: str | None = None,
                    composed: Path | None = None, composed_sha256: str | None = None,
-                   max_candidates: int = 24, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
+                   max_candidates: int = 32, random_seeds: tuple[int, ...] = tuple(range(8)), workers: int = 12,
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
+                   mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_evaluations: int = 0,
                    scorer: Callable | None = None) -> dict:
     """Return a receipt; selected artifacts are also copied to output_dir.
@@ -136,6 +142,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("unsupported provider or memory profile")
     if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
+    if provider != "model" and mreg_candidates != ():
+        raise ValueError("MREG candidates require the model provider")
     if search_evaluations < 0 or (search_evaluations and provider != "model"):
         raise ValueError("search-evaluations must be nonnegative and requires the model provider")
     source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
@@ -251,11 +259,12 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         evaluate_batch([(Candidate(), "default")])
         if provider == "model":
             evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in (1, 2, 4)] +
-                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds])
+                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(24, max_candidates))
             def winner() -> Candidate:
                 options = dict(best["options"])
                 options["store_windows"] = tuple(options["store_windows"])
                 options["virtual_orders"] = tuple(tuple(order) for order in options["virtual_orders"])
+                options["mreg_ranks"] = tuple(options["mreg_ranks"])
                 return Candidate(**options)
 
             program = json.loads((output / best["directory"] / "program.json").read_text())
@@ -270,7 +279,12 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                            for ranks in store_window_candidates]
             placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
                            for rank in range(1, 8) if store_count]
-            evaluate_batch(placements)
+            evaluate_batch(placements, limit=min(24, max_candidates))
+            register_base = winner()
+            if mreg_candidates is None:
+                mreg_candidates = tuple(tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8))
+            receipt["mreg_pool_size"] = len(mreg_candidates)
+            evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks") for ranks in mreg_candidates])
             if search_evaluations:
                 search_started = time.monotonic()
                 initial_count = len(receipt["candidates"])
@@ -327,8 +341,9 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pairs-sha256")
     parser.add_argument("--composed", type=Path)
     parser.add_argument("--composed-sha256")
-    parser.add_argument("--max-candidates", type=int, default=24)
+    parser.add_argument("--max-candidates", type=int, default=32)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--bank-candidates", action="store_true", help="score eight legal MREG rank vectors (model only)")
     parser.add_argument("--search-evaluations", type=int, default=0,
                         help="additional verified local order attempts after knob selection (model only)")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
@@ -342,6 +357,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,
             "composed_sha256": args.composed_sha256, "max_candidates": args.max_candidates,
             "workers": args.workers, "search_evaluations": args.search_evaluations,
+            "mreg_candidates": None if args.bank_candidates else (),
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
 
 

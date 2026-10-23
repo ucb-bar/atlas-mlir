@@ -125,11 +125,13 @@ std::string mlir::atlas::locationText(Location loc) {
   return text;
 }
 
-VirtualAllocationPlan::VirtualAllocationPlan(llvm::ArrayRef<unsigned> storeWindowRanks)
-    : storeWindowRanks(storeWindowRanks.begin(), storeWindowRanks.end()), fixedResources(selectedResources()) {}
+VirtualAllocationPlan::VirtualAllocationPlan(llvm::ArrayRef<unsigned> storeWindowRanks, llvm::ArrayRef<unsigned> mregRanks)
+    : storeWindowRanks(storeWindowRanks.begin(), storeWindowRanks.end()), mregRanks(mregRanks.begin(), mregRanks.end()),
+      fixedResources(selectedResources()) {}
 
 LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   this->function = function;
+  nextMreg = 0;
   tileRegs.clear();
   fp8Regs.clear();
   scalarRegs.clear();
@@ -571,20 +573,16 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   unsigned count = demand.capacity;
   unsigned used = 0;
   for (Value value : values) {
-    bool assigned = false;
+    SmallVector<unsigned> freeColors;
     for (unsigned color = 0; color < count; ++color) {
       bool conflict = llvm::any_of(neighbors[value], [&](Value other) {
         auto found = colors.find(other);
         return found != colors.end() && found->second == color;
       });
-      if (!conflict) {
-        colors[value] = color;
-        used = std::max(used, color + 1);
-        assigned = true;
-        break;
-      }
+      if (!conflict)
+        freeColors.push_back(color);
     }
-    if (!assigned) {
+    if (freeColors.empty()) {
       InFlightDiagnostic diag = function.emitOpError();
       if (kind == RegisterKind::BF16)
         diag << (mixedFp8 ? "mixed " : "") << "virtual BF16 interference exceeds "
@@ -596,6 +594,10 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
              << " scalar registers" << (hasPack ? " with FP8 pack" : "");
       return diag;
     }
+    unsigned rank = kind != RegisterKind::Scalar && !mregRanks.empty() ? mregRanks[nextMreg++ % mregRanks.size()] : 0;
+    unsigned color = freeColors[rank % freeColors.size()];
+    colors[value] = color;
+    used = std::max(used, color + 1);
   }
   for (Value value : values) {
     for (Value other : neighbors[value])
