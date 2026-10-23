@@ -9,6 +9,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SHA256.h"
 #include <algorithm>
 #include <climits>
@@ -210,18 +211,6 @@ llvm::Error checkIsaMetadata(const Object &root) {
   return llvm::Error::success();
 }
 
-bool hasDefaultOverlapConfiguration(const ModelTimingFacts &facts) {
-  const auto &provenance = facts.modelProvenance();
-  auto selected = provenance.find("configuration_sha256");
-  return selected != provenance.end() &&
-         selected->second == model_schema::compositionIdentity().at("configuration_sha256") &&
-         (!provenance.count("dma_curve_sha256") ||
-          provenance.at("dma_curve_sha256") == model_schema::dmaIdentity().at("curve_sha256"));
-}
-
-constexpr const char *isolatedConfigurationWarning =
-    "non-default model configuration: default-pinned overlap evidence is disabled; "
-    "falling back to isolated lifetimes";
 
 using model_schema::RegisterEvent;
 using model_schema::vpuBlocks;
@@ -473,7 +462,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
     if (!value) return factsError(std::string("missing derived semantic ") + key);
     semantic[key] = *value;
   }
-  for (const char *key : {"frontend_timing", "scratchpad_contract"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256"})
     if (const auto *value = root.get(key)) semantic[key] = *value;
   if (const auto *value = root.get("dma_timing")) {
     const Object *dma = value->getAsObject();
@@ -810,6 +799,12 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
   const Object *model = root->getObject("model");
   if (!model) return factsError("missing model provenance");
   ModelTimingFacts result;
+  result.testOverlap = testObservations;
+  if (const auto *rules = root->get("overlap_rules_sha256")) {
+    auto hash = rules->getAsString();
+    if (!hash || !hashSyntax(*hash)) return factsError("overlap_rules_sha256 must be a SHA-256 digest");
+    result.overlapRules = hash->str();
+  }
   int readLatency = 1;
   if (!testObservations || root->get("frontend_timing")) {
     const Object *document = root->getObject("frontend_timing");
@@ -1055,7 +1050,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
   }
 
   if (op.engine == Engine::Dma) {
-    if (!dma) return reject("DMA requires the dma=wait selection");
+    if (!dma) return reject("DMA requires the model completion-wait policy");
     if (!dmaTiming) return reject("DMA requires validated dma_timing facts");
     if (op.channel < 0 || op.channel >= int(kAtlasDMAChannels)) return reject("unsupported DMA channel");
     if (op.opClass == OpClass::DmaWait) return f; // Pairing is checked by the stream verifier.
@@ -1638,21 +1633,17 @@ static TimingRuleResult<TimingProvider> modelTimingProviderFactoryImpl(ModuleOp 
   }
   std::shared_ptr<const ModelOverlapFacts> overlap;
   auto pairs = selection.getAs<StringAttr>("pairs"), pairsHash = selection.getAs<StringAttr>("pairs_sha256");
-  auto composed = selection.getAs<StringAttr>("composed"), composedHash = selection.getAs<StringAttr>("composed_sha256");
   auto chains = selection.getAs<StringAttr>("chains");
+  auto testOnly = selection.getAs<StringAttr>("test_only");
   if ((selection.get("pairs") && !pairs) || (selection.get("pairs_sha256") && !pairsHash) ||
-      (selection.get("chains") && (!chains || (chains.getValue() != "true" && chains.getValue() != "false"))) ||
-      (selection.get("composed") && !composed) || (selection.get("composed_sha256") && !composedHash) ||
-      bool(composed) != bool(composedHash) || (composed && !pairs) ||
-      bool(pairs) != bool(pairsHash) || (chains && !pairs)) return {{}, "incomplete model overlap selection"};
-  if (pairs && !hasDefaultOverlapConfiguration(*facts))
-    module.emitWarning(isolatedConfigurationWarning);
-  if (pairs && hasDefaultOverlapConfiguration(*facts)) {
+      (selection.get("chains") && (!chains || chains.getValue() != "true")) ||
+      selection.get("composed") || selection.get("composed_sha256") ||
+      bool(pairs) != bool(pairsHash) || bool(chains) != bool(pairs) ||
+      (!pairs && (!testOnly || testOnly.getValue() != "true")))
+    return {{}, "incomplete source-derived model overlap selection"};
+  if (pairs) {
     auto loaded = loadModelOverlapFacts(pairs.getValue(), pairsHash.getValue(), *facts);
     if (!loaded) return {{}, llvm::toString(loaded.takeError())};
-    if (composed)
-      if (auto error = loaded->loadComposedFacts(composed.getValue(), composedHash.getValue(), *facts))
-        return {{}, llvm::toString(std::move(error))};
     for (const auto &[key, value] : loaded->metadata()) {
       auto retained = selection.getAs<StringAttr>(key);
       if (!retained || retained.getValue() != value) return {{}, "model overlap provenance mismatch: " + key};
@@ -1674,14 +1665,10 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SelectAtlasModelEvidencePass)
   SelectAtlasModelEvidencePass() = default;
   SelectAtlasModelEvidencePass(const SelectAtlasModelEvidencePass &other) : PassWrapper(other) {}
-  Option<std::string> opTiming{*this, "op-timing", llvm::cl::desc("Observed atlas.model_timing.v1 facts")};
-  Option<std::string> opTimingHash{*this, "op-timing-sha256", llvm::cl::desc("Expected facts SHA-256")};
-  Option<std::string> dmaPolicy{*this, "dma", llvm::cl::desc("Optional DMA completion policy: wait")};
-  Option<std::string> pairsPath{*this, "pairs", llvm::cl::desc("Optional catalog or source-derived overlap facts")};
-  Option<std::string> pairsHash{*this, "pairs-sha256", llvm::cl::desc("Expected compact overlap facts SHA-256")};
-  Option<std::string> composedPath{*this, "composed", llvm::cl::desc("Optional validated derived overlap side projection")};
-  Option<std::string> composedHash{*this, "composed-sha256", llvm::cl::desc("Expected derived side projection SHA-256")};
-  Option<bool> chains{*this, "chains", llvm::cl::desc("Enable exact confirmed chain witnesses"), llvm::cl::init(false)};
+  Option<std::string> factsDirectory{*this, "facts", llvm::cl::desc("Qualified model facts bundle directory")};
+  // Narrow synthetic-fixture hook: production model selection always consumes a bundle.
+  Option<std::string> testOpTiming{*this, "test-op-timing", llvm::cl::desc("Test-only isolated timing fixture")};
+  Option<std::string> testOpTimingHash{*this, "test-op-timing-sha256", llvm::cl::desc("Test-only fixture SHA-256")};
   StringRef getArgument() const final { return "select-atlas-model-evidence"; }
   StringRef getDescription() const final { return "Pin model observations; timing passes select provider=model"; }
   void runOnOperation() override {
@@ -1690,22 +1677,37 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     if (auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState); state && state.getValue() == "timed")
       return fail("select model evidence before timing; already timed input must be retimed");
     if (module->hasAttr(kAtlasTimingProvider)) return fail("model selection cannot replace a retained timing provider");
-    if (!dmaPolicy.empty() && dmaPolicy != "wait") return fail("only dma=wait is supported");
-    auto facts = loadModelTimingFacts(opTiming, opTimingHash, dmaPolicy == "wait");
+    bool testOnly = !testOpTiming.empty() || !testOpTimingHash.empty();
+    if (factsDirectory.empty() == !testOnly || (testOnly &&
+        (testOpTiming.empty() || testOpTimingHash.empty())))
+      return fail("facts requires a qualified bundle directory");
+    std::string opTiming = testOpTiming, opTimingHash = testOpTimingHash;
+    std::string overlapPath, overlapHash;
+    if (!testOnly) {
+      auto file = [&](llvm::StringRef name) {
+        llvm::SmallString<256> path(factsDirectory.getValue());
+        llvm::sys::path::append(path, name);
+        return path.str().str();
+      };
+      auto buffer = llvm::MemoryBuffer::getFile(file("facts.lock.json"));
+      if (!buffer) return fail("cannot read selected model facts lock");
+      auto decoded = llvm::json::parse((*buffer)->getBuffer());
+      if (!decoded) return fail(llvm::toString(decoded.takeError()));
+      const auto *lock = decoded->getAsObject();
+      if (!lock || lock->getString("schema") != "atlas.model_facts.lock.v1")
+        return fail("unsupported model facts lock");
+      auto opHash = lock->getString("op_timing_sha256"), pairHash = lock->getString("overlap_sha256");
+      if (!opHash || !pairHash || !hashSyntax(*opHash) || !hashSyntax(*pairHash))
+        return fail("model facts lock requires operation and qualified overlap hashes");
+      opTiming = file("model-timing.json"); opTimingHash = opHash->str();
+      overlapPath = file("model-overlap.json"); overlapHash = pairHash->str();
+    }
+    auto facts = loadModelTimingFacts(opTiming, opTimingHash, true);
     if (!facts) return fail(llvm::toString(facts.takeError()));
-    if (pairsPath.empty() != pairsHash.empty() || (chains && pairsPath.empty()))
-      return fail("pairs and pairs-sha256 are required together; chains requires pairs");
-    if (composedPath.empty() != composedHash.empty() || (!composedPath.empty() && pairsPath.empty()))
-      return fail("composed and composed-sha256 are required together and require pairs");
     std::shared_ptr<const ModelOverlapFacts> overlap;
-    if (!hasDefaultOverlapConfiguration(*facts))
-      module.emitWarning(isolatedConfigurationWarning);
-    if (!pairsPath.empty() && hasDefaultOverlapConfiguration(*facts)) {
-      auto loaded = loadModelOverlapFacts(pairsPath, pairsHash, *facts);
+    if (!testOnly) {
+      auto loaded = loadModelOverlapFacts(overlapPath, overlapHash, *facts);
       if (!loaded) return fail(llvm::toString(loaded.takeError()));
-      if (!composedPath.empty())
-        if (auto error = loaded->loadComposedFacts(composedPath, composedHash, *facts))
-          return fail(llvm::toString(std::move(error)));
       overlap = std::make_shared<ModelOverlapFacts>(std::move(*loaded));
     }
     Builder builder(module.getContext());
@@ -1713,12 +1715,13 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     selection.set("provider", builder.getStringAttr(kModelTimingProviderId));
     selection.set("op_timing", builder.getStringAttr(opTiming));
     selection.set("op_timing_sha256", builder.getStringAttr(opTimingHash));
-    if (facts->dmaWait()) selection.set("dma", builder.getStringAttr("wait"));
+    selection.set("dma", builder.getStringAttr("wait"));
+    if (testOnly) selection.set("test_only", builder.getStringAttr("true"));
+    else selection.set("facts", builder.getStringAttr(factsDirectory));
     for (const auto &[key, value] : facts->modelProvenance()) selection.set(key, builder.getStringAttr(value));
     if (overlap) {
-      selection.set("pairs", builder.getStringAttr(pairsPath));
-      if (!composedPath.empty()) selection.set("composed", builder.getStringAttr(composedPath));
-      selection.set("chains", builder.getStringAttr(chains ? "true" : "false"));
+      selection.set("pairs", builder.getStringAttr(overlapPath));
+      selection.set("chains", builder.getStringAttr("true"));
       for (const auto &[key, value] : overlap->metadata()) selection.set(key, builder.getStringAttr(value));
     }
     module->setAttr(kAtlasModelEvidence, selection.getDictionary(module.getContext()));

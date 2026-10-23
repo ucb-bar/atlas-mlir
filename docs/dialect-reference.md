@@ -171,15 +171,14 @@ transfer completes at an explicit `dma.wait`.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 
-`--select-atlas-model-evidence="op-timing=FILE op-timing-sha256=SHA dma=wait"` selects
-pinned isolated facts before timing. Add `pairs=FILE pairs-sha256=SHA chains=true`
-for confirmed overlap evidence, and `composed=FILE composed-sha256=SHA` for a
-qualified side projection bound to those exact facts. Select `provider=model`
+`--select-atlas-model-evidence="facts=DIR"` selects the generated bundle of
+source-derived operation and overlap rules, bound by `DIR/facts.lock.json` after
+their native validation gates. Select `provider=model`
 explicitly in virtual and physical scheduling; selection alone leaves the default
 unchanged. Missing coverage, unsupported operands/configurations, stale hashes and
 replacement of timed evidence fail. Verification, emission and LLVM handoff retain
 the selection. See [model timing](model-timing.md) for source derivation, numerical
-validation, exact pair/chain admission, scalar PACK proofs, regeneration and
+validation, exact pair/composition admission, scalar PACK proofs, regeneration and
 model-scored schedule/allocation search.
 
 ## Machine operations

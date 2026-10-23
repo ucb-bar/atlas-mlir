@@ -14,22 +14,19 @@ class ModelEvidenceTest(unittest.TestCase):
             self.assertFalse(model_evidence_available())
 
     def test_partial_and_missing_evidence_fail(self):
-        for values in ({"ATLAS_TEST_OP_TIMING": "/missing/atlas-op.json"},
-                       {"ATLAS_TEST_OP_TIMING": "", "ATLAS_TEST_PAIR_TIMING": ""},
-                       {"ATLAS_TEST_OP_TIMING": "/missing/atlas-op.json",
-                        "ATLAS_TEST_PAIR_TIMING": "/missing/atlas-pairs.json"}):
+        for values in ({"ATLAS_TEST_MODEL_FACTS": "/missing/atlas-bundle"},
+                       {"ATLAS_TEST_MODEL_FACTS": ""}):
             with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
                 with self.assertRaises(FileNotFoundError):
                     model_evidence_available()
 
     def test_existing_pins_enable_tests_and_missing_file_fails(self):
         with tempfile.TemporaryDirectory() as directory:
-            facts, pairs = Path(directory) / "facts.json", Path(directory) / "pairs.json"
-            facts.write_text("{}")
-            pairs.write_text("{}")
-            with patch.dict(os.environ, {"ATLAS_TEST_OP_TIMING": str(facts),
-                                         "ATLAS_TEST_PAIR_TIMING": str(pairs)}, clear=True):
+            bundle = Path(directory)
+            for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+                (bundle / name).write_text("{}")
+            with patch.dict(os.environ, {"ATLAS_TEST_MODEL_FACTS": str(bundle)}, clear=True):
                 self.assertTrue(model_evidence_available())
-                pairs.unlink()
-                with self.assertRaisesRegex(FileNotFoundError, "ATLAS_TEST_PAIR_TIMING"):
+                (bundle / "model-overlap.json").unlink()
+                with self.assertRaisesRegex(FileNotFoundError, "ATLAS_TEST_MODEL_FACTS"):
                     model_evidence_available()

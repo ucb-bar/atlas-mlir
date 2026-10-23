@@ -1,10 +1,8 @@
-"""Shared opt-in rule for tests requiring external model evidence."""
+"""Shared opt-in rule for tests requiring a qualified external model bundle."""
 import os
 from pathlib import Path
 import sys
 import unittest
-
-EVIDENCE_VARIABLES = ("ATLAS_TEST_OP_TIMING", "ATLAS_TEST_PAIR_TIMING")
 
 
 def isolate_model_imports(test_case, root):
@@ -29,16 +27,19 @@ def isolate_model_imports(test_case, root):
 
 
 def model_evidence_available():
-    """Skip only an unconfigured environment; incomplete or missing pins fail."""
-    if not any(name in os.environ for name in EVIDENCE_VARIABLES):
+    """Skip only an unconfigured environment; incomplete bundles fail."""
+    if "ATLAS_TEST_MODEL_FACTS" not in os.environ:
         return False
-    for name in EVIDENCE_VARIABLES:
-        value = os.environ.get(name)
-        if not value or not Path(value).is_file():
-            raise FileNotFoundError(f"{name} must name an existing evidence file: {value!r}")
+    value = os.environ["ATLAS_TEST_MODEL_FACTS"]
+    if not value:
+        raise FileNotFoundError("ATLAS_TEST_MODEL_FACTS must name a qualified bundle directory")
+    directory = Path(value)
+    for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+        if not (directory / name).is_file():
+            raise FileNotFoundError(f"ATLAS_TEST_MODEL_FACTS requires {name}: {value!r}")
     return True
 
 
 def requires_model_evidence(test):
     return unittest.skipUnless(model_evidence_available(),
-                               "set ATLAS_TEST_OP_TIMING and ATLAS_TEST_PAIR_TIMING for pinned evidence")(test)
+                               "set ATLAS_TEST_MODEL_FACTS for a qualified evidence bundle")(test)

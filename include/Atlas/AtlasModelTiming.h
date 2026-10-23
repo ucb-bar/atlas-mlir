@@ -59,6 +59,8 @@ public:
   const std::string &factsSha256() const { return sha256; }
   const std::map<std::string, std::string> &modelProvenance() const { return provenance; }
   bool dmaWait() const { return dma; }
+  const std::string &overlapRulesSha256() const { return overlapRules; }
+  bool allowsUnboundTestOverlap() const { return testOverlap; }
   TimingRuleResult<int> estimateDMACycles(int64_t bytes, bool store) const;
   TimingRuleResult<int> issueGap(const Instr &in) const;
   const ModelTimingBlock *block(llvm::StringRef name) const {
@@ -71,6 +73,8 @@ private:
   std::map<std::string, std::string> provenance;
   std::string sha256;
   bool dma = false;
+  bool testOverlap = false;
+  std::string overlapRules;
   std::optional<ModelDMATiming> dmaTiming;
   std::optional<ModelFrontendTiming> frontend;
   static llvm::Expected<ModelTimingFacts> parseImpl(llvm::StringRef, llvm::StringRef, bool, bool);

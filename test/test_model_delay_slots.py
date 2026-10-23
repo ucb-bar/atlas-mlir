@@ -62,11 +62,8 @@ class ModelDelaySlotTest(unittest.TestCase):
 
     @requires_model_evidence
     def test_pack_pointer_step_fills_slot_without_serializing_copy(self) -> None:
-        facts = pathlib.Path(os.environ["ATLAS_TEST_OP_TIMING"])
-        pairs = pathlib.Path(os.environ["ATLAS_TEST_PAIR_TIMING"])
-        self.evidence = (f"--select-atlas-model-evidence=op-timing={facts} "
-                         f"op-timing-sha256={hashlib.sha256(facts.read_bytes()).hexdigest()} "
-                         f"pairs={pairs} pairs-sha256={hashlib.sha256(pairs.read_bytes()).hexdigest()} dma=wait")
+        facts = pathlib.Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+        self.evidence = f"--select-atlas-model-evidence=facts={facts}"
         source = function("pack", [
             start(), inp("io0", "s1", "x", 0),
             f'%p = "atlas.virtual_pack_fp8"(%x) {{scale_code = 127 : i32}} : ({T}) -> {F}',

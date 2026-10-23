@@ -16,11 +16,9 @@ import atlas_model_timing as timing
 import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
-from atlas_model_facts import safe_path, identity, note_unqualified_model
+from atlas_model_facts import safe_path, identity, note_unqualified_model, overlap_bundle
 from atlas_model_schema import LOCK
-from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingEvidenceError, with_update_guidance
-from atlas_model_selection import evidence_option
-import atlas_model_pairs as pairs
+from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingValidationError, with_update_guidance
 from model_evidence import isolate_model_imports
 
 
@@ -74,7 +72,7 @@ class DerivationGateTest(unittest.TestCase):
                     self.assertIn(LOCK["model_revision"], lines[0])
                     self.assertIn("tools/model-timing.lock.json", lines[0])
                     self.assertIn("Compilation requires supported capabilities", lines[0])
-                    self.assertIn("overlap additionally requires the locked configuration and revision", lines[0])
+                    self.assertIn("reviewed source contracts", lines[0])
 
     def test_refusals_end_with_one_shared_model_update_guidance_line(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -94,19 +92,12 @@ class DerivationGateTest(unittest.TestCase):
             def missing_operation():
                 with patch.dict(sys.modules, {"npu_model.isa": SimpleNamespace(EXU=SimpleNamespace(VECTOR="vector"))}):
                     derive._instruction(SimpleNamespace(isa=SimpleNamespace(operations={})), "vmov", None)
-            def invalid_overlap():
-                with patch.object(pairs, "project", side_effect=ModelTimingEvidenceError("selected facts hash mismatch")), \
-                     patch.object(sys, "argv", ["atlas_model_pairs.py", "--master", str(source),
-                                                "--validation", str(source), "--per-op", str(source),
-                                                "--output", str(Path(directory) / "out")]):
-                    pairs.main()
             cases = [
                 ("source shape", lambda: derive._check_source(SimpleNamespace())),
                 ("unsupported semantics", lambda: mxu._plan("class DifferentEngine: pass")),
                 ("missing operation", missing_operation),
                 ("configuration mismatch", lambda: mxu.derive_mxu(cfg)),
                 ("validation failure", validate),
-                ("overlap validation CLI", invalid_overlap),
             ]
             with patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
                 for name, refuse in cases:
@@ -117,6 +108,42 @@ class DerivationGateTest(unittest.TestCase):
                         self.assertEqual(message.splitlines()[-1], UPDATE_GUIDANCE)
                         self.assertEqual(message.count(UPDATE_GUIDANCE), 1)
                         self.assertEqual(with_update_guidance(message), message)
+
+    def test_overlap_gate_failure_never_publishes_bundle_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / "model-timing.json").write_text("{}")
+            with patch("atlas_derive_overlap.generate", return_value={"pairs": [object()]}), \
+                 patch("atlas_validate_overlap.validate", side_effect=RuntimeError("negative boundary failed")):
+                with self.assertRaisesRegex(ModelTimingValidationError, "negative boundary failed"):
+                    overlap_bundle(out, out)
+            self.assertFalse((out / "facts.lock.json").exists())
+            self.assertFalse((out / "model-overlap.json").exists())
+
+    def test_overlap_pipeline_validates_frozen_proposal_before_returning_digests(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / "model-timing.json").write_text("{}")
+            def generate(model, facts, candidate, samples):
+                calls.append("derive")
+                candidate.write_text("frozen source rules")
+                return {"pairs": [object()]}
+            def validate(model, facts, candidate, samples, reports, final, **options):
+                self.assertEqual(candidate.read_text(), "frozen source rules")
+                self.assertEqual(calls, ["derive"])
+                self.assertEqual(options, {"workers": 1})
+                reports.mkdir()
+                (reports / "validation-report.json").write_text("native gate passed")
+                final.write_text("qualified source rules")
+                calls.append("validate")
+                return {"seconds": 1}
+            with patch("atlas_derive_overlap.generate", side_effect=generate), \
+                 patch("atlas_validate_overlap.validate", side_effect=validate):
+                result = overlap_bundle(out, out)
+            self.assertEqual(calls, ["derive", "validate"])
+            self.assertEqual(result["overlap_sha256"], timing.sha256(b"qualified source rules"))
+            self.assertEqual(result["overlap_validation_sha256"], timing.sha256(b"native gate passed"))
 
     def test_manifest_rejects_symlink_root_before_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
