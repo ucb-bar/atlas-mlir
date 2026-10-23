@@ -14,7 +14,7 @@ import inspect
 from pathlib import Path
 
 from atlas_model_timing import MXU_BLOCKS
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block
+from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block, validate_mxu_weight_timing
 
 
 _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic", "MatrixExecutionUnitInner")
@@ -241,3 +241,48 @@ def derive_mxu(cfg):
                 "unit": reservation(end - 1),
             }
     return blocks, releases
+
+
+def derive_weight_timing(cfg):
+    """Project native PE use windows onto whole output-column weight rows.
+
+    The full reviewed source shape binds the sampler's (output column, inner)
+    indexing, weight-slot selection and its placement before writes in tick.
+    Read bounds below are extracted from that source, never from execution or
+    the instruction latency table. Row projection includes every inner lane.
+    """
+    plans = _validated(cfg)
+    source, _ = _sources(cfg)
+    tree = ast.parse(source)
+    base = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
+                 and n.name == "_MatrixExecutionUnit"), "MXU base class")
+    uses = _method(base, "_weight_uses")
+    inner = _one((n for n in ast.walk(uses) if isinstance(n, ast.Compare)
+                  and len(n.ops) == 2 and _name(n.comparators[0], "age")), "inner weight window")
+    inner_window = _window(inner, None)
+    row = _assignment(uses, "row")
+    # Source uses age - offset - output_column - inner. Preserve the two
+    # tensor axes explicitly: a push writes output-column rows, not diagonals.
+    expression = ast.parse("age - 1 - _GRID[:, None] - _GRID[None, :]").body[0].value
+    if ast.dump(row.value, include_attributes=False) != ast.dump(expression, include_attributes=False):
+        raise UnsupportedMXU("unsupported MXU weight PE indexing")
+    bounds = [n for n in ast.walk(uses) if isinstance(n, ast.Compare) and _name(n.left, "row")
+              and len(n.ops) == 1 and isinstance(n.ops[0], (ast.GtE, ast.LtE))]
+    lower = _one((n for n in bounds if isinstance(n.ops[0], ast.GtE)), "weight row lower bound")
+    upper = _one((n for n in bounds if isinstance(n.ops[0], ast.LtE)), "weight row upper bound")
+    offset = _integer(row.value.left.left.right, None)
+    first = offset + _integer(lower.comparators[0], None)
+    last = offset + _integer(upper.comparators[0], None)
+    windows = {"mxu0": dict(first_age=first, last_age=last, row_step=1, column_step=1),
+               "mxu1": dict(first_age=inner_window["first_age"], last_age=inner_window["last_age"],
+                            row_step=0, column_step=0)}
+    engines = {}
+    for engine, window in windows.items():
+        rows = [dict(first_age=window["first_age"] + i * window["row_step"],
+                     last_age=window["last_age"] + i * window["row_step"] +
+                              31 * window["column_step"]) for i in range(32)]
+        if max(row["last_age"] for row in rows) > plans[engine]["compute_last"]:
+            raise UnsupportedMXU("MXU completes before its last weight use")
+        engines[engine] = dict(use_window=window, use_rows=rows,
+                               reads_before_writes=True, resource_row_axis="output_column")
+    return validate_mxu_weight_timing(dict(schema="atlas.mxu_weight_timing.v1", engines=engines))

@@ -37,7 +37,7 @@ std::string hash(llvm::StringRef bytes) {
 Object group(int first, int count, int step = 1) {
   return Object{{"first_age", first}, {"last_age", first + (count - 1) * step}, {"count", count}, {"step", step}};
 }
-Object block(const char *name, const char *engine, int free, Object events) {
+Object block(const std::string &name, const std::string &engine, int free, Object events) {
   return Object{{"name", name}, {"engine", engine}, {"resolved", true}, {"first_free_age", free},
           {"next_issue_age", free}, {"events", std::move(events)},
           {"assumptions", Object{{"scratchpad_read_latency", 1}}},
@@ -147,6 +147,20 @@ Object isaFixture() {
   roles("vtrpose.xlu", "MatrixReg", "MReg", "rd", true, true);
   return metadata;
 }
+Object weightFixture() {
+  Object engines;
+  for (int unit = 0; unit < 2; ++unit) {
+    int step = unit == 0 ? 1 : 0;
+    Array rows;
+    for (int row = 0; row < 32; ++row)
+      rows.push_back(Object{{"first_age", 1 + row * step}, {"last_age", 32 + (row + 31) * step}});
+    engines["mxu" + std::to_string(unit)] = Object{
+        {"use_window", Object{{"first_age", 1}, {"last_age", 32}, {"row_step", step}, {"column_step", step}}},
+        {"use_rows", std::move(rows)}, {"reads_before_writes", true}, {"resource_row_axis", "output_column"}};
+  }
+  return Object{{"schema", "atlas.mxu_weight_timing.v1"}, {"engines", std::move(engines)}};
+}
+
 Object fixture() {
   static const llvm::StringRef configuration =
       "{\"arch_state_config\":{\"dram_base\":2147483648,\"dram_size\":68719476736,\"init_seed\":42,"
@@ -196,6 +210,7 @@ Object fixture() {
                                        {"numerical_data_sha256", std::string(64, '7')}}},
           {"geometry", Object{{"rows", 32}, {"columns", 32}, {"mreg_count", 64}}},
           {"architecture", architectureFixture()}, {"isa_metadata", isaFixture()},
+          {"mxu_weight_timing", weightFixture()},
           {"operand_vocabulary", llvm::cantFail(llvm::json::parse(model_schema::vocabularyJson()))},
           {"observation", Object{{"accepted", true}, {"drained", true}}},
           {"op_timing", std::move(operations)}, {"dma_timing", dmaFixture()}};
@@ -217,7 +232,7 @@ void sealContractFixture(Object &object) {
   for (const char *key : {"geometry", "age_convention", "op_timing", "reservation_releases", "vocabulary_sha256",
                           "architecture", "operand_vocabulary", "isa_metadata"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
-  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256"})
+  for (const char *key : {"frontend_timing", "scratchpad_contract", "overlap_rules_sha256", "mxu_weight_timing"})
     if (const auto *value = object.get(key)) semantic[key] = *value;
   if (auto *dma = object.getObject("dma_timing")) {
     Object deterministic(*dma);
@@ -233,6 +248,8 @@ void sealContractFixture(Object &object) {
   object["validation"] = Object{{"passed", true}, {"operation_count", int64_t(object.getArray("op_timing")->size())},
       {"observed_runs", 1}, {"unobserved_runs", 1}, {"gate_report_sha256", std::string(64, 'a')},
       {"payload_sha256", payloadHash}};
+  if (object.get("mxu_weight_timing"))
+    (*object.getObject("validation"))["mxu_weight_validation"] = Object{{"passed", true}};
   if (auto *dma = object.getObject("dma_timing"))
     (*dma->getObject("validation"))["payload_sha256"] = payloadHash;
 }
@@ -358,7 +375,7 @@ void testDerivedContract() {
         check(!result, why);
         if (!result) llvm::consumeError(result.takeError());
       });
-  for (const char *key : {"architecture", "operand_vocabulary", "isa_metadata"}) {
+  for (const char *key : {"architecture", "operand_vocabulary", "isa_metadata", "mxu_weight_timing"}) {
     auto stale = contractFixture();
     (*stale.getObject(key))["stale_metadata"] = true;
     rejects(std::move(stale), "stale metadata is rejected by the semantic payload binding",
@@ -406,6 +423,27 @@ void testDerivedContract() {
   (*changed.getObject("scratchpad_contract")->getObject("assumptions"))["scratchpad_read_latency"] = 2;
   sealContractFixture(changed);
   rejects(std::move(changed), "changed target response assumption rejects with a precise capability diagnostic", "scratchpad target assumption");
+  changed = contractFixture();
+  changed.erase("mxu_weight_timing");
+  sealContractFixture(changed);
+  rejects(std::move(changed), "production cannot fall back to a hand-chosen weight lifetime", "weight-use windows");
+  changed = contractFixture();
+  auto *engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
+  (*(*engine->getArray("use_rows"))[31].getAsObject())["last_age"] = 93;
+  rejects(changed, "changed weight row is rejected before accepting stale validation", "derived semantic payload differs");
+  sealContractFixture(changed);
+  rejects(std::move(changed), "row projection must agree with source-derived PE windows", "row projection");
+  changed = contractFixture();
+  engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
+  (*engine)["reads_before_writes"] = false;
+  sealContractFixture(changed);
+  rejects(std::move(changed), "unsupported weight edge order refuses", "edge order");
+  changed = contractFixture();
+  changed.getObject("validation")->erase("mxu_weight_validation");
+  rejects(std::move(changed), "missing weight validation refuses", "MXU weight validation");
+  changed = contractFixture();
+  (*changed.getObject("validation")->getObject("mxu_weight_validation"))["passed"] = false;
+  rejects(std::move(changed), "failed weight validation refuses", "MXU weight validation");
 }
 
 Object derivedFixture(const ModelTimingFacts &facts) {
@@ -675,55 +713,94 @@ void testOverlapSafety(const std::shared_ptr<ModelTimingFacts> &facts) {
 }
 
 void testStreamedWeights(const std::shared_ptr<ModelTimingFacts> &facts) {
+  auto provider = modelTimingProvider(facts);
   Instr push{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
   Instr compute{findOp("vmatmul.mxu0"), 0, 2, 0};
-  Footprint first = facts->resolve(push, unknownRegs()), second = facts->resolve(compute, unknownRegs());
-  auto conservative = modelTimingProvider(facts);
-  int original = conservative.dependence(push, first, compute, second).value.distance;
-  check(first.error.empty() && second.error.empty() && original == 35,
-        "unqualified weight dependency retains the whole isolated write window");
-  auto qualify = [&](const char *a, const char *b, int minimum, int boundary) {
-    auto object = derivedFixture(*facts);
-    auto *validation = object.getObject("validation");
-    Object runs(*validation->getObject("engines")->getObject("vpu"));
-    (*validation)["engines"] = Object{{"mxu0", std::move(runs)}};
-    object["composition"] = Object{{"engines", Object{}}, {"classes", Array{}}};
-    object["pairs"] = Array{Object{{"first", a}, {"second", b},
-        {"relation", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "same"}}},
-        {"minimum", minimum}, {"high", facts->block(a)->firstFreeAge}}};
-    std::string bytes = encode(std::move(object));
-    auto loaded = parseModelOverlapFacts(bytes, hash(bytes), *facts);
-    check(bool(loaded), "exact directional weight witness loads");
-    if (!loaded) { llvm::consumeError(loaded.takeError()); return std::shared_ptr<ModelOverlapFacts>(); }
-    return std::make_shared<ModelOverlapFacts>(std::move(*loaded));
-  };
-  auto overlap = qualify("mxu0.push_weight", "mxu0.matmul", 1, 40);
-  if (!overlap) return;
-  auto qualified = modelTimingProvider(facts, overlap);
-  check(qualified.dependence(push, first, compute, second).value.distance == 1,
-        "exact confirmed weight push-to-matmul witness replaces the synthetic RAW bound");
-  auto reservations = qualified.createReservations();
-  check(reservations.value->reserve(push, first, 0).empty() &&
-            reservations.value->conflict(compute, second, 1).value.empty(),
-        "qualified dependency agrees with exact pair reservation admission");
-  compute.rs1 = 0;
-  check(qualified.dependence(push, first, compute, facts->resolve(compute, unknownRegs())).value.distance == original,
-        "uncovered source alias keeps the conservative weight dependency");
-  compute.rs1 = 2;
-  check(qualified.dependence(compute, second, push, first).value.distance ==
-            conservative.dependence(compute, second, push, first).value.distance,
-        "streamed push-to-compute evidence does not weaken compute-to-push weight lifetime");
-  overlap = qualify("mxu0.matmul", "mxu0.push_weight", 63, 95);
-  if (!overlap) return;
-  auto reuse = modelTimingProvider(facts, overlap);
-  check(reuse.dependence(compute, second, push, first).value.distance == 63,
-        "exact confirmed matmul-to-push witness replaces the synthetic weight WAR bound");
-  check(reuse.dependence(push, first, compute, second).value.distance == original,
-        "compute-to-push evidence does not weaken push-to-compute weight lifetime");
-  push.rd = 1;
-  check(reuse.dependence(compute, second, push, facts->resolve(push, unknownRegs())).value.distance ==
-            conservative.dependence(compute, second, push, facts->resolve(push, unknownRegs())).value.distance,
-        "other weight slot keeps its own dependency");
+  auto fp = facts->resolve(push, unknownRegs()), fc = facts->resolve(compute, unknownRegs());
+  check(fp.error.empty() && fc.error.empty() &&
+            provider.dependence(push, fp, compute, fc).value.distance == 3 &&
+            provider.dependence(compute, fc, push, fp).value.distance == 61,
+        "derived windows order streamed weights without overlap evidence, including shifted write ages");
+  auto state = provider.createReservations();
+  check(state.value->reserve(push, fp, 0).empty() && !state.value->conflict(compute, fc, 3).value.empty(),
+        "weight data dependencies do not waive isolated engine occupancy or overlap admission");
+  auto rules = derivedFixture(*facts);
+  auto *validation = rules.getObject("validation");
+  Object runs(*validation->getObject("engines")->getObject("vpu"));
+  (*validation)["engines"] = Object{{"mxu0", std::move(runs)}};
+  rules["composition"] = Object{{"engines", Object{}}, {"classes", Array{}}};
+  // Deliberately admit earlier than the shifted synthetic writes permit. A
+  // source overlap rule cannot replace either derived resource dependency.
+  rules["pairs"] = Array{Object{
+      {"first", "mxu0.push_weight"}, {"second", "mxu0.matmul"},
+      {"relation", Object{{"mreg_banks", "disjoint"}, {"weight_slot", "same"}}},
+      {"minimum", 1}, {"high", facts->block("mxu0.push_weight")->firstFreeAge}}};
+  std::string ruleBytes = encode(std::move(rules));
+  auto overlap = parseModelOverlapFacts(ruleBytes, hash(ruleBytes), *facts);
+  check(bool(overlap), "permissive synthetic source-derived overlap rule loads");
+  if (overlap) {
+    auto qualified = modelTimingProvider(facts, std::make_shared<ModelOverlapFacts>(std::move(*overlap)));
+    check(qualified.dependence(push, fp, compute, fc).value.distance == 3 &&
+              qualified.dependence(compute, fc, push, fp).value.distance == 61,
+          "source-derived overlap rules cannot substitute for derived weight dependencies");
+    state = qualified.createReservations();
+    check(state.value->reserve(push, fp, 0).empty() && state.value->conflict(compute, fc, 3).value.empty(),
+          "source-derived overlap independently admits a resource-safe derived weight boundary");
+    compute.rs1 = 0;
+    check(qualified.dependence(push, fp, compute, facts->resolve(compute, unknownRegs())).value.distance == 3 &&
+              !state.value->conflict(compute, facts->resolve(compute, unknownRegs()), 3).value.empty(),
+          "precise weight dependency cannot waive an uncovered MREG alias relation");
+  } else llvm::consumeError(overlap.takeError());
+
+  // Use model-shaped events to check both engines and slots independently of
+  // the deliberately shifted synthetic operation fixture above.
+  auto object = fixture();
+  Array operations;
+  for (int unit = 0; unit < 2; ++unit) {
+    std::string engine = "mxu" + std::to_string(unit);
+    int begin = unit == 0 ? 63 : 3;
+    operations.push_back(block(engine + ".push_weight", engine, 33,
+        Object{{"mreg_read1", group(0, 32)}, {"weight_write", group(1, 32)}, {"data_busy", group(0, 33)}}));
+    for (const char *suffix : {"matmul", "matmul_acc"}) {
+      Object events{{"mreg_read0", group(0, 32)}, {"acc_write", group(begin, 32)},
+                    {"compute_busy", group(0, begin + 32)}};
+      if (llvm::StringRef(suffix) == "matmul_acc") events["acc_read"] = group(0, 32);
+      operations.push_back(block(engine + "." + suffix, engine, begin + 32, std::move(events)));
+    }
+  }
+  object["op_timing"] = std::move(operations);
+  std::string bytes = encode(std::move(object));
+  auto parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
+  check(bool(parsed), "model-shaped weight fixture loads");
+  if (!parsed) { llvm::errs() << llvm::toString(parsed.takeError()) << '\n'; return; }
+  auto model = std::make_shared<ModelTimingFacts>(std::move(*parsed));
+  provider = modelTimingProvider(model);
+  for (int unit = 0; unit < 2; ++unit)
+    for (int slot = 0; slot < 2; ++slot)
+      for (const char *mode : {"vmatmul", "vmatmul.acc"}) {
+        std::string engine = ".mxu" + std::to_string(unit);
+        push = {findOp("vmatpush.weight" + engine), slot, 0, 0};
+        compute = {findOp(std::string(mode) + engine), 0, 2, slot};
+        fp = model->resolve(push, unknownRegs());
+        fc = model->resolve(compute, unknownRegs());
+        check(fp.error.empty() && fc.error.empty(), "both matmul modes resolve derived weight windows");
+        check(provider.dependence(push, fp, compute, fc).value.distance == (unit == 0 ? 1 : 32),
+              "source-derived weight RAW boundary");
+        check(provider.dependence(compute, fc, push, fp).value.distance == (unit == 0 ? 63 : 32),
+              "source-derived weight WAR boundary");
+        for (int row : {0, 31}) {
+          std::vector<int> ages;
+          int element = (unit * 2 + slot) * 32 + row;
+          for (const Access &access : fc.accesses)
+            if (access.res == Res::Weight && access.first <= element && element < access.first + access.count)
+              ages.push_back(access.age + (element - access.first) * access.step);
+          check(ages == std::vector<int>({unit == 0 ? 1 + row : 1, unit == 0 ? 63 + row : 32}),
+                "first and last row uses retain the engine and slot mapping");
+        }
+        push.rd = 1 - slot;
+        check(provider.dependence(compute, fc, push, model->resolve(push, unknownRegs())).value.distance == 0,
+              "different weight slots have no data dependency");
+      }
 }
 
 void testVloadWriteDuringRead(const std::shared_ptr<ModelTimingFacts> &facts) {
