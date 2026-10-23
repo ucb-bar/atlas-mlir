@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
+import io
 import json
+import os
 from pathlib import Path
+import struct
 import sys
 
 import numpy as np
@@ -16,7 +20,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 from atlas_path_guard import checked as physical_checked
 from atlas_tooling import sha256
-from compile_workload_inputs import prepare, pack_output
+from compile_workload_inputs import pack_activation, pack_weights, pack_output
+import atlas_host_layout
+from atlas_host_layout import ATLAS_DRAM_BASE
+from atlas_program import assembly
+from atlas_tile_arithmetic import tensor_scale_exponent
+from run_workload_contraction import resource_plan, admit_program
 from run_model_tile import configure_model, model_binding
 
 
@@ -68,7 +77,68 @@ def float_words(words):
     return (words.astype(np.uint32) << 16).view(np.float32)
 
 
+class ExactEncoder:
+    """Validate every distinct actual BF16 word/scale against selected RTL."""
+    def __init__(self, codec, torch, to_fp8):
+        self.codec, self.torch, self.to_fp8 = codec, torch, to_fp8
+        self.verified = {}
+
+    def encode(self, words):
+        packed, scale = self.codec.encode(words)
+        maximum = int((words & np.uint16(0x7fff)).max())
+        if tensor_scale_exponent([maximum]) != scale:
+            raise ValueError("vector tensor scale differs from selected scalar policy")
+        seen = self.verified.setdefault(scale, set())
+        missing = np.array([int(word) for word in np.unique(words) if int(word) not in seen], dtype=np.uint16)
+        if missing.size:
+            tensor = self.torch.from_numpy(missing.copy()).view(self.torch.bfloat16)
+            actual = self.to_fp8(tensor, 127 + scale).view(self.torch.uint8).numpy()
+            expected = self.codec.pack_words(missing.reshape(1, -1), scale).reshape(-1)
+            if not np.array_equal(actual, expected):
+                raise ValueError("vector FP8 bytes differ from selected RtlNumerics")
+            seen.update(int(word) for word in missing)
+        return packed, scale
+
+
+def prepare_encoded(a, b, exponent, assemble):
+    """Use unchanged shared packing/resource/assembly admission with exact bytes."""
+    m, k = a.shape
+    if b.ndim != 2 or b.shape[0] != k:
+        raise ValueError("encoded contraction dimensions disagree")
+    n = b.shape[1]
+    plan = resource_plan(m, k, n)
+    if not -126 <= exponent <= 127:
+        raise ValueError("VPU rescale factor must be normal finite BF16")
+    activation, weights = pack_activation(a), pack_weights(b)
+    inputs = activation + weights
+    output_bytes, offset = m * n * 2, len(inputs) + 256
+    initial = inputs + b"\xa5" * 256 + b"\xcd" * output_bytes + b"\x5a" * 256
+    source = assembly(m, k, n, offset, exponent, resident_b=plan["resident_b"],
+                      pretranspose_resident_b=plan["resident_b"], resident_a=plan["resident_a"])
+    words = list(assemble(io.StringIO(source)).assemble())
+    admit_program(words)
+    if plan["resident_b"]:
+        loads = m * k * (n // 32) + k * n
+    elif plan["resident_a"]:
+        loads = m * k + k * n * (m // 32)
+    else:
+        loads = (m // 32) * (n // 32) * (2 * k // 32 * 1024)
+    return {"source": source, "program": struct.pack(f"<{len(words)}I", *words), "initial": initial,
+            "activation": activation, "weights": weights,
+            "memory": {"dram_base": ATLAS_DRAM_BASE, "output_offset": offset, "total_dram_bytes": len(initial)},
+            "requested_dma": {"load_bytes": loads, "store_bytes": output_bytes}}
+
+
+def checked_layout():
+    header = checked(Path(__file__).absolute().parents[2] / "runtime/atlas_host_layout.h")
+    if checked(atlas_host_layout.HEADER) != header:
+        raise ValueError("host layout imported from another header")
+    atlas_host_layout.recheck()
+    return header
+
+
 def export(args):
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
     capture = checked(args.capture)
     if sha256(capture) != args.capture_sha256:
         raise ValueError("capture receipt changed")
@@ -94,15 +164,39 @@ def export(args):
             raise ValueError("capture source changed")
         pins[str(path)] = digest
     model_root = checked(args.model_root)
+    before = model_binding(model_root)
+    _, torch, assemble, _ = configure_model(model_root)
     binding = model_binding(model_root)
-    _, _, assemble, _ = configure_model(model_root)
+    if (any(before[key] != binding[key] for key in ("revision", "tracked_source_diff_exit", "curve_sha256"))
+            or any(binding["imported_source_sha256"].get(path) != digest
+                   for path, digest in before["imported_source_sha256"].items())):
+        raise ValueError("model changed during configuration")
+    from npu_model.configs.numerics import RtlNumerics
+    binding = model_binding(model_root)
     for name in ("export_capture.py",):
         path = checked(Path(__file__).with_name(name))
         pins[str(path)] = sha256(path)
     for name in ("compile_workload_inputs.py", "run_model_tile.py", "run_workload_contraction.py",
-                 "atlas_program.py", "atlas_path_guard.py", "atlas_tooling.py", "atlas_tile_arithmetic.py"):
+                 "atlas_program.py", "atlas_path_guard.py", "atlas_tooling.py", "atlas_tile_arithmetic.py",
+                 "atlas_vector_arithmetic.py", "atlas_host_layout.py"):
         path = checked(Path(__file__).absolute().parents[1] / name)
-        pins[str(path)] = sha256(path)
+        module = sys.modules.get(Path(name).stem)
+        if module is None or checked(module.__file__) != path:
+            raise ValueError("export helper imported from another source")
+        digest = sha256(path)
+        if str(path) in pins and pins[str(path)] != digest:
+            raise ValueError("conflicting export helper source pin")
+        pins[str(path)] = digest
+    header = checked_layout()
+    pins[str(header)] = sha256(header)
+    codec_paths = [checked(row["path"]) for row in report["source_records"]
+                   if Path(row["path"]).name == "tiny_fp8_pack.py"]
+    if len(codec_paths) != 1:
+        raise ValueError("one capture-bound vector FP8 codec required")
+    spec = importlib.util.spec_from_file_location("tiny_capture_fp8_codec", codec_paths[0])
+    codec = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(codec)
+    encoder = ExactEncoder(codec, torch, RtlNumerics.to_fp8)
     out.mkdir(parents=True)
     assets = Assets(out)
     kernels, host, references = [], {}, []
@@ -137,9 +231,11 @@ def export(args):
         rows = 128 if step == 0 else 1
         if a.ndim != 2 or b.ndim != 2 or a.shape != (rows, b.shape[0]):
             raise ValueError("logical source geometry")
-        physical_a = float_words(a)
+        physical_a = a
         if rows == 1:
-            physical_a = np.concatenate((physical_a, np.zeros((31, a.shape[1]), np.float32)))
+            physical_a = np.concatenate((physical_a, np.zeros((31, a.shape[1]), np.uint16)))
+        resource_plan(physical_a.shape[0], a.shape[1], 32)
+        encoded_a, a_scale = encoder.encode(physical_a)
         column = 0
         for panel in call["panels"]:
             lo, hi = panel["columns"]
@@ -148,13 +244,12 @@ def export(args):
             if (lo != column or hi <= lo or n != hi-lo or k != a.shape[1] or m != physical_a.shape[0]
                     or expected.shape != (m, n) or panel["logical_mkn"] != [rows, k, n]):
                 raise ValueError("physical panel coverage")
-            prepared = prepare({"A": physical_a, "B": float_words(np.ascontiguousarray(b[:, lo:hi])),
-                                "native_C": np.zeros((m, n), np.float32)}, "float32", assemble)
-            conversion = prepared["conversion"]
-            if (prepared["rescale_exponent"] != panel["rescale"]
-                    or conversion["A"]["scale_exponent"] != panel["A_scale"]
-                    or conversion["B"]["scale_exponent"] != panel["B_scale"]):
+            resource_plan(m, k, n)
+            encoded_b, b_scale = encoder.encode(np.ascontiguousarray(b[:, lo:hi]))
+            if (a_scale + b_scale != panel["rescale"]
+                    or a_scale != panel["A_scale"] or b_scale != panel["B_scale"]):
                 raise ValueError("captured integer-codec scales differ from producer")
+            prepared = prepare_encoded(encoded_a, encoded_b, a_scale + b_scale, assemble)
             memory = prepared["memory"]
             kernels.append({"index": len(kernels), "step": step, "site": call["site"],
                 "site_index": index, "columns": [lo, hi], "logical_rows": rows, "physical_mkn": [m, k, n],
@@ -212,6 +307,10 @@ def export(args):
     data = json.dumps(provenance, indent=2).encode() + b"\n"
     (out / "provenance.json").write_bytes(data)
     assets.sums["provenance.json"] = hashlib.sha256(data).hexdigest()
+    stage = {**provenance, "schema": "atlas.full_kernel_assets.v1"}
+    stage_raw = json.dumps(stage, indent=2).encode() + b"\n"
+    (out / "kernels.json").write_bytes(stage_raw)
+    assets.sums["kernels.json"] = hashlib.sha256(stage_raw).hexdigest()
     (out / "SHA256SUMS").write_text("".join(f"{digest}  {path}\n" for path, digest in sorted(assets.sums.items())))
     return provenance
 
