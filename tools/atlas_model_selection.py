@@ -179,7 +179,7 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
 
 
 def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = "model",
-                   profile: str = "fifo43", model: Path | None = None, model_regions: tuple[Path, ...] = (),
+                   profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
                    spill: bool = True, spill_mxu: bool = True, boundary: str = "boundary",
                    guarded_pack: bool = False,
                    op_timing: Path | None = None, op_timing_sha256: str | None = None,
@@ -201,6 +201,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     max_candidates bounds initial attempts, including compiler rejections. Search
     budgets count every attempted candidate, including compiler refusals.
     """
+    if profile is None:
+        profile = "curve" if provider == "model" else "fifo43"
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
         raise ValueError("unsupported provider or memory profile")
     if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
@@ -441,7 +443,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", choices=("builtin", "model"), default="builtin")
-    parser.add_argument("--profile", choices=("fifo43", "curve"), default="fifo43")
+    parser.add_argument("--profile", choices=("fifo43", "curve"),
+                        help="memory scoring profile (model default: curve)")
     parser.add_argument("--npu-model", type=Path, help="selected npu_model source tree; must match provider evidence")
     parser.add_argument("--model-region", type=Path, action="append", default=[],
                         help="DRAM region JSON with address, initial_hex and optional expected_hex")
@@ -475,7 +478,8 @@ def model_arguments(args: argparse.Namespace) -> dict:
     preset = SEARCH_BUDGETS[args.search_budget if args.provider == "model" else "selection"]
     budget = {name: getattr(args, name) if getattr(args, name) is not None else value for name, value in preset.items()}
     banks = budget.pop("bank_candidates")
-    return {"provider": args.provider, "profile": args.profile, "model": args.npu_model,
+    profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
+    return {"provider": args.provider, "profile": profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "op_timing": args.op_timing,
             "op_timing_sha256": args.op_timing_sha256, "pairs": args.pairs,
             "pairs_sha256": args.pairs_sha256, "composed": args.composed,

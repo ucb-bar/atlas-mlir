@@ -109,7 +109,7 @@ class ModelSelectionTest(unittest.TestCase):
         self.assertEqual((full["max_candidates"], full["search_evaluations"], full["search_group_evaluations"],
                           full["search_patience"]), (32, 96, 204, 96))
         self.assertIsNone(full["mreg_candidates"])
-        self.assertEqual(full["profile"], "fifo43")
+        self.assertEqual(full["profile"], "curve")
         selection = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", "selection"]))
         self.assertEqual((selection["max_candidates"], selection["search_evaluations"],
                           selection["search_group_evaluations"], selection["search_patience"]), (24, 0, 0, 0))
@@ -258,6 +258,7 @@ with TemporaryDirectory() as directory:
 
     def test_cycles_choose_winner_and_ties_keep_earlier_program(self) -> None:
         receipt = self.select(max_candidates=5)
+        self.assertEqual(receipt["profile"], "curve")
         self.assertEqual(receipt["selected_index"], 2)
         self.assertEqual(receipt["selected_cycles"], 5)
         self.assertEqual(receipt["default_cycles"], 10)
@@ -280,6 +281,7 @@ with TemporaryDirectory() as directory:
         self.assertEqual(len(receipt["candidates"]), 1)
         self.assertEqual(receipt["selected_index"], 0)
         self.assertIsNone(receipt["selected_cycles"])
+        self.assertEqual(receipt["profile"], "fifo43")
 
     def test_duplicate_words_are_scored_once(self) -> None:
         scores = []
