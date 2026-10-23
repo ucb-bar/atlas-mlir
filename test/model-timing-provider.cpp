@@ -643,6 +643,10 @@ void testExplicitReleases() {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 2 && llvm::StringRef(argv[1]) == "--fixture") {
+    llvm::outs() << encode(fixture()) << '\n';
+    return 0;
+  }
   if (argc != 1) return 2;
   testExplicitReleases();
   std::string bytes = encode(fixture());

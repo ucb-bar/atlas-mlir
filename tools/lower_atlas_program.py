@@ -32,6 +32,11 @@ import sys
 from pathlib import Path
 
 
+if __package__:
+    from .atlas_model_selection import add_model_arguments, model_arguments, select_program
+else:
+    from atlas_model_selection import add_model_arguments, model_arguments, select_program
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -59,7 +64,16 @@ def main() -> int:
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
     parser.add_argument("--guarded-pack", action="store_true",
                         help="opt in to bit-exact PACK via MXU0 for proven-finite sources")
+    add_model_arguments(parser)
     args = parser.parse_args()
+    if args.provider == "model":
+        try:
+            select_program(args.source, args.output_dir, args.atlas_bin_dir,
+                           spill=True, spill_mxu=True, guarded_pack=args.guarded_pack, **model_arguments(args))
+        except (OSError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        return 0
     try:
         source = args.source.resolve(strict=True)
         bin_dir = args.atlas_bin_dir.resolve(strict=True)
