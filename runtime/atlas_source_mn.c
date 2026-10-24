@@ -41,7 +41,7 @@ atlas_ordered_k_status atlas_source_mn_run_f32(
       rhs_code_bytes != n_rows * k_columns ||
       logical_bf16_bytes != m_rows * n_rows * 2 ||
       staging_bytes != logical_bf16_bytes ||
-      physical_tile_bytes != 2048 ||
+      physical_tile_bytes != ATLAS_BF16_TILE_BYTES ||
       lhs_tile_bytes != 32 * k_columns || rhs_tile_bytes != 32 * k_columns ||
       !valid_span(lhs, lhs_bytes) || !valid_span(rhs, rhs_bytes) ||
       !valid_span(result_f32, result_bytes) ||
@@ -156,7 +156,7 @@ atlas_ordered_k_status atlas_source_batched_mn_run_f32(
       lhs_code_bytes != lhs_cells || rhs_code_bytes != rhs_cells ||
       logical_bf16_bytes != result_cells * 2 ||
       staging_bytes != logical_bf16_bytes ||
-      physical_tile_bytes != 2048 ||
+      physical_tile_bytes != ATLAS_BF16_TILE_BYTES ||
       lhs_tile_bytes != 32 * k_columns || rhs_tile_bytes != 32 * k_columns ||
       !valid_span(lhs, lhs_bytes) || !valid_span(rhs, rhs_bytes) ||
       !valid_span(result_f32, result_bytes) ||

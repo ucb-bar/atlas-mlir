@@ -1,0 +1,21 @@
+#ifndef ATLAS_HOST_LAYOUT_H
+#define ATLAS_HOST_LAYOUT_H
+
+/* Default diagnostic mapping; platform bindings still supply atlas_host_map. */
+#define ATLAS_IMEM_BASE 0x20000
+#define ATLAS_IMEM_BYTES 0x20000
+#define ATLAS_VMEM_BASE 0x20000000
+#define ATLAS_CSR_BASE 0x40000
+#define ATLAS_DRAM_BASE 0x100000000
+#define ATLAS_CSR_CYCLES 0x00
+#define ATLAS_CSR_RETIRED 0x04
+#define ATLAS_CSR_STATUS 0x08
+#define ATLAS_CSR_PC 0x0c
+#define ATLAS_CSR_DBG0 0x10
+#define ATLAS_CSR_DBG1 0x14
+#define ATLAS_CSR_EXEC_CONTROL 0x18
+#define ATLAS_FP8_TILE_BYTES 1024
+#define ATLAS_BF16_HALF_BYTES 1024
+#define ATLAS_BF16_TILE_BYTES 2048
+
+#endif
