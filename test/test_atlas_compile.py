@@ -44,6 +44,11 @@ class AtlasCompileTest(unittest.TestCase):
                 self.assertEqual(compiled.stdout, spelled.stdout)
                 emitted = run("atlas-emit", compiled.stdout)
                 self.assertEqual(emitted.returncode, 0, emitted.stderr)
+                prepared = run("atlas-opt", source, "--atlas-compile-prepare")
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+                candidate = run("atlas-opt", prepared.stdout, "--atlas-compile-candidate")
+                self.assertEqual(candidate.returncode, 0, candidate.stderr)
+                self.assertEqual(candidate.stdout, compiled.stdout)
 
     def test_lowering_leaves_delay_slots_for_the_stream_scheduler(self) -> None:
         # The attention tile's PACK relayout loop closes with a back-edge.

@@ -210,7 +210,9 @@ launch on the same channel, an overlapping DRAM access where either side
 writes, a helper DMA, scalar memory or a branch or jump outside an analyzed
 scalar loop, an analyzed loop that touches its staging window, a CSR access,
 the halt, or entry to any other branch target. Transfers stay in flight through
-PACK ([DMA across loops](#dma-across-loops)).
+PACK ([DMA across loops](#dma-across-loops)). Under the model provider, a
+launch also completes the transfer launched eight launches earlier, whose RTL
+command slot it reuses.
 
 ## Physical program output
 
@@ -300,7 +302,7 @@ Editing words inside the final inline-assembly string skips every check.
   two accumulators per unit within a block.
 - Outside analyzed scalar loops, a DMA transfer is always completed before a
   branch, a branch target, or the halt, even when overlap would be safe.
-- Delays come from npu-model's `rtl-match` timing rules, not RTL
+- Delays come from NPU Model's `rtl-match` timing rules, not RTL
   measurements; a delay alone does not prove an MXU result or DMA is ready.
   The hand-written machine examples (`handoff_*_tile.mlir`) use hand-picked
   delays instead.

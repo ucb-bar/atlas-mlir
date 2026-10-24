@@ -1,0 +1,22 @@
+{
+  "schema": "atlas.model_timing.lock.v1",
+  "model_revision": "9e6313bddecb8ba936206eb347f5cd4e5335282c",
+  "source_sha256": "a9a919c3d118af94e2783c8969e05ad19f8d2523ec093922c4f9957641b54426",
+  "reference_configuration_sha256": "bdb127152c1ab4b174b2f628687f3b166dad48ea6f00be124ed8351443885e94",
+  "configuration_sha256": "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a",
+  "numerical_data_sha256": "9a279452a0e4115e1096f7cb01a99aa2796de4d33cccf76c378513bb55616ccd",
+  "source_shapes": {
+    "vpu.py": "0453ecc26390872861b72aab45a9fcefc154adb9e6fb28d6ea052d4cf624a0f0",
+    "bank_conflict.py": "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467",
+    "mxu.py": "c602bea263251bd02bb07c0941f192066773918a8505b1ffeb6979abc655f365",
+    "lsu.py": "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722",
+    "xlu.py": "c27797bd033a7abb9e9c6f2c161f26f04f7166667176fa8e7eea2111b3d08ec9",
+    "memory_backend.py": "5d2c767e6162a3b561f15e52a00f3e20780333e0b93fc89cde7c3ecf3f4fba25",
+    "dma.py": "5418b362426b6037a4838c0698924164d51b4b4b929f1f91d99ef9c3789a008d"
+  },
+  "curve_sha256": "282d21803ca85445f4fa54eb9c502bf70ead13ad3c8adbb1e89fbe19a7325469",
+  "dma_source_sha256": {
+    "memory_backend.py": "d21733f9141a57bc0da99db8e5390af6b1a078d662a377945227adfcf38f5cbb",
+    "dma.py": "0ba9095e9ce49d1b654fc52a25b1a43c17ed22a2878fc28d6246f2d7a42f2272"
+  }
+}

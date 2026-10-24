@@ -2,6 +2,7 @@
 #define ATLAS_VIRTUAL_ALLOCATION_H
 
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -34,7 +35,7 @@ struct DMATransferPlacement {
 // A PACK relayout row is 32 FP8 bytes: two 16-byte halves of four words,
 // which lowerPack copies one word at a time. It is fixed by the selected PACK
 // layout, not a parameter: lowerPack's loop is written for exactly this row.
-constexpr unsigned kPackRelayoutRowWords = 8;
+constexpr unsigned kPackRelayoutRowWords = kAtlasMregRowBytes / sizeof(uint32_t);
 
 struct FixedResourcePlacement {
   unsigned tensorTemporary;
@@ -118,7 +119,8 @@ std::string locationText(Location loc);
 
 class VirtualAllocationPlan {
 public:
-  VirtualAllocationPlan();
+  explicit VirtualAllocationPlan(llvm::ArrayRef<unsigned> storeWindowRanks = {},
+                                 llvm::ArrayRef<unsigned> mregRanks = {});
 
   // Requires a verified virtual CFG. Rebuild after changing its values or order;
   // placement accessors require successful allocation and live source IR.
@@ -147,7 +149,7 @@ public:
 private:
   LogicalResult colorValues(RegisterKind kind);
   LogicalResult placeMXU(Block &block);
-  LogicalResult placeDMA(Block &block, unsigned &nextTransfer);
+  LogicalResult placeDMA(Block &block, unsigned &nextTransfer, unsigned &nextStore);
   void stageLoads();
 
   func::FuncOp function;
@@ -158,6 +160,8 @@ private:
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   std::array<RegisterPressure, 3> pressure;
+  llvm::SmallVector<unsigned> storeWindowRanks, mregRanks;
+  unsigned nextMreg = 0;
   bool mixedFp8 = false;
   bool hasPack = false;
   const FixedResourcePlacement fixedResources;

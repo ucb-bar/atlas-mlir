@@ -1,6 +1,8 @@
 #include "Atlas/AtlasDialect.h"
+#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasModelTiming.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "Atlas/AtlasStream.h"
@@ -110,6 +112,7 @@ int main(int argc, char **argv) {
     }
     llvm::json::Object root{
         {"schema", "atlas.physical_program.v1"},
+        {"compiler_search_policy_sha256", search_policy::kCompilerPolicySHA256},
         {"selected_rtl_revision", kSelectedRTLRevision},
         {"pc_unit", "instruction_word"},
         {"word_endianness", "little"},
@@ -121,7 +124,19 @@ int main(int argc, char **argv) {
     if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
-      root["timing_provider"] = provider.getValue().str();
+      root["timing_provider"] = timing::canonicalTimingProviderId(provider.getValue()).str();
+    if (auto selected = (*module)->getAttrOfType<DictionaryAttr>(kAtlasModelEvidence)) {
+      llvm::json::Object evidence;
+      for (NamedAttribute entry : selected) {
+        auto value = dyn_cast<StringAttr>(entry.getValue());
+        if (!value) {
+          module->emitError("atlas.model_evidence values must be strings");
+          return 1;
+        }
+        evidence[entry.getName().str()] = value.getValue().str();
+      }
+      root["model_evidence"] = std::move(evidence);
+    }
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -54,6 +55,24 @@ struct Instr {
   bool release = false;
 };
 
+// Compiler-owned proof from a decided 32-iteration PACK replay. Each address
+// is the unrounded effective byte address at the same iteration ordinal.
+class InstructionTimingContext {
+public:
+  bool matches(const Instr &in) const;
+  bool sameRegion(const InstructionTimingContext &other) const { return region == other.region; }
+  const std::array<uint32_t, 32> &scalarAddresses() const { return addresses; }
+
+private:
+  InstructionTimingContext(Instr instruction, std::shared_ptr<const uint8_t> region, std::array<uint32_t, 32> addresses)
+      : instruction(instruction), region(std::move(region)), addresses(addresses) {}
+  Instr instruction;
+  std::shared_ptr<const uint8_t> region;
+  std::array<uint32_t, 32> addresses;
+  friend struct AtlasPackLoopTimingProofBuilder;
+};
+using TimingContext = std::shared_ptr<const InstructionTimingContext>;
+
 long long signExtend(long long value, int bits);
 int naturalGap(const Instr &in);
 
@@ -71,9 +90,9 @@ struct ScalarAccess {
 };
 ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
-const int kVmemBankBytes = 256 * 1024;
+const int kVmemBankBytes = kAtlasVmemBankBytes;
 const int kVmemBanks = kAtlasVmemBytes / kVmemBankBytes;
-const int kLineBytes = 32;
+const int kLineBytes = kAtlasMregRowBytes;
 
 enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase };
 
@@ -162,21 +181,14 @@ struct DepGraph {
 
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
-DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    const IncomingDma *incomingDma = nullptr);
-// Longest path in cycles from each node until everything after it finishes.
-std::vector<int> criticalHeights(const DepGraph &g);
 
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
 int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
-// Cycles from launching one DMA transfer on an idle engine to its completed
-// wait, by npu_model main's DMA model: the beat-level engine against its
-// default DRAM, the bandwidth-latency curves measured on VCS EE290SimConfig
-// (ee290sim_vcs_probe.json). Beats stream at the curve's peak bandwidth after a
-// fixed start; transfers queued behind one another pay only the beats.
+// Legacy builtin DMA proposal estimate, retained for identical builtin schedules.
+// Model providers supply their own estimates; matching waits establish completion.
 int dmaTransferCycles(long long bytes, bool store);
 
 class ReservationTable {

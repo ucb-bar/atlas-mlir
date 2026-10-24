@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
+from model_evidence import isolate_model_imports
 
 
 def pack_oracle(bits: int, scale: int) -> int:
@@ -57,14 +58,14 @@ class ScalarOracleTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ATLAS_PACK_MODEL_ROOT"), "select ATLAS_PACK_MODEL_ROOT")
 class ActualModelConverterTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        isolate_model_imports(cls, os.environ["ATLAS_PACK_MODEL_ROOT"])
+
     def test_every_finite_bf16_word_at_every_scale(self):
         import torch
         model_root = Path(os.environ["ATLAS_PACK_MODEL_ROOT"]).absolute()
-        sys.path.insert(0, str(model_root))
-        try:
-            from npu_model.configs import numerics, rtl_math as rtl
-        finally:
-            sys.path.pop(0)
+        from npu_model.configs import numerics, rtl_math as rtl
         self.assertEqual(Path(rtl.__file__).absolute().parent.parent.parent, model_root,
                          "cached npu_model import differs from selected source")
         torch.set_num_threads(1)
