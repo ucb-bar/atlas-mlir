@@ -24,7 +24,7 @@ from gdb_remote import Remote
 from model_device import Device, checked
 from bundle import Bundle, sha, verify_completion
 
-FULL_CONTRACTS = {"tiny-full": "tiny_full_contract", "smol-full": "smol_full_contract"}
+FULL_CONTRACTS = {"tiny-full": "tiny_full_contract"}
 
 
 def mmio_access_cap(device, workload):

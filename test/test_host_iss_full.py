@@ -150,7 +150,8 @@ class FullBudgetTest(unittest.TestCase):
                          1209600)
         for extra in [("--workload", "tiny-full"),
                       ("--workload", "tiny", "--wall-seconds", "86401"),
-                      ("--workload", "smol-full", "--wall-seconds", "2592001"),
+                      ("--workload", "tiny-full", "--wall-seconds", "2592001"),
+                      ("--workload", "smol-full", "--wall-seconds", "86400"),
                       ("--wall-seconds", "0"), ("--kernel-cycle-cap", "0")]:
             with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 arguments(self.cli(*extra))
