@@ -93,6 +93,8 @@ def run(args):
             helpers.append("block_bundle.py")
             if workload in FULL_CONTRACTS:
                 helpers.append("full_bundle.py")
+            if workload == "tiny-full":
+                helpers.append("tiny_contract.py")
             path = checked(Path(contract.__file__).absolute())
             pins[str(path)] = sha(path)
         for name in helpers:
