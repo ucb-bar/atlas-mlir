@@ -10,6 +10,7 @@ import random
 import re
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from itertools import permutations
 from pathlib import Path
 import subprocess
@@ -52,6 +53,21 @@ def proposal_graph(preds, order, latency=100):
     return graph
 
 
+class SyntheticNativeScorer:
+    def __init__(self, *, score=None, curve_path="/tmp/test-curve.json"):
+        self.score = score
+        self.curve_path = curve_path
+
+    def __call__(self, program, profile):
+        return self.score(program, profile) if self.score else program["cycles"]
+
+    def profile_receipt(self, program, profile):
+        return {"profile": profile, "sha256": profile + "-configuration-digest"}
+
+    def runtime_receipt(self):
+        return {"curve_path": self.curve_path, "configuration": {}, "python": "test"}
+
+
 class ModelSelectionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -82,6 +98,28 @@ class ModelSelectionTest(unittest.TestCase):
         kwargs.setdefault("scorer", lambda program, **_: program["cycles"])
         with patch("atlas_model_selection.subprocess.run", side_effect=runner or self.fake_run):
             return select_program(self.source, self.directory / name, self.directory, **kwargs)
+
+    @contextmanager
+    def native_scoring(self, scorer, *, capture=None, evidence=(), runner=None):
+        if capture is None:
+            capture = Mock(complete=Mock(return_value={"schema": "test-only"}))
+        with patch("atlas_model_scorer.ModelScorer", return_value=scorer), \
+                patch("atlas_model_selection.capture_selection_inputs", return_value=capture) as capture_inputs, \
+                patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
+                patch("atlas_model_selection.ProcessPoolExecutor", side_effect=lambda max_workers, **_: ThreadPoolExecutor(max_workers=max_workers)), \
+                patch("atlas_model_selection.evidence_option", side_effect=lambda *_: list(evidence)), \
+                patch("atlas_model_selection.subprocess.run", side_effect=runner or self.fake_run):
+            yield capture_inputs
+
+    def override_run(self, option, word, cycles, *, policy=False):
+        def run(argv, **kwargs):
+            result = self.fake_run(argv, **kwargs)
+            if candidate_command(argv) and option in " ".join(argv):
+                self.programs[kwargs["cwd"]] = {
+                    **({"compiler_search_policy_sha256": COMPILER_POLICY_SHA256} if policy else {}),
+                    "instructions": [{"word_u32": word}], "cycles": cycles}
+            return result
+        return run
 
     def write_graph(self, cwd, preds, initial=None, *, curve=False):
         path = cwd / "order.json"
@@ -147,10 +185,7 @@ class ModelSelectionTest(unittest.TestCase):
                           builtin["mreg_candidates"]), ("fifo43", 0, 0, ()))
 
     def test_fixed_batches_keep_all_compiles_canonical(self):
-        with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
-            receipt = select_program(self.source, self.directory / "compiled", self.directory,
-                curve_candidates=False, max_candidates=1, search_evaluations=13, workers=4,
-                scorer=lambda program, **_: program["cycles"])
+        receipt = self.select(runner=self.search_run, max_candidates=1, search_evaluations=13, workers=4)
         self.assertEqual(len(receipt["candidates"]), 14)
         self.assertEqual(receipt["search"]["evaluations"], 13)
         self.assertEqual([row["parent_index"] for row in receipt["candidates"][1:13]], [0] * 12)
@@ -194,9 +229,7 @@ class ModelSelectionTest(unittest.TestCase):
         expected = None
         for workers in (1, 4):
             arguments = model_arguments(parser.parse_args(["--provider", "model", "--workers", str(workers), "--profile", "fifo43"]))
-            with patch("atlas_model_selection.subprocess.run", side_effect=self.search_run):
-                receipt = select_program(self.source, self.directory / str(workers), self.directory,
-                                         scorer=lambda program, **_: program["cycles"], **arguments)
+            receipt = self.select(name=str(workers), runner=self.search_run, **arguments)
             rows = receipt["candidates"]
             phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
                       for field in ("search", "group_search")]
@@ -226,10 +259,9 @@ class ModelSelectionTest(unittest.TestCase):
     def test_mreg_pool_is_eight_seeds_at_every_cap(self):
         vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
         for cap, evaluated in ((32, 8), (64, 8), (25, 2)):
-            with self.subTest(cap=cap), patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
-                receipt = select_program(self.source, self.directory / str(cap), self.directory,
-                    curve_candidates=False, max_candidates=cap, mreg_candidates=None,
-                    store_window_candidates=((0, 1), (0, 2), (0, 3)), scorer=lambda program, **_: program["cycles"])
+            with self.subTest(cap=cap):
+                receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None,
+                                      store_window_candidates=((0, 1), (0, 2), (0, 3)))
             ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
             self.assertEqual((receipt["mreg_pool_size"], len(ranks)), (8, evaluated))
             self.assertEqual(ranks, vectors[:evaluated])
@@ -344,14 +376,7 @@ with TemporaryDirectory() as directory:
             calls[profile, word] += 1
             return program["cycles"]
 
-        def tied_run(argv, **kwargs):
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
-                                               "instructions": [{"word_u32": 8}], "cycles": 5}
-            return result
-
-        receipt = self.select(runner=tied_run, profile="curve", curve_candidates=False,
+        receipt = self.select(runner=self.override_run("random-seed=0", 8, 5, policy=True), profile="curve", curve_candidates=False,
                               max_candidates=16, workers=4, scorer=scorer)
         self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
         self.assertEqual(calls, Counter({("curve", word): 1 for word in (0, 1, 2, 8)}))
@@ -368,36 +393,11 @@ with TemporaryDirectory() as directory:
         self.assert_objective(receipt, scoring="injected-scorer")
 
     def test_native_profile_receipts_bind_only_the_selected_profile(self):
-        class NativeScorer:
-            def __call__(self, program, profile):
-                return program["cycles"]
-
-            def profile_receipt(self, program, profile):
-                return {"profile": profile, "sha256": profile + "-configuration-digest"}
-
-            def runtime_receipt(self):
-                return {"curve_path": "/tmp/test-curve.json", "configuration": {}, "python": "test"}
-
-        def executor(*, max_workers, **_):
-            return ThreadPoolExecutor(max_workers=max_workers)
-
-        def tied_run(argv, **kwargs):
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
-                                               "instructions": [{"word_u32": 8}], "cycles": 5}
-            return result
-
         for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve"}),
                                        ("fifo43", 5, {"fifo43"})):
             with self.subTest(profile=profile, cap=cap), \
-                    patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
-                    patch("atlas_model_selection.capture_selection_inputs", return_value=Mock(
-                        complete=Mock(return_value={"schema": "test-only"}))) as capture_inputs, \
-                    patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
-                    patch("atlas_model_selection.ProcessPoolExecutor", side_effect=executor), \
-                    patch("atlas_model_selection.evidence_option", side_effect=lambda *_: ["--select-atlas-model-evidence=facts=synthetic-test"]), \
-                    patch("atlas_model_selection.subprocess.run", side_effect=tied_run):
+                    self.native_scoring(SyntheticNativeScorer(), runner=self.override_run("random-seed=0", 8, 5, policy=True),
+                        evidence=("--select-atlas-model-evidence=facts=synthetic-test",)) as capture_inputs:
                 output = self.directory / f"native-{profile}-{cap}"
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
                                          profile=profile, model_facts=self.directory, curve_candidates=False, max_candidates=cap, workers=2)
@@ -413,25 +413,13 @@ with TemporaryDirectory() as directory:
 
         capture = capture_run_provenance(self.source, search_policy={"test_policy": "mutation-control"})
 
-        class NativeScorer:
-            def runtime_receipt(self):
-                return {"curve_path": str(self_source), "configuration": {}, "python": "test"}
+        def mutate_source(program, profile):
+            self.source.write_text("module { /* changed while scoring */ }")
+            return program["cycles"]
 
-            def profile_receipt(self, program, profile):
-                return {"profile": profile, "sha256": profile + "-configuration-digest"}
-
-            def __call__(self, program, profile):
-                self_source.write_text("module { /* changed while scoring */ }")
-                return program["cycles"]
-
-        self_source = self.source
         output = self.directory / "mutation"
-        with patch("atlas_model_scorer.ModelScorer", return_value=NativeScorer()), \
-                patch("atlas_model_selection.capture_selection_inputs", return_value=capture), \
-                patch("atlas_model_selection.bind_selection_facts", return_value="test-provider"), \
-                patch("atlas_model_selection.ProcessPoolExecutor", side_effect=lambda **_: ThreadPoolExecutor(1)), \
-                patch("atlas_model_selection.evidence_option", return_value=[]), \
-                patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run), \
+        with self.native_scoring(SyntheticNativeScorer(score=mutate_source, curve_path=str(self.source)),
+                                 capture=capture), \
                 self.assertRaisesRegex(ValueError, "changed during selection"):
             select_program(self.source, output, self.directory, model=self.directory,
                            model_facts=self.directory, max_candidates=1, workers=1)
@@ -447,9 +435,7 @@ with TemporaryDirectory() as directory:
             self.assertEqual(profile, "curve")
             return program["cycles"]
 
-        with patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
-            receipt = select_program(self.source, self.directory / "compiled", self.directory,
-                                     curve_candidates=False, max_candidates=3, scorer=scorer)
+        receipt = self.select(max_candidates=3, scorer=scorer)
         self.assertEqual(receipt["selected_index"], 2)
         self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
 
@@ -509,17 +495,12 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 2)
 
     def test_local_search_starts_from_best_bank_candidate(self):
-        def compile_bank(argv, **kwargs):
-            result = self.fake_run(argv, **kwargs)
-            cwd = kwargs["cwd"]
-            if result.returncode == 0 and candidate_command(argv):
-                self.write_graph(cwd, [[], [], []])
-                if "mreg-ranks=" in " ".join(argv):
-                    local = "order-file=" in " ".join(argv)
-                    self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": 101 if local else 100}], "cycles": 2 if local else 3}
-            return result
+        def compile_bank(argv, cwd, order):
+            if "mreg-ranks=" in " ".join(argv):
+                local = "order-file=" in " ".join(argv)
+                self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": 101 if local else 100}], "cycles": 2 if local else 3}
 
-        receipt = self.select(runner=compile_bank, max_candidates=25, mreg_candidates=((31, 7),),
+        receipt = self.select(runner=self.graph_run([[], [], []], configure=compile_bank), max_candidates=25, mreg_candidates=((31, 7),),
                               search_evaluations=4)
         start = receipt["candidates"][receipt["search"]["start_index"]]
         self.assertEqual(start["class"], "mreg-ranks")
@@ -539,13 +520,12 @@ with TemporaryDirectory() as directory:
 
     def test_parallel_completion_order_does_not_change_a_tied_winner(self) -> None:
         later_finished = threading.Event()
+        runner = self.override_run("random-seed=0", 99, 5)
 
         def reordered(argv, **kwargs):
             if "lookahead=2" in " ".join(argv):
                 self.assertTrue(later_finished.wait(timeout=2))
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv) and "random-seed=0" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 99}], "cycles": 5}
+            result = runner(argv, **kwargs)
             if Path(argv[0]).name == "atlas-emit" and self.programs[kwargs["cwd"]]["instructions"][0]["word_u32"] == 99:
                 later_finished.set()
             return result
@@ -767,13 +747,8 @@ with TemporaryDirectory() as directory:
         with self.assertRaisesRegex(ValueError, "pack-reload-candidates requires"):
             self.select(provider="builtin", pack_reload_candidates=True)
         for cycles in (4, 5, 6):
-            def compile_reload(argv, **kwargs):
-                result = self.fake_run(argv, **kwargs)
-                if candidate_command(argv) and "pack-reload-after-weight=true" in " ".join(argv):
-                    self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 99}], "cycles": cycles}
-                return result
             with self.subTest(cycles=cycles):
-                receipt = self.select(name=str(cycles), runner=compile_reload, max_candidates=3,
+                receipt = self.select(name=str(cycles), runner=self.override_run("pack-reload-after-weight=true", 99, cycles), max_candidates=3,
                                       pack_reload_candidates=True)
             candidate = receipt["candidates"][-1]
             self.assertEqual(candidate["class"], "pack-reload-order")
@@ -820,13 +795,12 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["candidates"][-1]["options"]["wait_placement"], "preloaded")
 
     def test_rejected_preload_alternatives_keep_reload_winner(self):
+        runner = self.override_run("pack-reload-after-weight=true", 99, 4)
+
         def reject_preload(argv, **kwargs):
             if "pack-weight-before-pack=true" in " ".join(argv):
                 return subprocess.CompletedProcess(argv, 1, "", "preload resource conflict")
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv) and "pack-reload-after-weight=true" in " ".join(argv):
-                self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 99}], "cycles": 4}
-            return result
+            return runner(argv, **kwargs)
         receipt = self.select(runner=reject_preload, max_candidates=3, pack_reload_candidates=True,
                               pack_preload_candidates=True)
         self.assertEqual(receipt["selected_index"], 3)

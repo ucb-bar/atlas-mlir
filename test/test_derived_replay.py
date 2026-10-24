@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from atlas_model_replay import replay, semantic_digest, validate_program, prediction_error
 from atlas_model_diagnostics import UnsupportedModelTiming
 from model_replay_fixture import replay_fixture
-from model_evidence import isolate_model_imports
+from model_evidence import NativeModelFixture
 
 
 class ReplayContractTest(unittest.TestCase):
@@ -39,15 +39,7 @@ class ReplayContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native Core contracts")
-class NativeReplayContractTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        isolate_model_imports(cls, os.environ['ATLAS_DERIVE_MODEL_ROOT'])
-        import torch
-        torch.set_num_threads(1)
-        from atlas_model_timing import configuration
-        cls.cfg, _ = configuration()
-
+class NativeReplayContractTest(NativeModelFixture, unittest.TestCase):
     def test_source_derivation_and_bounded_native_edge_validation(self):
         from atlas_derive_replay import derive_replay
         from atlas_validate_replay import validate_replay

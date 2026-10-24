@@ -1,7 +1,9 @@
-"""Shared opt-in rule for tests requiring a qualified external model bundle."""
+"""Shared fixtures for selected model sources and qualified evidence bundles."""
+import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -24,6 +26,60 @@ def isolate_model_imports(test_case, root):
     test_case.addClassCleanup(restore_imports)
     clear_model_modules()
     sys.path.insert(0, root)
+
+
+class NativeModelFixture:
+    @classmethod
+    def setUpClass(cls):
+        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
+        import torch
+        torch.set_num_threads(1)
+
+    def setUp(self):
+        from atlas_model_timing import configuration
+        self.cfg, _ = configuration()
+
+
+class ModelSourceFixture(NativeModelFixture):
+    def setUp(self):
+        super().setUp()
+        from atlas_derive_scratchpad import read_source
+        from npu_model.isa import EXU
+        root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model"
+        self.sources = {name: read_source(root / "hardware" / name)
+                        for name, _, _ in self.source_shapes}
+        self.sources["isa_definition.py"] = read_source(root / "configs/isa_definition.py")
+        self.scalar = {name: item.__name__ for name, item in self.cfg.isa.operations.items() if item.exu == EXU.SCALAR}
+
+    def mutated(self, filename, old, new):
+        self.assertIn(old, self.sources[filename], "mutation must alter the selected model source")
+        return dict(self.sources, **{filename: self.sources[filename].replace(old, new)})
+
+
+def semantic_sources(model):
+    """Read only reviewed relative source entries, checking paths before access."""
+    from atlas_derive_scratchpad import read_source
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "tools/model-semantics.json").read_text())
+    sources = {}
+    for relative in manifest["files"]:
+        if Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise AssertionError("guard manifest source must be relative")
+        sources[relative] = read_source(model / "npu_model" / relative)
+    return sources
+
+
+def copy_model_sources(test_case, sources, subdirectory=""):
+    """Give every test its own sparse source tree and register its cleanup."""
+    from atlas_validate_runtime import safe_path
+    directory = tempfile.TemporaryDirectory()
+    test_case.addCleanup(directory.cleanup)
+    root = safe_path(directory.name)
+    model = root / subdirectory
+    for relative, source in sources.items():
+        path = safe_path(model / "npu_model" / relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    return root, model
 
 
 def model_evidence_available():

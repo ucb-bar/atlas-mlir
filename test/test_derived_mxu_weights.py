@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_mxu as mxu
 from atlas_model_schema import validate_mxu_weight_timing
 from atlas_validate_mxu_weights import validate_weight_timing
-from model_evidence import isolate_model_imports
+from model_evidence import NativeModelFixture
 
 
 def weight_fixture():
@@ -40,15 +40,7 @@ class WeightSchemaTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native weight checks")
-class NativeWeightTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        import torch
-        torch.set_num_threads(1)
-        from atlas_model_timing import configuration
-        cls.cfg, _ = configuration()
-
+class NativeWeightTest(NativeModelFixture, unittest.TestCase):
     def test_exact_pe_windows_and_output_column_row_unions(self):
         self.assertEqual(mxu.derive_weight_timing(self.cfg), weight_fixture())
         facts = mxu.derive_weight_timing(self.cfg)

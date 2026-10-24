@@ -1,11 +1,9 @@
 """Source dependency closure and conservative semantic normalization."""
 import ast
 import builtins
-import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +11,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 import atlas_model_semantics as semantics
 from atlas_model_diagnostics import UnsupportedModelTiming
+from model_evidence import semantic_sources, copy_model_sources
 
 
 class NormalizationTest(unittest.TestCase):
@@ -104,28 +103,10 @@ class NormalizationTest(unittest.TestCase):
 class DependencyClosureTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        manifest = json.loads((TOOLS / "model-semantics.json").read_text())
-        cls.sources = {}
-        for relative in manifest["files"]:
-            path = cls.model / "npu_model" / relative
-            if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-                raise AssertionError("prohibited source path")
-            if ".." in path.parts:
-                raise AssertionError("source parent traversal")
-            for parent in reversed((path, *path.parents)):
-                if parent.is_symlink():
-                    raise AssertionError("source symlink")
-            cls.sources[relative] = path.read_text()
+        cls.sources = semantic_sources(Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]))
 
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.copy = Path(self.directory.name)
-        for relative, source in self.sources.items():
-            path = self.copy / "npu_model" / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(source)
+        _, self.copy = copy_model_sources(self, self.sources)
 
     def reject_mutation(self, relative, old, new):
         original = self.sources[relative]
