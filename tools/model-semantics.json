@@ -175,7 +175,7 @@
       "helpers": {}
     },
     "configs/isa_definition.py": {
-      "bindings": "d8efa4b9f77733819849f012a216f57cc5c58f28179a9c1cb90c504e322c021a",
+      "bindings": "077903cb76801a18f7df54eaf23379fcd0a1712a08bd5c79be4f25967d443de4",
       "helpers": {
         "ADD.exec": "1661a1b6f60471976e3c70074aed7b85a0f2d117a36b2aee8d7c609408e302cd",
         "ADDI.exec": "f8286801fc6cea2452b640e58a3136ea0dc9900cc957f0fe485d581c7d287167",
@@ -467,7 +467,7 @@
       }
     },
     "isa.py": {
-      "bindings": "7ed6bbadd6d1d67bccb3f5acd6b7160b24540fb24bafc5b39e1e5eba00585229",
+      "bindings": "41a9ffc6f6ce976c68642bb989846896f9afbadded4f8c9a0e0519e21674aa69",
       "helpers": {
         "CSRType.__init_subclass__": "38da4362f7150c384355565e15cdea0e40410097950037206a12d9270a5bc621",
         "CSRType.to_bytecode": "5160c00c419754fd511968bcc5dc4d24caf82f5a8c69eb1c0ad9d7acfc02731b",
@@ -533,7 +533,7 @@
       }
     },
     "isa_types.py": {
-      "bindings": "e1e98b42ab8166f9398ccddb8362414824a9596f6b2302bb0daa5080bf5f9432",
+      "bindings": "f376b97b301de40a777cb47418e9623c346b2b384333a9caa45fe245ac1a4074",
       "helpers": {
         "AsmError.__init__": "9685c328e1160fc67627675eb157376af08e2ee39b08a1559306a68120a8c04b",
         "BoundedInt.__new__": "918547c4faeca9a777340bb8c2d70baa0c847a66725422d620c6205f7c575fe5",

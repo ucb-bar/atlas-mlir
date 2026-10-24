@@ -19,36 +19,38 @@ class UnsupportedVPU(UnsupportedModelTiming):
 
 
 def _normalize_slot_capacity(tree):
-    """Extract paired source slot literals and normalize only their AST sites.
+    """Read the reviewed ISSUE_SLOTS constant and guard its two consumers.
 
-    The bounded native saturation fixtures currently cover one through three
-    slots. Geometry, logic sharing, and the slot admission predicate stay
-    guarded in full; a config attribute or a refactored predicate needs review.
+    Native saturation fixtures cover one through three slots. Only the module
+    constant is normalized; range(ISSUE_SLOTS), len(live) == ISSUE_SLOTS and all
+    admission/row-planning control flow remain protected by the complete AST.
     """
-    from atlas_derive_mxu import _assignment, _method, _one
+    from atlas_derive_mxu import _assignment, _method, _one, _name
     cls = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
                 and n.name == "VectorExecutionUnit"), "VPU class")
+    capacity = _assignment(tree, "ISSUE_SLOTS")
+    if (not isinstance(capacity.value, ast.Constant) or type(capacity.value.value) is not int
+            or not 1 <= capacity.value.value <= 3):
+        raise UnsupportedVPU("unsupported VPU source slot capacity (requires 1..3)")
+    slots = list(range(capacity.value.value))
     slot = _assignment(_method(cls, "_accept"), "slot")
     try:
         generator = slot.value.args[0]
         iterator = generator.generators[0].iter
-        slots = ast.literal_eval(iterator)
-    except (AttributeError, IndexError, TypeError, ValueError) as error:
+    except (AttributeError, IndexError, TypeError) as error:
         raise UnsupportedVPU("unsupported VPU source slot generator") from error
-    if (not isinstance(generator, ast.GeneratorExp) or not isinstance(slots, tuple)
-            or any(type(value) is not int for value in slots)
-            or slots != tuple(range(len(slots))) or not 1 <= len(slots) <= 3):
-        raise UnsupportedVPU("unsupported VPU source slot identifiers (requires 1..3 consecutive slots)")
+    if (not isinstance(generator, ast.GeneratorExp) or not isinstance(iterator, ast.Call)
+            or not _name(iterator.func, "range") or len(iterator.args) != 1
+            or iterator.keywords or not _name(iterator.args[0], "ISSUE_SLOTS")):
+        raise UnsupportedVPU("unsupported VPU source slot identifiers")
     count = _one((n for n in ast.walk(_method(cls, "_issue_blocked"))
                   if isinstance(n, ast.Compare) and isinstance(n.left, ast.Call)
                   and isinstance(n.left.func, ast.Name) and n.left.func.id == "len"), "VPU slot count")
     if (len(count.ops) != 1 or not isinstance(count.ops[0], ast.Eq) or len(count.comparators) != 1
-            or not isinstance(count.comparators[0], ast.Constant)
-            or type(count.comparators[0].value) is not int or count.comparators[0].value != len(slots)):
+            or not _name(count.comparators[0], "ISSUE_SLOTS")):
         raise UnsupportedVPU("VPU issue capacity differs from its source slots")
-    count.comparators[0] = ast.Constant(value=2)
-    generator.generators[0].iter = ast.Tuple(elts=[ast.Constant(value=0), ast.Constant(value=1)], ctx=ast.Load())
-    return list(slots)
+    capacity.value = ast.Constant(value=2)
+    return slots
 
 
 def _check_source(module, *, latency_table=False):

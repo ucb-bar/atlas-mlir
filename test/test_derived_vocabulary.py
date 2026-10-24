@@ -187,6 +187,17 @@ class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
         with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "stale: vpu_operand_roles"):
             vocabulary.validate_vocabulary(self.cfg, changed)
 
+    def test_bundle_adapter_refuses_unrepresentable_base_or_immediate_fields(self):
+        from types import SimpleNamespace
+        from npu_model.isa_types import Bundled, ExponentReg, Imm12, Imm16, Named, ScalarReg
+        scalar, imm12 = Named(ScalarReg, "rs1"), Named(Imm12, "imm")
+        for bundle in (Bundled(Named(ExponentReg, "rs1"), imm12), Bundled(Named(ScalarReg, "rs2"), imm12),
+                       Bundled(scalar, Named(Imm16, "imm")), Bundled(scalar, Named(Imm12, "other"))):
+            operation = SimpleNamespace(mnemonic="test.bundle", params=[bundle])
+            with self.subTest(bundle=bundle.format_arg()), self.assertRaisesRegex(
+                    vocabulary.UnsupportedVocabulary, "unsupported bundled assembly operand"):
+                vocabulary._compiler_operands(operation)
+
 
 if __name__ == "__main__":
     unittest.main()

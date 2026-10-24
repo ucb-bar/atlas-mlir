@@ -4,6 +4,8 @@
 
 ## Regenerate and validate
 
+The qualified NPU Model revision and source digest are recorded in `tools/model-timing.lock.json`. Facts from other revisions must be regenerated, not relabeled; changes to guarded source structure refuse.
+
 In the selected model's Python environment, run:
 
 ```sh

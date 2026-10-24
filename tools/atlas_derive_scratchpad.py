@@ -67,7 +67,8 @@ _SHAPES = {('vpu.py', 'VectorExecutionUnit', '_read'): 'e083516d26264797ff20dfd2
  ('mxu.py', '_MatrixExecutionUnit', 'tick'): '5e30aecc76ffe9b89c745c9e1fa591821560a7c9e3a1f96bf5fb6affce257db8',
  ('lsu.py', 'LoadStoreUnit', '_tick_scalar'): '0b10a168b3ae77b090fd75a869ac26e618395b331420bd139c08ccbe96a8dc87',
  ('lsu.py', 'LoadStoreUnit', '_tick_vector'): '0ec17a2290c9036a9b809ec004bf27aa4eb995d81dca2c483e5fdd4cfa1ce692',
- ('xlu.py', 'CrossLaneExecutionUnit', 'tick'): 'd0d7eed5f87c49e5d4b8d59f1271c535aedb620098eaa01fb55bd38e4f26264a',
+ # TRANSPOSE_CYCLES replaces only completion/delay literals; sample sites unchanged.
+ ('xlu.py', 'CrossLaneExecutionUnit', 'tick'): 'fcfef094195d58c7db5076d7c0b4d425a37d29ddaee537d22fe8a1bde40c2162',
  ('dma.py', 'DmaExecutionUnit', 'tick'): '10e7114c0424562758f87c02178d9d6f77b1e3d1a41a90a4c93794f3a4b08944'}
 
 

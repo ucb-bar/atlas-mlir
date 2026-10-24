@@ -4,24 +4,29 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
+import atlas_derive_memory as memory
 import atlas_derive_overlap as overlap
-from atlas_derive_mxu import _plan, UnsupportedMXU
+from atlas_derive_mxu import _method, _one, _plan, UnsupportedMXU
 from atlas_derive_vpu import _normalize_slot_capacity, UnsupportedVPU
 from test_derive_overlap import fixtures
 
 
 def slot_source(count, slots=None):
     return ast.parse(f"""
+ISSUE_SLOTS = {count!r}
 class VectorExecutionUnit:
     def _accept(self, uop):
-        slot = next(index for index in {tuple(range(count)) if slots is None else slots!r}
+        slot = next(index for index in {'range(ISSUE_SLOTS)' if slots is None else repr(slots)}
                     if all(op.slot != index for op in live))
     def _issue_blocked(self, name, cycle):
-        return bool(live and (len(live) == {count} or self._double(name)))
+        return bool(live and (len(live) == ISSUE_SLOTS or self._double(name)))
 """)
 
 
@@ -94,18 +99,40 @@ class CapacitySourceTests(unittest.TestCase):
         for value in (0, 65, "True", "self.config.depth"):
             with self.subTest(value=value), self.assertRaises(UnsupportedMXU):
                 _plan(source.replace("inflight_depth = 3", f"inflight_depth = {value}"))
-        with self.assertRaises(UnsupportedMXU):
-            _plan(source.replace("len(compute) >= self.inflight_depth", "len(compute) > self.inflight_depth"))
-        with self.assertRaises(UnsupportedMXU):
-            _plan(source.replace("op.issued < 32", "op.issued < 16"))
+        for old, new in (("len(compute) >= self.inflight_depth", "len(compute) > self.inflight_depth"),
+                         ("PORT_CYCLES = 32", "PORT_CYCLES = 16"),
+                         ('"weight": ((1,), (0,))', '"weight": ((0,), (1,))'),
+                         ('"push_bf16": ((0, 1),)', '"push_bf16": ((0,),)'),
+                         ("all(free(port) for port in choice)", "any(free(port) for port in choice)")):
+            with self.subTest(mutation=new), self.assertRaises(UnsupportedMXU):
+                _plan(source.replace(old, new))
 
     def test_only_exact_slot_parameter_positions_bypass_shape_pin(self):
         source = self.source("vpu.py")
         for slots in (1, 2, 3):
-            changed = source.replace("len(live) == 2", f"len(live) == {slots}").replace("index in (0, 1)", f"index in {tuple(range(slots))}")
+            changed = source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")
             overlap._guard_ast(ast.parse(changed), "vpu.py")
-        with self.assertRaises(ValueError):
-            overlap._guard_ast(ast.parse(source.replace("cycle - op.issued < op.write_last", "cycle - op.issued <= op.write_last")), "vpu.py")
+        for old, new in (("cycle - op.issued < op.write_last", "cycle - op.issued <= op.write_last"),
+                         ("return VPU_OP_LATENCIES[mnemonic] - 1", "return VPU_OP_LATENCIES[mnemonic]")):
+            with self.subTest(mutation=new), self.assertRaises(ValueError):
+                overlap._guard_ast(ast.parse(source.replace(old, new)), "vpu.py")
+
+    def test_xlu_duration_is_resolved_after_complete_source_review(self):
+        source = self.source("xlu.py")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "xlu.py"
+            path.write_text(source)
+            with patch.object(memory.inspect, "getsourcefile", return_value=str(path)):
+                tree = memory._source(SimpleNamespace())
+                cls = _one((node for node in tree.body if isinstance(node, ast.ClassDef)
+                            and node.name == "CrossLaneExecutionUnit"), "XLU class")
+                predicates = memory._predicates(_method(cls, "tick"))
+                self.assertEqual([memory._ages(node, 32)["last_age"] for node in predicates], [32, 33, 65, 65])
+                for old, new in (("TRANSPOSE_CYCLES = 66", "TRANSPOSE_CYCLES = 65"),
+                                 ("TRANSPOSE_CYCLES - 1 - age", "TRANSPOSE_CYCLES - age")):
+                    path.write_text(source.replace(old, new))
+                    with self.subTest(mutation=new), self.assertRaises(memory.UnsupportedMemory):
+                        memory._source(SimpleNamespace())
 
 
 if __name__ == "__main__":

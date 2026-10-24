@@ -215,6 +215,14 @@ class DependencyClosureTest(unittest.TestCase):
         with self.assertRaises(UnsupportedModelTiming):
             semantics.check_model_semantics(self.copy)
 
+    def test_functional_metadata_and_bundle_grammar_bindings_fail_closed(self):
+        # Neither functional metadata nor assembly grammar is ignored by
+        # normalization, even though the benchmark encoding is unchanged.
+        self.reject_mutation("isa.py", "functional: bool = True", "functional: bool = False")
+        self.reject_mutation("isa.py", "    functional: bool = True\n", "")
+        self.reject_mutation("configs/isa_definition.py", "functional = False", "functional = True")
+        self.reject_mutation("isa_types.py", "-?(?:0[xX]", "+?(?:0[xX]")
+
     def test_selected_source_comment_and_docstring_changes_are_accepted(self):
         baseline = semantics.check_model_semantics(self.copy)
         path = self.copy / "npu_model" / "hardware/core.py"

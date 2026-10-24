@@ -145,37 +145,28 @@ def extract_contract(model, facts):
         _guard_ast(tree, name)
     base = _named(mxu, "_MatrixExecutionUnit")
     accept = _method(base, "_accept")
-    active = _age_bound(_assignment(accept, "active").value, ast.Lt)
+    active = _literal(_assignment(mxu, "PORT_CYCLES").value)
     acc_push_last = _age_bound(_assignment(accept, "acc_pushes").value, ast.LtE)
     weight_drain_last = _age_bound(_guard(accept, "same slot drained"), ast.LtE)
     acc_forward = _age_bound(_guard(accept, "cycle after a push"), ast.Lt)
-    ports = sorted((n for n in ast.walk(accept) if isinstance(n, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id == "ports" for t in n.targets)), key=lambda n: n.lineno)
-    if len(ports) != 4 or not all(isinstance(n.value, ast.IfExp) for n in ports[2:]):
+    # _plan guarded the complete selection loop and table. The existing rule
+    # schema expresses fixed ports plus a shared single-push preference list.
+    choices = ast.literal_eval(_assignment(mxu, "PORT_CHOICES").value)
+    fixed = ("compute", "push_bf16", "pop_bf16", "pop_fp8")
+    if (set(choices) != {*fixed, "weight", "push_fp8"}
+            or any(not isinstance(choices[kind], tuple) or len(choices[kind]) != 1 for kind in fixed)
+            or choices["weight"] != choices["push_fp8"]
+            or any(not isinstance(choice, tuple) or len(choice) != 1 for choice in choices["weight"])):
         raise ValueError("unsupported MXU sequencer port selection")
-    port_roles = dict(compute=list(ast.literal_eval(ports[0].value)),
-                      push_bf16=list(ast.literal_eval(ports[1].value)),
-                      pop_bf16=list(ast.literal_eval(ports[2].value.body)),
-                      pop_fp8=list(ast.literal_eval(ports[2].value.orelse)))
-    priority = [ast.literal_eval(ports[3].value.body)[0], ast.literal_eval(ports[3].value.orelse)[0]]
+    port_roles = {kind: list(choices[kind][0]) for kind in fixed}
+    priority = [choice[0] for choice in choices["weight"]]
     if any(type(port) is not int or not 0 <= port < 4 for values in [*port_roles.values(), priority] for port in values):
         raise ValueError("unsupported MXU sequencer port identifiers")
     depths = {unit: _literal(_assignment(_named(mxu, cls), "inflight_depth").value)
               for unit, cls in (("mxu0", "MatrixExecutionUnitSystolic"), ("mxu1", "MatrixExecutionUnitInner"))}
-    vclass = _named(vpu, "VectorExecutionUnit")
-    slot_assignment = _assignment(_method(vclass, "_accept"), "slot")
-    slot_generator = slot_assignment.value.args[0]
-    if not isinstance(slot_generator, ast.GeneratorExp):
-        raise ValueError("unsupported VPU slot generator")
-    slots = list(ast.literal_eval(slot_generator.generators[0].iter))
-    if slots != list(range(len(slots))) or any(type(value) is not int for value in slots):
-        raise ValueError("unsupported VPU slot identifiers")
-    busy = _method(vclass, "_issue_blocked")
-    busy_count = _one((_literal(n.comparators[0]) for n in ast.walk(busy)
-                      if isinstance(n, ast.Compare) and isinstance(n.left, ast.Call)
-                      and isinstance(n.left.func, ast.Name) and n.left.func.id == "len"), "VPU slot count")
-    if busy_count != len(slots):
-        raise ValueError("VPU issue capacity differs from its slots")
+    from atlas_derive_vpu import _normalize_slot_capacity
+    slots = _normalize_slot_capacity(deepcopy(vpu))
+    busy_count = len(slots)
     mnemonic_to_block = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["vpu_blocks"]}
     groups = [sorted(mnemonic_to_block[name] for name in group)
               for group in ast.literal_eval(_assignment(vpu, "_GROUPS").value)]
@@ -207,7 +198,7 @@ def extract_contract(model, facts):
         mreg=dict(logical_release="next_begin_cycle", bank="reg_mod_32", row="reg_div_32_times_32_plus_row",
                   ports="one_read_one_write_different_rows", vload_may_write_during_read=True),
         vocabulary_sha256=sha256(canonical(VOCABULARY)),
-        source_change_policy="reviewed_full_AST;normalized_MXU_timing_and_tracker_literals;paired_VPU_slot_literals",
+        source_change_policy="reviewed_full_AST;normalized_MXU_timing_and_tracker_literals;VPU_ISSUE_SLOTS_constant",
         operand_domain="aligned_BF16_pairs;complete_legal_MXU_VPU_and_VPU_XLU_cross_command_relations")
     # Row indexing and physical bank geometry remain explicitly supported only
     # at 32. Tracker/slot literals above are source parameters, not config knobs.

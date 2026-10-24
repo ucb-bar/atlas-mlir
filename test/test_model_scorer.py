@@ -1,5 +1,6 @@
 """Selected-model identity, decoding and execution failures must fail closed."""
 from copy import deepcopy
+from io import StringIO
 import json
 import pickle
 import os
@@ -95,14 +96,60 @@ class ModelScorerTest(unittest.TestCase):
     def program(self, words):
         return dict(model_evidence=self.evidence, instructions=[dict(word_u32=word) for word in words])
 
-    def test_shift_immediate_decodes_without_function_bits(self):
+    def decode(self, word):
         from npu_model.configs import isa_definition as isa
+        row, = decode_binary(self.inventory, word.to_bytes(4, "little"))["instructions"]
+        instruction = model_instruction(row, self.inventory, isa)
+        self.assertEqual(instruction.to_bytecode(), word)
+        return row, instruction
+
+    def test_shift_immediate_decodes_without_function_bits(self):
         for word in (0x40115093, 0x00115093, 0x00111093):
             with self.subTest(word=word):
-                row = decode_binary(self.inventory, word.to_bytes(4, "little"))["instructions"][0]
-                instruction = model_instruction(row, self.inventory, isa)
-                self.assertEqual(instruction.to_bytecode(), word)
+                _, instruction = self.decode(word)
                 self.assertEqual(instruction.imm & 31, 1)
+
+    def test_every_selected_encoding_reencodes_through_the_model(self):
+        for mode in self.inventory["variants"]:
+            # Coverage of canonical zero-operand patterns does not qualify all
+            # reserved-field combinations or execute the instruction.
+            word = int(mode["rtl_bitpat"].replace("?", "0"), 2)
+            with self.subTest(mode=mode["id"]):
+                row, _ = self.decode(word)
+                self.assertEqual(row["mode_id"], mode["id"])
+
+    def test_nonzero_exponent_operand_survives_decode_and_reencoding(self):
+        from npu_model.util.converter import stream_to_instrs
+        for assembly in ("vpack.bf16.fp8 m7, m34, e31", "vmatpop.fp8.acc.mxu0 m9, acc1, e17",
+                         "vmatpop.fp8.acc.mxu1 m11, acc1, e23"):
+            original, = stream_to_instrs(StringIO(assembly))
+            with self.subTest(assembly=assembly):
+                row, instruction = self.decode(original.to_bytecode())
+                self.assertEqual(row["fields"]["scale_reg"], int(original.es1))
+                self.assertEqual(instruction.es1, original.es1)
+
+    def test_signed_bundled_offsets_preserve_the_encoded_memory_operands(self):
+        from npu_model.util.converter import stream_to_instrs
+        for mnemonic, register in (("lw", "x4"), ("sw", "x4"), ("seld", "e4"), ("vload", "m35"), ("vstore", "m35")):
+            for literal, expected in (("-2048", -2048), ("-1", -1), ("-0x10", -16),
+                                      ("-0b100", -4), ("-0o10", -8), ("2047", 2047)):
+                assembly = f"{mnemonic} {register}, {literal}(x3)"
+                original, = stream_to_instrs(StringIO(assembly))
+                with self.subTest(assembly=assembly):
+                    row, instruction = self.decode(original.to_bytecode())
+                    self.assertEqual(row["fields"]["offset"], expected)
+                    self.assertEqual(instruction.rs1, 3)
+                    # Constructors accept both signed values and their 12-bit
+                    # encoding; native memory access sign-extends those bits.
+                    self.assertEqual(instruction.imm & 0xfff, expected & 0xfff)
+
+    def test_functional_flags_do_not_remove_true_isa_decoding(self):
+        from npu_model.isa import IsaSpec
+        for operation in IsaSpec.operations.values():
+            self.assertIs(type(operation.functional), bool)
+        for word in (0x00001067, 0x00000073, 0x00100073, 0x0200007f):
+            with self.subTest(word=word):
+                self.decode(word)
 
     def test_runtime_receipt_records_imported_versions_and_curve_content(self):
         import platform

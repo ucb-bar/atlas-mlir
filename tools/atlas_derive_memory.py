@@ -49,6 +49,19 @@ def _source(module):
     digest = ast_digest(tree)
     if digest != SOURCE_SHAPES[path.rsplit("/", 1)[-1]]:
         raise UnsupportedMemory("unsupported LSU/XLU control-flow semantics")
+    if path.rsplit("/", 1)[-1] == "xlu.py":
+        # The full AST above guards the declaration and every use. Resolve the
+        # reviewed public duration before interpreting the age expressions.
+        from atlas_derive_mxu import _assignment
+        duration = _assignment(tree, "TRANSPOSE_CYCLES").value
+        if not isinstance(duration, ast.Constant) or type(duration.value) is not int:
+            raise UnsupportedMemory("unsupported XLU transpose duration")
+        class ResolveDuration(ast.NodeTransformer):
+            def visit_Name(self, node):
+                if isinstance(node.ctx, ast.Load) and node.id == "TRANSPOSE_CYCLES":
+                    return deepcopy(duration)
+                return node
+        tree = ResolveDuration().visit(tree)
     return tree
 
 

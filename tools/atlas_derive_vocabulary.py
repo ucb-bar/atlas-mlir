@@ -36,13 +36,18 @@ _PLANNER_RESOURCES = dict(mrf="MReg", wb="Weight", acc="Acc")
 
 def _compiler_operands(cls):
     """Translate the model's assembly parameter order into compiler tokens."""
-    from npu_model.isa_types import Bundled
+    from npu_model.isa_types import Bundled, Imm12, ScalarReg
     prefixes = dict(MatrixReg="m", WeightBuffer="w", Accumulator="a",
                     ExponentReg="e", ScalarReg="x")
     suffixes = dict(rd="d", rs1="1", rs2="2")
     tokens = []
     for parameter in cls.params:
         if isinstance(parameter, Bundled):
+            # The compiler's @ token means exactly imm12(rs1). A different
+            # bundle cannot be represented by the same assembly adapter.
+            if (parameter.reg.inner is not ScalarReg or parameter.reg.repr != "rs1"
+                    or parameter.imm.inner is not Imm12 or parameter.imm.repr != "imm"):
+                raise UnsupportedVocabulary(f"unsupported bundled assembly operand for {cls.mnemonic}")
             tokens.append("@")
             continue
         name = parameter.inner.__name__
