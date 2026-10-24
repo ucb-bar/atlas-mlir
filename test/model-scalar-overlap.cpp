@@ -1,3 +1,4 @@
+#include "ModelTimingTestSupport.h"
 #include "Atlas/AtlasModelPairs.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasPackLoop.h"
@@ -6,30 +7,18 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/Builders.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/JSON.h"
-#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
+using namespace model_timing_test;
 namespace {
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 int failures = 0;
 void check(bool good, const char *message) {
   if (!good) { ++failures; llvm::errs() << "FAIL: " << message << '\n'; }
-}
-std::string encode(Object value) {
-  std::string bytes;
-  llvm::raw_string_ostream stream(bytes);
-  stream << llvm::json::Value(std::move(value));
-  return bytes;
-}
-std::string hash(llvm::StringRef bytes) {
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  return llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
 }
 Object group(int age) { return Object{{"first_age", age}, {"last_age", age}, {"count", 1}, {"step", 1}}; }
 Object scalarBlock(const char *name, bool store) {
@@ -44,7 +33,7 @@ Object relation(const char *first = "lw", const char *second = "sw") {
       {"scalar_registers", "independent"}, {"scalar_address_alignment", "word"},
       {"vmem_bank", "same"}, {"vmem_window", "disjoint"}};
 }
-Object pair(const char *first, const char *second, Object rel, int minimum, int boundary, int index) {
+Object pair(const char *first, const char *second, Object rel, int minimum, int boundary) {
   return Object{{"first", first}, {"second", second}, {"relation", std::move(rel)},
                 {"minimum", minimum}, {"high", boundary}};
 }
@@ -134,7 +123,7 @@ int testScalarOverlap(Object perOp) {
   auto commands = replay(context, {load, store}, entry);
   check(commands[0].context && commands[1].context, "scalar pair has complete replay contexts");
   auto overlap = parse(projection(*facts, model,
-      Array{pair("scalar_lsu.load", "scalar_lsu.store", relation(), 1, 4, 0)}), *facts);
+      Array{pair("scalar_lsu.load", "scalar_lsu.store", relation(), 1, 4)}), *facts);
   if (!overlap) return failures + 1;
   check(overlap->admits(commands, false), "independent LW to SW admits gap one");
   commands[1].issue = 4;
@@ -189,7 +178,7 @@ int testScalarOverlap(Object perOp) {
     if (std::string(mode) == "shared_base_read_only") { b.rs1 = 10; rel["vmem_window"] = "same"; }
     else rel["scalar_destination_file"] = "xrf";
     auto qualified = parse(projection(*facts, model, Array{pair(storeFirst ? "scalar_lsu.store" : "scalar_lsu.load",
-        "scalar_lsu.load", std::move(rel), 1, storeFirst ? 2 : 4, 0)}), *facts);
+        "scalar_lsu.load", std::move(rel), 1, storeFirst ? 2 : 4)}), *facts);
     auto witness = replay(context, {a, b}, entry, {{findOp("lui"), 10, 0, 0, 64}});
     check(qualified && qualified->admits(witness, false),
           "published directional scalar register mode matches its complete roles");
@@ -201,7 +190,7 @@ int testScalarOverlap(Object perOp) {
 
   auto loads = replay(context, {load, Instr{findOp("lw"), 17, 11, 0, 0}}, entry);
   auto loadPair = parse(projection(*facts, model,
-      Array{pair("scalar_lsu.load", "scalar_lsu.load", relation("lw", "lw"), 3, 4, 0)}), *facts);
+      Array{pair("scalar_lsu.load", "scalar_lsu.load", relation("lw", "lw"), 3, 4)}), *facts);
   loads[1].issue = 2;
   check(loadPair && !loadPair->admits(loads, false), "load pair rejects one-short gap two");
   loads[1].issue = 3;

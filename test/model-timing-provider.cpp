@@ -1,3 +1,4 @@
+#include "ModelTimingTestSupport.h"
 #include "Atlas/AtlasModelTiming.h"
 #include "Atlas/AtlasModelVocabulary.h"
 #include "Atlas/AtlasModelPairs.h"
@@ -5,10 +6,7 @@
 #include "Atlas/AtlasStream.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/JSON.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <climits>
@@ -17,6 +15,7 @@
 using namespace mlir;
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
+using namespace model_timing_test;
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 
@@ -30,12 +29,6 @@ void check(bool passed, llvm::StringRef what) {
   ++failures;
   llvm::errs() << "FAIL: " << what << '\n';
 }
-std::string hash(llvm::StringRef bytes) {
-  auto digest = llvm::SHA256::hash(llvm::ArrayRef<uint8_t>(
-      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
-  return llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
-}
-
 Object group(int first, int count, int step = 1) {
   return Object{{"first_age", first}, {"last_age", first + (count - 1) * step}, {"count", count}, {"step", step}};
 }
@@ -256,12 +249,6 @@ Object fixture() {
           {"observation", Object{{"accepted", true}, {"drained", true}}},
           {"op_timing", std::move(operations)}, {"dma_timing", dmaFixture()}};
 }
-std::string encode(Object object) {
-  std::string bytes;
-  llvm::raw_string_ostream stream(bytes);
-  stream << llvm::json::Value(std::move(object));
-  return bytes;
-}
 // Internal parser fixtures exercise the production validation code. They are
 // deliberately constructed test data and are never exported by --fixture.
 void sealContractFixture(Object &object) {
@@ -383,17 +370,18 @@ Object dmaAdmissionFixture(const Object &object) {
 }
 
 
+Object release(int last, Array banks = {}) {
+  Object value{{"first_age", 0}, {"release_age", last}, {"available_age", last + 1}};
+  if (!banks.empty()) value["banks"] = std::move(banks);
+  return value;
+}
+
 Object contractFixture() {
   Object object = fixture();
   object.erase("test_only");
   (*object.getObject("model"))["revision_kind"] = "locked_source";
   object["vocabulary_sha256"] = model_schema::vocabularySha256();
   object["op_timing"] = Array{(*object.getArray("op_timing"))[0]};
-  auto release = [](int age, Array banks = {}) {
-    Object value{{"first_age", 0}, {"release_age", age}, {"available_age", age + 1}};
-    if (!banks.empty()) value["banks"] = std::move(banks);
-    return value;
-  };
   object["reservation_releases"] = Object{{"vpu.mov", Object{
       {"unit", release(72)}, {"mreg_read", release(64, Array{0, 1})},
       {"mreg_write", release(72, Array{4, 5})}}}};
@@ -436,6 +424,7 @@ struct InvalidFact {
   std::string path;
   llvm::json::Value value = nullptr;
   bool remove = false;
+  const char *diagnostic = nullptr;
 };
 
 // Paths describe fixture mutations only; every row gets a fresh copy and pin.
@@ -463,11 +452,11 @@ void invalidFacts(Object original, std::initializer_list<InvalidFact> cases, Rej
     }
     if (test.remove) parent->erase(path);
     else (*parent)[path] = test.value;
-    reject(std::move(object), test.why);
+    reject(std::move(object), test.why, test.diagnostic);
   }
 }
 void rejectedFacts(Object original, std::initializer_list<InvalidFact> cases) {
-  invalidFacts(std::move(original), cases, [](Object object, const char *why) {
+  invalidFacts(std::move(original), cases, [](Object object, const char *why, const char *) {
     rejected(std::move(object), why);
   });
 }
@@ -500,12 +489,21 @@ void testDerivedContract() {
   raw = parse(std::move(unmarked));
   check(!raw, "production parser refuses unmarked raw observations without a derivation contract");
   if (!raw) llvm::consumeError(raw.takeError());
-  auto rejects = [&](Object object, const char *why, const char *diagnostic) {
+  auto rejects = [&](Object object, const char *why, const char *diagnostic = nullptr) {
     auto result = parse(std::move(object));
     check(!result, why);
-    if (!result) check(llvm::toString(result.takeError()).find(diagnostic) != std::string::npos, why);
+    if (!result) {
+      auto error = llvm::toString(result.takeError());
+      if (diagnostic) check(error.find(diagnostic) != std::string::npos, why);
+    }
   };
-  invalidFacts(contractFixture(), {
+  auto rejectMutations = [&](bool reseal, std::initializer_list<InvalidFact> cases) {
+    invalidFacts(contractFixture(), cases, [&](Object object, const char *why, const char *diagnostic) {
+      if (reseal) sealContractFixture(object);
+      rejects(std::move(object), why, diagnostic);
+    });
+  };
+  rejectMutations(false, {
       {"versioned contract required", "derivation_contract/schema", "atlas.derived_facts.v0"},
       {"measured derivation refuses production", "derivation_contract/derivation/kind", "measured"},
       {"failed operation validation refuses production", "validation/passed", false},
@@ -514,26 +512,15 @@ void testDerivedContract() {
       {"stale semantic input binding rejects", "dma_timing/startup_cycles/load", 8},
       {"stale DMA validation payload rejects", "dma_timing/validation/payload_sha256", std::string(64, 'b')},
       {"self-reported DMA report cannot replace payload binding", "dma_timing/validation/payload_sha256", nullptr, true},
-      {"test-only contract refuses production", "test_only", true}},
-      [&](Object object, const char *why) {
-        auto result = parse(std::move(object));
-        check(!result, why);
-        if (!result) llvm::consumeError(result.takeError());
-      });
-  invalidFacts(contractFixture(), {
+      {"test-only contract refuses production", "test_only", true}});
+  rejectMutations(true, {
       {"DMA source reference must bind its authoritative record", "dma_admission/source_contract_sha256", std::string(64, 'b')},
       {"DMA source copies cannot disagree", "dma_admission/source_sha256/core.py", std::string(64, 'b')},
       {"DMA staging copies cannot disagree", "dma_admission/issue/store_read_to_request_cycles", 1},
       {"DMA proposal Core phase copies cannot disagree", "dma_timing/proposal_contract/source_evidence/core_tick_shape", std::string(64, 'b')},
       {"DMA shared source cannot change supported phase semantics", "dma_timing/source_contract/source_shapes/core.py", std::string(64, 'b')},
       {"DMA frontend issue copy cannot disagree", "dma_timing/source_contract/issue/ordinary_gap", 2},
-      {"VPU metadata capacity is bounded", "engine_admission/vpu/capacity", 4}},
-      [&](Object object, const char *why) {
-        sealContractFixture(object);
-        auto result = parse(std::move(object));
-        check(!result, why);
-        if (!result) llvm::consumeError(result.takeError());
-      });
+      {"VPU metadata capacity is bounded", "engine_admission/vpu/capacity", 4}});
   for (int capacity : {1, 3}) {
     auto metadata = contractFixture();
     (*metadata.getObject("engine_admission")->getObject("vpu"))["capacity"] = capacity;
@@ -577,25 +564,17 @@ void testDerivedContract() {
     sealContractFixture(spoofed);
     rejects(std::move(spoofed), "model metadata cannot override computed proposal identity", "reserved derived provenance");
   }
-  auto alteredProof = contractFixture();
-  (*alteredProof.getObject("proposal_costs")->getObject("timing_class"))["interval_scope"] = "all_operands";
-  sealContractFixture(alteredProof);
-  rejects(std::move(alteredProof), "representative intervals cannot claim universal operand coverage", "timing-class proof");
-  auto missingRelease = contractFixture();
-  missingRelease.getObject("reservation_releases")->getObject("vpu.mov")->erase("mreg_read");
-  sealContractFixture(missingRelease);
-  rejects(std::move(missingRelease), "missing resource coverage rejects even with rebound payload", "resource coverage");
-  auto missingReleases = contractFixture();
-  missingReleases.erase("reservation_releases");
-  sealContractFixture(missingReleases);
-  rejects(std::move(missingReleases), "missing releases reject even with rebound payload", "reservation_releases");
-  auto changed = contractFixture();
-  (*changed.getObject("dma_timing")->getObject("startup_cycles"))["load"] = 8;
-  sealContractFixture(changed);
-  rejects(std::move(changed), "rebound startup cannot disagree with its source contract", "launch/staging/issue");
+  rejectMutations(true, {
+      {"representative intervals cannot claim universal operand coverage", "proposal_costs/timing_class/interval_scope",
+       "all_operands", false, "timing-class proof"},
+      {"missing resource coverage rejects even with rebound payload", "reservation_releases/vpu.mov/mreg_read",
+       nullptr, true, "resource coverage"},
+      {"missing releases reject even with rebound payload", "reservation_releases", nullptr, true, "reservation_releases"},
+      {"rebound startup cannot disagree with its source contract", "dma_timing/startup_cycles/load", 8,
+       false, "launch/staging/issue"}});
   llvm::Expected<ModelTimingFacts> rebound = parse(contractFixture());
   if (!rebound) llvm::consumeError(rebound.takeError());
-  changed = contractFixture();
+  auto changed = contractFixture();
   (*changed.getObject("frontend_timing")->getObject("scalar"))["write_age"] = 3;
   sealContractFixture(changed);
   rebound = parse(std::move(changed));
@@ -618,31 +597,23 @@ void testDerivedContract() {
     rejects(std::move(changed), "source frontend change outside compiler encoding capability refuses precisely",
             "compiler scheduling/encoding capability");
   }
-  changed = contractFixture();
-  (*changed.getObject("scratchpad_contract")->getObject("assumptions"))["scratchpad_read_latency"] = 2;
-  sealContractFixture(changed);
-  rejects(std::move(changed), "changed target response assumption rejects with a precise capability diagnostic", "scratchpad target assumption");
-  changed = contractFixture();
-  changed.erase("mxu_weight_timing");
-  sealContractFixture(changed);
-  rejects(std::move(changed), "production cannot fall back to a hand-chosen weight lifetime", "weight-use windows");
+  rejectMutations(true, {
+      {"changed target response assumption rejects with a precise capability diagnostic",
+       "scratchpad_contract/assumptions/scratchpad_read_latency", 2, false, "scratchpad target assumption"},
+      {"production cannot fall back to a hand-chosen weight lifetime", "mxu_weight_timing",
+       nullptr, true, "weight-use windows"}});
   changed = contractFixture();
   auto *engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
   (*(*engine->getArray("use_rows"))[31].getAsObject())["last_age"] = 93;
   rejects(changed, "changed weight row is rejected before accepting stale validation", "derived semantic payload differs");
   sealContractFixture(changed);
   rejects(std::move(changed), "row projection must agree with source-derived PE windows", "row projection");
-  changed = contractFixture();
-  engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
-  (*engine)["reads_before_writes"] = false;
-  sealContractFixture(changed);
-  rejects(std::move(changed), "unsupported weight edge order refuses", "edge order");
-  changed = contractFixture();
-  changed.getObject("validation")->erase("mxu_weight_validation");
-  rejects(std::move(changed), "missing weight validation refuses", "MXU weight validation");
-  changed = contractFixture();
-  (*changed.getObject("validation")->getObject("mxu_weight_validation"))["passed"] = false;
-  rejects(std::move(changed), "failed weight validation refuses", "MXU weight validation");
+  rejectMutations(true, {
+      {"unsupported weight edge order refuses", "mxu_weight_timing/engines/mxu0/reads_before_writes",
+       false, false, "edge order"}});
+  rejectMutations(false, {
+      {"missing weight validation refuses", "validation/mxu_weight_validation", nullptr, true, "MXU weight validation"},
+      {"failed weight validation refuses", "validation/mxu_weight_validation/passed", false, false, "MXU weight validation"}});
 }
 
 Object derivedFixture(const ModelTimingFacts &facts) {
@@ -776,7 +747,7 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
     check(!unvalidated, "same-unit validation cannot qualify a cross-unit pair");
     if (!unvalidated) llvm::consumeError(unvalidated.takeError());
   } else llvm::consumeError(crossFacts.takeError());
-  auto reject = [&](Object object, const char *why) {
+  auto reject = [&](Object object, const char *why, const char * = nullptr) {
     std::string contents = encode(std::move(object));
     auto result = parseModelOverlapFacts(contents, hash(contents), *facts);
     check(!result, why);
@@ -1127,11 +1098,6 @@ void testVloadWriteDuringRead(const std::shared_ptr<ModelTimingFacts> &facts) {
 } // namespace
 
 void testExplicitReleases() {
-  auto release = [](int last, Array banks = {}) {
-    Object value{{"first_age", 0}, {"release_age", last}, {"available_age", last + 1}};
-    if (!banks.empty()) value["banks"] = std::move(banks);
-    return value;
-  };
   auto sample = fixture();
   sample["op_timing"] = Array{(*sample.getArray("op_timing"))[0]};
   sample["reservation_releases"] = Object{{"vpu.mov", Object{
@@ -1149,21 +1115,13 @@ void testExplicitReleases() {
   auto dependency = provider.dependence(first, a, second, b);
   check(dependency.error.empty() && dependency.value.distance == 65,
         "a conflicting write rejects the release edge and admits only the next age");
-  for (const char *field : {"release_age", "available_age"}) {
-    auto bad = Object(sample);
-    (*bad.getObject("reservation_releases")->getObject("vpu.mov")->getObject("unit"))[field] = 71;
-    rejected(std::move(bad), "unit reservation must match isolated drain and next-cycle availability");
-  }
+  rejectedFacts(sample, {
+      {"unit reservation must match isolated drain and next-cycle availability", "reservation_releases/vpu.mov/unit/release_age", 71},
+      {"unit reservation must match isolated drain and next-cycle availability", "reservation_releases/vpu.mov/unit/available_age", 71},
+      {"partial reservation coverage rejects", "reservation_releases", Object{}},
+      {"duplicate reservation banks reject", "reservation_releases/vpu.mov/mreg_read/banks", Array{0, 0}},
+      {"reservation banks must match canonical operand probes, not only their count", "reservation_releases/vpu.mov/mreg_read/banks", Array{0, 2}}});
   auto bad = Object(sample);
-  bad["reservation_releases"] = Object{};
-  rejected(std::move(bad), "partial reservation coverage rejects");
-  bad = Object(sample);
-  (*bad.getObject("reservation_releases")->getObject("vpu.mov")->getObject("mreg_read"))["banks"] = Array{0, 0};
-  rejected(std::move(bad), "duplicate reservation banks reject");
-  bad = Object(sample);
-  (*bad.getObject("reservation_releases")->getObject("vpu.mov")->getObject("mreg_read"))["banks"] = Array{0, 2};
-  rejected(std::move(bad), "reservation banks must match canonical operand probes, not only their count");
-  bad = Object(sample);
   (*bad.getObject("reservation_releases")->getObject("vpu.mov"))["mreg_read"] = release(63, Array{0, 1});
   bytes = encode(std::move(bad));
   parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
@@ -1202,16 +1160,10 @@ void testScalarCosts() {
       block("scalar_lsu.load", "scalar_lsu", 4, Object{{"vmem_read", group(0, 1)}, {"load_write", group(3, 1)}}),
       block("scalar_lsu.store", "scalar_lsu", 2, Object{{"vmem_write", group(0, 1)}}),
       block("scalar_lsu.scale_load", "scalar_lsu", 4, Object{{"vmem_read", group(0, 1)}, {"scale_write", group(3, 1)}})};
-  auto unit = [](int free) {
-    return Object{{"first_age", 0}, {"release_age", free - 1}, {"available_age", free}};
-  };
-  auto port = []() {
-    return Object{{"first_age", 0}, {"release_age", 0}, {"available_age", 1}, {"banks", Array{0}}};
-  };
   sample["reservation_releases"] = Object{
-      {"scalar_lsu.load", Object{{"unit", unit(4)}, {"vmem_read", port()}}},
-      {"scalar_lsu.store", Object{{"unit", unit(2)}, {"vmem_write", port()}}},
-      {"scalar_lsu.scale_load", Object{{"unit", unit(4)}, {"vmem_read", port()}}}};
+      {"scalar_lsu.load", Object{{"unit", release(3)}, {"vmem_read", release(0, Array{0})}}},
+      {"scalar_lsu.store", Object{{"unit", release(1)}, {"vmem_write", release(0, Array{0})}}},
+      {"scalar_lsu.scale_load", Object{{"unit", release(3)}, {"vmem_read", release(0, Array{0})}}}};
   auto parse = [](Object object) -> std::optional<TimingProvider> {
     auto bytes = encode(std::move(object));
     auto facts = parseModelTimingFactsForTesting(bytes, hash(bytes));
@@ -1237,7 +1189,7 @@ void testScalarCosts() {
       Object &entry = *value.getAsObject();
       if (entry.getString("name") == name) entry["first_free_age"] = entry["next_issue_age"] = free;
     }
-    (*changed.getObject("reservation_releases")->getObject(name))["unit"] = unit(free);
+    (*changed.getObject("reservation_releases")->getObject(name))["unit"] = release(free - 1);
     if (auto provider = parse(std::move(changed)))
       costIs(*provider, mnemonic, free, "longer scalar unit releases change costs with unchanged event ages");
     for (bool missingBlock : {false, true}) {

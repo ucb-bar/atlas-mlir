@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
-from model_evidence import isolate_model_imports
+from model_evidence import NativeModelFixture
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -71,13 +71,7 @@ class VocabularyContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for ISA source contracts")
-class NativeVocabularyTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        from atlas_model_timing import configuration
-        cls.cfg, _ = configuration()
-
+class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
     def test_pinned_model_reproduces_vocabulary_without_numerical_execution(self):
         from npu_model.hardware.arch_state import ArchState
         from npu_model.hardware.exu import StagedExecution

@@ -7,31 +7,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_frontend as frontend
-import atlas_derive_scratchpad as scratchpad
-import atlas_model_timing as timing
-from model_evidence import isolate_model_imports
+from model_evidence import ModelSourceFixture
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native source contracts")
-class SourceContractTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        cls.cfg, _ = timing.configuration()
-        from npu_model.isa import EXU
-        root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model"
-        cls.sources = {name: scratchpad.read_source(root / "hardware" / name)
-                       for name, _, _ in frontend._SHAPES.keys()}
-        cls.sources["isa_definition.py"] = scratchpad.read_source(root / "configs/isa_definition.py")
-        cls.scalar = {name: item.__name__ for name, item in cls.cfg.isa.operations.items() if item.exu == EXU.SCALAR}
+class SourceContractTest(ModelSourceFixture, unittest.TestCase):
+    source_shapes = frontend._SHAPES
 
     def derive(self, sources=None, **kwargs):
         return frontend.derive_frontend_sources(sources or self.sources, self.scalar,
                                                 fetch_width=kwargs.get("fetch_width", self.cfg.fetch_width))
-
-    def mutated(self, filename, old, new):
-        self.assertIn(old, self.sources[filename], "mutation must alter the selected model source")
-        return dict(self.sources, **{filename: self.sources[filename].replace(old, new)})
 
     def test_pinned_frontend_contract_and_operand_metadata(self):
         value = self.derive()

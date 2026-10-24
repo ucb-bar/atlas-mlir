@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_curve as curve
 import atlas_model_schema as schema
-from model_evidence import isolate_model_imports
+from model_evidence import NativeModelFixture
 
 
 class CurveContractTest(unittest.TestCase):
@@ -51,13 +51,7 @@ class CurveContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native curve contracts")
-class NativeCurveTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        isolate_model_imports(cls, os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        from atlas_model_timing import configuration
-        cls.cfg, _ = configuration()
-
+class NativeCurveTest(NativeModelFixture, unittest.TestCase):
     def test_derivation_allocates_no_architecture_and_issues_no_beats(self):
         from npu_model.hardware.arch_state import ArchState
         from npu_model.hardware.dma import DmaExecutionUnit

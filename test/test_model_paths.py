@@ -20,16 +20,19 @@ except ModuleNotFoundError:
     curve = None
 
 
+def path_checks(path, manifest):
+    checks = [lambda: scratchpad.read_source(path), lambda: facts.safe_path(path), lambda: mxu._read(path),
+              lambda: vpu._check_source(SimpleNamespace()), manifest,
+              lambda: overlap.safe_path(path), lambda: validator.safe_path(path)]
+    if curve is not None:
+        checks.append(lambda: curve._safe(path))
+    return checks
+
+
 class AccessBoundaryTest(unittest.TestCase):
     def test_all_path_exclusions_precede_filesystem_access(self):
         for name in ("/tmp/HaMmEr-source/facts.json", "/tmp/vLsI/../facts.json"):
-            checks = [lambda: scratchpad.read_source(name), lambda: facts.safe_path(name), lambda: mxu._read(name),
-                      lambda: vpu._check_source(SimpleNamespace()),
-                      lambda: timing.manifest(Path(name), "npu_model")]
-            checks.extend((lambda: overlap.safe_path(name), lambda: validator.safe_path(name)))
-            if curve is not None:
-                checks.append(lambda: curve._safe(name))
-            for check in checks:
+            for check in path_checks(name, lambda: timing.manifest(Path(name), "npu_model")):
                 with self.subTest(name=name, check=check), \
                         patch.object(vpu.inspect, "getsourcefile", return_value=name), \
                         patch.object(Path, "is_symlink", side_effect=AssertionError("looked up excluded path")), \
@@ -72,13 +75,7 @@ class AccessBoundaryTest(unittest.TestCase):
             if path == leaf:
                 self.fail("looked through an unchecked ancestor symlink")
             return path == link
-        checks = [lambda: scratchpad.read_source(leaf), lambda: facts.safe_path(leaf), lambda: mxu._read(leaf),
-                  lambda: vpu._check_source(SimpleNamespace()),
-                  lambda: timing.manifest(link.parent, "link/child.py")]
-        checks.extend((lambda: overlap.safe_path(leaf), lambda: validator.safe_path(leaf)))
-        if curve is not None:
-            checks.append(lambda: curve._safe(leaf))
-        for check in checks:
+        for check in path_checks(leaf, lambda: timing.manifest(link.parent, "link/child.py")):
             with self.subTest(check=check), patch.object(Path, "is_symlink", is_link), \
                     patch.object(vpu.inspect, "getsourcefile", return_value=str(leaf)):
                 with self.assertRaisesRegex((ValueError, RuntimeError), "symlink"):

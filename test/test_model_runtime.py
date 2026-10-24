@@ -5,15 +5,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 from atlas_model_diagnostics import ModelTimingValidationError
-from atlas_validate_runtime import MAX_CYCLES, native_case, runtime_cases, safe_path, validate_runtime
-from model_evidence import isolate_model_imports
+from atlas_validate_runtime import MAX_CYCLES, native_case, runtime_cases, validate_runtime
+from model_evidence import isolate_model_imports, semantic_sources, copy_model_sources
 
 
 class RuntimeValidationBoundsTest(unittest.TestCase):
@@ -116,23 +115,10 @@ class ProductionRuntimeRefusalTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        model = safe_path(os.environ["ATLAS_DERIVE_MODEL_ROOT"])
-        manifest = json.loads((TOOLS / "model-semantics.json").read_text())
-        cls.sources = {}
-        for relative in manifest["files"]:
-            if Path(relative).is_absolute() or ".." in Path(relative).parts:
-                raise AssertionError("guard manifest source must be relative")
-            cls.sources[relative] = safe_path(model / "npu_model" / relative).read_text()
+        cls.sources = semantic_sources(Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]))
 
     def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = safe_path(directory.name)
-        self.model = self.root / "model"
-        for relative, source in self.sources.items():
-            path = safe_path(self.model / "npu_model" / relative)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(source)
+        self.root, self.model = copy_model_sources(self, self.sources, "model")
         # Facts hashes numerical data before checking source semantics. The
         # empty directory permits that read but cannot support native imports.
         (self.model / "npu_model/configs/data").mkdir(parents=True)
