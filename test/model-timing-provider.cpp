@@ -290,17 +290,13 @@ Object replayFixture() {
   auto parsed = llvm::json::parse(search_policy::kReplayProjectionJson);
   assert(parsed && parsed->getAsObject());
   Object result(*parsed->getAsObject());
-  result["schema"] = "atlas.projected_core_replay.v1";
+  result["schema"] = "atlas.projected_core_replay.v2";
   result["source"] = Object{{"schema", "atlas.core_edges.v1"}, {"clock_step", 1},
       {"dma_wait_observes", "previous_edge_flags"}, {"implicit_exu_stalls", false},
       {"source_contract", "atlas.model_frontend.v1"},
       {"phases", Array{"s1_previous_state", "execution_units", "fetch"}},
       {"checked_methods", Array{"Core.tick", "Core._tick_s1"}}};
-  (*result.getObject("projection_policy"))["template_sha256"] = search_policy::kReplayProjectionSHA256;
-  for (const char *stage : {"start", "place"})
-    for (auto &assignment : *result.getArray(stage))
-      for (auto &token : *(*assignment.getAsArray())[1].getAsArray())
-        if (token.getAsString() == "$clock_step") token = 1;
+  (*result.getObject("projection_policy"))["policy_sha256"] = search_policy::kReplayProjectionSHA256;
   return result;
 }
 
@@ -558,6 +554,13 @@ void testDerivedContract() {
     sealContractFixture(missing);
     rejects(std::move(missing), "production proposal facts refuse missing derived extensions", "missing source-derived");
   }
+  rejectMutations(true, {
+      {"old replay bytecode schema refuses", "replay_timing/schema", "atlas.projected_core_replay.v1",
+       false, "schema/source/policy"},
+      {"replay clock remains source checked", "replay_timing/source/clock_step", 2,
+       false, "source edge contract"},
+      {"replay policy cannot select unknown arithmetic", "replay_timing/projection_policy/algorithm", "unknown-v2",
+       false, "declared projection policy"}});
   for (const char *field : {"replay_timing_sha256", "proposal_costs_sha256"}) {
     auto spoofed = contractFixture();
     (*spoofed.getObject("model"))[field] = std::string(64, 'b');

@@ -2,8 +2,7 @@
   "schema": "atlas.search_policy.v1",
   "revision": "bounded-native-selection-v2",
   "algorithms": {
-    "proposal_replay": "atlas.projected_core_replay.v1",
-    "order_neighbors": "dependency-window-insertion-v1",
+    "proposal_replay": "atlas.projected_core_replay.v2",
     "group_neighbors": "dependency-closure-insertion-v1",
     "candidate_ranking": "stable-summed-estimates-prefix-v1",
     "search_restart": "restart-on-any-objective-improvement-v1",
@@ -20,7 +19,6 @@
   "presets": {
     "selection": {
       "max_candidates": 24,
-      "search_evaluations": 0,
       "search_group_evaluations": 0,
       "search_patience": 0,
       "bank_candidates": false,
@@ -29,7 +27,6 @@
     },
     "full": {
       "max_candidates": 32,
-      "search_evaluations": 96,
       "search_group_evaluations": 204,
       "search_patience": 96,
       "bank_candidates": true,
@@ -49,7 +46,6 @@
     "spill_mxu": true,
     "boundary": "boundary",
     "api_max_candidates": 32,
-    "api_search_evaluations": 0,
     "api_search_group_evaluations": 0,
     "api_search_patience": 0,
     "api_pack_reload_candidates": false,
@@ -197,101 +193,9 @@
         "vmem_backpressure",
         "Core_conflict_errors",
         "exact_wait_placement"
-      ]
-    },
-    "start": [
-      [
-        "cycle",
-        [
-          "queued",
-          "frontend",
-          "frontend",
-          "unit_free",
-          "max",
-          "select"
-        ]
       ],
-      [
-        "cycle",
-        [
-          "drains",
-          "cycle",
-          "transfer_end",
-          "max",
-          "cycle",
-          "select"
-        ]
-      ],
-      [
-        "cycle",
-        [
-          "cycle",
-          "dependency_end",
-          "max",
-          "capacity_end",
-          "max"
-        ]
-      ]
-    ],
-    "place": [
-      [
-        "work",
-        [
-          "queued",
-          "cycle",
-          "frontend_cost",
-          "add",
-          "$clock_step",
-          "sub",
-          "unit_free",
-          "max",
-          "cycle",
-          "select"
-        ]
-      ],
-      [
-        "finished",
-        [
-          "work",
-          "latency",
-          "add"
-        ]
-      ],
-      [
-        "unit_free",
-        [
-          "work",
-          "busy",
-          "add"
-        ]
-      ],
-      [
-        "waiting",
-        [
-          "waiting",
-          "cycle",
-          "frontend",
-          "sub",
-          "add"
-        ]
-      ],
-      [
-        "frontend",
-        [
-          "cycle",
-          "frontend_cost",
-          "add"
-        ]
-      ],
-      [
-        "makespan",
-        [
-          "makespan",
-          "finished",
-          "max"
-        ]
-      ]
-    ]
+      "algorithm": "fixed-start-capacity-place-v1"
+    }
   },
   "validation": {
     "core_edges": {

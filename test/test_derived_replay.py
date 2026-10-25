@@ -1,4 +1,4 @@
-"""Shared replay grammar, explicit policy boundary and native Core edge gate."""
+"""Fixed replay policy, checked source edges and native Core edge gate."""
 from copy import deepcopy
 from pathlib import Path
 import os
@@ -14,11 +14,11 @@ from model_evidence import NativeModelFixture
 
 
 class ReplayContractTest(unittest.TestCase):
-    def test_policy_bytecode_is_exact_and_unknown_structures_fail_closed(self):
+    def test_fixed_policy_is_exact_and_unknown_structures_fail_closed(self):
         program = replay_fixture()
         self.assertEqual(validate_program(program), program)
-        for mutate in (lambda p: p["start"][0][1].append("add"),
-                       lambda p: p["place"][0][1].__setitem__(4, 2),
+        for mutate in (lambda p: p.update(start=[["cycle", [0]]]),
+                       lambda p: p.update(schema="atlas.projected_core_replay.v1"),
                        lambda p: p["source"].update(clock_step=2),
                        lambda p: p["projection_policy"].update(dma="native")):
             changed = deepcopy(program)
@@ -27,7 +27,7 @@ class ReplayContractTest(unittest.TestCase):
                 validate_program(changed)
             self.assertNotEqual(semantic_digest(changed), semantic_digest(program))
 
-    def test_compiled_transitions_and_prediction_error(self):
+    def test_fixed_recurrence_and_prediction_error(self):
         graph = dict(preds=[[], [], [0]], order=[0, 1, 2], proposal=dict(replay=replay_fixture(), dma_capacity=8,
             costs=[dict(unit=0, busy=10, latency=12, frontend=2, queued_dma=True, drains=False),
                    dict(unit=1, busy=3, latency=3, frontend=1, queued_dma=False, drains=False),

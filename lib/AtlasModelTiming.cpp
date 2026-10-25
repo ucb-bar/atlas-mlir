@@ -1886,10 +1886,10 @@ private:
       epoch.push_back(entry.command);
       eligible &= entry.eligible;
       if (live.size() == 1 && (!entry.eligible || !live[0]->eligible ||
-                              !overlap->admits({live[0]->command, entry.command}, false, "reservation"))) return false;
+                              !overlap->admits({live[0]->command, entry.command}, false))) return false;
       // A retired MXU command can determine the port held by the remaining live push.
       if (live.size() == 1 && epoch.size() >= 3 && overlap->rejectsPortHistory(epoch)) return false;
-      if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains, "reservation"))) return false;
+      if (live.size() >= 2 && (!eligible || !overlap->admits(epoch, chains))) return false;
       history.push_back(&entry);
     }
     return true;

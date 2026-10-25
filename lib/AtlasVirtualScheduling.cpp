@@ -788,11 +788,10 @@ private:
 class Machine {
 public:
   Machine(const BlockGraph &g, ArrayRef<Cost> costs,
-          const timing::ModelReplayProgram *replay = nullptr, unsigned dmaCapacity = kMaxQueuedDMA)
-      : g(g), costs(costs), finished(g.nodes.size(), 0), replay(replay), dmaCapacity(dmaCapacity) {}
+          unsigned dmaCapacity)
+      : g(g), costs(costs), finished(g.nodes.size(), 0), dmaCapacity(dmaCapacity) {}
 
   int start(unsigned node) const {
-    if (replay) return replayStart(node)[timing::ModelReplayProgram::Cycle];
     const Cost &cost = costs[node];
     int cycle = cost.queuedDMA ? frontend : std::max(frontend, unitFree[unit(node)]);
     if (cost.drains)
@@ -806,9 +805,9 @@ public:
       for (int end : transfers)
         if (end > cycle)
           busy.push_back(end);
-      if (busy.size() >= kMaxQueuedDMA) {
+      if (busy.size() >= dmaCapacity) {
         llvm::sort(busy);
-        cycle = busy[busy.size() - kMaxQueuedDMA];
+        cycle = busy[busy.size() - dmaCapacity];
       }
     }
     return cycle;
@@ -816,30 +815,10 @@ public:
 
   // When the frontend can issue again if `node` starts at `cycle`.
   int frontendAfter(unsigned node, int cycle) const {
-    if (replay) {
-      auto state = replayInputs(node);
-      state[timing::ModelReplayProgram::Cycle] = cycle;
-      timing::ModelReplayProgram::evaluate(replay->place, state);
-      return state[timing::ModelReplayProgram::Frontend];
-    }
     return cycle + costs[node].frontend;
   }
 
   void place(unsigned node) {
-    if (replay) {
-      auto state = replayStart(node);
-      timing::ModelReplayProgram::evaluate(replay->place, state);
-      finished[node] = state[timing::ModelReplayProgram::Finished];
-      unitFree[unit(node)] = state[timing::ModelReplayProgram::UnitFree];
-      if (costs[node].queuedDMA) {
-        llvm::erase_if(transfers, [&](int end) { return end <= state[timing::ModelReplayProgram::Cycle]; });
-        transfers.push_back(state[timing::ModelReplayProgram::UnitFree]);
-      }
-      frontend = state[timing::ModelReplayProgram::Frontend];
-      exposedWaiting = state[timing::ModelReplayProgram::Waiting];
-      makespan = state[timing::ModelReplayProgram::Makespan];
-      return;
-    }
     int cycle = start(node);
     const Cost &cost = costs[node];
     // A queued transfer starts after its staging and every earlier transfer.
@@ -848,8 +827,10 @@ public:
                    : cycle;
     finished[node] = work + cost.latency;
     unitFree[unit(node)] = work + cost.busy;
-    if (cost.queuedDMA)
+    if (cost.queuedDMA) {
+      llvm::erase_if(transfers, [&](int end) { return end <= cycle; });
       transfers.push_back(work + cost.busy);
+    }
     exposedWaiting += cycle - frontend;
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
@@ -858,31 +839,6 @@ public:
   int makespan = 0, exposedWaiting = 0;
 
 private:
-  timing::ModelReplayProgram::State replayInputs(unsigned node) const {
-    const Cost &cost = costs[node];
-    int dependencyEnd = 0, transferEnd = 0;
-    for (unsigned pred : g.preds[node]) dependencyEnd = std::max(dependencyEnd, finished[pred]);
-    for (int end : transfers) transferEnd = std::max(transferEnd, end);
-    return {{frontend, unitFree[unit(node)], dependencyEnd, transferEnd, 0,
-            int(cost.queuedDMA), int(cost.drains), cost.frontend, cost.latency, cost.busy,
-            exposedWaiting, makespan, 0, 0, 0}};
-  }
-
-  timing::ModelReplayProgram::State replayStart(unsigned node) const {
-    auto state = replayInputs(node);
-    timing::ModelReplayProgram::evaluate(replay->start, state);
-    if (costs[node].queuedDMA) {
-      SmallVector<int> active;
-      for (int end : transfers) if (end > state[timing::ModelReplayProgram::Cycle]) active.push_back(end);
-      if (active.size() >= dmaCapacity) {
-        llvm::sort(active);
-        state[timing::ModelReplayProgram::CapacityEnd] = active[active.size() - dmaCapacity];
-        timing::ModelReplayProgram::evaluate(replay->start, state);
-      }
-    }
-    return state;
-  }
-
   unsigned unit(unsigned node) const {
     return static_cast<unsigned>(costs[node].unit);
   }
@@ -894,7 +850,6 @@ private:
   // When each explicit transfer placed so far completes.
   SmallVector<int> transfers;
   int frontend = 0;
-  const timing::ModelReplayProgram *replay;
   unsigned dmaCapacity;
 };
 
@@ -902,8 +857,8 @@ class BlockScheduler {
 public:
   BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
                  std::vector<Cost> nodeCosts, const SpillCycles &spill,
-                 const timing::ModelReplayProgram *replay, unsigned dmaCapacity)
-      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill), replay(replay), dmaCapacity(dmaCapacity) {
+                 unsigned dmaCapacity)
+      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill), dmaCapacity(dmaCapacity) {
     unsigned n = g.nodes.size();
     // The earliest output each value reaches through non-state operands, or n
     // for none. Among equal starts, prefer it: shared operands load for their
@@ -939,7 +894,7 @@ public:
   }
 
   int makespan(ArrayRef<unsigned> order) const {
-    Machine machine(g, costs, replay, dmaCapacity);
+    Machine machine(g, costs, dmaCapacity);
     for (unsigned node : order)
       machine.place(node);
     return machine.makespan;
@@ -1025,7 +980,7 @@ private:
     for (unsigned i = 0; i < n; ++i)
       if ((waiting[i] = g.preds[i].size()) == 0)
         ready.push_back(i);
-    Machine machine(g, costs, replay, dmaCapacity);
+    Machine machine(g, costs, dmaCapacity);
     while (!ready.empty()) {
       unsigned node = pick(machine, ready);
       ready.erase(llvm::find(ready, node));
@@ -1046,7 +1001,6 @@ private:
   SpillCycles spill;
   std::vector<int> heights;
   std::vector<unsigned> firstOutput;
-  const timing::ModelReplayProgram *replay;
   unsigned dmaCapacity;
 };
 
@@ -1105,7 +1059,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   FailureOr<SpillCycles> spill = spillCyclesOf(block.getParentOp(), provider, possibleSpills);
   if (failed(spill))
     return failure();
-  BlockScheduler scheduler(block, g, liveness, std::move(*costs), *spill, provider.proposalReplay.get(),
+  BlockScheduler scheduler(block, g, liveness, std::move(*costs), *spill,
                            provider.proposalDMACapacity ? provider.proposalDMACapacity : kMaxQueuedDMA);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
@@ -1279,7 +1233,7 @@ struct ScheduleAtlasVirtualPass
         if (!graphOutput.empty()) {
           auto costs = costsOf(*graph, *selected);
           if (failed(costs)) return signalPassFailure();
-          Machine estimate(*graph, *costs, selected->proposalReplay.get(), selected->proposalDMACapacity);
+          Machine estimate(*graph, *costs, selected->proposalDMACapacity);
           llvm::json::Array preds, names, order, costRecords;
           llvm::DenseMap<Operation *, unsigned> ids;
           for (unsigned node = 0; node < graph->nodes.size(); ++node) {

@@ -48,7 +48,7 @@ class SearchPolicyTest(unittest.TestCase):
                     policy.load_policy()
 
     def test_canonical_identity_and_effective_overrides(self):
-        effective = {"random_seeds": [9], "workers": 2, "search_evaluations": 3}
+        effective = {"random_seeds": [9], "workers": 2, "search_group_evaluations": 3}
         receipt = policy.policy_receipt(effective)
         self.assertEqual(receipt["definition_sha256"], policy.canonical_hash(policy.POLICY))
         digest = receipt.pop("sha256")
@@ -118,7 +118,7 @@ class SearchPolicyTest(unittest.TestCase):
 
     def test_algorithm_changes_refuse_instead_of_becoming_unused_labels(self):
         changed = deepcopy(policy.POLICY)
-        changed["algorithms"]["order_neighbors"] = "unimplemented-v2"
+        changed["algorithms"]["group_neighbors"] = "unimplemented-v2"
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "policy.json"
             source.write_text(json.dumps(changed))
@@ -145,12 +145,12 @@ class SearchPolicyTest(unittest.TestCase):
                     policy.load_policy()
 
     def test_shuffle_seed_and_wait_pool_drive_proposals(self):
-        graph = {"preds": [[], [], [], []]}
-        order = ((0, 1, 2, 3),)
-        baseline = list(selection.order_neighbors([graph], order))
+        graph = {"preds": [[], [0], [], [], [], []]}
+        order = ((0, 1, 2, 3, 4, 5),)
+        baseline = list(selection.group_order_neighbors([graph], order))
         changed = dict(selection.POOLS, neighbor_shuffle_seed=17)
         with patch.object(selection, "POOLS", changed):
-            alternatives = list(selection.order_neighbors([graph], order))
+            alternatives = list(selection.group_order_neighbors([graph], order))
         self.assertEqual(set(baseline), set(alternatives))
         self.assertNotEqual(baseline, alternatives)
         changed = dict(selection.CANDIDATES, curve_wait_placements=["source", "default"])
@@ -163,7 +163,7 @@ class SearchPolicyTest(unittest.TestCase):
         selection.add_model_arguments(parser)
         args = parser.parse_args(["--provider", "model", "--workers", "2", "--max-candidates", "5"])
         options = selection.model_arguments(args)
-        options.update(random_seeds=(19,), search_evaluations=0, search_group_evaluations=0,
+        options.update(random_seeds=(19,), search_group_evaluations=0,
                        mreg_candidates=((7,) * 64,), store_window_candidates=((3,),),
                        pack_reload_candidates=False, pack_preload_candidates=False)
         with tempfile.TemporaryDirectory() as temporary:

@@ -44,8 +44,7 @@ def load_policy() -> dict:
         "selection_objective": "selected-profile-cycles-then-index-v1",
         "selection_tie": "canonical-candidate-index-v1",
         "curve_candidates_default": "model-curve-profile-only-v1",
-        "proposal_replay": "atlas.projected_core_replay.v1",
-        "order_neighbors": "dependency-window-insertion-v1",
+        "proposal_replay": "atlas.projected_core_replay.v2",
         "group_neighbors": "dependency-closure-insertion-v1",
         "candidate_ranking": "stable-summed-estimates-prefix-v1",
         "search_restart": "restart-on-any-objective-improvement-v1",
@@ -64,16 +63,16 @@ def load_policy() -> dict:
     keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering dma_proposal replay_projection validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
-        keys(preset, "max_candidates search_evaluations search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
+        keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
         for key, value in preset.items():
             if key.endswith("candidates") and key != "max_candidates":
                 if type(value) is not bool:
                     raise ValueError("invalid preset boolean: " + key)
             elif type(value) is not int or value < (1 if key == "max_candidates" else 0):
                 raise ValueError("invalid preset budget: " + key)
-    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_evaluations api_search_group_evaluations api_search_patience api_pack_reload_candidates api_pack_preload_candidates", "defaults")
+    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_group_evaluations api_search_patience api_pack_reload_candidates api_pack_preload_candidates", "defaults")
     defaults = policy["defaults"]
-    for name in ("workers", "api_max_candidates", "api_search_evaluations", "api_search_group_evaluations", "api_search_patience"):
+    for name in ("workers", "api_max_candidates", "api_search_group_evaluations", "api_search_patience"):
         if type(defaults[name]) is not int or defaults[name] < (1 if name in ("workers", "api_max_candidates") else 0):
             raise ValueError("invalid API default budget: " + name)
     for name in ("guarded_pack", "spill", "spill_mxu", "api_pack_reload_candidates", "api_pack_preload_candidates"):
@@ -105,7 +104,9 @@ def load_policy() -> dict:
     keys(policy["engineering"], "compiler scorer", "engineering")
     keys(policy["engineering"]["compiler"], "timing_search_cycles generated_word_limit spill_rewrite_limit", "compiler bounds")
     keys(policy["engineering"]["scorer"], "max_cycles torch_threads assertions_required", "scorer bounds")
-    keys(policy["replay_projection"], "projection_policy start place", "replay projection")
+    keys(policy["replay_projection"], "projection_policy", "replay projection")
+    if policy["replay_projection"]["projection_policy"].get("algorithm") != "fixed-start-capacity-place-v1":
+        raise ValueError("unsupported fixed replay recurrence")
     dma = policy["dma_proposal"]
     keys(dma, "classification intercommand_serialization_cycles", "DMA proposal")
     if (dma["classification"] != "compiler_policy"

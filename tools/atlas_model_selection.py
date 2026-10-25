@@ -178,29 +178,6 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
     return ["--atlas-compile-candidate=" + " ".join(options)]
 
 
-def order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...]):
-    """Enumerate single insertions within each node's dependency window."""
-    moves = []
-    for block, (graph, order) in enumerate(zip(graphs, orders)):
-        positions = {node: index for index, node in enumerate(order)}
-        successors = [[] for _ in order]
-        for node, preds in enumerate(graph["preds"]):
-            for pred in preds:
-                successors[pred].append(node)
-        for origin, node in enumerate(order):
-            first = max((positions[pred] + 1 for pred in graph["preds"][node]), default=0)
-            last = min((positions[succ] - 1 for succ in successors[node]), default=len(order) - 1)
-            for target in range(first, last + 1):
-                if origin == target:
-                    continue
-                moves.append((block, origin, target))
-    random.Random(POOLS["neighbor_shuffle_seed"]).shuffle(moves)
-    for block, origin, target in moves:
-        moved = list(orders[block])
-        moved.insert(target, moved.pop(origin))
-        yield orders[:block] + (tuple(moved),) + orders[block + 1:]
-
-
 def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...], max_nodes: int = POOLS["group_max_nodes"]):
     """Move a node together with the dependencies crossed by its insertion."""
     moves = []
@@ -383,7 +360,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    random_seeds: tuple[int, ...] = tuple(POOLS["random_seeds"]), workers: int = DEFAULTS["workers"],
                    store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
-                   search_evaluations: int = DEFAULTS["api_search_evaluations"],
                    search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
                    search_patience: int = DEFAULTS["api_search_patience"],
                    pack_reload_candidates: bool = DEFAULTS["api_pack_reload_candidates"],
@@ -411,8 +387,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
     if provider != "model" and mreg_candidates != ():
         raise ValueError("MREG candidates require the model provider")
-    if search_evaluations < 0 or (search_evaluations and provider != "model"):
-        raise ValueError("search-evaluations must be nonnegative and requires the model provider")
     if search_group_evaluations < 0 or (search_group_evaluations and provider != "model"):
         raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
     if search_patience < 0 or (search_patience and provider != "model"):
@@ -431,7 +405,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         random_seeds=list(random_seeds), workers=workers,
         store_window_candidates=[list(ranks) for ranks in store_window_candidates],
         mreg_candidates=[list(ranks) for ranks in mreg_candidates],
-        search_evaluations=search_evaluations, search_group_evaluations=search_group_evaluations,
+        search_group_evaluations=search_group_evaluations,
         search_patience=search_patience, pack_reload_candidates=pack_reload_candidates,
         pack_preload_candidates=pack_preload_candidates, curve_candidates=curve_candidates,
         objective=POLICY["objectives"][profile],
@@ -455,7 +429,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
                "objective": objective_receipt(provider, profile, scorer is None),
                "guarded_pack": guarded_pack, "curve_candidates": curve_candidates,
-               "max_candidates": max_candidates, "workers": workers, "search_evaluations": search_evaluations,
+               "max_candidates": max_candidates, "workers": workers,
                "search_group_evaluations": search_group_evaluations,
                "search_patience": search_patience,
                "pack_reload_candidates": pack_reload_candidates,
@@ -551,7 +525,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                 (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
             command([str(binaries / "atlas-opt"), str(prepared),
                      *candidate_options(candidate, provider, spill,
-                                        graph_output=bool(search_evaluations or search_group_evaluations)),
+                                        graph_output=bool(search_group_evaluations)),
                      "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
             stage = "emit"
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
@@ -644,15 +618,12 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             register_base = winner()
             receipt["mreg_pool_size"] = len(mreg_candidates)
             evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks") for ranks in mreg_candidates])
-            for field, budget, neighbors, category in (
-                    ("search", search_evaluations, order_neighbors, "local-order"),
-                    ("group_search", search_group_evaluations, group_order_neighbors, "group-order")):
-                if not budget:
-                    continue
+            if search_group_evaluations:
                 search_started = time.monotonic()
                 initial_count = len(receipt["candidates"])
-                limit = initial_count + budget
-                receipt[field] = {"start_index": best["index"], "accepted_indices": [], "stopped_for_patience": False}
+                limit = initial_count + search_group_evaluations
+                phase = receipt["group_search"] = {
+                    "start_index": best["index"], "accepted_indices": [], "stopped_for_patience": False}
                 while len(receipt["candidates"]) < limit:
                     parent = best
                     nonimproving = 0
@@ -660,7 +631,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                     orders = tuple(tuple(graph["order"]) for graph in graphs)
                     base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
                     seen.add(base)
-                    proposed = neighbors(graphs, orders)
+                    proposed = group_order_neighbors(graphs, orders)
                     if curve_candidates:
                         parent_program = json.loads((output / parent["directory"] / "program.json").read_text())
                         try:
@@ -677,8 +648,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                             graphs, chain((orders,), proposed), remaining,
                             eligible=lambda order: any(candidate not in seen for candidate in
                                                        order_candidates(base, (order,), True)))
-                        receipt[field]["proposal_policy"] = "native-cost-rank-with-wait-siblings-v1"
-                        receipt[field]["proposal_facts_sha256"] = parent_program["model_evidence"]["op_timing_sha256"]
+                        phase["proposal_policy"] = "native-cost-rank-with-wait-siblings-v1"
+                        phase["proposal_facts_sha256"] = parent_program["model_evidence"]["op_timing_sha256"]
                     pending = order_candidates(base, proposed, curve_candidates)
                     while len(receipt["candidates"]) < limit:
                         batch = []
@@ -692,20 +663,20 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                         if not batch:
                             break
                         before = len(receipt["candidates"])
-                        evaluate_batch([(candidate, category) for candidate in batch], limit)
+                        evaluate_batch([(candidate, "group-order") for candidate in batch], limit)
                         for row in receipt["candidates"][before:]:
                             row["parent_index"] = parent["index"]
                         if best["index"] != parent["index"]:
-                            receipt[field]["accepted_indices"].append(best["index"])
+                            phase["accepted_indices"].append(best["index"])
                             break
                         nonimproving += len(receipt["candidates"]) - before
                         if search_patience and nonimproving >= search_patience:
-                            receipt[field]["stopped_for_patience"] = True
+                            phase["stopped_for_patience"] = True
                             break
                     if best["index"] == parent["index"]:
                         break
-                receipt[field].update(evaluations=len(receipt["candidates"]) - initial_count,
-                                      elapsed_seconds=time.monotonic() - search_started)
+                phase.update(evaluations=len(receipt["candidates"]) - initial_count,
+                             elapsed_seconds=time.monotonic() - search_started)
             if pack_reload_candidates:
                 evaluate_batch([(replace(winner(), pack_reload_after_weight=True), "pack-reload-order")],
                                len(receipt["candidates"]) + 1)
@@ -749,10 +720,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workers", type=int, default=min(DEFAULTS["workers"], os.cpu_count() or 1))
     parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score eight legal MREG rank vectors (model only)")
-    parser.add_argument("--search-evaluations", type=int,
-                        help="additional verified local order attempts after knob selection (model only)")
     parser.add_argument("--search-group-evaluations", type=int,
-                        help="additional verified dependency-group attempts after local search (model only)")
+                        help="additional verified dependency-group attempts after knob selection (model only)")
     parser.add_argument("--search-patience", type=int,
                         help="stop a phase after this many nonimproving attempts, checked after each batch; zero disables")
     parser.add_argument("--curve-candidates", action=argparse.BooleanOptionalAction, default=None,

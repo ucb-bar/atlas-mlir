@@ -18,8 +18,7 @@ struct ModelOverlapCommand {
 
 class ModelOverlapFacts {
 public:
-  bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
-              llvm::StringRef origin = "dependence") const;
+  bool admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const;
   bool rejectsPortHistory(const std::vector<ModelOverlapCommand> &commands) const;
   const std::map<std::string, std::string> &metadata() const { return provenance; }
 
@@ -29,7 +28,6 @@ private:
     std::string first, second;
     Relation relation;
     int minimum = 0, high = 0;
-    std::string source = "source-derived";
   };
   std::vector<Pair> pairs;
   std::map<std::pair<std::string, std::string>, std::vector<size_t>> pairIndices;
@@ -38,7 +36,6 @@ private:
   bool structuralCapacity = false;
   int sequencerCycles = 0, mxu0Compute = 0, mxu1Compute = 0, vpuSlots = 0;
   std::map<std::string, std::string> provenance;
-  mutable std::set<std::string> loggedQueries;
   static llvm::Expected<ModelOverlapFacts> parseDerivedFacts(const llvm::json::Object &, llvm::StringRef,
                                                             const ModelTimingFacts &);
   friend llvm::Expected<ModelOverlapFacts> parseModelOverlapFacts(llvm::StringRef, llvm::StringRef,

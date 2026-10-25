@@ -1,6 +1,6 @@
-"""Derive reviewed Core edge facts and emit one common graph projection IR.
+"""Derive reviewed Core edge facts and emit a fixed graph projection descriptor.
 
-This is a projected virtual graph interpreter, not full instruction/Core replay.
+This describes a projected virtual graph recurrence, not full instruction/Core replay.
 The source contract refuses changed control structures before publishing facts.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 from atlas_derive_frontend import derive_frontend
 from atlas_derive_scratchpad import method, read_source
 from atlas_model_diagnostics import UnsupportedModelTiming
-from atlas_model_replay import SCHEMA, validate_program
+from atlas_model_replay import validate_program
 
 
 def projection_program(source):

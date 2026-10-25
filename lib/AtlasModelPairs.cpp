@@ -6,7 +6,6 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include <algorithm>
 #include <climits>
-#include <cstdlib>
 #include <iterator>
 #include <set>
 #include <tuple>
@@ -199,16 +198,6 @@ bool matchesRelation(const Relation &expected, const ModelOverlapCommand &first,
   return true;
 }
 
-int peak(const std::vector<ModelOverlapCommand> &commands) {
-  int result = 0;
-  for (const ModelOverlapCommand &edge : commands) {
-    int live = 0;
-    for (const ModelOverlapCommand &command : commands)
-      live += command.issue <= edge.issue && int64_t(edge.issue) < int64_t(command.issue) + command.firstFreeAge - 1;
-    result = std::max(result, live);
-  }
-  return result;
-}
 bool composedCapacity(const std::vector<ModelOverlapCommand> &commands,
                       int sequencerCycles, int mxu0Compute, int mxu1Compute, int vpuSlots) {
   std::vector<std::set<int>> ports(commands.size());
@@ -256,48 +245,7 @@ bool ModelOverlapFacts::rejectsPortHistory(const std::vector<ModelOverlapCommand
   return !composedCapacity(commands, sequencerCycles, mxu0Compute, mxu1Compute, vpuSlots);
 }
 
-bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains,
-                              llvm::StringRef origin) const {
-  auto reportQuery = [&](llvm::StringRef reason, bool admitted = false, const Pair *witness = nullptr) {
-    bool admittedLog = admitted && std::getenv("ATLAS_MODEL_LOG_ADMITTED");
-    if (!admittedLog && !std::getenv("ATLAS_MODEL_LOG_UNMATCHED")) return admitted;
-    if (admitted && !admittedLog && reason != "chain") return admitted;
-    Array operations, gaps, operands, matrix;
-    for (size_t i = 0; i < commands.size(); ++i) {
-      const auto &command = commands[i];
-      operations.push_back(command.block);
-      if (i) gaps.push_back(command.issue - commands[i - 1].issue);
-      Array registers;
-      for (int reg : command.registers) registers.push_back(reg);
-      Object operand{{"registers", std::move(registers)}};
-      if (command.accumulator) operand["accumulator"] = *command.accumulator;
-      if (command.weightSlot) operand["weight_slot"] = *command.weightSlot;
-      operands.push_back(std::move(operand));
-      for (size_t j = 0; j < i; ++j) {
-        Object relation;
-        for (const auto &[key, value] : actualRelation(commands[j], command)) relation[key] = value;
-        matrix.push_back(Object{{"first_index", int64_t(j)}, {"second_index", int64_t(i)},
-                               {"relation", std::move(relation)}});
-      }
-    }
-    Object document{{"reason", reason.str()}, {"origin", origin.str()}, {"operations", std::move(operations)},
-        {"gaps", std::move(gaps)}, {"operands", std::move(operands)}, {"all_pair_relations", std::move(matrix)},
-        {"in_flight_count", peak(commands)}};
-    if (witness) {
-      Object matched;
-      for (const auto &[key, value] : witness->relation) matched[key] = value;
-      document["matched_relation"] = std::move(matched);
-      document["pair_index"] = int64_t(witness - pairs.data());
-      document["evidence_source"] = witness->source;
-    } else if (admitted) {
-      document["evidence_source"] = "source-derived-composition";
-    }
-    std::string query = canonicalJson(std::move(document));
-    std::string message = (admittedLog ? "ATLAS_MODEL_ADMITTED " :
-                           admitted ? "ATLAS_MODEL_COMPOSED " : "ATLAS_MODEL_UNMATCHED ") + query;
-    if (loggedQueries.insert(message).second) llvm::errs() << message << "\n";
-    return admitted;
-  };
+bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands, bool chains) const {
   auto admitsPair = [&](const ModelOverlapCommand &first, const ModelOverlapCommand &second) -> const Pair * {
     int gap = second.issue - first.issue;
     auto domain = pairIndices.find({first.block, second.block});
@@ -309,15 +257,12 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
     }
     return nullptr;
   };
-  if (commands.size() == 2) {
-    const Pair *witness = admitsPair(commands[0], commands[1]);
-    return witness ? reportQuery("pair", true, witness) : reportQuery("pair");
-  }
+  if (commands.size() == 2) return admitsPair(commands[0], commands[1]) != nullptr;
   if (!chains || commands.size() < 3) return false;
   for (size_t i = 0; i < commands.size(); ++i)
     for (size_t j = i + 1; j < commands.size(); ++j)
       if (commands[j].issue - commands[i].issue < commands[i].firstFreeAge &&
-          !admitsPair(commands[i], commands[j])) return reportQuery("chain_live_pair");
+          !admitsPair(commands[i], commands[j])) return false;
   std::string engine = llvm::StringRef(commands.front().block).split('.').first.str();
   auto scope = compositionClasses.find(engine);
   if (scope != compositionClasses.end()) {
@@ -329,9 +274,9 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
         if (commands[i].issue - commands[j].issue < commands[j].firstFreeAge)
           covered &= scope->second.count(relationClass(actualRelation(commands[j], commands[i])));
     }
-    if (covered) return reportQuery("chain", true);
+    if (covered) return true;
   }
-  return reportQuery("chain");
+  return false;
 }
 
 llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
@@ -496,7 +441,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
           return invalid("source-derived vector pair carries unsupported semantic qualifiers");
     }
     result.pairIndices[{first->str(), second->str()}].push_back(result.pairs.size());
-    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high), "source-derived"});
+    result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high)});
   }
   const Object *engines = composition->getObject("engines");
   const Array *classes = composition->getArray("classes");
