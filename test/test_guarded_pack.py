@@ -90,6 +90,7 @@ class GuardedPackTests(unittest.TestCase):
             with self.subTest(scale=scale):
                 text = self.lower(source(scale=scale))
                 self.assertNotIn(PACK, text)
+                self.assertNotIn("atlas.guarded_pack_bound", text)
                 if scale == 127:
                     for operation in (ACC_LOAD, '"atlas.virtual_mxu_readout_fp8"'):
                         self.assertEqual(text.count(operation), 1)
@@ -108,8 +109,30 @@ class GuardedPackTests(unittest.TestCase):
 
         duplicate = '%q = "atlas.virtual_pack_fp8"(%x) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
         lowered = self.lower(source(after=duplicate))
-        for fragment in ('bits = 50144 : i32', 'bits = 17376 : i32', '"atlas.virtual_mxu_readout_fp8"'):
-            self.assertEqual(lowered.count(fragment), 2)
+        for fragment in ('bits = 50144 : i32', 'bits = 17376 : i32'):
+            self.assertEqual(lowered.count(fragment), 1)
+        self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 2)
+        self.assertEqual(lowered.count("atlas.guarded_pack_bound"), 2)
+
+    def test_repeated_conversions_share_only_equal_clamp_bounds(self):
+        packs = '\n'.join(
+            f'%p{i} = "atlas.virtual_pack_fp8"(%x) {{scale_code = {127 + i % 2} : i32}} '
+            ': (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
+            for i in range(16))
+        lowered = self.lower(source(after=packs))
+        # The original source splat plus two bounds for each of the two scales.
+        self.assertEqual(lowered.count('"atlas.virtual_vpu_splat"'), 5)
+        self.assertEqual(lowered.count('"atlas.virtual_mxu_readout_fp8"'), 17)
+        for scale in (127, 128):
+            cap = ((scale + 8) << 7) | 96
+            for bits in (cap, cap | 0x8000):
+                self.assertEqual(lowered.count(f'bits = {bits} : i32'), 1)
+        # Equal bits in distinct functions must have separate dominating defs.
+        body = source().removeprefix('module {').removesuffix('}\n')
+        two_functions = 'module {' + body + body.replace('@tile()', '@other()') + '}\n'
+        separate = self.lower(two_functions)
+        self.assertEqual(separate.count('bits = 17376 : i32'), 2)
+        self.assertEqual(separate.count('bits = 50144 : i32'), 2)
 
     def test_unproved_sources_fall_back(self):
         producers = [UNKNOWN] + [
@@ -157,6 +180,41 @@ class GuardedPackTests(unittest.TestCase):
                     if scale <= 246:
                         self.assertIn('"atlas.virtual_spill_bf16"', spilled)
                     self.emit(spilled, *MACHINE)
+
+    def test_allocation_rematerializes_shared_bounds_under_pressure(self):
+        # 15 middle tiles fill the BF16 pairs between the PACKs: per-use bounds
+        # fit, bounds shared across both PACKs would not.
+        tiles = '\n'.join(
+            f'%v{i} = "atlas.virtual_vpu_splat"() {{bits = {16257 + i} : i32}} '
+            ': () -> !atlas.virtual_bf16' for i in range(15))
+        outputs = '\n'.join(
+            f'%o{i} = "atlas.virtual_output_bf16"(%o{i - 1}, %v{i}) '
+            f'{{index = {i + 1} : i32}} : '
+            '(!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state'
+            for i in range(15)).replace('%o-1', '%first_out')
+        after = f'''%first = "atlas.virtual_mxu_matmul"(%p, %p) {{unit = 1 : i32}}
+      : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16
+    %first_out = "atlas.virtual_output_bf16"(%t, %first) {{index = 0 : i32}}
+      : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    {tiles}
+    {outputs}
+    %last = "atlas.virtual_vpu_splat"() {{bits = 16256 : i32}} : () -> !atlas.virtual_bf16
+    %q = "atlas.virtual_pack_fp8"(%last) {{scale_code = 127 : i32}}
+      : (!atlas.virtual_bf16) -> !atlas.virtual_fp8
+    %result = "atlas.virtual_mxu_matmul"(%q, %q) {{unit = 1 : i32}}
+      : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16'''
+        text = source(after=after, state="%o14", value="%result")
+        text = text.replace('"atlas.virtual_output_bf16"(%o14, %result) {index = 0',
+                            '"atlas.virtual_output_bf16"(%o14, %result) {index = 16')
+        # Allocate directly; a spill pass would hide the lifetime regression.
+        self.checked(text, '--lower-atlas-virtual-to-machine')
+        # Both PACKs must share one bound pair, or the test is vacuous.
+        shared = self.lower(text)
+        self.assertEqual(shared.count('bits = 50144 : i32'), 1)
+        self.assertEqual(shared.count("atlas.guarded_pack_bound"), 2)
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                self.emit(text, f'--lower-atlas-guarded-pack=unit={unit}', *MACHINE)
 
     def test_live_accumulator_slots_fallback(self):
         text = source()

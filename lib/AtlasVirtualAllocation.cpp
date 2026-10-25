@@ -1,5 +1,6 @@
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasDMAAllocationVerification.h"
+#include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
@@ -8,6 +9,7 @@
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -90,6 +92,26 @@ unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
     return kFP8Registers;
   FixedResourcePlacement fixed = selectedResources();
   return fixed.lastScalarValue - firstScalarValue(fixed, hasPack) + 1;
+}
+
+// On BF16 coloring failure, copy shared clamp bounds before each use. Clones are unmarked.
+bool rematerializeGuardedPackBounds(func::FuncOp function) {
+  SmallVector<VirtualVPUSplatOp> shared;
+  function.walk([&](VirtualVPUSplatOp splat) {
+    if (splat->hasAttr(kAtlasGuardedPackBoundAttr) &&
+        !splat.getDst().use_empty() && !splat.getDst().hasOneUse())
+      shared.push_back(splat);
+  });
+  for (auto splat : shared) {
+    for (OpOperand &use : llvm::make_early_inc_range(splat.getDst().getUses())) {
+      OpBuilder builder(use.getOwner());
+      Operation *copy = builder.clone(*splat);
+      copy->removeAttr(kAtlasGuardedPackBoundAttr);
+      use.set(copy->getResult(0));
+    }
+    splat.erase();
+  }
+  return !shared.empty();
 }
 } // namespace
 
@@ -577,6 +599,10 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       }
     }
     if (!assigned) {
+      if (kind == RegisterKind::BF16 && rematerializeGuardedPackBounds(function)) {
+        stageLoads();
+        return colorValues(kind);
+      }
       InFlightDiagnostic diag = function.emitOpError();
       if (kind == RegisterKind::BF16)
         diag << (mixedFp8 ? "mixed " : "") << "virtual BF16 interference exceeds "

@@ -59,6 +59,8 @@ struct LowerAtlasGuardedPackPass : PassWrapper<LowerAtlasGuardedPackPass, Operat
       if (!llvm::hasSingleElement(function.getBody()))
         continue;
       llvm::DenseMap<Value, bool> facts;
+      // Share equal clamp bounds; allocation copies them per use if they do not fit.
+      llvm::DenseMap<unsigned, Value> clampBounds;
       Value state;
       unsigned liveAcc = 0;
       for (Operation &op : llvm::make_early_inc_range(function.getBody().front())) {
@@ -84,12 +86,22 @@ struct LowerAtlasGuardedPackPass : PassWrapper<LowerAtlasGuardedPackPass, Operat
         Type bf16 = VirtualBF16Type::get(module.getContext());
         Type token = VirtualStateType::get(module.getContext());
         unsigned code = pack.getScaleCode();
-        // Per-use bounds avoid extending BF16 lifetimes across unrelated conversions.
         Value low, high;
         if (code <= 246) {
           unsigned cap = ((code + 8) << 7) | 96;
-          low = VirtualVPUSplatOp::create(builder, loc, bf16, cap | 0x8000).getDst();
-          high = VirtualVPUSplatOp::create(builder, loc, bf16, cap).getDst();
+          auto bound = [&](unsigned bits) {
+            auto found = clampBounds.find(bits);
+            if (found != clampBounds.end()) {
+              found->second.getDefiningOp()->setAttr(kAtlasGuardedPackBoundAttr, builder.getUnitAttr());
+              return found->second;
+            }
+            auto splat = VirtualVPUSplatOp::create(builder, loc, bf16, bits);
+            Value value = splat.getDst();
+            clampBounds[bits] = value;
+            return value;
+          };
+          low = bound(cap | 0x8000);
+          high = bound(cap);
         }
         // The retained signed shift saturates at code 254 (255 aliases it).
         unsigned inverse = 254 - std::min(code, 254u);

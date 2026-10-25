@@ -159,3 +159,7 @@ It uses MXU0 (`unit=1` selects MXU1) in single-block functions with a free
 accumulator slot. The ordinary spill stage handles register pressure introduced
 by conversion. Native fallback still admits only scales 122..128. Exactness
 does not guarantee a speedup under MXU contention or register pressure.
+
+Within each converted function, PACKs with equal clamp bounds share one pair of
+bound splats. If BF16 coloring then fails, allocation copies the bounds before
+each use and retries once.

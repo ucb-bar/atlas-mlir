@@ -123,6 +123,7 @@ public:
   // Requires a verified virtual CFG. Rebuild after changing its values or order;
   // placement accessors require successful allocation and live source IR.
   // Query only mapped value kinds; placement references/views expire on rebuild.
+  // If BF16 coloring fails, copies shared guarded PACK bounds per use and retries once.
   LogicalResult allocate(func::FuncOp function);
   LogicalResult verify() const;
   unsigned tile(Value value) const;
