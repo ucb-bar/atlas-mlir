@@ -55,7 +55,7 @@ struct Instr {
   bool release = false;
 };
 
-// Compiler-owned proof from a decided 32-iteration PACK replay. Each address
+// Compiler-owned proof from a decided finite PACK replay. Each address
 // is the unrounded effective byte address at the same iteration ordinal.
 class InstructionTimingContext {
 public:

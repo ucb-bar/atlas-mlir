@@ -1,4 +1,5 @@
 #include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
@@ -43,10 +44,11 @@ namespace {
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function, ArrayRef<unsigned> storeWindowRanks = {},
-                 ArrayRef<unsigned> mregRanks = {}, bool packReloadAfterWeight = false, bool packWeightBeforePack = false)
+                 ArrayRef<unsigned> mregRanks = {}, bool packReloadAfterWeight = false,
+                 bool packWeightBeforePack = false, unsigned packRelayoutRows = 1)
       : module(module), function(function), attrs(module.getContext()), emitter(module.getContext()),
         allocation(storeWindowRanks, mregRanks), packReloadAfterWeight(packReloadAfterWeight),
-        packWeightBeforePack(packWeightBeforePack) {}
+        packWeightBeforePack(packWeightBeforePack), packRelayoutRows(packRelayoutRows) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
@@ -637,37 +639,39 @@ private:
     materializeScalar(fixed().packRowsReg, kAtlasMregRows, loc);
     unsigned loop = newLabel();
     mark(loop);
-    // A row copies eight words: copy i moves word i / 2 of half i % 2, from
-    // that half's source to the row at 16 * half + 4 * word, through
-    // temporary i % 2. Each store follows the next copy's load instead of its
-    // own: it issues while the scalar load path is still busy, after its own
-    // load has landed, and the next load reuses the temporary it just read.
-    // The row counter advances in the first load's busy cycles, and each
-    // pointer once its last word is copied.
+    // Group adjacent logical rows while retaining the same two temporary
+    // registers. The target geometry defines every byte offset; grouping is
+    // compiler policy, not a timing fact. Stores of one row pipeline behind
+    // loads of the next, so the scalar load path stays occupied across rows.
     static_assert(kPackRelayoutRowWords == 8,
                   "the copy loop moves two halves of four words a row");
+    const unsigned copies = packRelayoutRows * kPackRelayoutRowWords;
+    auto rowOf = [&](unsigned copy) { return copy / kPackRelayoutRowWords; };
+    auto wordOf = [&](unsigned copy) { return (copy % kPackRelayoutRowWords) / 2; };
     auto copyLoad = [&](unsigned copy) {
       emit<ScalarLoadOp>(loc, "lw", /*dst=*/fixed().packTemporaryRegs[copy % 2],
-          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/sizeof(uint32_t) * (copy / 2));
+          /*base=*/fixed().packSourceRegs[copy % 2],
+          /*offset=*/rowOf(copy) * (kAtlasMregRowBytes / 2) + sizeof(uint32_t) * wordOf(copy));
     };
     auto copyStore = [&](unsigned copy) {
       emit<ScalarStoreOp>(loc, "sw", /*src=*/fixed().packTemporaryRegs[copy % 2],
           /*base=*/fixed().packDestinationReg,
-          /*offset=*/sizeof(uint32_t) * (copy / 2) + (kAtlasMregRowBytes / 2) * (copy % 2));
+          /*offset=*/rowOf(copy) * kAtlasMregRowBytes + sizeof(uint32_t) * wordOf(copy) +
+                     (kAtlasMregRowBytes / 2) * (copy % 2));
     };
     auto advance = [&](unsigned reg, int32_t step) {
       emit<ALUImmOp>(loc, "addi", /*dst=*/reg, /*src=*/reg, /*immediate=*/step);
     };
     copyLoad(0);
-    advance(fixed().packRowReg, 1);
-    for (unsigned copy = 1; copy < kPackRelayoutRowWords; ++copy) {
+    advance(fixed().packRowReg, packRelayoutRows);
+    for (unsigned copy = 1; copy < copies; ++copy) {
       copyLoad(copy);
       copyStore(copy - 1);
-      if (copy >= kPackRelayoutRowWords - 2)
-        advance(fixed().packSourceRegs[copy % 2], kAtlasMregRowBytes / 2);
+      if (copy >= copies - 2)
+        advance(fixed().packSourceRegs[copy % 2], packRelayoutRows * (kAtlasMregRowBytes / 2));
     }
-    copyStore(kPackRelayoutRowWords - 1);
-    advance(fixed().packDestinationReg, kAtlasMregRowBytes);
+    copyStore(copies - 1);
+    advance(fixed().packDestinationReg, packRelayoutRows * kAtlasMregRowBytes);
     redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
                             /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0), loop);
     size_t reloadBegin = planned.size();
@@ -990,6 +994,7 @@ private:
   VirtualAllocationPlan allocation;
   bool packReloadAfterWeight;
   bool packWeightBeforePack;
+  unsigned packRelayoutRows;
   SmallVector<int32_t> preloadedWeights;
   struct PackReload {
     Value value;
@@ -1070,25 +1075,8 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("PACK weight placement options are mutually exclusive");
       return signalPassFailure();
     }
-    if (packReloadAfterWeight || packWeightBeforePack) {
-      auto selected = selectAtlasTimingProvider(module, provider.getValue());
-      if (failed(selected))
-        return signalPassFailure();
-      if (selected->id != timing::kModelTimingProviderId) {
-        module.emitError() << (packWeightBeforePack ? "pack-weight-before-pack" : "pack-reload-after-weight")
-                           << " requires the model timing provider";
-        return signalPassFailure();
-      }
-    }
     SmallVector<unsigned> storeWindowRanks;
     if (!storeWindows.empty()) {
-      auto selected = selectAtlasTimingProvider(module, provider.getValue());
-      if (failed(selected))
-        return signalPassFailure();
-      if (selected->id != timing::kModelTimingProviderId) {
-        module.emitError("store-windows requires the model timing provider");
-        return signalPassFailure();
-      }
       SmallVector<StringRef> ranks;
       StringRef(storeWindows.getValue()).split(ranks, ',', -1, true);
       for (StringRef text : ranks) {
@@ -1112,16 +1100,28 @@ struct LowerAtlasVirtualToMachinePass
         }
         registerRanks.push_back(rank);
       }
-      auto selected = selectAtlasTimingProvider(module, provider.getValue());
-      if (failed(selected))
-        return signalPassFailure();
-      if (selected->id != timing::kModelTimingProviderId) {
-        module.emitError("mreg-ranks requires the model timing provider");
-        return signalPassFailure();
-      }
+    }
+    auto selected = selectAtlasTimingProvider(module, provider.getValue());
+    if (failed(selected))
+      return signalPassFailure();
+    const bool modelProvider = selected->id == timing::kModelTimingProviderId;
+    if ((packReloadAfterWeight || packWeightBeforePack) && !modelProvider) {
+      module.emitError() << (packWeightBeforePack ? "pack-weight-before-pack" : "pack-reload-after-weight")
+                         << " requires the model timing provider";
+      return signalPassFailure();
+    }
+    if (!storeWindows.empty() && !modelProvider) {
+      module.emitError("store-windows requires the model timing provider");
+      return signalPassFailure();
+    }
+    if (!mregRanks.empty() && !modelProvider) {
+      module.emitError("mreg-ranks requires the model timing provider");
+      return signalPassFailure();
     }
     reuseAtlasImmutableWeights(function);
-    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks, packReloadAfterWeight, packWeightBeforePack);
+    unsigned packRelayoutRows = atlasPackRelayoutRowsPerIteration(modelProvider);
+    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks, packReloadAfterWeight,
+                           packWeightBeforePack, packRelayoutRows);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pathlib
 import tempfile
@@ -11,9 +12,11 @@ import unittest
 from test_delay_insertion import OPT, addi, program, run, stream
 from model_evidence import requires_model_evidence
 from test_dma_ring_waits import fixture_evidence
-from model_evidence import requires_model_evidence
 from test_stream_scheduling import branch_target, issue_cycles
 from test_virtual_scheduling import F, S, T, function, inp, outp, start
+
+
+GROUPED_ROWS = 2  # kPackRelayoutUnrollFactor, compiler policy
 
 
 @requires_model_evidence
@@ -73,19 +76,32 @@ class ModelDelaySlotTest(unittest.TestCase):
         lowered = run(OPT, source, self.evidence, "--lower-atlas-virtual-to-machine=provider=model",
                       "--insert-atlas-dma-waits")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
+        timing = json.loads((facts / "model-timing.json").read_text())
+        geometry = timing["architecture"]
+        words = GROUPED_ROWS * geometry["mreg_row_bytes"] // geometry["scalar_word_bytes"]
+        updates = stream(lowered.stdout)
+        loop = updates[branch_target(updates):next(i for i, (op, _, _) in enumerate(updates) if op == "branch")]
+        steps = [fields for op, fields, _ in loop if op == "alu_imm"]
+        self.assertEqual(sum(f"immediate = {GROUPED_ROWS} : i32" in fields for fields in steps), 1)
+        self.assertEqual(sum(f"immediate = {GROUPED_ROWS * geometry['mreg_row_bytes'] // 2} : i32" in fields
+                             for fields in steps), 2)
         scheduled = self.schedule(lowered.stdout)
         lines = scheduled.splitlines()
         branch_line = next(i for i, line in enumerate(lines)
                            if '"atlas.branch"' in line and 'cfg_helper = "pack"' in line)
         self.assertIn('"atlas.alu_imm"', lines[branch_line + 1])
-        self.assertIn("immediate = 32 : i32", lines[branch_line + 1])
+        self.assertIn(f"immediate = {GROUPED_ROWS * geometry['mreg_row_bytes']} : i32", lines[branch_line + 1])
         ops = stream(scheduled)
         body = ops[branch_target(ops):next(i for i, (op, _, _) in enumerate(ops) if op == "branch") + 2]
-        self.assertEqual(sum(op == "scalar_load" for op, _, _ in body), 8)
-        self.assertEqual(sum(op == "scalar_store" for op, _, _ in body), 8)
-        # The confirmed PACK scalar relations pipeline the sixteen memory ops;
-        # dropping their replay contexts expands this 28-cycle body.
-        self.assertLessEqual(issue_cycles(body)[-1], 27)
+        self.assertEqual(sum(op == "scalar_load" for op, _, _ in body), words)
+        self.assertEqual(sum(op == "scalar_store" for op, _, _ in body), words)
+        # All copy loads, including the cross-row pair, sustain the derived
+        # scalar result age. A lost replay proof serializes them more slowly.
+        load_timing = next(row for row in timing["op_timing"] if row["name"] == "scalar_lsu.load")
+        load_age = load_timing["events"]["load_write"]["last_age"]
+        issues = issue_cycles(body)
+        loads = [issues[i] for i, (op, _, _) in enumerate(body) if op == "scalar_load"]
+        self.assertTrue(all(b - a <= load_age for a, b in zip(loads, loads[1:])))
         checked = run(OPT, scheduled, "--verify-atlas-generated-schedule")
         self.assertEqual(checked.returncode, 0, checked.stderr)
 

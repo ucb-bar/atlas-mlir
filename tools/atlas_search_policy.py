@@ -34,7 +34,7 @@ def load_policy() -> dict:
     # Labels bind implementation revisions, not arbitrary configurable algorithms.
     algorithms = {
         "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride",
-        "proposal_cost_adapter": "representative-disjoint-copy-serial-pack-setup-omitted-optimistic-filled-slot-v1",
+        "proposal_cost_adapter": "representative-disjoint-copy-grouped-pack-setup-omitted-optimistic-filled-slot-v2",
         "selection_objective": "selected-profile-cycles-then-index-v1",
         "selection_tie": "canonical-candidate-index-v1",
         "curve_candidates_default": "model-curve-profile-only-v1",

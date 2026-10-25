@@ -4,6 +4,7 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include <algorithm>
 
 using namespace mlir;
@@ -53,6 +54,17 @@ std::vector<TimingContext> mlir::atlas::proveAtlasPackLoopTimingContexts(
   std::vector<TimingContext> result(loop.end() - loop.begin);
   if (!isAtlasPackRelayoutLoop(stream.ops, loop))
     return result;
+  unsigned loads = 0, stores = 0;
+  for (size_t pc = loop.begin; pc < loop.end(); ++pc) {
+    loads += stream.instrs[pc].op->name == "lw";
+    stores += stream.instrs[pc].op->name == "sw";
+  }
+  // Grouped rows retain the same bounded tile copy. Count actual decoded
+  // words rather than trusting a lowering attribute to select its trip count.
+  unsigned rowsPerIteration = loads / kPackRelayoutRowWords;
+  bool completeGroupedBody = loads && loads == stores &&
+      loads % kPackRelayoutRowWords == 0 && rowsPerIteration <= kAtlasMregRows &&
+      kAtlasMregRows % rowsPerIteration == 0;
   std::vector<std::vector<uint32_t>> addresses(result.size());
   RegValues regs = entry;
   unsigned iterations = 0;
@@ -77,13 +89,20 @@ std::vector<TimingContext> mlir::atlas::proveAtlasPackLoopTimingContexts(
     return success();
   };
   auto exit = runAtlasLoop(stream.ops, loop, [&]() -> const RegValues & { return regs; }, step);
-  if (failed(exit) || *exit != AtlasLoopExit::Exited || !known || iterations != 32)
+  // Preserve the existing exact 32-case proof (including isolated scalar-pair
+  // witnesses). A shorter replay additionally proves a complete grouped copy.
+  if (failed(exit) || *exit != AtlasLoopExit::Exited || !known ||
+      (iterations != kAtlasMregRows &&
+       (!completeGroupedBody || iterations != kAtlasMregRows / rowsPerIteration)))
     return result;
   auto region = std::make_shared<const uint8_t>(0);
   for (size_t i = 0; i < addresses.size(); ++i) {
-    if (addresses[i].size() != 32) continue;
+    if (addresses[i].size() != iterations) continue;
     std::array<uint32_t, 32> cases;
-    std::copy(addresses[i].begin(), addresses[i].end(), cases.begin());
+    // Every paired access repeats the same decided iteration ordinal. The
+    // fixed-width context thus adds no address cases to the finite replay.
+    for (size_t ordinal = 0; ordinal < cases.size(); ++ordinal)
+      cases[ordinal] = addresses[i][ordinal % iterations];
     result[i] = AtlasPackLoopTimingProofBuilder::make(stream.instrs[loop.begin + i], region, cases);
   }
   return result;

@@ -538,8 +538,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     return checkedCost(op, Unit::Xlu, t->interval, t->latency);
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
-    // words a row (lowerPack). Each store hides behind the next word's load,
+    // Pack, then relayout the FP8 tile through VMEM in the same grouped-row
+    // scalar loop as lowerPack. Each store hides behind the next word's load,
     // so a row takes a load per load-path interval, then the last word's load
     // and store, and the back-edge, whose delay slot takes the destination step.
     // The loads are timed as the loop proof admits them (AtlasPackLoop).
@@ -557,8 +557,9 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
       return failure();
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload)) return failure();
-    const int rowWords = geometry.packRowWords();
-    const int rows = geometry.rows;
+    const int groupedRows = atlasPackRelayoutRowsPerIteration(provider.id == timing::kModelTimingProviderId);
+    const int rowWords = geometry.packRowWords() * groupedRows;
+    const int rows = geometry.rows / groupedRows;
     // Policy: this proposal omits general scalar setup and assumes the
     // destination increment can fill the slot when filling is enabled.
     // The physical scheduler separately proves an actual available filler.

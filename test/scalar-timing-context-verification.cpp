@@ -1,4 +1,5 @@
 #include "Atlas/AtlasTarget.h"
+#include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasStream.h"
@@ -36,6 +37,153 @@ bool noContexts(const std::vector<TimingContext> &contexts) {
 }
 void setI32(Operation *op, StringRef key, int64_t value) {
   op->setAttr(key, Builder(op->getContext()).getI32IntegerAttr(value));
+}
+
+void positive(MLIRContext &context) {
+  auto module = lower(context);
+  check(bool(module), "ungrouped PACK context fixture lowers", diagnostics);
+  if (!module) return;
+  auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(stream) && stream->loops.size() == 1, "context source has one proved PACK loop");
+  if (failed(stream) || stream->loops.size() != 1) return;
+  const auto &loop = stream->loops.front();
+  unsigned load = 0, store = 0;
+  TimingContext first;
+  for (size_t pc = 0; pc < stream->instrs.size(); ++pc) {
+    const Instr &in = stream->instrs[pc];
+    const TimingContext &proof = stream->timingContexts[pc];
+    bool memory = loop.contains(pc) && (in.op->name == "lw" || in.op->name == "sw");
+    check(bool(proof) == memory, "only scalar copy instructions carry contexts");
+    if (!proof) continue;
+    check(proof->matches(in), "context binds all decoded instruction fields");
+    Instr changed = in;
+    ++changed.imm;
+    check(!proof->matches(changed), "a changed effective-address immediate invalidates the context");
+    changed = in;
+    ++changed.rs1;
+    check(!proof->matches(changed), "a changed address role invalidates the context");
+    if (!first) first = proof;
+    check(first->sameRegion(*proof), "all copy contexts share one replay region");
+    bool isLoad = in.op->name == "lw";
+    unsigned copy = isLoad ? load++ : store++;
+    for (unsigned row = 0; row < 32; ++row) {
+      uint32_t expected = isLoad ? fixed().packWord * 4 + 512 * (copy % 2) + 16 * row + 4 * (copy / 2)
+                                : fixed().packRelayoutWord * 4 + 32 * row + 16 * (copy % 2) + 4 * (copy / 2);
+      check(proof->scalarAddresses()[row] == expected, "every replayed row has its exact effective byte address");
+    }
+  }
+  check(load == 8 && store == 8, "all sixteen scalar instructions have complete 32-row proofs");
+  auto reread = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(reread) && first && reread->timingContexts[loop.begin] &&
+            !first->sameRegion(*reread->timingContexts[loop.begin]),
+        "a new decoded snapshot recomputes its own immutable region");
+
+  std::vector<Instr> nodes(stream->instrs.begin() + loop.begin, stream->instrs.begin() + loop.end());
+  std::vector<TimingContext> contexts(stream->timingContexts.begin() + loop.begin,
+                                      stream->timingContexts.begin() + loop.end());
+  auto provider = builtinTimingProvider();
+  unsigned queries = 0;
+  provider.contextualDependence = [&](const Instr &a, const Footprint &fa, const TimingContext &ca,
+                                     const Instr &b, const Footprint &fb, const TimingContext &cb) {
+    if (ca) { check(ca->matches(a), "graph retains the first instruction's proof"); ++queries; }
+    if (cb) { check(cb->matches(b), "graph retains the second instruction's proof"); ++queries; }
+    return provider.dependence(a, fa, b, fb);
+  };
+  auto graph = buildTimingGraph(nodes, stream->entry[1], provider, nullptr, &contexts);
+  check(graph.error.empty() && queries > 0, "graph construction supplies contexts to dependence queries");
+  contexts.pop_back();
+  check(!buildTimingGraph(nodes, unknownRegs(), provider, nullptr, &contexts).error.empty(),
+        "graph rejects a context vector for a different instruction snapshot");
+}
+
+void grouped(MLIRContext &context) {
+  auto module = lower(context);
+  check(bool(module), "grouped PACK context fixture lowers", diagnostics);
+  if (!module) return;
+  auto original = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(original) && original->loops.size() == 1, "grouped fixture has one proved PACK loop");
+  if (failed(original) || original->loops.size() != 1) return;
+  const auto &oldLoop = original->loops.front();
+  check(!oldLoop.delaySlot, "grouped fixture starts before delay-slot insertion");
+  if (oldLoop.delaySlot) return;
+  Operation *branch = original->ops[oldLoop.branch];
+  std::vector<Operation *> memory, updates, oldBody;
+  for (size_t pc = oldLoop.begin; pc < oldLoop.branch; ++pc) {
+    Operation *op = original->ops[pc];
+    oldBody.push_back(op);
+    if (isa<ScalarLoadOp, ScalarStoreOp>(op)) memory.push_back(op);
+    else if (isa<ALUImmOp>(op)) updates.push_back(op);
+  }
+  // Construct two rows independently of the model lowering. Scalar memory
+  // accesses keep their decoded order; all four loop updates move to the end.
+  OpBuilder builder(branch);
+  unsigned bodyWords = 0;
+  Value state = oldBody.front()->getOperand(0);
+  auto clone = [&](Operation *op) {
+    Operation *copy = builder.clone(*op);
+    copy->setOperand(0, state);
+    state = copy->getResult(0);
+    ++bodyWords;
+    return copy;
+  };
+  for (unsigned row = 0; row < kPackRelayoutUnrollFactor; ++row)
+    for (Operation *op : memory) {
+      Operation *copy = clone(op);
+      int64_t offset = op->getAttrOfType<IntegerAttr>("offset").getInt();
+      offset += row * (isa<ScalarLoadOp>(op) ? kAtlasMregRowBytes / 2 : kAtlasMregRowBytes);
+      setI32(copy, "offset", offset);
+    }
+  for (Operation *op : updates) {
+    Operation *copy = clone(op);
+    setI32(copy, "immediate", op->getAttrOfType<IntegerAttr>("immediate").getInt() * kPackRelayoutUnrollFactor);
+  }
+  branch->setOperand(0, state);
+  for (Operation *op : llvm::reverse(oldBody)) op->erase();
+  setI32(branch, "offset_bytes", -2 * int64_t(bodyWords));
+
+  auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(stream) && stream->loops.size() == 1, "grouped copy remains a single decidable loop");
+  if (failed(stream) || stream->loops.size() != 1) return;
+  const auto &loop = stream->loops.front();
+  constexpr unsigned group = kPackRelayoutUnrollFactor;
+  constexpr unsigned iterations = kAtlasMregRows / group;
+  unsigned loads = 0, stores = 0;
+  for (size_t pc = loop.begin; pc < loop.end(); ++pc) {
+    const auto &in = stream->instrs[pc];
+    const auto &proof = stream->timingContexts[pc];
+    bool isLoad = in.op->name == "lw", isStore = in.op->name == "sw";
+    check(bool(proof) == (isLoad || isStore), "grouped copy proves every scalar word and no loop update");
+    if (!proof) continue;
+    unsigned copy = isLoad ? loads++ : stores++;
+    unsigned rowInGroup = copy / kPackRelayoutRowWords;
+    unsigned word = copy % kPackRelayoutRowWords;
+    for (unsigned ordinal = 0; ordinal < proof->scalarAddresses().size(); ++ordinal) {
+      unsigned row = group * (ordinal % iterations) + rowInGroup;
+      uint32_t expected = isLoad ? fixed().packWord * 4 + kAtlasRegisterBytes / 2 * (word % 2) +
+                                      kAtlasMregRowBytes / 2 * row + 4 * (word / 2)
+                                : fixed().packRelayoutWord * 4 + kAtlasMregRowBytes * row +
+                                      kAtlasMregRowBytes / 2 * (word % 2) + 4 * (word / 2);
+      check(proof->scalarAddresses()[ordinal] == expected,
+            "grouped proof repeats exact finite cases at the shared iteration ordinal");
+    }
+  }
+  check(loads == group * kPackRelayoutRowWords && stores == loads,
+        "grouped copy carries complete load and store proofs");
+  expectVerified("grouped replay preserves every PACK interleave word", true, {},
+                 [&] { return verifyAtlasGeneratedBufferContract(*module); });
+
+  RegValues incomplete = stream->factsOf(loop).entry;
+  incomplete[fixed().packRowsReg] = kAtlasMregRows - group;
+  check(noContexts(proveAtlasPackLoopTimingContexts(*stream, loop, incomplete)),
+        "a grouped replay missing one group has no timing proof");
+  AtlasStream malformed = *stream;
+  malformed.instrs[loop.begin].op = findOp("addi");
+  check(noContexts(proveAtlasPackLoopTimingContexts(malformed, loop, stream->factsOf(loop).entry)),
+        "unequal decoded copy counts cannot create grouped timing proofs");
+  auto reread = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(reread) && stream->timingContexts[loop.begin] &&
+            !stream->timingContexts[loop.begin]->sameRegion(*reread->timingContexts[loop.begin]),
+        "grouped contexts are recomputed for each decoded snapshot");
 }
 
 void negative(MLIRContext &context) {
@@ -102,5 +250,7 @@ void negative(MLIRContext &context) {
 } // namespace
 
 void atlas_test::runScalarTimingContext(MLIRContext &context) {
+  positive(context);
+  grouped(context);
   negative(context);
 }
