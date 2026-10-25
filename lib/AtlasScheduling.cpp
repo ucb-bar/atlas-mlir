@@ -178,12 +178,15 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   std::unique_ptr<TimingReservations> table = reservations();
   if (!fault.empty())
     return op(0)->emitOpError(fault);
-  auto checkCycle = [&](int i, int c) {
-    add(add(c, g.footprints[i].doneAge,
-            "timing provider completion age exceeds cycle domain"),
-        1, "timing provider completion age exceeds cycle domain");
-    add(c, gaps[i], "timing provider issue gap exceeds positive cycle domain");
+  auto completion = [&](int i, int c) {
+    return add(add(c, g.footprints[i].doneAge,
+                   "timing provider completion age exceeds cycle domain"),
+               1, "timing provider completion age exceeds cycle domain");
   };
+  auto nextIssue = [&](int i, int c) {
+    return add(c, gaps[i], "timing provider issue gap exceeds positive cycle domain");
+  };
+  auto checkCycle = [&](int i, int c) { completion(i, c); nextIssue(i, c); };
   auto busy = [&](int i, int c) {
     checkCycle(i, c);
     if (!fault.empty())
@@ -199,7 +202,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       error = state.onWait(nodes[i], c);
     note(error);
   };
-  std::vector<int> placedOrder;
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -249,10 +251,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         int t = g.edges[e].to;
         if (t >= nb || waitingPreds[t] != 1)
           continue;
-        int c = std::max(
-            add(cycle, gaps[bestWait],
-                "timing provider issue gap exceeds positive cycle domain"),
-            earliest[t]);
+        int c = std::max(nextIssue(bestWait, cycle), earliest[t]);
         int start = c;
         while (fault.empty() && !busy(t, c).empty()) {
           c = add(c, 1, "scheduler search exceeds cycle domain");
@@ -310,7 +309,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
       waitingPreds[ed.to]--;
     }
-    nextFree = add(cycle, gaps[best], "timing provider issue gap exceeds positive cycle domain");
+    nextFree = nextIssue(best, cycle);
     if (!fault.empty())
       return op(best)->emitOpError(fault);
     lastPlaced = cycle;
@@ -359,20 +358,17 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
             why[ed.to] = ed.reason + " after " + name(i);
           }
         }
-        nextFree = add(cycle, gaps[i], "timing provider issue gap exceeds positive cycle domain");
+        nextFree = nextIssue(i, cycle);
         if (!fault.empty()) return op(i)->emitOpError(fault);
       }
     }
   }
 
-  placedOrder = body;
   // Inclusive issue-edge-zero last events are visible to Core S1 only
   // on the next edge (S1 precedes this edge's EXUs, including for ECALL).
   int drain = 0;
   for (int i : body)
-    drain = std::max(drain, add(add(issue[i], g.footprints[i].doneAge,
-                                   "timing provider completion age exceeds cycle domain"),
-                               1, "timing provider completion age exceeds cycle domain"));
+    drain = std::max(drain, completion(i, issue[i]));
   if (!fault.empty()) return op(0)->emitOpError(fault);
 
   int termCycle = nextFree;
@@ -394,11 +390,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     for (;;) {
       std::string held = busy(term, termCycle);
       if (held.empty() && slot >= 0 && fault.empty()) {
-        int slotCycle = add(termCycle, gaps[term], "timing provider issue gap exceeds positive cycle domain");
+        int slotCycle = nextIssue(term, termCycle);
         // Replay placements to check the slot with the branch reserved.
         auto withBranch = reservations();
         if (withBranch && fault.empty()) {
-          for (int i : placedOrder)
+          for (int i : body)
             reserve(*withBranch, i, issue[i]);
           checkCycle(slot, slotCycle);
           if (fault.empty())
@@ -421,10 +417,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         return op(term)->emitOpError("found no free issue cycle: ") << held;
     }
     reserve(*table, term, termCycle);
-    int termEnd = add(termCycle, gaps[term], "timing provider issue gap exceeds positive cycle domain");
+    int termEnd = nextIssue(term, termCycle);
     if (slot >= 0) {
       reserve(*table, slot, termEnd);
-      add(termEnd, gaps[slot], "timing provider issue gap exceeds positive cycle domain");
+      nextIssue(slot, termEnd);
     }
     if (!fault.empty())
       return op(term)->emitOpError(fault);
@@ -435,7 +431,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (issue[i] > free)
       before[begin + i] = {idleDelays(issue[i] - free), false, reason[i]};
     order.push_back(begin + i);
-    free = add(issue[i], gaps[i], "timing provider issue gap exceeds positive cycle domain");
+    free = nextIssue(i, issue[i]);
   }
   if (term >= 0) {
     int idle = termCycle - free;

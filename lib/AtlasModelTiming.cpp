@@ -36,13 +36,42 @@ using Array = llvm::json::Array;
 
 constexpr int kLinesPerBank = kVmemBankBytes / kLineBytes;
 
+// Match closed records while keeping their fixed values beside the schema.
+bool isRecord(const Object *object, std::initializer_list<Object::KV> fixed,
+            std::initializer_list<const char *> fields = {}) {
+  if (!object || object->size() != fixed.size() + fields.size()) return false;
+  for (const auto &[key, value] : fixed)
+    if (!object->get(key) || *object->get(key) != value) return false;
+  for (const char *key : fields)
+    if (!object->get(key)) return false;
+  return true;
+}
+
+bool bounded(const Object *object, const char *key, int64_t minimum, int64_t maximum) {
+  auto value = object ? object->getInteger(key) : std::nullopt;
+  return value && *value >= minimum && *value <= maximum;
+}
+
+bool nonemptyStrings(const Array *array) {
+  return array && !array->empty() && std::all_of(array->begin(), array->end(), [](const auto &value) {
+    auto text = value.getAsString();
+    return text && !text->empty();
+  });
+}
+
+bool hashes(const Object &object) {
+  return std::all_of(object.begin(), object.end(), [](const auto &entry) {
+    auto text = entry.second.getAsString();
+    return text && hashSyntax(*text);
+  });
+}
+
 llvm::Error factsError(const std::string &message) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(), modelTimingDiagnostic("model timing facts: " + message));
 }
 
 // This contract describes lowering capabilities, not a qualified timing profile.
-// Timing values belong to the selected facts; legacy link/bus knobs are dormant
-// in the curve backend and therefore impose no compiler capability requirement.
+// Timing values belong to the selected facts.
 std::string unsupportedCapability(const Object &cfg) {
   const Object *arch = cfg.getObject("arch_state_config"), *units = cfg.getObject("execution_units");
   if (!arch) return "arch_state_config";
@@ -75,57 +104,54 @@ std::string unsupportedCapability(const Object &cfg) {
   return {};
 }
 
-// Fixed-layout compiler capabilities, including the layout used by overlap
-// consumers. Extraction is independent: selected facts must establish all these
-// values before any provider or overlap rule may use this compiled layout.
+// Fixed-layout compiler capabilities, including the layout used by overlap consumers. Extraction is independent:
+// selected facts must establish all these values before any provider or overlap rule may use this compiled layout.
+// The equality check was removed because unsupportedCapability (called first in parseImpl) pins every config key
+// to the same compiler constant; cfg remains only for the dynamic-binding loop.
 llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
   const Object *facts = root.getObject("architecture");
   if (!facts || facts->getString("schema") != "atlas.architecture.v1")
     return factsError("requires source-derived architecture facts (atlas.architecture.v1)");
-  struct Capability { const char *key; int64_t value; const char *config; bool arch; };
-  for (const auto &cap : std::initializer_list<Capability>{
-      {"mreg_count", kAtlasTensorRegisters, "num_m_registers", true},
-      {"mreg_rows", kAtlasMregRows, "mrf_depth", true},
-      {"mreg_row_bytes", kAtlasMregRowBytes, "mrf_width", true},
-      {"mreg_bytes", kAtlasRegisterBytes, nullptr, false},
-      {"mreg_physical_bank_count", kAtlasMregBanks, nullptr, false},
-      {"mreg_bank_modulus", kAtlasMregBanks, nullptr, false},
-      {"mreg_registers_per_bank", kAtlasTensorRegisters / kAtlasMregBanks, nullptr, false},
-      {"mreg_physical_row_stride", kAtlasMregRows, nullptr, false},
-      {"mreg_logical_limit", kAtlasTensorRegisters, nullptr, false},
-      {"bf16_registers_per_tile", kAtlasBF16Registers, nullptr, false},
-      {"bf16_pair_stride", 1, nullptr, false},
-      {"bf16_tile_bytes", kAtlasBF16TileBytes, nullptr, false},
-      {"bf16_element_bytes", 2, nullptr, false},
-      {"fp8_element_bytes", 1, nullptr, false},
-      {"fp8_registers_per_tile", 1, nullptr, false},
-      {"fp8_tile_bytes", kAtlasRegisterBytes, nullptr, false},
-      {"vmem_bytes", kAtlasVmemBytes, "vmem_size", true},
-      {"vmem_bank_bytes", kVmemBankBytes, "vmem_bank_bytes", false},
-      {"vmem_bank_count", kVmemBanks, nullptr, false},
-      {"weight_buffer_count", 2, "num_wb_registers", true},
-      {"weight_buffer_bytes", kAtlasRegisterBytes, "wb_width", true},
-      {"xreg_count", 32, "num_x_registers", true},
-      {"ereg_count", 32, "num_e_registers", true},
-      {"csr_count", 4096, "num_csrs", true},
-      {"scalar_word_bytes", 4, nullptr, false},
-      {"dma_channels", kAtlasDMAChannels, "dma_num_channels", false},
-      {"dma_beat_bytes", 32, "dma_beat_bytes", false},
-      {"dma_max_transfer_bytes", 4096, "dma_max_transfer_bytes", false},
-      {"fetch_width", 1, "fetch_width", false},
-      {"dram_base", 0x80000000LL, "dram_base", true},
-      {"dram_bytes", 0x1000000000LL, "dram_size", true},
+  using Capability = std::pair<const char *, int64_t>;
+  for (const auto &[key, expected] : std::initializer_list<Capability>{
+      {"mreg_count", kAtlasTensorRegisters},
+      {"mreg_rows", kAtlasMregRows},
+      {"mreg_row_bytes", kAtlasMregRowBytes},
+      {"mreg_bytes", kAtlasRegisterBytes},
+      {"mreg_physical_bank_count", kAtlasMregBanks},
+      {"mreg_bank_modulus", kAtlasMregBanks},
+      {"mreg_registers_per_bank", kAtlasTensorRegisters / kAtlasMregBanks},
+      {"mreg_physical_row_stride", kAtlasMregRows},
+      {"mreg_logical_limit", kAtlasTensorRegisters},
+      {"bf16_registers_per_tile", kAtlasBF16Registers},
+      {"bf16_pair_stride", 1},
+      {"bf16_tile_bytes", kAtlasBF16TileBytes},
+      {"bf16_element_bytes", 2},
+      {"fp8_element_bytes", 1},
+      {"fp8_registers_per_tile", 1},
+      {"fp8_tile_bytes", kAtlasRegisterBytes},
+      {"vmem_bytes", kAtlasVmemBytes},
+      {"vmem_bank_bytes", kVmemBankBytes},
+      {"vmem_bank_count", kVmemBanks},
+      {"weight_buffer_count", 2},
+      {"weight_buffer_bytes", kAtlasRegisterBytes},
+      {"xreg_count", 32},
+      {"ereg_count", 32},
+      {"csr_count", 4096},
+      {"scalar_word_bytes", 4},
+      {"dma_channels", kAtlasDMAChannels},
+      {"dma_beat_bytes", 32},
+      {"dma_max_transfer_bytes", 4096},
+      {"fetch_width", 1},
+      {"dram_base", 0x80000000LL},
+      {"dram_bytes", 0x1000000000LL},
       }) {
-    auto value = facts->getInteger(cap.key);
-    if (!value || *value != cap.value)
-      return factsError(std::string("unsupported architecture capability ") + cap.key +
-                        ": compiler requires " + std::to_string(cap.value));
-    const Object *config = cap.arch ? cfg.getObject("arch_state_config") : &cfg;
-    if (cap.config && (!config || config->getInteger(cap.config) != value))
-      return factsError(std::string("derived architecture differs from configuration: ") + cap.key);
+    auto value = facts->getInteger(key);
+    if (!value || *value != expected)
+      return factsError(std::string("unsupported architecture capability ") + key +
+                        ": compiler requires " + std::to_string(expected));
   }
-  // Selected timing capacity and dormant legacy geometry are derived and bound
-  // to configuration, but impose no fixed-layout compiler requirement.
+  // Dynamic capacity and dormant geometry remain configuration-bound.
   for (const char *key : {"dma_max_in_flight", "offchip_link_width_bits",
                          "offchip_link_core_cycles_per_beat", "dma_offchip_command_words",
                          "vmem_bus_width_bits", "vmem_bus_core_cycles_per_beat", "vmem_bytes_per_cycle"}) {
@@ -136,8 +162,7 @@ llvm::Error checkArchitecture(const Object &root, const Object &cfg) {
   return llvm::Error::success();
 }
 
-// Memory instruction roles are checked against the existing compiler footprint,
-// so this compatibility boundary does not introduce a second direction table.
+// Check roles against the compiler footprint instead of duplicating its direction table.
 llvm::Error checkMemoryOperandRoles(const OpInfo &op, const Object &entry) {
   const Array *operands = entry.getArray("operands");
   if (!operands) return factsError("missing ISA resource operands for " + op.name);
@@ -177,8 +202,7 @@ llvm::Error checkMemoryOperandRoles(const OpInfo &op, const Object &entry) {
   return llvm::Error::success();
 }
 
-// The model supplies operand types and assembly roles. Tokens are the small
-// compiler syntax adapter; comparing them also checks the builtin ISA table.
+// Assembly role tokens bind the model metadata to the builtin ISA adapter.
 llvm::Error checkIsaMetadata(const Object &root) {
   const Object *metadata = root.getObject("isa_metadata");
   if (!metadata) return factsError("requires source-derived ISA operand metadata");
@@ -273,14 +297,14 @@ struct Fill {
     const auto *release = reservation(key);
     return release ? release->releaseAge : legacy;
   }
-  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1, bool mergeRelease = true) {
+  int mreg(const char *key, int reg, bool write, int registers = 1, int passes = 1) {
     access(key, Res::MReg, write, reg * kAtlasMregRows, registers * kAtlasMregRows, passes);
     auto &list = write ? f.mregWrites : f.mregReads;
     for (int i = 0; i < registers; ++i) list.push_back(reg + i);
     int end = releaseEnd(write ? "mreg_write" : "mreg_read", last(key) + (write ? 0 : latency));
     if (end < last(key)) fail("MREG reservation releases before its last access");
     int &release = write ? f.writeRelease : f.readRelease;
-    release = mergeRelease ? std::max(release, end) : end;
+    release = std::max(release, end);
     return end;
   }
   int busyEnd() { return releaseEnd("unit", block ? block->firstFreeAge - 1 : 0); }
@@ -293,9 +317,8 @@ struct Fill {
       for (int bank = 0; bank < kVmemBanks; ++bank)
         f.holds.push_back({Unit::VmemBank, bank, from, to});
   }
-  void hold(std::initializer_list<Unit> units, int from, int to) {
-    if (from <= to)
-      for (Unit unit : units) f.holds.push_back({unit, 0, from, to});
+  void hold(Unit unit, int to) {
+    if (to >= 0) f.holds.push_back({unit, 0, 0, to});
   }
   Footprint done(int busy) {
     if (block)
@@ -306,9 +329,8 @@ struct Fill {
         if (!usedReleases.count(key)) fail("reservation release " + key + " is outside the mapped domain");
         if (key == "mreg_read" || key == "mreg_write") {
           const auto &regs = key == "mreg_read" ? f.mregReads : f.mregWrites;
-          // VPU reference facts describe disjoint operand roles. Identical
-          // source roles may name the same logical pair and coalesce at the
-          // exact row/edge; retain their role count here, then check ports.
+          // VPU reference facts describe disjoint operand roles. Identical source roles may name the same logical
+          // pair and coalesce at the exact row/edge; retain their role count here, then check ports.
           size_t banks = key == "mreg_read" && llvm::StringRef(name).starts_with("vpu.") ?
               regs.size() : std::set<int>(regs.begin(), regs.end()).size();
           if (banks != release.banks.size())
@@ -377,8 +399,7 @@ Footprint mxuFootprint(const Instr &in, const std::map<std::string, ModelTimingB
     auto uses = weightUses.find("mxu" + std::to_string(m));
     if (uses == weightUses.end()) fill.fail("missing source-derived weight-use windows");
     else {
-      // Pushes replace whole weight rows. Their dependencies need the first and
-      // last use across all PEs in each row, rather than the compute envelope.
+      // Whole-row pushes depend on both endpoints of every PE use window.
       const auto &rows = uses->second;
       if (rows.back().lastAge > busy) fill.fail("weight use exceeds compute lifetime");
       // The parser checks affine row projection. Two sweeps preserve every
@@ -434,27 +455,23 @@ std::string mlir::atlas::timing::canonicalJson(const llvm::json::Value &value) {
 
 namespace {
 bool exactKeys(const Object &object, std::initializer_list<const char *> keys) {
-  if (object.size() != keys.size()) return false;
-  for (const char *key : keys)
-    if (!object.get(key)) return false;
-  return true;
+  return isRecord(&object, {}, keys);
 }
 
 llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeightUses(const Object &document) {
   const Object *engines = document.getObject("engines");
-  if (!exactKeys(document, {"schema", "engines"}) ||
-      document.getString("schema") != "atlas.mxu_weight_timing.v1" || !engines ||
-      !exactKeys(*engines, {"mxu0", "mxu1"}))
+  if (!isRecord(&document, {{"schema", "atlas.mxu_weight_timing.v1"}}, {"engines"}) ||
+      !isRecord(engines, {}, {"mxu0", "mxu1"}))
     return factsError("requires source-derived MXU weight-use windows (atlas.mxu_weight_timing.v1)");
   std::map<std::string, std::vector<ModelTimingGroup>> result;
   for (const char *engine : {"mxu0", "mxu1"}) {
     const Object *entry = engines->getObject(engine);
-    if (!entry || !exactKeys(*entry, {"use_window", "use_rows", "reads_before_writes", "resource_row_axis"}) ||
-        entry->getBoolean("reads_before_writes") != true || entry->getString("resource_row_axis") != "output_column")
+    if (!isRecord(entry, {{"reads_before_writes", true}, {"resource_row_axis", "output_column"}},
+                {"use_window", "use_rows"}))
       return factsError("unsupported MXU weight resource mapping or edge order");
     const Object *window = entry->getObject("use_window");
     const Array *rows = entry->getArray("use_rows");
-    if (!window || !exactKeys(*window, {"first_age", "last_age", "row_step", "column_step"}) ||
+    if (!isRecord(window, {}, {"first_age", "last_age", "row_step", "column_step"}) ||
         !rows || rows->size() != kAtlasMregRows)
       return factsError("incomplete MXU weight-use geometry");
     auto first = window->getInteger("first_age"), last = window->getInteger("last_age");
@@ -467,7 +484,7 @@ llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeight
       const Object *use = (*rows)[row].getAsObject();
       int begin = *first + row * *rowStep;
       int end = *last + row * *rowStep + (kAtlasMregRows - 1) * *columnStep;
-      if (!use || !exactKeys(*use, {"first_age", "last_age"}) ||
+      if (!isRecord(use, {}, {"first_age", "last_age"}) ||
           use->getInteger("first_age") != begin || use->getInteger("last_age") != end)
         return factsError("MXU weight row projection differs from PE use windows");
       result[engine].push_back({begin, end, end - begin + 1, 1});
@@ -476,25 +493,21 @@ llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeight
   return result;
 }
 
-// The selected file carries an explicit serialization of its deterministic
-// semantic inputs. Hash those exact bytes (Python and LLVM render floats
-// differently), then compare both decoded objects using one canonicalizer.
+// Hash the producer's bytes (Python/LLVM float spellings differ), then compare decoded semantics.
 llvm::Expected<std::string> validateDerivedContract(const Object &root) {
   const Object *contract = root.getObject("derivation_contract");
-  if (!contract || !exactKeys(*contract, {"schema", "payload_json", "payload_sha256", "derivation", "validation"}) ||
-      contract->getString("schema") != "atlas.derived_facts.v1")
+  if (!isRecord(contract, {{"schema", "atlas.derived_facts.v1"}},
+              {"payload_json", "payload_sha256", "derivation", "validation"}))
     return factsError("requires versioned source-derived facts contract atlas.derived_facts.v1; raw observations are validation/test-only");
   auto payloadJson = contract->getString("payload_json"), payloadHash = contract->getString("payload_sha256");
   if (!payloadJson || !payloadHash || !hashSyntax(*payloadHash) || modelSha256(*payloadJson) != *payloadHash)
     return factsError("derived semantic payload hash mismatch");
   const Object *derivation = contract->getObject("derivation"), *validation = contract->getObject("validation");
-  if (!derivation || !exactKeys(*derivation, {"schema", "kind", "payload_sha256"}) ||
-      derivation->getString("schema") != "atlas.derivation.v1" ||
-      derivation->getString("kind") != "source_derived" || derivation->getString("payload_sha256") != payloadHash)
+  if (!isRecord(derivation, {{"schema", "atlas.derivation.v1"}, {"kind", "source_derived"},
+                           {"payload_sha256", *payloadHash}}))
     return factsError("requires a source-derived derivation record bound to the semantic payload");
-  if (!validation || !exactKeys(*validation, {"schema", "passed", "payload_sha256"}) ||
-      validation->getString("schema") != "atlas.validation.v1" || validation->getBoolean("passed") != true ||
-      validation->getString("payload_sha256") != payloadHash)
+  if (!isRecord(validation, {{"schema", "atlas.validation.v1"}, {"passed", true},
+                           {"payload_sha256", *payloadHash}}))
     return factsError("requires a successful validation record bound to the semantic payload");
   const Object *model = root.getObject("model");
   if (!model) return factsError("missing model provenance in derived semantic payload");
@@ -535,8 +548,8 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
   auto reportHash = gate ? gate->getString("gate_report_sha256") : std::nullopt;
   if (!gate || gate->getBoolean("passed") != true || gate->getString("payload_sha256") != payloadHash ||
       !operations || gate->getInteger("operation_count") != int64_t(operations->size()) ||
-      !gate->getInteger("observed_runs") || *gate->getInteger("observed_runs") < 1 ||
-      !gate->getInteger("unobserved_runs") || *gate->getInteger("unobserved_runs") < 1 || !reportHash || !hashSyntax(*reportHash))
+      !bounded(gate, "observed_runs", 1, INT64_MAX) || !bounded(gate, "unobserved_runs", 1, INT64_MAX) ||
+      !reportHash || !hashSyntax(*reportHash))
     return factsError("requires successful operation validation bound to the deterministic payload");
   if (root.get("mxu_weight_timing")) {
     const Object *weights = gate->getObject("mxu_weight_validation");
@@ -565,58 +578,52 @@ bool completeReleaseCoverage(const ModelTimingBlock &block) {
 }
 
 llvm::Expected<ModelFrontendTiming> parseFrontend(const Object &f) {
-  auto error = [](const char *why) -> llvm::Expected<ModelFrontendTiming> { return factsError(why); };
   const Object *delay = f.getObject("delay"), *scalar = f.getObject("scalar"), *control = f.getObject("control");
-  if (!exactKeys(f, {"schema", "ordinary_issue_gap", "delay", "scalar", "control", "instructions"}) ||
-      f.getString("schema") != "atlas.model_frontend.v1" || !delay || !scalar || !control ||
-      !exactKeys(*delay, {"base_gap", "immediate_mask", "decrement_per_tick"}) ||
-      !exactKeys(*scalar, {"read_age", "write_age", "completion_delay"}) ||
-      !exactKeys(*control, {"delay_slots", "operand_read_age", "jal_link_pc_offset"}))
-    return error("requires complete source-derived frontend timing schema");
-  auto bounded = [](const Object &object, const char *key, int minimum = 0) {
-    auto value = object.getInteger(key);
-    return value && *value >= minimum && *value < 65536;
-  };
-  if (!bounded(f, "ordinary_issue_gap", 1) || !bounded(*delay, "base_gap", 1) ||
-      !bounded(*delay, "immediate_mask") || delay->getInteger("decrement_per_tick") != 1 ||
-      !bounded(*scalar, "read_age") || !bounded(*scalar, "write_age") ||
-      !bounded(*scalar, "completion_delay", 1) || !bounded(*control, "operand_read_age") ||
+  if (!isRecord(&f, {{"schema", "atlas.model_frontend.v1"}},
+              {"ordinary_issue_gap", "delay", "scalar", "control", "instructions"}) ||
+      !isRecord(delay, {}, {"base_gap", "immediate_mask", "decrement_per_tick"}) ||
+      !isRecord(scalar, {}, {"read_age", "write_age", "completion_delay"}) ||
+      !isRecord(control, {}, {"delay_slots", "operand_read_age", "jal_link_pc_offset"}))
+    return factsError("requires complete source-derived frontend timing schema");
+  if (!bounded(&f, "ordinary_issue_gap", 1, 65535) || !bounded(delay, "base_gap", 1, 65535) ||
+      !bounded(delay, "immediate_mask", 0, 65535) || delay->getInteger("decrement_per_tick") != 1 ||
+      !bounded(scalar, "read_age", 0, 65535) || !bounded(scalar, "write_age", 0, 65535) ||
+      !bounded(scalar, "completion_delay", 1, 65535) || !bounded(control, "operand_read_age", 0, 65535) ||
       control->getInteger("delay_slots") != 1 || control->getInteger("jal_link_pc_offset") != 1)
-    return error("unsupported frontend issue, scalar timing or control-flow encoding capability");
+    return factsError("unsupported frontend issue, scalar timing or control-flow encoding capability");
   // These are compiler capabilities, separately checked after source extraction:
   // delay insertion encodes 12-bit chunks and the CFG scheduler has one slot.
   if (f.getInteger("ordinary_issue_gap") != 1 || delay->getInteger("base_gap") != 1 ||
       delay->getInteger("immediate_mask") != 4095)
-    return error("unsupported compiler scheduling/encoding capability: ordinary_issue_gap=1, delay base_gap=1 and immediate_mask=4095 are required");
-  // completion_delay schedules deferred execution-log callbacks. The reviewed
-  // scalar source commits register effects during exec at read_age/write_age.
+    return factsError("unsupported compiler scheduling/encoding capability: ordinary_issue_gap=1, delay base_gap=1 and immediate_mask=4095 are required");
+  // completion_delay affects log callbacks; scalar effects commit at read_age/write_age.
   ModelFrontendTiming result{int(*f.getInteger("ordinary_issue_gap")), int(*delay->getInteger("base_gap")),
       int(*delay->getInteger("immediate_mask")), int(*scalar->getInteger("read_age")),
       int(*scalar->getInteger("write_age")), int(*control->getInteger("operand_read_age")),
       int(*control->getInteger("delay_slots")), {}};
   const Object *instructions = f.getObject("instructions");
-  if (!instructions || instructions->empty()) return error("missing frontend instruction access coverage");
+  if (!instructions || instructions->empty()) return factsError("missing frontend instruction access coverage");
   for (const auto &[name, value] : *instructions) {
     const Object *entry = value.getAsObject();
     auto kind = entry ? entry->getString("kind") : std::nullopt;
-    if (!entry || !exactKeys(*entry, {"kind", "reads", "writes"}) || !kind ||
+    if (!isRecord(entry, {}, {"kind", "reads", "writes"}) || !kind ||
         (*kind != "scalar" && *kind != "branch" && *kind != "jump" && *kind != "halt" &&
          *kind != "delay" && *kind != "control"))
-      return error("unsupported frontend instruction access record");
+      return factsError("unsupported frontend instruction access record");
     std::vector<ModelFrontendAccess> accesses;
     std::set<std::tuple<bool, std::string, std::string>> unique;
     for (bool write : {false, true}) {
       const Array *records = entry->getArray(write ? "writes" : "reads");
-      if (!records) return error("missing frontend instruction read/write roles");
+      if (!records) return factsError("missing frontend instruction read/write roles");
       for (const auto &record : *records) {
         const Object *access = record.getAsObject();
         auto resource = access ? access->getString("resource") : std::nullopt;
         auto operand = access ? access->getString("operand") : std::nullopt;
-        if (!access || !exactKeys(*access, {"resource", "operand"}) || !resource || !operand ||
+        if (!isRecord(access, {}, {"resource", "operand"}) || !resource || !operand ||
             (*resource != "xreg" && *resource != "ereg") ||
             (*operand != "rd" && *operand != "rs1" && *operand != "rs2") ||
             !unique.emplace(write, resource->str(), operand->str()).second)
-          return error("unsupported frontend instruction register mapping");
+          return factsError("unsupported frontend instruction register mapping");
         accesses.push_back({operand->str(), write, *resource == "ereg"});
       }
     }
@@ -631,26 +638,21 @@ llvm::Expected<int> parseScratchpadContract(const Object &root) {
   auto pipeline = contract ? contract->getInteger("dma_store_read_to_request_cycles") : std::nullopt;
   auto limitation = contract ? contract->getString("limitation") : std::nullopt;
   const Array *checked = contract ? contract->getArray("checked_source_methods") : nullptr;
-  if (!contract || !exactKeys(*contract, {"schema", "status", "assumptions", "response_latency_derived",
-          "dma_store_read_to_request_cycles", "limitation", "checked_source_methods"}) ||
-      contract->getString("schema") != "atlas.scratchpad_contract.v1" ||
-      contract->getString("status") != "explicit-target-assumption" ||
-      contract->getBoolean("response_latency_derived") != false || !assumptions ||
-      !exactKeys(*assumptions, {"scratchpad_read_latency"}) || assumptions->getInteger("scratchpad_read_latency") != 1 ||
+  if (!isRecord(contract, {{"schema", "atlas.scratchpad_contract.v1"}, {"status", "explicit-target-assumption"},
+                         {"response_latency_derived", false}},
+              {"assumptions", "dma_store_read_to_request_cycles", "limitation", "checked_source_methods"}) ||
+      !isRecord(assumptions, {{"scratchpad_read_latency", 1}}) ||
       !pipeline || *pipeline < 1 || *pipeline >= 4096 || !limitation || limitation->empty() || !checked || checked->empty())
     return factsError("requires explicit supported scratchpad target assumption; model response latency is not derived");
-  for (const auto &method : *checked)
-    if (!method.getAsString() || method.getAsString()->empty())
-      return factsError("invalid scratchpad source-method coverage");
+  if (!nonemptyStrings(checked)) return factsError("invalid scratchpad source-method coverage");
   return int(*assumptions->getInteger("scratchpad_read_latency"));
 }
 
 llvm::Error validateDMASourceContract(const Object &d) {
   auto error = [](const std::string &why) { return factsError("DMA source contract: " + why); };
   const Object *shared = d.getObject("source_contract");
-  if (!shared || !exactKeys(*shared, {"schema", "source_sha256", "source_shapes", "issue", "edge_order",
-                                     "core_tick_shape", "core_s1_shape"}) ||
-      shared->getString("schema") != "atlas.dma_source.v1")
+  if (!isRecord(shared, {{"schema", "atlas.dma_source.v1"}},
+              {"source_sha256", "source_shapes", "issue", "edge_order", "core_tick_shape", "core_s1_shape"}))
     return error("requires authoritative source/phase record");
   const Object *sources = shared->getObject("source_sha256"), *shapes = shared->getObject("source_shapes");
   if (!sources || !shapes || sources->size() != model_schema::dmaSourceShapes().size() ||
@@ -666,9 +668,7 @@ llvm::Error validateDMASourceContract(const Object &d) {
     if (sources->getString(name) != dmaSources->getString(name) || shapes->getString(name) != dmaShapes->getString(name))
       return error("DMA/backend identity copies disagree");
   const Object *issue = shared->getObject("issue"), *startup = d.getObject("startup_cycles");
-  if (!issue || !exactKeys(*issue, {"ordinary_gap", "first_engine_age", "store_read_to_request_cycles"}) ||
-      issue->getInteger("ordinary_gap") != 1 || issue->getInteger("first_engine_age") != 1 ||
-      issue->getInteger("store_read_to_request_cycles") != 2 || !startup ||
+  if (!isRecord(issue, {{"ordinary_gap", 1}, {"first_engine_age", 1}, {"store_read_to_request_cycles", 2}}) || !startup ||
       startup->getInteger("load") != issue->getInteger("first_engine_age") ||
       startup->getInteger("store") != *issue->getInteger("first_engine_age") + *issue->getInteger("store_read_to_request_cycles") ||
       d.getInteger("issue_interval_cycles") != issue->getInteger("ordinary_gap"))
@@ -694,13 +694,12 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   auto error = [](const std::string &why) -> llvm::Expected<ModelDMATiming> {
     return factsError("dma_timing: " + why);
   };
-  if (!exactKeys(d, {"schema", "backend", "resolved", "estimate_only", "curve_sha256", "source_sha256",
-      "source_shapes", "beat_bytes", "max_in_flight", "num_channels", "max_transfer_bytes", "queue_depth",
-      "window_beats", "frequency_ghz", "channels", "measured_channels", "access_bytes", "latency_mode",
-      "converge", "knee", "enforce_peak", "min_latency", "startup_cycles", "issue_interval_cycles",
-      "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics", "limits", "validation", "proposal_contract", "source_contract"}) ||
-      d.getString("schema") != "atlas.dma_timing.v1" || d.getString("backend") != "curve" ||
-      d.getBoolean("resolved") != true || d.getBoolean("estimate_only") != true)
+  if (!isRecord(&d, {{"schema", "atlas.dma_timing.v1"}, {"backend", "curve"}, {"resolved", true}, {"estimate_only", true}},
+      {"curve_sha256", "source_sha256", "source_shapes", "beat_bytes", "max_in_flight", "num_channels",
+       "max_transfer_bytes", "queue_depth", "window_beats", "frequency_ghz", "channels", "measured_channels",
+       "access_bytes", "latency_mode", "converge", "knee", "enforce_peak", "min_latency", "startup_cycles",
+       "issue_interval_cycles", "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics",
+       "limits", "validation", "proposal_contract", "source_contract"}))
     return error("requires the complete resolved proposal-only curve schema");
   if (auto refusal = validateDMASourceContract(d)) return std::move(refusal);
   const auto &identity = model_schema::dmaIdentity();
@@ -721,9 +720,8 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
           exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs"}) :
           exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs", "payload_sha256"})) ||
       validation->getBoolean("passed") != true || !reportHash || !hashSyntax(*reportHash) ||
-      !validation->getInteger("backend_streams") || *validation->getInteger("backend_streams") < 1 ||
-      !validation->getInteger("isolated_dma_runs") || *validation->getInteger("isolated_dma_runs") < 1 ||
-      !validation->getInteger("mixed_dma_runs") || *validation->getInteger("mixed_dma_runs") < 1)
+      !bounded(validation, "backend_streams", 1, INT64_MAX) ||
+      !bounded(validation, "isolated_dma_runs", 1, INT64_MAX) || !bounded(validation, "mixed_dma_runs", 1, INT64_MAX))
     return error("requires successful backend/isolated/mixed validation and its report SHA-256");
   if (!payloadHash.empty() && validation->getString("payload_sha256") != payloadHash)
     return error("validation does not bind the selected deterministic payload");
@@ -772,8 +770,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   auto selectedQueue = params.getInteger("queue_depth");
   if (queue != selectedQueue.value_or(inFlight))
     return error("queue_depth mismatch with selected configuration");
-  // Explicit backend settings must agree with the derived effective values.
-  // Omitted settings are resolved by the model converter, not compiler defaults.
+  // The model converter resolves omissions; explicit settings must agree.
   for (const char *key : {"frequency_ghz", "window_beats", "channels", "beat_bytes",
                           "min_latency", "converge", "knee"}) {
     if (params.get(key) && params.get(key)->kind() != llvm::json::Value::Null &&
@@ -792,8 +789,8 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   const Object *startup = d.getObject("startup_cycles");
   auto load = startup ? startup->getInteger("load") : std::nullopt;
   auto store = startup ? startup->getInteger("store") : std::nullopt;
-  if (!startup || !exactKeys(*startup, {"load", "store"}) || !load || !store ||
-      *load < 1 || *store < 1 || *load > INT_MAX || *store > INT_MAX)
+  if (!isRecord(startup, {}, {"load", "store"}) || !bounded(startup, "load", 1, INT_MAX) ||
+      !bounded(startup, "store", 1, INT_MAX))
     return error("requires bounded source-derived launch startup");
   ModelDMATiming result{beat, maxBytes, int(*load), int(*store), 0, 0, 0};
   double maximumService = minimum;
@@ -804,7 +801,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   for (const auto &value : *curves) {
     const Object *curve = value.getAsObject();
     auto pct = curve ? curve->getInteger("read_percentage") : std::nullopt;
-    if (!curve || !exactKeys(*curve, {"read_percentage", "unloaded_latency_cycles", "peak_beats_per_cycle", "cycles_per_beat", "points"}) ||
+    if (!isRecord(curve, {}, {"read_percentage", "unloaded_latency_cycles", "peak_beats_per_cycle", "cycles_per_beat", "points"}) ||
         !pct || *pct < 0 || *pct > 100 || *pct <= previous)
       return error("curve percentages must be sorted, unique and in range");
     previous = int(*pct);
@@ -834,43 +831,32 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   }
   const Array *limits = d.getArray("limits");
   if (!reads || !writes || !limits || limits->empty()) return error("requires pure read/store endpoints and explicit scope limits");
-  for (const auto &limit : *limits)
-    if (!limit.getAsString() || limit.getAsString()->empty()) return error("invalid proposal scope limit");
+  if (!nonemptyStrings(limits)) return error("invalid proposal scope limit");
   const Object *proposal = d.getObject("proposal_contract");
-  if (!proposal || !exactKeys(*proposal, {"schema", "kind", "response_to_retire_cycles",
-          "retire_to_wait_issue_cycles", "per_beat_bound_cycles", "preconditions", "policy",
-          "recurrence", "source_evidence", "proof", "limitations"}) ||
-      proposal->getString("schema") != "atlas.dma_proposal.v1" ||
-      proposal->getString("kind") != "serialized_all_mix_upper_bound" ||
-      proposal->getInteger("response_to_retire_cycles") != 0 || interval != 1 ||
-      proposal->getInteger("retire_to_wait_issue_cycles") != interval)
+  if (!isRecord(proposal, {{"schema", "atlas.dma_proposal.v1"}, {"kind", "serialized_all_mix_upper_bound"},
+                         {"response_to_retire_cycles", 0}, {"retire_to_wait_issue_cycles", interval}},
+              {"per_beat_bound_cycles", "preconditions", "policy", "recurrence", "source_evidence", "proof", "limitations"}) ||
+      interval != 1)
     return error("requires supported source-derived DMA proposal/edge contract");
   const Object *preconditions = proposal->getObject("preconditions"), *policy = proposal->getObject("policy");
   const Object *recurrence = proposal->getObject("recurrence"), *evidence = proposal->getObject("source_evidence");
-  if (!preconditions || !exactKeys(*preconditions, {"engine_backend_drained_at_launch", "vmem_grant_denials", "history", "maximum_cycle", "maximum_arithmetic_operand"}) ||
-      preconditions->getBoolean("engine_backend_drained_at_launch") != true ||
-      preconditions->getInteger("vmem_grant_denials") != 0 ||
-      preconditions->getInteger("maximum_cycle") != INT_MAX ||
-      preconditions->getInteger("maximum_arithmetic_operand") != INT_MAX ||
-      preconditions->getString("history") != "arbitrary_retained_issue_history" ||
-      !policy || !exactKeys(*policy, {"classification", "intercommand_serialization_cycles"}) ||
+  if (!isRecord(preconditions, {{"engine_backend_drained_at_launch", true}, {"vmem_grant_denials", 0},
+                              {"maximum_cycle", INT_MAX}, {"maximum_arithmetic_operand", INT_MAX},
+                              {"history", "arbitrary_retained_issue_history"}}) ||
+      !isRecord(policy, {}, {"classification", "intercommand_serialization_cycles"}) ||
       canonicalJson(llvm::json::Value(Object(*policy))) != search_policy::kDMAProposalPolicyJson ||
-      !recurrence || !exactKeys(*recurrence, {"retire", "wait"}) ||
-      recurrence->getString("retire") != "launch+startup[direction]+beats*per_beat_bound_cycles" ||
-      recurrence->getString("wait") != "retire+retire_to_wait_issue_cycles")
+      !isRecord(recurrence, {{"retire", "launch+startup[direction]+beats*per_beat_bound_cycles"},
+                           {"wait", "retire+retire_to_wait_issue_cycles"}}))
     return error("unsupported DMA proposal preconditions, recurrence or serialization policy");
-  if (!evidence || !exactKeys(*evidence, {"core_tick_shape", "core_s1_shape", "expressions", "edge_order",
-          "service_maximum_cycles", "service_quantum"}) ||
-      !evidence->getObject("expressions") || evidence->getObject("expressions")->empty() ||
-      evidence->getNumber("service_maximum_cycles") != maximumService ||
-      evidence->getString("service_quantum") !=
-          "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval")
+  if (!isRecord(evidence, {{"service_maximum_cycles", maximumService},
+                         {"service_quantum", "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval"}},
+              {"core_tick_shape", "core_s1_shape", "expressions", "edge_order"}) ||
+      !evidence->getObject("expressions") || evidence->getObject("expressions")->empty())
     return error("missing DMA source proof premises or inconsistent service maximum");
   for (const char *key : {"proof", "limitations"}) {
     const Array *text = proposal->getArray(key);
     if (!text || text->empty()) return error("missing DMA proof scope");
-    for (const auto &line : *text)
-      if (!line.getAsString() || line.getAsString()->empty()) return error("invalid DMA proof scope");
+    if (!nonemptyStrings(text)) return error("invalid DMA proof scope");
   }
   double quantum = std::ceil(maximumService) + interval;
   auto bound = proposal->getInteger("per_beat_bound_cycles");
@@ -887,22 +873,33 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   return result;
 }
 // No scheduling state is added: this qualifies the existing asynchronous policy.
+llvm::Error checkAdmissionValidation(const Object *gate, llvm::StringRef payloadHash,
+                                     llvm::StringRef family) {
+  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
+  const char *failure = nullptr;
+  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
+      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
+    failure = "requires successful native validation bound to derived payload";
+  else
+    for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
+      if (!bounded(gate, key, 1, INT64_MAX)) failure = "missing native mechanism coverage";
+  return failure ? factsError(family.str() + ": " + failure) : llvm::Error::success();
+}
+
 llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::StringRef payloadHash) {
   auto error = [](const std::string &why) { return factsError("DMA admission: " + why); };
   const Object *d = root.getObject("dma_admission");
-  if (!d || !exactKeys(*d, {"schema", "age_convention", "contract", "source_sha256", "source_shapes",
-                             "configuration", "issue", "source_contract_sha256", "semantics", "producer_sources", "validation"}) ||
-      d->getString("schema") != "atlas.dma_admission.v1" ||
-      d->getString("age_convention") != "issue_edge_zero" ||
-      d->getString("contract") != "source-asynchronous-dma-admission-v1")
+  if (!isRecord(d, {{"schema", "atlas.dma_admission.v1"}, {"age_convention", "issue_edge_zero"},
+                  {"contract", "source-asynchronous-dma-admission-v1"}},
+              {"source_sha256", "source_shapes", "configuration", "issue", "source_contract_sha256",
+               "semantics", "producer_sources", "validation"}))
     return error("requires source-derived asynchronous DMA issue contract");
   const Object *sources = d->getObject("source_sha256"), *shapes = d->getObject("source_shapes");
   if (!sources || !shapes ||
       !exactKeys(*sources, {"core.py", "dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py"}) ||
       !exactKeys(*shapes, {"core.py", "dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py"}))
     return error("missing complete source identity");
-  for (const auto &[name, value] : *sources)
-    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed source hash");
+  if (!hashes(*sources)) return error("malformed source hash");
   const Object *timing = root.getObject("dma_timing");
   const Object *shared = timing ? timing->getObject("source_contract") : nullptr;
   if (!shared || d->getString("source_contract_sha256") != modelSha256(canonicalJson(llvm::json::Value(Object(*shared)))) ||
@@ -922,10 +919,8 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
   for (const char *name : {"core.py", "lsu.py", "bank_conflict.py"})
     if (sources->getString(name) != engineSources->getString(name)) return error("engine source identities differ");
   const Object *configuration = d->getObject("configuration"), *issue = d->getObject("issue");
-  if (!configuration || !exactKeys(*configuration, {"num_channels", "beat_bytes", "max_in_flight", "max_transfer_bytes", "vmem_bank_bytes"}) ||
-      !issue || !exactKeys(*issue, {"ordinary_gap", "first_engine_age", "store_read_to_request_cycles"}) ||
-      issue->getInteger("ordinary_gap") != 1 || issue->getInteger("first_engine_age") != 1 ||
-      issue->getInteger("store_read_to_request_cycles") != 2)
+  if (!isRecord(configuration, {}, {"num_channels", "beat_bytes", "max_in_flight", "max_transfer_bytes", "vmem_bank_bytes"}) ||
+      !isRecord(issue, {{"ordinary_gap", 1}, {"first_engine_age", 1}, {"store_read_to_request_cycles", 2}}))
     return error("unsupported launch/staging policy");
   if (!shared->getObject("issue") || *issue != *shared->getObject("issue"))
     return error("launch/staging fields differ from authoritative DMA source contract");
@@ -956,17 +951,11 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
       {"fixed_dma_windows", "none"}, {"command_ring", "separate_unchanged_rtl_contract"}})
     if (semantics->getString(key) != value) return error("unsupported dynamic completion policy");
   const Object *producers = d->getObject("producer_sources");
-  if (!producers || !exactKeys(*producers, {"atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py"}))
+  if (!isRecord(producers, {}, {"atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py"}))
     return error("missing producer traceability");
-  for (const auto &[key, value] : *producers)
-    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed producer hash");
-  const Object *gate = d->getObject("validation");
-  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
-  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
-      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
-    return error("requires successful native validation bound to derived payload");
-  for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
-    if (!gate->getInteger(key) || *gate->getInteger(key) < 1) return error("missing native mechanism coverage");
+  if (!hashes(*producers)) return error("malformed producer hash");
+  if (auto error = checkAdmissionValidation(d->getObject("validation"), payloadHash, "DMA admission"))
+    return std::move(error);
   return llvm::Error::success();
 }
 
@@ -975,75 +964,55 @@ llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
     const Object &document, const Object &model,
     const std::map<std::string, ModelTimingBlock> &blocks, llvm::StringRef payloadHash) {
   auto error = [](const std::string &why) { return factsError("engine admission: " + why); };
-  if (!exactKeys(document, {"schema", "age_convention", "contract", "model", "source_contract",
-                             "vpu", "xlu", "vlsu", "scalar_lsu", "policy", "validation"}) ||
-      document.getString("schema") != "atlas.engine_admission.v1" ||
-      document.getString("age_convention") != "issue_edge_zero" ||
-      document.getString("contract") != "source-engine-initiation-v1")
+  if (!isRecord(&document, {{"schema", "atlas.engine_admission.v1"}, {"age_convention", "issue_edge_zero"},
+                          {"contract", "source-engine-initiation-v1"}},
+              {"model", "source_contract", "vpu", "xlu", "vlsu", "scalar_lsu", "policy", "validation"}))
     return error("unsupported schema or source contract");
   const Object *identity = document.getObject("model"), *source = document.getObject("source_contract");
-  if (!identity || !exactKeys(*identity, {"source_sha256", "configuration_sha256", "numerical_data_sha256"}))
+  if (!isRecord(identity, {}, {"source_sha256", "configuration_sha256", "numerical_data_sha256"}))
     return error("missing model identity");
   for (const auto &[key, value] : *identity)
     if (!model.get(key) || value != *model.get(key)) return error("model identity mismatch");
   const Object *units = source ? source->getObject("execution_units") : nullptr;
   const Object *config = model.getObject("configuration");
-  const Object *hashes = source ? source->getObject("source_sha256") : nullptr;
-  if (!source || !exactKeys(*source, {"source_sha256", "core_init_shape", "execution_units"}) ||
-      source->getString("core_init_shape") != "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9" ||
+  const Object *sourceHashes = source ? source->getObject("source_sha256") : nullptr;
+  if (!isRecord(source, {{"core_init_shape", "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9"}},
+              {"source_sha256", "execution_units"}) ||
       !units || !config || !config->getObject("execution_units") ||
-      *units != *config->getObject("execution_units") || !hashes ||
-      !exactKeys(*hashes, {"mxu.py", "vpu.py", "bank_conflict.py", "lsu.py", "core.py", "xlu.py"}))
+      *units != *config->getObject("execution_units") || !sourceHashes ||
+      !exactKeys(*sourceHashes, {"mxu.py", "vpu.py", "bank_conflict.py", "lsu.py", "core.py", "xlu.py"}))
     return error("missing reviewed source/engine routing identity");
-  for (const auto &[key, value] : *hashes)
-    if (!value.getAsString() || !hashSyntax(*value.getAsString())) return error("malformed source hash");
+  if (!hashes(*sourceHashes)) return error("malformed source hash");
   const Object *xlu = document.getObject("xlu"), *vlsu = document.getObject("vlsu"), *policy = document.getObject("policy");
   const Object *scalar = document.getObject("scalar_lsu");
   const Object *paths = vlsu ? vlsu->getObject("initiation_ages") : nullptr;
   auto xblock = blocks.find("xlu.transpose"), load = blocks.find("vlsu.vload"), store = blocks.find("vlsu.vstore");
-  if (!xlu || !exactKeys(*xlu, {"independent_from_vpu", "initiation", "initiation_age"}) ||
-      xlu->getBoolean("independent_from_vpu") != true || xlu->getString("initiation") != "prior_first_free" ||
-      !xlu->getInteger("initiation_age") || *xlu->getInteger("initiation_age") < 1 ||
-      *xlu->getInteger("initiation_age") > 4096 ||
+  if (!isRecord(xlu, {{"independent_from_vpu", true}, {"initiation", "prior_first_free"}}, {"initiation_age"}) ||
+      !bounded(xlu, "initiation_age", 1, 4096) ||
       (xblock != blocks.end() && xlu->getInteger("initiation_age") != xblock->second.firstFreeAge) ||
-      !vlsu || !exactKeys(*vlsu, {"independent_load_store_paths", "initiation", "initiation_ages"}) ||
-      vlsu->getBoolean("independent_load_store_paths") != true ||
-      vlsu->getString("initiation") != "same_path_prior_first_free" ||
-      !paths || !exactKeys(*paths, {"vlsu.vload", "vlsu.vstore"}) ||
-      !paths->getInteger("vlsu.vload") || !paths->getInteger("vlsu.vstore") ||
-      *paths->getInteger("vlsu.vload") < 1 || *paths->getInteger("vlsu.vload") > 4096 ||
-      *paths->getInteger("vlsu.vstore") < 1 || *paths->getInteger("vlsu.vstore") > 4096 ||
+      !isRecord(vlsu, {{"independent_load_store_paths", true}, {"initiation", "same_path_prior_first_free"}}, {"initiation_ages"}) ||
+      !isRecord(paths, {}, {"vlsu.vload", "vlsu.vstore"}) ||
+      !bounded(paths, "vlsu.vload", 1, 4096) || !bounded(paths, "vlsu.vstore", 1, 4096) ||
       (load != blocks.end() && paths->getInteger("vlsu.vload") != load->second.firstFreeAge) ||
       (store != blocks.end() && paths->getInteger("vlsu.vstore") != store->second.firstFreeAge) ||
-      !scalar || !exactKeys(*scalar, {"load_response_gap", "store_busy", "independent_vector_paths"}) ||
-      !scalar->getInteger("load_response_gap") || *scalar->getInteger("load_response_gap") < 1 ||
-      *scalar->getInteger("load_response_gap") > 4096 || scalar->getString("store_busy") != "none" ||
-      scalar->getBoolean("independent_vector_paths") != true ||
-      !policy || !exactKeys(*policy, {"mreg_ports", "unknown_vmem", "scalar_lsu", "mxu", "waits"}) ||
-      policy->getString("mreg_ports") != "vpu_same_logical_register_row_read_coalescing" ||
-      policy->getString("unknown_vmem") != "aliases_all_banks" ||
-      policy->getString("scalar_lsu") != "existing_alias_dependency_and_writeback_checks" ||
-      policy->getString("mxu") != "existing_source_overlap_rules" ||
-      policy->getString("waits") != "invalidate_live_admission")
+      !isRecord(scalar, {{"store_busy", "none"}, {"independent_vector_paths", true}}, {"load_response_gap"}) ||
+      !bounded(scalar, "load_response_gap", 1, 4096) ||
+      !isRecord(policy, {{"mreg_ports", "vpu_same_logical_register_row_read_coalescing"},
+                       {"unknown_vmem", "aliases_all_banks"}, {"scalar_lsu", "existing_alias_dependency_and_writeback_checks"},
+                       {"mxu", "existing_source_overlap_rules"}, {"waits", "invalidate_live_admission"}}))
     return error("unsupported engine/resource policy");
-  const Object *gate = document.getObject("validation");
-  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
-  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
-      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
-    return error("requires successful native validation bound to derived payload");
-  for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
-    if (!gate->getInteger(key) || *gate->getInteger(key) < 1) return error("missing native mechanism coverage");
+  if (auto error = checkAdmissionValidation(document.getObject("validation"), payloadHash, "engine admission"))
+    return std::move(error);
   const Object *vpu = document.getObject("vpu");
   const Object *final = vpu ? vpu->getObject("final_write_age") : nullptr;
   const Array *doubles = vpu ? vpu->getArray("double") : nullptr;
   const Array *groups = vpu ? vpu->getArray("logic_groups") : nullptr;
-  if (!vpu || !exactKeys(*vpu, {"capacity", "live", "final_write_age", "logic_groups", "double"}) ||
-      !vpu->getInteger("capacity") || *vpu->getInteger("capacity") < 1 || *vpu->getInteger("capacity") > 3 ||
-      vpu->getString("live") != "age_lt_final_write" ||
+  if (!isRecord(vpu, {{"live", "age_lt_final_write"}}, {"capacity", "final_write_age", "logic_groups", "double"}) ||
+      !bounded(vpu, "capacity", 1, 3) ||
       !final || final->empty() || !doubles || !groups)
     return error("unsupported VPU live-set predicate");
   ModelEngineAdmission result;
-  for (const auto &[name, value] : *hashes) result.sourceHashes[name.str()] = value.getAsString()->str();
+  for (const auto &[name, value] : *sourceHashes) result.sourceHashes[name.str()] = value.getAsString()->str();
   result.vpuCapacity = int(*vpu->getInteger("capacity"));
   result.scalarLoadGap = int(*scalar->getInteger("load_response_gap"));
   for (const auto &[name, event] : {std::pair<const char *, const char *>{"scalar_lsu.load", "load_write"},
@@ -1061,8 +1030,7 @@ llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
       int lastWrite = -1;
       for (const auto &[event, sweep] : block.events)
         if (llvm::StringRef(event).starts_with("write")) lastWrite = std::max(lastWrite, sweep.lastAge);
-      // Native write_last is the issue-live/retirement endpoint selected by
-      // latency; the guarded row planner may finish physical writes earlier.
+      // Guarded physical writes may precede the latency-selected issue-live endpoint.
       if (!age || lastWrite < 0 || lastWrite > *age || *age != block.firstFreeAge - 1)
         return error("VPU source live endpoint differs from lifetime or precedes row writes");
       result.vpuFinalWrite[name] = int(*age);
@@ -1096,9 +1064,8 @@ TimingRuleResult<int> ModelDMATiming::estimate(int64_t bytes, bool store) const 
   auto error = [](const char *why) -> TimingRuleResult<int> { return {0, std::string("model DMA estimate: ") + why}; };
   if (bytes < beatBytes || bytes > maxBytes || bytes % beatBytes)
     return error("transfer is outside the derived aligned geometry");
-  // Analytic all-mixture envelope under the contract's drained/no-denial
-  // preconditions. The source proof accounts for registered capacity and one
-  // response per edge; there is no hand-written queue simulator here.
+  // The source proof accounts for registered capacity and one response per edge;
+  // there is no hand-written queue simulator here.
   int64_t completion = int64_t(store ? storeStartup : loadStartup) +
                        (bytes / beatBytes) * perBeatBound;
   if (completion > INT_MAX)
@@ -1175,15 +1142,12 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     if (!document) return factsError("missing source-derived representative cost probes");
     const Object *proof = document->getObject("timing_class");
     const Object *probes = document->getObject("probes");
-    if (!exactKeys(*document, {"schema", "timing_class", "probes", "placement_policy"}) ||
-        document->getString("schema") != "atlas.proposal_costs.v1" ||
-        document->getString("placement_policy") != search_policy::kProposalOperandPlacement || !proof || !probes ||
-        !exactKeys(*proof, {"kind", "vpu", "mxu", "memory", "interval_scope"}) ||
-        proof->getString("kind") != "guarded_operand_independent_isolated_ages" ||
-        proof->getString("vpu") != "mnemonic_latency_and_register_independent_row_predicates" ||
-        proof->getString("mxu") != "guarded_age_geometry_expressions" ||
-        proof->getString("memory") != "guarded_age_geometry_predicates" ||
-        proof->getString("interval_scope") != "selected_representative_pair_only")
+    if (!isRecord(document, {{"schema", "atlas.proposal_costs.v1"}, {"placement_policy", search_policy::kProposalOperandPlacement}},
+                {"timing_class", "probes"}) || !probes ||
+        !isRecord(proof, {{"kind", "guarded_operand_independent_isolated_ages"},
+                       {"vpu", "mnemonic_latency_and_register_independent_row_predicates"},
+                       {"mxu", "guarded_age_geometry_expressions"}, {"memory", "guarded_age_geometry_predicates"},
+                       {"interval_scope", "selected_representative_pair_only"}}))
       return factsError("requires source-derived representative cost probes and timing-class proof");
     for (const auto &[name, value] : *probes) {
       const Array *pair = value.getAsArray();
@@ -1192,7 +1156,7 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
       std::pair<Instr, Instr> decoded;
       for (size_t index = 0; index < pair->size(); ++index) {
         const Object *row = (*pair)[index].getAsObject();
-        if (!row || !exactKeys(*row, {"rd", "rs1", "rs2", "imm"}))
+        if (!isRecord(row, {}, {"rd", "rs1", "rs2", "imm"}))
           return factsError("invalid representative cost operand record");
         Instr &in = index ? decoded.second : decoded.first;
         in.op = op;
@@ -1275,8 +1239,7 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
       return factsError("invalid model provenance field " + key.str());
     result.provenance[key.str()] = text->str();
   }
-  // Derive extension identities after model metadata so arbitrary provenance
-  // keys cannot override the selected semantic program/cost binding.
+  // Derive extension identities last so model metadata cannot override semantic bindings.
   for (const char *key : {"replay_timing", "proposal_costs"})
     if (const Object *document = root->getObject(key))
       result.provenance[std::string(key) + "_sha256"] = modelSha256(canonicalJson(llvm::json::Value(Object(*document))));
@@ -1466,8 +1429,7 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     return synchronous();
   }
   if (name == "delay" || name == "ecall") return synchronous();
-  // The verifier drains every engine before a successor starts, so redirect
-  // latency need only cover the delay slot; operands are read at issue.
+  // Successors start drained, so redirect latency need only cover the delay slot.
   if (op.opClass == OpClass::Branch) {
     if (!xreg(in.rs1) || !xreg(in.rs2)) return reject("unsupported branch operands");
     x(in.rs1, false);
@@ -1560,12 +1522,12 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     const char *rows = load ? "mreg_write" : "mreg_read";
     x(in.rs1, false);
     fill.access(vmem, Res::Vmem, !load, line.value_or(0), 32);
-    fill.mreg(rows, in.rd, load, 1, 1, /*mergeRelease=*/false);
+    fill.mreg(rows, in.rd, load, 1, 1);
     // lsu.py permits VLOAD writes during read reservations; observed rows still order WARs.
     f.writeDuringRead = load;
     int busy = fill.busyEnd();
     // Bank holds order VLS paths; MREG ports/releases order their overlap with VPU and XLU.
-    fill.hold({load ? Unit::VloadPath : Unit::VstorePath}, 0, busy);
+    fill.hold(load ? Unit::VloadPath : Unit::VstorePath, busy);
     fill.bank(line, vmem);
     if (!load) {
       f.writeRelease = fill.releaseEnd(vmem, fill.last(vmem));
@@ -1582,10 +1544,10 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
     if (!mreg(in.rd) || !mreg(in.rs1) || in.rs2 != 0 || in.imm != 0)
       return reject("unsupported XLU operands or encoding");
     Fill fill(f, "xlu.transpose", blocks);
-    fill.mreg("read", in.rs1, false, 1, 1, /*mergeRelease=*/false);
-    fill.mreg("write", in.rd, true, 1, 1, /*mergeRelease=*/false);
+    fill.mreg("read", in.rs1, false, 1, 1);
+    fill.mreg("write", in.rd, true, 1, 1);
     int busy = fill.busyEnd();
-    fill.hold({Unit::Xlu}, 0, busy);
+    fill.hold(Unit::Xlu, busy);
     return fill.done(busy);
   }
 
@@ -1628,8 +1590,8 @@ Footprint ModelTimingFacts::resolve(const Instr &in, const RegValues &regs) cons
                     std::to_string(reg & 31));
     }
     int busy = fill.busyEnd();
-    // VPU/XLU overlap is authorized by the shared pair/composition contract.
-    fill.hold({Unit::Xlu}, 0, busy);
+    // Hold the XLU for the VPU busy span unless the pair rules admit the overlap.
+    fill.hold(Unit::Xlu, busy);
     return fill.done(busy);
   }
 
@@ -2032,8 +1994,7 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
         disjoint &= uint64_t(aa[row]) + 4 <= bb[row] || uint64_t(bb[row]) + 4 <= aa[row];
     }
     if (!disjoint) return base(a, fa, b, fb);
-    // Exact byte disjointness removes only the line-granularity VMEM alias.
-    // All decoded register, release, ordering and port obligations survive.
+    // Byte disjointness removes VMEM aliases while retaining register/release/port obligations.
     Footprint precise = fa;
     precise.accesses.erase(std::remove_if(precise.accesses.begin(), precise.accesses.end(),
         [](const Access &access) { return access.res == Res::Vmem; }), precise.accesses.end());
@@ -2077,8 +2038,7 @@ static TimingRuleResult<TimingProvider> modelTimingProviderFactoryImpl(ModuleOp 
   if (!facts) return {{}, llvm::toString(facts.takeError())};
   for (const auto &[key, value] : facts->modelProvenance()) {
     auto retained = selection.getAs<StringAttr>(key);
-    // Legacy selected modules could only carry the locked curve. Preserve that
-    // default success path; a different curve always needs its explicit digest.
+    // Legacy selections implicitly bind the locked curve; other curves need an explicit digest.
     if (!retained && key == "dma_curve_sha256" && value == model_schema::dmaIdentity().at("curve_sha256"))
       continue;
     if (!retained || retained.getValue() != value) return {{}, "model evidence provenance mismatch: " + key};

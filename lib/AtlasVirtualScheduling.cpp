@@ -342,18 +342,18 @@ FailureOr<Cost> checkedCost(Operation *at, Unit unit, int64_t busy,
   return cost;
 }
 
+FailureOr<Cost> onUnit(const std::string &name, Unit unit, Operation *at, const timing::TimingProvider &provider) {
+  auto t = timing::machineTimingOf(provider, name, at);
+  if (failed(t)) return failure();
+  return checkedCost(at, unit, t->interval, t->latency);
+}
+
 FailureOr<Cost> onMxu(StringRef name, unsigned unit, Operation *at, const timing::TimingProvider &provider) {
-  auto t = timing::machineTimingOf(provider, (name + ".mxu" + Twine(unit)).str(), at);
-  if (failed(t))
-    return failure();
-  return checkedCost(at, unit ? Unit::Mxu1 : Unit::Mxu0, t->interval, t->latency);
+  return onUnit((name + ".mxu" + Twine(unit)).str(), unit ? Unit::Mxu1 : Unit::Mxu0, at, provider);
 }
 
 FailureOr<Cost> onVpu(const std::string &name, Operation *at, const timing::TimingProvider &provider) {
-  auto t = timing::machineTimingOf(provider, name, at);
-  if (failed(t))
-    return failure();
-  return checkedCost(at, Unit::Vpu, t->interval, t->latency);
+  return onUnit(name, Unit::Vpu, at, provider);
 }
 
 // Work that holds the frontend from start to finish.
@@ -532,10 +532,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   if (isa<VirtualVPUSplatOp>(op))
     return onVpu("vli.all", op, provider);
   if (isa<VirtualXLUTransposeOp>(op)) {
-    auto t = timing::machineTimingOf(provider, "vtrpose.xlu", op);
-    if (failed(t))
-      return failure();
-    return checkedCost(op, Unit::Xlu, t->interval, t->latency);
+    return onUnit("vtrpose.xlu", Unit::Xlu, op, provider);
   }
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM in the same grouped-row
@@ -616,25 +613,14 @@ FailureOr<SpillCycles> spillCyclesOf(Operation *at, const timing::TimingProvider
     unsigned k = indexOf(kind);
     if (!possibleSpills[k])
       continue;
-    if (kind == RegisterKind::Scalar) {
-      auto save = scalarSlotCycles(true, -1, at, provider);
-      if (failed(save)) return failure();
-      auto reload = scalarSlotCycles(false, -1, at, provider);
-      if (failed(reload)) return failure();
-      for (int64_t cycles : {*save, *reload})
-        if (cycles < 0 || cycles > std::numeric_limits<int>::max())
-          return at->emitOpError("virtual cost exceeds nonnegative cycle domain");
-      spill.save[k] = static_cast<int>(*save);
-      spill.reload[k] = static_cast<int>(*reload);
-      continue;
-    }
-    unsigned halves = registersOf(kind == RegisterKind::FP8);
-    FailureOr<int64_t> save = vmemCycles(halves, true, at, provider);
-    if (failed(save))
-      return failure();
-    FailureOr<int64_t> reload = vmemCycles(halves, false, at, provider);
-    if (failed(reload))
-      return failure();
+    auto cycles = [&](bool store) {
+      return kind == RegisterKind::Scalar ? scalarSlotCycles(store, -1, at, provider)
+          : vmemCycles(registersOf(kind == RegisterKind::FP8), store, at, provider);
+    };
+    auto save = cycles(true);
+    if (failed(save)) return failure();
+    auto reload = cycles(false);
+    if (failed(reload)) return failure();
     for (int64_t cycles : {*save, *reload})
       if (cycles < 0 || cycles > std::numeric_limits<int>::max())
         return at->emitOpError("virtual cost exceeds nonnegative cycle domain");
@@ -1138,50 +1124,33 @@ struct ScheduleAtlasVirtualPass
     ModuleOp module = getOperation();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
+    auto refuse = [&](const Twine &why) { module.emitError(why); signalPassFailure(); };
     FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
-    if (lookahead != 0 && !llvm::is_contained(search_policy::kSupportedLookaheads, lookahead)) {
-      module.emitError("lookahead must be 0, 1, 2, 4, or 8");
-      return signalPassFailure();
-    }
-    if (lookahead && selected->id != timing::kModelTimingProviderId) {
-      module.emitError("lookahead requires the model timing provider");
-      return signalPassFailure();
-    }
-    if (lookahead && randomSeed >= 0) {
-      module.emitError("lookahead and random-seed are mutually exclusive");
-      return signalPassFailure();
-    }
-    if (selected->id == timing::kModelTimingProviderId && (!selected->proposalReplay || !selected->proposalDMACapacity)) {
-      module.emitError("model virtual scheduling requires source-bound replay and DMA capacity");
-      return signalPassFailure();
-    }
-    if ((!orderFile.empty() || !graphOutput.empty()) && selected->id != timing::kModelTimingProviderId) {
-      module.emitError("explicit orders and graph output require the model timing provider");
-      return signalPassFailure();
-    }
-    if (!orderFile.empty() && (lookahead || randomSeed >= 0)) {
-      module.emitError("order-file excludes lookahead and random-seed");
-      return signalPassFailure();
-    }
+    if (lookahead != 0 && !llvm::is_contained(search_policy::kSupportedLookaheads, lookahead))
+      return refuse("lookahead must be 0, 1, 2, 4, or 8");
+    if (lookahead && selected->id != timing::kModelTimingProviderId)
+      return refuse("lookahead requires the model timing provider");
+    if (lookahead && randomSeed >= 0)
+      return refuse("lookahead and random-seed are mutually exclusive");
+    if (selected->id == timing::kModelTimingProviderId && (!selected->proposalReplay || !selected->proposalDMACapacity))
+      return refuse("model virtual scheduling requires source-bound replay and DMA capacity");
+    if ((!orderFile.empty() || !graphOutput.empty()) && selected->id != timing::kModelTimingProviderId)
+      return refuse("explicit orders and graph output require the model timing provider");
+    if (!orderFile.empty() && (lookahead || randomSeed >= 0))
+      return refuse("order-file excludes lookahead and random-seed");
     std::optional<llvm::json::Value> requested;
     if (!orderFile.empty()) {
       auto file = llvm::MemoryBuffer::getFile(orderFile);
-      if (!file) {
-        module.emitError("cannot read order-file: ") << file.getError().message();
-        return signalPassFailure();
-      }
+      if (!file)
+        return refuse(Twine("cannot read order-file: ") + file.getError().message());
       auto parsed = llvm::json::parse((*file)->getBuffer());
-      if (!parsed) {
-        module.emitError("invalid order-file JSON: ") << llvm::toString(parsed.takeError());
-        return signalPassFailure();
-      }
+      if (!parsed)
+        return refuse(Twine("invalid order-file JSON: ") + llvm::toString(parsed.takeError()));
       requested = std::move(*parsed);
-      if (!requested->getAsArray()) {
-        module.emitError("order-file must contain an array of block permutations");
-        return signalPassFailure();
-      }
+      if (!requested->getAsArray())
+        return refuse("order-file must contain an array of block permutations");
     }
     llvm::json::Array graphs;
     unsigned blockIndex = 0;
@@ -1207,23 +1176,17 @@ struct ScheduleAtlasVirtualPass
         if (requested) {
           const auto &blocks = *requested->getAsArray();
           const auto *order = blockIndex < blocks.size() ? blocks[blockIndex].getAsArray() : nullptr;
-          if (!order || order->size() != graph->nodes.size()) {
-            module.emitError("order-file must contain one complete permutation per block");
-            return signalPassFailure();
-          }
+          if (!order || order->size() != graph->nodes.size())
+            return refuse("order-file must contain one complete permutation per block");
           SmallVector<Operation *> ops;
           std::vector<bool> placed(graph->nodes.size(), false);
           for (const auto &value : *order) {
             auto node = value.getAsInteger();
-            if (!node || *node < 0 || static_cast<uint64_t>(*node) >= placed.size() || placed[*node]) {
-              module.emitError("order-file contains an invalid or duplicate node");
-              return signalPassFailure();
-            }
+            if (!node || *node < 0 || static_cast<uint64_t>(*node) >= placed.size() || placed[*node])
+              return refuse("order-file contains an invalid or duplicate node");
             for (unsigned pred : graph->preds[*node])
-              if (!placed[pred]) {
-                module.emitError("order-file violates a dependence");
-                return signalPassFailure();
-              }
+              if (!placed[pred])
+                return refuse("order-file violates a dependence");
             placed[*node] = true;
             ops.push_back(graph->nodes[*node]);
           }
@@ -1281,16 +1244,12 @@ struct ScheduleAtlasVirtualPass
     if (!graphOutput.empty()) {
       std::error_code error;
       llvm::raw_fd_ostream output(graphOutput, error);
-      if (error) {
-        module.emitError("cannot write graph-output: ") << error.message();
-        return signalPassFailure();
-      }
+      if (error)
+        return refuse(Twine("cannot write graph-output: ") + error.message());
       output << llvm::json::Value(std::move(graphs)) << "\n";
       output.flush();
-      if (output.has_error()) {
-        module.emitError("cannot write graph-output");
-        return signalPassFailure();
-      }
+      if (output.has_error())
+        return refuse("cannot write graph-output");
     }
   }
 };

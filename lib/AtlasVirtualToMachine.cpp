@@ -1,3 +1,4 @@
+#include "llvm/ADT/Twine.h"
 #include "Atlas/AtlasModelTiming.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasVirtualToMachine.h"
@@ -1071,53 +1072,36 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
     }
-    if (packReloadAfterWeight && packWeightBeforePack) {
-      module.emitError("PACK weight placement options are mutually exclusive");
+    auto refuse = [&](const Twine &why) { module.emitError(why); signalPassFailure(); };
+    if (packReloadAfterWeight && packWeightBeforePack)
+      return refuse("PACK weight placement options are mutually exclusive");
+    auto parseRanks = [&](StringRef option, StringRef text, SmallVectorImpl<unsigned> &result) -> LogicalResult {
+      if (text.empty()) return success();
+      SmallVector<StringRef> ranks;
+      text.split(ranks, ',', -1, true);
+      for (StringRef rankText : ranks) {
+        unsigned rank;
+        if (rankText.empty() || rankText.getAsInteger(10, rank))
+          return module.emitError() << option << " must contain comma-separated unsigned integers";
+        result.push_back(rank);
+      }
+      return success();
+    };
+    SmallVector<unsigned> storeWindowRanks, registerRanks;
+    if (failed(parseRanks("store-windows", storeWindows.getValue(), storeWindowRanks)) ||
+        failed(parseRanks("mreg-ranks", mregRanks.getValue(), registerRanks)))
       return signalPassFailure();
-    }
-    SmallVector<unsigned> storeWindowRanks;
-    if (!storeWindows.empty()) {
-      SmallVector<StringRef> ranks;
-      StringRef(storeWindows.getValue()).split(ranks, ',', -1, true);
-      for (StringRef text : ranks) {
-        unsigned rank;
-        if (text.empty() || text.getAsInteger(10, rank)) {
-          module.emitError("store-windows must contain comma-separated unsigned integers");
-          return signalPassFailure();
-        }
-        storeWindowRanks.push_back(rank);
-      }
-    }
-    SmallVector<unsigned> registerRanks;
-    if (!mregRanks.empty()) {
-      SmallVector<StringRef> ranks;
-      StringRef(mregRanks.getValue()).split(ranks, ',', -1, true);
-      for (StringRef text : ranks) {
-        unsigned rank;
-        if (text.empty() || text.getAsInteger(10, rank)) {
-          module.emitError("mreg-ranks must contain comma-separated unsigned integers");
-          return signalPassFailure();
-        }
-        registerRanks.push_back(rank);
-      }
-    }
     auto selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
     const bool modelProvider = selected->id == timing::kModelTimingProviderId;
-    if ((packReloadAfterWeight || packWeightBeforePack) && !modelProvider) {
-      module.emitError() << (packWeightBeforePack ? "pack-weight-before-pack" : "pack-reload-after-weight")
-                         << " requires the model timing provider";
-      return signalPassFailure();
-    }
-    if (!storeWindows.empty() && !modelProvider) {
-      module.emitError("store-windows requires the model timing provider");
-      return signalPassFailure();
-    }
-    if (!mregRanks.empty() && !modelProvider) {
-      module.emitError("mreg-ranks requires the model timing provider");
-      return signalPassFailure();
-    }
+    if ((packReloadAfterWeight || packWeightBeforePack) && !modelProvider)
+      return refuse(Twine(packWeightBeforePack ? "pack-weight-before-pack" : "pack-reload-after-weight") +
+                    " requires the model timing provider");
+    if (!storeWindows.empty() && !modelProvider)
+      return refuse("store-windows requires the model timing provider");
+    if (!mregRanks.empty() && !modelProvider)
+      return refuse("mreg-ranks requires the model timing provider");
     reuseAtlasImmutableWeights(function);
     unsigned packRelayoutRows = atlasPackRelayoutRowsPerIteration(modelProvider);
     VirtualPlanner planner(module, function, storeWindowRanks, registerRanks, packReloadAfterWeight,
