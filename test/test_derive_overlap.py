@@ -5,7 +5,6 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import atlas_derive_overlap as derive
-from atlas_overlap_rules import validate_relation
 
 
 def event(first, last):
@@ -75,22 +74,14 @@ class DeriveOverlapTests(unittest.TestCase):
         self.assertEqual({(r["accumulator"], r["weight_slot"]) for r, *_ in rows},
                          {("same", "same"), ("same", "other"), ("other", "same"), ("other", "other")})
 
-    def test_scalar_templates_bind_full_supported_qualifiers(self):
-        rows = list(derive.scalar_domain())
-        self.assertTrue(rows)
-        seen = set()
-        for first, second, relation, assembly, initial in rows:
-            validate_relation(relation)
-            key = derive.canonical([first, second, relation])
-            self.assertNotIn(key, seen)
-            seen.add(key)
-            self.assertEqual(relation["mreg_banks"], "disjoint")
-            self.assertEqual(relation["scalar_address_alignment"], "word")
+    def test_minimal_vector_pair_domain_keeps_disjoint_source_legal_operands(self):
+        for first, second in [("vpu.relu", "vpu.relu"), ("vpu.fp8pack", "vpu.exp2")]:
+            rows = list(derive.pair_domain(first, second))
+            self.assertEqual(len(rows), 1)
+            relation, operands, assembly = rows[0]
+            self.assertEqual(relation, {"mreg_banks": "disjoint"})
             self.assertEqual(len(assembly), 2)
-            self.assertTrue(all(0 < int(reg) < 32 for reg in initial))
-            if relation["scalar_registers"] == "shared_base_read_only":
-                self.assertEqual(relation["vmem_bank"], "same")
-                self.assertEqual(relation["vmem_word_window"], "same")
+            self.assertFalse(set(operands[0]["registers"]) & set(operands[1]["registers"]))
 
     def test_retired_prefix_samples_keep_source_gaps(self):
         facts, contract = fixtures()

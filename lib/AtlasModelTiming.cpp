@@ -1703,11 +1703,6 @@ std::optional<ModelOverlapCommand> overlapCommand(const Instr &in, const Footpri
   std::string name = mxuBlockName(*in.op);
   if (auto found = vpuBlocks().find(in.op->name); found != vpuBlocks().end()) name = found->second;
   if (in.op->opClass == OpClass::Transpose) name = "xlu.transpose";
-  if (in.op->opClass == OpClass::VLoad) name = "vlsu.vload";
-  if (in.op->opClass == OpClass::VStore) name = "vlsu.vstore";
-  if (in.op->name == "lw") name = "scalar_lsu.load";
-  if (in.op->name == "sw") name = "scalar_lsu.store";
-  if (in.op->name == "seld") name = "scalar_lsu.scale_load";
   const ModelTimingBlock *block = facts.block(name);
   if (!block) return std::nullopt;
   ModelOverlapCommand command{name, in.op->engine, f.mregReads, {}, {}, cycle, block->firstFreeAge};
@@ -1770,9 +1765,7 @@ public:
           if (a.unit == b.unit && a.index == b.index && prior.cycle + a.from <= cycle + b.to &&
               cycle + b.from <= prior.cycle + a.to)
             if (!(waiver && sameEngine(*in.op, *prior.in.op, facts.get()) &&
-                  (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu ||
-                   (a.unit == Unit::ScalarLoad && scalarContext(in, context) &&
-                    scalarContext(prior.in, prior.context)))))
+                  (a.unit == Unit::MxuCompute || a.unit == Unit::Xlu)))
               return {std::string(unitName(a.unit)) + " occupied", {}};
       for (const Port &a : prior.ports)
         for (const Port &b : ports)
@@ -1809,9 +1802,6 @@ private:
     Instr in; Footprint f; int cycle; std::vector<Port> ports; bool eligible;
     TimingContext context;
   };
-  static bool scalarContext(const Instr &in, const TimingContext &context) {
-    return context && context->matches(in) && (in.op->name == "lw" || in.op->name == "sw");
-  }
   std::string admissionConflict(const Instr &in, int cycle) const {
     const auto &admission = *facts->engineAdmission();
     for (const Issued &prior : issued)
@@ -1830,10 +1820,6 @@ private:
   bool admitsInsertion(const Instr &in, const Footprint &f, int cycle, const TimingContext &context) const {
     auto candidate = overlapCommand(in, f, cycle, *facts);
     if (!candidate) return false;
-    if (scalarContext(in, context)) {
-      candidate->scalarInstruction = in;
-      candidate->context = context;
-    }
     struct Entry { ModelOverlapCommand command; int end; bool eligible, candidate; };
     std::vector<Entry> entries{{*candidate, cycle + f.doneAge, true, true}};
     for (const Issued &prior : issued) {
@@ -1842,10 +1828,6 @@ private:
       if (!command) {
         if (prior.cycle <= cycle + f.doneAge && cycle <= prior.cycle + prior.f.doneAge) return false;
         continue;
-      }
-      if (scalarContext(prior.in, prior.context)) {
-        command->scalarInstruction = prior.in;
-        command->context = prior.context;
       }
       entries.push_back({*command, prior.cycle + prior.f.doneAge, prior.eligible, false});
     }

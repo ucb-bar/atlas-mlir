@@ -172,9 +172,7 @@ DMA_SOURCE_SHAPES["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db
 DMA_EDGE_ORDER = ("Core.S1", "DMA.D", "DMA.store_read", "DMA.A",
                   "DMA.retire_clear_flag", "DMA.enqueue_launch")
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
-BASE_KEYS = set(VOCABULARY["base_relation_keys"])
 RELATION_VALUES = {key: set(values) for key, values in VOCABULARY["relation_values"].items()}
-RELATION_KEYS = BASE_KEYS | set(RELATION_VALUES)
 VPU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["vpu_blocks"]}
 MXU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["mxu_blocks"]}
 BINARY = {entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"] if entry["two_input"]}

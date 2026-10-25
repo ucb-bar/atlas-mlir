@@ -1,8 +1,6 @@
 """Complete operand partitions for the guarded 64-register/32-bank geometry."""
 from __future__ import annotations
 
-from functools import lru_cache
-
 
 def _shape(roles):
     groups = {}
@@ -88,44 +86,6 @@ def _assignments(widths):
                     yield from visit(values, max(used, bank_pair + 1))
                     values.pop()
     yield from visit([], 0)
-
-
-@lru_cache(maxsize=128)
-def _domain(shape_a, shape_b, footprints_a, footprints_b):
-    shapes = shape_a + shape_b
-    widths = tuple(width for _, width in shapes)
-    if len(widths) > 6:
-        raise ValueError("unsupported operand partition size")
-    constraints_a, constraints_b = _constraints(footprints_a), _constraints(footprints_b)
-    result = {}
-    for bases in _assignments(widths):
-        registers_a = tuple(base + index for base, (_, width) in zip(bases, shape_a)
-                            for index in range(width))
-        registers_b = tuple(base + index for base, (_, width) in zip(bases[len(shape_a):], shape_b)
-                            for index in range(width))
-        if not _legal(registers_a, constraints_a) or not _legal(registers_b, constraints_b):
-            continue
-        key = relation(registers_a, registers_b)
-        # Retain a deterministic legal witness for every exact cross relation.
-        result.setdefault(key, (bases[:len(shape_a)], bases[len(shape_a):]))
-    return tuple((key, *value) for key, value in sorted(result.items()))
-
-
-def operand_domain(first_roles, second_roles, first_registers, second_registers):
-    """Return exact cross relations and concrete, independently legal witnesses.
-
-    Footprints must come from guarded source-derived facts. Missing/unknown
-    structures fail closed; legality includes duplicate-source coalescing,
-    distinct-logical same-bank reads, writes and same-row read/write collisions.
-    This also supports engines with unrestricted singleton register operands.
-    """
-    shape_a, directions_a = _shape(first_roles)
-    shape_b, directions_b = _shape(second_roles)
-    footprints_a = _footprints(first_registers, directions_a)
-    footprints_b = _footprints(second_registers, directions_b)
-    return [(key, dict(zip((key for key, _ in shape_a), a)),
-             dict(zip((key for key, _ in shape_b), b)))
-            for key, a, b in _domain(shape_a, shape_b, footprints_a, footprints_b)]
 
 
 def standalone_domain(roles, registers):

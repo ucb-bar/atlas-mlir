@@ -3,18 +3,7 @@
   "base_relation_keys": ["mreg_banks", "accumulator", "weight_slot"],
   "relation_values": {
     "accumulator": ["same", "other"],
-    "weight_slot": ["same", "other"],
-    "vmem_bank": ["other", "same"],
-    "vmem_window": ["disjoint", "overlap", "same"],
-    "vmem_word_window": ["disjoint", "overlap", "same"],
-    "first_mnemonic": ["lb", "lbu", "lh", "lhu", "lw", "sb", "seld", "sh", "sw", "vload", "vstore"],
-    "second_mnemonic": ["lb", "lbu", "lh", "lhu", "lw", "sb", "seld", "sh", "sw", "vload", "vstore"],
-    "scalar_address_alignment": ["explicit_byte_offsets", "word"],
-    "first_scalar_byte_offset": ["0", "1", "2", "3"],
-    "second_scalar_byte_offset": ["0", "1", "2", "3"],
-    "scalar_registers": ["first_address_base_equals_second_load_destination", "independent", "same_load_destination", "shared_base_read_only", "store_data_equals_load_destination"],
-    "scalar_destination_file": ["erf", "xrf"],
-    "scalar_other_registers": ["independent"]
+    "weight_slot": ["same", "other"]
   },
   "vpu_blocks": [
     {"mnemonic": "vadd.bf16", "block": "add", "two_input": true, "op_class": "VpuElementwise"},

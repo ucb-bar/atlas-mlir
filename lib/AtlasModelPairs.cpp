@@ -11,8 +11,6 @@
 #include <tuple>
 
 using namespace mlir::atlas::timing;
-using mlir::atlas::kAtlasVmemBytes;
-using mlir::atlas::kAtlasRegisterBytes;
 
 namespace {
 using Object = llvm::json::Object;
@@ -49,25 +47,11 @@ bool relation(const Object *object, Relation &out) {
     auto text = value.getAsString();
     if (!text) return false;
     if (key != "mreg_banks") {
+      if (key != "accumulator" && key != "weight_slot") return false;
       auto allowed = values.find(key.str());
       if (allowed == values.end() || !allowed->second.count(text->str())) return false;
     }
     out[key.str()] = text->str();
-  }
-  auto get = [&](const char *key) { auto it = out.find(key); return it == out.end() ? std::string() : it->second; };
-  std::string mode = get("scalar_registers"), file = get("scalar_destination_file"), others = get("scalar_other_registers");
-  if (mode.empty() && (!file.empty() || !others.empty())) return false;
-  if ((mode == "independent" || mode == "shared_base_read_only") && !file.empty()) return false;
-  if (!mode.empty() && mode != "independent") {
-    if (others != "independent") return false;
-    if (mode != "shared_base_read_only" && (file.empty() || (mode != "same_load_destination" && file != "xrf"))) return false;
-  }
-  bool explicitOffsets = get("scalar_address_alignment") == "explicit_byte_offsets";
-  for (const char *side : {"first", "second"}) {
-    std::string mnemonic = get((std::string(side) + "_mnemonic").c_str());
-    bool offset = out.count(std::string(side) + "_scalar_byte_offset");
-    if (offset && !explicitOffsets) return false;
-    if (explicitOffsets && mnemonic != "vload" && mnemonic != "vstore" && !offset) return false;
   }
   return true;
 }
@@ -99,103 +83,7 @@ Relation relationClass(Relation relation) {
 // Match the complete producer relation. Optional qualifiers are predicates;
 // absent qualifiers never acquire invented constraints or resource capacity.
 bool matchesRelation(const Relation &expected, const ModelOverlapCommand &first, const ModelOverlapCommand &second) {
-  Relation base, extra;
-  for (const auto &[key, value] : expected)
-    (key == "mreg_banks" || key == "accumulator" || key == "weight_slot" ? base : extra)[key] = value;
-  if (base != actualRelation(first, second)) return false;
-  if (extra.empty()) return !llvm::StringRef(first.block).starts_with("scalar") &&
-      !llvm::StringRef(second.block).starts_with("scalar");
-  if (llvm::StringRef(first.block).starts_with("scalar") || llvm::StringRef(second.block).starts_with("scalar"))
-    for (const char *key : {"first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"})
-      if (!extra.count(key)) return false;
-  if (!first.scalarInstruction || !second.scalarInstruction || !first.context || !second.context ||
-      !first.context->matches(*first.scalarInstruction) || !second.context->matches(*second.scalarInstruction) ||
-      !first.context->sameRegion(*second.context)) return false;
-  const Instr &a = *first.scalarInstruction, &b = *second.scalarInstruction;
-  if (!a.op || !b.op) return false;
-  auto memory = [](const Instr &in) {
-    return in.op->opClass == OpClass::ScalarLoad || in.op->opClass == OpClass::ScalarStore ||
-        in.op->opClass == OpClass::ScaleLoad || in.op->opClass == OpClass::VLoad || in.op->opClass == OpClass::VStore;
-  };
-  if (!memory(a) || !memory(b)) return false;
-  auto blockMatches = [](const ModelOverlapCommand &command, const Instr &in) {
-    if (command.block == "scalar_lsu.load") return in.op->opClass == OpClass::ScalarLoad;
-    if (command.block == "scalar_lsu.store") return in.op->opClass == OpClass::ScalarStore;
-    if (command.block == "scalar_lsu.scale_load") return in.op->opClass == OpClass::ScaleLoad;
-    if (command.block == "vlsu.vload") return in.op->opClass == OpClass::VLoad;
-    if (command.block == "vlsu.vstore") return in.op->opClass == OpClass::VStore;
-    return false;
-  };
-  if (!blockMatches(first, a) || !blockMatches(second, b)) return false;
-  using Resource = std::pair<std::string, int>;
-  struct Roles {
-    Resource base;
-    std::optional<Resource> destination, data;
-    std::set<Resource> resources;
-    bool vector = false;
-  };
-  auto roles = [](const Instr &in) {
-    Roles r{{"xrf", in.rs1}, {}, {}, {}, in.op->opClass == OpClass::VLoad || in.op->opClass == OpClass::VStore};
-    r.resources.insert(r.base);
-    if (in.op->opClass == OpClass::ScalarLoad || in.op->opClass == OpClass::ScaleLoad) {
-      r.destination = Resource{in.op->opClass == OpClass::ScaleLoad ? "erf" : "xrf", in.rd};
-      r.resources.insert(*r.destination);
-    }
-    if (in.op->opClass == OpClass::ScalarStore) {
-      r.data = Resource{"xrf", in.rs2}; r.resources.insert(*r.data);
-    }
-    return r;
-  };
-  Roles ra = roles(a), rb = roles(b);
-  auto get = [&](const char *key) { auto it = extra.find(key); return it == extra.end() ? std::string() : it->second; };
-  if ((!get("first_mnemonic").empty() && get("first_mnemonic") != a.op->name) ||
-      (!get("second_mnemonic").empty() && get("second_mnemonic") != b.op->name)) return false;
-  std::set<Resource> common;
-  std::set_intersection(ra.resources.begin(), ra.resources.end(), rb.resources.begin(), rb.resources.end(),
-                        std::inserter(common, common.begin()));
-  std::string mode = get("scalar_registers"), file = get("scalar_destination_file");
-  auto only = [&](const Resource &resource) { return common == std::set<Resource>{resource}; };
-  auto writable = [](const std::optional<Resource> &destination) {
-    return destination && (destination->first != "xrf" || destination->second != 0);
-  };
-  if (mode == "independent") {
-    if (!common.empty()) return false;
-  } else if (mode == "same_load_destination") {
-    if (!writable(ra.destination) || ra.destination != rb.destination || ra.destination->first != file ||
-        !only(*ra.destination) || ra.base == *ra.destination || rb.base == *ra.destination) return false;
-  } else if (mode == "store_data_equals_load_destination") {
-    if (!writable(rb.destination) || rb.destination->first != "xrf" || ra.data != rb.destination ||
-        !only(*rb.destination) || ra.base == *rb.destination || rb.base == *rb.destination) return false;
-  } else if (mode == "first_address_base_equals_second_load_destination") {
-    if (!writable(rb.destination) || rb.destination->first != "xrf" || ra.base != *rb.destination ||
-        rb.base == *rb.destination || ra.data == rb.destination || ra.destination == rb.destination ||
-        !only(*rb.destination)) return false;
-  } else if (mode == "shared_base_read_only") {
-    if (ra.base != rb.base || !only(ra.base) || ra.destination == ra.base || rb.destination == ra.base ||
-        ra.data == ra.base || rb.data == ra.base) return false;
-  } else if (!mode.empty()) return false;
-  const auto &aa = first.context->scalarAddresses(), &ba = second.context->scalarAddresses();
-  for (size_t ordinal = 0; ordinal < aa.size(); ++ordinal) {
-    uint64_t x = aa[ordinal], y = ba[ordinal];
-    uint64_t xs = ra.vector ? x : x & ~uint64_t(3), ys = rb.vector ? y : y & ~uint64_t(3);
-    uint64_t xw = ra.vector ? kAtlasRegisterBytes : 4, yw = rb.vector ? kAtlasRegisterBytes : 4;
-    if (x >= kAtlasVmemBytes || y >= kAtlasVmemBytes || xs + xw > kAtlasVmemBytes || ys + yw > kAtlasVmemBytes ||
-        xs / kVmemBankBytes != (xs + xw - 1) / kVmemBankBytes ||
-        ys / kVmemBankBytes != (ys + yw - 1) / kVmemBankBytes ||
-        (ra.vector && x % kAtlasRegisterBytes) || (rb.vector && y % kAtlasRegisterBytes)) return false;
-    std::string bank = xs / kVmemBankBytes == ys / kVmemBankBytes ? "same" : "other";
-    std::string window = xs == ys && xw == yw ? "same" : xs < ys + yw && ys < xs + xw ? "overlap" : "disjoint";
-    if ((!get("vmem_bank").empty() && get("vmem_bank") != bank) ||
-        (!get("vmem_window").empty() && get("vmem_window") != window) ||
-        (!get("vmem_word_window").empty() && get("vmem_word_window") != window)) return false;
-    if (mode == "shared_base_read_only" && x != y) return false;
-    if (get("scalar_address_alignment") == "word" && ((!ra.vector && x % 4) || (!rb.vector && y % 4))) return false;
-    if (!get("first_scalar_byte_offset").empty() &&
-        (ra.vector || get("first_scalar_byte_offset") != std::to_string(x % 4))) return false;
-    if (!get("second_scalar_byte_offset").empty() &&
-        (rb.vector || get("second_scalar_byte_offset") != std::to_string(y % 4))) return false;
-  }
-  return true;
+  return expected == actualRelation(first, second);
 }
 
 bool composedCapacity(const std::vector<ModelOverlapCommand> &commands,
@@ -387,7 +275,7 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   std::set<std::string> validated;
   for (const auto &[engine, value] : *engineRuns) {
     const Object *runs = value.getAsObject();
-    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu" && engine != "scalar_lsu" && engine != "vpu_xlu") ||
+    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu") ||
         !runs || !keys(*runs, {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks",
                                "chain_positive_runs", "chain_negative_runs"}))
       return invalid("unsupported source validation engine or counter");
@@ -422,24 +310,18 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     auto minimum = record ? record->getInteger("minimum") : std::nullopt;
     auto high = record ? record->getInteger("high") : std::nullopt;
     const auto *a = first ? operations.block(*first) : nullptr, *b = second ? operations.block(*second) : nullptr;
-    bool crossVector = a && b && ((a->engine == "vpu" && b->engine == "xlu") ||
-                                 (a->engine == "xlu" && b->engine == "vpu"));
     Relation rel;
     if (!record || !keys(*record, {"first", "second", "relation", "minimum", "high"}) ||
-        !a || !b || (!crossVector && a->engine != b->engine) ||
-        !validated.count(crossVector ? "vpu_xlu" : a->engine) ||
+        !a || !b || a->engine == "scalar_lsu" || b->engine == "scalar_lsu" ||
+        a->engine != b->engine ||
+        !validated.count(a->engine) ||
         !minimum || !high || *minimum < 1 || *minimum > *high || *high != a->firstFreeAge ||
         !relation(record->getObject("relation"), rel) ||
         !seen.emplace(first->str(), second->str(), rel).second)
       return invalid("invalid, duplicate, unvalidated or unbounded source-derived pair");
-    if (a->engine == "scalar_lsu") {
-      for (const char *key : {"first_mnemonic", "second_mnemonic", "scalar_address_alignment", "scalar_registers", "vmem_bank"})
-        if (!rel.count(key)) return invalid("source-derived scalar pair lacks complete context predicates");
-    } else {
-      for (const auto &[key, value] : rel)
-        if (key != "mreg_banks" && key != "accumulator" && key != "weight_slot")
-          return invalid("source-derived vector pair carries unsupported semantic qualifiers");
-    }
+    for (const auto &[key, value] : rel)
+      if (key != "mreg_banks" && key != "accumulator" && key != "weight_slot")
+        return invalid("source-derived vector pair carries unsupported semantic qualifiers");
     result.pairIndices[{first->str(), second->str()}].push_back(result.pairs.size());
     result.pairs.push_back({first->str(), second->str(), std::move(rel), int(*minimum), int(*high)});
   }

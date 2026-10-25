@@ -12,8 +12,6 @@ struct ModelOverlapCommand {
   std::vector<int> registers;
   std::optional<int> accumulator, weightSlot;
   int issue = 0, firstFreeAge = 0;
-  std::optional<Instr> scalarInstruction;
-  TimingContext context;
 };
 
 class ModelOverlapFacts {

@@ -103,8 +103,12 @@ int testEngineAdmission() {
     }
     check(object->getInteger("alias_class_count") == checked, "consumer covers every frozen internal operand class");
   }
-  check(conflict({{relu, 0}, {transpose, 1}}).empty(), "VPU then XLU uses independent engines");
-  check(conflict({{transpose, 0}, {relu, 1}}).empty(), "XLU then VPU uses independent engines");
+  check(!conflict({{relu, 0}, {transpose, 1}}).empty(), "omitted VPU then XLU pair remains serialized");
+  check(!conflict({{transpose, 0}, {relu, 1}}).empty(), "omitted XLU then VPU pair remains serialized");
+  check(conflict({{relu, 0}, {transpose, provider.footprint(relu, regs).doneAge + 1}}).empty(),
+        "XLU remains legal after VPU drain");
+  check(conflict({{transpose, 0}, {relu, provider.footprint(transpose, regs).doneAge + 1}}).empty(),
+        "VPU remains legal after XLU drain");
   check(!conflict({{relu, 0}, {exp, 0}}).empty(), "one frontend issue per edge");
   check(conflict({{relu, 0}, {exp, 1}}).empty(), "independent VPU logic uses qualified pair rules");
   check(!conflict({{relu, 0}, {exp, 1}, {transpose, 2}}).empty(), "mixed VPU/XLU live chains retain conservative support boundary");
@@ -127,8 +131,12 @@ int testEngineAdmission() {
   check(!conflict({{transpose, 0}, {instr("vrelu.bf16", 12, 52), 1}}).empty(), "cross-engine physical read bank collision remains enforced");
   check(!conflict({{instr("vredmax.bf16", 4, 0), 0}, {instr("vrelu.bf16", 12, 0), 64}}).empty(),
         "source pair rules retain suffix-safe support even for an isolated legal coalescing gap");
-  check(conflict({{instr("vredmax.bf16", 4, 0), 0}, {instr("vrelu.bf16", 12, 0), 96}}).empty(),
-        "shared-read relation admits its source-derived suffix boundary");
+  check(!conflict({{instr("vredmax.bf16", 4, 0), 0}, {instr("vrelu.bf16", 12, 0), 96}}).empty(),
+        "omitted shared-read pair remains serialized at the former suffix boundary");
+  auto reduction = instr("vredmax.bf16", 4, 0);
+  check(conflict({{reduction, 0},
+                  {instr("vrelu.bf16", 12, 0), provider.footprint(reduction, regs).doneAge + 1}}).empty(),
+        "shared-read operands remain legal after the reduction drains");
   check(conflict({{instr("vadd.bf16", 4, 0, 0), 0}}).empty(),
         "identical same-row duplicate sources use native VPU read coalescing");
   auto vload = instr("vload", 4, 2), vstore = instr("vstore", 8, 3);

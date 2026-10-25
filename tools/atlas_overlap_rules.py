@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 from atlas_model_diagnostics import ModelTimingEvidenceError
-from atlas_model_schema import RELATION_KEYS, RELATION_VALUES
+from atlas_model_schema import RELATION_VALUES
 
 
 def relation_key(relation):
@@ -45,35 +45,16 @@ def bank_bound(left, right, sign, coalescing):
 
 
 def validate_relation(relation):
-    if not isinstance(relation, dict) or not set(relation) <= RELATION_KEYS or 'mreg_banks' not in relation:
+    if (not isinstance(relation, dict) or not set(relation) <= {'mreg_banks', 'accumulator', 'weight_slot'}
+            or 'mreg_banks' not in relation):
         raise ModelTimingEvidenceError('unsupported or missing relation constraint')
     for key, value in relation.items():
         if key == 'mreg_banks':
-            if value != 'disjoint' and (not isinstance(value, str) or not re.fullmatch('\\d+[=~]\\d+(,\\d+[=~]\\d+)*', value)):
+            if value != 'disjoint' and (
+                    not isinstance(value, str) or not re.fullmatch(r'\d+[=~]\d+(,\d+[=~]\d+)*', value)):
                 raise ModelTimingEvidenceError('invalid MREG relation')
         elif not isinstance(value, str) or value not in RELATION_VALUES[key]:
             raise ModelTimingEvidenceError('invalid relation qualifier')
-    mode = relation.get('scalar_registers')
-    if mode is None:
-        if set(relation) & {'scalar_destination_file', 'scalar_other_registers'}:
-            raise ModelTimingEvidenceError('scalar roles lack a joint register mode')
-    elif mode == 'independent':
-        if 'scalar_destination_file' in relation:
-            raise ModelTimingEvidenceError('independent roles cannot specify a destination alias')
-    else:
-        if relation.get('scalar_other_registers') != 'independent':
-            raise ModelTimingEvidenceError('scalar alias must constrain other registers')
-        if mode == 'shared_base_read_only':
-            if 'scalar_destination_file' in relation:
-                raise ModelTimingEvidenceError('shared read-only base has no destination alias')
-        elif relation.get('scalar_destination_file') not in ({'xrf', 'erf'} if mode == 'same_load_destination' else {'xrf'}):
-            raise ModelTimingEvidenceError('scalar alias has an invalid destination file')
-    if relation.get('scalar_address_alignment') == 'explicit_byte_offsets':
-        for side in ('first', 'second'):
-            if relation.get(side + '_mnemonic') not in {'vload', 'vstore'} and side + '_scalar_byte_offset' not in relation:
-                raise ModelTimingEvidenceError('explicit alignment lacks scalar byte offset')
-    elif any((key.endswith('scalar_byte_offset') for key in relation)):
-        raise ModelTimingEvidenceError('scalar byte offsets require explicit alignment')
 
 
 class RuleSet:
@@ -140,9 +121,7 @@ class RuleSet:
         elif unit == 'xlu':
             add('read', False)
             add('write', True)
-        elif unit == 'vlsu':
-            add('mreg_write' if part == 'vload' else 'mreg_read', part == 'vload')
-        elif unit != 'scalar_lsu':
+        else:
             raise ModelTimingEvidenceError('unmodelled engine: ' + unit)
         return tuple(reads + writes)
 
@@ -151,14 +130,10 @@ class RuleSet:
         relation = dict(relation_items)
         if first not in self.blocks or second not in self.blocks:
             raise ModelTimingEvidenceError('operation lacks isolated footprint')
-        unknown = set(relation) - {'mreg_banks', 'accumulator', 'weight_slot', 'vmem_bank', 'vmem_window', 'vmem_word_window', 'first_mnemonic', 'second_mnemonic', 'scalar_registers', 'scalar_destination_file', 'scalar_other_registers', 'scalar_address_alignment', 'first_scalar_byte_offset', 'second_scalar_byte_offset'}
-        if unknown:
-            raise ModelTimingEvidenceError('unsupported relation keys: ' + ','.join(sorted(unknown)))
+        validate_relation(relation)
         bounds = dict(structural_issue=self._structural_bound(first, second, relation), logical_reservation=1, bank_or_row=1, vmem_bank=1)
         ra, rb = (self.registers(first), self.registers(second))
-        banks = relation.get('mreg_banks')
-        if banks is None:
-            raise ModelTimingEvidenceError('missing complete MREG relation')
+        banks = relation['mreg_banks']
         if banks != 'disjoint':
             for term in banks.split(','):
                 match = re.fullmatch('(\\d+)([=~])(\\d+)', term)
@@ -168,20 +143,16 @@ class RuleSet:
                 if i >= len(ra) or j >= len(rb):
                     raise ModelTimingEvidenceError('MREG relation operand outside isolated footprint')
                 left, right = (ra[i], rb[j])
-                if sign == '=' and (left.write or (right.write and second != 'vlsu.vload')):
+                if sign == '=' and (left.write or right.write):
                     bounds['logical_reservation'] = max(bounds['logical_reservation'], left.release)
                 bounds['bank_or_row'] = max(bounds['bank_or_row'],
                     bank_bound(left, right, sign, engine(first) == engine(second) == 'vpu'))
-        if relation.get('vmem_bank') == 'same':
-            ea, eb = (self.blocks[first]['events'], self.blocks[second]['events'])
-            aa = [age for key in ('vmem_read', 'vmem_write') if key in ea for age in self.ages(first, key)]
-            bb = [age for key in ('vmem_read', 'vmem_write') if key in eb for age in self.ages(second, key)]
-            if aa and bb:
-                bounds['vmem_bank'] = max(bounds['vmem_bank'], max(aa) - min(bb) + 1)
         return bounds
 
     def minimum_gap(self, first, second, relation):
         """First gap of the suffix with no derived collision at any larger gap."""
+        if engine(first) != engine(second) or engine(first) not in {'mxu0', 'mxu1', 'vpu'}:
+            raise ModelTimingEvidenceError('unsupported overlap pair engine')
         validate_relation(relation)
         return max(self.bounds(first, second, relation_key(relation)).values())
 

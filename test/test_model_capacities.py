@@ -31,30 +31,6 @@ class CapacityRulesTests(unittest.TestCase):
         self.assertEqual(baseline.minimum_gap("mxu0.matmul", "mxu0.matmul", independent), 32)
         self.assertEqual(strict.minimum_gap("mxu0.matmul", "mxu0.matmul", independent), 95)
 
-    def test_chain_slots_and_tracker_final_edge_follow_selected_capacity(self):
-        facts, contract = fixtures()
-        # The three-slot saturation probe uses one additional independent lane box.
-        sin = deepcopy(next(b for b in facts["op_timing"] if b["name"] == "vpu.relu"))
-        sin["name"] = "vpu.sin"
-        facts["op_timing"].append(sin)
-        facts["reservation_releases"]["vpu.sin"] = deepcopy(facts["reservation_releases"]["vpu.relu"])
-        for slots in (1, 2, 3):
-            changed = deepcopy(contract)
-            changed["capacity"].update(vpu_slots=slots, mxu0_compute=2, mxu1_compute=1)
-            rules = overlap.SourceRules(facts, changed)
-            samples = [s for s in overlap.chain_samples(rules) if s["category"] == "capacity"]
-            self.assertEqual(len(samples), 6)
-            for sample in samples:
-                issues = [0]
-                for gap in sample["gaps"]:
-                    issues.append(issues[-1] + gap)
-                conflict = rules.capacity_conflict(sample["operations"], issues)
-                with self.subTest(slots=slots, sample=sample["id"]):
-                    if sample["expectation"] == "positive":
-                        self.assertIsNone(conflict)
-                    else:
-                        self.assertIsNotNone(conflict)
-
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for reviewed source guards")
 class CapacitySourceTests(unittest.TestCase):

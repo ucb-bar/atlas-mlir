@@ -17,15 +17,13 @@ from atlas_validate_common import safe_path, instructions, native_state, native_
 
 sys.dont_write_bytecode = True
 POLICY = 'source-mechanism-boundaries-v2'
-ENGINES = {'mxu0', 'mxu1', 'vpu', 'scalar_lsu', 'vpu_xlu'}
+ENGINES = {'mxu0', 'mxu1', 'vpu'}
 
 
 def pair_engine(first, second):
     left, right = first.split('.')[0], second.split('.')[0]
-    if left == right:
+    if left == right and left in ENGINES:
         return left
-    if {left, right} == {'vpu', 'xlu'}:
-        return 'vpu_xlu'
     raise ValueError('unsupported cross-engine pair')
 
 
@@ -111,9 +109,7 @@ def sample_plan(document, candidate, max_samples=128):
         names = sample['operations']
         if (not isinstance(names, list) or len(names) < 2 or len(names) > 16 or
                 len(sample['assembly']) != len(names) or len(sample['gaps']) != len(names)-1 or
-                (sample['engine'] == 'vpu_xlu' and
-                 (len(names) != 2 or pair_engine(*names) != 'vpu_xlu')) or
-                (sample['engine'] != 'vpu_xlu' and any(n.split('.')[0] != sample['engine'] for n in names))):
+                any(n.split('.')[0] != sample['engine'] for n in names)):
             raise ValueError('invalid sample operations/assembly/gaps')
         issues(sample['gaps'])
         if sample['expectation'] not in {'positive', 'reject'}:
@@ -147,8 +143,6 @@ def sample_plan(document, candidate, max_samples=128):
         result.update(('relation',unit,key,value) for key,value in relation_class(sample.get('relation',{})).items())
         if sample['category']=='pair':
             result.add(('threshold',unit,str(sample['minimum'])))
-            if unit == 'vpu_xlu':
-                result.add(('direction', sample['operations'][0].split('.')[0]))
         return result
 
     # Cover independent source obligations, not their Cartesian product. The
@@ -187,12 +181,11 @@ class NativeFault(Exception):
 def resource_fault(fault):
     """Only reviewed native resource conflicts can satisfy a negative control."""
     if fault.kind == 'BankConflictError':
-        return fault.message.startswith(('MRF bank conflict:', 'Undefined MRF same-row read/write collision', 'VMEM bank conflict:'))
+        return fault.message.startswith(('MRF bank conflict:', 'Undefined MRF same-row read/write collision'))
     if fault.kind != 'RuntimeError':
         return False
     return bool(re.fullmatch(
         r'(?:VPU command .+ issued while its issue-busy bit is set|'
-        r'scalar load issued while prior load response pending|'
         r'(?:mxu0|mxu1): (?:command issued before previous compute row-0 writeback|'
         r'compute issued while read port or in-flight tracker is busy|'
         r'BF16 push issued while read ports are busy|pop issued while write ports are busy|'
@@ -267,11 +260,6 @@ def decoded_operand(name, insn):
         if any(not 0 <= value < 64 for value in result['registers']):
             raise ValueError('sample XLU operand exceeds selected geometry')
         return result
-    if engine == 'scalar_lsu':
-        expected = {'load': 'lw', 'store': 'sw'}.get(kind)
-        if expected is None or insn.mnemonic != expected:
-            raise ValueError('unsupported/mismatched scalar assembly')
-        return result
     family = 'mxu' if engine in {'mxu0', 'mxu1'} else 'vpu'
     mnemonic = insn.mnemonic.rsplit('.', 1)[0] if family == 'mxu' else insn.mnemonic
     if family == 'mxu' and not insn.mnemonic.endswith('.'+engine):
@@ -319,54 +307,6 @@ def actual_relation(first,second):
     return result
 
 
-def scalar_matches(relation,first,second,initial_xrf):
-    required={'first_mnemonic','second_mnemonic','scalar_address_alignment','scalar_registers','vmem_bank'}
-    optional={'scalar_destination_file','scalar_other_registers','vmem_window','vmem_word_window'}
-    if not required <= relation.keys() or relation.keys()-required-optional-{'mreg_banks'}:
-        return False
-    if relation['first_mnemonic'] != first.mnemonic or relation['second_mnemonic'] != second.mnemonic:
-        return False
-    if relation['scalar_address_alignment'] != 'word':
-        return False
-    def roles(insn):
-        base=('xrf',int(insn.rs1))
-        destination=('xrf',int(insn.rd)) if insn.mnemonic=='lw' else None
-        data=('xrf',int(insn.rs2)) if insn.mnemonic=='sw' else None
-        resources={r for r in (base,destination,data) if r is not None}
-        return base,destination,data,resources
-    a,ad,ax,ar=roles(first);b,bd,bx,br=roles(second)
-    common=ar&br
-    mode=relation['scalar_registers']
-    if mode=='independent':
-        okay=not common and 'scalar_destination_file' not in relation
-    elif mode=='shared_base_read_only':
-        okay=a==b and common=={a} and ad!=a and bd!=a and ax!=a and bx!=a and 'scalar_destination_file' not in relation
-    elif mode=='same_load_destination':
-        okay=ad is not None and ad==bd and ad!=('xrf',0) and common=={ad} and a!=ad and b!=ad
-    elif mode=='store_data_equals_load_destination':
-        okay=bd is not None and bd!=('xrf',0) and ax==bd and common=={bd} and a!=bd and b!=bd
-    elif mode=='first_address_base_equals_second_load_destination':
-        okay=bd is not None and bd!=('xrf',0) and a==bd and common=={bd} and b!=bd and ax!=bd and ad!=bd
-    else:
-        return False
-    if mode!='independent' and relation.get('scalar_other_registers')!='independent':
-        return False
-    if mode not in {'independent','shared_base_read_only'} and relation.get('scalar_destination_file')!='xrf':
-        return False
-    def address(insn):
-        offset=int(insn.imm)&0xfff
-        if offset&0x800:offset-=0x1000
-        return initial_xrf.get(str(int(insn.rs1)),0)+offset
-    x,y=address(first),address(second)
-    if not 0<=x<1572864-3 or not 0<=y<1572864-3 or x%4 or y%4:
-        return False
-    bank='same' if x//262144==y//262144 else 'other'
-    window='same' if x==y else 'overlap' if x<y+4 and y<x+4 else 'disjoint'
-    return (okay and relation['vmem_bank']==bank and
-            all(relation[k]==window for k in ('vmem_window','vmem_word_window') if k in relation) and
-            (mode!='shared_base_read_only' or x==y))
-
-
 def check_sample_assembly(sample):
     assembled = instructions(sample['assembly'])
     if len(assembled)!=len(sample['operations']):
@@ -379,10 +319,7 @@ def check_sample_assembly(sample):
         base={k:v for k,v in relation.items() if k in {'mreg_banks','accumulator','weight_slot'}}
         if actual_relation(*operands)!=base:
             raise ValueError('assembled operand relation differs from candidate relation')
-        if sample['engine']=='scalar_lsu':
-            if not scalar_matches(relation,*assembled,sample.get('initial_xrf',{})):
-                raise ValueError('assembled scalar context does not satisfy candidate qualifiers')
-        elif relation!=base:
+        if relation!=base:
             raise ValueError('unsupported non-scalar relation qualifier')
     if 'all_pair_relations' in sample:
         expected=[dict(first_index=i,second_index=j,relation=actual_relation(operands[i],operands[j]))
@@ -392,23 +329,14 @@ def check_sample_assembly(sample):
     return operands
 
 
-def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, initial_xrf=None):
+def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192):
     """Run unmodified numerical units at exact ages with a fresh state and unit."""
     from atlas_model_timing import configuration
     cfg, _ = configuration()
     with native_state(cfg) as state:
-        initialize_state(state, nonzero, initial_xrf)
+        initialize_state(state, nonzero)
         initial = digest(encoded(state_snapshot(state)))
-        if engine == 'vpu_xlu':
-            # Preserve the Core's configuration order. Both units tick every
-            # edge against one ArchState/checker, even when only one issues.
-            selected = {'VectorExecutionUnit': 'vpu', 'CrossLaneExecutionUnit': 'xlu'}
-            units = [native_unit(cfg, state, selected[configured])
-                     for configured in cfg.execution_units.values() if configured in selected]
-            if len(units) != 2:
-                raise ValueError('cross-unit validation requires exactly one VPU and XLU')
-        else:
-            units = [native_unit(cfg, state, engine)]
+        unit = native_unit(cfg, state, engine)
         commands = uops(assembly)
         if len(commands) != len(assembly):
             raise ValueError('assembly instruction count differs')
@@ -417,26 +345,24 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
         for age in range(max_cycles):
             issue = None
             if next_index < len(commands):
-                ready = (age == expected[next_index]) if not serial else (next_index == 0 or not any(u.has_in_flight for u in units))
+                ready = (age == expected[next_index]) if not serial else (next_index == 0 or not unit.has_in_flight)
                 if ready:
                     issue = commands[next_index]
             try:
-                before = sum(u.total_instructions for u in units)
-                for unit in units:
-                    unit.tick(issue if issue is not None and unit.can_handle(issue) else None)
-                    completed += unit.complete_count
+                before = unit.total_instructions
+                unit.tick(issue if issue is not None and unit.can_handle(issue) else None)
+                completed += unit.complete_count
                 if issue is not None:
-                    if sum(u.total_instructions for u in units) != before + 1:
+                    if unit.total_instructions != before + 1:
                         raise RuntimeError('native unit did not accept exact scheduled issue')
                     accepted.append(age)
                     next_index += 1
             except Exception as exc:
                 raise NativeFault(type(exc).__name__, str(exc), age, accepted) from exc
-            if next_index == len(commands) and not any(u.has_in_flight for u in units):
+            if next_index == len(commands) and not unit.has_in_flight:
                 # One begin-cycle applies deferred release requests after drain.
-                for unit in units:
-                    unit.tick(None)
-                    completed += unit.complete_count
+                unit.tick(None)
+                completed += unit.complete_count
                 checker = state.conflict_checker
                 if checker._mreg_reservations or checker._mreg_releases:
                     raise NativeFault('RuntimeError', 'MREG reservations remain at drain', age+1, accepted)
@@ -445,7 +371,7 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
             raise NativeFault('RuntimeError', 'native sequence did not drain within cycle bound', max_cycles, accepted)
         if not serial and accepted != expected:
             raise RuntimeError('observed issue ages differ from exact requested ages')
-        total = sum(u.total_instructions for u in units)
+        total = unit.total_instructions
         if total != len(commands) or completed != len(commands):
             raise RuntimeError('accepted/completed counts do not equal sequence length')
         final = state_snapshot(state)
@@ -538,7 +464,7 @@ def run_sample(sample):
         serial = None
         if sample['numerical_equivalent']:
             # A failing serial execution is fatal, never a rejected negative.
-            serial = native_run(sample['engine'], sample['assembly'], sample['gaps'], nonzero, serial=True, initial_xrf=sample.get('initial_xrf'))
+            serial = native_run(sample['engine'], sample['assembly'], sample['gaps'], nonzero, serial=True)
         for variant, gaps in variants:
             row = dict(sample_id=sample['id'], engine=sample['engine'], mechanism=sample['mechanism'],
                        category=sample['category'], variant=variant, nonzero=nonzero, gaps=gaps,
@@ -548,7 +474,7 @@ def run_sample(sample):
                 rows.append(row)
                 continue
             try:
-                actual = native_run(sample['engine'], sample['assembly'], gaps, nonzero, initial_xrf=sample.get('initial_xrf'))
+                actual = native_run(sample['engine'], sample['assembly'], gaps, nonzero)
             except NativeFault as fault:
                 if not resource_fault(fault):
                     raise RuntimeError('unexpected native failure: ' + str(fault.record())) from fault

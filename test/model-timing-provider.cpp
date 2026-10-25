@@ -21,7 +21,6 @@ using namespace model_timing_test;
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 
-int testScalarOverlap(Object fixture);
 int testEngineAdmission();
 
 namespace {
@@ -733,56 +732,6 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
   check(!facts->resolve(bankAliasRead, unknownRegs()).error.empty(),
         "VPU distinct logical sources sharing a physical bank remain illegal");
 
-  auto crossOperations = fixture();
-  crossOperations.getArray("op_timing")->push_back(block("xlu.transpose", "xlu", 66,
-      Object{{"read", group(1, 32)}, {"write", group(34, 32)}}));
-  auto crossBytes = encode(std::move(crossOperations));
-  auto crossFacts = parseModelTimingFactsForTesting(crossBytes, hash(crossBytes));
-  check(bool(crossFacts), "cross-unit operation fixture loads");
-  if (crossFacts) {
-    auto cross = derivedFixture(*crossFacts);
-    auto *validation = cross.getObject("validation");
-    (*validation->getObject("engines"))["vpu_xlu"] = Object{
-        {"positive_runs", 2}, {"negative_runs", 2}, {"negative_rejections", 1},
-        {"numerical_checks", 2}, {"chain_positive_runs", 0}, {"chain_negative_runs", 0}};
-    (*validation)["positive_runs"] = 4;
-    (*validation)["negative_runs"] = 5;
-    (*validation)["negative_rejections"] = 2;
-    (*validation)["numerical_checks"] = 4;
-    cross.getArray("pairs")->push_back(Object{{"first", "vpu.mov"}, {"second", "xlu.transpose"},
-        {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 73}});
-    cross.getArray("pairs")->push_back(Object{{"first", "xlu.transpose"}, {"second", "vpu.mov"},
-        {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 66}});
-    auto bytes = encode(cross);
-    auto overlap = parseModelOverlapFacts(bytes, hash(bytes), *crossFacts);
-    check(bool(overlap), "validated VPU/XLU pairs load");
-    if (overlap) {
-      auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(*crossFacts),
-                                         std::make_shared<ModelOverlapFacts>(*overlap), true);
-      Instr transpose{findOp("vtrpose.xlu"), 24, 22, 0};
-      auto ft = crossFacts->resolve(transpose, unknownRegs());
-      for (bool reverse : {false, true}) {
-        auto reservations = provider.createReservations();
-        auto first = reverse ? transpose : a, second = reverse ? a : transpose;
-        auto left = reverse ? ft : fa, right = reverse ? fa : ft;
-        check(reservations.value->reserve(first, left, 0).empty() &&
-              reservations.value->conflict(second, right, 1).value.empty(),
-              "disjoint cross-unit pair waives only the isolated engine window");
-      }
-      ModelOverlapCommand xlu{"xlu.transpose", Engine::Xlu, {22, 24}, {}, {}, 1, 66};
-      check(!overlap->admits({commands[0], xlu, commands[1]}, true),
-            "mixed-unit chains retain conservative admission");
-    } else llvm::consumeError(overlap.takeError());
-    validation->getObject("engines")->erase("vpu_xlu");
-    (*validation)["positive_runs"] = 2;
-    (*validation)["negative_runs"] = 3;
-    (*validation)["negative_rejections"] = 1;
-    (*validation)["numerical_checks"] = 2;
-    bytes = encode(cross);
-    auto unvalidated = parseModelOverlapFacts(bytes, hash(bytes), *crossFacts);
-    check(!unvalidated, "same-unit validation cannot qualify a cross-unit pair");
-    if (!unvalidated) llvm::consumeError(unvalidated.takeError());
-  } else llvm::consumeError(crossFacts.takeError());
   auto reject = [&](Object object, const char *why, const char * = nullptr) {
     std::string contents = encode(std::move(object));
     auto result = parseModelOverlapFacts(contents, hash(contents), *facts);
@@ -837,38 +786,6 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
   auto wrongHash = parseModelOverlapFacts(bytes, std::string(64, '0'), *facts);
   check(!wrongHash, "source artifact must match selected file digest");
   if (!wrongHash) llvm::consumeError(wrongHash.takeError());
-
-  auto scalarSource = fixture();
-  scalarSource.getArray("op_timing")->push_back(block("scalar_lsu.load", "scalar_lsu", 4,
-      Object{{"vmem_read", group(0, 1)}, {"load_write", group(3, 1)}}));
-  scalarSource.getArray("op_timing")->push_back(block("scalar_lsu.store", "scalar_lsu", 2,
-      Object{{"vmem_write", group(0, 1)}}));
-  std::string scalarBytes = encode(std::move(scalarSource));
-  auto scalarFacts = parseModelTimingFactsForTesting(scalarBytes, hash(scalarBytes));
-  check(bool(scalarFacts), "source scalar operation fixture loads");
-  if (!scalarFacts) { llvm::consumeError(scalarFacts.takeError()); return; }
-  auto scalar = derivedFixture(*scalarFacts);
-  auto *scalarValidation = scalar.getObject("validation");
-  Object scalarRuns(*scalarValidation->getObject("engines")->getObject("vpu"));
-  scalarRuns.erase("chain_positive_runs"); scalarRuns.erase("chain_negative_runs");
-  (*scalarValidation)["engines"] = Object{{"scalar_lsu", std::move(scalarRuns)}};
-  scalar["composition"] = Object{{"engines", Object{}}, {"classes", Array{}}};
-  scalar["pairs"] = Array{Object{{"first", "scalar_lsu.load"}, {"second", "scalar_lsu.store"},
-      {"minimum", 1}, {"high", 4}, {"relation", Object{{"mreg_banks", "disjoint"},
-          {"first_mnemonic", "lw"}, {"second_mnemonic", "sw"}, {"scalar_registers", "independent"},
-          {"scalar_address_alignment", "word"}, {"vmem_bank", "same"}, {"vmem_window", "disjoint"}}}}};
-  scalarBytes = encode(scalar);
-  auto scalarOverlap = parseModelOverlapFacts(scalarBytes, hash(scalarBytes), *scalarFacts);
-  check(bool(scalarOverlap), "source scalar pairs load with complete immutable-context predicates");
-  if (!scalarOverlap) { llvm::consumeError(scalarOverlap.takeError()); return; }
-  check(!scalarOverlap->admits({{"scalar_lsu.load", Engine::Scalar, {}, {}, {}, 0, 4},
-                                {"scalar_lsu.store", Engine::Scalar, {}, {}, {}, 1, 2}}, false),
-        "source scalar evidence cannot admit absent replay contexts");
-  (*scalar.getArray("pairs"))[0].getAsObject()->getObject("relation")->erase("scalar_registers");
-  scalarBytes = encode(std::move(scalar));
-  auto incompleteScalar = parseModelOverlapFacts(scalarBytes, hash(scalarBytes), *scalarFacts);
-  check(!incompleteScalar, "source scalar relation must retain all context predicates");
-  if (!incompleteScalar) llvm::consumeError(incompleteScalar.takeError());
 
   auto mxuSource = fixture();
   mxuSource.getArray("op_timing")->push_back(block("mxu0.push_acc_fp8", "mxu0", 33,
@@ -1350,7 +1267,6 @@ int main(int argc, char **argv) {
   testDerivedOverlap(facts);
   testStreamedWeights(facts);
   testVloadWriteDuringRead(facts);
-  failures += testScalarOverlap(fixture());
   auto provider = modelTimingProvider(facts);
   RegValues dmaRegs = unknownRegs();
   dmaRegs[1] = 0x20000 / 4; dmaRegs[2] = 0; dmaRegs[3] = 1024;

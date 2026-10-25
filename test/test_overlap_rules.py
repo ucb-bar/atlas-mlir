@@ -6,7 +6,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from atlas_derive_overlap import SourceRules
 from test_derive_overlap import fixtures, event, release
 
-
 class OverlapRulesTests(unittest.TestCase):
 
     def test_register_lifetimes_follow_selected_reservation_releases(self):
@@ -31,6 +30,16 @@ class OverlapRulesTests(unittest.TestCase):
                 facts["reservation_releases"] = releases
                 with self.assertRaisesRegex(ValueError, "mreg_read reservation release"):
                     SourceRules(facts, contract).registers(name)
+
+    def test_removed_pair_qualifiers_and_engines_fail_closed(self):
+        model = SourceRules(*fixtures())
+        for qualifier in ('vmem_bank', 'scalar_registers', 'first_scalar_byte_offset'):
+            with self.subTest(qualifier=qualifier), self.assertRaisesRegex(ValueError, 'unsupported'):
+                model.minimum_gap('mxu0.matmul', 'mxu0.matmul', dict(mreg_banks='disjoint', **{qualifier: 'same'}))
+        for first, second in [('vpu.relu', 'mxu0.matmul'), ('scalar_lsu.load', 'scalar_lsu.load')]:
+            with self.subTest(first=first, second=second), self.assertRaisesRegex(
+                    ValueError, 'unsupported overlap pair engine'):
+                model.minimum_gap(first, second, dict(mreg_banks='disjoint'))
 
     def test_source_event_pairs_derive_suffix_safe_minima(self):
         model = SourceRules(*fixtures())
