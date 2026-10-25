@@ -1,9 +1,4 @@
-"""Versioned compiler optimization policy, deliberately separate from model facts.
-
-Numeric values and ordered pools drive the implementation. Algorithm identifiers
-name reviewed code semantics; changing an identifier requires a matching code
-change, rather than selecting an unimplemented algorithm by editing JSON.
-"""
+"""Versioned compiler policy; algorithm identifiers must match reviewed implementation semantics."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -36,8 +31,7 @@ def load_policy() -> dict:
         raise ValueError("unsupported search policy schema")
     if not isinstance(policy.get("revision"), str) or not policy["revision"]:
         raise ValueError("missing search policy revision")
-    # Fail closed on algorithm labels: these describe implementation revisions,
-    # rather than unused configurable strings that falsely promise new behavior.
+    # Labels bind implementation revisions, not arbitrary configurable algorithms.
     algorithms = {
         "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride",
         "proposal_cost_adapter": "representative-disjoint-copy-serial-pack-setup-omitted-optimistic-filled-slot-v1",

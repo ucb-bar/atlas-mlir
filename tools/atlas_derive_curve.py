@@ -1,11 +1,7 @@
-"""Derive proposal-only curve DMA facts from the reviewed source and curve bytes.
-
-Derivation constructs the backend's pure configuration converter, but never issues
-beats, calls a tick, or allocates architectural state. Numerical observations live
-in atlas_validate_curve.py and cannot supply values to this extractor.
-"""
+"""Derive proposal-only curve DMA facts from the reviewed source and curve bytes."""
 from __future__ import annotations
 
+from atlas_derive_scratchpad import source_path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
@@ -13,7 +9,6 @@ import hashlib
 import inspect
 import json
 import math
-import os
 from pathlib import Path
 from copy import deepcopy
 
@@ -105,19 +100,8 @@ def _check_curve_configuration(cfg, params, data):
 
 
 def _safe(path):
-    path = Path(path)
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedCurve("prohibited DMA source or curve path")
-    if ".." in path.parts:
-        raise ValueError("parent traversal is unsupported")
-    path = Path(os.path.abspath(path))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedCurve("prohibited DMA source or curve path")
-    # Check root toward leaf, so no stat follows a previously unchecked ancestor.
-    for parent in reversed((path, *path.parents)):
-        if parent.is_symlink():
-            raise UnsupportedCurve("DMA source or curve path contains a symlink")
-    return path
+    return source_path(path, UnsupportedCurve, "prohibited DMA source or curve path",
+                       "DMA source or curve path contains a symlink", absolute=True, parent_error=ValueError)
 
 
 def _review(module):
@@ -207,13 +191,7 @@ def review_dma_sources(sources):
 
 
 def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, epsilon, interval):
-    """Checked analytic bound, with source expressions as its proof premises.
-
-    The bound is deliberately serialized. It covers retained history, but not
-    pre-existing live work or externally denied grants. No observed timing enters
-    this function. Full reviewed method guards also protect predicates that the
-    compact evidence below does not repeat.
-    """
+    """Checked analytic bound, with source expressions as its proof premises."""
     core_tick, s1, core_tick_shape, core_s1_shape = _core_phase_contract(core_source)
     dma_cls = _one((n for n in dma_tree.body if isinstance(n, ast.ClassDef)
                     and n.name == "DmaExecutionUnit"), "DMA class")

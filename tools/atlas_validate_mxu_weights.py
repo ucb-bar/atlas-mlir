@@ -1,39 +1,27 @@
-"""Validate source-derived weight windows against isolated native MXU edges.
-
-Observation records masks returned by the unchanged native sampler, including
-uses of unchanged data. Push/compute boundary probes also check real numerical
-results and the native rejection at the immediately preceding issue edge.
-"""
+"""Validate native MXU weight masks, boundary refusals and numerical results."""
 from __future__ import annotations
 
-from io import StringIO
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+
+from atlas_validate_common import native_state, native_unit, uops
 
 from atlas_model_diagnostics import ModelTimingValidationError
 
 
 def _native(cfg, engine, *, slot=0, push_gap=None, push_first=False, observe=False, mutation=None):
     import torch
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.mxu import MatrixExecutionUnitInner, MatrixExecutionUnitSystolic
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
-
-    state = ArchState(cfg.arch_state_config)
-    unit_type = MatrixExecutionUnitSystolic if engine == "mxu0" else MatrixExecutionUnitInner
-    try:
+    with native_state(cfg) as state:
         state.write_mrf_fp8(0, torch.ones((32, 32)).to(torch.float8_e4m3fn))
         state.write_mrf_fp8(2, torch.full((32, 32), 2.).to(torch.float8_e4m3fn))
         for selected in (0, 1):
             state.write_wb_fp8(engine, selected, torch.eye(32).to(torch.float8_e4m3fn))
-        unit = unit_type(engine, Mock(spec=Logger), state, config=cfg)
+        unit = native_unit(cfg, state, engine)
         compute = f"vmatmul.{engine} acc0, m0, w{slot}\n"
         push = f"vmatpush.weight.{engine} w{slot}, m2\n"
         assembly = compute
         if push_gap is not None:
             assembly = push + compute if push_first else compute + push
-        commands = [Uop(insn, pc=i * 4) for i, insn in enumerate(stream_to_instrs(StringIO(assembly)))]
+        commands = uops(assembly)
         uses = []
         original = unit._weight_uses
         def weight_uses(age):
@@ -64,8 +52,6 @@ def _native(cfg, engine, *, slot=0, push_gap=None, push_first=False, observe=Fal
         if push_gap is not None and not torch.equal(state.read_wb_u8(engine, slot), state.read_mrf_u8(2)):
             raise ModelTimingValidationError("MXU boundary weight push did not commit its bytes")
         return uses
-    finally:
-        state.close()
 
 
 def validate_weight_timing(cfg, facts):

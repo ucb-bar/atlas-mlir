@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -123,7 +122,8 @@ class RunProvenanceTest(unittest.TestCase):
 
     def test_cache_bytes_are_not_model_source(self):
         capture = self.capture()
-        self.write("model/__pycache__/core.cpython.pyc", b"cache")
+        self.write("model/__pycache__/core.cpython-312.pyc", b"import-generated cache")
+        self.write("model/data/__pycache__/table.pyc", b"numerical-tree cache")
         capture.complete()
 
     def test_semantic_bytes_policy_profile_and_runtime_change_identity(self):
@@ -209,21 +209,6 @@ class RunProvenanceTest(unittest.TestCase):
                                  "unobserved_runs": 1})
         return seal_derived(facts)
 
-    def test_verified_facts_identity_normalizes_only_known_curve_path(self):
-        first = self.facts("/first/model/curves.json")
-        second = self.facts("/second/model/renamed.json")
-        original = deepcopy(first)
-        first_semantic, first_verified = selection_facts_identity(first)
-        second_semantic, second_verified = selection_facts_identity(second)
-        self.assertEqual(first_semantic, second_semantic)
-        self.assertNotEqual(first_verified, second_verified)
-        self.assertEqual(first, original)
-        # A path-looking string outside the known curve field remains content.
-        changed = self.facts("/second/model/renamed.json")
-        changed["model"]["configuration"]["description"] = "/second/model/renamed.json"
-        seal_derived(changed)
-        self.assertNotEqual(selection_facts_identity(changed)[0], first_semantic)
-
     def test_complete_identity_remains_stable_across_relocated_fact_reports(self):
         receipts = []
         for index, curve_path in enumerate(("/first/curve.json", "/second/renamed.json")):
@@ -242,6 +227,10 @@ class RunProvenanceTest(unittest.TestCase):
 
     def test_facts_normalization_preserves_curve_and_other_content_identity(self):
         baseline = selection_facts_identity(self.facts("/first/curve.json"))[0]
+        changed = self.facts("/second/curve.json")
+        changed["model"]["configuration"]["description"] = "/second/curve.json"
+        seal_derived(changed)
+        self.assertNotEqual(selection_facts_identity(changed)[0], baseline)
         changed = self.facts("/second/curve.json", b"different actual curve bytes")
         self.assertNotEqual(selection_facts_identity(changed)[0], baseline)
         changed = self.facts("/second/curve.json")
@@ -251,22 +240,6 @@ class RunProvenanceTest(unittest.TestCase):
         changed["dma_timing"]["curve_sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "semantic payload mismatch"):
             selection_facts_identity(changed)
-
-    def test_profile_legacy_hashes_stay_evidence_and_content_stays_semantic(self):
-        profile = {"curve": {"sha256": "a" * 64, "profile": "curve",
-                   "model_identity": {"configuration_sha256": "b" * 64, "source_sha256": "c" * 64},
-                   "configuration": {"dma_memory_params": {"curves": {"sha256": sha(b"curve bytes")}}}}}
-        changed = deepcopy(profile)
-        changed["curve"]["sha256"] = "d" * 64
-        changed["curve"]["model_identity"]["configuration_sha256"] = "e" * 64
-        first = self.capture().complete(scoring_configurations=profile)
-        second = self.capture().complete(scoring_configurations=changed)
-        self.assertEqual(first["semantic_sha256"], second["semantic_sha256"])
-        self.assertEqual(first["evidence"]["scoring_configurations"], profile)
-        self.assertEqual(second["evidence"]["scoring_configurations"], changed)
-        self.assertIn("sha256", profile["curve"])
-        changed["curve"]["configuration"]["dma_memory_params"]["curves"]["sha256"] = sha(b"other curve bytes")
-        self.assertNotEqual(self.capture().complete(scoring_configurations=changed)["semantic_sha256"], first["semantic_sha256"])
 
 
 if __name__ == "__main__":

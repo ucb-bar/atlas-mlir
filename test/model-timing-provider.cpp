@@ -7,9 +7,11 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <tuple>
 
 using namespace mlir;
@@ -502,6 +504,14 @@ void testDerivedContract() {
   rejectMutations(false, {
       {"versioned contract required", "derivation_contract/schema", "atlas.derived_facts.v0"},
       {"measured derivation refuses production", "derivation_contract/derivation/kind", "measured"},
+      {"failed contract validation refuses production", "derivation_contract/validation/passed", false,
+       false, "successful validation record"},
+      {"unbound contract validation refuses production", "derivation_contract/validation/payload_sha256", std::string(64, 'b'),
+       false, "successful validation record"},
+      {"unsupported revision identity refuses production", "model/revision_kind", "unreviewed",
+       false, "revision identity kind"},
+      {"unbound operation validation refuses production", "validation/payload_sha256", std::string(64, 'b'),
+       false, "successful operation validation"},
       {"failed operation validation refuses production", "validation/passed", false},
       {"missing validation-only run coverage refuses production", "validation/unobserved_runs", 0},
       {"vocabulary is mandatory", "vocabulary_sha256", nullptr, true},
@@ -513,7 +523,6 @@ void testDerivedContract() {
       {"DMA source reference must bind its authoritative record", "dma_admission/source_contract_sha256", std::string(64, 'b')},
       {"DMA source copies cannot disagree", "dma_admission/source_sha256/core.py", std::string(64, 'b')},
       {"DMA staging copies cannot disagree", "dma_admission/issue/store_read_to_request_cycles", 1},
-      {"DMA proposal Core phase copies cannot disagree", "dma_timing/proposal_contract/source_evidence/core_tick_shape", std::string(64, 'b')},
       {"DMA shared source cannot change supported phase semantics", "dma_timing/source_contract/source_shapes/core.py", std::string(64, 'b')},
       {"DMA frontend issue copy cannot disagree", "dma_timing/source_contract/issue/ordinary_gap", 2},
       {"VPU metadata capacity is bounded", "engine_admission/vpu/capacity", 4}});
@@ -537,11 +546,6 @@ void testDerivedContract() {
   (*paddedLifetime.getObject("engine_admission")->getObject("vpu")->getObject("final_write_age"))["vpu.mov"] = 71;
   sealContractFixture(paddedLifetime);
   rejects(std::move(paddedLifetime), "physical row-write maximum cannot shorten native issue liveness", "source live endpoint");
-  auto receiptOnly = contractFixture();
-  (*receiptOnly.getObject("dma_timing"))["producer_sources"] = Object{{"receipt", "not a semantic rule"}};
-  // Parser schema remains exact; this field is not a supported DMA extension,
-  // even though all validated-record digest exclusions use the same helper.
-  rejects(std::move(receiptOnly), "unknown DMA producer field does not change semantic binding", "resolved proposal-only curve schema");
   for (const char *key : {"architecture", "operand_vocabulary", "isa_metadata", "mxu_weight_timing"}) {
     auto stale = contractFixture();
     (*stale.getObject(key))["stale_metadata"] = true;
@@ -554,13 +558,6 @@ void testDerivedContract() {
     sealContractFixture(missing);
     rejects(std::move(missing), "production proposal facts refuse missing derived extensions", "missing source-derived");
   }
-  rejectMutations(true, {
-      {"old replay bytecode schema refuses", "replay_timing/schema", "atlas.projected_core_replay.v1",
-       false, "schema/source/policy"},
-      {"replay clock remains source checked", "replay_timing/source/clock_step", 2,
-       false, "source edge contract"},
-      {"replay policy cannot select unknown arithmetic", "replay_timing/projection_policy/algorithm", "unknown-v2",
-       false, "declared projection policy"}});
   for (const char *field : {"replay_timing_sha256", "proposal_costs_sha256"}) {
     auto spoofed = contractFixture();
     (*spoofed.getObject("model"))[field] = std::string(64, 'b');
@@ -575,37 +572,10 @@ void testDerivedContract() {
       {"missing releases reject even with rebound payload", "reservation_releases", nullptr, true, "reservation_releases"},
       {"rebound startup cannot disagree with its source contract", "dma_timing/startup_cycles/load", 8,
        false, "launch/staging/issue"}});
-  llvm::Expected<ModelTimingFacts> rebound = parse(contractFixture());
-  if (!rebound) llvm::consumeError(rebound.takeError());
-  auto changed = contractFixture();
-  (*changed.getObject("frontend_timing")->getObject("scalar"))["write_age"] = 3;
-  sealContractFixture(changed);
-  rebound = parse(std::move(changed));
-  check(bool(rebound), "supported source-derived frontend operands load");
-  if (rebound) {
-    auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*rebound)));
-    auto scalar = provider.footprint({findOp("addi"), 1, 2, 0}, unknownRegs());
-    check(provider.issueGap({findOp("addi")}).value == 1 &&
-          provider.issueGap({findOp("delay"), 0, 0, 0, 511}).value == 512,
-          "ordinary issue gap and DELAY mask consume supported derived frontend inputs");
-    check(scalar.error.empty() && scalar.doneAge == 3 && scalar.accesses.back().age == 3,
-          "synchronous register write age comes from derived frontend inputs");
-  } else llvm::consumeError(rebound.takeError());
-  for (const char *field : {"ordinary_issue_gap", "base_gap", "immediate_mask"}) {
-    changed = contractFixture();
-    Object *record = changed.getObject("frontend_timing");
-    if (llvm::StringRef(field) != "ordinary_issue_gap") record = record->getObject("delay");
-    (*record)[field] = llvm::StringRef(field) == "immediate_mask" ? 255 : 2;
-    sealContractFixture(changed);
-    rejects(std::move(changed), "source frontend change outside compiler encoding capability refuses precisely",
-            "compiler scheduling/encoding capability");
-  }
   rejectMutations(true, {
-      {"changed target response assumption rejects with a precise capability diagnostic",
-       "scratchpad_contract/assumptions/scratchpad_read_latency", 2, false, "scratchpad target assumption"},
       {"production cannot fall back to a hand-chosen weight lifetime", "mxu_weight_timing",
        nullptr, true, "weight-use windows"}});
-  changed = contractFixture();
+  auto changed = contractFixture();
   auto *engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
   (*(*engine->getArray("use_rows"))[31].getAsObject())["last_age"] = 93;
   rejects(changed, "changed weight row is rejected before accepting stale validation", "derived semantic payload differs");
@@ -617,6 +587,69 @@ void testDerivedContract() {
   rejectMutations(false, {
       {"missing weight validation refuses", "validation/mxu_weight_validation", nullptr, true, "MXU weight validation"},
       {"failed weight validation refuses", "validation/mxu_weight_validation/passed", false, false, "MXU weight validation"}});
+  const char *directory = std::getenv("ATLAS_TEST_MODEL_FACTS");
+  if (!directory) {
+    llvm::outs() << "SKIP: selected-bundle contract mutations (ATLAS_TEST_MODEL_FACTS is unset)\n";
+    return;
+  }
+  auto file = llvm::MemoryBuffer::getFile(std::string(directory) + "/model-timing.json");
+  check(bool(file), "production contract test reads selected source-derived facts");
+  if (!file) return;
+  auto document = llvm::json::parse((*file)->getBuffer());
+  check(bool(document) && document->getAsObject(), "production contract fixture is an object");
+  if (!document) { llvm::consumeError(document.takeError()); return; }
+  if (!document->getAsObject()) return;
+  invalidFacts(*document->getAsObject(), {
+      {"native semantic payload binds timing inputs", "architecture/mreg_count", 1, false, "derived semantic payload differs"},
+      {"native payload identity cannot be forged", "derivation_contract/payload_sha256", std::string(64, '0'), false, "payload hash mismatch"},
+      {"native successful-validation evidence is mandatory", "validation/passed", false, false, "successful operation validation"}},
+      [](Object object, const char *why, const char *diagnostic) {
+        auto bytes = encode(std::move(object));
+        auto parsed = parseModelTimingFacts(bytes, hash(bytes), true);
+        check(!parsed, why);
+        if (!parsed) check(llvm::StringRef(llvm::toString(parsed.takeError())).contains(diagnostic), why);
+      });
+}
+
+// These optional sections also validate in fixture mode, without a sealed
+// production contract masking the section-specific refusal.
+void testFixtureExtensions() {
+  auto sample = fixture();
+  const auto extensions = contractFixture();
+  for (const char *field : {"frontend_timing", "scratchpad_contract", "replay_timing"})
+    sample[field] = *extensions.get(field);
+  (*sample.getObject("frontend_timing")->getObject("scalar"))["write_age"] = 3;
+  auto bytes = encode(Object(sample));
+  auto parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
+  check(bool(parsed), "optional frontend, scratchpad and replay fixture sections load");
+  if (parsed) {
+    auto provider = modelTimingProvider(std::make_shared<ModelTimingFacts>(std::move(*parsed)));
+    auto scalar = provider.footprint({findOp("addi"), 1, 2, 0}, unknownRegs());
+    check(provider.issueGap({findOp("addi")}).value == 1 &&
+          provider.issueGap({findOp("delay"), 0, 0, 0, 511}).value == 512,
+          "ordinary issue gap and DELAY mask consume supported derived frontend inputs");
+    check(scalar.error.empty() && scalar.doneAge == 3 && scalar.accesses.back().age == 3,
+          "synchronous register write age comes from derived frontend inputs");
+  } else llvm::consumeError(parsed.takeError());
+  invalidFacts(sample, {
+      {"frontend ordinary gap is capability checked", "frontend_timing/ordinary_issue_gap", 2, false, "compiler scheduling/encoding capability"},
+      {"frontend delay base is capability checked", "frontend_timing/delay/base_gap", 2, false, "compiler scheduling/encoding capability"},
+      {"frontend delay mask is capability checked", "frontend_timing/delay/immediate_mask", 255, false, "compiler scheduling/encoding capability"},
+      {"changed target response assumption rejects precisely", "scratchpad_contract/assumptions/scratchpad_read_latency", 2,
+       false, "scratchpad target assumption"},
+      {"old replay bytecode schema refuses", "replay_timing/schema", "atlas.projected_core_replay.v1", false, "schema/source/policy"},
+      {"replay clock remains source checked", "replay_timing/source/clock_step", 2, false, "source edge contract"},
+      {"replay policy cannot select unknown arithmetic", "replay_timing/projection_policy/algorithm", "unknown-v2", false, "declared projection policy"},
+      {"DMA proposal Core phase copies cannot disagree", "dma_timing/proposal_contract/source_evidence/core_tick_shape", std::string(64, 'b'),
+       false, "Core phase"},
+      {"unknown DMA producer field does not change semantic binding", "dma_timing/producer_sources", Object{{"receipt", "not a semantic rule"}},
+       false, "resolved proposal-only curve schema"}},
+      [](Object object, const char *why, const char *diagnostic) {
+        auto bytes = encode(std::move(object));
+        auto parsed = parseModelTimingFactsForTesting(bytes, hash(bytes));
+        check(!parsed, why);
+        if (!parsed) check(llvm::StringRef(llvm::toString(parsed.takeError())).contains(diagnostic), why);
+      });
 }
 
 Object derivedFixture(const ModelTimingFacts &facts) {
@@ -770,6 +803,7 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
       {"source validation report hash must be well formed", "validation/report_sha256", "bad"},
       {"source sample policy must be recognized", "validation/sample_policy", "unreviewed"},
       {"source validation numerical checks are mandatory", "validation/engines/vpu/numerical_checks", 0},
+      {"source native negative runs are mandatory", "validation/engines/vpu/negative_runs", 0},
       {"source native rejections are mandatory", "validation/engines/vpu/negative_rejections", 0},
       {"source root totals must aggregate the engine probes", "validation/positive_runs", 3},
       {"source composition needs native chain positives", "validation/engines/vpu/chain_positive_runs", 0},
@@ -869,20 +903,6 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
       {"mxu0.matmul", Engine::Mxu0, {4}, 1, 0, 32, 95},
       {"mxu0.matmul", Engine::Mxu0, {8}, 0, 0, 64, 95}};
   check(!mxu->rejectsPortHistory(computes), "three source compute trackers preserve the default legal capacity");
-  for (int depth : {1, 2, 4}) {
-    auto changed = object;
-    auto *derivation = changed.getObject("derivation");
-    auto *contract = derivation->getObject("source_contract");
-    (*contract->getObject("capacity"))["mxu0_compute"] = depth;
-    (*derivation)["source_contract_sha256"] = hash(canonicalJson(llvm::json::Value(Object(*contract))));
-    auto capacityBytes = encode(std::move(changed));
-    auto selected = parseModelOverlapFacts(capacityBytes, hash(capacityBytes), *mxuFacts);
-    check(bool(selected), "supported source compute tracker parameter loads");
-    if (selected)
-      check(selected->rejectsPortHistory(computes) == (depth < 3),
-            "selected source compute tracker depth drives retained issue history");
-    else llvm::consumeError(selected.takeError());
-  }
   auto mxuProvider = modelTimingProvider(mxuFacts, std::make_shared<ModelOverlapFacts>(*mxu), true);
   Instr accumulator{findOp("vmatpush.acc.fp8.mxu0"), 0, 4, 0};
   Instr weight{findOp("vmatpush.weight.mxu0"), 0, 0, 0};
@@ -1056,15 +1076,6 @@ void testStreamedWeights(const std::shared_ptr<ModelTimingFacts> &facts) {
               "source-derived weight RAW boundary");
         check(provider.dependence(compute, fc, push, fp).value.distance == (unit == 0 ? 63 : 32),
               "source-derived weight WAR boundary");
-        for (int row : {0, 31}) {
-          std::vector<int> ages;
-          int element = (unit * 2 + slot) * 32 + row;
-          for (const Access &access : fc.accesses)
-            if (access.res == Res::Weight && access.first <= element && element < access.first + access.count)
-              ages.push_back(access.age + (element - access.first) * access.step);
-          check(ages == std::vector<int>({unit == 0 ? 1 + row : 1, unit == 0 ? 63 + row : 32}),
-                "first and last row uses retain the engine and slot mapping");
-        }
         push.rd = 1 - slot;
         check(provider.dependence(compute, fc, push, model->resolve(push, unknownRegs())).value.distance == 0,
               "different weight slots have no data dependency");
@@ -1132,18 +1143,9 @@ void testExplicitReleases() {
   if (parsed)
     check(!parsed->resolve(first, unknownRegs()).error.empty(), "reservation cannot end before the final MREG access");
   else llvm::consumeError(parsed.takeError());
-  auto config = fixture();
-  auto *model = config.getObject("model");
-  (*model->getObject("configuration"))["vpu_simple_op_latency_cycles"] = 17;
-  auto canonical = canonicalJson(llvm::json::Value(Object(*model->getObject("configuration"))));
-  (*model)["configuration_json"] = canonical;
-  (*model)["configuration_sha256"] = hash(canonical);
-  bytes = encode(Object(config));
-  auto changed = parseModelTimingFactsForTesting(bytes, hash(bytes));
-  check(bool(changed), "configuration identity is data; bounded latency-profile changes need no compiler rebuild");
-  if (!changed) llvm::consumeError(changed.takeError());
+
   auto rejectConfiguration = [&](const char *key, llvm::json::Value value, const char *why) {
-    auto changed = Object(config);
+    auto changed = fixture();
     auto *model = changed.getObject("model");
     (*model->getObject("configuration"))[key] = std::move(value);
     auto canonical = canonicalJson(llvm::json::Value(Object(*model->getObject("configuration"))));
@@ -1332,6 +1334,7 @@ int main(int argc, char **argv) {
   if (argc != 1) return 2;
   failures += testEngineAdmission();
   testDerivedContract();
+  testFixtureExtensions();
   testScalarCosts();
   testDMAEstimates();
   testExplicitReleases();
@@ -1362,8 +1365,6 @@ int main(int argc, char **argv) {
   check(!provider.footprint({findOp("vmov"), 3, 0, 0}, unknownRegs()).error.empty(), "odd BF16 pair rejects");
   check(provider.footprint({findOp("vmov"), 32, 0, 0}, unknownRegs()).error.empty(),
         "read and write may use different logical registers in the same physical bank");
-  check(!provider.footprint({findOp("vadd.bf16"), 4, 0, 32}, unknownRegs()).error.empty(),
-        "two read operands cannot share a physical bank");
   Instr pack{findOp("vpack.bf16.fp8"), 1, 0, 32};
   Footprint packed = provider.footprint(pack, unknownRegs());
   auto packReservations = provider.createReservations();

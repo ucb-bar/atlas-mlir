@@ -1,12 +1,12 @@
 """Derive VectorFSM timing from its issue metadata and pure row planners."""
 from __future__ import annotations
 
+from atlas_derive_scratchpad import source_path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
 from collections import defaultdict
 import inspect
-from pathlib import Path
 from types import FunctionType, SimpleNamespace
 
 from atlas_model_schema import (SOURCE_SHAPES, VPU_BLOCKS, ast_digest, mreg_event,
@@ -19,12 +19,7 @@ class UnsupportedVPU(UnsupportedModelTiming):
 
 
 def _normalize_slot_capacity(tree):
-    """Read the reviewed ISSUE_SLOTS constant and guard its two consumers.
-
-    Native saturation fixtures cover one through three slots. Only the module
-    constant is normalized; range(ISSUE_SLOTS), len(live) == ISSUE_SLOTS and all
-    admission/row-planning control flow remain protected by the complete AST.
-    """
+    """Read the reviewed ISSUE_SLOTS constant and guard its two consumers."""
     from atlas_derive_mxu import _assignment, _method, _one, _name
     cls = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
                 and n.name == "VectorExecutionUnit"), "VPU class")
@@ -54,13 +49,8 @@ def _normalize_slot_capacity(tree):
 
 
 def _check_source(module, *, latency_table=False):
-    path = Path(inspect.getsourcefile(module))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedVPU("prohibited model source path")
-    if ".." in path.parts:
-        raise ValueError("parent traversal is unsupported")
-    if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-        raise UnsupportedVPU("model source path contains a symlink")
+    path = source_path(inspect.getsourcefile(module), UnsupportedVPU, "prohibited model source path",
+                       "model source path contains a symlink", parent_error=ValueError)
     tree = ast.parse(path.read_text())
     if latency_table:
         tree.body = [node for node in tree.body if not (

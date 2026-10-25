@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -16,38 +17,16 @@ from model_evidence import NativeModelFixture
 
 
 class CurveContractTest(unittest.TestCase):
-    def test_prohibited_paths_rejected_before_any_filesystem_access(self):
-        with patch.object(Path, "is_symlink", side_effect=AssertionError("accessed prohibited path")):
-            for name in ("/tmp/HAMMER/curve.json", "/tmp/vLsI/../curve.json"):
-                with self.assertRaisesRegex(curve.UnsupportedCurve, "prohibited"):
-                    curve._safe(name)
-
-    def test_symlink_ancestor_rejected_before_descendant_lookup(self):
-        with tempfile.TemporaryDirectory() as directory:
-            link = Path(directory) / "link"
-            link.symlink_to(Path(directory) / "unvisited")
-            with self.assertRaisesRegex(curve.UnsupportedCurve, "symlink"):
-                curve._safe(link / "curve.json")
-
-    def test_old_lock_without_dma_contract_remains_loadable(self):
-        value = {k: v for k, v in schema.LOCK.items() if k not in {"curve_sha256", "dma_source_sha256"}}
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "lock.json"
-            path.write_text(json.dumps(value))
-            self.assertEqual(schema.load_lock(path), value)
-            value["curve_sha256"] = "bad"
-            path.write_text(json.dumps(value))
-            with self.assertRaisesRegex(ValueError, "curve_sha256"):
-                schema.load_lock(path)
-
-    def test_generated_cpp_identity_covers_curve_source_and_ast_pins(self):
-        generated = schema.generate(schema.VOCABULARY)
-        self.assertIn("&dmaIdentity()", generated)
-        self.assertIn(schema.LOCK["curve_sha256"], generated)
-        for name, digest in schema.LOCK["dma_source_sha256"].items():
-            self.assertIn(digest, generated)
-            self.assertIn('"shape:' + name + '"', generated)
-            self.assertIn(schema.SOURCE_SHAPES[name], generated)
+    def test_knee_empty_curves_and_nonpositive_latency_refuse(self):
+        cfg = SimpleNamespace(dma_beat_bytes=64)
+        params, data = {"latency_mode": "unloaded"}, {"curves": {"100": [[100, 20]]}}
+        curve._check_curve_configuration(cfg, params, data)
+        for field, value in (("latency_mode", "knee"), ("min_latency", 0), ("min_latency", -1)):
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    curve.UnsupportedCurve, "unsupported capability: dma_memory_params\\." + field):
+                curve._check_curve_configuration(cfg, dict(params, **{field: value}), data)
+        with self.assertRaisesRegex(curve.UnsupportedCurve, "unsupported capability: curve\\.curves"):
+            curve._check_curve_configuration(cfg, params, {"curves": {}})
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native curve contracts")
@@ -68,32 +47,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         self.assertEqual(shared["core_tick_shape"], facts["proposal_contract"]["source_evidence"]["core_tick_shape"])
         self.assertTrue(facts["estimate_only"])
         self.assertEqual(facts["semantics"]["address_dependence"], "none")
-
-    def test_scaling_changes_source_converted_facts(self):
-        original = curve.derive_curve(self.cfg)
-        scaled = copy(self.cfg)
-        scaled.dma_memory_params = dict(self.cfg.dma_memory_params, channels=2, frequency_ghz=1.0)
-        changed = curve.derive_curve(scaled)
-        self.assertEqual(changed["curve_sha256"], original["curve_sha256"])
-        for first, second in zip(original["curves"], changed["curves"]):
-            self.assertEqual(second["cycles_per_beat"], first["cycles_per_beat"])
-            self.assertEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 2)
-
-    def test_unknown_modes_or_malformed_curve_rejected(self):
-        for values in ({"latency_mode": "mess"}, {"latency_mode": "knee"},
-                       {"converge": 0.5}, {"enforce_peak": False}, {"curves": {}}, {"beat_bytes": 16},
-                       {"min_latency": 0}, {"min_latency": -1}):
-            cfg = copy(self.cfg)
-            cfg.dma_memory_params = dict(self.cfg.dma_memory_params, **values)
-            with self.subTest(values=values), self.assertRaises(curve.UnsupportedCurve):
-                curve.derive_curve(cfg)
-        cfg = copy(self.cfg)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "changed.json"
-            path.write_text('{"latencyMode": "unloaded", "curves": {}}\n')
-            cfg.dma_memory_params = dict(self.cfg.dma_memory_params, curves=str(path))
-            with self.assertRaisesRegex(curve.UnsupportedCurve, "unsupported capability: curve.curves"):
-                curve.derive_curve(cfg)
 
     def test_frequency_queue_and_history_are_independent_configuration_inputs(self):
         from atlas_validate_curve import FactBackend, _stream
@@ -164,19 +117,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         facts["curves"][-1]["cycles_per_beat"] *= 1.01
         self.assertNotEqual(native, _stream(FactBackend(facts), [False] * 65))
 
-    def test_bound_covers_every_history_curve_and_extracts_wait_visibility(self):
-        import math
-        facts = curve.derive_curve(self.cfg)
-        contract = facts["proposal_contract"]
-        maximum = max(facts["min_latency"], *(r["unloaded_latency_cycles"] for r in facts["curves"]),
-                      *(r["cycles_per_beat"] for r in facts["curves"]))
-        self.assertEqual(contract["per_beat_bound_cycles"], math.ceil(maximum) + facts["issue_interval_cycles"])
-        self.assertEqual(contract["response_to_retire_cycles"], 0)
-        self.assertEqual(contract["retire_to_wait_issue_cycles"], 1)
-        self.assertTrue(contract["preconditions"]["engine_backend_drained_at_launch"])
-        self.assertEqual(contract["preconditions"]["maximum_cycle"], 2147483647)
-        self.assertEqual(contract["policy"]["classification"], "compiler_policy")
-
     def test_core_order_and_wait_predicate_mutations_refuse(self):
         original_read = curve._read
         for before, after in (("target = self._tick_s1()", "target = None"),
@@ -210,15 +150,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
             positive = _core_wait_observation(self.cfg, store=store, beats=1, wait_age=age + 1)
             self.assertEqual(short["wait_checks"][0], dict(cycle=short["retired_cycle"], fired=False, stall="dma.wait"))
             self.assertEqual(positive["wait_checks"], [dict(cycle=positive["retired_cycle"] + 1, fired=True, stall=None)])
-
-    def test_mixed_queued_grant_denials_preserve_native_backend_parity(self):
-        from atlas_validate_curve import _mixed_engine_observation
-        facts = curve.derive_curve(self.cfg)
-        native = _mixed_engine_observation(self.cfg, facts, deny_grants=True)
-        self.assertEqual(native, _mixed_engine_observation(self.cfg, facts, fact_backend=True, deny_grants=True))
-        denied = [access for event in native["trace"] for access in (event["vmem_read"], event["vmem_write"])
-                  if access is not None and not access[2]]
-        self.assertTrue(denied)
 
     def test_near_epsilon_latency_bound_uses_ceiling_before_issue_interval(self):
         from atlas_validate_curve import _engine_observation

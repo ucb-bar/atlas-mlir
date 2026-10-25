@@ -1,7 +1,6 @@
 """ISA/resource vocabulary extraction and refusal of stale compiler snapshots."""
 from copy import deepcopy
 from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
 import sys
@@ -12,7 +11,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_vocabulary as vocabulary
-from atlas_model_schema import VOCABULARY, canonical, generate
+from atlas_model_schema import VOCABULARY, canonical
 
 
 class VocabularyContractTest(unittest.TestCase):
@@ -50,12 +49,6 @@ class VocabularyContractTest(unittest.TestCase):
                 with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "prohibited"):
                     vocabulary._safe(path)
 
-    def test_nonuniform_and_shifted_row_plans_have_precise_refusals(self):
-        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "noncontiguous or shifted"):
-            vocabulary._dimensions([(0, 1, 0)], 0, 1)
-        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "incomplete or nonuniform"):
-            vocabulary._dimensions([(0, 0, 0)], 0, 2)
-
     def test_dimensions_come_from_row_requests(self):
         requests = [(age, age // 2, age % 2) for age in range(4)]
         self.assertEqual(vocabulary._dimensions(requests, 0, 2),
@@ -66,9 +59,11 @@ class VocabularyContractTest(unittest.TestCase):
         self.assertEqual(vocabulary._dimensions(simultaneous, 0, 2),
                          [dict(offset=0, registers=1, passes=1), dict(offset=1, registers=1, passes=1)])
 
-    def test_cpp_embeds_the_exact_generated_snapshot(self):
-        self.assertIn("vocabularyJson() { return " + json.dumps(canonical(VOCABULARY).decode()), generate(VOCABULARY))
-
+    def test_nonuniform_and_shifted_row_plans_have_precise_refusals(self):
+        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "noncontiguous or shifted"):
+            vocabulary._dimensions([(0, 1, 0)], 0, 1)
+        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "incomplete or nonuniform"):
+            vocabulary._dimensions([(0, 0, 0)], 0, 2)
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for ISA source contracts")
 class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
@@ -137,13 +132,6 @@ class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
             with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "unsupported ISA dispatch for vadd.bf16"):
                 vocabulary.derive_vocabulary(self.cfg)
 
-    def test_memory_dispatch_change_is_refused(self):
-        from npu_model.isa import EXU
-        cls = self.cfg.isa.operations["vload"]
-        with patch.object(cls, "exu", EXU.SCALAR):
-            with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "unsupported ISA dispatch for vload"):
-                vocabulary.derive_vocabulary(self.cfg)
-
     def test_memory_shifted_register_selector_is_refused(self):
         cls = self.cfg.isa.operations["vload"]
         def shifted_destination(self, state):
@@ -151,6 +139,21 @@ class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
             state.write_mrf_u8(self.vd + 1, None)
         with patch.object(cls, "exec", shifted_destination):
             with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "unresolved register selector for write_mrf_u8"):
+                vocabulary.derive_vocabulary(self.cfg)
+
+    def test_new_model_instruction_requires_explicit_compiler_adapter(self):
+        from types import SimpleNamespace
+        cfg = deepcopy(self.cfg)
+        cfg.isa = SimpleNamespace(operations=dict(self.cfg.isa.operations))
+        cfg.isa.operations["vnew.bf16"] = cfg.isa.operations["vadd.bf16"]
+        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "added=.*vnew.bf16"):
+            vocabulary.derive_vocabulary(cfg)
+
+    def test_memory_dispatch_change_is_refused(self):
+        from npu_model.isa import EXU
+        cls = self.cfg.isa.operations["vload"]
+        with patch.object(cls, "exu", EXU.SCALAR):
+            with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "unsupported ISA dispatch for vload"):
                 vocabulary.derive_vocabulary(self.cfg)
 
     def test_unknown_model_resource_accessor_is_refused(self):
@@ -172,14 +175,6 @@ class NativeVocabularyTest(NativeModelFixture, unittest.TestCase):
         with patch.object(vocabulary, "_issue", issue):
             with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "unmapped reads resource"):
                 vocabulary.derive_vocabulary(self.cfg)
-
-    def test_new_model_instruction_requires_explicit_compiler_adapter(self):
-        from types import SimpleNamespace
-        cfg = deepcopy(self.cfg)
-        cfg.isa = SimpleNamespace(operations=dict(self.cfg.isa.operations))
-        cfg.isa.operations["vnew.bf16"] = cfg.isa.operations["vadd.bf16"]
-        with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "added=.*vnew.bf16"):
-            vocabulary.derive_vocabulary(cfg)
 
     def test_handwritten_operand_count_cannot_override_planner(self):
         changed = deepcopy(VOCABULARY)

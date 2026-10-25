@@ -1,21 +1,14 @@
-"""Reviewed helper closure for fatal errors, frontend dispatch and storage.
-
-This is a source compatibility boundary, not a simulator or timing estimator.
-Each helper is checked independently, together with module/class bindings: a
-caller's fingerprint never stands for its callees. Engine timing interpreters
-remain responsible for their separately inventoried source domains.
-"""
+"""Check helpers and module/class bindings independently of their callers."""
 from __future__ import annotations
 
 import ast
-from copy import deepcopy
-import hashlib
 import json
 import sys
 from pathlib import Path
 
 from atlas_derive_scratchpad import read_source
 from atlas_model_diagnostics import UnsupportedModelTiming
+from atlas_model_schema import ast_digest as _digest
 
 
 class UnsupportedModelSemantics(UnsupportedModelTiming):
@@ -43,13 +36,7 @@ def _docstrings(node):
 
 
 def _local_names(function):
-    """Alpha-normalize ordinary locals only in an unambiguous single scope.
-
-Arguments stay named (keyword calls and runtime signature inspection matter).
-Closures, comprehensions, pattern/exception bindings and namespace reflection
-retain literal names. No expression, assertion, logging call or annotation is
-removed. New globals cannot collide with the canonical, non-Python identifiers.
-"""
+    """Normalize locals only in simple scopes; preserve arguments and reflected names."""
     body = ast.Module(body=function.body, type_ignores=[])
     nodes = list(ast.walk(body))
     complex_scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
@@ -112,10 +99,6 @@ def _normalized(source):
     return tree
 
 
-def _digest(node):
-    return hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
-
-
 def module_contract(source):
     """Return independent helper fingerprints and all remaining source bindings."""
     tree = _normalized(source)
@@ -138,11 +121,7 @@ def module_contract(source):
 
 
 def check_model_semantics(model):
-    """Check selected source before importing/allocating/executing native Core.
-
-The emitted inventory is provenance, bound by the existing model source digest
-in atlas.derived_facts.v1; it adds no scheduling value or measured timing fact.
-"""
+    """Check source before importing or executing Core; return its provenance."""
     if sys.version_info[:2] != (3, 14):
         raise UnsupportedModelSemantics(
             "model timing requires Python 3.14 for reviewed AST fingerprints; "
@@ -161,5 +140,5 @@ in atlas.derived_facts.v1; it adds no scheduling value or measured timing fact.
         if actual["bindings"] != expected["bindings"]:
             raise UnsupportedModelSemantics(f"unsupported semantics: {filename}:module/class bindings")
         checked[filename] = actual
-    return dict(schema=contract["schema"], files=checked, dependencies=deepcopy(contract["dependencies"]),
+    return dict(schema=contract["schema"], files=checked,
                 binding="model.source_sha256 in atlas.derived_facts.v1 semantic payload")

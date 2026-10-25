@@ -1,9 +1,4 @@
-"""Reusable source-footprint event and operand-relation algebra.
-
-This module contains no measured catalog reader, observation fitter, artifact
-projector, or pinned hardware capacity. Structural rules come from the guarded
-source contract supplied by atlas_derive_overlap.SourceRules.
-"""
+"""Reusable source-footprint event and operand-relation algebra."""
 from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
@@ -15,6 +10,7 @@ from atlas_model_schema import RELATION_KEYS, RELATION_VALUES
 def relation_key(relation):
     return tuple(sorted(relation.items()))
 
+
 def relation_class(relation):
     result = dict(relation)
     banks = result['mreg_banks']
@@ -22,8 +18,10 @@ def relation_class(relation):
         result['mreg_banks'] = 'mixed_alias' if '=' in banks and '~' in banks else 'register_alias' if '=' in banks else 'bank_alias'
     return result
 
+
 def engine(name):
     return name.split('.', 1)[0]
+
 
 @dataclass(frozen=True)
 class Register:
@@ -34,22 +32,17 @@ class Register:
 
 @lru_cache(maxsize=None)
 def bank_bound(left, right, sign, coalescing):
-    """Suffix-safe bank bound for immutable source event shapes.
-
-    Many opcodes share the same row planners. Cache their event algebra, not
-    a measured gap or a concrete benchmark relation.
-    """
+    """Suffix-safe bank bound for immutable source event shapes."""
     bound = 1
     for age, row in left.requests:
         for later, later_row in right.requests:
-            if left.write == right.write:
-                shared = not left.write and coalescing and sign == '=' and row == later_row
-                collision = not shared
-            else:
-                collision = sign == '=' and row == later_row
+            same_row = sign == '=' and row == later_row
+            collision = (not (not left.write and coalescing and same_row)
+                         if left.write == right.write else same_row)
             if collision and age >= later:
                 bound = max(bound, age - later + 1)
     return bound
+
 
 def validate_relation(relation):
     if not isinstance(relation, dict) or not set(relation) <= RELATION_KEYS or 'mreg_banks' not in relation:
@@ -81,6 +74,7 @@ def validate_relation(relation):
                 raise ModelTimingEvidenceError('explicit alignment lacks scalar byte offset')
     elif any((key.endswith('scalar_byte_offset') for key in relation)):
         raise ModelTimingEvidenceError('scalar byte offsets require explicit alignment')
+
 
 class RuleSet:
 

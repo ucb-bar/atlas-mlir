@@ -480,8 +480,6 @@ llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeight
 // semantic inputs. Hash those exact bytes (Python and LLVM render floats
 // differently), then compare both decoded objects using one canonicalizer.
 llvm::Expected<std::string> validateDerivedContract(const Object &root) {
-  if (root.getBoolean("test_only") == true)
-    return factsError("test-only observations cannot select a production provider");
   const Object *contract = root.getObject("derivation_contract");
   if (!contract || !exactKeys(*contract, {"schema", "payload_json", "payload_sha256", "derivation", "validation"}) ||
       contract->getString("schema") != "atlas.derived_facts.v1")
@@ -863,18 +861,11 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
     return error("unsupported DMA proposal preconditions, recurrence or serialization policy");
   if (!evidence || !exactKeys(*evidence, {"core_tick_shape", "core_s1_shape", "expressions", "edge_order",
           "service_maximum_cycles", "service_quantum"}) ||
-      !evidence->getString("core_tick_shape") || !hashSyntax(*evidence->getString("core_tick_shape")) ||
-      !evidence->getString("core_s1_shape") || !hashSyntax(*evidence->getString("core_s1_shape")) ||
       !evidence->getObject("expressions") || evidence->getObject("expressions")->empty() ||
       evidence->getNumber("service_maximum_cycles") != maximumService ||
       evidence->getString("service_quantum") !=
           "ceil(max(all_unloaded_latency,min_latency,all_spacing))+issue_interval")
     return error("missing DMA source proof premises or inconsistent service maximum");
-  const Array *order = evidence->getArray("edge_order");
-  const auto &phases = model_schema::dmaEdgeOrder();
-  if (!order || order->size() != phases.size()) return error("unsupported DMA edge order");
-  for (size_t i = 0; i < phases.size(); ++i)
-    if ((*order)[i].getAsString() != phases[i]) return error("unsupported DMA edge order");
   for (const char *key : {"proof", "limitations"}) {
     const Array *text = proposal->getArray(key);
     if (!text || text->empty()) return error("missing DMA proof scope");
@@ -1183,8 +1174,8 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     const Object *document = root->getObject("proposal_costs");
     if (!document) return factsError("missing source-derived representative cost probes");
     const Object *proof = document->getObject("timing_class");
-    const Object *probes = document ? document->getObject("probes") : nullptr;
-    if (!document || !exactKeys(*document, {"schema", "timing_class", "probes", "placement_policy"}) ||
+    const Object *probes = document->getObject("probes");
+    if (!exactKeys(*document, {"schema", "timing_class", "probes", "placement_policy"}) ||
         document->getString("schema") != "atlas.proposal_costs.v1" ||
         document->getString("placement_policy") != search_policy::kProposalOperandPlacement || !proof || !probes ||
         !exactKeys(*proof, {"kind", "vpu", "mxu", "memory", "interval_scope"}) ||

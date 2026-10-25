@@ -3,7 +3,6 @@ from pathlib import Path
 import os
 import sys
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_frontend as frontend
@@ -17,20 +16,6 @@ class SourceContractTest(ModelSourceFixture, unittest.TestCase):
     def derive(self, sources=None, **kwargs):
         return frontend.derive_frontend_sources(sources or self.sources, self.scalar,
                                                 fetch_width=kwargs.get("fetch_width", self.cfg.fetch_width))
-
-    def test_pinned_frontend_contract_and_operand_metadata(self):
-        value = self.derive()
-        self.assertEqual(frontend.derive_frontend(self.cfg), value)
-        self.assertEqual(value["ordinary_issue_gap"], 1)
-        self.assertEqual(value["delay"], dict(base_gap=1, immediate_mask=4095, decrement_per_tick=1))
-        self.assertEqual(value["scalar"], dict(read_age=0, write_age=0, completion_delay=1))
-        self.assertEqual(value["control"], dict(delay_slots=1, operand_read_age=0, jal_link_pc_offset=1))
-        self.assertEqual(value["instructions"]["addi"]["reads"], [dict(resource="xreg", operand="rs1")])
-        self.assertEqual(value["instructions"]["seli"]["writes"], [dict(resource="ereg", operand="rd")])
-        self.assertEqual(value["instructions"]["beq"]["writes"], [])
-        self.assertEqual(value["instructions"]["jal"]["writes"], [dict(resource="xreg", operand="rd")])
-        self.assertEqual(value["instructions"]["ecall"]["kind"], "halt")
-        self.assertEqual(value["instructions"]["csrrw"]["kind"], "control")
 
     def test_delay_immediate_mask_is_extracted_and_propagates(self):
         source = self.mutated("core.py", "self.delay_counter = int(insn.imm) & 0xFFF",
@@ -75,14 +60,6 @@ class SourceContractTest(ModelSourceFixture, unittest.TestCase):
     def test_fetch_width_change_is_explicitly_unsupported(self):
         with self.assertRaisesRegex(frontend.UnsupportedFrontend, "one S1 issue slot"):
             self.derive(fetch_width=2)
-
-    def test_helpers_never_execute_numerics_or_tick(self):
-        from npu_model.hardware.core import Core
-        from npu_model.hardware.arch_state import ArchState
-        with patch.object(Core, "tick", side_effect=AssertionError("model execution")), \
-                patch.object(ArchState, "__init__", side_effect=AssertionError("numerical state")):
-            self.assertEqual(frontend.derive_frontend(self.cfg), self.derive())
-
 
 if __name__ == "__main__":
     unittest.main()

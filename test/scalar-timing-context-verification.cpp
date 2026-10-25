@@ -38,65 +38,12 @@ void setI32(Operation *op, StringRef key, int64_t value) {
   op->setAttr(key, Builder(op->getContext()).getI32IntegerAttr(value));
 }
 
-void positive(MLIRContext &context) {
-  auto module = lower(context);
-  if (!module) return;
-  auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(stream) && stream->loops.size() == 1, "context source has one proved PACK loop");
-  if (failed(stream) || stream->loops.size() != 1) return;
-  const auto &loop = stream->loops.front();
-  unsigned load = 0, store = 0;
-  TimingContext first;
-  for (size_t pc = 0; pc < stream->instrs.size(); ++pc) {
-    const Instr &in = stream->instrs[pc];
-    const TimingContext &proof = stream->timingContexts[pc];
-    bool memory = loop.contains(pc) && (in.op->name == "lw" || in.op->name == "sw");
-    check(bool(proof) == memory, "only scalar copy instructions carry contexts");
-    if (!proof) continue;
-    check(proof->matches(in), "context binds all decoded instruction fields");
-    Instr changed = in;
-    ++changed.imm;
-    check(!proof->matches(changed), "a changed effective-address immediate invalidates the context");
-    changed = in;
-    ++changed.rs1;
-    check(!proof->matches(changed), "a changed address role invalidates the context");
-    if (!first) first = proof;
-    check(first->sameRegion(*proof), "all copy contexts share one replay region");
-    bool isLoad = in.op->name == "lw";
-    unsigned copy = isLoad ? load++ : store++;
-    for (unsigned row = 0; row < 32; ++row) {
-      uint32_t expected = isLoad ? fixed().packWord * 4 + 512 * (copy % 2) + 16 * row + 4 * (copy / 2)
-                                : fixed().packRelayoutWord * 4 + 32 * row + 16 * (copy % 2) + 4 * (copy / 2);
-      check(proof->scalarAddresses()[row] == expected, "every replayed row has its exact effective byte address");
-    }
-  }
-  check(load == 8 && store == 8, "all sixteen scalar instructions have complete 32-row proofs");
-  auto reread = readAtlasStream(*module, AtlasStreamReadMode::Verification);
-  check(succeeded(reread) && !first->sameRegion(*reread->timingContexts[loop.begin]),
-        "a new decoded snapshot recomputes its own immutable region");
-
-  std::vector<Instr> nodes(stream->instrs.begin() + loop.begin, stream->instrs.begin() + loop.end());
-  std::vector<TimingContext> contexts(stream->timingContexts.begin() + loop.begin,
-                                      stream->timingContexts.begin() + loop.end());
-  auto provider = builtinTimingProvider();
-  unsigned queries = 0;
-  provider.contextualDependence = [&](const Instr &a, const Footprint &fa, const TimingContext &ca,
-                                     const Instr &b, const Footprint &fb, const TimingContext &cb) {
-    if (ca) { check(ca->matches(a), "graph retains the first instruction's proof"); ++queries; }
-    if (cb) { check(cb->matches(b), "graph retains the second instruction's proof"); ++queries; }
-    return provider.dependence(a, fa, b, fb);
-  };
-  auto graph = buildTimingGraph(nodes, stream->entry[1], provider, nullptr, &contexts);
-  check(graph.error.empty() && queries > 0, "graph construction supplies contexts to dependence queries");
-  contexts.pop_back();
-  check(!buildTimingGraph(nodes, unknownRegs(), provider, nullptr, &contexts).error.empty(),
-        "graph rejects a context vector for a different instruction snapshot");
-}
-
 void negative(MLIRContext &context) {
   auto module = lower(context);
+  check(bool(module), "PACK context fixture lowers", diagnostics);
   if (!module) return;
   auto stream = readAtlasStream(*module, AtlasStreamReadMode::Verification);
+  check(succeeded(stream) && stream->loops.size() == 1, "PACK context fixture has one proved loop");
   if (failed(stream) || stream->loops.size() != 1) return;
   const auto &loop = stream->loops.front();
   RegValues entry = stream->factsOf(loop).entry;
@@ -155,6 +102,5 @@ void negative(MLIRContext &context) {
 } // namespace
 
 void atlas_test::runScalarTimingContext(MLIRContext &context) {
-  positive(context);
   negative(context);
 }

@@ -1,9 +1,4 @@
-"""Source qualification for asynchronous DMA issue; never a completion estimate.
-
-This deliberately preserves the compiler's matching-wait and alias policies.
-Full reviewed ASTs establish the ordering/grant predicates; numeric pipeline
-and configuration values are extracted without executing the model.
-"""
+"""Source qualification for asynchronous DMA issue; never a completion estimate."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -36,23 +31,17 @@ class UnsupportedDMAAdmission(UnsupportedModelTiming):
 
 
 def review_sources(sources):
-    """Pure AST contract, including a mutation-test interface."""
     try:
-        contract = review_dma_sources(sources)
+        return review_dma_sources(sources)
     except UnsupportedCurve as error:
         raise UnsupportedDMAAdmission(str(error)) from error
-    return contract["source_shapes"], contract["issue"]
 
 
 def derive_dma_admission(model, per_op):
     """Return frozen, unvalidated admission facts; no Core allocation or ticks."""
     model = safe_path(model)
-    paths = {name: safe_path(model / "npu_model" / "hardware" / name) for name in SOURCE_NAMES}
-    sources = {name: path.read_text() for name, path in paths.items()}
-    try:
-        shared = review_dma_sources(sources)
-    except UnsupportedCurve as error:
-        raise UnsupportedDMAAdmission(str(error)) from error
+    sources = {name: safe_path(model / "npu_model" / "hardware" / name).read_text() for name in SOURCE_NAMES}
+    shared = review_sources(sources)
     timing = per_op.get("dma_timing", {})
     if timing.get("source_contract") != shared:
         raise UnsupportedDMAAdmission("DMA admission differs from authoritative DMA source/phase contract")

@@ -12,12 +12,7 @@ TARGETS = Path(__file__).with_name("model-scoring-targets.json")
 
 @dataclass(frozen=True)
 class PeriodicAcceptance:
-    """Adapter to the pinned model's supported accept_fn configuration hook.
-
-    The model has no declarative acceptance pattern or FIFO43 preset. Keep
-    the synthetic harness choices solely in model-scoring-targets.json.
-    Phase is absolute DMA/backend cycle zero, not first request acceptance.
-    """
+    """Synthetic acceptance prefix, phased from absolute DMA/backend cycle zero."""
     period_cycles: int
     accepted_prefix_cycles: int
 
@@ -41,16 +36,14 @@ def bind_synthetic_configuration(cfg, target):
     cfg.dma_memory_backend = target["dma_memory_backend"]
     cfg.dma_memory_params = deepcopy(target["dma_memory_params"])
     cfg.dma_memory_params["accept_fn"] = PeriodicAcceptance(**target["accept_pattern"])
-    # Exercise the model's configuration validation before recording a receipt.
-    # Core constructs its own fresh backend from these same parameters.
+    # Validate the parameters before recording a receipt; Core creates its own backend.
     make_memory_backend(cfg)
 
 
 def scoring_configuration_receipt(cfg, profile, identity, *, synthetic_target=None):
     values = deepcopy(configuration_values(cfg))
     if synthetic_target is not None:
-        # A Python callable has no stable JSON identity. Record the complete
-        # declarative input to the only supported callback adapter instead.
+        # Bind declarative callback inputs because Python callables lack a stable JSON identity.
         callback = values["dma_memory_params"]["accept_fn"]
         values["dma_memory_params"]["accept_fn"] = {
             "adapter": "absolute-cycle-periodic-prefix-v1",

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Choose a fully verified Atlas program using cold cycles from the selected npu_model.
-
-The default is retained as candidate zero, exact cycle ties use canonical candidate
-order, and builtin compiles once without importing the model. The bounded
-search exposes existing lowering choices and optional legal order mutations.
-"""
+"""Choose verified Atlas programs by native model cycles, breaking ties by candidate order."""
 
 from __future__ import annotations
 
@@ -157,24 +152,19 @@ def evidence_option(model_facts: Path | None = None) -> list[str]:
 
 def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
     options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json"]
-    if candidate.virtual_orders:
-        options.append("order-file=order.json")
-    if graph_output:
-        options.append("graph-output=graph.json")
-    if candidate.lookahead:
-        options.append(f"lookahead={candidate.lookahead}")
-    if candidate.random_seed is not None:
-        options.append(f"random-seed={candidate.random_seed}")
-    if candidate.store_windows:
-        options.append("store-windows='" + ",".join(map(str, candidate.store_windows)) + "'")
-    if candidate.mreg_ranks:
-        options.append("mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'")
-    if candidate.pack_reload_after_weight:
-        options.append("pack-reload-after-weight=true")
-    if candidate.pack_weight_before_pack:
-        options.append("pack-weight-before-pack=true")
-    if candidate.wait_placement != "default":
-        options.append("wait-placement=" + candidate.wait_placement)
+    for enabled, option in (
+        (candidate.virtual_orders, "order-file=order.json"),
+        (graph_output, "graph-output=graph.json"),
+        (candidate.lookahead, f"lookahead={candidate.lookahead}"),
+        (candidate.random_seed is not None, f"random-seed={candidate.random_seed}"),
+        (candidate.store_windows, "store-windows='" + ",".join(map(str, candidate.store_windows)) + "'"),
+        (candidate.mreg_ranks, "mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'"),
+        (candidate.pack_reload_after_weight, "pack-reload-after-weight=true"),
+        (candidate.pack_weight_before_pack, "pack-weight-before-pack=true"),
+        (candidate.wait_placement != "default", "wait-placement=" + candidate.wait_placement),
+    ):
+        if enabled:
+            options.append(option)
     return ["--atlas-compile-candidate=" + " ".join(options)]
 
 
@@ -212,8 +202,7 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
                 rank = {other: index for index, other in enumerate(moved)}
                 if any(rank[pred] >= rank[other] for other in moved for pred in graph["preds"][other]):
                     continue
-                # Added adjacency edges identify the resulting permutation exactly,
-                # without retaining a complete order for every legal group move.
+                # Added adjacencies identify permutations without retaining every full order.
                 signature = (block, tuple(edge for edge in zip((-1,) + moved, moved + (-2,))
                                           if edge not in parent_edges[block]))
                 if moved != order and signature not in seen:
@@ -301,12 +290,7 @@ def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
 
 def rank_order_neighbors(graphs: list[dict], neighbors, max_orders: int | None = None,
                          eligible: Callable | None = None):
-    """Stream estimates and retain only the stable prefix the attempt budget can use.
-
-    Every unseen legal order must still be estimated to preserve the exhaustive
-    ranking's prefix. Storage for full orders and sorting scale with max_orders,
-    not neighborhood size. Compact adjacency signatures deduplicate before replay.
-    """
+    """Rank every unseen order, retaining only the stable prefix within the attempt budget."""
     if max_orders is not None and max_orders < 0:
         raise ValueError("ranked order limit must be nonnegative")
     if max_orders == 0:
@@ -341,8 +325,7 @@ def order_candidates(base: Candidate, orders, curve_candidates: bool):
     """Each wait sibling is a separate ordinary attempt under existing search limits."""
     for order in orders:
         if curve_candidates:
-            # Local search precedes PACK-placement trials. Reset preloaded state
-            # defensively so inherited options cannot suppress either wait sibling.
+            # Clear preloading so neither wait sibling is suppressed by inherited options.
             for placement in CANDIDATES["curve_wait_placements"]:
                 yield replace(base, virtual_orders=order, wait_placement=placement,
                               pack_weight_before_pack=False)
@@ -366,15 +349,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    pack_preload_candidates: bool = DEFAULTS["api_pack_preload_candidates"],
                    curve_candidates: bool | None = None, scorer: Callable | None = None,
                    search_policy=None) -> dict:
-    """Return a receipt; selected artifacts are also copied to output_dir.
-
-    All candidates run allocation, timing and generated-schedule verification
-    before scoring. Compiler refusals remain in the receipt and cannot win. A
-    failed builtin default, a canonical scoring failure (including a mismatched
-    model identity) or no passing initial candidate fails the compilation.
-    max_candidates bounds initial attempts, including compiler rejections. Search
-    budgets count every attempted candidate, including compiler refusals.
-    """
+    """Verify and score candidates; count refusals toward budgets and publish the winner with its receipt."""
     if profile is None:
         profile = DEFAULTS["model_profile"] if provider == "model" else DEFAULTS["builtin_profile"]
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
@@ -387,14 +362,12 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
     if provider != "model" and mreg_candidates != ():
         raise ValueError("MREG candidates require the model provider")
-    if search_group_evaluations < 0 or (search_group_evaluations and provider != "model"):
-        raise ValueError("search-group-evaluations must be nonnegative and requires the model provider")
-    if search_patience < 0 or (search_patience and provider != "model"):
-        raise ValueError("search-patience must be nonnegative and requires the model provider")
-    if pack_reload_candidates and provider != "model":
-        raise ValueError("pack-reload-candidates requires the model provider")
-    if pack_preload_candidates and provider != "model":
-        raise ValueError("pack-preload-candidates requires the model provider")
+    for name, value in (("search-group-evaluations", search_group_evaluations), ("search-patience", search_patience)):
+        if value < 0 or (value and provider != "model"):
+            raise ValueError(name + " must be nonnegative and requires the model provider")
+    for name, value in (("pack-reload-candidates", pack_reload_candidates), ("pack-preload-candidates", pack_preload_candidates)):
+        if value and provider != "model":
+            raise ValueError(name + " requires the model provider")
     if mreg_candidates is None:
         mreg_candidates = tuple(tuple(random.Random(seed).choices(POOLS["mreg_rank_choices"],
                                                                 k=POOLS["mreg_vector_length"]))
@@ -450,9 +423,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                  mreg_candidates=mreg_candidates)})
         from atlas_model_scorer import ModelScorer
         scorer = ModelScorer(model, model_regions)
-        # Capture external configuration data before facts regeneration or compilation.
-        # Use an isolated process with the same interpreter as native scoring.
-        # A short-lived process preserves model import isolation on prepare failures.
+        # Capture configuration before preparation, keeping model imports out of compiler threads.
         with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
             runtime = executor.submit(scorer.runtime_receipt).result()
         capture.bind(files={"selected_curve": runtime.pop("curve_path")},
@@ -580,8 +551,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
                 fail(f"candidate {row['index']} failed model scoring: {row['error']}")
         passing = [row for row in receipt["candidates"] if row["status"] == "PASS"]
-        # One objective governs every incumbent, including search restarts.
-        # Canonical indices are assigned before parallel compilation/scoring.
+        # Assign canonical indices before parallel work to preserve deterministic ties.
         best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
 
     # Model imports, configuration and execution are isolated from compiler threads.
@@ -596,18 +566,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             if best is None:
                 fail("no legal candidate: every initial candidate was refused")
             def winner() -> Candidate:
-                options = dict(best["options"])
-                options["store_windows"] = tuple(options["store_windows"])
-                options["virtual_orders"] = tuple(tuple(order) for order in options["virtual_orders"])
-                options["mreg_ranks"] = tuple(options["mreg_ranks"])
-                return Candidate(**options)
+                return Candidate(**best["options"])  # asdict preserves tuple fields.
 
             program = json.loads((output / best["directory"] / "program.json").read_text())
             store_count = sum(instruction.get("operation") == "atlas.dma" and
                               instruction.get("fields", {}).get("direction") == "store"
                               for instruction in program["instructions"])
-            # All legal per-store free ranks are expressible; allocation maps ranks
-            # modulo that store's actual free set and never claims a held window.
+            # Allocation maps each free rank modulo the store's actual free set.
             window_base = winner()
             placements = [(replace(window_base, wait_placement=CANDIDATES["initial_wait_placement"]), "wait-placement")]
             placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
@@ -638,11 +603,8 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                             validate_proposal_graphs(graphs, parent_program)
                         except ValueError as error:
                             fail(str(error))
-                        # Bank choices or a new order can change the best wait placement.
-                        # Include the incumbent order; the seen set drops its unchanged sibling.
-                        # Each retained order has at least one unseen wait sibling.
-                        # Thus remaining attempts also bound the orders needed for
-                        # every canonical batch within the attempt budget.
+                        # Revisit incumbent wait placement after bank/order changes. Each retained
+                        # order has an unseen sibling, so remaining attempts bound the required prefix.
                         remaining = limit - len(receipt["candidates"])
                         proposed = rank_order_neighbors(
                             graphs, chain((orders,), proposed), remaining,

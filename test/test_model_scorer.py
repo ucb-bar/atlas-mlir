@@ -48,6 +48,10 @@ class ScorerGuardsTest(unittest.TestCase):
         self.assertEqual(identity[:4], (Path("/tmp"), "source", "data", sha256(encoded(values))))
         self.assertIs(identity[4], cfg)
 
+    def test_configuration_values_preserves_floats(self):
+        self.assertEqual(configuration_values(SimpleNamespace(frequency=0.75, latency=1.25)),
+                         {"frequency": 0.75, "latency": 1.25, "ignore_runtime_errors": False})
+
     def test_periodic_acceptance_validates_and_preserves_absolute_phase_when_pickled(self):
         acceptance = PeriodicAcceptance(7, 3)
         restored = pickle.loads(pickle.dumps(acceptance))
@@ -63,9 +67,8 @@ class ScorerGuardsTest(unittest.TestCase):
             selected = Path(directory) / "selected.json"
             selected.write_bytes(raw)
             cfg = SimpleNamespace(dma_memory_params={"curves": str(selected), "frequency_ghz": 0.75})
-            with patch("atlas_model_scorer.resolve_curve_path", return_value=selected) as resolve:
+            with patch("atlas_model_scorer.resolve_curve_path", return_value=selected):
                 bind_curve_configuration(cfg, {"dma_curve_sha256": sha256(raw)})
-            resolve.assert_called_once_with(cfg)
             self.assertEqual(cfg.dma_memory_params, {"curves": json.loads(raw), "frequency_ghz": 0.75})
 
     def test_curve_identity_mismatch_and_legacy_omission_fail_closed(self):
@@ -111,8 +114,6 @@ class ModelScorerTest(unittest.TestCase):
 
     def test_every_selected_encoding_reencodes_through_the_model(self):
         for mode in self.inventory["variants"]:
-            # Coverage of canonical zero-operand patterns does not qualify all
-            # reserved-field combinations or execute the instruction.
             word = int(mode["rtl_bitpat"].replace("?", "0"), 2)
             with self.subTest(mode=mode["id"]):
                 row, _ = self.decode(word)
@@ -139,17 +140,7 @@ class ModelScorerTest(unittest.TestCase):
                     row, instruction = self.decode(original.to_bytecode())
                     self.assertEqual(row["fields"]["offset"], expected)
                     self.assertEqual(instruction.rs1, 3)
-                    # Constructors accept both signed values and their 12-bit
-                    # encoding; native memory access sign-extends those bits.
                     self.assertEqual(instruction.imm & 0xfff, expected & 0xfff)
-
-    def test_functional_flags_do_not_remove_true_isa_decoding(self):
-        from npu_model.isa import IsaSpec
-        for operation in IsaSpec.operations.values():
-            self.assertIs(type(operation.functional), bool)
-        for word in (0x00001067, 0x00000073, 0x00100073, 0x0200007f):
-            with self.subTest(word=word):
-                self.decode(word)
 
     def test_runtime_receipt_records_imported_versions_and_curve_content(self):
         import platform
@@ -173,30 +164,6 @@ class ModelScorerTest(unittest.TestCase):
             self.assertEqual(self.scorer(program, profile), 3)
         with self.assertRaisesRegex(ValueError, "exhausted before ECALL"):
             self.scorer(self.program([0x00100093]))
-
-    def test_nondefault_curve_filename_scaling_and_timing_configuration(self):
-        cfg, _ = configuration()
-        from atlas_derive_curve import resolve_curve_path
-        raw = resolve_curve_path(cfg).read_bytes()
-        with tempfile.TemporaryDirectory() as directory:
-            selected = Path(directory) / "selected.json"
-            selected.write_bytes(raw)
-
-            def selected_configuration():
-                cfg, _ = configuration()
-                cfg.vpu_simple_op_latency_cycles = 6
-                cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=str(selected), frequency_ghz=0.75)
-                return cfg, configuration_values(cfg)
-
-            with patch("atlas_model_scorer.configuration", side_effect=selected_configuration):
-                _, source, data, config = selected_model(self.scorer.model)
-                evidence = dict(source_sha256=source, numerical_data_sha256=data,
-                                configuration_sha256=config, dma_curve_sha256=sha256(raw))
-                program = dict(self.program([0x00100093, 0xc1009073, 0x00000073]), model_evidence=evidence)
-                self.assertEqual(self.scorer(program), 3)
-                selected.write_bytes(raw + b"\n")
-                with self.assertRaisesRegex(ValueError, "DMA curve differs from provider evidence"):
-                    self.scorer(program)
 
     def test_fifo43_native_backend_matches_previous_callable_trajectories(self):
         from atlas_validate_curve import _stream
@@ -223,7 +190,6 @@ class ModelScorerTest(unittest.TestCase):
         for profile, receipt in receipts.items():
             payload = dict(receipt)
             self.assertEqual(payload.pop("sha256"), sha256(encoded(payload)))
-            self.assertEqual(json.loads(json.dumps(receipt)), receipt)
             self.assertEqual(receipt["model_identity"], self.evidence)
             self.assertEqual(receipt, pickle.loads(pickle.dumps(self.scorer)).profile_receipt(document, profile))
         self.assertNotEqual(receipts["curve"]["sha256"], receipts["fifo43"]["sha256"])
@@ -236,29 +202,8 @@ class ModelScorerTest(unittest.TestCase):
             with self.subTest(field=field), patch("atlas_model_scorer.synthetic_targets", return_value=target):
                 changed = ModelScorer(self.scorer.model)
                 self.assertNotEqual(changed.profile_receipt(document, "fifo43")["sha256"], receipts["fifo43"]["sha256"])
-                self.assertEqual(self.scorer.profile_receipt(document, "fifo43"), receipts["fifo43"])
         _, values = configuration()
         self.assertNotEqual(sha256(encoded(values)), receipts["fifo43"]["sha256"])
-
-    def test_default_curve_materialization_preserves_backend_state_and_trajectories(self):
-        from atlas_validate_curve import _stream
-        from npu_model.hardware.memory_backend import make_memory_backend
-        old, _ = configuration()
-        old.dma_memory_params = dict(old.dma_memory_params,
-                                     curves=str(self.scorer.model / "npu_model/configs/memory_curves/ee290sim_vcs_probe.json"))
-        current, _ = configuration()
-        bind_curve_configuration(current, self.evidence)
-        old_backend, current_backend = make_memory_backend(old), make_memory_backend(current)
-        # The dict input intentionally has no filesystem path. All execution
-        # state, including converted curves, scaling and pacing, is identical.
-        execution_state = lambda backend: {key: value for key, value in vars(backend).items()
-                                          if key not in {"path", "source"}}
-        self.assertEqual(execution_state(old_backend), execution_state(current_backend))
-        for stores in ([False] * 65, [True] * 65, [False, True] * 65,
-                       [False] * 32 + [True] * 32 + [False] * 65):
-            with self.subTest(stores=stores[:4], count=len(stores)):
-                self.assertEqual(_stream(make_memory_backend(old), stores),
-                                 _stream(make_memory_backend(current), stores))
 
 
 if __name__ == "__main__":

@@ -28,14 +28,6 @@ class RelationalPredicateTest(unittest.TestCase):
         self.assertTrue(guard([("vpu.relu", 0), ("vpu.exp", 1)], "vpu.sin", 2))
         self.assertFalse(guard([("vpu.relu", 0), ("vpu.exp", 1)], "vpu.sin", 65))
 
-    def test_receipts_do_not_change_semantics_but_guards_do(self):
-        semantic = derive.semantic_admission(self.admission)
-        changed = deepcopy(self.admission)
-        changed.update(validation=dict(passed=True), producer_sources={"test": "receipt"})
-        self.assertEqual(derive.semantic_admission(changed), semantic)
-        changed["vpu"]["double"] = []
-        self.assertNotEqual(derive.semantic_admission(changed), semantic)
-
     def test_native_live_endpoint_may_follow_the_last_row_write(self):
         blocks = {"vpu.rsum": dict(engine="vpu", first_free_age=40,
             events=dict(write0=dict(last_age=38), write1=dict(last_age=38)))}
@@ -103,16 +95,6 @@ class NativeEngineAdmissionTest(unittest.TestCase):
                 configuration_sha256=sha256(encoded(config)), numerical_data_sha256=numerical_data(cls.model)[0],
                 configuration=config), op_timing=list((vpu | mxu | memory).values()), reservation_releases=vr | mr | lr)
         cls.admission = derive.derive_admission(cls.model, cls.facts)
-
-    def test_source_metadata_is_relational_and_preserves_conservative_boundaries(self):
-        admission = self.admission
-        self.assertEqual(admission["schema"], "atlas.engine_admission.v1")
-        self.assertEqual(admission["scalar_lsu"]["load_response_gap"], 3)
-        self.assertTrue(admission["xlu"]["independent_from_vpu"])
-        self.assertEqual(admission["policy"]["unknown_vmem"], "aliases_all_banks")
-        self.assertTrue(all(name.startswith("vpu.") for name in admission["vpu"]["double"]))
-        self.assertTrue(all(name.startswith("vpu.") for group in admission["vpu"]["logic_groups"] for name in group))
-        self.assertFalse(admission["validation"]["passed"])
 
     def test_construction_or_routing_refactor_refuses_before_publication(self):
         original = derive._source

@@ -61,11 +61,11 @@ def validate_mxu_weight_timing(value):
     return value
 
 
-def _object(pairs):
+def _object(pairs, prefix="duplicate model schema key: "):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("duplicate model schema key: " + key)
+            raise ValueError(prefix + key)
         result[key] = value
     return result
 
@@ -166,16 +166,12 @@ def load_vocabulary(path):
 _DIRECTORY = Path(__file__).resolve().parent
 LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
 SOURCE_SHAPES = LOCK["source_shapes"]
-# Shared DMA admission/proposal source schema. Both producers use the same
-# review helper; consumers receive these pins from this generated vocabulary.
 DMA_SOURCE_SHAPES = {name: SOURCE_SHAPES[name] for name in
                      ("dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py")}
 DMA_SOURCE_SHAPES["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5"
 DMA_EDGE_ORDER = ("Core.S1", "DMA.D", "DMA.store_read", "DMA.A",
                   "DMA.retire_clear_flag", "DMA.enqueue_launch")
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
-MODEL_REVISION = LOCK["model_revision"]
-CONFIGURATION_SHA256 = LOCK["configuration_sha256"]
 BASE_KEYS = set(VOCABULARY["base_relation_keys"])
 RELATION_VALUES = {key: set(values) for key, values in VOCABULARY["relation_values"].items()}
 RELATION_KEYS = BASE_KEYS | set(RELATION_VALUES)

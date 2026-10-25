@@ -1,12 +1,4 @@
-"""Complete operand partitions for the guarded 64-register/32-bank geometry.
-
-Aligned pairs never cross a physical bank-pair boundary. Enumerating restricted
-growth strings of those boundaries, then logical halves and singleton parity,
-therefore covers every equality/bank-alias relation without enumerating 64**6
-assignments. Physical bank renaming and exchanging the two logical halves of a
-bank-pair preserve every port and row-equality test. No native execution or
-observed timing enters this enumeration.
-"""
+"""Complete operand partitions for the guarded 64-register/32-bank geometry."""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -152,13 +144,7 @@ def standalone_domain(roles, registers):
 
 
 def preserves_inputs(roles, registers, values):
-    """Prove no internal write precedes the first read of an input row.
-
-    The guarded VPU stages initial operands, then samples each consumed row.
-    Its repeated column-reduction reads do not resample after the first pass.
-    Preserving each row through its first read therefore prevents any internal
-    alias from changing a sampled operand relative to atomic Instruction.exec.
-    """
+    """Prove no internal write precedes the first read of an input row."""
     _shape(roles)
     concrete = [values[role["operand"]] + role["offset"] + index
                 for role in roles for index in range(role["registers"])]

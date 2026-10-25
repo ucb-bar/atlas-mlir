@@ -1,21 +1,18 @@
-"""Fixed cold virtual-graph recurrence, declared compiler projection policy.
-
-Source-checked Core edges supply the clock step. Graph dependency/unit and cold
-DMA serialization are projection policies, not implicit native Core stalls.
-"""
+"""Replay cold graphs with source-checked edges and declared compiler projection policy."""
 from __future__ import annotations
 
 from copy import deepcopy
 from functools import lru_cache
 from heapq import heappop, heappush
-import hashlib
 import json
+
+from atlas_model_schema import canonical, sha256
 
 SCHEMA = "atlas.projected_core_replay.v2"
 
 
 def semantic_digest(program):
-    return hashlib.sha256(json.dumps(program, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return sha256(canonical(program))
 
 
 def instantiate_program(source):

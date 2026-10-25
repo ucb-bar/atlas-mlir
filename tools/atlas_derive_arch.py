@@ -1,17 +1,10 @@
-"""Derive model-owned storage geometry and address mappings without simulation.
-
-Configuration supplies capacities. Small AST contracts extract the physical MREG
-bank/row mapping, BF16 tile layout and scalar width from their implementations.
-Compiler capability checks belong to the consumer; the RTL DMA command ring is
-deliberately absent because the model has no such architectural contract.
-"""
+"""Derive model-owned storage geometry and address mappings without simulation."""
 from __future__ import annotations
 
 import ast
 import inspect
-import os
-from pathlib import Path
 
+from atlas_derive_scratchpad import source_path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 
@@ -23,11 +16,8 @@ def _source(module):
     value = inspect.getsourcefile(module)
     if value is None:
         raise UnsupportedArchitecture("architecture source file is unavailable")
-    path = Path(os.path.abspath(value))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedArchitecture("prohibited architecture source path")
-    if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-        raise UnsupportedArchitecture("architecture source path contains a symlink")
+    path = source_path(value, UnsupportedArchitecture, "prohibited architecture source path",
+                       "architecture source path contains a symlink", absolute=True)
     return ast.parse(path.read_text())
 
 
@@ -234,12 +224,7 @@ def _scalar_bytes(tree):
 
 
 def derive_arch(cfg):
-    """Return source-derived architecture facts for the actual selected config.
-
-    No architectural state is allocated and no execution unit or simulator runs.
-    Unsupported mapping shapes fail explicitly; representable source/config
-    changes propagate for the consumer to accept or reject as capabilities.
-    """
+    """Return source-derived architecture facts for the actual selected config."""
     from npu_model.hardware import arch_state, bank_conflict, dma, lsu
     import torch
 

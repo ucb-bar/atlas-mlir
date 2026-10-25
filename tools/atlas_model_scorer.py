@@ -45,22 +45,16 @@ def bind_curve_configuration(cfg, evidence):
     """Run exactly the configured curve bytes whose digest the provider retained."""
     path = resolve_curve_path(cfg)
     curve_bytes = path.read_bytes()
-    # Older providers admitted only the locked curve, and did not retain a
-    # separate digest. Omission must not admit arbitrary replacement bytes.
+    # Providers without a separate curve digest admitted only the locked curve.
     expected = evidence.get("dma_curve_sha256", LOCK["curve_sha256"])
     if sha256(curve_bytes) != expected:
         raise ValueError("scoring DMA curve differs from provider evidence")
-    # Pass the checked bytes through the backend's supported dict input. This
-    # prevents a second implicit path resolution or file read during Core init.
+    # Bind checked bytes to prevent a second path resolution/read during Core init.
     cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=json.loads(curve_bytes))
 
 
 def model_instruction(row, inventory, isa):
-    """Bind a decoded instruction and require an identical re-encoded word.
-
-    npu_model executes instruction objects. Decode uses the existing RTL
-    inventory, independently of the emitter and its JSON operand annotations.
-    """
+    """Bind independently decoded words to model instructions and require identical re-encoding."""
     from npu_model.isa import SBType, SType, UJType, UType, VIType
     from npu_model.isa_patterns import ScalarComputeShamt
 

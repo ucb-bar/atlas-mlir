@@ -242,10 +242,10 @@ input/output guards and size limits. The small byte/control executor treats DMA
 as atomic and is not a numerical or timing simulator. The existing Python
 virtual evaluator consumes pre-spill IR; it is not a production fallback.
 
-The optional model test uses Python 3.14, Torch, and an explicitly selected
-`npu_model` source checkout matching `tools/model-timing.lock.json` (currently
-`47b8599d8ffbe5ddd96059ffe2b5be2427a410f5`). With the model's dependencies
-available in the Python environment, select that checkout directly:
+The optional test uses Python 3.14, Torch and an explicit `npu_model` checkout
+matching `tools/model-timing.lock.json` (currently
+`47b8599d8ffbe5ddd96059ffe2b5be2427a410f5`). With model dependencies available,
+select it directly:
 
 ```sh
 ATLAS_RUN_NPU_MODEL=1 ATLAS_DERIVE_MODEL_ROOT=/path/to/npu_model \
@@ -253,17 +253,16 @@ ATLAS_RUN_NPU_MODEL=1 ATLAS_DERIVE_MODEL_ROOT=/path/to/npu_model \
   /path/to/python3.14 -m unittest -v test_spill_model_execution
 ```
 
-The test isolates model imports, verifies that they resolve to the selected
-checkout, and checks its actual source digest against the lock. Installed package
-origin metadata does not establish the source identity used for execution.
+The test isolates imports, checks that they resolve to the selected checkout
+and verifies its source digest against the lock; installed origin metadata
+cannot establish execution identity.
 
 It independently decodes emitted words using the selected RTL inventory and
-uses the shared scoring adapter to require each model instruction object to
-re-encode identically. It then runs seven programs with VMEM noise and checks
-outputs, inputs, guards, halt and runtime errors. The model executes instruction
-objects, not a binary decoder. These are standalone model checks, not RTL,
-full-SoC, FPGA or whole-model qualification. The compiler does not import or
-require `npu_model`.
+uses the shared scoring adapter to require identical instruction re-encoding.
+Seven programs with VMEM noise check outputs, inputs, guards, halt and runtime
+errors. The model executes instruction objects rather than binary words; these
+standalone checks qualify neither RTL, full SoC, FPGA nor whole models. The
+compiler does not require `npu_model`.
 
 The optional model suite also runs ten MXU pressure cases: raw BF16
 save/restore, seeded continuation, reset/spill/continuation, and one- and

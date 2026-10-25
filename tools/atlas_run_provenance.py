@@ -1,10 +1,4 @@
-"""Content identities for a selection run, with locations kept as evidence.
-
-Capture before preparing/searching, bind generated facts before consuming them,
-and complete before publishing selected artifacts. This records the caller's
-opaque policy identity; it does not define a search-policy format. No model or
-numerical package is imported here.
-"""
+"""Snapshot selection inputs before use; seal content identities and location evidence after verification."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -85,12 +79,7 @@ def _tree(root, suffixes=None):
 
 
 def selection_facts_identity(facts):
-    """Return (semantic digest, verified provider digest) without path aliases.
-
-    Keep the provider's sealed digest as evidence. Only the known configuration
-    curve filename is substituted, using the curve bytes already bound by that
-    verified fact payload; unrelated strings and content fields remain intact.
-    """
+    """Verify facts and normalize only the known configuration curve filename to its bound content digest."""
     from atlas_derived_contract import semantic_payload, verify_derived
 
     verified = verify_derived(facts)
@@ -107,15 +96,7 @@ def selection_facts_identity(facts):
 
 
 class RunCapture:
-    """A filesystem snapshot; completion fails if any consumed input changes.
-
-    ``files`` and ``trees`` use stable, caller-chosen role names. Tree values
-    are a path or ``(path, suffixes)``; ``None`` includes every regular file.
-    ``evidence_files`` records raw reports without affecting semantic identity.
-    ``semantic`` accepts content identities already established by a provider.
-    Configuration path fields must be normalized explicitly by the caller
-    (for example by substituting the checked curve content digest).
-    """
+    """Snapshot files, filtered trees and semantic inputs; reject mutation before sealing the receipt."""
     def __init__(self, source, *, regions=(), files=None, trees=None,
                  evidence_files=None, configuration=None, search_policy=None,
                  revisions=None, archive_dir=None):
@@ -221,8 +202,7 @@ class RunCapture:
         profiles = _json_copy(scoring_configurations or {})
         for profile in profiles.values():
             profile.pop("sha256", None)
-            # The effective profile configuration and normalized base
-            # configuration bind these values without the raw path-based hash.
+            # Effective and normalized base configurations replace the path-based hash.
             profile.get("model_identity", {}).pop("configuration_sha256", None)
         semantic["scoring_configurations"] = profiles
         if runtime_versions is not None:

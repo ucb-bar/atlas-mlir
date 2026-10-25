@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import atlas_derive_arch as arch
 import atlas_derive_scratchpad as scratchpad
 import atlas_derive_mxu as mxu
 import atlas_derive_vpu as vpu
@@ -14,6 +15,7 @@ import atlas_model_facts as facts
 import atlas_model_timing as timing
 import atlas_derive_overlap as overlap
 import atlas_validate_overlap as validator
+import atlas_validate_common as common
 try:
     import atlas_derive_curve as curve
 except ModuleNotFoundError:
@@ -22,7 +24,7 @@ except ModuleNotFoundError:
 
 def path_checks(path, manifest):
     checks = [lambda: scratchpad.read_source(path), lambda: facts.safe_path(path), lambda: mxu._read(path),
-              lambda: vpu._check_source(SimpleNamespace()), manifest,
+              lambda: vpu._check_source(SimpleNamespace()), lambda: arch._source(SimpleNamespace()), manifest,
               lambda: overlap.safe_path(path), lambda: validator.safe_path(path)]
     if curve is not None:
         checks.append(lambda: curve._safe(path))
@@ -40,6 +42,20 @@ class AccessBoundaryTest(unittest.TestCase):
                         patch.object(timing.os, "scandir", side_effect=AssertionError("traversed excluded path")):
                     with self.assertRaises((ValueError, RuntimeError)):
                         check()
+
+    def test_native_model_loader_refuses_an_import_from_another_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected, decoy = root / "selected", root / "decoy"
+            selected.mkdir()
+            package = decoy / "npu_model"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("")
+            with patch.object(sys, "path", [str(decoy), *sys.path]), \
+                    patch.dict(sys.modules, {"torch": Mock()}):
+                sys.modules.pop("npu_model", None)
+                with self.assertRaisesRegex(ValueError, "imported native model differs from --model"):
+                    common.load_model(selected)
 
     def test_scratchpad_source_rejects_parent_traversal_before_lookup(self):
         with patch.object(Path, "is_symlink", side_effect=AssertionError("premature lookup")):

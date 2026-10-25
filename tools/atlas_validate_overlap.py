@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-"""Gate source-derived overlap facts using bounded, fresh native-unit execution.
-
-The candidate is never fitted to observations. Samples are descriptors, not
-admission authority; the final artifact is published only after the gate passes.
-"""
+"""Gate source-derived overlap facts with bounded, fresh native-unit execution."""
 from __future__ import annotations
 
 import argparse
 import copy
-from collections import Counter, defaultdict
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-import hashlib
-from io import StringIO
 import json
-import os
 from pathlib import Path
 import re
 import sys
 import time
-from unittest.mock import Mock
+from atlas_model_schema import _object, canonical as encoded, sha256 as digest
+from atlas_validate_common import safe_path, instructions, native_state, native_unit, native_core, uops, load_model as worker_init
 
 sys.dont_write_bytecode = True
 POLICY = 'source-mechanism-boundaries-v2'
@@ -35,35 +29,8 @@ def pair_engine(first, second):
     raise ValueError('unsupported cross-engine pair')
 
 
-def safe_path(value):
-    raw = Path(value)
-    if any(word in part.lower() for part in raw.parts for word in ('hammer', 'vlsi')):
-        raise ValueError('prohibited path')
-    path = Path(os.path.abspath(raw))
-    if any(p.is_symlink() for p in reversed((path, *path.parents))):
-        raise ValueError('symlink paths are not supported')
-    return path
-
-
-def encoded(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
-
-
-def digest(value):
-    return hashlib.sha256(value).hexdigest()
-
-
-def _object(items):
-    result = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError('duplicate JSON key: ' + key)
-        result[key] = value
-    return result
-
-
 def load(path):
-    return json.loads(safe_path(path).read_text(), object_pairs_hook=_object)
+    return json.loads(safe_path(path).read_text(), object_pairs_hook=lambda items: _object(items, "duplicate JSON key: "))
 
 
 def write(path, value):
@@ -401,11 +368,10 @@ def scalar_matches(relation,first,second,initial_xrf):
 
 
 def check_sample_assembly(sample):
-    from npu_model.util.converter import stream_to_instrs
-    instructions=list(stream_to_instrs(StringIO('\n'.join(sample['assembly']))))
-    if len(instructions)!=len(sample['operations']):
+    assembled = instructions(sample['assembly'])
+    if len(assembled)!=len(sample['operations']):
         raise ValueError('sample assembly length mismatch')
-    operands=[decoded_operand(n,i) for n,i in zip(sample['operations'],instructions)]
+    operands=[decoded_operand(n,i) for n,i in zip(sample['operations'],assembled)]
     if 'operands' in sample and sample['operands']!=operands:
         raise ValueError('sample concrete operands differ from assembled instructions')
     if sample['category']=='pair':
@@ -414,7 +380,7 @@ def check_sample_assembly(sample):
         if actual_relation(*operands)!=base:
             raise ValueError('assembled operand relation differs from candidate relation')
         if sample['engine']=='scalar_lsu':
-            if not scalar_matches(relation,*instructions,sample.get('initial_xrf',{})):
+            if not scalar_matches(relation,*assembled,sample.get('initial_xrf',{})):
                 raise ValueError('assembled scalar context does not satisfy candidate qualifiers')
         elif relation!=base:
             raise ValueError('unsupported non-scalar relation qualifier')
@@ -428,47 +394,32 @@ def check_sample_assembly(sample):
 
 def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, initial_xrf=None):
     """Run unmodified numerical units at exact ages with a fresh state and unit."""
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.lsu import LoadStoreUnit
-    from npu_model.hardware.mxu import MatrixExecutionUnitInner, MatrixExecutionUnitSystolic
-    from npu_model.hardware.vpu import VectorExecutionUnit
-    from npu_model.hardware.xlu import CrossLaneExecutionUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
     from atlas_model_timing import configuration
     cfg, _ = configuration()
-    state = ArchState(cfg.arch_state_config)
-    classes = {'vpu': VectorExecutionUnit, 'mxu0': MatrixExecutionUnitSystolic,
-               'mxu1': MatrixExecutionUnitInner, 'scalar_lsu': LoadStoreUnit,
-               'xlu': CrossLaneExecutionUnit}
-    try:
+    with native_state(cfg) as state:
         initialize_state(state, nonzero, initial_xrf)
         initial = digest(encoded(state_snapshot(state)))
         if engine == 'vpu_xlu':
             # Preserve the Core's configuration order. Both units tick every
             # edge against one ArchState/checker, even when only one issues.
-            selected = {'VectorExecutionUnit': ('vpu', VectorExecutionUnit),
-                        'CrossLaneExecutionUnit': ('xlu', CrossLaneExecutionUnit)}
-            units = [cls(name, Mock(spec=Logger), state, config=cfg)
-                     for configured in cfg.execution_units.values() if configured in selected
-                     for name, cls in [selected[configured]]]
+            selected = {'VectorExecutionUnit': 'vpu', 'CrossLaneExecutionUnit': 'xlu'}
+            units = [native_unit(cfg, state, selected[configured])
+                     for configured in cfg.execution_units.values() if configured in selected]
             if len(units) != 2:
                 raise ValueError('cross-unit validation requires exactly one VPU and XLU')
         else:
-            units = [classes[engine](engine, Mock(spec=Logger), state, config=cfg)]
-        instructions = list(stream_to_instrs(StringIO('\n'.join(assembly))))
-        if len(instructions) != len(assembly):
+            units = [native_unit(cfg, state, engine)]
+        commands = uops(assembly)
+        if len(commands) != len(assembly):
             raise ValueError('assembly instruction count differs')
-        uops = [Uop(insn, pc=i*4) for i, insn in enumerate(instructions)]
         expected = issues(gaps)
         accepted, next_index, completed = [], 0, 0
         for age in range(max_cycles):
             issue = None
-            if next_index < len(uops):
+            if next_index < len(commands):
                 ready = (age == expected[next_index]) if not serial else (next_index == 0 or not any(u.has_in_flight for u in units))
                 if ready:
-                    issue = uops[next_index]
+                    issue = commands[next_index]
             try:
                 before = sum(u.total_instructions for u in units)
                 for unit in units:
@@ -481,7 +432,7 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
                     next_index += 1
             except Exception as exc:
                 raise NativeFault(type(exc).__name__, str(exc), age, accepted) from exc
-            if next_index == len(uops) and not any(u.has_in_flight for u in units):
+            if next_index == len(commands) and not any(u.has_in_flight for u in units):
                 # One begin-cycle applies deferred release requests after drain.
                 for unit in units:
                     unit.tick(None)
@@ -495,30 +446,22 @@ def native_run(engine, assembly, gaps, nonzero, serial=False, max_cycles=8192, i
         if not serial and accepted != expected:
             raise RuntimeError('observed issue ages differ from exact requested ages')
         total = sum(u.total_instructions for u in units)
-        if total != len(uops) or completed != len(uops):
+        if total != len(commands) or completed != len(commands):
             raise RuntimeError('accepted/completed counts do not equal sequence length')
         final = state_snapshot(state)
         return dict(initial_sha256=initial, final_sha256=digest(encoded(final)), final_state=final,
                     issued_ages=accepted, drained_age=age+1, accepted=total,
-                    completed=completed, instruction_words=[i.to_bytecode() for i in instructions])
-    finally:
-        state.close()
+                    completed=completed, instruction_words=[u.insn.to_bytecode() for u in commands])
 
 
 def standalone_operand_validation(per_op):
-    """Check every legal internal VPU/XLU class against atomic Instruction.exec.
-
-    Classes and issue ages come exclusively from guarded source facts. Native
-    results certify correctness; they never select a class or fit a timing.
-    """
+    """Check all legal internal VPU/XLU classes against atomic Instruction.exec."""
     from atlas_derive_overlap import command, operand_roles
     from atlas_derive_vpu import derive_vpu
     from atlas_derive_memory import derive_memory
     from atlas_model_timing import configuration
     from atlas_overlap_rules import RuleSet
     from atlas_vpu_partition import standalone_domain, require_preserved_inputs
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.util.converter import stream_to_instrs
     cfg, config = configuration()
     if config != per_op['model']['configuration']:
         raise ValueError('standalone VPU configuration differs from selected facts')
@@ -549,15 +492,12 @@ def standalone_operand_validation(per_op):
     results = []
     for descriptor in descriptors:
         for nonzero in (False, True):
-            state = ArchState(cfg.arch_state_config)
-            try:
+            with native_state(cfg) as state:
                 initialize_state(state, nonzero)
                 initial = digest(encoded(state_snapshot(state)))
-                insn, = stream_to_instrs(StringIO(descriptor['assembly']))
+                insn, = instructions(descriptor['assembly'])
                 insn.exec(state)
                 expected = digest(encoded(state_snapshot(state)))
-            finally:
-                state.close()
             actual = native_run(descriptor['operation'].split('.')[0], [descriptor['assembly']], [], nonzero)
             passed = (descriptor['input_rows_preserved'] and initial == actual['initial_sha256']
                       and expected == actual['final_sha256'])
@@ -565,7 +505,8 @@ def standalone_operand_validation(per_op):
                 nonzero=nonzero, passed=passed, initial_sha256=initial, atomic_isa_sha256=expected,
                 native_sha256=actual['final_sha256']))
     sources = {name: digest(safe_path(Path(__file__).with_name(name)).read_bytes())
-               for name in ('atlas_validate_overlap.py', 'atlas_vpu_partition.py',
+               for name in ('atlas_validate_overlap.py', 'atlas_validate_common.py', 'atlas_derive_scratchpad.py',
+                            'atlas_model_schema.py', 'atlas_vpu_partition.py',
                             'atlas_derive_vpu.py', 'atlas_derive_memory.py')}
     engines = {unit: dict(operation_count=sum(name.split('.')[0] == unit for name in blocks),
                          alias_class_count=sum(row['operation'].split('.')[0] == unit for row in descriptors),
@@ -641,15 +582,6 @@ def summarize_runs(flattened):
     return engines
 
 
-def worker_init(model):
-    sys.path.insert(0, str(safe_path(model)))
-    import torch
-    import npu_model
-    torch.set_num_threads(1)
-    if safe_path(Path(npu_model.__file__).parent.parent) != safe_path(model):
-        raise ValueError('imported native model differs from --model')
-
-
 def validate(model, per_op_path, candidate_path, samples_path, output_dir, output_path, workers=4, max_samples=128):
     started = time.monotonic()
     model, output_dir, output_path = map(safe_path, (model, output_dir, output_path))
@@ -659,7 +591,7 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
         raise ValueError('workers must be in [1,4]')
     per_op_path, candidate_path, samples_path = map(safe_path, (per_op_path, candidate_path, samples_path))
     original = {str(p):digest(p.read_bytes()) for p in (per_op_path, candidate_path, samples_path, Path(__file__))}
-    tool_names=('atlas_validate_overlap.py','atlas_vpu_partition.py','atlas_derive_vpu.py','atlas_derive_memory.py',
+    tool_names=('atlas_validate_overlap.py','atlas_validate_common.py','atlas_derive_scratchpad.py','atlas_vpu_partition.py','atlas_derive_vpu.py','atlas_derive_memory.py',
                 'atlas_derive_overlap.py','atlas_overlap_rules.py','atlas_model_facts.py','atlas_model_timing.py',
                 'atlas_model_schema.py','atlas_model_observer.py','model-timing.lock.json','model-timing-vocabulary.json')
     tool_paths=[safe_path(Path(__file__).with_name(name)) for name in tool_names]
@@ -678,15 +610,10 @@ def validate(model, per_op_path, candidate_path, samples_path, output_dir, outpu
     _, config = configuration()
     if config != per_op['model']['configuration']:
         raise ValueError('native default configuration differs from selected facts')
-    from npu_model.hardware.core import Core
-    from npu_model.logging.logger import Logger
     cfg, _ = configuration()
-    core = Core(config=cfg, logger=Mock(spec=Logger))
-    try:
+    with native_core(cfg) as core:
         if core.ignore_runtime_errors is not False:
             raise ValueError('native model suppresses runtime errors')
-    finally:
-        core.arch_state.close()
     output_dir.mkdir(parents=True)
     standalone = standalone_operand_validation(per_op)
     standalone_hash = write(output_dir/'standalone-operands-report.json', standalone)

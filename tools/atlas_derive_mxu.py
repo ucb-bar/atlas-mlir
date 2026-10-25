@@ -1,11 +1,7 @@
-"""Derive isolated MXU row windows and logical MREG releases from model source.
-
-No execution unit, architectural state, instruction execution, or tensor is created.
-The reviewed AST shape is guarded after replacing the expressions derived below;
-its digest is a semantics whitelist, not a timing table or a source identity pin.
-"""
+"""Derive isolated MXU row windows and logical MREG releases from model source."""
 from __future__ import annotations
 
+from atlas_derive_scratchpad import source_path, shape
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
@@ -26,14 +22,8 @@ class UnsupportedMXU(UnsupportedModelTiming):
 
 
 def _read(path):
-    path = Path(path)
-    if any(any(word in part.lower() for word in ("hammer", "vlsi")) for part in path.parts):
-        raise UnsupportedMXU("unsupported model source path")
-    if ".." in path.parts:
-        raise ValueError("parent traversal is unsupported")
-    if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-        raise UnsupportedMXU("model source symlinks are unsupported")
-    return path.read_text()
+    return source_path(path, UnsupportedMXU, "unsupported model source path",
+                       "model source symlinks are unsupported", parent_error=ValueError).read_text()
 
 
 def _sources(cfg):
@@ -62,13 +52,7 @@ def _method(tree, name):
 
 
 def _shape(nodes):
-    class StripDocstrings(ast.NodeTransformer):
-        def visit_Expr(self, node):
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                return None
-            return self.generic_visit(node)
-    tree = StripDocstrings().visit(ast.Module(body=deepcopy(nodes), type_ignores=[]))
-    return ast_digest(tree)
+    return shape(ast.Module(body=nodes, type_ignores=[]))
 
 
 def _integer(expr, compute_first):
@@ -216,12 +200,7 @@ def _blocks(plans):
                 for bank in range(2 if bf16 else 1):
                     events[f"mreg_write{bank}"] = values["transfer"]
             else:
-                if compute:
-                    groups = ("mreg_read0",)
-                elif bf16:
-                    groups = ("mreg_read0", "mreg_read1")
-                else:
-                    groups = ("mreg_read1",)
+                groups = ("mreg_read0",) if compute else ("mreg_read0", "mreg_read1") if bf16 else ("mreg_read1",)
                 events.update({group: values["read"] for group in groups})
                 group = "acc_write" if compute else "weight_write" if mnemonic.endswith("weight") else "acc_load"
                 events[group] = values["compute" if compute else "transfer"]
@@ -252,13 +231,7 @@ def derive_mxu(cfg):
 
 
 def derive_weight_timing(cfg):
-    """Project native PE use windows onto whole output-column weight rows.
-
-    The full reviewed source shape binds the sampler's (output column, inner)
-    indexing, weight-slot selection and its placement before writes in tick.
-    Read bounds below are extracted from that source, never from execution or
-    the instruction latency table. Row projection includes every inner lane.
-    """
+    """Project native PE use windows onto whole output-column weight rows."""
     plans = _validated(cfg)
     source, _ = _sources(cfg)
     tree = ast.parse(source)

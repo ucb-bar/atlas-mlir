@@ -1,9 +1,4 @@
-"""Extract ISA operands and resource roles from the selected model's pure planners.
-
-The checked-in vocabulary is a generated compiler snapshot. Only its block/class
-names and relation labels are compiler adapters; operand dimensions and directions
-are reconstructed here without executing an instruction or allocating model state.
-"""
+"""Extract ISA operands and resource roles from the selected model's pure planners."""
 from __future__ import annotations
 
 import argparse
@@ -18,6 +13,7 @@ import sys
 from types import FunctionType, SimpleNamespace
 import textwrap
 
+from atlas_derive_scratchpad import source_path
 from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_schema import VOCABULARY, canonical
 
@@ -27,6 +23,8 @@ class UnsupportedVocabulary(UnsupportedModelTiming):
 
 
 # Names describe the compiler's encoding, not hardware resource/timing values.
+
+
 _OPERANDS = dict(vd="rd", vs1="rs1", vs2="rs2", es1="rs1", imm="imm",
                  rd="rd", rs1="rs1", rs2="rs2")
 _RESOURCES = dict(MatrixReg="MReg", WeightBuffer="Weight", Accumulator="Acc",
@@ -64,11 +62,7 @@ def _compiler_operands(cls):
 
 
 def _isa_directions(cls):
-    """Follow ISA accessors and local helpers without running numerical code.
-
-    Helper arguments retain their originating instruction operand even when the
-    helper adds a register offset. Directions are independent of array layout.
-    """
+    """Follow ISA accessors and local helpers without running numerical code."""
     directions = defaultdict(set)
     resource_files = dict(xrf="XReg", erf="EReg", mrf="MReg", wb="Weight", acc="Acc")
     operand_resources = {field.name: _RESOURCES.get(getattr(field.type, "__name__", None))
@@ -157,7 +151,7 @@ def _isa_directions(cls):
                     if operand not in register_operands:
                         refuse("unresolved register selector for " + node.func.attr)
                     directions[operand].add((resource_files[parts[1]], parts[0]))
-            elif isinstance(node.func, ast.Name):
+            else:
                 helper = resolved_helper(node)
                 if helper:
                     if node.keywords:
@@ -168,21 +162,13 @@ def _isa_directions(cls):
                 elif any(origin(argument, bindings) in register_operands
                          for argument in [*node.args, *(keyword.value for keyword in node.keywords)]):
                     refuse("unresolved helper dispatch receiving a register operand")
-            elif any(origin(argument, bindings) in register_operands
-                     for argument in [*node.args, *(keyword.value for keyword in node.keywords)]):
-                refuse("unresolved helper dispatch receiving a register operand")
     visit(cls.exec, {}, set())
     return directions
 
 
 def _safe(path):
-    path = Path(path)
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedVocabulary("prohibited vocabulary source/output path")
-    for parent in reversed((path, *path.parents)):
-        if parent.is_symlink():
-            raise UnsupportedVocabulary("vocabulary source/output path contains a symlink")
-    return path
+    return source_path(path, UnsupportedVocabulary, "prohibited vocabulary source/output path",
+                       "vocabulary source/output path contains a symlink")
 
 
 def _parameters(cls):
@@ -212,7 +198,7 @@ def _instruction(cls, operands):
     return cls(**values), values
 
 
-def _issue(cfg, module, unit_cls, insn, engine):
+def _issue(cfg, unit_cls, insn, engine):
     captured = {}
     def stage(uop, state, reads, writes, *args):
         captured.update(reads=reads, writes=writes)
@@ -258,16 +244,16 @@ def _metadata(cfg, adapter):
     for module in (vpu, mxu):
         _safe(inspect.getsourcefile(module))
     mxu_windows = _plan(Path(inspect.getsourcefile(mxu)).read_text())
-    specs = [(entry, "vpu", vpu, vpu.VectorExecutionUnit) for entry in adapter["vpu_blocks"]]
-    specs += [(dict(entry, mnemonic=entry["mnemonic"] + "." + engine), engine, mxu, cls)
+    specs = [(entry, "vpu", vpu.VectorExecutionUnit) for entry in adapter["vpu_blocks"]]
+    specs += [(dict(entry, mnemonic=entry["mnemonic"] + "." + engine), engine, cls)
               for engine, cls in (("mxu0", mxu.MatrixExecutionUnitSystolic), ("mxu1", mxu.MatrixExecutionUnitInner))
               for entry in adapter["mxu_blocks"]]
-    expected = {entry["mnemonic"] for entry, engine, module, cls in specs}
+    expected = {entry["mnemonic"] for entry, engine, cls in specs}
     actual = {name for name, cls in cfg.isa.operations.items() if cls.exu in {EXU.VECTOR, EXU.MATRIX_SYSTOLIC, EXU.MATRIX_INNER}}
     if actual != expected:
         raise UnsupportedVocabulary(f"unsupported ISA vocabulary coverage: missing={sorted(expected-actual)}, added={sorted(actual-expected)}")
     result = {}
-    for entry, engine, module, unit_cls in specs:
+    for entry, engine, unit_cls in specs:
         mnemonic = entry["mnemonic"]
         cls = cfg.isa.operations[mnemonic]
         expected_exu = EXU.VECTOR if engine == "vpu" else unit_cls.exu_type
@@ -276,7 +262,7 @@ def _metadata(cfg, adapter):
         _safe(inspect.getsourcefile(cls))
         operands = _parameters(cls)
         insn, values = _instruction(cls, operands)
-        unit, plan, staged = _issue(cfg, module, unit_cls, insn, engine)
+        unit, plan, staged = _issue(cfg, unit_cls, insn, engine)
         for direction, locations in staged.items():
             if any(location[0] not in _PLANNER_RESOURCES for location in locations):
                 raise UnsupportedVocabulary(f"{mnemonic}: unrecognized {direction} resource in unit planner")

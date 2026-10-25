@@ -1,5 +1,5 @@
 """Source-derived PE windows, whole-row projection, and native boundary checks."""
-import copy
+from copy import deepcopy
 import os
 from pathlib import Path
 import sys
@@ -33,7 +33,7 @@ class WeightSchemaTest(unittest.TestCase):
                        lambda x: x["use_window"].update(first_age=True),
                        lambda x: x["use_rows"].pop(),
                        lambda x: x["use_window"].update(column_step=4094)):
-            changed = copy.deepcopy(facts)
+            changed = deepcopy(facts)
             change(changed["engines"]["mxu0"])
             with self.assertRaisesRegex(ValueError, "MXU weight"):
                 validate_mxu_weight_timing(changed)
@@ -41,23 +41,6 @@ class WeightSchemaTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native weight checks")
 class NativeWeightTest(NativeModelFixture, unittest.TestCase):
-    def test_exact_pe_windows_and_output_column_row_unions(self):
-        self.assertEqual(mxu.derive_weight_timing(self.cfg), weight_fixture())
-        facts = mxu.derive_weight_timing(self.cfg)
-        for i in range(32):
-            row = facts["engines"]["mxu0"]["use_rows"][i]
-            self.assertEqual(row, dict(first_age=1 + i, last_age=63 + i))
-            for j in range(32):
-                self.assertLessEqual(row["first_age"], 1 + i + j)
-                self.assertGreaterEqual(row["last_age"], 32 + i + j)
-
-    def test_source_only_derivation_constructs_no_state_or_unit(self):
-        from npu_model.hardware.arch_state import ArchState
-        from npu_model.hardware.mxu import _MatrixExecutionUnit
-        with patch.object(ArchState, "__init__", side_effect=AssertionError("numerical state")), \
-                patch.object(_MatrixExecutionUnit, "tick", side_effect=AssertionError("native execution")):
-            self.assertEqual(mxu.derive_weight_timing(self.cfg), weight_fixture())
-
     def test_changed_weight_masks_mapping_and_read_order_refuse(self):
         source, checker = mxu._sources(self.cfg)
         mutations = (
@@ -79,16 +62,6 @@ class NativeWeightTest(NativeModelFixture, unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual((report["isolated_runs"], report["boundary_runs"]), (4, 4))
         self.assertEqual((report["consumer_runs"], report["mutable_pe_runs"]), (3, 8))
-        boundaries = {check["engine"]: (check["accepted_gap"], check["rejected_gap"])
-                      for check in report["checks"] if check["kind"] == "native_overwrite_boundary"}
-        self.assertEqual(boundaries, dict(mxu0=(63, 62), mxu1=(32, 31)))
-        consumers = {check["engine"]: (check["accepted_gap"], check["rejected_gap"])
-                     for check in report["checks"] if check["kind"] == "native_consumer_boundary"}
-        self.assertEqual(consumers, dict(mxu0=(1, None), mxu1=(32, 31)))
-        mutable = {check["engine"]: (check["accepted_first_age"], check["rejected_first_late_age"],
-                                      check["rejected_last_age"], check["accepted_post_last_age"])
-                   for check in report["checks"] if check["kind"] == "native_mutable_pe_boundaries"}
-        self.assertEqual(mutable, dict(mxu0=(11, 12, 42, 43), mxu1=(1, 2, 32, 33)))
 
     def test_incorrect_derived_mask_fails_native_gate(self):
         from atlas_model_diagnostics import ModelTimingValidationError

@@ -1,12 +1,12 @@
-"""Architecture capacities and model-owned mapping mutations propagate or refuse."""
+"""Selected-source architecture mapping and capacity regressions."""
 import ast
 import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from model_evidence import isolate_model_imports
 from unittest.mock import patch
+from model_evidence import isolate_model_imports
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_arch as derive
@@ -109,13 +109,6 @@ def configuration():
 
 
 class ArchitectureDerivationTest(unittest.TestCase):
-    def test_scalar_final_store_and_x0_control_flow_are_checked(self):
-        for old, new in (("self.xrf[rd] = value", "self.xrf[rd] = value & 0xFFFF"),
-                         ("if rd == 0:", "if rd == 1:")):
-            with self.subTest(mutation=new), self.assertRaisesRegex(
-                    derive.UnsupportedArchitecture, "scalar storage semantics in ArchState.write_xrf"):
-                self.derive(arch=ARCH_SOURCE.replace(old, new))
-
     def derive(self, cfg=None, bank=BANK_SOURCE, arch=ARCH_SOURCE, lsu=LSU_SOURCE, dma=DMA_SOURCE):
         bank_module, arch_module, lsu_module, dma_module = object(), object(), object(), object()
         modules = {"npu_model": SimpleNamespace(), "npu_model.hardware":
@@ -126,21 +119,56 @@ class ArchitectureDerivationTest(unittest.TestCase):
         with patch.dict(sys.modules, modules), patch.object(derive, "_source", side_effect=source):
             return derive.derive_arch(cfg or configuration())
 
-    def test_baseline_architecture_has_source_mapping_and_no_rtl_ring(self):
+    def test_source_geometry_and_mapping_propagate_without_rtl_ring(self):
         facts = self.derive()
-        self.assertEqual(facts["schema"], "atlas.architecture.v1")
-        self.assertEqual((facts["mreg_count"], facts["mreg_rows"], facts["mreg_row_bytes"],
-                          facts["mreg_bytes"]), (64, 32, 32, 1024))
-        self.assertEqual((facts["bf16_registers_per_tile"], facts["bf16_pair_stride"],
-                          facts["bf16_tile_bytes"], facts["bf16_element_bytes"]), (2, 1, 2048, 2))
-        self.assertEqual((facts["fp8_registers_per_tile"], facts["fp8_tile_bytes"],
-                          facts["fp8_element_bytes"]), (1, 1024, 1))
-        self.assertEqual((facts["mreg_bank_modulus"], facts["mreg_registers_per_bank"],
-                          facts["mreg_physical_row_stride"]), (32, 2, 32))
-        self.assertEqual((facts["vmem_bytes"], facts["vmem_bank_bytes"], facts["vmem_bank_count"]),
-                         (1572864, 262144, 6))
-        self.assertEqual((facts["dma_channels"], facts["scalar_word_bytes"]), (8, 4))
+        expected = dict(schema="atlas.architecture.v1", mreg_count=64, mreg_rows=32,
+                        mreg_row_bytes=32, mreg_bytes=1024, bf16_registers_per_tile=2,
+                        bf16_pair_stride=1, bf16_tile_bytes=2048, bf16_element_bytes=2,
+                        fp8_registers_per_tile=1, fp8_tile_bytes=1024, fp8_element_bytes=1,
+                        mreg_bank_modulus=32, mreg_registers_per_bank=2,
+                        mreg_physical_row_stride=32, vmem_bytes=1572864,
+                        vmem_bank_bytes=262144, vmem_bank_count=6, dma_channels=8,
+                        scalar_word_bytes=4)
+        self.assertEqual({key: facts[key] for key in expected}, expected)
         self.assertFalse(any("ring" in key or "command_slots" in key for key in facts))
+        self.assertEqual(self.derive(arch=ARCH_SOURCE.replace("0xFFFFFFFF", "0xFFFF"))["scalar_word_bytes"], 2)
+        bank = BANK_SOURCE.replace("reg + 1", "reg + 2")
+        arch = ARCH_SOURCE.replace("vd + 1", "vd + 2").replace("vs + 1", "vs + 2")
+        self.assertEqual(self.derive(bank=bank, arch=arch)["bf16_pair_stride"], 2)
+        bank = BANK_SOURCE.replace("reg % 32", "reg % 16").replace("reg // 32", "reg // 16")
+        changed = self.derive(bank=bank)
+        self.assertEqual((changed["mreg_bank_modulus"], changed["mreg_registers_per_bank"]), (16, 4))
+        cfg = configuration()
+        cfg.arch_state_config.num_m_registers, cfg.arch_state_config.mrf_depth = 128, 16
+        bank = BANK_SOURCE.replace("reg >= 64", "reg >= 128").replace("* 32 + row", "* 16 + row")
+        changed = self.derive(cfg, bank=bank)
+        self.assertEqual((changed["mreg_logical_limit"], changed["mreg_physical_row_stride"], changed["mreg_bytes"]),
+                         (128, 16, 512))
+
+    def test_unreviewed_source_mappings_fail_with_precise_diagnostics(self):
+        cases = [
+            ("bank", "reg + 1", "reg + 2", "BF16 tile read mapping"),
+            ("arch", "vd + 1", "vd + 2", "BF16 tile write mapping"),
+            ("arch", "self.mrf[vs].view(torch.float8_e4m3fn)", "self.mrf[vs + 1].view(torch.float8_e4m3fn)", "FP8 register read mapping"),
+            ("arch", "value.numel() == self.cfg.mrf_depth", "value.numel() == 2 * self.cfg.mrf_depth", "FP8 register write mapping"),
+            ("arch", "self.xrf[rd] = value", "self.xrf[rd] = value & 0xFFFF", "scalar storage semantics"),
+            ("arch", "if rd == 0:", "if rd == 1:", "scalar storage semantics"),
+            ("arch", "0xFFFFFFFF", "0xFFFE", "whole number of bytes"),
+            ("arch", "self.cfg.mrf_depth * self.cfg.mrf_width,", "self.cfg.mrf_depth * self.cfg.mrf_width * 2,", "storage allocation for self.mrf"),
+            ("lsu", "address // self.config.vmem_bank_bytes", "address % self.config.vmem_bank_bytes", "LSU physical VMEM bank mapping"),
+            ("dma", "line_address // self.bank_bytes", "line_address % self.bank_bytes", "DMA physical VMEM bank mapping"),
+            ("dma", "self.config.dma_num_channels", "self.config.dma_num_channels * 2", "DMA configuration mapping for num_channels"),
+            ("bank", "reg % 32", "reg & 31", "MREG bank mapping"),
+            ("bank", "reg // 32", "reg // 16", "divisor differs"),
+            ("bank", "+ row", "+ row + 1", "physical-row mapping"),
+            ("bank", "key = (write, bank)", "bank += 1\n        key = (write, bank)", "reassignment"),
+        ]
+        sources = dict(bank=BANK_SOURCE, arch=ARCH_SOURCE, lsu=LSU_SOURCE, dma=DMA_SOURCE)
+        for source, before, after, diagnostic in cases:
+            with self.subTest(source=source, diagnostic=diagnostic):
+                self.assertIn(before, sources[source])
+                with self.assertRaisesRegex(derive.UnsupportedArchitecture, diagnostic):
+                    self.derive(**{source: sources[source].replace(before, after)})
 
     def test_config_capacity_mutations_propagate(self):
         cfg = configuration()
@@ -152,94 +180,22 @@ class ArchitectureDerivationTest(unittest.TestCase):
         cfg.arch_state_config.num_x_registers = 64
         cfg.dma_num_channels = 16
         cfg.dma_max_transfer_bytes *= 2
-        changed = self.derive(cfg)
-        self.assertEqual(changed["vmem_bank_count"], 24)
-        self.assertEqual(changed["mreg_bytes"], 2048)
-        self.assertEqual(changed["bf16_tile_bytes"], 4096)
-        self.assertEqual(changed["weight_buffer_count"], 4)
-        self.assertEqual(changed["weight_buffer_bytes"], 2048)
-        self.assertEqual(changed["xreg_count"], 64)
-        self.assertEqual(changed["dma_channels"], 16)
-        self.assertEqual(changed["dma_max_transfer_bytes"], 8192)
+        facts = self.derive(cfg)
+        for field, expected in dict(vmem_bank_count=24, mreg_bytes=2048, bf16_tile_bytes=4096,
+                                    weight_buffer_count=4, weight_buffer_bytes=2048,
+                                    xreg_count=64, dma_channels=16, dma_max_transfer_bytes=8192).items():
+            self.assertEqual(facts[field], expected, field)
 
-    def test_source_bank_modulus_changes_propagate(self):
-        bank = BANK_SOURCE.replace("reg % 32", "reg % 16").replace("reg // 32", "reg // 16")
-        changed = self.derive(bank=bank)
-        self.assertEqual(changed["mreg_physical_bank_count"], 16)
-        self.assertEqual(changed["mreg_bank_modulus"], 16)
-        self.assertEqual(changed["mreg_registers_per_bank"], 4)
-        self.assertEqual(changed["mreg_physical_row_stride"], 32)
-
-    def test_source_logical_bound_and_geometry_changes_propagate_together(self):
-        cfg = configuration()
-        cfg.arch_state_config.num_m_registers = 128
-        cfg.arch_state_config.mrf_depth = 16
-        bank = BANK_SOURCE.replace("reg >= 64", "reg >= 128").replace("* 32 + row", "* 16 + row")
-        changed = self.derive(cfg, bank=bank)
-        self.assertEqual((changed["mreg_count"], changed["mreg_logical_limit"]), (128, 128))
-        self.assertEqual((changed["mreg_rows"], changed["mreg_physical_row_stride"]), (16, 16))
-        self.assertEqual(changed["mreg_bytes"], 512)
-
-    def test_bf16_pair_mapping_changes_require_read_write_and_reservations_to_agree(self):
-        bank = BANK_SOURCE.replace("reg + 1", "reg + 2")
-        arch = ARCH_SOURCE.replace("vd + 1", "vd + 2").replace("vs + 1", "vs + 2")
-        self.assertEqual(self.derive(bank=bank, arch=arch)["bf16_pair_stride"], 2)
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "BF16 tile read mapping"):
-            self.derive(bank=bank)
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "BF16 tile write mapping"):
-            self.derive(arch=ARCH_SOURCE.replace("vd + 1", "vd + 2"))
-
-    def test_fp8_layout_mutations_fail_precisely(self):
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "FP8 register read mapping"):
-            self.derive(arch=ARCH_SOURCE.replace("self.mrf[vs].view(torch.float8_e4m3fn)",
-                                                "self.mrf[vs + 1].view(torch.float8_e4m3fn)"))
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "FP8 register write mapping"):
-            self.derive(arch=ARCH_SOURCE.replace("value.numel() == self.cfg.mrf_depth",
-                                                "value.numel() == 2 * self.cfg.mrf_depth"))
-
-    def test_scalar_source_mask_controls_word_bytes(self):
-        self.assertEqual(self.derive(arch=ARCH_SOURCE.replace("0xFFFFFFFF", "0xFFFF"))["scalar_word_bytes"], 2)
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "whole number of bytes"):
-            self.derive(arch=ARCH_SOURCE.replace("0xFFFFFFFF", "0xFFFE"))
-
-    def test_storage_and_vmem_mapping_mutations_fail_precisely(self):
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "storage allocation for self.mrf"):
-            self.derive(arch=ARCH_SOURCE.replace("self.cfg.mrf_depth * self.cfg.mrf_width,", "self.cfg.mrf_depth * self.cfg.mrf_width * 2,"))
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "LSU physical VMEM bank mapping"):
-            self.derive(lsu=LSU_SOURCE.replace("address // self.config.vmem_bank_bytes", "address % self.config.vmem_bank_bytes"))
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "DMA physical VMEM bank mapping"):
-            self.derive(dma=DMA_SOURCE.replace("line_address // self.bank_bytes", "line_address % self.bank_bytes"))
-        with self.assertRaisesRegex(derive.UnsupportedArchitecture, "DMA configuration mapping for num_channels"):
-            self.derive(dma=DMA_SOURCE.replace("self.config.dma_num_channels", "self.config.dma_num_channels * 2"))
-
-    def test_unknown_mapping_changes_fail_precisely(self):
-        cases = [
-            (BANK_SOURCE.replace("reg % 32", "reg & 31"), "MREG bank mapping"),
-            (BANK_SOURCE.replace("reg // 32", "reg // 16"), "divisor differs"),
-            (BANK_SOURCE.replace("+ row", "+ row + 1"), "physical-row mapping"),
-            (BANK_SOURCE.replace("key = (write, bank)", "bank += 1\n        key = (write, bank)"), "reassignment"),
-        ]
-        for bank, diagnostic in cases:
-            with self.subTest(diagnostic=diagnostic), self.assertRaisesRegex(derive.UnsupportedArchitecture, diagnostic):
-                self.derive(bank=bank)
 
     def test_inconsistent_geometry_fails_precisely(self):
-        cases = [("mrf_depth", 16, "physical-row stride"),
-                 ("num_m_registers", 32, "logical-register upper bound"),
-                 ("vmem_size", 1572865, "not divisible"),
-                 ("mrf_width", 31, "whole BF16 elements"),
-                 ("num_x_registers", 0, "num_x_registers must be a positive integer")]
-        for name, value, diagnostic in cases:
+        for name, value, diagnostic in (("mrf_depth", 16, "physical-row stride"),
+                ("num_m_registers", 32, "logical-register upper bound"),
+                ("vmem_size", 1572865, "not divisible"), ("mrf_width", 31, "whole BF16 elements"),
+                ("num_x_registers", 0, "num_x_registers must be a positive integer")):
             cfg = configuration()
             setattr(cfg.arch_state_config, name, value)
             with self.subTest(name=name), self.assertRaisesRegex(derive.UnsupportedArchitecture, diagnostic):
                 self.derive(cfg)
-
-    def test_source_path_guards_run_before_reading(self):
-        with patch.object(derive.inspect, "getsourcefile", return_value="/tmp/prohibited_VLSI/source.py"), \
-                patch.object(Path, "read_text", side_effect=AssertionError("read source")):
-            with self.assertRaisesRegex(derive.UnsupportedArchitecture, "prohibited architecture source path"):
-                derive._source(object())
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for model source contracts")
@@ -264,7 +220,6 @@ class NativeArchitectureTest(unittest.TestCase):
                                  (reg, (reg // facts["mreg_bank_modulus"]) * facts["mreg_physical_row_stride"] + row))
         self.assertEqual(facts["vmem_bank_count"], 6)
 
-    def test_selected_model_source_mutations_propagate_or_refuse(self):
         from atlas_model_timing import configuration as selected_configuration
         from npu_model.hardware import arch_state, bank_conflict
         cfg, _ = selected_configuration()

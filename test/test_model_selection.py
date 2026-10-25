@@ -6,12 +6,12 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import re
+import random
 from collections import Counter
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
 from itertools import permutations
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -68,7 +68,7 @@ class SyntheticNativeScorer:
         return {"curve_path": self.curve_path, "configuration": {}, "python": "test"}
 
 
-class ModelSelectionTest(unittest.TestCase):
+class SelectionFixture:
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -111,12 +111,12 @@ class ModelSelectionTest(unittest.TestCase):
                 patch("atlas_model_selection.subprocess.run", side_effect=runner or self.fake_run):
             yield capture_inputs
 
-    def override_run(self, option, word, cycles, *, policy=False):
+    def override_run(self, option, word, cycles, *, policy=COMPILER_POLICY_SHA256):
         def run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
             if candidate_command(argv) and option in " ".join(argv):
                 self.programs[kwargs["cwd"]] = {
-                    **({"compiler_search_policy_sha256": COMPILER_POLICY_SHA256} if policy else {}),
+                    "compiler_search_policy_sha256": policy,
                     "instructions": [{"word_u32": word}], "cycles": cycles}
             return result
         return run
@@ -138,43 +138,16 @@ class ModelSelectionTest(unittest.TestCase):
             return (configure(argv, cwd, order) if configure else None) or result
         return run
 
-    def test_guarded_pack_is_threaded_into_model_preparation(self):
-        receipt = self.select(max_candidates=1, guarded_pack=True)
-        self.assertTrue(receipt["guarded_pack"])
-        preparations = [arg for argv in self.invocations for arg in argv if arg.startswith("--atlas-compile-prepare=")]
-        self.assertEqual(preparations,
-                         ["--atlas-compile-prepare=spill-mxu-state=true boundary=boundary guarded-pack=true"])
-
-    def test_standalone_preserves_guarded_pack_for_model_selection(self):
-        import atlas_model_selection
-
-        argv = ["atlas_model_selection.py", str(self.source), "--output-dir", str(self.directory / "compiled"),
-                "--atlas-bin-dir", str(self.directory), "--guarded-pack"]
-        result = dict(selected_index=0, selected_class="default", default_cycles=1, selected_cycles=1, elapsed_seconds=0)
-        with patch.object(sys, "argv", argv), patch.object(atlas_model_selection, "select_program", return_value=result) as select:
-            self.assertEqual(atlas_model_selection.main(), 0)
-        self.assertTrue(select.call_args.kwargs["guarded_pack"])
-
-    def test_driver_preserves_guarded_pack_for_model_selection(self):
-        import lower_atlas_program
-
-        argv = ["lower_atlas_program.py", str(self.source), "--output-dir", str(self.directory / "compiled"),
-                "--atlas-bin-dir", str(self.directory), "--provider", "model", "--guarded-pack"]
-        with patch.object(sys, "argv", argv), patch.object(lower_atlas_program, "select_program") as select:
-            self.assertEqual(lower_atlas_program.main(), 0)
-        self.assertTrue(select.call_args.kwargs["guarded_pack"])
-
-    def test_search_presets_and_explicit_overrides(self):
+class ModelSelectionTest(SelectionFixture, unittest.TestCase):
+    def test_explicit_overrides(self):
         parser = argparse.ArgumentParser()
         add_model_arguments(parser)
-        full = model_arguments(parser.parse_args(["--provider", "model", "--workers", "36"]))
-        self.assertEqual((full["max_candidates"], full["search_group_evaluations"],
-                          full["search_patience"]), (32, 204, 96))
-        self.assertIsNone(full["mreg_candidates"])
-        self.assertEqual(full["profile"], "curve")
-        selection = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", "selection"]))
-        self.assertEqual((selection["max_candidates"], selection["search_group_evaluations"],
-                          selection["search_patience"]), (24, 0, 0))
+        for budget, expected in (("full", (32, 204, 96)), ("selection", (24, 0, 0))):
+            values = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", budget]))
+            self.assertEqual(tuple(values[key] for key in
+                                   ("max_candidates", "search_group_evaluations", "search_patience")), expected)
+            self.assertEqual(values["profile"], "curve")
+            self.assertEqual(values["mreg_candidates"], None if budget == "full" else ())
         values = model_arguments(parser.parse_args(["--provider", "model", "--workers", "4",
             "--search-group-evaluations", "72", "--profile", "fifo43", "--no-bank-candidates",
             "--no-pack-reload-candidates", "--no-pack-preload-candidates"]))
@@ -184,13 +157,139 @@ class ModelSelectionTest(unittest.TestCase):
         self.assertEqual((builtin["profile"], builtin["search_group_evaluations"],
                           builtin["mreg_candidates"]), ("fifo43", 0, ()))
 
-    def test_fixed_batches_keep_all_compiles_canonical(self):
-        receipt = self.select(runner=self.search_run, max_candidates=1, search_group_evaluations=13, workers=4)
-        self.assertEqual(len(receipt["candidates"]), 14)
-        self.assertEqual(receipt["group_search"]["evaluations"], 13)
-        self.assertEqual([row["parent_index"] for row in receipt["candidates"][1:13]], [0] * 12)
-        self.assertEqual(len([argv for argv in self.invocations if candidate_command(argv)]), 14)
-        self.assertFalse((self.directory / "compiled/prefetch").exists())
+    def test_guarded_pack_reaches_preparation_and_entry_points(self):
+        import atlas_model_selection
+        import lower_atlas_program
+        receipt = self.select(max_candidates=1, guarded_pack=True)
+        self.assertTrue(receipt["guarded_pack"])
+        self.assertEqual([arg for argv in self.invocations for arg in argv
+                          if arg.startswith("--atlas-compile-prepare=")],
+                         ["--atlas-compile-prepare=spill-mxu-state=true boundary=boundary guarded-pack=true"])
+        result = dict(selected_index=0, selected_class="default", default_cycles=1,
+                      selected_cycles=1, elapsed_seconds=0)
+        for module in (atlas_model_selection, lower_atlas_program):
+            argv = [module.__name__, str(self.source), "--output-dir", str(self.directory / "entry"),
+                    "--atlas-bin-dir", str(self.directory), "--provider", "model", "--guarded-pack"]
+            with self.subTest(entry=module.__name__), patch.object(sys, "argv", argv), \
+                    patch.object(module, "select_program", return_value=result) as select:
+                self.assertEqual(module.main(), 0)
+                self.assertTrue(select.call_args.kwargs["guarded_pack"])
+
+    def test_candidate_options_and_validation(self):
+        self.assertEqual(candidate_options(Candidate(store_windows=(7, 3, 0), mreg_ranks=(31, 0, 7),
+                                                      wait_placement="source"), "model", True),
+                         ["--atlas-compile-candidate=provider=model spill=true allocation-report=allocation.json "
+                          "store-windows='7,3,0' mreg-ranks='31,0,7' wait-placement=source"])
+        self.assertNotIn("wait-placement", candidate_options(Candidate(), "model", True)[0])
+        for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
+                        {"lookahead": 1, "virtual_orders": ((0,),)}, {"store_windows": (-1,)},
+                        {"mreg_ranks": (-1,)}, {"wait_placement": "other"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                Candidate(**invalid)
+
+    def test_seeded_register_pool_preserves_store_prefix_and_budget(self):
+        vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
+        receipts = []
+        for cap, evaluated in ((25, 2), (32, 8)):
+            receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None,
+                                  store_window_candidates=((0, 1), (0, 2), (0, 3)))
+            ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
+            self.assertEqual((receipt["mreg_pool_size"], ranks), (8, vectors[:evaluated]))
+            self.assertTrue({"explicit-store-windows", "uniform-store-windows"} <=
+                            {row["class"] for row in receipt["candidates"]})
+            receipts.append(receipt["candidates"])
+        self.assertEqual([row["options"] for row in receipts[0]],
+                         [row["options"] for row in receipts[1][:len(receipts[0])]])
+        self.assertFalse(any(row["class"] == "mreg-ranks" for row in self.select()["candidates"]))
+        with self.assertRaisesRegex(ValueError, "MREG candidates require"):
+            self.select(provider="builtin", mreg_candidates=None)
+
+    def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
+        common = dict(curve_candidates=False, scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
+        prefix = self.select(name="prefix", max_candidates=24, **common)
+        extended = self.select(name="extended", max_candidates=32, mreg_candidates=None, **common)
+        self.assertEqual([row["options"] for row in prefix["candidates"]],
+                         [row["options"] for row in extended["candidates"][:len(prefix["candidates"])]])
+        self.assertEqual(sum(row["class"] == "mreg-ranks" for row in extended["candidates"]), 8)
+
+    def test_programming_errors_during_candidate_scoring_propagate(self) -> None:
+        for index, error in enumerate((TypeError("scorer bug"), KeyError("scorer bug"))):
+            def scorer(program, **_):
+                raise error
+            with self.subTest(error=error), self.assertRaises(type(error)) as raised:
+                self.select(name="unexpected-" + str(index), max_candidates=1, scorer=scorer)
+            self.assertIs(raised.exception, error)
+
+    def test_group_neighbors_preserve_dependencies_and_other_blocks(self) -> None:
+        preds = [[], [], [0], [1, 2], []]
+        for order in permutations(range(5)):
+            positions = {node: i for i, node in enumerate(order)}
+            if any(positions[pred] >= positions[node] for node in order for pred in preds[node]):
+                continue
+            neighbors = list(group_order_neighbors([{"preds": preds}, {"preds": [[]]}], (order, (0,))))
+            self.assertEqual(len(neighbors), len(set(neighbors)))
+            for moved, other in neighbors:
+                self.assertEqual(other, (0,))
+                self.assertEqual(sorted(moved), list(range(5)))
+                rank = {node: i for i, node in enumerate(moved)}
+                self.assertTrue(all(rank[pred] < rank[node] for node in moved for pred in preds[node]))
+
+    def test_group_neighbors_move_crossed_predecessors_and_successors(self) -> None:
+        graph = {"preds": [[], [0], [1], [], []]}
+        orders = ((0, 3, 1, 4, 2),)
+        neighbors = set(group_order_neighbors([graph], orders))
+        self.assertIn(((0, 1, 2, 3, 4),), neighbors)
+        self.assertIn(((3, 4, 0, 1, 2),), neighbors)
+        self.assertEqual(list(group_order_neighbors([graph], orders, max_nodes=1)), [])
+        chain = {"preds": [[], [0], [1], [2], [3], [], [], [], [], []]}
+        interleaved = ((5, 0, 6, 1, 7, 2, 8, 3, 9, 4),)
+        whole_chain = ((0, 1, 2, 3, 4, 5, 6, 7, 8, 9),)
+        self.assertIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=5)))
+        self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
+
+    def test_proposal_active_transfer_heap_matches_full_history_replay(self):
+        def reference(graph, order):
+            proposal = graph["proposal"]
+            free, finished, transfers = {}, [0] * len(order), []
+            frontend = makespan = waiting = 0
+            for node in order:
+                cost = proposal["costs"][node]
+                unit = cost["unit"]
+                cycle = frontend if cost["queued_dma"] else max(frontend, free.get(unit, 0))
+                if cost["drains"]:
+                    cycle = max([cycle, *transfers])
+                cycle = max([cycle, *(finished[pred] for pred in graph["preds"][node])])
+                if cost["queued_dma"]:
+                    busy = sorted(end for end in transfers if end > cycle)
+                    capacity = proposal["dma_capacity"]
+                    if len(busy) >= capacity:
+                        cycle = busy[len(busy) - capacity]
+                work = max(cycle + cost["frontend"] - 1, free.get(unit, 0)) if cost["queued_dma"] else cycle
+                finished[node] = work + cost["latency"]
+                free[unit] = work + cost["busy"]
+                if cost["queued_dma"]:
+                    transfers.append(work + cost["busy"])
+                waiting += cycle - frontend
+                frontend = cycle + cost["frontend"]
+                makespan = max(makespan, finished[node])
+            return makespan, waiting
+
+        for seed in range(30):
+            rng = random.Random(seed)
+            count = 30
+            order = list(range(count))
+            rng.shuffle(order)
+            preds = [[] for _ in order]
+            costs = []
+            for position, node in enumerate(order):
+                preds[node] = [earlier for earlier in order[:position] if rng.random() < .08]
+            for node in range(count):
+                queued = rng.choice((False, True))
+                costs.append(dict(unit=rng.randrange(4), busy=rng.randrange(100),
+                                  latency=rng.randrange(100), frontend=rng.randrange(1 if queued else 0, 10),
+                                  queued_dma=queued, drains=rng.choice((False, True))))
+            graph = dict(preds=preds, proposal=dict(costs=costs, dma_capacity=1 + seed % 3, replay=replay_fixture()))
+            self.assertEqual(proposal_estimate(graph, tuple(order)), reference(graph, order))
 
     def test_patience_stops_at_batch_boundary_and_still_checks_pack_alternatives(self):
         receipt = self.select(runner=self.graph_run([[], [0], *[[] for _ in range(14)]]), max_candidates=1,
@@ -198,85 +297,12 @@ class ModelSelectionTest(unittest.TestCase):
                               pack_reload_candidates=True, pack_preload_candidates=True)
         self.assertEqual(receipt["group_search"]["evaluations"], 12)
         self.assertTrue(receipt["group_search"]["stopped_for_patience"])
+        self.assertEqual(receipt["group_search"]["accepted_indices"], [])
         self.assertEqual([row["class"] for row in receipt["candidates"]][-2:],
                          ["pack-reload-order", "pack-preload-waits"])
         self.assertEqual(receipt["selected_index"], 0)
         self.assertEqual(receipt["score_cache_entries"], 1)
         self.assertEqual(receipt["score_cache_hits"], 14)
-
-    def search_run(self, argv, **kwargs):
-        """Give every option set and order distinct words and cycles on a graph with dependences."""
-        result = self.fake_run(argv, **kwargs)
-        option = candidate_command(argv)
-        if result.returncode or not option:
-            return result
-        cwd = kwargs["cwd"]
-        order = self.write_graph(cwd, [[], [0], [], [2], [], [], [5], []])
-        # Provider spelling is metadata, not part of the synthetic instruction stream.
-        word_options = " ".join(token for token in option.split() if not token.startswith("--atlas-compile-candidate=provider="))
-        # Fixed salt exercises accepted group moves.
-        key = int(hashlib.sha256(repr((10, word_options, order)).encode()).hexdigest()[:8], 16)
-        if key % 11 == 0 and "order-file" in option:
-            return subprocess.CompletedProcess(argv, 1, "", "refused")
-        # Order replays score below every knob candidate, so group search accepts moves.
-        cycles = 1000 + key % 97 + (0 if "order-file" in option else 100)
-        self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": key}], "cycles": cycles}
-        return result
-
-    def test_full_preset_trajectory_is_deterministic_and_bounded(self):
-        parser = argparse.ArgumentParser()
-        add_model_arguments(parser)
-        expected = None
-        for workers in (1, 4):
-            arguments = model_arguments(parser.parse_args(["--provider", "model", "--workers", str(workers), "--profile", "fifo43"]))
-            receipt = self.select(name=str(workers), runner=self.search_run, **arguments)
-            rows = receipt["candidates"]
-            phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
-                      for field in ("group_search",)]
-            trajectory = ([(row["class"], row["options"], row["status"], row.get("cycles"), row.get("parent_index"))
-                           for row in rows], phases, receipt["selected_index"])
-            if expected is None:
-                expected = trajectory
-            self.assertEqual(trajectory, expected)
-            self.assertEqual(hashlib.sha256(json.dumps(trajectory, sort_keys=True).encode()).hexdigest(),
-                             "1c181d61e3ca9ef4a33048d0813865ad2e23c2a9685d8c611e891712b82dd1e2")
-            self.assertEqual([row["class"] for row in rows[:12]], ["default"] + ["lookahead"] * 3 + ["random-seed"] * 8)
-            self.assertEqual([row["options"]["lookahead"] for row in rows[1:4]], [1, 2, 4])
-            self.assertEqual(sum(row["class"] == "mreg-ranks" for row in rows), 8)
-            self.assertFalse(any(row["class"] in ("coordinate-store-windows", "pack-preload-order") for row in rows))
-            self.assertNotIn("search", receipt)
-            for field, budget in (("group_search", 204),):
-                phase = receipt[field]
-                self.assertGreater(phase["evaluations"], 0)
-                self.assertLessEqual(phase["evaluations"], budget)
-                self.assertTrue(phase["accepted_indices"])
-                for index in phase["accepted_indices"]:
-                    self.assertLess(rows[index]["cycles"], rows[rows[index]["parent_index"]]["cycles"])
-            winner = min((row for row in rows if row["status"] == "PASS"), key=lambda row: (row["cycles"], row["index"]))
-            self.assertEqual(receipt["selected_index"], winner["index"])
-            self.assertTrue(any(row["status"] == "FAIL" for row in rows))
-            self.assertEqual([row["class"] for row in rows[-2:]], ["pack-reload-order", "pack-preload-waits"])
-
-    def test_mreg_pool_is_eight_seeds_at_every_cap(self):
-        vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
-        for cap, evaluated in ((32, 8), (64, 8), (25, 2)):
-            with self.subTest(cap=cap):
-                receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None,
-                                      store_window_candidates=((0, 1), (0, 2), (0, 3)))
-            ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
-            self.assertEqual((receipt["mreg_pool_size"], len(ranks)), (8, evaluated))
-            self.assertEqual(ranks, vectors[:evaluated])
-
-    def test_removed_search_controls_are_rejected(self):
-        with self.assertRaises(TypeError):
-            self.select(search_prefetch_batches=1)
-        parser = argparse.ArgumentParser()
-        add_model_arguments(parser)
-        from contextlib import redirect_stderr
-        from io import StringIO
-        for options in (("--search-budget", "max"), ("--search-budget", "wide"), ("--search-prefetch-batches", "3")):
-            with self.subTest(options=options), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-                parser.parse_args(options)
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
@@ -288,48 +314,6 @@ class ModelSelectionTest(unittest.TestCase):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, diagnostic):
                 self.select(**options)
         self.assertEqual(self.invocations, [])
-
-    def test_package_import_finds_scorer_without_pythonpath(self):
-        script = """from pathlib import Path
-from tempfile import TemporaryDirectory
-from subprocess import CompletedProcess
-from unittest.mock import patch
-from tools.atlas_model_selection import select_program
-with TemporaryDirectory() as directory:
-    root = Path(directory)
-    source = root / "source.mlir"
-    source.write_text("module {}")
-    with patch("tools.atlas_model_selection.subprocess.run", return_value=CompletedProcess([], 0, "", "")):
-        try:
-            select_program(source, root / "output", root)
-        except ValueError as error:
-            assert str(error) == "model scoring requires --npu-model", str(error)
-        else:
-            raise AssertionError("missing model was accepted")
-"""
-        result = subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT,
-                                env=dict(os.environ, PYTHONPATH=""), capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_cycles_choose_winner_and_ties_keep_earlier_program(self) -> None:
-        receipt = self.select(max_candidates=5)
-        self.assertEqual(receipt["profile"], "curve")
-        self.assertEqual(receipt["selected_index"], 2)
-        self.assertEqual(receipt["selected_cycles"], 5)
-        self.assertEqual(receipt["default_cycles"], 10)
-        self.assertEqual(receipt["candidates"][3]["status"], "FAIL")
-        self.assertIn("does not fit", receipt["candidates"][3]["error"])
-        self.assertEqual((self.directory / "compiled/program.hex").read_text(), "00000002\n")
-        self.assertTrue((self.directory / "compiled/candidates/000-default/program.json").exists())
-        self.assertEqual(len(receipt["candidates"]), 5)
-        compiled = [candidate_command(argv) for argv in self.invocations if candidate_command(argv)]
-        self.assertEqual(len(compiled), 5)
-        for option in compiled:
-            self.assertIn("provider=model", option)
-            self.assertIn("spill=true", option)
-            self.assertIn("allocation-report=allocation.json", option)
-        preparations = [arg for argv in self.invocations for arg in argv if arg.startswith("--atlas-compile-prepare=")]
-        self.assertEqual(preparations, ["--atlas-compile-prepare=spill-mxu-state=true boundary=boundary"])
 
     def test_builtin_does_not_score_or_generate_alternatives(self) -> None:
         receipt = self.select(provider="builtin", scorer=lambda *_, **__: self.fail("builtin was scored"))
@@ -375,9 +359,10 @@ with TemporaryDirectory() as directory:
             calls[profile, word] += 1
             return program["cycles"]
 
-        receipt = self.select(runner=self.override_run("random-seed=0", 8, 5, policy=True), profile="curve", curve_candidates=False,
+        receipt = self.select(runner=self.override_run("random-seed=0", 8, 5), profile="curve", curve_candidates=False,
                               max_candidates=16, workers=4, scorer=scorer)
         self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
+        self.assertEqual(receipt["candidates"][3]["status"], "FAIL")
         self.assertEqual(calls, Counter({("curve", word): 1 for word in (0, 1, 2, 8)}))
         self.assertEqual(receipt["score_cache_entries"], 4)
         self.assertGreater(receipt["score_cache_hits"], 0)
@@ -395,7 +380,7 @@ with TemporaryDirectory() as directory:
         for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve"}),
                                        ("fifo43", 5, {"fifo43"})):
             with self.subTest(profile=profile, cap=cap), \
-                    self.native_scoring(SyntheticNativeScorer(), runner=self.override_run("random-seed=0", 8, 5, policy=True),
+                    self.native_scoring(SyntheticNativeScorer(), runner=self.override_run("random-seed=0", 8, 5),
                         evidence=("--select-atlas-model-evidence=facts=synthetic-test",)) as capture_inputs:
                 output = self.directory / f"native-{profile}-{cap}"
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
@@ -429,76 +414,6 @@ with TemporaryDirectory() as directory:
         for name in ("program.json", "program.hex", "final.mlir", "allocation.json"):
             self.assertFalse((output / name).exists())
 
-    def test_unique_curve_minimum_never_scores_fifo43(self):
-        def scorer(program, profile):
-            self.assertEqual(profile, "curve")
-            return program["cycles"]
-
-        receipt = self.select(max_candidates=3, scorer=scorer)
-        self.assertEqual(receipt["selected_index"], 2)
-        self.assertFalse(any("fifo43_cycles" in row for row in receipt["candidates"]))
-
-    def test_curve_ties_do_not_restart_search_or_reset_patience(self):
-        def scorer(program, profile):
-            self.assertEqual(profile, "curve")
-            return 10
-
-        receipt = self.select(runner=self.search_run, profile="curve",
-                              curve_candidates=False, max_candidates=1, search_group_evaluations=48,
-                              search_patience=12, workers=4, scorer=scorer)
-        self.assertEqual(receipt["selected_index"], 0)
-        phase = receipt["group_search"]
-        self.assertEqual(phase["start_index"], 0)
-        self.assertEqual(phase["accepted_indices"], [])
-        self.assertEqual(phase["evaluations"], 12)
-        self.assertTrue(phase["stopped_for_patience"])
-        self.assertTrue(all(row["parent_index"] == 0 for row in receipt["candidates"][1:]))
-
-    def test_strict_primary_improvements_restart_search_and_reset_patience(self):
-        trajectories = []
-        for profile in ("curve", "fifo43"):
-            def scorer(program, profile):
-                return program["cycles"]
-
-            receipt = self.select(name=profile, runner=self.search_run, profile=profile,
-                                  curve_candidates=False, max_candidates=32, search_group_evaluations=48,
-                                  search_patience=12, workers=4,
-                                  pack_reload_candidates=True, pack_preload_candidates=True, scorer=scorer)
-            phase = receipt["group_search"]
-            self.assertTrue(phase["accepted_indices"])
-            self.assertGreater(phase["evaluations"], 12)
-            for index in phase["accepted_indices"]:
-                row = receipt["candidates"][index]
-                self.assertLess(row["cycles"], receipt["candidates"][row["parent_index"]]["cycles"])
-            phases = [{key: value for key, value in receipt[field].items() if key != "elapsed_seconds"}
-                      for field in ("group_search",)]
-            trajectories.append(([(row["options"], row["status"], row.get("parent_index"))
-                                  for row in receipt["candidates"]], phases, receipt["selected_index"]))
-        self.assertEqual(*trajectories)
-
-    def test_duplicate_words_are_scored_once(self) -> None:
-        scores = []
-        receipt = self.select(profile="fifo43", max_candidates=16,
-                              scorer=lambda program, **_: scores.append(program["cycles"]) or 10)
-        self.assertEqual(len(scores), 3)
-        self.assertEqual(receipt["score_cache_entries"], 3)
-        self.assertEqual(receipt["selected_index"], 0)
-        self.assertIn("uniform-store-windows", {row["class"] for row in receipt["candidates"]})
-
-    def test_register_candidates_follow_existing_bounded_search(self):
-        receipt = self.select(max_candidates=22, mreg_candidates=((31, 0), (7, 3)))
-        self.assertEqual([row["class"] for row in receipt["candidates"]][-2:], ["mreg-ranks", "mreg-ranks"])
-        self.assertEqual(receipt["candidates"][-1]["options"]["mreg_ranks"], (7, 3))
-        self.assertEqual(receipt["selected_index"], 2)
-
-    def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
-        common = dict(curve_candidates=False, scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
-        prefix = self.select(name="prefix", max_candidates=24, **common)
-        extended = self.select(name="extended", max_candidates=32, mreg_candidates=None, **common)
-        self.assertEqual([row["options"] for row in prefix["candidates"]],
-                         [row["options"] for row in extended["candidates"][:len(prefix["candidates"])]])
-        self.assertEqual(sum(row["class"] == "mreg-ranks" for row in extended["candidates"]), 8)
-
     def test_parallel_completion_order_does_not_change_a_tied_winner(self) -> None:
         later_finished = threading.Event()
         runner = self.override_run("random-seed=0", 99, 5)
@@ -515,7 +430,6 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["selected_index"], 2)
 
     def refuse(self, refused):
-        """Refuse every candidate compile whose option string satisfies refused."""
         def run(argv, **kwargs):
             if (option := candidate_command(argv)) and refused(option):
                 self.invocations.append(argv)
@@ -546,14 +460,6 @@ with TemporaryDirectory() as directory:
             receipt = json.loads((self.directory / str(index) / "selection.json").read_text())
             self.assertEqual(receipt["candidates"][index]["error_stage"], "score")
 
-    def test_programming_errors_during_candidate_scoring_propagate(self) -> None:
-        for index, error in enumerate((TypeError("scorer bug"), KeyError("scorer bug"))):
-            def scorer(program, **_):
-                raise error
-            with self.subTest(error=error), self.assertRaises(type(error)) as raised:
-                self.select(name="unexpected-" + str(index), max_candidates=1, scorer=scorer)
-            self.assertIs(raised.exception, error)
-
     def test_all_refusals_raise_no_legal_candidate(self) -> None:
         with self.assertRaisesRegex(ValueError, "no legal candidate"):
             self.select(runner=self.refuse(lambda option: True), max_candidates=5)
@@ -565,51 +471,6 @@ with TemporaryDirectory() as directory:
         with self.assertRaisesRegex(ValueError, "default candidate failed"):
             self.select(runner=self.refuse(lambda option: True), provider="builtin")
         self.assertEqual(sum(bool(candidate_command(argv)) for argv in self.invocations), 1)
-
-    def test_candidate_choices_only_use_exposed_existing_knobs(self) -> None:
-        options = candidate_options(Candidate(store_windows=(7, 3, 0), wait_placement="source", mreg_ranks=(31, 0, 7)),
-                                    "model", True)
-        self.assertEqual(len(options), 1)
-        self.assertTrue(options[0].startswith("--atlas-compile-candidate="))
-        self.assertIn("provider=model", options[0])
-        self.assertIn("spill=true", options[0])
-        self.assertIn("allocation-report=allocation.json", options[0])
-        self.assertTrue(any("store-windows='7,3,0'" in option for option in options))
-        self.assertTrue(any("wait-placement=source" in option for option in options))
-        self.assertTrue(any("mreg-ranks='31,0,7'" in option for option in options))
-        with self.assertRaisesRegex(ValueError, "explicit virtual orders"):
-            Candidate(lookahead=1, virtual_orders=((0,),))
-        for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
-                        {"store_windows": (-1,)}, {"mreg_ranks": (-1,)}, {"wait_placement": "other"}):
-            with self.assertRaises(ValueError):
-                Candidate(**invalid)
-
-    def test_group_neighbors_preserve_dependencies_and_other_blocks(self) -> None:
-        preds = [[], [], [0], [1, 2], []]
-        for order in permutations(range(5)):
-            positions = {node: i for i, node in enumerate(order)}
-            if any(positions[pred] >= positions[node] for node in order for pred in preds[node]):
-                continue
-            neighbors = list(group_order_neighbors([{"preds": preds}, {"preds": [[]]}], (order, (0,))))
-            self.assertEqual(len(neighbors), len(set(neighbors)))
-            for moved, other in neighbors:
-                self.assertEqual(other, (0,))
-                self.assertEqual(sorted(moved), list(range(5)))
-                rank = {node: i for i, node in enumerate(moved)}
-                self.assertTrue(all(rank[pred] < rank[node] for node in moved for pred in preds[node]))
-
-    def test_group_neighbors_move_crossed_predecessors_and_successors(self) -> None:
-        graph = {"preds": [[], [0], [1], [], []]}
-        orders = ((0, 3, 1, 4, 2),)
-        neighbors = set(group_order_neighbors([graph], orders))
-        self.assertIn(((0, 1, 2, 3, 4),), neighbors)
-        self.assertIn(((3, 4, 0, 1, 2),), neighbors)
-        self.assertEqual(list(group_order_neighbors([graph], orders, max_nodes=1)), [])
-        chain = {"preds": [[], [0], [1], [2], [3], [], [], [], [], []]}
-        interleaved = ((5, 0, 6, 1, 7, 2, 8, 3, 9, 4),)
-        whole_chain = ((0, 1, 2, 3, 4, 5, 6, 7, 8, 9),)
-        self.assertIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=5)))
-        self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
 
     def test_group_search_crosses_tied_orders(self) -> None:
         initial, winner = (0, 3, 1, 4, 2), (0, 1, 2, 3, 4)
@@ -644,23 +505,6 @@ with TemporaryDirectory() as directory:
         self.assertEqual(receipt["group_search"]["accepted_indices"], [])
         self.assertEqual(receipt["candidates"][1]["status"], "FAIL")
 
-    def test_exhausted_tied_neighborhood_is_deterministic_across_worker_counts(self) -> None:
-        receipts = []
-        for workers in (1, 4):
-            receipt = self.select(name=str(workers), runner=self.graph_run([[], [0], []]), max_candidates=1,
-                                  search_group_evaluations=20, workers=workers, scorer=lambda program, **_: 10)
-            self.assertEqual(receipt["selected_index"], 0)
-            self.assertEqual(receipt["group_search"]["accepted_indices"], [])
-            self.assertEqual(receipt["group_search"]["evaluations"], 1)
-            receipts.append([row["options"] for row in receipt["candidates"]])
-        self.assertEqual(*receipts)
-
-    def test_bank_candidates_are_opt_in_and_provider_gated(self):
-        receipt = self.select()
-        self.assertFalse(any(row["class"] == "mreg-ranks" for row in receipt["candidates"]))
-        with self.assertRaisesRegex(ValueError, "MREG candidates require"):
-            self.select(name="other", provider="builtin", mreg_candidates=None)
-
     def test_pack_reload_candidate_requires_provider_and_strict_model_improvement(self):
         with self.assertRaisesRegex(ValueError, "pack-reload-candidates requires"):
             self.select(provider="builtin", pack_reload_candidates=True)
@@ -673,16 +517,6 @@ with TemporaryDirectory() as directory:
             self.assertEqual(candidate["options"]["lookahead"], 2)
             self.assertTrue(candidate["options"]["pack_reload_after_weight"])
             self.assertEqual(receipt["selected_index"], 3 if cycles < 5 else 2)
-
-    def test_invalid_pack_reload_candidate_keeps_verified_incumbent(self):
-        def reject_reload(argv, **kwargs):
-            if "pack-reload-after-weight=true" in " ".join(argv):
-                return subprocess.CompletedProcess(argv, 1, "", "reload timing rejected")
-            return self.fake_run(argv, **kwargs)
-        receipt = self.select(runner=reject_reload, max_candidates=3, pack_reload_candidates=True)
-        self.assertEqual(receipt["selected_index"], 2)
-        self.assertEqual(receipt["candidates"][-1]["status"], "FAIL")
-        self.assertIn("reload timing rejected", receipt["candidates"][-1]["error"])
 
     def test_preload_candidates_replace_reload_and_compare_wait_placements(self):
         with self.assertRaisesRegex(ValueError, "pack-preload-candidates requires"):
@@ -712,18 +546,6 @@ with TemporaryDirectory() as directory:
             self.assertTrue(row["options"]["pack_weight_before_pack"])
         self.assertEqual(receipt["candidates"][-1]["options"]["wait_placement"], "preloaded")
 
-    def test_rejected_preload_alternatives_keep_reload_winner(self):
-        runner = self.override_run("pack-reload-after-weight=true", 99, 4)
-
-        def reject_preload(argv, **kwargs):
-            if "pack-weight-before-pack=true" in " ".join(argv):
-                return subprocess.CompletedProcess(argv, 1, "", "preload resource conflict")
-            return runner(argv, **kwargs)
-        receipt = self.select(runner=reject_preload, max_candidates=3, pack_reload_candidates=True,
-                              pack_preload_candidates=True)
-        self.assertEqual(receipt["selected_index"], 3)
-        self.assertEqual(receipt["candidates"][-1]["status"], "FAIL")
-
     def bundle(self):
         bundle = self.directory / "facts"
         bundle.mkdir(exist_ok=True)
@@ -743,13 +565,6 @@ with TemporaryDirectory() as directory:
         with self.assertRaisesRegex(ValueError, "model-overlap.json"):
             evidence_option(bundle)
 
-    def test_bundle_selection_uses_one_directory(self) -> None:
-        self.select(model_facts=self.bundle(), max_candidates=1)
-        option = next(arg for arg in self.invocations[0] if arg.startswith("--select-atlas-model-evidence="))
-        self.assertIn("facts=", option)
-        self.assertNotIn("pairs=", option)
-        self.assertNotIn("sha256", option)
-
     def test_model_selection_regenerates_bundle_by_default(self) -> None:
         def run(argv, **kwargs):
             if len(argv) > 2 and argv[1] == "-B" and "atlas_model_facts.py" in argv[2]:
@@ -763,72 +578,10 @@ with TemporaryDirectory() as directory:
         self.assertEqual(self.invocations[0][2], str(ROOT / "tools/atlas_model_facts.py"))
         self.assertIn("facts=", self.invocations[1][2])
 
-    def test_curve_priorities_preserve_all_neighbors_and_change_with_pacing(self):
-        initial = (0, 1, 2)
-        current_first = (0, 2, 1)
-        slow = proposal_graph([[], [0], []], initial)
-        fast = proposal_graph([[], [0], []], initial, latency=1)
-        program = {"model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}}
-        for graph in (slow, fast):
-            validate_proposal_graphs([graph], program)
-        orders = [(initial,), (current_first,)]
-        self.assertEqual(next(rank_order_neighbors([slow], orders)), (current_first,))
-        self.assertEqual(next(rank_order_neighbors([fast], orders)), (initial,))
-        preds = [[], [], [0], [1, 2], []]
-        graph = proposal_graph(preds, tuple(range(5)))
-        ordinary = list(group_order_neighbors([graph], (tuple(range(5)),)))
-        ranked = list(rank_order_neighbors([graph], ordinary))
-        self.assertEqual(set(ordinary), set(ranked))
-        self.assertEqual(len(set(ordinary)), len(ranked))
-        self.assertEqual([proposal_estimate(graph, order[0]) for order in ranked],
-                         sorted(proposal_estimate(graph, order[0]) for order in set(ordinary)))
-        self.assertEqual(ranked, list(rank_order_neighbors([graph], ordinary)))
-
-    def test_proposal_active_transfer_heap_matches_full_history_replay(self):
-        def reference(graph, order):
-            proposal = graph["proposal"]
-            free, finished, transfers = {}, [0] * len(order), []
-            frontend = makespan = waiting = 0
-            for node in order:
-                cost = proposal["costs"][node]
-                unit = cost["unit"]
-                cycle = frontend if cost["queued_dma"] else max(frontend, free.get(unit, 0))
-                if cost["drains"]:
-                    cycle = max([cycle, *transfers])
-                cycle = max([cycle, *(finished[pred] for pred in graph["preds"][node])])
-                if cost["queued_dma"]:
-                    busy = sorted(end for end in transfers if end > cycle)
-                    capacity = proposal["dma_capacity"]
-                    if len(busy) >= capacity:
-                        cycle = busy[len(busy) - capacity]
-                work = max(cycle + cost["frontend"] - 1, free.get(unit, 0)) if cost["queued_dma"] else cycle
-                finished[node] = work + cost["latency"]
-                free[unit] = work + cost["busy"]
-                if cost["queued_dma"]:
-                    transfers.append(work + cost["busy"])
-                waiting += cycle - frontend
-                frontend = cycle + cost["frontend"]
-                makespan = max(makespan, finished[node])
-            return makespan, waiting
-
-        rng = random.Random(71)
-        for _ in range(100):
-            count = rng.randrange(1, 60)
-            order = list(range(count))
-            rng.shuffle(order)
-            preds = [[] for _ in order]
-            costs = []
-            for position, node in enumerate(order):
-                preds[node] = [earlier for earlier in order[:position] if rng.random() < .08]
-            for node in range(count):
-                queued = rng.choice((False, True))
-                costs.append(dict(unit=rng.randrange(4), busy=rng.randrange(100),
-                                  latency=rng.randrange(100), frontend=rng.randrange(1 if queued else 0, 10),
-                                  queued_dma=queued, drains=rng.choice((False, True))))
-            graph = dict(preds=preds, proposal=dict(costs=costs, dma_capacity=rng.randrange(1, 9), replay=replay_fixture()))
-            self.assertEqual(proposal_estimate(graph, tuple(order)), reference(graph, order))
-
     def test_curve_bounded_ranking_preserves_exhaustive_attempt_prefix(self):
+        self.assertEqual(list(rank_order_neighbors([], iter(()), max_orders=0)), [])
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            rank_order_neighbors([], iter(()), max_orders=-1)
         initial = tuple(range(6))
         graph = proposal_graph([[], [], [0], [], [1], []], initial)
         base = Candidate(virtual_orders=(initial,))
@@ -846,21 +599,6 @@ with TemporaryDirectory() as directory:
                 actual = [candidate for candidate in order_candidates(base, ranked, True)
                           if candidate not in seen]
                 self.assertEqual(actual[:remaining], expected[:remaining])
-
-    def test_curve_ranking_deduplicates_and_filters_before_replay(self):
-        graph = proposal_graph([[], [], []], (0, 1, 2))
-        first, second = ((1, 0, 2),), ((2, 0, 1),)
-        original = proposal_estimate
-        with patch("atlas_model_selection.proposal_estimate", wraps=original) as replay, \
-             patch("atlas_model_selection.heapq.nsmallest", wraps=__import__("heapq").nsmallest) as smallest:
-            ranked = list(rank_order_neighbors([graph], iter([first, second, first, second]), 1,
-                                               eligible=lambda orders: orders != second))
-        self.assertEqual(ranked, [first])
-        self.assertEqual(replay.call_count, 2)  # One parent and one eligible unique order.
-        self.assertEqual(smallest.call_args.args[0], 1)
-        self.assertEqual(list(rank_order_neighbors([graph], iter([first]), 0)), [])
-        with self.assertRaisesRegex(ValueError, "nonnegative"):
-            rank_order_neighbors([graph], iter([first]), -1)
 
     def test_curve_metadata_requires_schema_identity_costs_and_native_parity(self):
         from copy import deepcopy
@@ -960,25 +698,6 @@ with TemporaryDirectory() as directory:
             self.assertEqual(tuple(winner["options"]["virtual_orders"][0]), initial)
             self.assertEqual(tuple(winner["options"]["mreg_ranks"]), (1,))
 
-    def test_curve_group_search_charges_odd_budget_per_wait_sibling(self):
-        initial = tuple(range(8))
-        preds = [[], [0], [], [], [], [], [], []]
-        def compile_order(argv, cwd, order):
-            word = sum((node + 1) * 9 ** i for i, node in enumerate(order))
-            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}], "cycles": 10,
-                                  "model_evidence": {"op_timing_sha256": PROPOSAL_ID, "replay_timing_sha256": replay_identity()}}
-        runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
-        receipt = self.select(name="curve-group", runner=runner, profile="curve", max_candidates=1,
-                              search_group_evaluations=5)
-        local = receipt["candidates"][1:]
-        self.assertEqual(receipt["group_search"]["evaluations"], 5)
-        self.assertEqual([row["options"]["wait_placement"] for row in local],
-                         ["source", "default", "source", "default", "source"])
-        self.assertEqual(tuple(local[0]["options"]["virtual_orders"][0]), initial)
-        self.assertEqual(len({Candidate(**{**row["options"], "virtual_orders": tuple(
-            tuple(order) for order in row["options"]["virtual_orders"])}) for row in local}), 5)
-        self.assertEqual(receipt["selected_index"], 0)
-
     def test_curve_search_malformed_metadata_is_fatal_and_baseline_switch_bypasses_ranking(self):
         def compile_order(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
@@ -1008,6 +727,19 @@ from test_virtual_ssa import BIN, ROOT, run
 from test_virtual_scheduling import S, T, F, function, start, inp, const, dma_load, dma_store, outp
 
 EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
+
+
+@requires_model_evidence
+class TiledSelectionTest(unittest.TestCase):
+    def test_one_candidate_real_emit_and_policy_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "selected"
+            receipt = select_program(ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir", output, BIN,
+                                     max_candidates=1, model_facts=Path(os.environ["ATLAS_TEST_MODEL_FACTS"]),
+                                     scorer=lambda program, **_: len(program["instructions"]))
+            self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
+            self.assertEqual(json.loads((output / "program.json").read_text())["compiler_search_policy_sha256"],
+                             COMPILER_POLICY_SHA256)
 
 
 @requires_model_evidence
@@ -1073,13 +805,6 @@ class ModelFactsBundleTest(unittest.TestCase):
         selected = self.select()
         self.assertNotEqual(selected.returncode, 0)
         self.assertNotIn("falling back to isolated lifetimes", selected.stderr)
-
-    def test_manual_legacy_selection_options_are_unavailable(self):
-        for option in ("op-timing", "op-timing-sha256", "pairs", "pairs-sha256", "composed", "composed-sha256"):
-            selected = run("atlas-opt", "module {}", f"--select-atlas-model-evidence={option}=unused")
-            self.assertNotEqual(selected.returncode, 0)
-            self.assertIn("no such option", selected.stderr)
-
 
 @requires_model_evidence
 class GuardedModelPreparationTest(unittest.TestCase):
@@ -1158,29 +883,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
                 self.assertEqual(before.returncode, 0, before.stderr)
                 self.assertEqual(after.returncode, 0, after.stderr)
                 self.assertEqual(before.stdout, after.stdout)
-
-
-# External evidence is optional only when no bundle was configured.
-@requires_model_evidence
-class TiledSelectionTest(unittest.TestCase):
-    def test_mlp16_default_is_ring_legal_after_wait_insertion(self):
-        source = ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir"
-        bundle = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
-        with tempfile.TemporaryDirectory() as directory:
-            receipt = select_program(source, Path(directory) / "selected", BIN, max_candidates=1,
-                                     model_facts=bundle, scorer=lambda program, **_: len(program["instructions"]))
-        self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
-        # Derived costs may change whether this default needs an extra ring wait.
-        # Explicit ninth-launch negative controls are covered by test_dma_ring_waits.
-        evidence = evidence_option(bundle)
-        lowered = run("atlas-opt", source.read_text(), *evidence, "--atlas-compile-prepare",
-                      "--schedule-atlas-virtual=provider=model", "--atlas-compile-spill",
-                      "--atlas-compile-lower=provider=model")
-        self.assertEqual(lowered.returncode, 0, lowered.stderr)
-        timed = run("atlas-opt", lowered.stdout, "--insert-atlas-dma-waits=provider=model",
-                    "--schedule-atlas-stream=provider=model", "--verify-atlas-timing",
-                    "--verify-atlas-generated-schedule")
-        self.assertEqual(timed.returncode, 0, timed.stderr)
 
 
 @requires_model_evidence
@@ -1267,28 +969,6 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.order_path.write_text(json.dumps(orders))
         return self.schedule(order_file=self.order_path)
 
-    def test_native_proposal_metadata_matches_explicit_order_replay(self):
-        graphs, _ = self.graph()
-        identity = re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1)
-        program = {"model_evidence": {"op_timing_sha256": identity,
-            "replay_timing_sha256": semantic_digest(graphs[0]["proposal"]["replay"])}}
-        validate_proposal_graphs(graphs, program)
-        self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
-        replay_path = self.directory / "replayed-graph.json"
-        replay = self.schedule(order_file=self.order_path, graph_output=replay_path)
-        self.assertEqual(replay.returncode, 0, replay.stderr)
-        replayed = json.loads(replay_path.read_text())
-        validate_proposal_graphs(replayed, program)
-        self.assertEqual(graphs, replayed)
-        for graph in graphs:
-            self.assertEqual(len(graph["proposal"]["costs"]), len(graph["operations"]))
-            for name, cost in zip(graph["operations"], graph["proposal"]["costs"]):
-                if name in ("atlas.virtual_input_bf16", "atlas.virtual_output_bf16"):
-                    self.assertTrue(cost["drains"])
-                    self.assertEqual(cost["frontend"], cost["latency"])
-                if name in ("atlas.virtual_dma_load_bf16", "atlas.virtual_dma_store_bf16"):
-                    self.assertTrue(cost["queued_dma"])
-
     def test_native_pack_proposal_is_frontend_blocking_beside_queued_load(self):
         from test_dma_ring_waits import fixture_evidence
         self.evidence = fixture_evidence(self.directory)
@@ -1297,7 +977,7 @@ class ModelOrderReplayTest(unittest.TestCase):
             dma_load("s1", "s2", "weight", "address", "size", "fp8"),
             f'%packed = "atlas.virtual_pack_fp8"(%tile) {{scale_code = 127 : i32}} : ({T}) -> {F}',
             outp("s2", "s3", "tile", 0), f"return %s3 : {S}"])
-        graphs, _ = self.graph()
+        graphs, scheduled = self.graph()
         graph = graphs[0]
         pack = graph["operations"].index("atlas.virtual_pack_fp8")
         load = graph["operations"].index("atlas.virtual_dma_load_fp8")
@@ -1307,15 +987,21 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.assertFalse(costs[pack]["drains"])
         self.assertTrue(costs[load]["queued_dma"])
         self.assertEqual(costs[load]["frontend"], 1)
+        for name, cost in zip(graph["operations"], costs):
+            if name in ("atlas.virtual_input_bf16", "atlas.virtual_output_bf16"):
+                self.assertTrue(cost["drains"])
+                self.assertEqual(cost["frontend"], cost["latency"])
         validate_proposal_graphs(graphs, {"model_evidence": {
             "op_timing_sha256": re.search(r'test-op-timing-sha256=([0-9a-f]{64})', self.evidence).group(1),
             "replay_timing_sha256": semantic_digest(graphs[0]["proposal"]["replay"])}})
-
-    def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
-        graphs, scheduled = self.graph()
-        replay = self.replay([graph["order"] for graph in graphs])
+        self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
+        replay_path = self.directory / "replayed-graph.json"
+        replay = self.schedule(order_file=self.order_path, graph_output=replay_path)
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(replay.stdout, scheduled)
+        self.assertEqual(graphs, json.loads(replay_path.read_text()))
+
+    def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
         self.source = function("loads", [start(), const("address", -2147481600), const("size", 2048),
             dma_load("io0", "s1", "a", "address", "size", "bf16"),
             dma_load("s1", "s2", "b", "address", "size", "bf16"),

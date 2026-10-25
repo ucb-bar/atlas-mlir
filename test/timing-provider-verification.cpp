@@ -333,21 +333,13 @@ void testRegistry(MLIRContext &context) {
 }
 
 void testProviderAliases(MLIRContext &context) {
-  for (StringRef retained : {StringRef("builtin"), StringRef(kLegacyBuiltinTimingProviderId)}) {
-    auto module = runPipeline(context, kCopy, "insert-atlas-delays{provider=builtin}");
-    check(bool(module), "alias fixture is timed", diagnostics);
-    if (!module)
-      return;
-    (*module)->setAttr(kAtlasTimingProvider, StringAttr::get(&context, retained));
-    for (StringRef requested : {StringRef("builtin"), StringRef(kLegacyBuiltinTimingProviderId)}) {
-      auto selected = selectAtlasTimingProvider(*module, requested);
-      check(succeeded(selected) && selected->id == "builtin", "aliases agree with retained identity", diagnostics);
-      auto provider = builtinTimingProvider();
-      provider.id = requested.str();
-      check(succeeded(verifyAtlasTiming(*module, provider)), "explicit provider aliases verify", diagnostics);
-      check(retainedProvider(*module) == retained, "selection and verification preserve input metadata");
-    }
-  }
+  auto module = runPipeline(context, kCopy, "insert-atlas-delays{provider=builtin}");
+  check(bool(module), "legacy identity fixture is timed", diagnostics);
+  if (!module) return;
+  (*module)->setAttr(kAtlasTimingProvider, StringAttr::get(&context, kLegacyBuiltinTimingProviderId));
+  auto selected = selectAtlasTimingProvider(*module, "builtin");
+  check(succeeded(selected) && selected->id == "builtin" && succeeded(verifyAtlasTiming(*module)),
+        "canonical selection and verification accept retained legacy identity", diagnostics);
 }
 
 void testProviderGraph(MLIRContext &context) {

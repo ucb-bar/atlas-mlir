@@ -4,13 +4,7 @@
     "provenance": "synthetic-rtl-harness-target",
     "description": "Explicit target chosen to match the standalone AtlasCore memory responder; not derived from NPU Model defaults or extracted from RTL.",
     "dma_memory_backend": "fixed",
-    "dma_memory_params": {
-      "latency": 43,
-      "cycles_per_beat": 1
-    },
-    "accept_pattern": {
-      "period_cycles": 11,
-      "accepted_prefix_cycles": 4
-    }
+    "dma_memory_params": {"latency": 43, "cycles_per_beat": 1},
+    "accept_pattern": {"period_cycles": 11, "accepted_prefix_cycles": 4}
   }
 }

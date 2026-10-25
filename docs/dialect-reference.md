@@ -155,15 +155,14 @@ that with every pending transfer. A transfer may stay pending across a block
 boundary only into or out of such a loop, so a PACK does not complete earlier
 transfers ([DMA across loops](loop-dma-analysis.md)).
 
-Scheduling and timing passes take `provider=<id>` (default: the module's
-`atlas.timing_provider`, else `builtin`) from a registry that
-holds the built-in default and the selected model provider ([`AtlasTimingProvider.h`](../include/Atlas/AtlasTimingProvider.h)).
-The selected provider supplies virtual machine-operation costs, physical
-dependence distances, issue gaps, reservations, DMA conflicts and verification.
-Unknown ids, missing rules and disagreement with retained provider metadata fail.
-The old `npu-model-rtl-match-v1` ID remains an accepted alias for `builtin`; timed MLIR
-and program JSON record `builtin`. `model` consumes isolated model
-facts and qualified overlap evidence.
+Scheduling and timing passes take `provider=<id>` (default: module
+`atlas.timing_provider`, else `builtin`) from the [provider
+registry](../include/Atlas/AtlasTimingProvider.h). The provider supplies
+operation costs, dependence distances, issue gaps, reservations, DMA conflicts
+and verification; unknown IDs, missing rules or conflicting retained metadata
+fail. Legacy ID `npu-model-rtl-match-v1` aliases `builtin`; timed MLIR/program
+JSON record `builtin`. `model` consumes derived facts and qualified overlap
+evidence.
 The schedulers estimate a DMA transfer with npu_model main's DRAM model
 (`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
 loading or 21.68 storing); no check depends on that estimate, since every
@@ -171,15 +170,14 @@ transfer completes at an explicit `dma.wait`.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 
-`--select-atlas-model-evidence="facts=DIR"` selects the generated bundle of
-source-derived operation and overlap rules, bound by `DIR/facts.lock.json` after
-their native validation gates. Select `provider=model`
-explicitly in virtual and physical scheduling; selection alone leaves the default
-unchanged. Missing coverage, unsupported operands/configurations, stale hashes and
-replacement of timed evidence fail. Verification, emission and LLVM handoff retain
-the selection. See [model timing](model-timing.md) for source derivation, numerical
-validation, exact pair/composition admission, scalar PACK proofs, regeneration and
-model-scored schedule/allocation search.
+`--select-atlas-model-evidence="facts=DIR"` selects source-derived
+operation/overlap rules bound by `DIR/facts.lock.json` after native validation.
+Set `provider=model` explicitly in virtual/physical scheduling; selecting
+evidence leaves the default unchanged. Missing coverage, unsupported
+operands/configurations, stale hashes and replacing timed evidence fail.
+Verification, emission and LLVM handoff retain selection. See [model
+timing](model-timing.md) for derivation, numerical validation, admission,
+scalar PACK proofs, regeneration and model-scored search.
 
 ## Machine operations
 

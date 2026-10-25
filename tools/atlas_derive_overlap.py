@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Derive bounded overlap proposals from reviewed source, without native runs.
-
-No catalog, workload query, measured minimum or native observation is an input.
-The native gate must replace validation.passed=false before consumer selection.
-"""
+"""Derive bounded overlap proposals from reviewed source, without native runs."""
 from __future__ import annotations
 
 import argparse
@@ -14,13 +10,13 @@ import hashlib
 import inspect
 import itertools
 import json
-import os
 from pathlib import Path
 import sys
 
 sys.dont_write_bytecode = True
 
-from atlas_derive_mxu import _plan, _check_checker, _assignment, _method, _one, _integer
+from atlas_derive_mxu import _plan, _check_checker, _assignment, _method, _one
+from atlas_derive_scratchpad import source_path
 from atlas_overlap_rules import RuleSet, engine, relation_class
 from atlas_model_schema import SOURCE_SHAPES, VOCABULARY, canonical, sha256
 from atlas_model_timing import configuration, source_digest, numerical_data, encoded
@@ -29,14 +25,8 @@ CONTRACT = "source-resource-occupancy-v1"
 
 
 def safe_path(value):
-    raw = Path(value)
-    if any(word in part.lower() for part in raw.parts for word in ("hammer", "vlsi")):
-        raise ValueError("prohibited overlap source/output path")
-    path = Path(os.path.abspath(raw))
-    for parent in reversed((path, *path.parents)):
-        if parent.is_symlink():
-            raise ValueError("overlap source/output path contains a symlink")
-    return path
+    return source_path(value, ValueError, "prohibited overlap source/output path",
+                       "overlap source/output path contains a symlink", absolute=True)
 
 
 def load(path):
@@ -50,14 +40,11 @@ def load(path):
     return json.loads(safe_path(path).read_text(), object_pairs_hook=unique)
 
 
-def _int(value):
+def _literal(node):
+    value = ast.literal_eval(node)
     if type(value) is not int or not 0 <= value < 4096:
         raise ValueError("unsupported source integer")
     return value
-
-
-def _literal(node):
-    return _int(ast.literal_eval(node))
 
 
 def _named(tree, name):
@@ -574,7 +561,8 @@ def generate(model_root, per_op_path, output_path, samples_path=None):
     composition = [value for _, value in sorted(classes.items())]
     samples.extend(chain_samples(rules))
     tool_names = ("atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_vpu_partition.py", "atlas_derive_mxu.py",
-                  "atlas_derive_vpu.py", "atlas_derive_memory.py", "atlas_model_schema.py", "atlas_model_timing.py",
+                  "atlas_derive_vpu.py", "atlas_derive_memory.py", "atlas_derive_scratchpad.py",
+                  "atlas_model_schema.py", "atlas_model_timing.py",
                   "atlas_model_observer.py", "model-timing.lock.json",
                   "model-timing-vocabulary.json")
     tools = {name: sha256(safe_path(Path(__file__).parent / name).read_bytes()) for name in tool_names}

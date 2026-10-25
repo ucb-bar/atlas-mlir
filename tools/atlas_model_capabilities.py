@@ -1,9 +1,4 @@
-"""Compiler representation limits, checked before allocating native model state.
-
-Legacy latency/link/bus settings are deliberately absent: the reviewed curve
-execution path does not read them. DMA controller parameters are derived by
-atlas_derive_curve rather than compared with a default profile here.
-"""
+"""Check representation limits before allocation; DMA curve parameters are derived."""
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 
@@ -18,12 +13,8 @@ def check_configuration(cfg):
     expected_arch = dict(mrf_depth=32, mrf_width=32, num_m_registers=64,
                          num_wb_registers=2, wb_width=1024, num_x_registers=32,
                          num_e_registers=32, num_csrs=4096, vmem_size=1536 * 1024,
-                         dram_base=0x80000000, dram_size=0x1000000000)
+                         dram_base=0x80000000, dram_size=0x1000000000, numerics="rtl", randomize_init=False)
     for field, expected in expected_arch.items():
-        value = getattr(arch, field, None)
-        if type(value) is not int or value != expected:
-            unsupported("arch_state_config." + field)
-    for field, expected in (("numerics", "rtl"), ("randomize_init", False)):
         value = getattr(arch, field, None)
         if type(value) is not type(expected) or value != expected:
             unsupported("arch_state_config." + field)

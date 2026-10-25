@@ -1,9 +1,4 @@
-"""Extract the reviewed Core/S1/scalar frontend contract without execution.
-
-The source-shape guards establish edge ordering and reject unknown pipeline
-structure. Extracted DELAY masks and scalar completion delays are not pins.
-Instruction encoding is deliberately outside this module.
-"""
+"""Extract the reviewed Core/S1/scalar frontend contract without execution."""
 from __future__ import annotations
 
 import ast

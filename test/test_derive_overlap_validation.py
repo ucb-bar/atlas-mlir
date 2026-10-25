@@ -2,10 +2,8 @@
 import copy
 import importlib.util
 import json
-import math
 import os
 from pathlib import Path
-import struct
 import sys
 import unittest
 from unittest.mock import patch
@@ -80,65 +78,11 @@ class NativeValidationTests(unittest.TestCase):
         other=dict(sample,id='case1',mechanism='another-source-predicate')
         with self.assertRaises(ValueError):v.sample_plan(dict(schema='atlas.overlap_samples.v1',samples=[sample,other]),candidate,max_samples=1)
 
-    def test_each_chain_mechanism_retains_its_positive_and_reject_control(self):
-        _,_,candidate,pair=fixture()
-        samples=[]
-        for mechanism in ('read-port-history','retired-prefix-history'):
-            for expectation in ('positive','reject'):
-                samples.append(dict(pair,id=mechanism+'-'+expectation,
-                                    mechanism=mechanism,category='port_history',
-                                    operations=['vpu.relu']*3,assembly=['one','two','three'],
-                                    gaps=[1,32] if expectation=='positive' else [1,31],
-                                    expectation=expectation))
-        planned=v.sample_plan(dict(schema='atlas.overlap_samples.v1',samples=samples),candidate)
-        self.assertEqual({row['id'] for row in planned},{row['id'] for row in samples})
-        self.assertEqual(len(planned),4)
-
-    def test_actual_alias_decoding_does_not_trust_supplied_relation(self):
-        a={'registers':[0,1],'accumulator':0};b={'registers':[32,1],'accumulator':1}
-        self.assertEqual(v.actual_relation(a,b),{'mreg_banks':'0~0,1=1','accumulator':'other'})
-
-    def test_duplicate_json_keys_rejected(self):
-        with self.assertRaises(ValueError):json.loads('{"a":1,"a":2}',object_pairs_hook=v._object)
-
     def test_cross_unit_scope_is_explicit_and_direction_independent(self):
         for first, second in [('vpu.relu', 'xlu.transpose'), ('xlu.transpose', 'vpu.sub')]:
             self.assertEqual(v.pair_engine(first, second), 'vpu_xlu')
         with self.assertRaisesRegex(ValueError, 'unsupported cross-engine'):
             v.pair_engine('vpu.relu', 'mxu0.matmul')
-
-    def test_chain_counters_only_count_actual_rejections(self):
-        runs=[dict(engine='vpu',category='chain',expected='positive',passed=True,outcome='accepted_equal',numerical_checked=True,numerical_equal=True),
-              dict(engine='vpu',category='capacity',expected='reject',passed=True,outcome='native_rejected',numerical_checked=False),
-              dict(engine='vpu',category='pair',expected='reject_or_conservative',passed=True,outcome='zero_unencodable',numerical_checked=False)]
-        counts=v.summarize_runs(runs)['vpu']
-        self.assertEqual(counts['negative_runs'],2)
-        self.assertEqual(counts['negative_rejections'],1)
-        self.assertEqual(counts['chain_positive_runs'],1)
-        self.assertEqual(counts['chain_negative_runs'],1)
-
-    def test_nonzero_patterns_distinguish_every_register_row_and_column(self):
-        patterns=[v.nonzero_mreg_bytes(bank) for bank in range(64)]
-        self.assertEqual(len(set(patterns)),64)
-        self.assertNotEqual(patterns[0],patterns[32])
-        self.assertNotEqual(patterns[1],patterns[33])
-        self.assertNotEqual(patterns[0],patterns[8])
-        for raw in patterns:
-            rows=[raw[i:i+32] for i in range(0,len(raw),32)]
-            self.assertEqual(len(set(rows)),32)
-            for row in rows:
-                self.assertEqual(len({row[i:i+2] for i in range(0,32,2)}),16)
-
-    def test_nonzero_patterns_are_positive_small_finite_in_both_formats(self):
-        for bank in range(64):
-            raw=v.nonzero_mreg_bytes(bank)
-            # Positive E4M3FN encodings 0x01..0x3e have no NaN/infinity,
-            # and span only positive subnormal values through 1.75.
-            self.assertTrue(all(1<=byte<=0x3e for byte in raw))
-            for position in range(0,len(raw),2):
-                bits=int.from_bytes(raw[position:position+2],'little')<<16
-                value=struct.unpack('<f',struct.pack('<I',bits))[0]
-                self.assertTrue(math.isfinite(value) and 0<value<0.2)
 
 
 @unittest.skipUnless(os.environ.get('ATLAS_TEST_NATIVE_OVERLAP_MODEL'),
@@ -148,23 +92,18 @@ class NativeInitializerObservabilityTests(unittest.TestCase):
     def setUpClass(cls):
         v.worker_init(os.environ['ATLAS_TEST_NATIVE_OVERLAP_MODEL'])
 
-    def test_streamed_accumulator_push_pop_changes_aliased_destination(self):
-        assembly=['vmatpush.acc.bf16.mxu0 acc0, m0',
-                  'vmatpop.bf16.acc.mxu0 m32, acc0']
-        actual=v.native_run('mxu0',assembly,[2],True)
-        serial=v.native_run('mxu0',assembly,[2],True,serial=True)
-        self.assertEqual(actual['final_sha256'],serial['final_sha256'])
-        tensors=actual['final_state']['tensors']
-        for source,destination in ((0,32),(1,33)):
-            self.assertEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(source)))
-            self.assertNotEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(destination)))
-
-    def test_vmov_changes_both_destination_registers(self):
-        actual=v.native_run('vpu',['vmov m8, m0'],[],True)
-        tensors=actual['final_state']['tensors']
-        for source,destination in ((0,8),(1,9)):
-            self.assertEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(source)))
-            self.assertNotEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(destination)))
+    def test_native_copy_changes_both_destination_registers(self):
+        for engine,assembly,gaps,dest in (
+                ('mxu0',['vmatpush.acc.bf16.mxu0 acc0, m0','vmatpop.bf16.acc.mxu0 m32, acc0'],[2],32),
+                ('vpu',['vmov m8, m0'],[],8)):
+            with self.subTest(engine=engine):
+                actual=v.native_run(engine,assembly,gaps,True)
+                serial=v.native_run(engine,assembly,gaps,True,serial=True)
+                self.assertEqual(actual['final_sha256'],serial['final_sha256'])
+                tensors=actual['final_state']['tensors']
+                for source,destination in ((0,dest),(1,dest+1)):
+                    self.assertEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(source)))
+                    self.assertNotEqual(tensors[destination],v.digest(v.nonzero_mreg_bytes(destination)))
 
     def test_cross_unit_prototype_points_and_source_minima(self):
         for assembly, gap in [

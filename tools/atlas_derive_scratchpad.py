@@ -1,9 +1,4 @@
-"""Explicit SRAM contract boundary; source exposes samples, not response events.
-
-No response latency can be recovered from synchronous tensor reads. The legacy
-one-edge target assumption is inactive in production: complete derived releases
-override the test-only fallback. It is never observed validation.
-"""
+"""Explicit SRAM contract boundary; source exposes samples, not response events."""
 from __future__ import annotations
 
 import ast
@@ -26,18 +21,25 @@ def scratchpad_assumptions():
     return {"scratchpad_read_latency": 1}
 
 
-def read_source(path):
+def source_path(path, error, prohibited, symlink, *, absolute=False, parent_error=None):
     path = Path(path)
     if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedScratchpad("prohibited source path")
-    if ".." in path.parts:
-        raise UnsupportedScratchpad("parent traversal is unsupported")
-    path = Path(os.path.abspath(path))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise UnsupportedScratchpad("prohibited source path")
+        raise error(prohibited)
+    if parent_error and ".." in path.parts:
+        raise parent_error("parent traversal is unsupported")
+    if absolute:
+        path = Path(os.path.abspath(path))
+        if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
+            raise error(prohibited)
     if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-        raise UnsupportedScratchpad("source symlinks are unsupported")
-    return path.read_text()
+        raise error(symlink)
+    return path
+
+
+def read_source(path):
+    return source_path(path, UnsupportedScratchpad, "prohibited source path",
+                       "source symlinks are unsupported", absolute=True,
+                       parent_error=UnsupportedScratchpad).read_text()
 
 
 def method(source, cls, name):
@@ -61,6 +63,8 @@ def shape(node):
 
 
 # Reviewed method structure only: numeric DMA store staging is extracted below.
+
+
 _SHAPES = {('vpu.py', 'VectorExecutionUnit', '_read'): 'e083516d26264797ff20dfd29aba04590a4ce968e7517409cc47aaec58b49bfc',
  ('vpu.py', 'VectorExecutionUnit', '_advance'): '8a8d8ce1964fbfdea57fdd05bcffb421f2f599fc00d51406a5a4e9d23b7ec931',
  ('mxu.py', '_MatrixExecutionUnit', '_sample'): 'a661911a4a2041d6c7fcdb4aa0cb57dce2e9d67893ff76254850b1136df0e76e',

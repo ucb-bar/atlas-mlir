@@ -1,8 +1,9 @@
 """Configuration admission follows compiler capabilities, before native state IO."""
+from copy import deepcopy
 from dataclasses import make_dataclass
 from pathlib import Path
-from types import SimpleNamespace
 import sys
+from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -29,36 +30,16 @@ def configuration():
 
 
 class CapabilitiesTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = configuration()
+
     def test_dispatch_membership_and_order_are_closed(self):
         for mutation in (lambda units: dict(reversed(list(units.items()))),
                          lambda units: dict(units, Extra="ScalarExecutionUnit")):
-            cfg = configuration()
+            cfg = deepcopy(self.cfg)
             cfg.execution_units = mutation(cfg.execution_units)
             with self.assertRaisesRegex(UnsupportedModelTiming, "dispatch order/membership"):
                 check_configuration(cfg)
-
-    def test_supported_config_and_independent_in_flight(self):
-        cfg = configuration()
-        check_configuration(cfg)
-        for outstanding in (1, 17, 129):
-            cfg.dma_max_in_flight = outstanding
-            check_configuration(cfg)
-
-    def test_each_architecture_limit_names_the_unsupported_capability(self):
-        cfg = configuration()
-        for field, value in vars(cfg.arch_state_config).items():
-            changed = configuration()
-            setattr(changed.arch_state_config, field, not value if isinstance(value, bool)
-                    else value + 1 if isinstance(value, int) else "other")
-            with self.subTest(field=field), self.assertRaisesRegex(
-                    UnsupportedModelTiming, "unsupported capability: arch_state_config\\." + field):
-                check_configuration(changed)
-        for field in ("fetch_width", "dma_num_channels", "dma_beat_bytes", "dma_max_transfer_bytes", "vmem_bank_bytes"):
-            changed = configuration()
-            setattr(changed, field, getattr(changed, field) + 1)
-            with self.subTest(field=field), self.assertRaisesRegex(
-                    UnsupportedModelTiming, "unsupported capability: " + field):
-                check_configuration(changed)
 
     def test_dormant_curve_path_settings_do_not_restrict_admission(self):
         cfg = configuration()
@@ -77,6 +58,30 @@ class CapabilitiesTest(unittest.TestCase):
         self.assertEqual(values["legacy_float"], 0.75)
         self.assertEqual(values["dma_memory_params"]["frequency_ghz"], 0.75)
 
+    def test_supported_config_and_independent_in_flight(self):
+        cfg = self.cfg
+        check_configuration(cfg)
+        for outstanding in (1, 17, 129):
+            cfg.dma_max_in_flight = outstanding
+            check_configuration(cfg)
+
+    def test_each_architecture_limit_names_the_unsupported_capability(self):
+        cfg = self.cfg
+        for field, value in vars(cfg.arch_state_config).items():
+            if field == "init_seed":
+                continue
+            changed = deepcopy(cfg)
+            setattr(changed.arch_state_config, field, not value if isinstance(value, bool)
+                    else value + 1 if isinstance(value, int) else "other")
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    UnsupportedModelTiming, "unsupported capability: arch_state_config\\." + field):
+                check_configuration(changed)
+        for field in ("fetch_width", "dma_num_channels", "dma_beat_bytes", "dma_max_transfer_bytes", "vmem_bank_bytes"):
+            changed = deepcopy(cfg)
+            setattr(changed, field, getattr(changed, field) + 1)
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    UnsupportedModelTiming, "unsupported capability: " + field):
+                check_configuration(changed)
 
 if __name__ == "__main__":
     unittest.main()

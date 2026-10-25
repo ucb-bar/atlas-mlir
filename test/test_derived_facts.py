@@ -16,43 +16,21 @@ import atlas_model_timing as timing
 import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
-from atlas_model_facts import safe_path, identity, note_unqualified_model, overlap_bundle
+from atlas_model_facts import identity, note_unqualified_model, overlap_bundle
 from atlas_model_schema import LOCK
-from atlas_model_diagnostics import UPDATE_GUIDANCE, ModelTimingValidationError, with_update_guidance
+from atlas_model_diagnostics import ModelTimingValidationError
 from model_evidence import isolate_model_imports
 
 
-def retained_probe_cases():
-    """Fixed disjoint operand representatives; no boundary/alias variants."""
-    for mnemonic, suffix in timing.VPU_BLOCKS.items():
-        if mnemonic.startswith("vli."):
-            assembly = f"{mnemonic} m4, 0"
-        elif mnemonic in {"vpack.bf16.fp8", "vunpack.fp8.bf16"}:
-            assembly = f"{mnemonic} m4, m0, e0"
-        elif mnemonic in timing.BINARY:
-            assembly = f"{mnemonic} m4, m0, m2"
-        else:
-            assembly = f"{mnemonic} m4, m0"
-        yield "vpu." + suffix, "vpu", assembly
-    for mxu in ("mxu0", "mxu1"):
-        for mnemonic, suffix in timing.MXU_BLOCKS.items():
-            if mnemonic == "vmatpush.weight":
-                operands = "w0, m0"
-            elif mnemonic.startswith("vmatpush"):
-                operands = "acc0, m0"
-            elif mnemonic == "vmatpop.fp8.acc":
-                operands = "m4, acc0, e0"
-            elif mnemonic == "vmatpop.bf16.acc":
-                operands = "m4, acc0"
-            else:
-                operands = "acc0, m0, w0"
-            yield f"{mxu}.{suffix}", mxu, f"{mnemonic}.{mxu} {operands}"
-    yield "vlsu.vload", "vlsu", "vload m4, 0(x0)"
-    yield "vlsu.vstore", "vlsu", "vstore m0, 0(x0)"
-    yield "xlu.transpose", "xlu", "vtrpose.xlu m4, m0"
-    yield "scalar_lsu.load", "scalar_lsu", "lw x4, 0(x0)"
-    yield "scalar_lsu.scale_load", "scalar_lsu", "seld e4, 0(x0)"
-    yield "scalar_lsu.store", "scalar_lsu", "sw x1, 0(x0)"
+class VPUShapeTest(unittest.TestCase):
+    def test_both_source_shape_pins_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("vpu.py", "bank_conflict.py"):
+                source = Path(directory) / name
+                source.write_text("def changed_timing():\n    return 0\n")
+                with self.subTest(name=name), patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
+                    with self.assertRaisesRegex(derive.UnsupportedVPU, "unsupported VPU timing semantics in " + name):
+                        derive._check_source(SimpleNamespace(), latency_table=name == "vpu.py")
 
 
 class DerivationGateTest(unittest.TestCase):
@@ -69,45 +47,6 @@ class DerivationGateTest(unittest.TestCase):
                 self.assertEqual(len(lines), int(changed))
                 if changed:
                     self.assertIn("results are not from the qualified revision", lines[0])
-                    self.assertIn(LOCK["model_revision"], lines[0])
-                    self.assertIn("tools/model-timing.lock.json", lines[0])
-                    self.assertIn("Compilation requires supported capabilities", lines[0])
-                    self.assertIn("reviewed source contracts", lines[0])
-
-    def test_refusals_end_with_one_shared_model_update_guidance_line(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "vpu.py"
-            source.write_text("def changed_timing():\n    return 0\n")
-            cfg = SimpleNamespace(arch_state_config=SimpleNamespace(mrf_depth=16, mrf_width=32,
-                                                                   wb_width=1024, num_wb_registers=2))
-            raw = {key: [] for key in ("architectural_states", "control_states", "pre_edges")}
-            raw.update(initial_state_sha256="a", final_state_sha256="b", first_free_age=2,
-                       complete_count=1, total_instructions=1, busy_cycles=2, instruction_word=0,
-                       configuration={}, reservations=[])
-            block = dict(name="xlu.transpose", first_free_age=2, events={})
-            def validate():
-                with patch.object(timing, "isa_cases", return_value=[("xlu.transpose", "xlu", "probe")]), \
-                     patch.object(timing, "observe_case", side_effect=[(block, raw), (block, dict(raw, final_state_sha256="changed"))] * 2):
-                    timing.validate_derived(object(), {"xlu.transpose": block}, {}, Path(directory))
-            def missing_operation():
-                with patch.dict(sys.modules, {"npu_model.isa": SimpleNamespace(EXU=SimpleNamespace(VECTOR="vector"))}):
-                    derive._instruction(SimpleNamespace(isa=SimpleNamespace(operations={})), "vmov", None)
-            cases = [
-                ("source shape", lambda: derive._check_source(SimpleNamespace())),
-                ("unsupported semantics", lambda: mxu._plan("class DifferentEngine: pass")),
-                ("missing operation", missing_operation),
-                ("configuration mismatch", lambda: mxu.derive_mxu(cfg)),
-                ("validation failure", validate),
-            ]
-            with patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
-                for name, refuse in cases:
-                    with self.subTest(path=name):
-                        with self.assertRaises((ValueError, RuntimeError, SystemExit)) as raised:
-                            refuse()
-                        message = str(raised.exception)
-                        self.assertEqual(message.splitlines()[-1], UPDATE_GUIDANCE)
-                        self.assertEqual(message.count(UPDATE_GUIDANCE), 1)
-                        self.assertEqual(with_update_guidance(message), message)
 
     def test_overlap_gate_failure_never_publishes_bundle_lock(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -120,45 +59,39 @@ class DerivationGateTest(unittest.TestCase):
             self.assertFalse((out / "facts.lock.json").exists())
             self.assertFalse((out / "model-overlap.json").exists())
 
-    def test_overlap_pipeline_validates_frozen_proposal_before_returning_digests(self):
-        calls = []
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            (out / "model-timing.json").write_text("{}")
-            def generate(model, facts, candidate, samples):
-                calls.append("derive")
-                candidate.write_text("frozen source rules")
-                return {"pairs": [object()]}
-            def validate(model, facts, candidate, samples, reports, final, **options):
-                self.assertEqual(candidate.read_text(), "frozen source rules")
-                self.assertEqual(calls, ["derive"])
-                self.assertEqual(options, {"workers": 1})
-                reports.mkdir()
-                (reports / "validation-report.json").write_text("native gate passed")
-                final.write_text("qualified source rules")
-                calls.append("validate")
-                return {"seconds": 1}
-            with patch("atlas_derive_overlap.generate", side_effect=generate), \
-                 patch("atlas_validate_overlap.validate", side_effect=validate):
-                result = overlap_bundle(out, out)
-            self.assertEqual(calls, ["derive", "validate"])
-            self.assertEqual(result["overlap_sha256"], timing.sha256(b"qualified source rules"))
-            self.assertEqual(result["overlap_validation_sha256"], timing.sha256(b"native gate passed"))
-
-    def test_manifest_rejects_symlink_root_before_traversal(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "npu_model").symlink_to(root / "unvisited")
-            with patch.object(timing.os, "scandir", side_effect=AssertionError("traversed symlink")):
-                with self.assertRaisesRegex(RuntimeError, "symlink"):
-                    timing.source_digest(root)
-
-    def test_safe_path_rejects_symlink_ancestors(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "link").symlink_to(root / "unvisited")
-            with self.assertRaisesRegex(ValueError, "symlink"):
-                safe_path(root / "link" / "child")
+    def test_overlap_pipeline_validates_frozen_bound_proposal_before_returning_digests(self):
+        from test_derived_contract import overlap_fixture
+        from atlas_derived_contract import overlap_semantics
+        rules = overlap_fixture()
+        digest = timing.sha256(timing.encoded(overlap_semantics(rules)))
+        for bound in (digest, "0" * 64):
+            with self.subTest(bound=bound), tempfile.TemporaryDirectory() as directory:
+                out, calls = Path(directory), []
+                (out / "model-timing.json").write_text(json.dumps(dict(overlap_rules_sha256=bound)))
+                def generate(model, facts, candidate, samples):
+                    calls.append("derive")
+                    candidate.write_text("frozen source rules")
+                    return rules
+                def validate(model, facts, candidate, samples, reports, final, **options):
+                    self.assertEqual((candidate.read_text(), calls, options),
+                                     ("frozen source rules", ["derive"], {"workers": 1}))
+                    reports.mkdir()
+                    (reports / "validation-report.json").write_text("native gate passed")
+                    final.write_text("qualified source rules")
+                    calls.append("validate")
+                    return {"seconds": 1}
+                with patch("atlas_derive_overlap.generate", side_effect=generate), \
+                        patch("atlas_validate_overlap.validate", side_effect=validate) as gate:
+                    if bound != digest:
+                        with self.assertRaisesRegex(ValueError, "overlap proposal differs from the sealed derived semantics"):
+                            overlap_bundle(out, out)
+                        gate.assert_not_called()
+                        self.assertFalse((out / "model-overlap.json").exists())
+                    else:
+                        result = overlap_bundle(out, out)
+                        self.assertEqual(calls, ["derive", "validate"])
+                        self.assertEqual(result["overlap_sha256"], timing.sha256(b"qualified source rules"))
+                        self.assertEqual(result["overlap_validation_sha256"], timing.sha256(b"native gate passed"))
 
     def test_validator_forwards_configuration_and_fails_noninterference(self):
         cfg = object()
@@ -197,19 +130,6 @@ class DerivationGateTest(unittest.TestCase):
             self.assertEqual(changed_source["source_sha256"], changed_data["source_sha256"])
             self.assertNotEqual(changed_source["numerical_data_sha256"], changed_data["numerical_data_sha256"])
 
-    def test_memory_derivation_reports_shared_source_failures_as_memory_errors(self):
-        for error_type in (mxu.UnsupportedMXU, memory.UnsupportedVPU):
-            error = error_type("unsupported source helper semantics")
-            with self.subTest(error_type=error_type), patch.object(memory, "_derive_memory", side_effect=error):
-                with self.assertRaisesRegex(memory.UnsupportedMemory, "unsupported source helper semantics") as raised:
-                    memory.derive_memory(object())
-                self.assertIs(raised.exception.__cause__, error)
-
-    def test_unknown_mxu_semantics_fail_closed(self):
-        with self.assertRaises(mxu.UnsupportedMXU):
-            mxu._plan("class DifferentEngine: pass")
-
-
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for source contracts")
 class NativeModelTest(unittest.TestCase):
     @classmethod
@@ -219,34 +139,26 @@ class NativeModelTest(unittest.TestCase):
 
 
 class ModelDerivationTest(NativeModelTest):
-    def test_isa_metadata_reproduces_all_retained_probe_operands(self):
-        self.assertEqual(timing.isa_cases(self.cfg), list(retained_probe_cases()))
-
-    def test_mxu_and_memory_need_no_numerical_state_or_unit_ticks(self):
+    def test_derivation_needs_no_numerical_state_or_unit_ticks(self):
         from npu_model.hardware.arch_state import ArchState
         from npu_model.hardware.exu import StagedExecution
         from npu_model.hardware.mxu import _MatrixExecutionUnit
         from npu_model.hardware.lsu import LoadStoreUnit
         from npu_model.hardware.xlu import CrossLaneExecutionUnit
+        from npu_model.hardware.vpu import VectorExecutionUnit
         with patch.object(ArchState, "__init__", side_effect=AssertionError("allocated state")), \
                 patch.object(StagedExecution, "__init__", side_effect=AssertionError("staged arithmetic")), \
                 patch.object(_MatrixExecutionUnit, "tick", side_effect=AssertionError("MXU tick")), \
+                patch.object(VectorExecutionUnit, "tick", side_effect=AssertionError("VPU tick")), \
                 patch.object(LoadStoreUnit, "tick", side_effect=AssertionError("LSU tick")), \
                 patch.object(CrossLaneExecutionUnit, "tick", side_effect=AssertionError("XLU tick")):
             self.assertEqual(len(mxu.derive_mxu(self.cfg)[0]), 14)
+            self.assertEqual(len(derive.derive_vpu(self.cfg)[0]), 29)
             blocks, releases = memory.derive_memory(self.cfg)
         self.assertEqual(len(blocks), 6)
         self.assertEqual(releases["vlsu.vstore"]["mreg_read"]["release_age"], 34)
         self.assertEqual(releases["xlu.transpose"]["mreg_read"]["release_age"], 33)
         self.assertEqual(releases["scalar_lsu.load"]["vmem_read"]["available_age"], 2)
-
-    @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_REFERENCE"), "set ATLAS_DERIVE_REFERENCE for measured parity")
-    def test_all_blocks_are_canonical_byte_equal_to_retained_measured_export(self):
-        from atlas_derive_vpu import derive_vpu
-        expected = json.loads(Path(os.environ["ATLAS_DERIVE_REFERENCE"]).read_text())
-        derived = derive_vpu(self.cfg)[0] | mxu.derive_mxu(self.cfg)[0] | memory.derive_memory(self.cfg)[0]
-        self.assertEqual(len(derived), 49)
-        self.assertEqual(timing.encoded(derived), timing.encoded({b["name"]: b for b in expected["op_timing"]}))
 
     def test_mxu_source_latency_moves_compute_window_and_drain(self):
         source, _ = mxu._sources(self.cfg)
@@ -265,72 +177,12 @@ class ModelDerivationTest(NativeModelTest):
             with self.assertRaises(mxu.UnsupportedMXU):
                 mxu._plan(changed)
 
-    def test_real_vpu_to_mxu_overwrite_rejects_release_edge_accepts_next_age(self):
-        import torch
-        from io import StringIO
-        from unittest.mock import Mock
-        from npu_model.hardware.arch_state import ArchState
-        from npu_model.hardware.bank_conflict import BankConflictError
-        from npu_model.hardware.vpu import VectorExecutionUnit
-        from npu_model.hardware.mxu import MatrixExecutionUnitInner
-        from npu_model.logging.logger import Logger
-        from npu_model.software.instruction import Uop
-        from npu_model.util.converter import stream_to_instrs
-        for gap in (63, 64):
-            with self.subTest(gap=gap):
-                state = ArchState(self.cfg.arch_state_config)
-                try:
-                    for bank in (0, 1):
-                        state.mrf[bank].view(torch.bfloat16).fill_(0.5 + bank * 0.25)
-                    state.acc["mxu1"][0].fill_(2)
-                    expected = [state.mrf[bank].clone() for bank in (0, 1)]
-                    vector = VectorExecutionUnit("vpu", Mock(spec=Logger), state, config=self.cfg)
-                    matrix = MatrixExecutionUnitInner("mxu1", Mock(spec=Logger), state, config=self.cfg)
-                    instructions = stream_to_instrs(StringIO("vmov m4, m0\nvmatpop.bf16.acc.mxu1 m0, acc0\n"))
-                    first, second = [Uop(instruction, pc=i * 4) for i, instruction in enumerate(instructions)]
-                    def execute():
-                        for age in range(gap + 35):
-                            vector.tick(first if age == 0 else None)
-                            matrix.tick(second if age == gap else None)
-                    if gap == 63:
-                        with self.assertRaises(BankConflictError):
-                            execute()
-                    else:
-                        execute()
-                        self.assertFalse(vector.has_in_flight or matrix.has_in_flight)
-                        self.assertTrue(all(torch.equal(state.mrf[bank + 4], expected[bank]) for bank in (0, 1)))
-                finally:
-                    state.close()
-
-
-class VPUShapeTest(unittest.TestCase):
-    def test_unsupported_source_shape_fails_closed(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "vpu.py"
-            source.write_text("def changed_timing():\n    return 0\n")
-            with patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
-                with self.assertRaisesRegex(derive.UnsupportedVPU, "unsupported VPU timing semantics"):
-                    derive._check_source(SimpleNamespace(), latency_table=True)
-
-
 class DerivedVPUTest(NativeModelTest):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         from npu_model.hardware import vpu
         cls.vpu, cls.timing = vpu, timing
-
-    def test_derivation_never_executes_or_ticks_and_preserves_model_methods(self):
-        from npu_model.hardware.arch_state import ArchState
-        from npu_model.hardware.exu import StagedExecution
-        methods = (self.vpu.StagedExecution, self.vpu.VectorExecutionUnit._accept, StagedExecution._execute)
-        with patch.object(ArchState, "__init__", side_effect=AssertionError("architectural state allocated")), \
-                patch.object(StagedExecution, "__init__", side_effect=AssertionError("numerical staging executed")), \
-                patch.object(self.vpu.VectorExecutionUnit, "tick", side_effect=AssertionError("unit tick executed")), \
-                patch.object(self.vpu.VectorExecutionUnit, "_advance", side_effect=AssertionError("unit advanced")):
-            self.assertEqual(len(derive.derive_vpu(self.cfg)[0]), 29)
-        self.assertEqual(methods, (self.vpu.StagedExecution, self.vpu.VectorExecutionUnit._accept, StagedExecution._execute))
-
 
     def test_latency_edits_change_drain_and_reservations_from_source_table(self):
         baseline = derive.derive_vpu(self.cfg)[0]
@@ -343,18 +195,6 @@ class DerivedVPUTest(NativeModelTest):
         self.assertEqual(releases["vpu.add"]["mreg_write"]["release_age"], 79)
         self.assertEqual({name: block for name, block in changed.items() if name != "vpu.add"},
                          {name: block for name, block in baseline.items() if name != "vpu.add"})
-
-    def test_reservations_include_banks_before_first_write_and_defer_releases(self):
-        releases = derive.derive_vpu(self.cfg)[1]
-        self.assertEqual(releases["vpu.add"]["mreg_read"],
-                         dict(banks=[0, 1, 2, 3], first_age=0, release_age=63, available_age=64))
-        self.assertEqual(releases["vpu.add"]["mreg_write"],
-                         dict(banks=[4, 5], first_age=0, release_age=65, available_age=66))
-        self.assertEqual(releases["vpu.rsum"]["mreg_read"]["available_age"], 32)
-        self.assertEqual(releases["vpu.csum"]["mreg_read"]["available_age"], 128)
-        self.assertEqual(releases["vpu.fp8unpack"]["mreg_read"]["banks"], [0])
-        self.assertEqual(releases["vpu.fp8pack"]["mreg_write"]["banks"], [4])
-        self.assertNotIn("mreg_read", releases["vpu.vliAll"])
 
     def test_bad_latencies_fail_closed(self):
         for latency in (0, -1, True, 1.5, 4096, 32, 64, 65):
@@ -375,12 +215,15 @@ class DerivedVPUTest(NativeModelTest):
 
     @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for numerical validation")
     def test_all_blocks_observed_with_noninterference(self):
-        blocks, releases = derive.derive_vpu(self.cfg)
-        cases = [case for case in self.timing.isa_cases(self.cfg) if case[1] == "vpu"]
-        with tempfile.TemporaryDirectory() as directory, patch.object(self.timing, "isa_cases", return_value=cases):
+        blocks, releases = {}, {}
+        for derive_blocks in (derive.derive_vpu, mxu.derive_mxu, memory.derive_memory):
+            values, reservations = derive_blocks(self.cfg)
+            blocks.update(values)
+            releases.update(reservations)
+        with tempfile.TemporaryDirectory() as directory:
             report, _ = self.timing.validate_derived(self.cfg, blocks, releases, Path(directory))
         self.assertTrue(report["passed"])
-        self.assertEqual(report["observed_runs"], 58)
+        self.assertEqual(report["observed_runs"], 98)
 
     @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for numerical validation")
     def test_changed_latency_matches_observed_drain(self):

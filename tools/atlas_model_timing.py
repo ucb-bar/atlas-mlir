@@ -8,30 +8,22 @@ from atlas_search_policy import POLICY, fixed_execution_contract
 from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import asdict, replace
-from io import StringIO
 import json
 import os
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from atlas_model_observer import observe_mxu
-from atlas_derive_scratchpad import scratchpad_assumptions
+from atlas_validate_common import native_state, native_unit, uops
+from atlas_derive_scratchpad import scratchpad_assumptions, source_path
 from atlas_model_schema import VPU_BLOCKS, MXU_BLOCKS, BINARY, mreg_event, canonical as encoded, sha256
 
 
 def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
     records = []
     kind = "model source" if suffixes else "model numerical data"
-    root = model_root / subdir
-    if any(word in part.lower() for part in root.parts for word in ("hammer", "vlsi")):
-        raise RuntimeError("prohibited manifest path")
-    if ".." in root.parts:
-        raise RuntimeError("parent traversal is unsupported")
-    root = Path(os.path.abspath(root))
-    if any(word in part.lower() for part in root.parts for word in ("hammer", "vlsi")):
-        raise RuntimeError("prohibited manifest path")
-    if any(path.is_symlink() for path in reversed((root, *root.parents))):
-        raise RuntimeError(kind + " root contains a symlink")
+    root = source_path(model_root / subdir, RuntimeError, "prohibited manifest path",
+                       kind + " root contains a symlink", absolute=True, parent_error=RuntimeError)
     if not root.is_dir():
         raise RuntimeError(kind + " root is missing")
     def visit(directory):
@@ -152,30 +144,17 @@ def compress(ages: list[int]) -> dict:
 def observe_case(block_name: str, engine: str, assembly: str, *, nonzero=False, instrument=True, max_cycles=1024, cfg=None):
     """Execute one instruction, capturing real calls, never latency tables."""
     import torch
-    from npu_model.hardware.arch_state import ArchState
     from npu_model.hardware.exu import StagedExecution
-    from npu_model.hardware.lsu import LoadStoreUnit
-    from npu_model.hardware.mxu import MatrixExecutionUnitInner, MatrixExecutionUnitSystolic
-    from npu_model.hardware.vpu import VectorExecutionUnit
-    from npu_model.hardware.xlu import CrossLaneExecutionUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
 
     if cfg is None:
         cfg, config_values = configuration()
     else:
         config_values = configuration_values(cfg)
-    state = ArchState(cfg.arch_state_config)
-    with ExitStack() as cleanup:
-        cleanup.callback(state.close)
+    with native_state(cfg) as state, ExitStack() as cleanup:
         finish_tick = lambda: None
-        classes = {"vpu": VectorExecutionUnit, "mxu0": MatrixExecutionUnitSystolic,
-                   "mxu1": MatrixExecutionUnitInner, "vlsu": LoadStoreUnit,
-                   "scalar_lsu": LoadStoreUnit, "xlu": CrossLaneExecutionUnit}
-        unit = classes[engine](engine, Mock(spec=Logger), state, config=cfg)
-        instruction, = stream_to_instrs(StringIO(assembly))
-        uop = Uop(instruction, pc=0)
+        unit = native_unit(cfg, state, engine)
+        uop, = uops(assembly)
+        instruction = uop.insn
         mnemonic = instruction.mnemonic
         # Nonzero runs fill every register file and VMEM; zero runs keep reset state.
         if nonzero:
@@ -310,7 +289,7 @@ def result_signature(raw):
 
 def observer_manifest():
     return [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
-            for name in ("atlas_model_timing.py", "atlas_model_observer.py")]
+            for name in ("atlas_model_timing.py", "atlas_model_observer.py", "atlas_validate_common.py")]
 
 
 def observed_releases(block, raw):

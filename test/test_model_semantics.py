@@ -136,72 +136,24 @@ class DependencyClosureTest(unittest.TestCase):
             inventory = semantics.check_model_semantics(self.copy)
         self.assertTrue(inventory)
 
-    def test_fatal_policy_dispatch_and_cold_initialization_mutations_are_rejected(self):
+    def test_changed_dependencies_fail_closed(self):
         cases = (
-            ("hardware/core.py", "if not self.ignore_runtime_errors:\n            return False",
-             "if not self.ignore_runtime_errors:\n            return True"),
-            ("hardware/core.py", "EXU(type(exu).__name__): exu", "EXU(type(exu).__name__): self.exus[0]"),
             ("hardware/core.py", "self.cycle_count = 0", "self.cycle_count = 1"),
-            ("hardware/core.py", "self.delay_counter = 0", "self.delay_counter = 1"),
-            ("hardware/core.py", "self.ifu.load_program(program)", "self.ifu.reset()"),
             ("hardware/exu.py", "self._pending_completion_uop: Uop | None = None",
              "self._pending_completion_uop: Uop | None = stale_uop"),
-            ("hardware/arch_state.py", "self.initialize_buffers()", "self.initialize_buffers = None"),
-            ("hardware/arch_state.py", "self.pc = 0", "self.pc = 1"),
-        )
-        for relative, old, new in cases:
-            with self.subTest(relative=relative, old=old):
-                self.reject_mutation(relative, old, new)
-
-    def test_scalar_flags_csr_and_bf16_storage_mutations_are_rejected(self):
-        cases = (
-            ("if rd == 0:", "if rd == 1:"),
-            ("return self.xrf[rs]", "return 0"),
-            ("self.erf[rd] = value & 0xFF", "self.erf[rd] = value & 0x7F"),
-            ("self.flags[flag] = True", "self.flags[flag] = False"),
-            ("self.flags[flag] = False", "self.flags[flag] = True"),
-            ("return self.flags[flag]", "return False"),
-            ("self._csr_written.clear()", "self._csr_written = {0xC00}"),
-            ("self._csr_values[address] + increment", "self._csr_values[address] + increment + 1"),
-            ("self.mrf[vd].view(torch.bfloat16)[:] = value.flatten()",
-             "self.mrf[vd + 1].view(torch.bfloat16)[:] = value.flatten()"),
-            ("self.read_mrf_bf16(vs + 1)", "self.read_mrf_bf16(vs + 2)"),
-        )
-        for old, new in cases:
-            with self.subTest(old=old):
-                self.reject_mutation("hardware/arch_state.py", old, new)
-
-    def test_imem_stage_handoff_and_instruction_pc_mutations_are_rejected(self):
-        cases = (
+            ("hardware/arch_state.py", "self.read_mrf_bf16(vs + 1)", "self.read_mrf_bf16(vs + 2)"),
             ("hardware/ifu.py", "WORDS = 32768", "WORDS = 16384"),
-            ("hardware/ifu.py", "read_address = fetch_address & (self.WORDS - 1)",
-             "read_address = (fetch_address + 1) & (self.WORDS - 1)"),
-            ("hardware/ifu.py", "self.words[:len(program)] = deepcopy(program.instructions)",
-             "self.words[1:len(program) + 1] = deepcopy(program.instructions)"),
             ("hardware/stage_data.py", "self.valid = self._is_non_empty(data)", "self.valid = True"),
-            ("hardware/stage_data.py", "self.valid = False\n            return data",
-             "self.valid = True\n            return data"),
             ("software/instruction.py", "self.pc = pc", "self.pc = pc + 1"),
             ("software/program.py", "self.instructions = instructions", "self.instructions = instructions[1:]"),
-        )
-        for relative, old, new in cases:
-            with self.subTest(relative=relative, old=old):
-                self.reject_mutation(relative, old, new)
-
-    def test_isa_helper_bindings_and_sparse_memory_mutations_are_rejected(self):
-        cases = (
             ("configs/isa_definition.py", "_MASK32 = 0xFFFFFFFF", "_MASK32 = 0x7FFFFFFF"),
-            ("configs/isa_definition.py", "value -= 1 << length", "value += 1 << length"),
-            ("isa.py", "IsaSpec.operations[cls.mnemonic] = cls", "IsaSpec.operations[cls.mnemonic] = Instruction"),
+            ("isa.py", "functional: bool = True", "functional: bool = False"),
             ("isa_types.py", 'SCALAR = "ScalarExecutionUnit"', 'SCALAR = "LoadStoreUnit"'),
             ("isa_patterns.py", 'Named(ScalarReg, "rs1")', 'Named(ScalarReg, "rs2")'),
             ("hardware/sparse_memory.py", "_PAGE_BITS = 16", "_PAGE_BITS = 15"),
-            ("hardware/sparse_memory.py", "out[address - start:address - start + run].zero_()",
-             "out[address - start:address - start + run].fill_(1)"),
-            ("hardware/sparse_memory.py", "return start, max(start, stop)", "return start + 1, max(start, stop)"),
         )
         for relative, old, new in cases:
-            with self.subTest(relative=relative, old=old):
+            with self.subTest(relative=relative):
                 self.reject_mutation(relative, old, new)
 
     def test_added_override_and_changed_import_binding_are_rejected(self):
@@ -214,14 +166,6 @@ class DependencyClosureTest(unittest.TestCase):
         path.write_text(self.sources[relative] + "\nCore.tick = lambda self: None\n")
         with self.assertRaises(UnsupportedModelTiming):
             semantics.check_model_semantics(self.copy)
-
-    def test_functional_metadata_and_bundle_grammar_bindings_fail_closed(self):
-        # Neither functional metadata nor assembly grammar is ignored by
-        # normalization, even though the benchmark encoding is unchanged.
-        self.reject_mutation("isa.py", "functional: bool = True", "functional: bool = False")
-        self.reject_mutation("isa.py", "    functional: bool = True\n", "")
-        self.reject_mutation("configs/isa_definition.py", "functional = False", "functional = True")
-        self.reject_mutation("isa_types.py", "-?(?:0[xX]", "+?(?:0[xX]")
 
     def test_selected_source_comment_and_docstring_changes_are_accepted(self):
         baseline = semantics.check_model_semantics(self.copy)

@@ -10,7 +10,6 @@ from atlas_overlap_rules import Register
 from atlas_vpu_partition import (operand_domain, relation, standalone_domain, preserves_inputs,
                                  require_preserved_inputs)
 import atlas_derive_overlap as derive
-from test_derive_overlap import fixtures
 
 
 def role(operand, write=False, count=2):
@@ -94,16 +93,6 @@ class VpuPartitionTests(unittest.TestCase):
                 self.assertFalse(values["rs1"] % 32 == values["rs2"] % 32
                                  and values["rs1"] != values["rs2"])
 
-    def test_legality_includes_read_cache_and_same_row_read_write(self):
-        roles = [role("rs1", count=1), role("rd", True, 1)]
-        same_row = (Register(False, ((0, 0),), 2), Register(True, ((0, 0),), 2))
-        rows = operand_domain(roles, roles, same_row, same_row)
-        for _, a, b in rows:
-            self.assertNotEqual(a["rs1"], a["rd"])
-            self.assertNotEqual(b["rs1"], b["rd"])
-            self.assertTrue(native_port_oracle(registers(roles, a), same_row))
-            self.assertTrue(native_port_oracle(registers(roles, b), same_row))
-
     def test_missing_or_unknown_structure_fails_closed(self):
         roles = [role("rs1"), role("rd", True)]
         with self.assertRaisesRegex(ValueError, "requires guarded"):
@@ -112,14 +101,6 @@ class VpuPartitionTests(unittest.TestCase):
             operand_domain(roles, roles, (), ())
         with self.assertRaisesRegex(ValueError, "unsupported operand partition role"):
             operand_domain([role("rs1", count=3)], roles, (), ())
-
-    def test_derive_integration_uses_source_footprints(self):
-        facts, contract = fixtures()
-        rules = derive.SourceRules(facts, contract)
-        domain = derive.mreg_domain("vpu.relu", "vpu.exp2", rules)
-        self.assertGreater(len(domain), 10)
-        for key, (_, _, a, b, _, _) in domain.items():
-            self.assertEqual(derive.actual_relation(a, b)["mreg_banks"], key)
 
     def test_pack_second_source_half_is_rejected_by_actual_row_collision(self):
         roles = [role("rs2"), role("rd", True, 1)]

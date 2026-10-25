@@ -1,9 +1,4 @@
-"""Source-derived operands for representative compiler proposal costs.
-
-The field-order placement algorithm is compiler policy. Register spans, limits,
-instruction roles and legal constructors come from the selected model. A probe
-interval describes that pair only; it is never a general overlap admission.
-"""
+"""Source-derived operands for representative compiler proposal costs."""
 from __future__ import annotations
 
 import ast
@@ -25,12 +20,7 @@ def _tree(function):
 
 
 def check_timing_conditions(node, register_fields):
-    """Prove planner timing predicates do not depend on register selectors.
-
-    Source-shape contracts separately bound calls/control flow. This small
-    dependency check follows local numeric aliases to reject operand-sensitive
-    conditions; returned bank selectors may depend on operands as intended.
-    """
+    """Prove planner timing predicates do not depend on register selectors."""
     tainted = set()
 
     def depends(expression):

@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from io import StringIO
 from unittest.mock import Mock
 
 from atlas_derive_admission import derive_admission, semantic_admission
 from atlas_derive_overlap import command
 from atlas_model_schema import canonical, sha256
 from atlas_validate_overlap import initialize_state, state_snapshot
+from atlas_validate_common import native_state, native_unit, uops
 
 
 def sample_plan(admission, per_op):
@@ -92,32 +92,24 @@ def sample_plan(admission, per_op):
 
 def native_run(sample, nonzero, serial=False):
     """Independent native units, one command/edge, shared native checker/state."""
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.vpu import VectorExecutionUnit
-    from npu_model.hardware.xlu import CrossLaneExecutionUnit
-    from npu_model.hardware.lsu import LoadStoreUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
     from atlas_model_timing import configuration
+    from npu_model.logging.logger import Logger
     cfg, _ = configuration()
-    state = ArchState(cfg.arch_state_config)
-    logger = Mock(spec=Logger)
-    units = [cls(name, logger, state, config=cfg) for cls, name in
-             ((VectorExecutionUnit, "Vector0"), (CrossLaneExecutionUnit, "XLU"), (LoadStoreUnit, "LSU"))]
-    try:
+    with native_state(cfg) as state:
+        logger = Mock(spec=Logger)
+        units = [native_unit(cfg, state, engine, name, logger) for engine, name in
+                 (("vpu", "Vector0"), ("xlu", "XLU"), ("lsu", "LSU"))]
         initialize_state(state, nonzero, {"2": 0, "3": cfg.vmem_bank_bytes // 4, "6": cfg.vmem_bank_bytes})
-        insns = list(stream_to_instrs(StringIO("\n".join(sample["assembly"]))))
-        if len(insns) != len(sample["issues"]):
+        commands = uops(sample["assembly"])
+        if len(commands) != len(sample["issues"]):
             raise ValueError("native admission sample length differs")
-        uops = [Uop(insn, pc=index*4) for index, insn in enumerate(insns)]
         next_index, accepted = 0, []
         for age in range(8192):
             issue = None
-            if next_index < len(uops) and (
+            if next_index < len(commands) and (
                     (not serial and age == sample["issues"][next_index]) or
                     (serial and (not accepted or not any(unit.has_in_flight for unit in units)))):
-                issue = uops[next_index]
+                issue = commands[next_index]
             state.current_uop = issue
             try:
                 for unit in units:
@@ -138,14 +130,12 @@ def native_run(sample, nonzero, serial=False):
             if issue is not None:
                 accepted.append(age)
                 next_index += 1
-            if next_index == len(uops) and not any(unit.has_in_flight for unit in units):
+            if next_index == len(commands) and not any(unit.has_in_flight for unit in units):
                 for unit in units:
                     unit.flush_completions()
                 return dict(accepted=True, issued_ages=accepted, drained=True,
                             final_state_sha256=sha256(canonical(state_snapshot(state))))
         raise ValueError("native admission sample failed to drain")
-    finally:
-        state.close()
 
 
 def validate_admission(model, per_op, admission):

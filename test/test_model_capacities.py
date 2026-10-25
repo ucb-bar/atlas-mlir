@@ -13,40 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import atlas_derive_memory as memory
 import atlas_derive_overlap as overlap
-from atlas_derive_mxu import _method, _one, _plan, UnsupportedMXU
-from atlas_derive_vpu import _normalize_slot_capacity, UnsupportedVPU
+from atlas_derive_mxu import _plan, UnsupportedMXU
 from test_derive_overlap import fixtures
 
 
-def slot_source(count, slots=None):
-    return ast.parse(f"""
-ISSUE_SLOTS = {count!r}
-class VectorExecutionUnit:
-    def _accept(self, uop):
-        slot = next(index for index in {'range(ISSUE_SLOTS)' if slots is None else repr(slots)}
-                    if all(op.slot != index for op in live))
-    def _issue_blocked(self, name, cycle):
-        return bool(live and (len(live) == ISSUE_SLOTS or self._double(name)))
-""")
-
-
 class CapacityRulesTests(unittest.TestCase):
-    def test_slot_predicate_and_allocator_are_one_parameter(self):
-        baseline = ast.dump(slot_source(2), include_attributes=False)
-        for count in (1, 2, 3):
-            with self.subTest(count=count):
-                tree = slot_source(count)
-                self.assertEqual(_normalize_slot_capacity(tree), list(range(count)))
-                self.assertEqual(ast.dump(tree, include_attributes=False), baseline)
-        for count, slots in ((0, ()), (4, (0, 1, 2, 3)), (2, (0,)), (2, (0, 2)), (1, (True,))):
-            with self.subTest(count=count, slots=slots), self.assertRaises(UnsupportedVPU):
-                _normalize_slot_capacity(slot_source(count, slots))
-        tree = slot_source(2)
-        comparison = next(n for n in ast.walk(tree) if isinstance(n, ast.Compare) and isinstance(n.left, ast.Call))
-        comparison.ops = [ast.GtE()]
-        with self.assertRaises(UnsupportedVPU):
-            _normalize_slot_capacity(tree)
-
     def test_one_slot_or_tracker_binds_pair_minimum(self):
         facts, contract = fixtures()
         baseline = overlap.SourceRules(facts, contract)
@@ -112,6 +83,9 @@ class CapacitySourceTests(unittest.TestCase):
         for slots in (1, 2, 3):
             changed = source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")
             overlap._guard_ast(ast.parse(changed), "vpu.py")
+        for slots in (0, 4, True):
+            with self.subTest(slots=slots), self.assertRaises(ValueError):
+                overlap._guard_ast(ast.parse(source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")), "vpu.py")
         for old, new in (("cycle - op.issued < op.write_last", "cycle - op.issued <= op.write_last"),
                          ("return VPU_OP_LATENCIES[mnemonic] - 1", "return VPU_OP_LATENCIES[mnemonic]")):
             with self.subTest(mutation=new), self.assertRaises(ValueError):
@@ -121,13 +95,7 @@ class CapacitySourceTests(unittest.TestCase):
         source = self.source("xlu.py")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "xlu.py"
-            path.write_text(source)
             with patch.object(memory.inspect, "getsourcefile", return_value=str(path)):
-                tree = memory._source(SimpleNamespace())
-                cls = _one((node for node in tree.body if isinstance(node, ast.ClassDef)
-                            and node.name == "CrossLaneExecutionUnit"), "XLU class")
-                predicates = memory._predicates(_method(cls, "tick"))
-                self.assertEqual([memory._ages(node, 32)["last_age"] for node in predicates], [32, 33, 65, 65])
                 for old, new in (("TRANSPOSE_CYCLES = 66", "TRANSPOSE_CYCLES = 65"),
                                  ("TRANSPOSE_CYCLES - 1 - age", "TRANSPOSE_CYCLES - age")):
                     path.write_text(source.replace(old, new))

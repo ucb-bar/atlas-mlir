@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -13,6 +12,7 @@ sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError, model_timing_cli
 from atlas_model_schema import LOCK
+from atlas_derive_scratchpad import source_path
 from atlas_search_policy import POLICY
 from atlas_model_capabilities import check_configuration
 from atlas_model_semantics import check_model_semantics
@@ -22,17 +22,9 @@ from atlas_model_timing import (configuration, encoded, isa_cases, numerical_dat
 
 
 def safe_path(value):
-    path = Path(value)
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise ValueError("prohibited path")
-    if ".." in path.parts:
-        raise ValueError("parent traversal is unsupported")
-    path = Path(os.path.abspath(path))
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise ValueError("prohibited path")
-    if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-        raise ValueError("model and output paths must not contain symlinks")
-    return path
+    return source_path(value, ValueError, "prohibited path",
+                       "model and output paths must not contain symlinks",
+                       absolute=True, parent_error=ValueError)
 
 
 def identity(root):

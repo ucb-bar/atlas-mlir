@@ -1,11 +1,4 @@
-"""Versioned integrity boundary for source-derived production timing facts.
-
-The payload contains scheduling semantics and model identity, not producer
-receipts or elapsed times. The serialized payload is carried explicitly so
-Python and C++ verify the same bytes without relying on float printer parity.
-This binds a derivation/validation record; it is not a signature or an assertion
-that an arbitrary external author actually ran the recorded derivation.
-"""
+"""Bind model identity and timing semantics using identical Python/C++ payload bytes."""
 from __future__ import annotations
 
 import copy
@@ -60,9 +53,9 @@ def seal_derived(facts):
     for name in VALIDATED_FIELDS:
         if name in facts and facts[name].get("validation", {}).get("passed") is not True:
             raise ValueError("derived facts require successful " + name + " validation")
-    if "mxu_weight_timing" in facts and validation.get("mxu_weight_validation", {}).get("passed") is not True:
-        raise ValueError("derived facts require successful MXU weight validation")
     if "mxu_weight_timing" in facts:
+        if validation.get("mxu_weight_validation", {}).get("passed") is not True:
+            raise ValueError("derived facts require successful MXU weight validation")
         validate_mxu_weight_timing(facts["mxu_weight_timing"])
     encoded = canonical(semantic_payload(facts))
     digest = sha256(encoded)

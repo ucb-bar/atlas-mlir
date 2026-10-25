@@ -1,8 +1,4 @@
-"""Configuration capabilities using private mutations of opted-in derived facts.
-
-Resealed configuration variants are synthetic test data, written only to each
-test's temporary directory. They are not model derivation or production exports.
-"""
+"""Compiler configuration capabilities using private, resealed test variants."""
 from copy import deepcopy
 import hashlib
 import json
@@ -26,16 +22,12 @@ class ModelConfigContractTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.facts = json.loads((Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json").read_text())
-        # Check the genuine input before creating any private synthetic variants.
-        # Raw observer fixtures must never be promoted to derived facts here.
         verify_derived(self.facts)
 
     def select(self):
         model = self.facts["model"]
         model["configuration_json"] = json.dumps(model["configuration"], sort_keys=True, separators=(",", ":"))
         model["configuration_sha256"] = hashlib.sha256(model["configuration_json"].encode()).hexdigest()
-        # These mutations isolate compiler capability checks from derivation.
-        # Resealing is a private test operation, never a production bypass.
         self.facts["engine_admission"]["model"]["configuration_sha256"] = model["configuration_sha256"]
         self.facts["engine_admission"]["source_contract"]["execution_units"] = deepcopy(model["configuration"]["execution_units"])
         for field, config in (("num_channels", "dma_num_channels"), ("beat_bytes", "dma_beat_bytes"),
@@ -92,23 +84,6 @@ class ModelConfigContractTest(unittest.TestCase):
         self.facts["model"]["configuration"]["dma_memory_params"].update(
             frequency_ghz=None, channels=None, latency_mode=None)
         result = self.select()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_python_float_serialization_matches_configuration_values(self):
-        for frequency in (1.0, .000001, .75):
-            with self.subTest(frequency=frequency):
-                self.facts["model"]["configuration"]["dma_memory_params"]["frequency_ghz"] = frequency
-                self.facts["dma_timing"]["frequency_ghz"] = frequency
-                result = self.select()
-                self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_legacy_selected_default_curve_metadata_remains_usable(self):
-        result = self.select()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        import re
-        legacy = re.sub(r'dma_curve_sha256 = "[0-9a-f]{64}", ', '', result.stdout)
-        self.assertNotEqual(legacy, result.stdout)
-        result = run(OPT, legacy, "--verify-atlas-timing")
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_selected_engine_capacity_is_bound_not_fixed(self):

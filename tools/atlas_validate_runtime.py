@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Validate fatal runtime faults through bounded, unmodified native Core runs.
-
-These paired probes validate the source contract; observations never derive or
-relax timing facts. No model method, exception handler, or unit is patched.
-"""
+"""Validate fatal runtime faults through bounded, unmodified native Core runs."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +12,7 @@ from types import SimpleNamespace
 
 from atlas_model_diagnostics import ModelTimingValidationError, model_timing_cli
 from atlas_validate_overlap import safe_path
+from atlas_validate_common import load_model, native_core
 
 POLICY = "native-core-runtime-fault-pairs-v1"
 MAX_CYCLES = 512
@@ -65,31 +62,18 @@ def runtime_cases(isa, cfg):
     )
 
 
-def _load_model(model):
-    root = safe_path(model)
-    sys.path.insert(0, str(root))
-    import npu_model
-    import torch
-    if safe_path(Path(npu_model.__file__).parent.parent) != root:
-        raise ValueError("imported npu_model differs from --npu-model")
-    torch.set_num_threads(1)
-    return root
-
-
 def native_case(case, cfg, *, max_cycles=MAX_CYCLES):
     """Run one complete Core, accepting only its specifically expected fault."""
-    from npu_model.hardware.core import Core
     from npu_model.hardware.bank_conflict import BankConflictError
     from npu_model.logging.logger import Logger
     from npu_model.software.program import InstantiableProgram
 
     logger = SimpleNamespace(**{name: lambda *args, **kwargs: None
                                 for name in dir(Logger) if name.startswith("log_")})
-    core = Core(cfg, logger)
     result = dict(name=case.name, mechanism=case.mechanism,
                   expectation="reject" if case.expected_type else "positive",
                   words_u32=[insn.to_bytecode() for insn in case.instructions])
-    try:
+    with native_core(cfg, logger=logger) as core:
         if core.ignore_runtime_errors is not False:
             raise ModelTimingValidationError("native runtime validation requires ignore_runtime_errors=False")
         core.load_program(InstantiableProgram(list(case.instructions)))
@@ -122,8 +106,6 @@ def native_case(case, cfg, *, max_cycles=MAX_CYCLES):
             raise ModelTimingValidationError(f"runtime probe {case.name} reached ECALL before engines/DMA drained")
         return dict(result, observed="ecall_drained", cycles=core.cycle_count,
                     ignore_runtime_errors=False)
-    finally:
-        core.close()
 
 
 def validate_runtime(model, *, max_cycles=MAX_CYCLES):
@@ -132,14 +114,11 @@ def validate_runtime(model, *, max_cycles=MAX_CYCLES):
         raise ModelTimingValidationError("native runtime validation requires Python assertions; disable -O/PYTHONOPTIMIZE")
     if type(max_cycles) is not int or not 1 <= max_cycles <= MAX_CYCLES:
         raise ValueError(f"runtime cycle bound must be an integer in 1..{MAX_CYCLES}")
-    _load_model(model)
+    load_model(model, "imported npu_model differs from --npu-model")
     from npu_model.configs import isa_definition as isa
     from atlas_derive_curve import resolve_curve_path
     from atlas_model_timing import configuration
     cfg, _ = configuration()
-    # Use the selected model's supported bytes input, as in native scoring.
-    # This binds path resolution before Core construction without changing any
-    # model behavior or its curve parameters.
     cfg.dma_memory_params = dict(cfg.dma_memory_params,
                                 curves=json.loads(resolve_curve_path(cfg).read_bytes()))
     cases = [native_case(case, cfg, max_cycles=max_cycles) for case in runtime_cases(isa, cfg)]

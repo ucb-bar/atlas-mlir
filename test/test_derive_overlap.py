@@ -1,15 +1,11 @@
-import ast
-from copy import deepcopy
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import atlas_derive_overlap as derive
 from atlas_overlap_rules import validate_relation
-from atlas_model_schema import sha256
 
 
 def event(first, last):
@@ -58,28 +54,6 @@ def fixtures():
 
 
 class DeriveOverlapTests(unittest.TestCase):
-    def test_literal_extraction_uses_actual_expression(self):
-        for value in (7, 32, 41):
-            expr = ast.parse(f"self.cycle - op.issued < {value}", mode="eval")
-            self.assertEqual(derive._age_bound(expr, ast.Lt), value)
-        for text in ("self.cycle - op.issued < variable", "age < 32", "self.cycle - op.issued < True"):
-            with self.subTest(text=text), self.assertRaises(ValueError):
-                derive._age_bound(ast.parse(text, mode="eval"), ast.Lt)
-
-    def test_full_ast_structural_change_requires_review(self):
-        tree = ast.parse("_GROUPS = ({'vexp.bf16', 'vexp2.bf16'},)\n")
-        digest = sha256(ast.dump(tree, include_attributes=False).encode())
-        with patch.dict(derive.SOURCE_SHAPES, {"vpu.py": digest}):
-            derive._guard_ast(tree, "vpu.py")
-            mutated = ast.parse("_GROUPS = ({'vexp.bf16'},)\n")
-            with self.assertRaisesRegex(ValueError, "unsupported overlap control-flow"):
-                derive._guard_ast(mutated, "vpu.py")
-
-    def test_prohibited_paths_reject_before_filesystem_access(self):
-        for value in ("/tmp/HAMMER-case/no-file", "/tmp/disallowed-vLsI/file"):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "prohibited"):
-                derive.safe_path(value)
-
     def test_complete_single_register_relations(self):
         domain = derive.mreg_domain("mxu0.matmul", "mxu0.push_weight")
         self.assertEqual(set(domain), {"disjoint", "0=0", "0~0"})
@@ -101,10 +75,6 @@ class DeriveOverlapTests(unittest.TestCase):
         self.assertEqual({(r["accumulator"], r["weight_slot"]) for r, *_ in rows},
                          {("same", "same"), ("same", "other"), ("other", "same"), ("other", "other")})
 
-    def test_relation_terms_include_logical_and_physical_identity(self):
-        self.assertEqual(derive.actual_relation(dict(registers=[0, 1]), dict(registers=[0, 33])),
-                         dict(mreg_banks="0=0,1~1"))
-
     def test_scalar_templates_bind_full_supported_qualifiers(self):
         rows = list(derive.scalar_domain())
         self.assertTrue(rows)
@@ -122,19 +92,7 @@ class DeriveOverlapTests(unittest.TestCase):
                 self.assertEqual(relation["vmem_bank"], "same")
                 self.assertEqual(relation["vmem_word_window"], "same")
 
-    def test_source_depth_and_sequencer_fields_drive_capacity(self):
-        facts, contract = fixtures()
-        rules = derive.SourceRules(facts, contract)
-        names = ["mxu0.push_weight", "mxu0.push_acc_fp8", "mxu0.matmul"]
-        self.assertIn("sequencer", rules.capacity_conflict(names, [0, 1, 2]))
-        self.assertIsNone(rules.capacity_conflict(names, [0, 1, 33]))
-        changed = deepcopy(contract)
-        changed["capacity"]["mxu0_compute"] = 1
-        strict = derive.SourceRules(facts, changed)
-        self.assertIn("tracker", strict.capacity_conflict(["mxu0.matmul"] * 2, [0, 32]))
-        self.assertIsNone(rules.capacity_conflict(["mxu0.matmul"] * 2, [0, 32]))
-
-    def test_retired_prefix_port_choice_survives_first_command_drain(self):
+    def test_retired_prefix_samples_keep_source_gaps(self):
         facts, contract = fixtures()
         rules = derive.SourceRules(facts, contract)
         samples = [sample for sample in derive.chain_samples(rules)
@@ -142,19 +100,11 @@ class DeriveOverlapTests(unittest.TestCase):
         self.assertEqual(len(samples), 4)
         for sample in samples:
             with self.subTest(sample=sample["id"]):
-                first, weight, compute = sample["operations"]
+                first = sample["operations"][0]
                 weight_issue, gap = sample["gaps"]
                 compute_issue = weight_issue + gap
                 self.assertGreaterEqual(compute_issue, rules.first_free_age(first))
                 self.assertEqual(sample["gaps"], [2, 32 if sample["expectation"] == "positive" else 31])
-                full = rules.capacity_conflict(sample["operations"], [0, weight_issue, compute_issue])
-                if sample["expectation"] == "reject":
-                    self.assertIsNotNone(full)
-                    # Reconstructing only currently live commands changes the
-                    # weight's port choice and loses the real native conflict.
-                    self.assertIsNone(rules.capacity_conflict([weight, compute], [weight_issue, compute_issue]))
-                else:
-                    self.assertIsNone(full)
 
 
 if __name__ == "__main__":

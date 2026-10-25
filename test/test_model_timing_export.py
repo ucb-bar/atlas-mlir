@@ -115,7 +115,6 @@ class ModelObserverTest(unittest.TestCase):
             with self.subTest(ages=ages), self.assertRaises(ValueError):
                 compress(ages)
 
-
     def test_noninterference_signature_includes_each_state_and_progress(self):
         fields = ("initial_state_sha256", "final_state_sha256", "architectural_states", "control_states", "pre_edges",
                   "first_free_age", "complete_count", "total_instructions", "busy_cycles", "instruction_word", "configuration")

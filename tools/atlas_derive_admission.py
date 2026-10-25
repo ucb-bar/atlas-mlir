@@ -1,8 +1,4 @@
-"""Extract engine initiation predicates, independently of overlap pair coverage.
-
-Isolated next_issue_age remains a lifetime envelope. This contract describes
-the reviewed relational predicates that may admit work inside that envelope.
-"""
+"""Extract engine initiation predicates, independently of overlap pair coverage."""
 from __future__ import annotations
 
 import ast
@@ -29,11 +25,7 @@ def semantic_admission(admission):
 
 
 def _vpu_live_ages(cfg, blocks):
-    """Read native write_last, which controls issue liveness and retirement.
-
-    The guarded issue planner sets this field from the selected latency. Row
-    writes may finish earlier; their maximum is not an issue-admission bound.
-    """
+    """Read native write_last, which controls issue liveness and retirement."""
     from atlas_derive_vpu import _plans
     final = {name: operation.write_last for name, _, _, operation in _plans(cfg)}
     if set(final) != {name for name, block in blocks.items() if block["engine"] == "vpu"}:

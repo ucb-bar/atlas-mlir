@@ -1,19 +1,13 @@
-"""Independent fact-driven DMA predictions checked against the native pinned model.
-
-This module never derives facts or fits timings. Its reference consumes only the
-exported fact object and compares exact backend traces, native Core completion
-visibility, source-derived command bounds, and bytes under varied streams.
-"""
+"""Check fact-driven DMA predictions, bytes and completion edges against the native model."""
 from __future__ import annotations
 
 from atlas_model_diagnostics import ModelTimingValidationError
 
 from collections import deque
 from copy import copy
-from io import StringIO
 import json
 import math
-from unittest.mock import Mock
+from atlas_validate_common import instructions, native_core, native_state, native_unit, uops
 
 
 class FactBackend:
@@ -88,14 +82,8 @@ def _stream(backend, stores, *, translation=0, stalls=False, gap=0):
 
 def _engine_observation(cfg, *, store, beats, history=()):
     import torch
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.dma import DmaExecutionUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
     size = beats * cfg.dma_beat_bytes
-    state = ArchState(cfg.arch_state_config)
-    try:
+    with native_state(cfg) as state:
         data = (torch.arange(size, dtype=torch.int64) % 251).to(torch.uint8)
         dram_address = state.cfg.dram_base
         state.write_xrf(1, dram_address)
@@ -107,18 +95,17 @@ def _engine_observation(cfg, *, store, beats, history=()):
             state.dram[dram_address:dram_address + size] = data
         state.set_flag(0)
         mnemonic = "dma.store x1, x2, x3, ch0" if store else "dma.load x2, x1, x3, ch0"
-        instruction, = stream_to_instrs(StringIO(mnemonic + "\n"))
-        unit = DmaExecutionUnit("dma", Mock(spec=Logger), state, config=cfg)
+        command, = uops(mnemonic)
+        unit = native_unit(cfg, state, "dma")
         if history:
             # Drain a prior mixed backend stream, preserving issued history and
             # fractional ready state. The launch follows its last acknowledgement.
             prior = _stream(unit.backend, history)
             unit.cycle = prior["completed"][-1][0]
         launch = unit.cycle + 1
-        uop = Uop(instruction, pc=0)
         issued, completed = [], []
         for age in range(200000):
-            unit.tick(uop if age == 0 else None)
+            unit.tick(command if age == 0 else None)
             event = unit.last_cycle
             if event.a is not None:
                 issued.append(unit.cycle)
@@ -132,22 +119,14 @@ def _engine_observation(cfg, *, store, beats, history=()):
                     raise ModelTimingValidationError("isolated DMA validation did not drain")
                 return dict(issued=issued, completed=completed, retired_cycle=unit.cycle, launch_cycle=launch)
         raise ModelTimingValidationError("native isolated DMA validation timed out")
-    finally:
-        state.close()
 
 
 def _mixed_engine_observation(cfg, facts, *, fact_backend=False, deny_grants=False):
     """Three concurrent channels, mixed commands, disjoint source/destination bytes."""
     import torch
     from dataclasses import asdict
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.dma import DmaExecutionUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
-    state = ArchState(cfg.arch_state_config)
     size = facts["beat_bytes"] * (facts["window_beats"] + 1)
-    try:
+    with native_state(cfg) as state:
         base = state.cfg.dram_base
         bank = cfg.vmem_bank_bytes
         read0 = (torch.arange(size, dtype=torch.int64) % 251).to(torch.uint8)
@@ -159,13 +138,12 @@ def _mixed_engine_observation(cfg, facts, *, fact_backend=False, deny_grants=Fal
         for register, value in {1: base, 2: 0, 3: size, 4: base + bank,
                                 5: bank // 4, 6: base + 2 * bank, 7: 2 * bank // 4}.items():
             state.write_xrf(register, value)
-        instructions = stream_to_instrs(StringIO("dma.load x2, x1, x3, ch0\n"
-                                                "dma.store x4, x5, x3, ch1\n"
-                                                "dma.load x7, x6, x3, ch2\n"))
-        commands = [Uop(insn, pc=index * 4) for index, insn in enumerate(instructions)]
+        commands = uops("dma.load x2, x1, x3, ch0\n"
+                        "dma.store x4, x5, x3, ch1\n"
+                        "dma.load x7, x6, x3, ch2\n")
         for channel in range(len(commands)):
             state.set_flag(channel)
-        unit = DmaExecutionUnit("dma", Mock(spec=Logger), state, config=cfg)
+        unit = native_unit(cfg, state, "dma")
         if fact_backend:
             unit.backend = FactBackend(facts)
         trace = []
@@ -185,26 +163,20 @@ def _mixed_engine_observation(cfg, facts, *, fact_backend=False, deny_grants=Fal
                 return dict(trace=trace, retired_cycle=unit.cycle, bytes_per_command=size,
                             commands=len(commands), bytes_verified=True)
         raise ModelTimingValidationError("mixed native DMA validation timed out")
-    finally:
-        state.close()
 
 
 def _core_wait_observation(cfg, *, store, beats, wait_age=1):
     """Execute real Core S1 and DMA edges, including a precisely placed wait."""
-    from npu_model.hardware.core import Core
     from npu_model.hardware.dma import DmaExecutionUnit
-    from npu_model.logging.logger import Logger
     from npu_model.software.program import InstantiableProgram
-    from npu_model.util.converter import stream_to_instrs
-    core = Core(config=cfg, logger=Mock(spec=Logger))
-    try:
+    mnemonic = "dma.store x1, x2, x3, ch0" if store else "dma.load x2, x1, x3, ch0"
+    assembly = [mnemonic] + ["addi x0, x0, 0"] * (wait_age - 1) + ["dma.wait ch0"]
+    with native_core(cfg) as core:
         state = core.arch_state
         state.write_xrf(1, state.cfg.dram_base)
         state.write_xrf(2, 0)
         state.write_xrf(3, beats * cfg.dma_beat_bytes)
-        mnemonic = "dma.store x1, x2, x3, ch0" if store else "dma.load x2, x1, x3, ch0"
-        assembly = [mnemonic] + ["addi x0, x0, 0"] * (wait_age - 1) + ["dma.wait ch0"]
-        core.load_program(InstantiableProgram(stream_to_instrs(StringIO("\n".join(assembly) + "\n"))))
+        core.load_program(InstantiableProgram(instructions(assembly)))
         dma = next(unit for unit in core.exus if isinstance(unit, DmaExecutionUnit))
         launch = retired = waited = None
         wait_checks = []
@@ -224,8 +196,6 @@ def _core_wait_observation(cfg, *, store, beats, wait_age=1):
                 return dict(launch_cycle=launch, retired_cycle=retired, wait_issue_cycle=waited,
                             wait_checks=wait_checks, drained=not dma.backend.outstanding)
         raise ModelTimingValidationError("native Core DMA/wait validation timed out")
-    finally:
-        core.close()
 
 
 def validate_curve(cfg, facts, out):

@@ -1,17 +1,7 @@
-"""Derive reviewed Core edge facts and emit a fixed graph projection descriptor.
-
-This describes a projected virtual graph recurrence, not full instruction/Core replay.
-The source contract refuses changed control structures before publishing facts.
-"""
+"""Derive reviewed Core edge facts and emit a fixed graph projection descriptor."""
 from __future__ import annotations
 
-import ast
-import inspect
-from pathlib import Path
-
 from atlas_derive_frontend import derive_frontend
-from atlas_derive_scratchpad import method, read_source
-from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_replay import validate_program
 
 
@@ -22,21 +12,8 @@ def projection_program(source):
 
 
 def derive_replay(cfg):
-    # This independent frontend extraction checks complete Core.tick/_tick_s1
-    # source shapes, preserving S1-before-EXU and issue-before-fetch ordering.
+    # The frontend guards complete Core.tick/_tick_s1 ordering and stall logic.
     frontend = derive_frontend(cfg)
-    root = Path(inspect.getfile(cfg.isa)).parent
-    tick = method(read_source(root / "hardware" / "core.py"), "Core", "tick")
-    calls = [(item.lineno, ast.unparse(item.func)) for item in ast.walk(tick) if isinstance(item, ast.Call)]
-    def line(name):
-        found = [position for position, target in calls if target == name]
-        if len(found) != 1:
-            raise UnsupportedModelTiming("unsupported Core transition ordering: " + name)
-        return found[0]
-    if not line("self._tick_s1") < line("exu.tick") < line("self.ifu.tick"):
-        raise UnsupportedModelTiming("unsupported Core transition phase ordering")
-    # Core reads DMA flags in S1 before EXU completion updates on each edge.
-    # The frontend shape also excludes implicit engine/dependency stalls.
     source = dict(schema="atlas.core_edges.v1", clock_step=frontend["ordinary_issue_gap"],
                   phases=["s1_previous_state", "execution_units", "fetch"],
                   dma_wait_observes="previous_edge_flags",

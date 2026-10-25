@@ -211,8 +211,8 @@ writes, a helper DMA, scalar memory or a branch or jump outside an analyzed
 scalar loop, an analyzed loop that touches its staging window, a CSR access,
 the halt, or entry to any other branch target. Transfers stay in flight through
 PACK ([DMA across loops](#dma-across-loops)). Under the model provider, a
-launch also completes the transfer launched eight launches earlier, whose RTL
-command slot it reuses.
+launch first completes the transfer whose RTL command slot it reuses (eight
+launches earlier).
 
 ## Physical program output
 

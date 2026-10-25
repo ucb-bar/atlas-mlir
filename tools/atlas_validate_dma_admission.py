@@ -1,21 +1,14 @@
-"""Bounded native qualification of frozen asynchronous DMA admission semantics.
-
-Native executions check issue traces and complete architectural state against
-serial references. They never select gaps or derive completion/overlap windows.
-"""
+"""Qualify frozen DMA admission semantics against native issue traces and serial state."""
 from __future__ import annotations
 
 from copy import deepcopy
-from io import StringIO
 import math
-from pathlib import Path
-import sys
-from unittest.mock import Mock
 
 from atlas_derive_dma_admission import derive_dma_admission
 from atlas_derive_overlap import safe_path
 from atlas_model_diagnostics import ModelTimingValidationError
 from atlas_model_schema import canonical, sha256
+from atlas_validate_common import load_model, native_core
 
 
 POLICY = "source-asynchronous-dma-boundaries-v1"
@@ -79,11 +72,7 @@ def sample_plan(per_op):
 
 def _run(cfg, sample, *, nonzero, serial=False):
     import torch
-    from npu_model.hardware.core import Core
     from npu_model.hardware.dma import DmaExecutionUnit
-    from npu_model.logging.logger import Logger
-    from npu_model.software.program import InstantiableProgram
-    from npu_model.util.converter import stream_to_instrs
 
     commands = sample["commands"]
     assembly, pcs, pending = [], [], set()
@@ -109,12 +98,9 @@ def _run(cfg, sample, *, nonzero, serial=False):
                 assembly.append("delay " + str(VALIDATION_POLICY["serial_compute_delay_imm"]))
     assembly.extend("dma.wait ch" + str(channel) for channel in sorted(pending))
     assembly.append("ecall")
-    instructions = stream_to_instrs(StringIO("\n".join(assembly) + "\n"))
-    core = Core(config=cfg, logger=Mock(spec=Logger))
-    try:
+    with native_core(cfg, assembly) as core:
         if core.ignore_runtime_errors:
             raise ModelTimingValidationError("DMA gate requires fatal native runtime errors")
-        core.load_program(InstantiableProgram(instructions))
         state = core.arch_state
         bank = cfg.vmem_bank_bytes
         span = 8192
@@ -183,8 +169,6 @@ def _run(cfg, sample, *, nonzero, serial=False):
         return dict(id=sample["id"], rejected=False, issue_trace=relative, denied_grants=denied,
                     dma_events_sha256=sha256(canonical(events)), state_sha256=digest,
                     retired_age=core.cycle_count - traces[0][1], drained=True)
-    finally:
-        core.close()
 
 
 def validate_dma_admission(model, per_op, admission):
@@ -194,13 +178,8 @@ def validate_dma_admission(model, per_op, admission):
     expected = derive_dma_admission(model, per_op)
     if _semantics(expected) != _semantics(frozen):
         raise ModelTimingValidationError("DMA admission candidate differs from selected source derivation")
-    sys.path.insert(0, str(model))
-    import npu_model
-    import torch
+    load_model(model, "DMA admission imported a different model", ModelTimingValidationError)
     from atlas_model_timing import configuration
-    if safe_path(Path(npu_model.__file__).parent.parent) != model:
-        raise ModelTimingValidationError("DMA admission imported a different model")
-    torch.set_num_threads(1)
     cfg, config = configuration()
     if config != per_op["model"]["configuration"]:
         raise ModelTimingValidationError("DMA admission native configuration differs from facts")
