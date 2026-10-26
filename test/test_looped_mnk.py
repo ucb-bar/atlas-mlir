@@ -354,8 +354,8 @@ class LoopedMNKTest(unittest.TestCase):
                     self.assertEqual(virtual.count('"atlas.virtual_restore"'), kc if cached else 0)
                     if cached:
                         self.assertEqual(virtual.count('"atlas.virtual_dma_load_fp8"'), 2 * kc)
-                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), kc)
-                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'), kc - (seed is None))
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), 1)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'), int(seed is not None))
                         entry, row = virtual.split("^m_body(", 1)
                         # A is refreshed for each row; a single W column is
                         # initialized once before any output-row iteration.

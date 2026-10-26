@@ -347,21 +347,23 @@ def _virtual(
             lines.append("    %seed_tile = arith.addi %seed_row, %zero_n : i32")
         lines += [f"    cf.br ^n_body(%mb : {state})", f"  ^n_body(%nb: {state}):"]
     if seed_address is None:
-        tile_product("first", "nb", "arow", "wrow", cached=0 if reuse else None)
+        tile_product("first", "nb", "arow", "wrow", cached=0 if reuse else None, readout=not reuse or kc == 1)
     else:
         c("seed_bytes", ob)
         effect("dma_load_bf16", "nb", "seed_loaded", ["seed_tile", "seed_bytes"], ["i32", "i32"], ("seed_value", bf16))
-        tile_product("first", "seed_loaded", "arow", "wrow", "seed_value", cached=0 if reuse else None)
+        tile_product("first", "seed_loaded", "arow", "wrow", "seed_value", cached=0 if reuse else None, readout=not reuse or kc == 1)
     if reuse:
-        current, value = "first_result_s", "first_result"
+        # Static cache steps share the accumulator until the completed output tile.
+        current, value = ("first_dot_s", "first_acc") if kc > 1 else ("first_result_s", "first_result")
         for index in range(1, kc):
             prefix = f"cached_step_{index}"
             c(prefix + "_offset", index * ab)
             base = "wrow" if reuse == "a" else "arow"
             lines.append(f"    %{prefix}_p = arith.addi %{base}, %{prefix}_offset : i32")
             ap, wp = ("arow", prefix + "_p") if reuse == "a" else (prefix + "_p", "wrow")
-            tile_product(prefix, current, ap, wp, value, cached=index)
-            current, value = prefix + "_result_s", prefix + "_result"
+            current, value = tile_product(
+                prefix, current, ap, wp, value, cached=index, acc_is_handle=True, readout=index == kc - 1
+            )
         lines.append(f"    cf.br ^store(%{current}, %{value} : {state}, {bf16})")
     elif kc > 1 and k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
