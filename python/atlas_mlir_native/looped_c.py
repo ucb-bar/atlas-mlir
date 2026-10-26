@@ -309,7 +309,8 @@ static int {name}_overlaps(const void *a, size_t an, const void *b, size_t bn) {
       !io.write || !io.read || !polls || bytes < {workspace}u ||
       !{name}_valid_range(workspace,{workspace}u) ||
       {name}_overlaps(workspace,{workspace}u,ctx,sizeof(*ctx)) ||
-      {name}_overlaps(workspace,{workspace}u,host,sizeof(*host))) return {upper}_INVALID;
+      {name}_overlaps(workspace,{workspace}u,host,sizeof(*host)) ||
+      {name}_overlaps(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
   *ctx = ({name}_context){{host,io,(uint8_t *)workspace,polls,{{
     {{{addresses[0]}u,{ab}u,ATLAS_HOST_DEVICE_READ}},
     {{{addresses[1]}u,{wb}u,ATLAS_HOST_DEVICE_READ}},
