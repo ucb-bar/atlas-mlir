@@ -1,4 +1,4 @@
-"""Opt-in Tiny 128x2048x2048 compulsory-DMA assembly prototype.
+"""Opt-in Tiny 128x2048xN compulsory-DMA assembly prototype.
 
 VMEM operands are four-byte words, while DRAM operands are bytes. A occupies
 bank 1 exactly; bank 0 holds a 64-KiB transposed B column panel and 2-KiB
@@ -8,15 +8,18 @@ store / pop 34, transpose / BF16 arithmetic 66, weight push 32, compute 96.
 """
 
 
+SHAPES = ((128, 2048, 2048), (128, 2048, 256),
+          (128, 2048, 1280), (128, 2048, 1536))
+
 def assembly(m, k, n, output_offset, rescale_exponent=None):
-    if (m, k, n) != (128, 2048, 2048):
-        raise ValueError("Tiny reuse requires physical dimensions 128x2048x2048")
+    if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
+        raise ValueError("Tiny reuse requires a captured physical shape")
     if rescale_exponent is not None and not -126 <= rescale_exponent <= 127:
         raise ValueError("VPU rescale factor must be normal finite BF16")
     lines = [
         "li x1, 0x10000", "li x3, 0x4000", "li x9, 0x4100",
         "li x5, 1024", "li x8, 2048", f"li x12, {output_offset}",
-        "li x14, 64", "li x22, 131072", "li x30, 1", "dma.config x30, ch0",
+        f"li x14, {n // 32}", f"li x22, {64 * n}", "li x30, 1", "dma.config x30, ch0",
         "add x19, x1, x0", "li x20, 0", "li x21, 256", "resident_a_loop:",
         "dma.load x19, x20, x5, ch0", "dma.wait ch0",
         "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
@@ -56,6 +59,6 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
 
 
 def dma_load_bytes(m, k, n):
-    if (m, k, n) != (128, 2048, 2048):
-        raise ValueError("Tiny reuse requires physical dimensions 128x2048x2048")
+    if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
+        raise ValueError("Tiny reuse requires a captured physical shape")
     return m * k + k * n

@@ -193,7 +193,7 @@ class TinyReuseTests(unittest.TestCase):
                 prove(source.replace(old, new))
 
     def test_admission(self):
-        for shape in ((64, 2048, 2048), (128, 1024, 2048), (128, 2048, 256), (160, 2048, 2048)):
+        for shape in ((64, 2048, 2048), (128, 1024, 2048), (128, 2048, 512), (160, 2048, 2048)):
             with self.subTest(shape=shape), self.assertRaises(ValueError):
                 producer.assembly(*shape, OUTPUT, -14)
             with self.assertRaises(ValueError):

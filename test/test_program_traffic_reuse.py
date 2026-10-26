@@ -65,6 +65,13 @@ TARGETS = {
     (192, 960, 960): "atlas_program_reuse_smol",
     (192, 960, 2560): "atlas_program_reuse_smol",
     (192, 2560, 960): "atlas_program_reuse_resnet",
+    (128, 2048, 1536): "atlas_program_reuse_tiny",
+    (32, 5632, 1024): "atlas_program_reuse_tiny_breadth",
+    (32, 2048, 1536): "atlas_program_reuse_tiny_breadth",
+    (128, 2048, 256): "atlas_program_reuse_tiny",
+    (32, 2048, 256): "atlas_program_reuse_tiny_breadth",
+    (32, 2048, 1280): "atlas_program_reuse_tiny_breadth",
+    (128, 2048, 1280): "atlas_program_reuse_tiny",
 }
 
 

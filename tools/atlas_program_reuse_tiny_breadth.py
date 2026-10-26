@@ -6,7 +6,9 @@ waited before its first use. All matrix/LSU spacing is the established
 atlas_program spacing; no numerical reassociation or partial pop occurs.
 VMEM addresses in the assembly are four-byte words, DRAM offsets bytes.
 """
-SHAPES = ((128, 5632, 1024), (32, 2048, 2048), (32, 2048, 1024))
+SHAPES = ((128, 5632, 1024), (32, 2048, 2048), (32, 2048, 1024),
+          (32, 5632, 1024), (32, 2048, 1536), (32, 2048, 256),
+          (32, 2048, 1280))
 
 
 def allocation(m, k, n):
