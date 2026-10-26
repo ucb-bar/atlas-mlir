@@ -1,5 +1,7 @@
 # Python generator traffic-reuse prototypes
 
+> Accepted three-shape prototype snapshot at `7493e39`. For the expanded eight-shape evidence, target limits and standalone RTL checks, see [Generator reuse breadth](generator-reuse-breadth.md).
+
 All three requested captured shapes exceed the ≥3% curve-cycle reduction bar and pass byte-exact original outputs, inputs and guards. These are opt-in Python generator recipes; G0–G7 stay shelved. Launch ABI and host protocol are unchanged. The measurements qualify one exact captured launch per shape, not all occurrences or a full model.
 
 ## Measured comparison
