@@ -136,7 +136,7 @@ class GuardedPackTests(unittest.TestCase):
             with self.subTest(producer=producer, scale=scale, unit=unit):
                 self.emit(source(producer, scale), f'--lower-atlas-guarded-pack=unit={unit}', *MACHINE)
 
-    def test_register_pressure_is_recovered_by_spilling(self):
+    def test_register_pressure_is_recovered_by_splat_rematerialization(self):
         # Fourteen original tiles fit beside the native PACK source, but
         # conversion needs additional BF16 bounds/intermediates while they live.
         tiles = '\n'.join(
@@ -153,10 +153,14 @@ class GuardedPackTests(unittest.TestCase):
                     converted = self.checked(candidate, f'--lower-atlas-guarded-pack=unit={unit}')
                     self.assertNotIn(PACK, converted)
                     self.assertIn(ACC_LOAD, converted)
-                    spilled = self.checked(converted, '--spill-atlas-virtual')
+                    rematerialized = self.checked(converted, '--spill-atlas-virtual')
                     if scale <= 246:
-                        self.assertIn('"atlas.virtual_spill_bf16"', spilled)
-                    self.emit(spilled, *MACHINE)
+                        self.assertIn('atlas.spill_rematerialized', rematerialized)
+                    self.assertNotIn('"atlas.virtual_spill_bf16"', rematerialized)
+                    self.assertNotIn('"atlas.virtual_reload_bf16"', rematerialized)
+                    for bits in range(16257, 16271):
+                        self.assertIn(f'bits = {bits} : i32', rematerialized)
+                    self.emit(rematerialized, *MACHINE)
 
     def test_live_accumulator_slots_fallback(self):
         text = source()

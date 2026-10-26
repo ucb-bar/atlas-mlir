@@ -418,6 +418,18 @@ void spill(Value value, Operation *staged) {
     for (Operation &op : block)
       if (llvm::is_contained(op.getOperands(), value))
         consumers.push_back(&op);
+  // A splat is an exact immediate pair write, independent of state and memory.
+  // Recreate it once per consumer, including repeated operands of that op.
+  if (auto splat = value.getDefiningOp<VirtualVPUSplatOp>()) {
+    for (Operation *consumer : consumers) {
+      OpBuilder builder(consumer);
+      Operation *copy = builder.clone(*splat);
+      copy->setAttr("atlas.spill_rematerialized", builder.getUnitAttr());
+      consumer->replaceUsesOfWith(value, copy->getResult(0));
+    }
+    splat.erase();
+    return;
+  }
   // Proven address/size constants need no memory round trip. Recreate their
   // wrapping-i32 value at each use, retaining exact static DMA proofs.
   if (auto constant = provenI32(value)) {
@@ -599,7 +611,8 @@ struct SpillAtlasVirtualPass
       unsigned longest = 0;
       for (Block &block : function.getBody()) {
         for (Operation &op : block) {
-          if (isAtlasSpillLoad(&op) || isAtlasSpillStore(&op) || isAtlasSlotAccess(&op))
+          if (isAtlasSpillLoad(&op) || isAtlasSpillStore(&op) || isAtlasSlotAccess(&op) ||
+              (isa<VirtualVPUSplatOp>(op) && op.hasAttr("atlas.spill_rematerialized")))
             continue;
           for (Value value : op.getResults()) {
             std::optional<RegisterKind> kind = registerKindOf(value);
@@ -614,7 +627,12 @@ struct SpillAtlasVirtualPass
             for (Operation *user : value.getUsers())
               last = std::max(last, order.lookup(user));
             unsigned span = last - first;
-            if (span > longest) {
+            // Prefer exact, operand-free splats to a VMEM round trip for
+            // another value. Already-local copies cannot shorten a lifetime.
+            bool remat = isa<VirtualVPUSplatOp>(op);
+            bool selectedRemat = victim && victim.getDefiningOp<VirtualVPUSplatOp>();
+            if (span >= 2 && ((remat && !selectedRemat) ||
+                (remat == selectedRemat && span > longest))) {
               longest = span;
               victim = value;
             }
@@ -625,7 +643,8 @@ struct SpillAtlasVirtualPass
         function.emitError("insufficient non-spillable working registers");
         return signalPassFailure();
       }
-      saved.insert(victim);
+      if (!victim.getDefiningOp<VirtualVPUSplatOp>())
+        saved.insert(victim);
       spill(victim, plan.stagingPoint(victim));
       ++count;
       if (failed(placeSlots(function, limit)))

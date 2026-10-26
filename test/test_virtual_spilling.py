@@ -41,6 +41,22 @@ def wrap(body):
             +'\n'.join(body)+'\n}}\n')
 
 
+def splat_pressure(bits=0xBF80, count=31, repeated_operands=False):
+    """Keep an immediate live across input pressure, then use it twice."""
+    source = pressure(count)
+    start = f'%s0 = "atlas.virtual_start"() : () -> {STATE}'
+    source = source.replace(start, start + '\n' +
+        f'%literal = "atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {BF16}')
+    body = []
+    if repeated_operands:
+        body.append(f'%same = "atlas.virtual_vpu_binary"(%literal, %literal) {{kind = "add"}} : ({BF16}, {BF16}) -> {BF16}')
+    for i in range(2):
+        incoming = f"s{count*2}" if i == 0 else "literal_out0"
+        body.append(f'%literal_out{i} = "atlas.virtual_output_bf16"(%{incoming}, %literal) {{index = {count+i} : i32}} : ({STATE}, {BF16}) -> {STATE}')
+    body.append(f'return %literal_out1 : {STATE}')
+    return source.replace(f'return %s{count*2} : {STATE}', '\n'.join(body))
+
+
 def raw_roundtrip(fp8=False):
     tile, suffix = (FP8, "fp8") if fp8 else (BF16, "bf16")
     body = [f'%s0 = "atlas.virtual_start"() : () -> {STATE}',
@@ -183,6 +199,10 @@ def execute_copies(program, inputs, visits=None, runtime=None):
             assert f["kind"] == "lw"
             address = (x[f["base"]] + f["offset"]) & 0xffffffff
             x[f["dst"]] = int.from_bytes(bytes(vmem[address+i] for i in range(4)), 'little')
+        elif op == "atlas.vli":
+            assert f["mode"] == "all"
+            half = f["immediate"].to_bytes(2, 'little') * 512
+            registers[f["dst"]:f["dst"]+2] = [half, half]
         elif op == "atlas.vpu_unary":
             assert f["kind"] == "mov"
             registers[f["dst"]:f["dst"]+2] = registers[f["src"]:f["src"]+2]
@@ -287,6 +307,98 @@ class VirtualSpillingTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("stores = 0", result.stdout)
         self.assertNotIn('"atlas.virtual_spill_bf16"', result.stdout)
+
+    def test_pressure_rematerializes_splats_without_vmem_spills_and_preserves_bits(self):
+        # Include both zeros, a negative finite value, subnormals, infinities,
+        # and NaN payloads. Rematerialization must copy raw BF16 attributes.
+        for bits in (0x0000, 0x8000, 0xBF83, 0x0001, 0x8001,
+                     0x7F80, 0xFF80, 0x7FC1, 0xFFFF):
+            with self.subTest(bits=hex(bits)):
+                source = splat_pressure(bits)
+                failed = run(source, "--lower-atlas-virtual-to-machine")
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("exceeds 31 physical pairs", failed.stderr)
+                remat = run(source, "--spill-atlas-virtual")
+                self.assertEqual(remat.returncode, 0, remat.stderr)
+                splats = [line for line in remat.stdout.splitlines()
+                          if '"atlas.virtual_vpu_splat"' in line]
+                self.assertEqual(len(splats), 2)
+                self.assertTrue(all('atlas.spill_rematerialized' in line and
+                                    f'bits = {bits} : i32' in line for line in splats))
+                self.assertIn("stores = 0", remat.stdout)
+                self.assertNotIn('"atlas.virtual_spill_', remat.stdout)
+                self.assertNotIn('"atlas.virtual_reload_', remat.stdout)
+                _, program = compile_program(remat.stdout)
+                vli = [row["fields"] for row in program["instructions"]
+                       if row["operation"] == "atlas.vli"]
+                self.assertEqual([f["immediate"] for f in vli], [bits, bits])
+                inputs = [(0x90000000+i*2048, bytes((j*19+i*13) % 256 for j in range(2048)))
+                          for i in range(31)]
+                memory = execute_copies(program, inputs)
+                for i, (_, data) in enumerate(inputs):
+                    self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
+                for i in (31, 32):
+                    self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)),
+                                     bits.to_bytes(2, 'little') * 1024)
+
+    def test_splat_rematerialization_is_deterministic_and_idempotent(self):
+        source = splat_pressure(repeated_operands=True)
+        first = run(source, "--spill-atlas-virtual")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(run(source, "--spill-atlas-virtual").stdout, first.stdout)
+        again = run(first.stdout, "--spill-atlas-virtual")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stdout, first.stdout)
+        # Two uses by one consumer share one immediate, plus two output users.
+        splats = [line for line in first.stdout.splitlines()
+                  if '"atlas.virtual_vpu_splat"' in line]
+        self.assertEqual(len(splats), 3)
+        binary, = [line for line in first.stdout.splitlines()
+                   if '"atlas.virtual_vpu_binary"' in line]
+        lhs, rhs = re.search(r'\((%\w+), (%\w+)\)', binary).groups()
+        self.assertEqual(lhs, rhs)
+        self.assertNotIn('"atlas.virtual_spill_', first.stdout)
+
+    def test_splat_rematerialization_dominates_each_diamond_consumer(self):
+        for taken in (False, True):
+            with self.subTest(taken=taken):
+                source = splat_pressure(0x8001)
+                cut = source.index('%s32 =')
+                flow = '\n'.join([
+                    f'%choose = arith.constant {int(taken)} : i1',
+                    f'cf.cond_br %choose, ^left(%s31 : {STATE}), ^right(%s31 : {STATE})',
+                    f'^left(%left_state: {STATE}):',
+                    f'%left = "atlas.virtual_vpu_unary"(%literal) {{kind = "mov"}} : ({BF16}) -> {BF16}',
+                    f'cf.br ^done(%left_state : {STATE})',
+                    f'^right(%right_state: {STATE}):',
+                    f'%right = "atlas.virtual_vpu_unary"(%literal) {{kind = "mov"}} : ({BF16}) -> {BF16}',
+                    f'cf.br ^done(%right_state : {STATE})',
+                    f'^done(%done_state: {STATE}):\n'])
+                source = source[:cut] + flow + source[cut:].replace('(%s31,', '(%done_state,', 1)
+                remat = run(source, "--spill-atlas-virtual", "--verify-atlas-virtual-stream")
+                self.assertEqual(remat.returncode, 0, remat.stderr)
+                # Branch consumers still face all input tiles, so generic VMEM
+                # spilling may also be needed after the immediate is localized.
+                self.assertEqual(remat.stdout.count('"atlas.virtual_vpu_splat"'), 4)
+                _, program = compile_program(remat.stdout)
+                inputs = [(0x90000000+i*2048, bytes([i])*2048) for i in range(31)]
+                memory = execute_copies(program, inputs)
+                for i, (_, data) in enumerate(inputs):
+                    self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)), data)
+                for i in (31, 32):
+                    self.assertEqual(bytes(memory[0x90020000+i*2048+j] for j in range(2048)),
+                                     b'\x01\x80' * 1024)
+
+    def test_no_pressure_keeps_shared_splats_unchanged(self):
+        source = splat_pressure(count=2)
+        canonical = run(source)
+        self.assertEqual(canonical.returncode, 0, canonical.stderr)
+        result = run(source, "--spill-atlas-virtual")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The spill accounting attribute is the pass's only no-pressure change.
+        clean = lambda text: re.sub(r'module attributes \{atlas\.spill_report = \{[^}]*\}\}', 'module', text)
+        self.assertEqual(clean(result.stdout), canonical.stdout)
+        self.assertNotIn('atlas.spill_rematerialized', result.stdout)
 
     def test_raw_fp8_and_both_bf16_halves_survive(self):
         for fp8 in (False, True):

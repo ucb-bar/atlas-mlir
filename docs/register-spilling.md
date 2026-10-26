@@ -36,6 +36,13 @@ For programs that need spilling, use this order, which `atlas-opt
 6. Insert DMA waits and delays, then run the generated-schedule, machine-stream
    and timing verifiers before emission.
 
+When BF16 allocation fails, the spill pass prefers rematerializing an
+operand-free `atlas.virtual_vpu_splat` over saving another tile to VMEM.
+It clones the raw BF16 bits immediately before each distinct consumer and
+removes the original definition. This shortens long constant lifetimes without
+floating-point conversion; programs that already allocate are unchanged.
+Rematerialized copies are reported by `atlas.spill_report.rematerialized`.
+
 Spilling can add operations after virtual scheduling. Final waits and timing
 checks must therefore run on the rewritten machine program. A pre-spill
 schedule is not sufficient evidence that the final program is safe.
