@@ -216,7 +216,10 @@ int {name}_source_dispatch(void *context, const void *const *inputs, void *const
       {name}_overlaps(scratch,{upper}_SOURCE_WORKSPACE_BYTES,region->workspace,{workspace}u) ||
       {name}_overlaps(scratch,{upper}_SOURCE_WORKSPACE_BYTES,region,sizeof(*region)) ||
       {name}_overlaps(scratch,{upper}_SOURCE_WORKSPACE_BYTES,region->host,sizeof(*region->host)) ||
-      {name}_overlaps(scratch,{upper}_SOURCE_WORKSPACE_BYTES,ctx,sizeof(*ctx))) return {upper}_INVALID;
+      {name}_overlaps(scratch,{upper}_SOURCE_WORKSPACE_BYTES,ctx,sizeof(*ctx)) ||
+      {name}_overlaps(ctx,sizeof(*ctx),region,sizeof(*region)) ||
+      {name}_overlaps(ctx,sizeof(*ctx),region->host,sizeof(*region->host)) ||
+      {name}_overlaps(ctx,sizeof(*ctx),region->workspace,{workspace}u)) return {upper}_INVALID;
   *ctx = ({name}_source_context){{region,scratch}};
   return {upper}_OK;
 }}

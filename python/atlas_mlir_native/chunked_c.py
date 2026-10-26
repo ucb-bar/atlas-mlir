@@ -193,7 +193,8 @@ static int {name}_overlaps(const void *a,size_t an,const void *b,size_t bn) {{
   if (!ctx || !host || host->active || bytes<{workspace}ULL || !polls ||
       !{name}_valid_range(workspace,{workspace}ULL) ||
       {name}_overlaps(workspace,{workspace}ULL,ctx,sizeof(*ctx)) ||
-      {name}_overlaps(workspace,{workspace}ULL,host,sizeof(*host))) return {upper}_INVALID;
+      {name}_overlaps(workspace,{workspace}ULL,host,sizeof(*host)) ||
+      {name}_overlaps(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
   *ctx=({name}_context){{.host=host,.workspace=workspace,.device=ATLAS_HOST_INVALID}};
 {bind}
   ctx->ready=1;

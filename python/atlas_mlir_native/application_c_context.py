@@ -58,7 +58,7 @@ int {name}_bind_parameters({name}_context *ctx,const void *data,size_t bytes) {{
 """ if external else ""
     implementation = f"""
 int {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,size_t max_polls) {{
-  if (!ctx || !host || !max_polls) return -1;
+  if (!ctx || !host || !max_polls || {name}_overlap(ctx,sizeof(*ctx),host,sizeof(*host))) return -1;
   if (ctx->state.active || host->active) return -2;
 {chr(10).join(initialization)}
   ctx->host=host;

@@ -18,6 +18,20 @@ static int valid_host_span(const void *pointer, size_t bytes) {
   return pointer && bytes && bytes <= UINTPTR_MAX - (uintptr_t)pointer;
 }
 
+int atlas_ordered_k_binding_valid(const atlas_ordered_k_tile *tile, const atlas_host *host,
+                                const void *scratch, size_t scratch_bytes,
+                                const atlas_host_buffer *buffers, size_t buffer_capacity) {
+  if (buffer_capacity > SIZE_MAX / sizeof(*buffers)) return 0;
+  const void *objects[] = {tile, host, scratch, buffers};
+  const size_t bytes[] = {sizeof(*tile), sizeof(*host), scratch_bytes, buffer_capacity * sizeof(*buffers)};
+  for (unsigned i = 0; i < 4; ++i) {
+    if (!valid_host_span(objects[i], bytes[i])) return 0;
+    for (unsigned j = 0; j < i; ++j)
+      if (overlaps((uintptr_t)objects[i], bytes[i], (uintptr_t)objects[j], bytes[j])) return 0;
+  }
+  return 1;
+}
+
 int atlas_ordered_k_admit_code(uint8_t code) {
   unsigned exponent = (code >> 3) & 15;
   return code == 0 || (exponent >= 1 && exponent <= 14);
