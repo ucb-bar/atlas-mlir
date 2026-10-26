@@ -1,7 +1,8 @@
 """Opt-in ordered MXU0 row residency with four-tile B prefetch.
 
-Two rows share each B weight for 128/5632/1024; one row suffices for
-32/2048/2048 and 32/2048/1024. The 4096-byte B buffers alternate, and each incoming DMA is
+Two rows share each B weight for the admitted M128 shape; each admitted M32
+shape uses one row. SHAPES below defines the exact coverage. The 4096-byte B
+buffers alternate, and each incoming DMA is
 waited before its first use. All matrix/LSU spacing is the established
 atlas_program spacing; no numerical reassociation or partial pop occurs.
 VMEM addresses in the assembly are four-byte words, DRAM offsets bytes.

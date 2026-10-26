@@ -105,9 +105,15 @@ class BlockKernelsTest(unittest.TestCase):
     def test_real_compiler_embeds_exact_assets(self):
         compiler = os.environ.get('RISCV_CC') or shutil.which('riscv64-unknown-elf-gcc')
         if compiler is None: self.skipTest('set RISCV_CC for actual ELF validation')
-        out = self.root / 'real'
-        result = kernels.build_kernel(self.row, out, compiler, max_polls=7, wall_seconds=30)
+        for fast in (False, True):
+            with self.subTest(fast_check=fast):
+                self._real_compiler_embeds_exact_assets(compiler, fast)
+
+    def _real_compiler_embeds_exact_assets(self, compiler, fast):
+        out = self.root / ('real-fast' if fast else 'real-default')
+        result = kernels.build_kernel(self.row, out, compiler, max_polls=7, wall_seconds=30, fast_check=fast)
         self.assertEqual(result['returncode'], 0, (out / 'build.log').read_text())
+        self.assertEqual(result.get('fast_check', False), fast)
         kernels.audit_loadmem((out / 'host.elf').read_bytes(), self.program, self.initial, self.expected, 0x100000000)
         self.assertEqual((out / 'program.bin').read_bytes(), self.program)
         self.assertEqual((out / 'expected-dram.bin').read_bytes(), self.expected)
@@ -151,7 +157,8 @@ class BlockKernelsTest(unittest.TestCase):
         run, meta, log = self.valid_run()
         build = dict(elf_sha256='bound', fast_check=True)
         self.assertFalse(kernels.kernel_result('tiny-00', run, build)['exact'])
-        log = log.replace('_unit_mismatches', '_byte_mismatches')
+        log = log.replace('_unit_mismatches', '_byte_mismatches').replace(
+            'ATLAS_KERNEL_CHECK ', 'ATLAS_KERNEL_CHECK_TIMING fast=1 check_cpu_cycles=42\nATLAS_KERNEL_CHECK ')
         (run / 'sim.log').write_text(log)
         self.assertTrue(kernels.kernel_result('tiny-00', run, build)['exact'])
         for field in ('output_byte_mismatches', 'preserved_byte_mismatches'):

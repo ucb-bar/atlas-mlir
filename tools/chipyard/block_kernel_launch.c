@@ -13,9 +13,7 @@ static atlas_host_check_result first_failure;
 static size_t first_failure_base;
 #endif
 
-#if ATLAS_FAST_CHECK || ATLAS_CHECK_TIMING
-/* Optional diagnostic state; does not participate in the launch protocol. */
-volatile uint64_t atlas_check_measurement[4];
+#if ATLAS_FAST_CHECK
 static inline uint64_t check_cycles(void) {
   uint64_t value;
   __asm__ volatile("fence rw,rw\nrdcycle %0" : "=r"(value) : : "memory");
@@ -90,7 +88,7 @@ int main(void) {
     printf("ATLAS_KERNEL_FAIL phase=launch-or-wait\n"); return 2;
   }
   uint64_t output_bad = 0, preserved_bad = 0, cursor = 0;
-#if ATLAS_FAST_CHECK || ATLAS_CHECK_TIMING
+#if ATLAS_FAST_CHECK
   const uint64_t check_begin = check_cycles();
 #endif
   for (unsigned i = 0; i < PAYLOAD_OUTPUT_RANGES; ++i) {
@@ -99,12 +97,8 @@ int main(void) {
     cursor = atlas_output_ranges[i][0] + atlas_output_ranges[i][1];
   }
   preserved_bad += compare(cursor, PAYLOAD_DRAM_BYTES - cursor);
-#if ATLAS_FAST_CHECK || ATLAS_CHECK_TIMING
+#if ATLAS_FAST_CHECK
   const uint64_t check_elapsed = check_cycles() - check_begin;
-  atlas_check_measurement[0] = check_elapsed;
-  atlas_check_measurement[1] = output_bad;
-  atlas_check_measurement[2] = preserved_bad;
-  atlas_check_measurement[3] = ATLAS_FAST_CHECK;
   printf("ATLAS_KERNEL_CHECK_TIMING fast=%u check_cpu_cycles=%" PRIu64 "\n", ATLAS_FAST_CHECK, check_elapsed);
 #endif
 #if ATLAS_FAST_CHECK

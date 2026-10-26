@@ -2,6 +2,7 @@
 """Run a source-bound 32xK by Kx32 tile with the pinned Atlas Python model."""
 
 from atlas_host_layout import ATLAS_DRAM_BASE
+# preflight_archive is intentionally re-exported for tools/rtl_core/probe.py's support loader.
 from atlas_tooling import preflight_archive, run_command
 
 
