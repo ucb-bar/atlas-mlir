@@ -14,8 +14,11 @@ SHAPES = ((128, 2048, 2048), (128, 2048, 256),
 def assembly(m, k, n, output_offset, rescale_exponent=None):
     if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
         raise ValueError("Tiny reuse requires a captured physical shape")
-    if rescale_exponent is not None and not -126 <= rescale_exponent <= 127:
-        raise ValueError("VPU rescale factor must be normal finite BF16")
+    if type(output_offset) is not int or output_offset != m * k + k * n + 256:
+        raise ValueError("output must preserve the original input and guard layout")
+    if rescale_exponent is not None and (type(rescale_exponent) is not int
+            or not -126 <= rescale_exponent <= 127):
+        raise ValueError("VPU rescale factor must be normal finite integer BF16")
     lines = [
         "li x1, 0x10000", "li x3, 0x4000", "li x9, 0x4100",
         "li x5, 1024", "li x8, 2048", f"li x12, {output_offset}",

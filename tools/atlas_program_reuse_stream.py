@@ -21,6 +21,11 @@ def layout(m, k, n):
                 output_word=(a_spill + b_panel) // 4)
 
 
+def dma_load_bytes(m, k, n):
+    layout(m, k, n)
+    return m * k + k * n
+
+
 def a_word(byte_offset):
     """Injectively map packed A bytes: first bank 1, then bank 0."""
     return ((BANK_BYTES + byte_offset) if byte_offset < BANK_BYTES

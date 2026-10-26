@@ -198,9 +198,13 @@ class TinyReuseTests(unittest.TestCase):
                 producer.assembly(*shape, OUTPUT, -14)
             with self.assertRaises(ValueError):
                 producer.dma_load_bytes(*shape)
-        for exponent in (-127, 128):
+        for exponent in (True, False, 0.0, float("inf"), float("nan"), -127, 128):
             with self.assertRaises(ValueError):
                 producer.assembly(*SHAPE, OUTPUT, exponent)
+
+        for offset in (0, OUTPUT - 1, OUTPUT + 1, float(OUTPUT), True):
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                producer.assembly(*SHAPE, offset, -14)
 
 
 if __name__ == '__main__':

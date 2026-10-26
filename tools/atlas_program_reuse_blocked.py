@@ -1,4 +1,4 @@
-"""Compact, bank-bounded A-block/B-column reuse for captured ResNet shapes.
+"""Compact, bank-bounded A-block/B-column reuse for qualified physical shapes.
 
 Packed DRAM inputs and guarded output offsets are unchanged. Each row block
 loads A once into bank 1 followed by bank 0; each B column is transposed once
@@ -9,20 +9,56 @@ output has one BF16 pop/rescale. Delays match the established generator.
 
 BANK_BYTES = 262144
 SHAPES = {
-    (224, 2304, 256), (64, 4608, 512), (800, 1152, 128),
-    (224, 256, 1024), (3136, 576, 64), (3136, 64, 256),
-    (224, 1024, 256), (800, 128, 512), (64, 512, 2048),
-    (800, 512, 128), (12544, 160, 64), (64, 2048, 512),
-    (64, 1024, 2048), (224, 512, 1024), (224, 1024, 512),
-    (800, 256, 512), (3136, 256, 64), (3136, 256, 128),
-    (800, 512, 256), (3136, 64, 64),
+    (32, 32, 960),
+    (64, 32, 736),
+    (64, 320, 320),
+    (64, 512, 2048),
+    (64, 736, 320),
+    (64, 736, 736),
+    (64, 736, 960),
+    (64, 736, 2048),
+    (64, 960, 320),
+    (64, 960, 736),
+    (64, 960, 960),
+    (64, 960, 2560),
+    (64, 1024, 2048),
+    (64, 1440, 736),
+    (64, 2048, 512),
+    (64, 2048, 736),
+    (64, 2560, 960),
+    (64, 4608, 512),
+    (128, 320, 320),
+    (128, 768, 3072),
+    (128, 960, 320),
+    (128, 960, 960),
+    (128, 960, 2560),
+    (128, 2560, 960),
+    (192, 960, 320),
+    (192, 960, 960),
+    (192, 960, 2560),
     (192, 2560, 960),
+    (224, 256, 1024),
+    (224, 512, 1024),
+    (224, 1024, 256),
+    (224, 1024, 512),
+    (224, 2304, 256),
+    (800, 128, 512),
+    (800, 256, 512),
+    (800, 512, 128),
+    (800, 512, 256),
+    (800, 1152, 128),
+    (3136, 64, 64),
+    (3136, 64, 256),
+    (3136, 256, 64),
+    (3136, 256, 128),
+    (3136, 576, 64),
+    (12544, 160, 64),
 }
 
 
 def layout(m, k, n):
     if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
-        raise ValueError("ResNet reuse requires one of the captured physical shapes")
+        raise ValueError("Blocked reuse requires one of the captured physical shapes")
     b_bytes = k * 32
     a_bank0 = b_bytes + 2048
     rows = min(m // 32, (2 * BANK_BYTES - a_bank0) // (k * 32))

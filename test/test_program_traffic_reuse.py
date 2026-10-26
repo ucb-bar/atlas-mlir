@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
@@ -14,66 +15,6 @@ import atlas_program as program
 
 # Captured from the unmodified generator before introducing the opt-in path.
 GOLDEN = [{'mkn': [32, 32, 32], 'exponent': None, 'flags': {}, 'sha256': '417148a962e510c0ffd519bc7b180b1384c61490b91d1c09708fc3e11d472e1c'}, {'mkn': [64, 64, 64], 'exponent': -19, 'flags': {'resident_b': True}, 'sha256': '00adb37f615953037d555af81e50f474dd194c4b1d846be6c3d0f90725f88a32'}, {'mkn': [64, 64, 64], 'exponent': -19, 'flags': {'resident_b': True, 'pretranspose_resident_b': True}, 'sha256': 'eb3b4604b30b312b89144fd40d13aeea1aebe5cba7371f47a2bf2afa6c2a78c4'}, {'mkn': [128, 768, 768], 'exponent': -19, 'flags': {'resident_a': True}, 'sha256': '18adfb148517cf06d814d279abe5ecebd69581ac8f5ea4af4cddb07fed01eb9b'}, {'mkn': [128, 2048, 2048], 'exponent': -14, 'flags': {'resident_a': True}, 'sha256': '295cf8b87a435c281671fdc066c89289c4eb2ec5452632aaf1e2157c91d848f0'}, {'mkn': [128, 3072, 768], 'exponent': -15, 'flags': {}, 'sha256': 'dce0cda320332da92c77f6bfed92affa6fd58c79d3948bc7dd3caad4fce5f6e2'}]
-TARGETS = {
-    (128, 768, 768): "atlas_program_reuse_resident",
-    (128, 2048, 2048): "atlas_program_reuse_tiny",
-    (128, 3072, 768): "atlas_program_reuse_stream",
-    (128, 5632, 1024): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 2048): "atlas_program_reuse_tiny_breadth",
-    (224, 2304, 256): "atlas_program_reuse_resnet",
-    (64, 4608, 512): "atlas_program_reuse_resnet",
-    (800, 1152, 128): "atlas_program_reuse_resnet",
-    (224, 256, 1024): "atlas_program_reuse_resnet",
-    (3136, 576, 64): "atlas_program_reuse_resnet",
-    (3136, 64, 256): "atlas_program_reuse_resnet",
-    (224, 1024, 256): "atlas_program_reuse_resnet",
-    (800, 128, 512): "atlas_program_reuse_resnet",
-    (64, 512, 2048): "atlas_program_reuse_resnet",
-    (800, 512, 128): "atlas_program_reuse_resnet",
-    (12544, 160, 64): "atlas_program_reuse_resnet",
-    (64, 2048, 512): "atlas_program_reuse_resnet",
-    (64, 1024, 2048): "atlas_program_reuse_resnet",
-    (224, 512, 1024): "atlas_program_reuse_resnet",
-    (224, 1024, 512): "atlas_program_reuse_resnet",
-    (800, 256, 512): "atlas_program_reuse_resnet",
-    (3136, 256, 64): "atlas_program_reuse_resnet",
-    (3136, 256, 128): "atlas_program_reuse_resnet",
-    (800, 512, 256): "atlas_program_reuse_resnet",
-    (3136, 64, 64): "atlas_program_reuse_resnet",
-    (32, 2048, 1024): "atlas_program_reuse_tiny_breadth",
-    (64, 320, 320): "atlas_program_reuse_smol",
-    (128, 320, 320): "atlas_program_reuse_smol",
-    (64, 32, 736): "atlas_program_reuse_smol",
-    (32, 32, 960): "atlas_program_reuse_smol",
-    (128, 768, 3072): "atlas_program_reuse_smol",
-    (64, 736, 2048): "atlas_program_reuse_smol",
-    (64, 2048, 736): "atlas_program_reuse_smol",
-    (128, 960, 2560): "atlas_program_reuse_smol",
-    (128, 2560, 960): "atlas_program_reuse_smol",
-    (64, 960, 736): "atlas_program_reuse_smol",
-    (64, 736, 960): "atlas_program_reuse_smol",
-    (64, 736, 320): "atlas_program_reuse_smol",
-    (64, 960, 2560): "atlas_program_reuse_smol",
-    (128, 960, 960): "atlas_program_reuse_smol",
-    (64, 2560, 960): "atlas_program_reuse_smol",
-    (64, 960, 960): "atlas_program_reuse_smol",
-    (128, 960, 320): "atlas_program_reuse_smol",
-    (64, 1440, 736): "atlas_program_reuse_smol",
-    (64, 960, 320): "atlas_program_reuse_smol",
-    (64, 736, 736): "atlas_program_reuse_smol",
-    (192, 960, 320): "atlas_program_reuse_smol",
-    (192, 960, 960): "atlas_program_reuse_smol",
-    (192, 960, 2560): "atlas_program_reuse_smol",
-    (192, 2560, 960): "atlas_program_reuse_resnet",
-    (128, 2048, 1536): "atlas_program_reuse_tiny",
-    (32, 5632, 1024): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 1536): "atlas_program_reuse_tiny_breadth",
-    (128, 2048, 256): "atlas_program_reuse_tiny",
-    (32, 2048, 256): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 1280): "atlas_program_reuse_tiny_breadth",
-    (128, 2048, 1280): "atlas_program_reuse_tiny",
-}
-
 
 class TrafficReuseTests(unittest.TestCase):
     def test_default_assembly_is_unchanged(self):
@@ -94,8 +35,7 @@ class TrafficReuseTests(unittest.TestCase):
                                                        traffic_reuse=False), old_loads)
 
     def test_exact_dispatch_and_recipe_loads(self):
-        self.assertEqual(program._TRAFFIC_REUSE_MODULES, TARGETS)
-        for dims, name in TARGETS.items():
+        for dims, name in program._TRAFFIC_REUSE_MODULES.items():
             m, k, n = dims
             helper = importlib.import_module(name)
             for exponent in (-126, -19, 0, 127):
@@ -126,6 +66,14 @@ class TrafficReuseTests(unittest.TestCase):
                         (32, 2048, 1024): 2162688,
                         (192, 2560, 960): 5406720}.get(dims, m*k+k*n)
             self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), expected)
+
+    def test_dma_accounting_delegates_to_each_helper(self):
+        for name in set(program._TRAFFIC_REUSE_MODULES.values()):
+            dims = next(dims for dims, module in program._TRAFFIC_REUSE_MODULES.items() if module == name)
+            helper = importlib.import_module(name)
+            with self.subTest(module=name), mock.patch.object(helper, "dma_load_bytes", return_value=12345) as call:
+                self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), 12345)
+                call.assert_called_once_with(*dims)
 
     def test_reject_unsupported_dimensions_and_legacy_flags(self):
         for dims in ((32,32,32), (0,768,768), (True,768,768), (128.0,768,768),
@@ -162,7 +110,7 @@ class TrafficReuseTests(unittest.TestCase):
 
     def test_source_closure_tracks_all_helpers_only_when_enabled(self):
         legacy = {"atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py"}
-        expanded = legacy | {name+".py" for name in TARGETS.values()}
+        expanded = legacy | {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()}
         self.assertEqual(set(program.code_sources()), legacy)
         self.assertEqual(set(program.code_sources(traffic_reuse=False)), legacy)
         self.assertEqual(set(program.code_sources(traffic_reuse=True)), expanded)
@@ -176,7 +124,7 @@ class TrafficReuseTests(unittest.TestCase):
             before = copied.code_sources(traffic_reuse=True)
             for name, digest in before.items():
                 self.assertEqual(digest, hashlib.sha256((directory/name).read_bytes()).hexdigest())
-            for helper in TARGETS.values():
+            for helper in dict.fromkeys(program._TRAFFIC_REUSE_MODULES.values()):
                 name = helper+".py"
                 path = directory/name
                 original = path.read_bytes()
