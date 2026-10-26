@@ -58,7 +58,7 @@ def program(words):
 
 
 class ProgramBoundTest(unittest.TestCase):
-    def test_all_57_dispatch_shapes_fit_hardware_and_graph_exception_is_explicit(self):
+    def test_all_57_dispatch_shapes_fit_hardware_and_graph(self):
         self.assertEqual(len(atlas_program._TRAFFIC_REUSE_MODULES), 57)
         graph_exceptions = set()
         for m, k, n in atlas_program._TRAFFIC_REUSE_MODULES:
@@ -68,7 +68,7 @@ class ProgramBoundTest(unittest.TestCase):
                 self.assertLessEqual(bound + 5, ATLAS_IMEM_BYTES // 4)
                 if bound > GRAPH_PROGRAM_WORDS:
                     graph_exceptions.add((m, k, n))
-        self.assertEqual(graph_exceptions, {(12544, 160, 64)})
+        self.assertEqual(graph_exceptions, set())
 
     def test_counter_comments_labels_and_li_domain(self):
         self.assertEqual(raw_word_upper_bound("# comment\nstart: # label\nli x31, 0xffffffff\nnop\necall"), 4)

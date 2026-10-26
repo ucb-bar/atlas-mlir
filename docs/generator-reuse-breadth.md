@@ -29,7 +29,9 @@ Launch-Weighted Curve Transfer Model v2 applies measured captured-shape deltas t
 
 These are representative contraction-kernel transfer estimates, excluding host and noncontraction work, not full-model executions. The selected layer is separate from full-policy totals. Smol `64/736/32` improved only 1.848% and retains its original kernel. Smol `64/12288/960` has two unmeasured launches: its recorded short-run admission exceeded the wall budget, so no full run or candidate was started. The complete-policy Smol percentage remains unknown.
 
-**Graph eligibility differs from raw coverage.** ResNet `12544/160/64` emits 13,740 raw words: it fits the real raw host but exceeds the graph host's 8,192-word copy buffer. Both graph builders reject its actual encoded bytes before linking. If the other 53 ResNet launches adopt reuse while this launch stays original, Launch-Weighted Curve Transfer Model v3 (graph eligibility) estimates 54.693% fewer kernel cycles from the same v2 receipts. This is an adoption scenario; graph builds do not enable reuse automatically.
+**All 54 ResNet launches now fit the graph copy buffer.** For exactly `12544/160/64`, contiguous row pairs within one VMEM bank share a scalar loop. Cross-bank pairs and odd tails retain their explicit bodies. The same blocks, DMA transfers, ordered accumulations and guarded output layout remain. Its program shrinks from 13,740 to 1,337 words, below the 8,192-word graph limit. A fresh captured curve pair measures 5,174,282 original cycles versus 3,504,686 compact reuse cycles, a 32.267% reduction, with exact outputs, inputs and guards across the full DRAM image. The compact recipe is 0.102% slower than the retained 3,501,132-cycle raw-only reuse program. A fresh FIFO43 pair measures 1,693,078 original cycles versus 1,278,154 compact cycles, a 24.507% reduction, also with exact full DRAM.
+
+Launch-Weighted Curve Transfer Model v4 (compact graph eligibility) updates this one representative in v2 and admits all 21 ResNet shapes, covering 54 of 54 launches. If all adopt reuse, the estimated kernel subtotal changes from 195,740,569 to 87,014,077 cycles, a 55.546% reduction. This replaces v3's 53-launch graph scenario. The v2 table above retains its earlier raw-host receipts. The estimate excludes host and noncontraction work; no full graph was executed, and graph builds do not enable reuse automatically.
 
 The original three-shape and eight-shape checkpoints are historical; their smaller tables are not the current allowlist. [Initial prototype pairs](generator-traffic-reuse.md) retain the original measurements.
 
@@ -53,7 +55,7 @@ Safety requires known quiescence and exclusive raw ownership. Raw metadata, prog
 | ResNet graph host and segments | Raw copy buffer ≤ 8,192 words, plus separate hardware limit |
 | Retained standalone RTL driver | ≤ 8,192 loaded words including its eight-word wrapper |
 
-The largest recipe is `12544/160/64`: 13,740 + 5 = 13,745 words. It is raw-only under the current graph limit. Other admitted programs fit the graph capacity. Builders validate actual byte and descriptor counts. Unconditional tests conservatively bound all generated programs against hardware and identify the graph exception.
+The largest current recipe is `3136/576/64`: 3,750 raw words, or 3,755 with raw-host markers. All 57 admitted programs fit the graph capacity. Builders validate actual byte and descriptor counts. Unconditional tests conservatively bound every generated program against both hardware and graph limits.
 
 ## Host checking and selected-layer handoff
 

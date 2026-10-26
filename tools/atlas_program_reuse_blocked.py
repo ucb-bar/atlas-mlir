@@ -119,8 +119,23 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                   'addi x20, x20, 1024', 'addi x21, x21, -1',
                   f'beq x21, x0, {tag}_b_done', 'nop', f'jal x0, {tag}_b', 'nop',
                   tag + '_b_done:', 'add x15, x20, x0', 'add x22, x12, x0']
+        groups = []
         for row in range(0, block['row_tiles'], 2):
             rows = min(2, block['row_tiles'] - row)
+            bank = row * k * 32 // BANK_BYTES
+            # Compact only this qualified shape's pairs wholly inside one bank.
+            if (m, k, n) == (12544, 160, 64) and rows == 2 and (row + 2) * k * 32 <= (bank + 1) * BANK_BYTES:
+                if groups and groups[-1][2] == bank:
+                    groups[-1][1] += 1
+                    continue
+                groups.append([row, 1, bank])
+            else:
+                groups.append([row, 1, None])
+        for row, repeats, _ in groups:
+            rows = min(2, block['row_tiles'] - row)
+            pair_loop = f'{tag}_row_{row}_pairs'
+            if repeats > 1:
+                lines += ['li x23, 0', f'li x24, {repeats}', f'li x25, {k * 16}', pair_loop + ':']
             # Split K loops exactly where either A pointer crosses banks. No
             # vector/DMA tile crosses a bank, and no pointer-wrap speculation.
             cuts = {0, 1, k // 32}
@@ -134,7 +149,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                 lines += [f'li x6, {first * 256}', f'li x21, {end - first}']
                 for acc in range(rows):
                     addr = a_word((row + acc) * k * 32 + first * 1024, base0)
-                    lines += [f'li x{4 if acc == 0 else 7}, {addr}']
+                    reg = 4 if acc == 0 else 7
+                    lines += [f'li x{reg}, {addr}']
+                    if repeats > 1:
+                        lines += [f'add x{reg}, x{reg}, x23']
                 lines += [label + ':', 'vload m1, 0(x6)', 'delay 34', 'vmatpush.weight.mxu0 w0, m1', 'delay 32']
                 op = 'vmatmul.mxu0' if first == 0 else 'vmatmul.acc.mxu0'
                 for acc in range(rows):
@@ -150,6 +168,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                           'vmul.bf16 m2, m2, m4', 'delay 66', 'vstore m2, 0(x3)', 'delay 34',
                           'vstore m3, 0(x9)', 'delay 34', 'dma.store x22, x3, x8, ch0',
                           'dma.wait ch0', 'add x22, x22, x16']
+            if repeats > 1:
+                lines += ['add x23, x23, x25', 'addi x24, x24, -1',
+                          f'beq x24, x0, {pair_loop}_done', 'nop', f'jal x0, {pair_loop}', 'nop',
+                          pair_loop + '_done:']
         lines += ['add x12, x12, x8', 'addi x17, x17, -1',
                   f'beq x17, x0, {tag}_done', 'nop', f'jal x0, {tag}_columns', 'nop', tag + '_done:']
     return '\n'.join(lines + ['nop', 'ecall']) + '\n'

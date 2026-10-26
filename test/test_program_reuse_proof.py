@@ -61,6 +61,12 @@ class ReuseProofTests(unittest.TestCase):
                 ('dma.wait ch0', 'nop'),
                 ('vmul.bf16 m2, m2, m4', 'nop')])
 
+    def test_compact_resnet_pair_loop_negative_controls(self):
+        self.reject_mutations((12544, 160, 64), [
+            ('add x23, x23, x25', 'add x23, x23, x8'),
+            ('addi x24, x24, -1', 'addi x24, x24, -2'),
+            ('add x7, x7, x23', 'add x7, x7, x0')])
+
     def test_tiny_and_prefetch_negative_controls(self):
         for shape in ((128, 2048, 256), (32, 5632, 1024), (128, 5632, 1024)):
             changes = [
