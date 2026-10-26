@@ -4159,6 +4159,7 @@ int main(int argc,char **argv) {
             "-DATLAS_DIAGNOSTIC_PRECISION_POLICY=1", f"-I{static_bundle}",
             f"-I{wrapper_dir}", str(wrapper_dir / "main.c"),
             str(wrapper_dir / "atlas_source_mn_model_wrapper.c"),
+            str(static_bundle / "atlas_host.c"), str(static_bundle / "atlas_ordered_k.c"),
             "-o", str(wrapper_executable),
         ], check=False, capture_output=True, text=True)
         self.assertEqual(wrapper_build.returncode, 0, wrapper_build.stderr)
