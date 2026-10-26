@@ -1,6 +1,7 @@
 """Independent scalar-flow/operand provenance proof, without numerical timing."""
 
 from collections import Counter
+import hashlib
 from pathlib import Path
 import re
 import sys
@@ -125,6 +126,18 @@ def prove(source, m, k, n, exponent):
 
 
 class ResNetReuseTests(unittest.TestCase):
+    def test_original_three_programs_are_unchanged(self):
+        # Zero-rescale assembly identities captured before broadening admission.
+        originals = {
+            (64,4608,512): '3e0febeda4234345f8892786f4ce15cde2ac82ed48f1aacfce27fddb361bf808',
+            (224,2304,256): '0274a95acb093e8dba22109b6b6cc1d66cdf30215dec708a4184f2348c8a5a9d',
+            (800,1152,128): '1eb4e08d6504bd3c43671e4e9424fd215420cfb30a85af4605f491cf298dafa5',
+        }
+        for (m,k,n), expected in originals.items():
+            with self.subTest(shape=(m,k,n)):
+                source = producer.assembly(m,k,n,m*k+k*n+256,0)
+                self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), expected)
+
     def test_complete_operand_origin_order_and_outputs(self):
         for m,k,n in sorted(producer.SHAPES):
             with self.subTest(shape=(m,k,n)):

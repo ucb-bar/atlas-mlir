@@ -1,4 +1,4 @@
-"""Compact, bank-bounded A-block/B-column reuse for three captured ResNet shapes.
+"""Compact, bank-bounded A-block/B-column reuse for captured ResNet shapes.
 
 Packed DRAM inputs and guarded output offsets are unchanged. Each row block
 loads A once into bank 1 followed by bank 0; each B column is transposed once
@@ -8,12 +8,20 @@ output has one BF16 pop/rescale. Delays match the established generator.
 """
 
 BANK_BYTES = 262144
-SHAPES = {(224, 2304, 256), (64, 4608, 512), (800, 1152, 128)}
+SHAPES = {
+    (224, 2304, 256), (64, 4608, 512), (800, 1152, 128),
+    (224, 256, 1024), (3136, 576, 64), (3136, 64, 256),
+    (224, 1024, 256), (800, 128, 512), (64, 512, 2048),
+    (800, 512, 128), (12544, 160, 64), (64, 2048, 512),
+    (64, 1024, 2048), (224, 512, 1024), (224, 1024, 512),
+    (800, 256, 512), (3136, 256, 64), (3136, 256, 128),
+    (800, 512, 256), (32, 2048, 1024), (3136, 64, 64),
+}
 
 
 def layout(m, k, n):
     if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
-        raise ValueError("ResNet reuse requires one of the three captured physical shapes")
+        raise ValueError("ResNet reuse requires one of the captured physical shapes")
     b_bytes = k * 32
     a_bank0 = b_bytes + 2048
     rows = min(m // 32, (2 * BANK_BYTES - a_bank0) // (k * 32))
