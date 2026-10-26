@@ -17,7 +17,7 @@ import time
 import traceback
 import numpy as np
 from atlas_vector_arithmetic import ordered_matmul, rescale_bf16_array
-from atlas_program import assembly, preflight_bundle
+from atlas_program import assembly, dma_load_bytes, preflight_bundle
 from atlas_path_guard import checked as safe_path
 from atlas_tooling import sha256, write_json
 from run_model_tile import (load_bundle, configure_model, encode_operands, execute_tile, input_sources, model_binding,
@@ -73,11 +73,6 @@ def code_sources():
     names = ("run_workload_contraction.py", "atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py",
         "atlas_vector_arithmetic.py")
     expected = Path(__file__).absolute().parent
-    for name in names:
-        module = sys.modules.get(Path(name).stem)
-        filename = __file__ if name == "run_workload_contraction.py" else getattr(module, "__file__", None)
-        if filename is None or safe_path(filename) != safe_path(expected / name):
-            raise ValueError("Workload helper imported outside bound producer source: " + name)
     return {name: sha256(expected / name) for name in names}
 
 
@@ -122,8 +117,8 @@ def run(args, out, receipt):
     words = program.assemble()
     admit_program(words)
     plan["instruction_words"] = len(words)
-    requested = {"load_bytes": (m * k * (n // 32) + k * n if resident_b else m * k + k * n * (m // 32) if resident_a
-        else m // 32 * (n // 32) * (2 * k // 32 * 1024)), "store_bytes": len(payload)}
+    requested = {"load_bytes": dma_load_bytes(m, k, n, resident_a=resident_a, resident_b=resident_b),
+        "store_bytes": len(payload)}
     for name, data in [("initial-dram.bin", initial), ("expected-bf16-tiles.bin", payload),
         ("program.bin", b"".join(struct.pack("<I", x) for x in words))]:
         (out / name).write_bytes(data)

@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from atlas_program import assembly
+from atlas_host_layout import fp8_output_offset
+from atlas_program import assembly, dma_load_bytes
 from atlas_vector_arithmetic import ordered_matmul, rescale_bf16_array
 
 
@@ -31,7 +32,7 @@ def prepare(encoded_a, encoded_b, exponent, *, workers=1):
     m, k, n = map(padded_extent, (logical_m, logical_k, logical_n))
     if k > 12288 or m * n > 1048576:
         raise ValueError("Projection requires row panels or exceeds SmolVLA K bound")
-    output_offset = m * k + k * n + 256
+    output_offset = fp8_output_offset(m, k, n)
     dram_bytes = output_offset + m * n * 2 + 256
     if dram_bytes > 64 * 1024 * 1024:
         raise ValueError("Projection exceeds bounded Atlas DRAM window")
@@ -50,9 +51,8 @@ def prepare(encoded_a, encoded_b, exponent, *, workers=1):
     resident_a = not resident_b and m * k <= 256 * 1024
     source = assembly(m, k, n, output_offset, exponent, resident_b=resident_b,
                       pretranspose_resident_b=resident_b, resident_a=resident_a)
-    requested = {"load_bytes": m * k * (n // 32) + k * n if resident_b else
-                 m * k + k * n * (m // 32) if resident_a else
-                 (m // 32) * (n // 32) * (2 * k // 32 * 1024), "store_bytes": m * n * 2}
+    requested = {"load_bytes": dma_load_bytes(m, k, n, resident_a=resident_a, resident_b=resident_b),
+                 "store_bytes": m * n * 2}
     return {"A": aa, "B": bb, "expected": expected,
             "logical_output": expected[:logical_m, :logical_n].copy(), "source": source,
             "logical_mkn": [logical_m, logical_k, logical_n], "physical_mkn": [m, k, n],

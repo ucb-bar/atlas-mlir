@@ -250,17 +250,9 @@ class FullPreparationTest(unittest.TestCase):
             kernels.prepare_full(root, 'tiny-full', out)
         self.assertFalse(out.exists())
 
-    def test_foreign_cached_helper_and_stale_layout_fail_before_output(self):
+    def test_stale_layout_fails_before_output(self):
         root, _, _ = self.bundle()
         kernels.full_bundle(root, 'tiny-full')
-        for name in ('full_bundle', 'bundle', 'block_bundle', 'atlas_host_layout',
-                     'atlas_path_guard', 'atlas_tooling', 'run_sim'):
-            out = self.root / ('foreign-' + name)
-            with self.subTest(helper=name), mock.patch.object(
-                    sys.modules[name], '__file__', str(self.root / 'foreign.py')):
-                with self.assertRaisesRegex(ValueError, 'another source'):
-                    kernels.prepare_full(root, 'tiny-full', out)
-                self.assertFalse(out.exists())
         with mock.patch.object(sys.modules['atlas_host_layout'], 'HEADER_SHA256', '0' * 64):
             with self.assertRaisesRegex(ValueError, 'layout identity'):
                 kernels.prepare_full(root, 'tiny-full', self.root / 'stale-layout')

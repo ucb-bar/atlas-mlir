@@ -27,3 +27,8 @@ globals().update(CONSTANTS)
 def recheck():
     if sha256(HEADER) != HEADER_SHA256:
         raise ValueError("host layout changed during use")
+
+
+def fp8_output_offset(m, k, n):
+    """Output offset after packed FP8 operands and the 256-byte input guard."""
+    return m * k + k * n + 256

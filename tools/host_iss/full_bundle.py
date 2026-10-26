@@ -5,7 +5,7 @@ import json
 import re
 import struct
 
-from atlas_host_layout import ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
+from atlas_host_layout import fp8_output_offset, ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
 from block_bundle import integer
 from bundle import ChecksumBundle
 
@@ -57,7 +57,7 @@ class KernelAssets(ChecksumBundle):
         total = integer(item.get("total_dram_bytes"), 1)
         if (item.get("dram_base") != ATLAS_DRAM_BASE
                 or type(item.get("dram_base")) is not int
-                or offset != m * k + k * n + 256
+                or offset != fp8_output_offset(m, k, n)
                 or total != offset + 2 * m * n + 256
                 or total > 64 * 1024 * 1024):
             raise ValueError("full-model staging extent differs")

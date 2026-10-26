@@ -1,6 +1,7 @@
 """Authenticate raw images and rebuild arithmetic or explicitly reuse bound evidence."""
 
 from atlas_host_layout import ATLAS_DRAM_BASE, ATLAS_IMEM_BASE
+from atlas_program import dma_load_bytes
 from run_model_tile import MODEL_PIN, check_model_pin
 import importlib.util
 import json
@@ -53,7 +54,6 @@ def requested_traffic(original, m, k, n):
         if (claim is not True or marker != {"mode": mode, size_key: size, base_key: 0x40000}
             or type(marker.get(size_key)) is not int or type(marker.get(base_key)) is not int or size > 256 * 1024):
             raise ValueError("Resident operand metadata or bank capacity differs")
-        loads = m * k + k * n * (m // 32) if a else m * k * (n // 32) + k * n
     else:
         if claim is not None and claim is not False:
             raise ValueError("Unqualified operand reuse claim")
@@ -61,7 +61,7 @@ def requested_traffic(original, m, k, n):
             or claim is False) and (marker != {"mode": "none", "resident_b_bytes": 0, "resident_b_vmem_byte_base": None}
             or type(marker.get("resident_b_bytes")) is not int):
             raise ValueError("Default operand metadata differs")
-        loads = 2 * m * k * (n // 32)
+    loads = dma_load_bytes(m, k, n, resident_a=a, resident_b=b)
     return {"load_bytes": loads, "store_bytes": 2 * m * n}
 
 

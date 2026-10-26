@@ -7,6 +7,20 @@ from run_model_tile import validate_archive_members
 import zipfile
 
 
+def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False):
+    """Requested FP8 input bytes for a complete tiled contraction.
+
+    Callers admit physical dimensions and resident bank capacity separately.
+    """
+    if resident_a and resident_b:
+        raise ValueError("resident A and resident B are mutually exclusive")
+    if resident_b:
+        return m * k * (n // 32) + k * n
+    if resident_a:
+        return m * k + k * n * (m // 32)
+    return 2 * m * k * (n // 32)
+
+
 def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False, pretranspose_resident_b=False,
     resident_a=False):
     if resident_a and resident_b:

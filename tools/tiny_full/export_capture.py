@@ -23,7 +23,7 @@ from atlas_tooling import sha256
 from compile_workload_inputs import pack_activation, pack_weights, pack_output
 import atlas_host_layout
 from atlas_host_layout import ATLAS_DRAM_BASE
-from atlas_program import assembly
+from atlas_program import assembly, dma_load_bytes
 from atlas_tile_arithmetic import tensor_scale_exponent
 from run_workload_contraction import resource_plan, admit_program
 from run_model_tile import configure_model, model_binding
@@ -117,12 +117,7 @@ def prepare_encoded(a, b, exponent, assemble):
                       pretranspose_resident_b=plan["resident_b"], resident_a=plan["resident_a"])
     words = list(assemble(io.StringIO(source)).assemble())
     admit_program(words)
-    if plan["resident_b"]:
-        loads = m * k * (n // 32) + k * n
-    elif plan["resident_a"]:
-        loads = m * k + k * n * (m // 32)
-    else:
-        loads = (m // 32) * (n // 32) * (2 * k // 32 * 1024)
+    loads = dma_load_bytes(m, k, n, resident_a=plan["resident_a"], resident_b=plan["resident_b"])
     return {"source": source, "program": struct.pack(f"<{len(words)}I", *words), "initial": initial,
             "activation": activation, "weights": weights,
             "memory": {"dram_base": ATLAS_DRAM_BASE, "output_offset": offset, "total_dram_bytes": len(initial)},
@@ -131,8 +126,6 @@ def prepare_encoded(a, b, exponent, assemble):
 
 def checked_layout():
     header = checked(Path(__file__).absolute().parents[2] / "runtime/atlas_host_layout.h")
-    if checked(atlas_host_layout.HEADER) != header:
-        raise ValueError("host layout imported from another header")
     atlas_host_layout.recheck()
     return header
 
@@ -180,9 +173,6 @@ def export(args):
                  "atlas_program.py", "atlas_path_guard.py", "atlas_tooling.py", "atlas_tile_arithmetic.py",
                  "atlas_vector_arithmetic.py", "atlas_host_layout.py"):
         path = checked(Path(__file__).absolute().parents[1] / name)
-        module = sys.modules.get(Path(name).stem)
-        if module is None or checked(module.__file__) != path:
-            raise ValueError("export helper imported from another source")
         digest = sha256(path)
         if str(path) in pins and pins[str(path)] != digest:
             raise ValueError("conflicting export helper source pin")

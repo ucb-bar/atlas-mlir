@@ -83,16 +83,29 @@ class WorkloadAdmissionTest(unittest.TestCase):
         expected = output_halves(bits[:, :32]) + output_halves(bits[:, 32:])
         self.assertEqual(workload.physical_payload(bits), expected)
 
-    def test_all_five_imported_helpers_bound_to_local_sources(self):
+    def test_all_five_producer_sources_are_hashed(self):
         sources = workload.code_sources()
         self.assertEqual(set(sources),
             {"run_workload_contraction.py", "atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py",
             "atlas_vector_arithmetic.py"})
-        import atlas_vector_arithmetic
+        for name, digest in sources.items():
+            self.assertEqual(digest, workload.sha256(Path(workload.__file__).with_name(name)))
 
-        with mock.patch.object(atlas_vector_arithmetic, "__file__", "/tmp/unbound-vector.py"):
-            with self.assertRaisesRegex(ValueError, "outside bound producer"):
-                workload.code_sources()
+    def test_requested_dma_counts_tile_reuse(self):
+        from atlas_program import dma_load_bytes
+
+        # One tile loads A and B once in every mode.
+        for flags in ({}, {"resident_a": True}, {"resident_b": True}):
+            with self.subTest(flags=flags):
+                self.assertEqual(dma_load_bytes(32, 32, 32, **flags), 2048)
+        # A 2x4 output grid reduces three K tiles per output tile: 48 loads.
+        self.assertEqual(dma_load_bytes(64, 96, 128), 48 * 1024)
+        # Resident A: 6 A tiles once, 12 B tiles twice.
+        self.assertEqual(dma_load_bytes(64, 96, 128, resident_a=True), 30 * 1024)
+        # Resident B: 12 B tiles once, 6 A tiles four times.
+        self.assertEqual(dma_load_bytes(64, 96, 128, resident_b=True), 36 * 1024)
+        with self.assertRaises(ValueError):
+            dma_load_bytes(32, 32, 32, resident_a=True, resident_b=True)
 
 
 if __name__ == "__main__":

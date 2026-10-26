@@ -13,7 +13,7 @@ import struct
 
 import numpy as np
 
-from atlas_program import assembly
+from atlas_program import assembly, dma_load_bytes
 from run_model_tile import encode_operands
 from run_workload_contraction import admit_program, physical_payload, resource_plan, validate_workload_arrays
 
@@ -67,12 +67,7 @@ def prepare(arrays, source_dtype, assemble):
     words = list(assemble(io.StringIO(source)).assemble())
     admit_program(words)
     plan["instruction_words"] = len(words)
-    if plan["resident_b"]:
-        load_bytes = m * k * (n // 32) + k * n
-    elif plan["resident_a"]:
-        load_bytes = m * k + k * n * (m // 32)
-    else:
-        load_bytes = (m // 32) * (n // 32) * (2 * k // 32 * 1024)
+    load_bytes = dma_load_bytes(m, k, n, resident_a=plan["resident_a"], resident_b=plan["resident_b"])
     return {"source": source, "program": struct.pack(f"<{len(words)}I", *words), "initial": initial,
         "activation": activation, "weights": weights, "shape": [m, k, n], "rescale_exponent": exponent,
         "conversion": conversion, "plan": plan,

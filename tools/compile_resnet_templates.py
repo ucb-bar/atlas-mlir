@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile the 54 ResNet templates and derive rescale patches without execution."""
 
-from atlas_host_layout import ATLAS_DRAM_BASE
+from atlas_host_layout import fp8_output_offset, ATLAS_DRAM_BASE
 import argparse
 import io
 import json
@@ -60,7 +60,7 @@ def main():
         m, k, n = node["padded_mkn"]
         if any(type(x) is not int or x <= 0 or x % 32 for x in (m, k, n)) or k > 8192 or m * n > 1048576:
             raise ValueError("shape violates workload resource admission")
-        offset = m * k + k * n + 256
+        offset = fp8_output_offset(m, k, n)
         total = offset + m * n * 2 + 256
         if total > 64 * 1024 * 1024:
             raise ValueError("DRAM resource bound exceeded")
