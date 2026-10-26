@@ -6,7 +6,7 @@
 
 typedef struct {
   size_t mismatch_bytes;
-  size_t first_offset; /* SIZE_MAX when equal. */
+  size_t first_offset; /* SIZE_MAX when equal or a mismatch cannot be located. */
   uint8_t actual, expected;
 } atlas_host_check_result;
 
@@ -41,7 +41,11 @@ static inline atlas_host_check_result atlas_host_check_exact(
     ++i;
   }
   if (!different) return result;
-  /* Failure-only byte scan supplies exact, unambiguous diagnostics. */
+#ifdef ATLAS_HOST_CHECK_TEST_BEFORE_RESCAN
+  /* Test-only seam for deterministic changes between the two volatile scans. */
+  ATLAS_HOST_CHECK_TEST_BEFORE_RESCAN(actual_span, expected_span, bytes);
+#endif
+  /* Failure-only byte scan supplies exact diagnostics for stable spans. */
   for (i = 0; i < bytes; ++i) {
     uint8_t got = actual[i], want = expected[i];
     if (got != want) {
@@ -52,6 +56,11 @@ static inline atlas_host_check_result atlas_host_check_exact(
       }
       ++result.mismatch_bytes;
     }
+  }
+  /* A disappearing mismatch still invalidates the first-pass comparison. */
+  if (!result.mismatch_bytes) {
+    result.mismatch_bytes = 1;
+    result.first_offset = SIZE_MAX;
   }
   return result;
 }

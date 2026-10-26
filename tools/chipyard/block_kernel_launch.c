@@ -108,10 +108,14 @@ int main(void) {
   printf("ATLAS_KERNEL_CHECK_TIMING fast=%u check_cpu_cycles=%" PRIu64 "\n", ATLAS_FAST_CHECK, check_elapsed);
 #endif
 #if ATLAS_FAST_CHECK
-  if (first_failure.mismatch_bytes)
-    printf("ATLAS_KERNEL_BYTE_FAILURE offset=%" PRIu64 " actual=%u expected=%u\n",
-           (uint64_t)(first_failure_base + first_failure.first_offset),
-           (unsigned)first_failure.actual, (unsigned)first_failure.expected);
+  if (first_failure.mismatch_bytes) {
+    if (first_failure.first_offset == SIZE_MAX)
+      printf("ATLAS_KERNEL_BYTE_FAILURE unstable=1 offset=unknown\n");
+    else
+      printf("ATLAS_KERNEL_BYTE_FAILURE offset=%" PRIu64 " actual=%u expected=%u\n",
+             (uint64_t)(first_failure_base + first_failure.first_offset),
+             (unsigned)first_failure.actual, (unsigned)first_failure.expected);
+  }
   printf("ATLAS_KERNEL_CHECK output_byte_mismatches=%" PRIu64 " preserved_byte_mismatches=%" PRIu64
 #else
   printf("ATLAS_KERNEL_CHECK output_unit_mismatches=%" PRIu64 " preserved_unit_mismatches=%" PRIu64
