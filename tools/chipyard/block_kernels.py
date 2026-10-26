@@ -203,13 +203,15 @@ def audit_loadmem(raw, program, initial, expected, base):
             raise ValueError("ELF immutable asset differs: " + label)
 
 
-def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500):
+def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, fast_check=False):
     out, compiler = (safe_path(p) for p in (out, compiler))
     if out.exists():
         raise ValueError("fresh kernel output required")
     if not 0 < max_polls <= 100000000:
         raise ValueError("poll bound must be between 1 and 100000000")
     positive(wall_seconds)
+    if type(fast_check) is not bool:
+        raise ValueError("fast_check must be boolean")
     admission = Admission()
     program, runtime_program, initial, expected, base, ranges = admit(row, admission)
     runtime = safe_path(ROOT / "runtime")
@@ -218,6 +220,8 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500):
     for path in [LAUNCH, compiler] + helpers + [runtime / filename for filename in
                                     ("atlas_host.c", "atlas_host.h", "atlas_host_layout.h")]:
         admission.read(safe_path(path))
+    if fast_check:
+        admission.read(safe_path(runtime / "atlas_host_check.h"))
     if any(c in str(out) for c in ('"', "\\", "\n", "\r")):
         raise ValueError("unsafe assembly path")
     out.mkdir(parents=True)
@@ -244,6 +248,8 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500):
                f"-Wl,--section-start=.atlas_dram={base:#x}", "-I" + str(out), "-I" + str(runtime),
                str(LAUNCH), str(runtime / "atlas_host.c"), str(out / "assets.S"),
                "-Wl,-Map," + str(out / "host.map"), "-o", str(out / "host.elf")]
+    if fast_check:
+        command.insert(1, "-DATLAS_FAST_CHECK=1")
     error = None
     with (out / "build.log").open("w") as log:
         try:
@@ -263,6 +269,8 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500):
                    initial_sha256=sha(initial), expected_sha256=sha(expected), output_ranges=ranges,
                    dram_base=base, dram_bytes=len(initial), max_polls=max_polls,
                    wall_limit_seconds=wall_seconds, full_soc_executed=False)
+    if fast_check:
+        receipt.update(fast_check=True, mismatch_metric="bytes", check_algorithm="exact-or-of-word-xors-with-byte-fallback")
     if error:
         receipt["error"] = error
     if not receipt["returncode"]:
@@ -303,11 +311,12 @@ def kernel_result(item, run, build):
         phase = fields(phases[0]) if len(phases) == 1 else {}
         check = fields(checks[0]) if len(checks) == 1 else {}
         cycles = int(matches[0][1]) if len(matches) == 1 and matches[0][0] == item else None
+        metric = "byte" if build.get("fast_check") is True else "unit"
         exact = (code == 0 and metadata.get("returncode") == 0 and metadata.get("timed_out") is False
                  and metadata.get("elf_sha256") == build["elf_sha256"] and cycles is not None
                  and phase.get("result") == phase.get("active") == "0" and phase.get("sequence") == "1"
                  and phase.get("device_cycles") == str(cycles)
-                 and check.get("output_unit_mismatches") == check.get("preserved_unit_mismatches") == "0"
+                 and check.get("output_" + metric + "_mismatches") == check.get("preserved_" + metric + "_mismatches") == "0"
                  and check.get("dbg0") == check.get("dbg1") == "1" and "ATLAS_KERNEL_FAIL" not in log)
         return dict(kernel=item, exact=exact, returncode=code, device_cycles=cycles, run=str(run))
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -338,6 +347,7 @@ def main():
     build.add_argument("--out", required=True, type=Path)
     build.add_argument("--max-polls", type=positive, default=100000000)
     build.add_argument("--wall-seconds", type=positive, default=1500)
+    build.add_argument("--fast-check", action="store_true", help="opt in to exact wide comparison with byte diagnostics")
     run = actions.add_parser("run")
     run.add_argument("--build-root", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
@@ -361,7 +371,7 @@ def main():
         write_json(out / "batch.json", dict(schema=SCHEMA, kernels=[row["id"] for row in rows], kernel_count=len(rows)))
         for row in rows:
             receipt = build_kernel(row, out / row["id"], compiler, max_polls=args.max_polls,
-                                   wall_seconds=args.wall_seconds)
+                                   wall_seconds=args.wall_seconds, fast_check=args.fast_check)
             print(json.dumps(receipt, sort_keys=True), flush=True)
             if receipt["returncode"]:
                 return 1

@@ -133,6 +133,31 @@ class BlockKernelsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'overlapping'):
             kernels.audit_loadmem(bytes(broken), self.program, self.initial, self.expected, 0x100000000)
 
+    def test_fast_check_is_explicit_and_source_bound(self):
+        for fast in (False, True):
+            def compiler(command, **kwargs):
+                Path(command[-1]).write_bytes(b'synthetic ELF')
+                return SimpleNamespace(returncode=0)
+            with mock.patch.object(kernels.subprocess, 'run', side_effect=compiler), mock.patch.object(kernels, 'audit_loadmem'):
+                result = kernels.build_kernel(self.row, self.root / str(fast), self.compiler, fast_check=fast)
+            self.assertEqual(result['returncode'], 0)
+            self.assertEqual('-DATLAS_FAST_CHECK=1' in result['command'], fast)
+            self.assertEqual(str(kernels.ROOT / 'runtime/atlas_host_check.h') in result['inputs_sha256'], fast)
+            self.assertEqual(result.get('fast_check', False), fast)
+        with self.assertRaises(ValueError):
+            kernels.build_kernel(self.row, self.root / 'invalid', self.compiler, fast_check='yes')
+
+    def test_fast_result_requires_byte_metrics_and_rejects_byte_failure(self):
+        run, meta, log = self.valid_run()
+        build = dict(elf_sha256='bound', fast_check=True)
+        self.assertFalse(kernels.kernel_result('tiny-00', run, build)['exact'])
+        log = log.replace('_unit_mismatches', '_byte_mismatches')
+        (run / 'sim.log').write_text(log)
+        self.assertTrue(kernels.kernel_result('tiny-00', run, build)['exact'])
+        for field in ('output_byte_mismatches', 'preserved_byte_mismatches'):
+            (run / 'sim.log').write_text(log.replace(field + '=0', field + '=1'))
+            self.assertFalse(kernels.kernel_result('tiny-00', run, build)['exact'])
+
     def valid_run(self):
         run = self.root / 'run'; run.mkdir()
         (run / 'exit-status.txt').write_text('0\n')

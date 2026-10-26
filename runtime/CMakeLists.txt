@@ -2,7 +2,7 @@ add_library(atlas-host STATIC atlas_host.c)
 target_include_directories(atlas-host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(atlas-host PROPERTIES C_STANDARD 11)
 install(TARGETS atlas-host ARCHIVE DESTINATION lib)
-install(FILES atlas_host.h atlas_host_layout.h DESTINATION include)
+install(FILES atlas_host.h atlas_host_layout.h atlas_host_check.h DESTINATION include)
 
 add_library(atlas-model-tile STATIC atlas_model_tile.c)
 target_include_directories(atlas-model-tile PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
