@@ -166,7 +166,7 @@ class SmolReuseTests(unittest.TestCase):
 
     def test_strict_admission(self):
         for shape in [(128.,768,3072),(129,768,3072),(32,32,32),
-                      (64,12288,960),(128,768,768),(128,3072,768)]:
+                      (64,12288,960),(128,768,768),(128,3072,768),(64,736,32)]:
             with self.assertRaises(ValueError): producer.layout(*shape)
         m,k,n=64,320,320
         offset=m*k+k*n+256
@@ -175,10 +175,10 @@ class SmolReuseTests(unittest.TestCase):
             with self.assertRaises(ValueError): producer.assembly(m,k,n,bad_offset,exp)
 
     def test_precise_candidate_scope(self):
-        self.assertEqual(len(producer.SHAPES),21)
+        self.assertEqual(len(producer.SHAPES),20)
         self.assertIn((32,32,960),producer.SHAPES)
         self.assertIn((64,32,736),producer.SHAPES)
-        self.assertIn((64,736,32),producer.SHAPES)
+        self.assertNotIn((64,736,32),producer.SHAPES)
         self.assertIn((128,2560,960),producer.SHAPES)
 
 if __name__=='__main__': unittest.main()
