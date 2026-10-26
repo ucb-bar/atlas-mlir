@@ -1,10 +1,8 @@
-"""Exercise the production C orchestrator with two explicit source providers.
+"""Exercise production C orchestration with test-only ABI stubs by default.
 
-FullModelTest always runs with test-only ABI stubs: it checks routing, cache
-ownership, state commits and the production BF16 argmax, not host arithmetic.
-FullModelIntegrationTest additionally runs with real host primitives when
-TINY_MERLIN_COMPARISONS names their source directory. Neither suite qualifies
-full-model numerical equivalence: projections here are synthetic callbacks.
+TINY_MERLIN_COMPARISONS selects real host headers and primitives instead, checking
+provider linkage with the same orchestration assertions. Synthetic projections
+and nonnumerical stubs do not qualify full-model numerical equivalence.
 """
 import ctypes as ct
 import _ctypes
@@ -32,9 +30,17 @@ Projection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void
                          ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p)
 
 
-class FullModelChecks:
+class FullModelTest(unittest.TestCase):
     @classmethod
-    def compile_host(cls, provider, names):
+    def setUpClass(cls):
+        value = os.environ.get("TINY_MERLIN_COMPARISONS")
+        cls.stub_provider = value is None
+        provider = Path(value) if value is not None else Path(__file__).absolute().parent / "fixtures/tiny_full_host_stubs"
+        if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
+            raise ValueError("restricted source provider")
+        names = ("host_stubs.c",) if cls.stub_provider else (
+            "smol_host_ops.c", "llama_host_attention.c", "llama_host_layout.c",
+            "llama_rotary_table.c", "llama_host_bmm.c", "smol_host_softmax.c")
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
@@ -222,16 +228,9 @@ class FullModelChecks:
                 self.assertTrue(np.any(self.values[1] != 0))
                 self.assertEqual(observed[-1], (11, 6) if failure == "later_layer" else (22, 7))
 
-
-class FullModelTest(FullModelChecks, unittest.TestCase):
-    """Default, self-contained C orchestration coverage with nonnumerical stubs."""
-
-    @classmethod
-    def setUpClass(cls):
-        provider = Path(__file__).absolute().parent / "fixtures/tiny_full_host_stubs"
-        cls.compile_host(provider, ("host_stubs.c",))
-
     def test_embedding_rows_feed_first_projection(self):
+        if not self.stub_provider:
+            self.skipTest("raw embedding routing requires the identity RMSNorm stub")
         p, s = self.fixture()
         self.embedding[7] = 0x3f00
         observed = []
@@ -258,22 +257,6 @@ class FullModelTest(FullModelChecks, unittest.TestCase):
         self.assertEqual(status, -2)
         self.assertEqual(len(observed), 1)
         np.testing.assert_array_equal(observed[0].reshape(128, 2048), self.embedding[tokens])
-
-
-class FullModelIntegrationTest(FullModelChecks, unittest.TestCase):
-    """Explicit integration with Merlin's real host primitives and synthetic projections."""
-
-    @classmethod
-    def setUpClass(cls):
-        value = os.environ.get("TINY_MERLIN_COMPARISONS")
-        if value is None:
-            raise unittest.SkipTest("set TINY_MERLIN_COMPARISONS to the explicit source provider")
-        provider = Path(value)
-        if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
-            raise ValueError("restricted source provider")
-        names = ("smol_host_ops.c", "llama_host_attention.c", "llama_host_layout.c",
-                 "llama_rotary_table.c", "llama_host_bmm.c", "smol_host_softmax.c")
-        cls.compile_host(provider, names)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@ import zipfile
 def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False):
     """Requested FP8 input bytes for a complete tiled contraction.
 
-    Callers admit physical dimensions and resident bank capacity separately.
+    m, k and n must be positive physical dimensions divisible by 32. Callers
+    enforce this precondition and resident bank capacity before accounting.
     """
     if resident_a and resident_b:
         raise ValueError("resident A and resident B are mutually exclusive")
