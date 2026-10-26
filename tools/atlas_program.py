@@ -54,6 +54,10 @@ _TRAFFIC_REUSE_MODULES = {
     (64, 1440, 736): "atlas_program_reuse_smol",
     (64, 960, 320): "atlas_program_reuse_smol",
     (64, 736, 736): "atlas_program_reuse_smol",
+    (192, 960, 320): "atlas_program_reuse_smol",
+    (192, 960, 960): "atlas_program_reuse_smol",
+    (192, 960, 2560): "atlas_program_reuse_smol",
+    (192, 2560, 960): "atlas_program_reuse_resnet",
 }
 
 

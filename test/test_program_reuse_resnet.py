@@ -126,6 +126,19 @@ def prove(source, m, k, n, exponent):
 
 
 class ResNetReuseTests(unittest.TestCase):
+    def test_selected_layer_down_projection_preserves_resnet_programs(self):
+        selected=(192,2560,960)
+        self.assertIn(selected,producer.SHAPES)
+        previous=producer.SHAPES-{selected}
+        self.assertEqual(len(previous),20)
+        sources=''.join(producer.assembly(m,k,n,m*k+k*n+256,-13)
+                        for m,k,n in sorted(previous))
+        self.assertEqual(hashlib.sha256(sources.encode()).hexdigest(),
+                         '92fb498f244ea8bf5299f6e9213e8d8f4bcad2703d17ae6a91d5820c4f4ba271')
+        plan=producer.layout(*selected)
+        self.assertEqual([b['row_tiles'] for b in plan['blocks']],[5,1])
+        self.assertEqual(plan['dma_load_bytes'],5406720)
+
     def test_original_three_programs_are_unchanged(self):
         # Zero-rescale assembly identities captured before broadening admission.
         originals = {

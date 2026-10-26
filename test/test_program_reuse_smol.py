@@ -175,10 +175,23 @@ class SmolReuseTests(unittest.TestCase):
             with self.assertRaises(ValueError): producer.assembly(m,k,n,bad_offset,exp)
 
     def test_precise_candidate_scope(self):
-        self.assertEqual(len(producer.SHAPES),20)
+        self.assertEqual(len(producer.SHAPES),23)
         self.assertIn((32,32,960),producer.SHAPES)
         self.assertIn((64,32,736),producer.SHAPES)
         self.assertNotIn((64,736,32),producer.SHAPES)
         self.assertIn((128,2560,960),producer.SHAPES)
+
+    def test_selected_layer_scope_preserves_full_model_programs(self):
+        selected={(192,960,320),(192,960,960),(192,960,2560)}
+        self.assertTrue(selected <= producer.SHAPES)
+        self.assertNotIn((192,2560,960),producer.SHAPES)
+        previous=producer.SHAPES-selected
+        self.assertEqual(len(previous),20)
+        sources=''.join(producer.assembly(m,k,n,m*k+k*n+256,-13)
+                        for m,k,n in sorted(previous))
+        self.assertEqual(hashlib.sha256(sources.encode()).hexdigest(),
+                         '10198ea7a1bf45e2ac9cd0d83cd95cb254008fb2e2a4e47ee6825acd26d62b91')
+        for shape in selected:
+            self.assertEqual([b['row_tiles'] for b in producer.layout(*shape)['blocks']],[6])
 
 if __name__=='__main__': unittest.main()

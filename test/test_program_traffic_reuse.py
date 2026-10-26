@@ -61,6 +61,10 @@ TARGETS = {
     (64, 1440, 736): "atlas_program_reuse_smol",
     (64, 960, 320): "atlas_program_reuse_smol",
     (64, 736, 736): "atlas_program_reuse_smol",
+    (192, 960, 320): "atlas_program_reuse_smol",
+    (192, 960, 960): "atlas_program_reuse_smol",
+    (192, 960, 2560): "atlas_program_reuse_smol",
+    (192, 2560, 960): "atlas_program_reuse_resnet",
 }
 
 
@@ -112,7 +116,8 @@ class TrafficReuseTests(unittest.TestCase):
                         (3136, 256, 128): 868352,
                         (800, 512, 256): 540672,
                         (3136, 64, 64): 204800,
-                        (32, 2048, 1024): 2162688}.get(dims, m*k+k*n)
+                        (32, 2048, 1024): 2162688,
+                        (192, 2560, 960): 5406720}.get(dims, m*k+k*n)
             self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), expected)
 
     def test_reject_unsupported_dimensions_and_legacy_flags(self):
