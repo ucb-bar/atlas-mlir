@@ -18,7 +18,7 @@ ROOT = Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tools/host_iss'))
 from atlas_path_guard import checked
-from atlas_program import assembly, dma_load_bytes
+from atlas_program import assembly, code_sources, dma_load_bytes
 from elf_image import Image, mmio_sites
 from bundle import ChecksumBundle
 
@@ -57,9 +57,9 @@ def build(args):
     started = time.monotonic()
     try:
         read(__file__)
-        for name in ('atlas_program.py','atlas_program_reuse_smol.py','atlas_program_reuse_resnet.py',
-                     'atlas_path_guard.py','atlas_tooling.py','run_model_tile.py','atlas_tile_arithmetic.py',
-                     'host_iss/elf_image.py','host_iss/bundle.py'):
+        for name, digest in code_sources(traffic_reuse=True).items():
+            read(ROOT/'tools'/name, digest)
+        for name in ('atlas_path_guard.py','atlas_tooling.py','host_iss/elf_image.py','host_iss/bundle.py'):
             read(ROOT/'tools'/name)
         git = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'], check=True, capture_output=True, text=True)
         if git.stdout: raise ValueError('commit all source changes before build')

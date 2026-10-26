@@ -35,7 +35,7 @@ The original three-shape and eight-shape checkpoints remain historical evidence 
 
 ## Exactness and tests
 
-Qualified representatives match the original expected full DRAM image, including output, inputs and guards. Recipes preserve increasing K order, first overwrite then ordered accumulation, two MXU0 slots, one BF16 pop and the original power-of-two rescale. They do not pop partial reductions or reassociate arithmetic. Exactly one static `vli.all m4` patch site changes with the exponent.
+Qualified representatives match the original expected full DRAM image, including output, inputs and guards. Recipes preserve increasing K order, first overwrite then ordered accumulation, up to two MXU0 slots, one BF16 pop and the original power-of-two rescale. They do not pop partial reductions or reassociate arithmetic. Exactly one static `vli.all m4` patch site changes with the exponent.
 
 Shared in-repo symbolic tests exercise every public shape: operand origins and transpose, accumulator ordering, output halves/scatter, pending DMA ownership on both channels and bank-contained accesses. Mutation controls remove required waits, transpose, accumulation, rescale or correct output placement. Receipt-derived DMA counts anchor dispatch accounting. Default-generator compatibility controls remain separate.
 
