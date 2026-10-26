@@ -177,7 +177,7 @@ class ResNetReuseTests(unittest.TestCase):
                 self.assertEqual(expected,producer.assembly(m,k,n,m*k+k*n+256,exponent).splitlines())
 
     def test_strict_admission(self):
-        for shape in [(224.,2304,256),(225,2304,256),(32,32,32)]:
+        for shape in [(224.,2304,256),(225,2304,256),(32,32,32),(32,2048,1024)]:
             with self.assertRaises(ValueError): producer.layout(*shape)
         for offset,exp in [(0,-13),(1106177,-13),(1106176,None),(1106176,-127),(1106176,True)]:
             with self.assertRaises(ValueError): producer.assembly(224,2304,256,offset,exp)
