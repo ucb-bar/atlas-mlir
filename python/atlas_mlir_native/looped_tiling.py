@@ -196,7 +196,7 @@ def _virtual(
             + f") -> {returns}"
         )
 
-    def tile_product(prefix, before, ap, wp, acc=None):
+    def tile_product(prefix, before, ap, wp, acc=None, *, acc_is_handle=False, readout=True):
         c(prefix + "_bytes", ab)
         effect("dma_load_fp8", before, prefix + "_a_s", [ap, prefix + "_bytes"], ["i32", "i32"], (prefix + "_a", fp8))
         effect(
@@ -227,23 +227,28 @@ def _virtual(
                 (prefix + "_acc", accum),
             )
         else:
-            effect(
-                "mxu_load_acc_bf16",
-                prefix + "_weight_s",
-                prefix + "_seed_s",
-                [acc],
-                [bf16],
-                (prefix + "_seed", accum),
-                "{unit = 0 : i32}",
-            )
+            seed, ready = acc, prefix + "_weight_s"
+            if not acc_is_handle:
+                effect(
+                    "mxu_load_acc_bf16",
+                    ready,
+                    prefix + "_seed_s",
+                    [acc],
+                    [bf16],
+                    (prefix + "_seed", accum),
+                    "{unit = 0 : i32}",
+                )
+                seed, ready = prefix + "_seed", prefix + "_seed_s"
             effect(
                 "mxu_accumulate",
-                prefix + "_seed_s",
+                ready,
                 prefix + "_dot_s",
-                [prefix + "_a", prefix + "_weight", prefix + "_seed"],
+                [prefix + "_a", prefix + "_weight", seed],
                 [fp8, weight, accum],
                 (prefix + "_acc", accum),
             )
+        if not readout:
+            return prefix + "_dot_s", prefix + "_acc"
         effect(
             "mxu_readout_bf16",
             prefix + "_dot_s",
@@ -252,6 +257,7 @@ def _virtual(
             [accum],
             (prefix + "_result", bf16),
         )
+        return prefix + "_result_s", prefix + "_result"
 
     c("zero_m", 0)
     c("abase", a)
@@ -309,9 +315,10 @@ def _virtual(
         tile_product("first", "seed_loaded", "arow", "wrow", "seed_value")
     if kc > 1 and k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
-        # each step consumes the previous completed BF16 value. This changes
-        # loop control only; it does not reassociate the reduction or extend
-        # the live MXU state across iterations.
+        # each step consumes the previous accumulator version. Keep that handle
+        # inside the unrolled block; only its last step reads BF16 for the loop
+        # edge. The ordered K arithmetic and loop-boundary representation stay
+        # the same.
         factor = min(k_unroll, kc - 1)
         remainder = (kc - 1) % factor
         c("zero_k", 0)
@@ -344,8 +351,10 @@ def _virtual(
                         )
                     )
                     left, right = step + "_ap", step + "_wp"
-                tile_product(step, before, left, right, value)
-                before, value = step + "_result_s", step + "_result"
+                before, value = tile_product(
+                    step, before, left, right, value,
+                    acc_is_handle=index > 0, readout=index == count - 1,
+                )
             return before, value
 
         current, value = ordered_steps("ku_step", factor, "kub", "ku_ap", "ku_wp", "ku_value")
