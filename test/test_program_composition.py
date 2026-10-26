@@ -14,15 +14,19 @@ from test_looped_mnk import source_request
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def composed_source(factor, k=65):
+def composed_source(factor, k=65, *, shape=None, entries=2):
     from atlas_mlir_native.looped_tiling import _virtual, prepare_plan
 
-    plan = prepare_plan(source_request(1, 1, k))
+    plan = prepare_plan(source_request(*(shape or (1, 1, k))))
+    wbase = max(0x90004000, 0x90000000 + plan.buffer_bytes[0])
+    output_base = max(0x90010000, (wbase + plan.buffer_bytes[1] + 2047) // 2048 * 2048)
     functions = []
-    for name, output in (("first", 0x90010000), ("second", 0x90010800)):
-        source = _virtual(plan, (0x90000000, 0x90004000), output, k_unroll=factor)
+    names = ("first", "second", "third")[:entries]
+    for index, name in enumerate(names):
+        output = output_base + index * plan.buffer_bytes[2]
+        source = _virtual(plan, (0x90000000, wbase), output, k_unroll=factor)
         functions.append("\n".join(source.splitlines()[1:-1]).replace("@looped_matmul", "@" + name))
-    return 'module attributes {atlas.program_entries = ["first", "second"]} {\n' + "\n".join(functions) + "\n}\n"
+    return f'module attributes {{atlas.program_entries = {json.dumps(names)}}} {{\n' + "\n".join(functions) + "\n}\n"
 
 
 @unittest.skipUnless(
@@ -62,6 +66,28 @@ class ProgramCompositionTest(unittest.TestCase):
                 halts = [row for row in program["instructions"] if row["operation"] == "atlas.trap"]
                 self.assertEqual(len(halts), 1)
                 self.assertEqual(halts[0]["fields"]["kind"], "ecall")
+
+    def test_composed_operand_caches_share_only_between_initialized_fragments(self):
+        tools = Path(os.environ["ATLAS_OOT_BIN_DIR"])
+        for shape in ((65, 35, 65), (65, 7, 65), (32, 64, 2592)):
+            source = composed_source(4, shape=shape, entries=3)
+            joined = subprocess.run([str(tools / "atlas-opt"), "--compose-atlas-program", "-"],
+                                    input=source, text=True, capture_output=True)
+            self.assertEqual(joined.returncode, 0, joined.stderr)
+            slots = joined.stdout.count('"atlas.virtual_slot"')
+            self.assertEqual(slots, (shape[2] + 31) // 32)
+            for pipeline in ("mandatory", "optimized"):
+                self.compile(source, pipeline=pipeline)
+        source = composed_source(4, shape=(65, 35, 65))
+        # A later fragment cannot read a previous fragment's private scratch
+        # unless its own original slot was initialized on every reaching path.
+        save = '"atlas.virtual_save"(%cache_0_loaded, %operand_cache_0, %cache_0_value)'
+        index = source.rindex(save)
+        source = source[:index] + source[index:].replace(save, save.replace("%operand_cache_0", "%operand_cache_1"), 1)
+        invalid = subprocess.run([str(tools / "atlas-opt"), "--compose-atlas-program", "-"],
+                                 input=source, text=True, capture_output=True)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("not initialized", invalid.stderr)
 
     def test_straight_line_entries_load_the_control_flow_dialect(self):
         functions = []

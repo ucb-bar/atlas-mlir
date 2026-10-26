@@ -159,6 +159,15 @@ def prepare_execution_plan(request):
     return full, streaming.body if streaming else full, streaming
 
 
+def _operand_cache(plan, enabled=True):
+    # The allocator owns bank 2 after eight BF16 DMA windows; reserve half its
+    # remaining frame for edge values and spills. Other VMEM banks stay private.
+    mc, nc, kc = plan.counts
+    if not enabled or kc * plan.tile_bytes[0] > (256 * 1024 - 8 * 2048) // 2:
+        return None
+    return "a" if nc > 1 else "w" if mc > 1 else None
+
+
 def _virtual(
     plan: LoopedMNKTiling,
     addresses: tuple[int, int],
@@ -177,11 +186,7 @@ def _virtual(
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"
     # Static K slots keep A across N, or W across M for a single column block.
-    # The allocator owns bank 2 after eight BF16 DMA windows; reserve half its
-    # remaining frame for edge values and spills. Other VMEM banks stay private.
-    reuse = "a" if nc > 1 else "w" if mc > 1 else None
-    if not operand_reuse or kc * ab > (256 * 1024 - 8 * 2048) // 2:
-        reuse = None
+    reuse = _operand_cache(plan, operand_reuse)
     slot = "!atlas.virtual_spill"
     lines = [
         "module {",
@@ -767,6 +772,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
                 {
                     "schema": "atlas.looped_mnk_execution_plan.v1",
                     "codegen": codegen,
+                    "operand_reuse": _operand_cache(plan, codegen["program_size_limit_bytes"] is None),
                     "scope": "diagnostic_selected_standalone_core",
                     "shape": list(plan.extents[:2]),
                     "reduction_extent": plan.extents[2],

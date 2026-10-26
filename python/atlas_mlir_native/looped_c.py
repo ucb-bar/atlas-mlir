@@ -23,6 +23,7 @@ from .binding import (
     dram_slots,
 )
 from .looped_tiling import (
+    _operand_cache,
     _virtual,
     prepare_execution_plan,
     split_epilogue,
@@ -150,6 +151,7 @@ def prepare_c_package(
         if codegen.get("reduction_unroll") not in (1, 2, 4, 8):
             raise ValueError("unrecognized reduction unroll factor")
         expected["codegen"] = codegen
+    expected["operand_reuse"] = _operand_cache(device_tiling, not codegen or codegen["program_size_limit_bytes"] is None)
     virtual = _virtual(
         device_tiling,
         tuple(addresses[:2]),

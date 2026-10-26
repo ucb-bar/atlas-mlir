@@ -1,4 +1,6 @@
 #include "Atlas/AtlasProgramComposition.h"
+#include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTypes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -68,6 +70,7 @@ struct ComposeAtlasProgramPass
         function.emitError("composition needs one entry start, explicit DMA and no calls");
         return signalPassFailure();
       }
+      if (failed(atlas::verifyAtlasSpillSlots(function))) return signalPassFailure();
       auto base = function->getAttrOfType<IntegerAttr>("atlas.output_dram_base");
       auto bytes = function->getAttrOfType<IntegerAttr>("atlas.output_dram_bytes");
       auto input = function->getAttrOfType<IntegerAttr>("atlas.input_dram_base");
@@ -140,6 +143,7 @@ struct ComposeAtlasProgramPass
     Block *header = joined.addEntryBlock();
     SmallVector<Block *> starts;
     SmallVector<func::ReturnOp> returns;
+    SmallVector<atlas::VirtualSlotOp> scratch;
     for (auto function : functions) {
       IRMapping mapping;
       function.getBody().cloneInto(&joined.getBody(), mapping);
@@ -147,6 +151,7 @@ struct ComposeAtlasProgramPass
       Value incoming = entry->addArgument(state, function.getLoc());
       starts.push_back(entry);
       SmallVector<Operation *> remove;
+      SmallVector<atlas::VirtualSlotOp> slots;
       for (Block &original : function.getBody()) {
         Block *block = mapping.lookup(&original);
         for (Operation &op : *block) {
@@ -155,9 +160,30 @@ struct ComposeAtlasProgramPass
             op.getResult(0).replaceAllUsesWith(incoming);
             remove.push_back(&op);
           }
+          if (auto slot = dyn_cast<atlas::VirtualSlotOp>(op)) slots.push_back(slot);
         }
       }
       for (Operation *op : remove) op->erase();
+      // Scratch is private to each sequential fragment. Share matching slots
+      // across fragments, keeping each fragment's simultaneous slots distinct.
+      llvm::SmallPtrSet<Operation *, 8> used;
+      for (auto slot : slots) {
+        atlas::VirtualSlotOp available;
+        bool share = slot.getPurpose() == "scratch" && !slot.getPinned() && slot.getSlotWord() == -1;
+        if (share)
+          for (auto candidate : scratch)
+            if (!used.contains(candidate) && candidate.getKind() == slot.getKind() &&
+                candidate.getWords() == slot.getWords()) { available = candidate; break; }
+        if (available) {
+          slot.getSlot().replaceAllUsesWith(available.getSlot());
+          slot.erase();
+        } else {
+          slot->moveBefore(header, header->end());
+          available = slot;
+          if (share) scratch.push_back(slot);
+        }
+        used.insert(available);
+      }
       // Each cloned function may have several return blocks. Record all of them
       // with the next entry rather than assuming the return is textually last.
       for (Block &original : function.getBody()) {
@@ -182,10 +208,11 @@ struct ComposeAtlasProgramPass
         ret.erase();
       }
     }
-    builder.setInsertionPointToEnd(header);
+    builder.setInsertionPointToStart(header);
     OperationState start(module.getLoc(), "atlas.virtual_start");
     start.addTypes(state);
     Operation *begun = builder.create(start);
+    builder.setInsertionPointToEnd(header);
     cf::BranchOp::create(builder, module.getLoc(), starts.front(), begun->getResults());
     for (Operation *function : originals) function->erase();
     module->removeAttr("atlas.program_entries");

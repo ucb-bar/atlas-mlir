@@ -367,6 +367,19 @@ class LoopedMNKTest(unittest.TestCase):
                         machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
                         _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
 
+    def test_operand_cache_keeps_explicit_code_size_budgets_compact(self):
+        from atlas_mlir_native.looped_c import prepare_c_package
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
+        with codegen_options(CodegenOptions(io_memory_bytes=1048576, reduction_unroll="4", program_size_limit_bytes=2048)):
+            snapshot = build_snapshot(self.root / "compact-snapshot")
+            target = self.root / "compact-cache-fallback"
+            _, _, _, _, execution = compile_case(snapshot, (64, 128, 512), target)
+            self.assertIsNone(execution["operand_reuse"])
+            self.assertNotIn('"atlas.virtual_slot"', (target / "atlas-virtual.mlir").read_text())
+            self.assertLessEqual((target / "program.bin").stat().st_size, 2048)
+            prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)
+
     def source_bound_contraction(self):
         import hashlib
 

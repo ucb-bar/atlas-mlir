@@ -577,7 +577,9 @@ def compile_resident(
         if "reduction_extent" in body_execution:
             count = body_execution["tiling"]["loop_counts"][2]
             records[-1].update(
-                reduction_tiles=count, effective_K_unroll=min(unroll, max(1, count - 1))
+                reduction_tiles=count,
+                effective_K_unroll=count if body_execution.get("operand_reuse") else min(unroll, max(1, count - 1)),
+                operand_reuse=body_execution.get("operand_reuse"),
             )
     # Staged fragments have already checked their local boundaries. Their
     # workspace reads are initialized by preceding fragments, so rechecking
