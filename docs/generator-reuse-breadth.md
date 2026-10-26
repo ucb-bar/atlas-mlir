@@ -61,7 +61,7 @@ The largest recipe is `12544/160/64`: 13,740 + 5 = 13,745 words. It is raw-only 
 
 `tools/chipyard/smol_layer.py` builds one live selected Smol layer in q, k, v, o, gate, up, down order. It retains checksum-bound nonlinear C and final output/key/value checks, adds exact full-DRAM checks after each reuse launch, and emits `ATLAS_KERNEL_*` lines plus an `ATLAS_LAYER_*` total. Its maximum wrapped program is 361 words; shared DRAM is 3,625,472 bytes.
 
-A combined live QEMU and NPU Model run of the layer was not attempted: the measured component run times already exceed the run time limit before host overhead. Whole-host QEMU checks with captured device outputs and separate bounded numerical components are distinct from combined live Model execution. QEMU intercepts HTIF console output, so real frontend transport is left to an SoC or FPGA run; in VCS the layer runs about 5.5 billion host instructions, so it needs the FPGA.
+A combined live QEMU and NPU Model run of the layer was not attempted: the measured component run times already exceed the run time limit before host overhead. Whole-host QEMU checks with captured device outputs and separate bounded numerical components are distinct from combined live Model execution. QEMU intercepts HTIF console output, so real frontend transport is left to an SoC or FPGA run; the union bit-copy fix reduces the measured host work from 5.50 to 1.55 billion QEMU instructions with captured device outputs. These are not Rocket cycles or a whole-system timing estimate; see [host bit copies](host-bit-copies.md).
 
 ## Standalone RTL and SoC evidence
 

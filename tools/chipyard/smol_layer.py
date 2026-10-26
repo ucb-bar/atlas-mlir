@@ -86,7 +86,11 @@ def build(args):
             return copy(p, target, old_pins[str(p)])
         for name in RETAINED:
             retained_copy('source/' + name + '.c', source / (name + '.c'))
-        for name in HEADERS: retained_copy('source/' + name, source / name)
+        for name in HEADERS:
+            if name == 'smol_host_bits.h':
+                copy(ROOT / 'runtime' / name, source / name)
+            else:
+                retained_copy('source/' + name, source / name)
         retained_copy('source/atlas_resnet_graph_math.c', source/'atlas_resnet_graph_math.c')
         for name in ('rv64_support.c', 'expf_bf16_values.inc'):
             retained_copy('elf/support/' + name, source / name)
