@@ -1,4 +1,8 @@
 #include "smol_block_raw_adapter.h"
+#if defined(ATLAS_SMOL_CAPTURE_CHECK) && ATLAS_SMOL_CAPTURE_CHECK
+#include "atlas_host_check.h"
+#include "smol_block_capture.h"
+#endif
 /* Packing callbacks are provided by the embedding workload library. */
 int host_matrix_pack_bf16(const uint16_t *, size_t, size_t, size_t, size_t, size_t, size_t, uint8_t *, size_t, int *);
 
@@ -84,6 +88,22 @@ int smol_block_raw_linear(void *opaque, unsigned role, const uint16_t *input, si
   if (w->runtime_result == ATLAS_HOST_OK) w->runtime_result = atlas_host_wait(w->host, w->max_polls);
   w->cycle_delta[role] = w->host->mmio.read32(w->host->mmio.context, w->host->map.csr_base + ATLAS_CSR_CYCLES) - before;
   if (w->runtime_result != ATLAS_HOST_OK) return reject(w, SMOL_RAW_RUNTIME);
+#if defined(ATLAS_SMOL_CAPTURE_CHECK) && ATLAS_SMOL_CAPTURE_CHECK
+  uint64_t check_begin, check_end;
+  __asm__ volatile("fence rw,rw\nrdcycle %0" : "=r"(check_begin) : : "memory");
+  const uint8_t *expected = smol_capture_expected[role];
+  smol_capture_result *check = &smol_capture_results[role];
+  check->preserved_mismatches = atlas_host_check_exact(w->dram, expected, k->output_offset).mismatch_bytes;
+  check->output_mismatches = atlas_host_check_exact(w->dram + k->output_offset, expected + k->output_offset,
+                                                   k->output_bytes).mismatch_bytes;
+  size_t tail = k->output_offset + k->output_bytes;
+  check->preserved_mismatches += atlas_host_check_exact(w->dram + tail, expected + tail,
+                                                       k->dram_bytes - tail).mismatch_bytes;
+  __asm__ volatile("fence rw,rw\nrdcycle %0" : "=r"(check_end) : : "memory");
+  check->check_cycles = check_end - check_begin;
+  if (check->output_mismatches) return reject(w, SMOL_RAW_OUTPUT);
+  if (check->preserved_mismatches) return reject(w, SMOL_RAW_INPUT);
+#else
   for (size_t i = k->activation_bytes + k->weight_bytes; i < k->output_offset; ++i)
     if (((volatile uint8_t *)w->dram)[i] != 0xa5) return reject(w, SMOL_RAW_GUARD);
   for (size_t i = k->output_offset + k->output_bytes; i < k->dram_bytes; ++i)
@@ -92,6 +112,7 @@ int smol_block_raw_linear(void *opaque, unsigned role, const uint16_t *input, si
     if (((volatile uint8_t *)w->dram)[i] != w->activation_copy[i]) return reject(w, SMOL_RAW_INPUT);
   for (size_t i = 0; i < k->weight_bytes; ++i)
     if (((volatile uint8_t *)w->dram)[k->activation_bytes + i] != k->weights[i]) return reject(w, SMOL_RAW_INPUT);
+#endif
   /* Validate complete physical output and positive-zero padded rows before
    * writing even the first native output word. */
   for (size_t row = 0; row < 192; ++row)
