@@ -1,17 +1,17 @@
 """Opt-in ordered MXU0 row residency with four-tile B prefetch.
 
 Two rows share each B weight for 128/5632/1024; one row suffices for
-32/2048/2048. The 4096-byte B buffers alternate, and each incoming DMA is
+32/2048/2048 and 32/2048/1024. The 4096-byte B buffers alternate, and each incoming DMA is
 waited before its first use. All matrix/LSU spacing is the established
 atlas_program spacing; no numerical reassociation or partial pop occurs.
 VMEM addresses in the assembly are four-byte words, DRAM offsets bytes.
 """
-SHAPES = ((128, 5632, 1024), (32, 2048, 2048))
+SHAPES = ((128, 5632, 1024), (32, 2048, 2048), (32, 2048, 1024))
 
 
 def allocation(m, k, n):
-    if (m, k, n) not in SHAPES:
-        raise ValueError("Tiny breadth supports only 128/5632/1024 and 32/2048/2048")
+    if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
+        raise ValueError("Prefetch reuse requires a captured physical shape")
     rows = min(m // 32, 2)
     a = [(0 if rows == 2 else 262144, 32 * k)]
     if rows == 2:

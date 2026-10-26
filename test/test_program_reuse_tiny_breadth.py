@@ -1,5 +1,6 @@
 """Full symbolic address/order proof including asynchronous prefetch ownership."""
 from collections import Counter
+import hashlib
 from pathlib import Path
 import re
 import sys
@@ -103,6 +104,16 @@ def prove(source, shape, exponent):
 
 
 class BreadthTests(unittest.TestCase):
+    def test_original_two_programs_are_unchanged(self):
+        originals = {
+            (128,5632,1024): 'dc942a73b9e8e61b770f5b44fd1411326ad84647bbbc1cbb0d1b70ef8dc5fbd2',
+            (32,2048,2048): '6bbe476863b12a923462f8bff7b4285765c6bfadc36cc27a6969433b151a66e5',
+        }
+        for (m,k,n), expected in originals.items():
+            with self.subTest(shape=(m,k,n)):
+                source = producer.assembly(m,k,n,m*k+k*n+256,0)
+                self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), expected)
+
     def test_all_addresses_order_hazards_and_extreme_scales(self):
         for shape in producer.SHAPES:
             for exponent in (None, -126, -18, 127):
@@ -128,6 +139,9 @@ class BreadthTests(unittest.TestCase):
             with self.subTest(control=old), self.assertRaises((AssertionError, KeyError)):
                 prove(source.replace(old,new),shape,-18)
     def test_admission(self):
+        for shape in [(32.,2048,1024), (32,2048,1024.), (32,2048,1056)]:
+            with self.subTest(shape=shape), self.assertRaises(ValueError):
+                producer.allocation(*shape)
         for args in [(128,2048,2048,4456704,-14),(128,5632,1024,0,-18),
                      (32,2048,2048,4260096,False),(32,2048,2048,4260096,-127)]:
             with self.assertRaises(ValueError):producer.assembly(*args)
