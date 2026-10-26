@@ -157,6 +157,7 @@ def prepare_c_package(
         epilogue,
         seed_address=addresses[2] if seed else None,
         k_unroll=codegen["reduction_unroll"] if codegen else 1,
+        operand_reuse=not codegen or codegen["program_size_limit_bytes"] is None,
     )
     if codegen and codegen["program_size_limit_bytes"] is not None:
         virtual = virtual.replace(

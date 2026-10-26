@@ -46,7 +46,7 @@ class LoopedCPackageTest(unittest.TestCase):
             for name, data in files.items():
                 (package / name).write_bytes(data)
             cls.cases.append((shape, target, package, record, execution))
-        for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True)):
+        for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True), ((65, 7, 65), True)):
             target = cls.root / ("seeded_" + "_".join(map(str, shape)))
             _, _, _, _, execution = compile_case(cls.snapshot, shape, target, source=seeded_source_request(shape, relu))
             record, files = prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)

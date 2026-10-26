@@ -167,6 +167,7 @@ def _virtual(
     *,
     seed_address=None,
     k_unroll=1,
+    operand_reuse=True,
 ) -> str:
     """Emit only typed operations; scheduling and physical placement stay downstream."""
     if type(k_unroll) is not int or not 1 <= k_unroll <= 64:
@@ -175,6 +176,13 @@ def _virtual(
     ab, wb, ob = plan.tile_bytes
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"
+    # Static K slots keep A across N, or W across M for a single column block.
+    # The allocator owns bank 2 after eight BF16 DMA windows; reserve half its
+    # remaining frame for edge values and spills. Other VMEM banks stay private.
+    reuse = "a" if nc > 1 else "w" if mc > 1 else None
+    if not operand_reuse or kc * ab > (256 * 1024 - 8 * 2048) // 2:
+        reuse = None
+    slot = "!atlas.virtual_spill"
     lines = [
         "module {",
         f"  func.func @looped_matmul() -> {state} attributes {{atlas.input_dram_base = {a} : i64, atlas.output_dram_base = {output} : i64, atlas.output_dram_bytes = {plan.buffer_bytes[2]} : i64}} {{",
@@ -196,17 +204,25 @@ def _virtual(
             + f") -> {returns}"
         )
 
-    def tile_product(prefix, before, ap, wp, acc=None, *, acc_is_handle=False, readout=True):
+    if reuse:
+        for index in range(kc):
+            lines.append(
+                f'    %operand_cache_{index} = "atlas.virtual_slot"() '
+                f'{{kind = "fp8", words = {ab // 4} : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {slot}'
+            )
+
+    def tile_product(prefix, before, ap, wp, acc=None, *, cached=None, acc_is_handle=False, readout=True):
         c(prefix + "_bytes", ab)
-        effect("dma_load_fp8", before, prefix + "_a_s", [ap, prefix + "_bytes"], ["i32", "i32"], (prefix + "_a", fp8))
-        effect(
-            "dma_load_fp8",
-            prefix + "_a_s",
-            prefix + "_w_s",
-            [wp, prefix + "_bytes"],
-            ["i32", "i32"],
-            (prefix + "_w", fp8),
-        )
+        if cached is None or reuse != "a":
+            effect("dma_load_fp8", before, prefix + "_a_s", [ap, prefix + "_bytes"], ["i32", "i32"], (prefix + "_a", fp8))
+        else:
+            effect("restore", before, prefix + "_a_s", [f"operand_cache_{cached}"], [slot], (prefix + "_a", fp8))
+        if cached is None or reuse != "w":
+            effect("dma_load_fp8", prefix + "_a_s", prefix + "_w_s", [wp, prefix + "_bytes"],
+                   ["i32", "i32"], (prefix + "_w", fp8))
+        else:
+            effect("restore", prefix + "_a_s", prefix + "_w_s", [f"operand_cache_{cached}"],
+                   [slot], (prefix + "_w", fp8))
         weight, accum = "!atlas.virtual_mxu_weight<0>", "!atlas.virtual_mxu_acc<0>"
         effect(
             "mxu_load_weight",
@@ -259,6 +275,23 @@ def _virtual(
         )
         return prefix + "_result_s", prefix + "_result"
 
+    def cache_operand(before, base):
+        c("cache_bytes", ab)
+        for index in range(kc):
+            prefix = f"cache_{index}"
+            c(prefix + "_offset", index * ab)
+            lines.append(f"    %{prefix}_ap = arith.addi %{base}, %{prefix}_offset : i32")
+            effect("dma_load_fp8", before, prefix + "_loaded", [prefix + "_ap", "cache_bytes"],
+                   ["i32", "i32"], (prefix + "_value", fp8))
+            effect("save", prefix + "_loaded", prefix + "_saved", [f"operand_cache_{index}", prefix + "_value"],
+                   [slot, fp8])
+            before = prefix + "_saved"
+        return before
+
+    entry_state = "start"
+    if reuse == "w":
+        c("cache_wbase", w)
+        entry_state = cache_operand("start", "cache_wbase")
     c("zero_m", 0)
     c("abase", a)
     c("ybase", output)
@@ -271,7 +304,7 @@ def _virtual(
     seed_n_parameter = ", %seed_tile: i32" if seed_address is not None else ""
     if mc > 1:
         lines += [
-            f"    cf.br ^m_header(%start, %zero_m, %abase, %ybase{seed_entry} : {state}, i32, i32, i32{seed_type})",
+            f"    cf.br ^m_header(%{entry_state}, %zero_m, %abase, %ybase{seed_entry} : {state}, i32, i32, i32{seed_type})",
             f"  ^m_header(%ms: {state}, %m: i32, %arow: i32, %yrow: i32{seed_m_parameter}):",
         ]
         c("m_count", mc)
@@ -286,11 +319,12 @@ def _virtual(
         if seed_address is not None:
             c("seed_row", seed_address)
         lines += [f"    cf.br ^m_body(%start : {state})", f"  ^m_body(%mb: {state}):"]
+    row_state = cache_operand("mb", "arow") if reuse == "a" else "mb"
     c("zero_n", 0)
     c("wbase", w)
     if nc > 1:
         lines += [
-            f"    cf.br ^n_header(%mb, %zero_n, %wbase, %yrow{seed_m_value} : {state}, i32, i32, i32{seed_type})",
+            f"    cf.br ^n_header(%{row_state}, %zero_n, %wbase, %yrow{seed_m_value} : {state}, i32, i32, i32{seed_type})",
             f"  ^n_header(%ns: {state}, %n: i32, %wrow: i32, %ytile: i32{seed_n_parameter}):",
         ]
         c("n_count", nc)
@@ -308,12 +342,23 @@ def _virtual(
             lines.append("    %seed_tile = arith.addi %seed_row, %zero_n : i32")
         lines += [f"    cf.br ^n_body(%mb : {state})", f"  ^n_body(%nb: {state}):"]
     if seed_address is None:
-        tile_product("first", "nb", "arow", "wrow")
+        tile_product("first", "nb", "arow", "wrow", cached=0 if reuse else None)
     else:
         c("seed_bytes", ob)
         effect("dma_load_bf16", "nb", "seed_loaded", ["seed_tile", "seed_bytes"], ["i32", "i32"], ("seed_value", bf16))
-        tile_product("first", "seed_loaded", "arow", "wrow", "seed_value")
-    if kc > 1 and k_unroll > 1:
+        tile_product("first", "seed_loaded", "arow", "wrow", "seed_value", cached=0 if reuse else None)
+    if reuse:
+        current, value = "first_result_s", "first_result"
+        for index in range(1, kc):
+            prefix = f"cached_step_{index}"
+            c(prefix + "_offset", index * ab)
+            base = "wrow" if reuse == "a" else "arow"
+            lines.append(f"    %{prefix}_p = arith.addi %{base}, %{prefix}_offset : i32")
+            ap, wp = ("arow", prefix + "_p") if reuse == "a" else (prefix + "_p", "wrow")
+            tile_product(prefix, current, ap, wp, value, cached=index)
+            current, value = prefix + "_result_s", prefix + "_result"
+        lines.append(f"    cf.br ^store(%{current}, %{value} : {state}, {bf16})")
+    elif kc > 1 and k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
         # each step consumes the previous accumulator version. Keep that handle
         # inside the unrolled block; only its last step reads BF16 for the loop
@@ -647,6 +692,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         epilogue,
         seed_address=ranges[2][0] if seed else None,
         k_unroll=unroll,
+        operand_reuse=codegen["program_size_limit_bytes"] is None,
     )
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     pipeline = _native_pipeline()

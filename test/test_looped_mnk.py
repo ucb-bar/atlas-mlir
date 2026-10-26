@@ -13,7 +13,7 @@ from pathlib import Path
 
 from test_virtual_ssa import ROOT
 
-SHAPES = ((64, 64, 64), (64, 96, 32), (31, 33, 32), (33, 65, 31), (1, 7, 65), (7, 33, 1))
+SHAPES = ((64, 64, 64), (64, 96, 32), (31, 33, 32), (33, 65, 31), (1, 7, 65), (7, 33, 1), (65, 7, 65))
 
 
 def source_request(m, n, k, *, relu=False):
@@ -334,6 +334,38 @@ class LoopedMNKTest(unittest.TestCase):
         for bad in (0, -1, 65, True, 2.0):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 _virtual(plan, (0x90000000, 0x90010000), 0x90020000, k_unroll=bad)
+
+    def test_operand_cache_scope_capacity_and_compact_fallback(self):
+        from atlas_mlir_native.binding import NATIVE_CHECKS, NATIVE_PIPELINES, _run
+        from atlas_mlir_native.looped_tiling import _virtual, prepare_plan
+
+        tools = Path(os.environ["ATLAS_OOT_BIN_DIR"])
+        addresses, output = (0x90000000, 0x90040000), 0x90080000
+        for shape in ((65, 97, 65), (65, 7, 65), (1, 65, 1), (65, 1, 1), (1, 1, 65),
+                      (32, 64, 3840), (32, 64, 3841)):
+            plan = prepare_plan(source_request(*shape))
+            mc, nc, kc = plan.counts
+            cached = (mc > 1 or nc > 1) and kc <= 120
+            for seed in (None, 0x90070000):
+                with self.subTest(shape=shape, seed=seed):
+                    virtual = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4)
+                    compact = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4, operand_reuse=False)
+                    self.assertEqual(virtual.count('"atlas.virtual_slot"'), kc if cached else 0)
+                    self.assertEqual(virtual.count('"atlas.virtual_restore"'), kc if cached else 0)
+                    if cached:
+                        self.assertEqual(virtual.count('"atlas.virtual_dma_load_fp8"'), 2 * kc)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), kc)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'), kc - (seed is None))
+                        entry, row = virtual.split("^m_body(", 1)
+                        # A is refreshed for each row; a single W column is
+                        # initialized once before any output-row iteration.
+                        self.assertEqual('"atlas.virtual_save"' in entry, nc == 1)
+                        self.assertEqual('"atlas.virtual_save"' in row, nc > 1)
+                    else:
+                        self.assertEqual(virtual, compact)
+                    for pipeline in ("mandatory", "optimized"):
+                        machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
+                        _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
 
     def source_bound_contraction(self):
         import hashlib
