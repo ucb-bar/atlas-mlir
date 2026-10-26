@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
   mlir::atlas::registerVerifyAtlasVirtualStreamPass();
   mlir::atlas::registerReuseAtlasImmutableWeightsPass();
   mlir::atlas::registerLowerAtlasGuardedPackPass();
+  mlir::atlas::registerLowerAtlasPackRelayoutPass();
   mlir::atlas::registerLowerAtlasVirtualBoundaryToDMAPass();
   mlir::atlas::registerScheduleAtlasVirtualPass();
   mlir::atlas::registerSpillAtlasVirtualPass();

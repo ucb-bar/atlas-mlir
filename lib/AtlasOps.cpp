@@ -294,6 +294,10 @@ LogicalResult VirtualPackFP8Op::verify() {
   return inRange(getOperation(), "scale_code", getScaleCode(), 0, 255);
 }
 
+LogicalResult VirtualPackRoundTripBF16Op::verify() {
+  return inRange(getOperation(), "scale_code", getScaleCode(), 122, 128);
+}
+
 LogicalResult VirtualOutputBF16Op::verify() {
   if (getIndexAttr().getValue().getSExtValue() < 0)
     return emitOpError("output index must be nonnegative");

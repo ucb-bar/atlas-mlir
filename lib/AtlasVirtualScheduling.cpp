@@ -78,7 +78,7 @@ bool isImplicitMemory(Operation *op) {
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
-  if (isa<VirtualPackFP8Op>(op))
+  if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op>(op))
     e.writes = bit(kPack);
   else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
     e.reads |= bit(kUnit0 + unitOf(load.getWeight().getType()));
@@ -475,6 +475,10 @@ Cost costOf(Operation *op) {
     MachineTiming t = timingOf("vtrpose.xlu");
     return {Unit::Xlu, t.interval, t.latency};
   }
+  if (isa<VirtualPackRoundTripBF16Op>(op))
+    // Both conversions use the reserved tensor temporary and scratch ERF.
+    return blocking(Unit::Vpu,
+        timingOf("vpack.bf16.fp8").latency + timingOf("vunpack.fp8.bf16").latency + 2 * timingOf("seli").latency);
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
     // words a row (lowerPack). Each store hides behind the next word's load,

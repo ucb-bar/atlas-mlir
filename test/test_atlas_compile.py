@@ -12,6 +12,7 @@ PASSES = [
     "spill-atlas-mxu-state", "verify-atlas-virtual-stream",
     "lower-atlas-virtual-boundary-to-dma", "schedule-atlas-virtual", "verify-atlas-virtual-stream",
     "spill-atlas-virtual", "verify-atlas-virtual-stream",
+    "lower-atlas-pack-relayout", "spill-atlas-virtual", "verify-atlas-virtual-stream",
     "lower-atlas-virtual-to-machine", "insert-atlas-dma-waits",
     "verify-atlas-machine-stream", "verify-atlas-generated-schedule",
     "schedule-atlas-stream",
@@ -46,9 +47,10 @@ class AtlasCompileTest(unittest.TestCase):
                 self.assertEqual(emitted.returncode, 0, emitted.stderr)
 
     def test_lowering_leaves_delay_slots_for_the_stream_scheduler(self) -> None:
-        # The attention tile's PACK relayout loop closes with a back-edge.
-        stages = ("--atlas-compile-verify", "--atlas-compile-schedule", "--atlas-compile-spill")
-        lowered = run("atlas-opt", PROGRAMS[1].read_text(), *stages, "--atlas-compile-lower")
+        # Direct lowering retains the scalar fallback's PACK back-edge.
+        stages = ("--atlas-compile-verify", "--atlas-compile-schedule",
+                  "--spill-atlas-virtual", "--verify-atlas-virtual-stream")
+        lowered = run("atlas-opt", PROGRAMS[1].read_text(), *stages, "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timed = run("atlas-opt", lowered.stdout, "--atlas-compile-time")
         self.assertEqual(timed.returncode, 0, timed.stderr)

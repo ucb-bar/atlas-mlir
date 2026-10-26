@@ -38,6 +38,11 @@ void buildScheduleStage(OpPassManager &pm) {
 void buildSpillStage(OpPassManager &pm) {
   pm.addPass(createSpillAtlasVirtualPass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
+  pm.addPass(createLowerAtlasPackRelayoutPass());
+  // Keep the allocated helper values visible in the virtual stage artifact,
+  // and recover any register pressure introduced by the quantized BF16 tile.
+  pm.addPass(createSpillAtlasVirtualPass());
+  pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
 void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
