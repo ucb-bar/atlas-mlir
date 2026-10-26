@@ -270,7 +270,8 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
                    dram_base=base, dram_bytes=len(initial), max_polls=max_polls,
                    wall_limit_seconds=wall_seconds, full_soc_executed=False)
     if fast_check:
-        receipt.update(fast_check=True, mismatch_metric="bytes", check_algorithm="exact-or-of-word-xors-with-byte-fallback")
+        receipt.update(fast_check=True, mismatch_metric="bytes",
+                       check_algorithm="exact-or-of-word-xors-with-byte-fallback")
     if error:
         receipt["error"] = error
     if not receipt["returncode"]:
@@ -316,7 +317,8 @@ def kernel_result(item, run, build):
                  and metadata.get("elf_sha256") == build["elf_sha256"] and cycles is not None
                  and phase.get("result") == phase.get("active") == "0" and phase.get("sequence") == "1"
                  and phase.get("device_cycles") == str(cycles)
-                 and check.get("output_" + metric + "_mismatches") == check.get("preserved_" + metric + "_mismatches") == "0"
+                 and check.get("output_" + metric + "_mismatches")
+                 == check.get("preserved_" + metric + "_mismatches") == "0"
                  and check.get("dbg0") == check.get("dbg1") == "1" and "ATLAS_KERNEL_FAIL" not in log)
         return dict(kernel=item, exact=exact, returncode=code, device_cycles=cycles, run=str(run))
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -347,7 +349,8 @@ def main():
     build.add_argument("--out", required=True, type=Path)
     build.add_argument("--max-polls", type=positive, default=100000000)
     build.add_argument("--wall-seconds", type=positive, default=1500)
-    build.add_argument("--fast-check", action="store_true", help="opt in to exact wide comparison with byte diagnostics")
+    build.add_argument("--fast-check", action="store_true",
+                       help="opt in to exact wide comparison with byte diagnostics")
     run = actions.add_parser("run")
     run.add_argument("--build-root", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)

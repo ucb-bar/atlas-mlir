@@ -144,7 +144,8 @@ class BlockKernelsTest(unittest.TestCase):
             def compiler(command, **kwargs):
                 Path(command[-1]).write_bytes(b'synthetic ELF')
                 return SimpleNamespace(returncode=0)
-            with mock.patch.object(kernels.subprocess, 'run', side_effect=compiler), mock.patch.object(kernels, 'audit_loadmem'):
+            with (mock.patch.object(kernels.subprocess, 'run', side_effect=compiler),
+                  mock.patch.object(kernels, 'audit_loadmem')):
                 result = kernels.build_kernel(self.row, self.root / str(fast), self.compiler, fast_check=fast)
             self.assertEqual(result['returncode'], 0)
             self.assertEqual('-DATLAS_FAST_CHECK=1' in result['command'], fast)

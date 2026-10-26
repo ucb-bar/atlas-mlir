@@ -24,10 +24,10 @@ Accepted native DMA beats multiplied by the pinned 32-byte beat size agree with 
 
 Each pair matches the original complete expected DRAM image, including operands and guards. Reduction order remains increasing K, with first overwrite, ordered accumulation, one BF16 pop and the original power-of-two rescale. There is no partial accumulator spill or reassociation. Exactly one static `vli.all m4` is patchable; changing the exponent changes that word only.
 
-Only VMEM banks 0–1 are used. Each tile stays within one bank; VMEM addresses count four-byte words and DRAM addresses bytes. Output scatters to the original packed layout and guards. Safety requires exclusive raw ownership and completed DMA. Compiled mailbox/tensor allocations can overlap these banks, so recipes do not establish mixed-client safety.
+Only VMEM banks 0-1 are used. Each tile stays within one bank; VMEM addresses count four-byte words and DRAM addresses bytes. Output scatters to the original packed layout and guards. Safety requires exclusive raw ownership and completed DMA. Compiled mailbox/tensor allocations can overlap these banks, so recipes do not establish mixed-client safety.
 
 ## API and retained evidence
 
 Use `atlas_program.assembly(..., traffic_reuse=True)`, `dma_load_bytes(..., traffic_reuse=True)` and `code_sources(traffic_reuse=True)`. Admission checks exact shape, original output offset and finite integer exponent. The option defaults off; the default generator/source set remains unchanged. Legacy residency/pretranspose flags cannot be combined with reuse. Current shared tests cover all admitted shapes; program limits are in the coverage page.
 
-The original pairs and source/program/input/expected/profile hashes are in `/tmp/reednicolas-atlas/sota-fast/generator-reuse/results.json`. Per-case commands and cap receipts are under `tiny/`, `smol-stream/` and `smol-resident/` in that output root. Supplementary captures, standalone RTL, later coverage, host-check improvements and owner-run SoC results have separate named receipts in the current coverage page. These three representatives alone do not qualify every numeric variant or a full-model execution.
+Each original pair records its source, program, input, expected-output and profile hashes, per-case commands and cap receipts. Supplementary captures, standalone RTL, later coverage, host-check improvements and SoC results are on the current coverage page. These three representatives alone do not qualify every numeric variant or a full-model execution.

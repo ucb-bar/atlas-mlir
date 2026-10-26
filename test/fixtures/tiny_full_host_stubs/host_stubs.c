@@ -16,22 +16,19 @@ int smol_host_rmsnorm_bf16(const uint16_t *input, const uint16_t *weight,
     return 0;
 }
 
-int smol_host_residual_bf16(const uint16_t *left, const uint16_t *right,
-                           uint16_t *output, size_t count) {
+int smol_host_residual_bf16(const uint16_t *left, const uint16_t *right, uint16_t *output, size_t count) {
     (void)right;
     memcpy(output, left, count * sizeof(*output));
     return 0;
 }
 
-int smol_host_silu_mul_bf16(const uint16_t *gate, const uint16_t *up,
-                           uint16_t *output, size_t count) {
+int smol_host_silu_mul_bf16(const uint16_t *gate, const uint16_t *up, uint16_t *output, size_t count) {
     (void)up;
     memcpy(output, gate, count * sizeof(*output));
     return 0;
 }
 
-int llama_host_attention_bf16(const llama_host_attention_inputs *a,
-                              const llama_host_attention_buffers *b) {
+int llama_host_attention_bf16(const llama_host_attention_inputs *a, const llama_host_attention_buffers *b) {
     /* Reject incorrect descriptors even though no attention math is executed. */
     if (a->query_heads != 32 || a->kv_heads != 4 || a->dimension != 64
         || a->table_rows != 160 || a->scaling != 0.125f
@@ -45,8 +42,7 @@ int llama_host_attention_bf16(const llama_host_attention_inputs *a,
     for (size_t head = 0; head < 4; ++head) {
         size_t start = head * total * 64;
         if (a->past_rows) {
-            memcpy(b->keys + start, a->past_keys + head * a->past_rows * 64,
-                   a->past_rows * 64 * sizeof(*b->keys));
+            memcpy(b->keys + start, a->past_keys + head * a->past_rows * 64, a->past_rows * 64 * sizeof(*b->keys));
             memcpy(b->values + start, a->past_values + head * a->past_rows * 64,
                    a->past_rows * 64 * sizeof(*b->values));
         }

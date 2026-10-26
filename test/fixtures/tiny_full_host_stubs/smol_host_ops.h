@@ -5,6 +5,5 @@
 #include <stdint.h>
 int smol_host_residual_bf16(const uint16_t *, const uint16_t *, uint16_t *, size_t);
 int smol_host_silu_mul_bf16(const uint16_t *, const uint16_t *, uint16_t *, size_t);
-int smol_host_rmsnorm_bf16(const uint16_t *, const uint16_t *, float,
-                          uint16_t *, size_t, size_t);
+int smol_host_rmsnorm_bf16(const uint16_t *, const uint16_t *, float, uint16_t *, size_t, size_t);
 #endif

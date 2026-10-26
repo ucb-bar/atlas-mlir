@@ -28,8 +28,7 @@ def prove(source, m, k, n, exponent):
     def accessible(base, size=1024):
         assert base % 1024 == 0 and 0 <= base < base + size <= 524288
         assert base // 262144 == (base + size - 1) // 262144
-        assert all(base + size <= start or end <= base
-                   for start, end, _ in pending.values()), 'pending DMA hazard'
+        assert all(base + size <= start or end <= base for start, end, _ in pending.values()), 'pending DMA hazard'
         return base
 
     def address(arg):
@@ -70,8 +69,7 @@ def prove(source, m, k, n, exponent):
             assert ch in configured and ch not in pending and size in (1024, 4096)
             assert src % 1024 == 0 and 0 <= src < src + size <= m * k + k * n
             accessible(dst, size)
-            writes = {dst + delta: ('input', src + delta, False)
-                      for delta in range(0, size, 1024)}
+            writes = {dst + delta: ('input', src + delta, False) for delta in range(0, size, 1024)}
             pending[ch] = (dst, dst + size, writes)
             loads.append((dst, src, size))
         elif op == 'vload':
@@ -142,8 +140,7 @@ def prove(source, m, k, n, exponent):
             assert counts['vmatmul.acc.mxu0'] == len(outputs) * (k // 32 - 1)
             assert counts['vmatpop.bf16.acc.mxu0'] == len(outputs)
             assert counts['vmul.bf16'] == (len(outputs) if exponent is not None else 0)
-            return dict(load_bytes=load_budget, store_bytes=len(stores) * 2048,
-                        counts=dict(counts), loads=loads)
+            return dict(load_bytes=load_budget, store_bytes=len(stores) * 2048, counts=dict(counts), loads=loads)
         else:
             raise AssertionError(op)
     raise AssertionError('nontermination')

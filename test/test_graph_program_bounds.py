@@ -121,7 +121,8 @@ class ProgramBoundTest(unittest.TestCase):
                             "program": {"path": str(root / "program"), "sha256": "program"}}
                 graph = {"input_sha256": {str(paths["templates"]): "templates"},
                          "generated_sha256": {}, "params_sha256": {},
-                         "geometry_admission": "all operators/shapes/arity/topology/54 contractions/groups 1 proven before generation",
+                         "geometry_admission": ("all operators/shapes/arity/topology/54 contractions/"
+                                                "groups 1 proven before generation"),
                          "kernels": [{"template": template, "kernel_index": i} for i in range(54)]}
                 payloads = {paths["replay-gate"]: json.dumps(gate).encode(),
                             graphpath: json.dumps(graph).encode(), receiptpath: json.dumps(reference).encode(),

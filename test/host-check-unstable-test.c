@@ -8,8 +8,7 @@ static void restore_before_rescan(const volatile void *, const void *, size_t);
 
 static size_t rescans;
 
-static void restore_before_rescan(const volatile void *actual_span,
-                                  const void *expected_span, size_t bytes) {
+static void restore_before_rescan(const volatile void *actual_span, const void *expected_span, size_t bytes) {
   /* The fixture owns writable storage. Simulate a late DMA store without a
    * timing-dependent thread or changing the checker's volatile load semantics. */
   volatile uint8_t *actual = (volatile uint8_t *)actual_span;

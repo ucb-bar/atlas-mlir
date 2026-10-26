@@ -74,12 +74,10 @@ def _reuse_enabled(value):
     return value
 
 
-def _reuse_module(m, k, n, *, resident_a=False, resident_b=False,
-                  pretranspose_resident_b=False):
+def _reuse_module(m, k, n, *, resident_a=False, resident_b=False, pretranspose_resident_b=False):
     if any(type(d) is not int or d <= 0 or d % 32 for d in (m, k, n)):
         raise ValueError("traffic reuse requires positive integer dimensions divisible by 32")
-    if any(flag is not False for flag in
-           (resident_a, resident_b, pretranspose_resident_b)):
+    if any(flag is not False for flag in (resident_a, resident_b, pretranspose_resident_b)):
         raise ValueError("traffic reuse excludes legacy residency and pretranspose flags")
     try:
         return _TRAFFIC_REUSE_MODULES[(m, k, n)]

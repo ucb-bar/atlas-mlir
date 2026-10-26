@@ -14,7 +14,30 @@ sys.path.insert(0, str(TOOLS))
 import atlas_program as program
 
 # Captured from the unmodified generator before introducing the opt-in path.
-GOLDEN = [{'mkn': [32, 32, 32], 'exponent': None, 'flags': {}, 'sha256': '417148a962e510c0ffd519bc7b180b1384c61490b91d1c09708fc3e11d472e1c'}, {'mkn': [64, 64, 64], 'exponent': -19, 'flags': {'resident_b': True}, 'sha256': '00adb37f615953037d555af81e50f474dd194c4b1d846be6c3d0f90725f88a32'}, {'mkn': [64, 64, 64], 'exponent': -19, 'flags': {'resident_b': True, 'pretranspose_resident_b': True}, 'sha256': 'eb3b4604b30b312b89144fd40d13aeea1aebe5cba7371f47a2bf2afa6c2a78c4'}, {'mkn': [128, 768, 768], 'exponent': -19, 'flags': {'resident_a': True}, 'sha256': '18adfb148517cf06d814d279abe5ecebd69581ac8f5ea4af4cddb07fed01eb9b'}, {'mkn': [128, 2048, 2048], 'exponent': -14, 'flags': {'resident_a': True}, 'sha256': '295cf8b87a435c281671fdc066c89289c4eb2ec5452632aaf1e2157c91d848f0'}, {'mkn': [128, 3072, 768], 'exponent': -15, 'flags': {}, 'sha256': 'dce0cda320332da92c77f6bfed92affa6fd58c79d3948bc7dd3caad4fce5f6e2'}]
+GOLDEN = [{'mkn': [32, 32, 32],
+  'exponent': None,
+  'flags': {},
+  'sha256': '417148a962e510c0ffd519bc7b180b1384c61490b91d1c09708fc3e11d472e1c'},
+ {'mkn': [64, 64, 64],
+  'exponent': -19,
+  'flags': {'resident_b': True},
+  'sha256': '00adb37f615953037d555af81e50f474dd194c4b1d846be6c3d0f90725f88a32'},
+ {'mkn': [64, 64, 64],
+  'exponent': -19,
+  'flags': {'resident_b': True, 'pretranspose_resident_b': True},
+  'sha256': 'eb3b4604b30b312b89144fd40d13aeea1aebe5cba7371f47a2bf2afa6c2a78c4'},
+ {'mkn': [128, 768, 768],
+  'exponent': -19,
+  'flags': {'resident_a': True},
+  'sha256': '18adfb148517cf06d814d279abe5ecebd69581ac8f5ea4af4cddb07fed01eb9b'},
+ {'mkn': [128, 2048, 2048],
+  'exponent': -14,
+  'flags': {'resident_a': True},
+  'sha256': '295cf8b87a435c281671fdc066c89289c4eb2ec5452632aaf1e2157c91d848f0'},
+ {'mkn': [128, 3072, 768],
+  'exponent': -15,
+  'flags': {},
+  'sha256': 'dce0cda320332da92c77f6bfed92affa6fd58c79d3948bc7dd3caad4fce5f6e2'}]
 
 class TrafficReuseTests(unittest.TestCase):
     def test_default_assembly_is_unchanged(self):
@@ -25,14 +48,12 @@ class TrafficReuseTests(unittest.TestCase):
                 for option in ({}, {"traffic_reuse": False}):
                     text = program.assembly(*args, **case["flags"], **option)
                     self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), case["sha256"])
-                flags = {key: value for key, value in case["flags"].items()
-                         if key != "pretranspose_resident_b"}
+                flags = {key: value for key, value in case["flags"].items() if key != "pretranspose_resident_b"}
                 old_loads = (m*k*(n//32)+k*n if flags.get("resident_b") else
                              m*k+k*n*(m//32) if flags.get("resident_a") else
                              2*m*k*(n//32))
                 self.assertEqual(program.dma_load_bytes(m, k, n, **flags), old_loads)
-                self.assertEqual(program.dma_load_bytes(m, k, n, **flags,
-                                                       traffic_reuse=False), old_loads)
+                self.assertEqual(program.dma_load_bytes(m, k, n, **flags, traffic_reuse=False), old_loads)
 
     def test_exact_dispatch_and_recipe_loads(self):
         for dims, name in program._TRAFFIC_REUSE_MODULES.items():
@@ -41,8 +62,7 @@ class TrafficReuseTests(unittest.TestCase):
             for exponent in (-126, -19, 0, 127):
                 with self.subTest(dims=dims, exponent=exponent):
                     args = (*dims, m*k+k*n+256, exponent)
-                    self.assertEqual(program.assembly(*args, traffic_reuse=True),
-                                     helper.assembly(*args))
+                    self.assertEqual(program.assembly(*args, traffic_reuse=True), helper.assembly(*args))
             expected = {(128,5632,1024): 12255232, (32,2048,2048): 4259840,
                         (224,2304,256): 1695744, (64,4608,512): 2654208,
                         (800,1152,128): 1216512,
@@ -76,8 +96,7 @@ class TrafficReuseTests(unittest.TestCase):
                 call.assert_called_once_with(*dims)
 
     def test_reject_unsupported_dimensions_and_legacy_flags(self):
-        for dims in ((32,32,32), (0,768,768), (True,768,768), (128.0,768,768),
-                     (128,769,768), (128,768,-768)):
+        for dims in ((32,32,32), (0,768,768), (True,768,768), (128.0,768,768), (128,769,768), (128,768,-768)):
             with self.subTest(dims=dims):
                 with self.assertRaises(ValueError):
                     program.assembly(*dims, 688384, -19, traffic_reuse=True)

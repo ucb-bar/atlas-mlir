@@ -8,16 +8,14 @@ store / pop 34, transpose / BF16 arithmetic 66, weight push 32, compute 96.
 """
 
 
-SHAPES = ((128, 2048, 2048), (128, 2048, 256),
-          (128, 2048, 1280), (128, 2048, 1536))
+SHAPES = ((128, 2048, 2048), (128, 2048, 256), (128, 2048, 1280), (128, 2048, 1536))
 
 def assembly(m, k, n, output_offset, rescale_exponent=None):
     if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
         raise ValueError("Tiny reuse requires a captured physical shape")
     if type(output_offset) is not int or output_offset != m * k + k * n + 256:
         raise ValueError("output must preserve the original input and guard layout")
-    if rescale_exponent is not None and (type(rescale_exponent) is not int
-            or not -126 <= rescale_exponent <= 127):
+    if rescale_exponent is not None and (type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127):
         raise ValueError("VPU rescale factor must be normal finite integer BF16")
     lines = [
         "li x1, 0x10000", "li x3, 0x4000", "li x9, 0x4100",
@@ -40,8 +38,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
     if rescale_exponent is not None:
         lines += [f"vli.all m4, {(rescale_exponent + 127) << 7}", "delay 66"]
     for pair in range(2):
-        lines += [f"li x4, {0x10000 + pair * 32768}",
-                  f"li x7, {0x10000 + pair * 32768 + 16384}", "li x6, 0"]
+        lines += [f"li x4, {0x10000 + pair * 32768}", f"li x7, {0x10000 + pair * 32768 + 16384}", "li x6, 0"]
         for tile in range(k // 32):
             compute = "vmatmul.mxu0" if tile == 0 else "vmatmul.acc.mxu0"
             lines += [

@@ -81,8 +81,7 @@ def dma_load_bytes(m, k, n):
 
 
 def a_word(offset, bank0_base):
-    return (BANK_BYTES + offset if offset < BANK_BYTES
-            else bank0_base + offset - BANK_BYTES) // 4
+    return (BANK_BYTES + offset if offset < BANK_BYTES else bank0_base + offset - BANK_BYTES) // 4
 
 
 def assembly(m, k, n, output_offset, rescale_exponent=0):
@@ -99,8 +98,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
     for bi, block in enumerate(plan['blocks']):
         tag = f'block_{bi}'
         size = block['row_tiles'] * k * 32
-        for pi, (offset, count) in enumerate(((0, min(size, BANK_BYTES)),
-                                            (BANK_BYTES, max(0, size - BANK_BYTES)))):
+        for pi, (offset, count) in enumerate(((0, min(size, BANK_BYTES)), (BANK_BYTES, max(0, size - BANK_BYTES)))):
             if not count:
                 continue
             label = f'{tag}_a_{pi}'
@@ -137,8 +135,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                 for acc in range(rows):
                     addr = a_word((row + acc) * k * 32 + first * 1024, base0)
                     lines += [f'li x{4 if acc == 0 else 7}, {addr}']
-                lines += [label + ':', 'vload m1, 0(x6)', 'delay 34',
-                          'vmatpush.weight.mxu0 w0, m1', 'delay 32']
+                lines += [label + ':', 'vload m1, 0(x6)', 'delay 34', 'vmatpush.weight.mxu0 w0, m1', 'delay 32']
                 op = 'vmatmul.mxu0' if first == 0 else 'vmatmul.acc.mxu0'
                 for acc in range(rows):
                     reg = 4 if acc == 0 else 7

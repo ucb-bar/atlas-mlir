@@ -21,6 +21,5 @@ typedef struct {
     uint16_t *keys, *values, *output;
     size_t cache_capacity, output_capacity;
 } llama_host_attention_buffers;
-int llama_host_attention_bf16(const llama_host_attention_inputs *,
-                              const llama_host_attention_buffers *);
+int llama_host_attention_bf16(const llama_host_attention_inputs *, const llama_host_attention_buffers *);
 #endif

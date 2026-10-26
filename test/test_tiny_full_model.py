@@ -35,7 +35,8 @@ class FullModelTest(unittest.TestCase):
     def setUpClass(cls):
         value = os.environ.get("TINY_MERLIN_COMPARISONS")
         cls.stub_provider = value is None
-        provider = Path(value) if value is not None else Path(__file__).absolute().parent / "fixtures/tiny_full_host_stubs"
+        provider = (Path(value) if value is not None
+                    else Path(__file__).absolute().parent / "fixtures/tiny_full_host_stubs")
         if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
             raise ValueError("restricted source provider")
         names = ("host_stubs.c",) if cls.stub_provider else (
@@ -122,10 +123,8 @@ class FullModelTest(unittest.TestCase):
                     self.assertTrue(np.all(cache[:, 129] == 0x4000))
         expected = [(layer, role) for layer in range(22) for role in range(7)] + [(22, 7)]
         self.assertEqual([(layer, role) for layer, role, *_ in observed], expected * 2)
-        shapes = [(2048, 2048), (2048, 256), (2048, 256), (2048, 2048),
-                  (2048, 5632), (2048, 5632), (5632, 2048)]
-        expected_calls = [(layer, role, 1, k, width) for layer in range(22)
-                          for role, (k, width) in enumerate(shapes)]
+        shapes = [(2048, 2048), (2048, 256), (2048, 256), (2048, 2048), (2048, 5632), (2048, 5632), (5632, 2048)]
+        expected_calls = [(layer, role, 1, k, width) for layer in range(22) for role, (k, width) in enumerate(shapes)]
         expected_calls.append((22, 7, 1, 2048, 32000))
         self.assertEqual(observed, expected_calls * 2)
 
@@ -209,8 +208,7 @@ class FullModelTest(unittest.TestCase):
                 @Projection
                 def callback(_, layer, logical, incoming, rows, k, width, output):
                     observed.append((layer, logical))
-                    words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)),
-                                                 shape=(rows * width,))
+                    words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)), shape=(rows * width,))
                     words[:] = 0
                     if failure == "later_layer" and (layer, logical) == (11, 6):
                         return -1
@@ -237,8 +235,7 @@ class FullModelTest(unittest.TestCase):
 
         @Projection
         def callback(_, layer, logical, incoming, rows, k, width, output):
-            words = np.ctypeslib.as_array(ct.cast(incoming, ct.POINTER(ct.c_uint16)),
-                                         shape=(rows * k,))
+            words = np.ctypeslib.as_array(ct.cast(incoming, ct.POINTER(ct.c_uint16)), shape=(rows * k,))
             observed.append(words.copy())
             return -1
 

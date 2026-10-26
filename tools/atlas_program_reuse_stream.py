@@ -28,8 +28,7 @@ def dma_load_bytes(m, k, n):
 
 def a_word(byte_offset):
     """Injectively map packed A bytes: first bank 1, then bank 0."""
-    return ((BANK_BYTES + byte_offset) if byte_offset < BANK_BYTES
-            else (byte_offset - BANK_BYTES)) // 4
+    return ((BANK_BYTES + byte_offset) if byte_offset < BANK_BYTES else (byte_offset - BANK_BYTES)) // 4
 
 
 def assembly(m, k, n, output_offset, rescale_exponent=None):
@@ -37,8 +36,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
     if (type(output_offset) is not int or output_offset < m * k + k * n
             or output_offset % 32 or output_offset + 2 * m * n > 2**32):
         raise ValueError("output must be aligned, after inputs, and within the DRAM low word")
-    if rescale_exponent is not None and (type(rescale_exponent) is not int
-            or not -126 <= rescale_exponent <= 127):
+    if rescale_exponent is not None and (type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127):
         raise ValueError("VPU rescale factor must be normal finite BF16")
     b, out = plan['b_word'], plan['output_word']
     lines = ["li x5, 1024", "li x8, 2048", f"li x3, {out}", f"li x9, {out + 256}",
@@ -48,8 +46,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
     if rescale_exponent is not None:
         lines += [f"vli.all m4, {(rescale_exponent + 127) << 7}", "delay 66"]
     # Each preload loop remains inside a single physical bank, even at its end.
-    for part, (origin, count) in enumerate(((0, plan['a_bank1_bytes']),
-                                         (BANK_BYTES, plan['a_bank0_bytes']))):
+    for part, (origin, count) in enumerate(((0, plan['a_bank1_bytes']), (BANK_BYTES, plan['a_bank0_bytes']))):
         if not count:
             continue
         lines += [f"li x19, {a_word(origin)}", f"li x20, {origin}", f"li x21, {count // 1024}",

@@ -30,8 +30,7 @@ static inline atlas_host_check_result atlas_host_check_exact(
       ++i;
     }
     while (bytes - i >= 8) {
-      different |= *(const volatile atlas_check_word *)(actual + i) ^
-                   *(const atlas_check_word *)(expected + i);
+      different |= *(const volatile atlas_check_word *)(actual + i) ^ *(const atlas_check_word *)(expected + i);
       i += 8;
     }
   }

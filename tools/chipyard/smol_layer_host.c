@@ -104,7 +104,8 @@ void atlas_workload_main(void) {
   for (unsigned i=0; i<7; ++i) { smol_workload_mailbox.sequence[i]=context.sequence[i];
     smol_workload_mailbox.device_cycles[i]=context.cycle_delta[i]; }
   smol_workload_mailbox.output_mismatches=smol_output_mismatches;
-  smol_workload_mailbox.key_mismatches=smol_key_mismatches; smol_workload_mailbox.value_mismatches=smol_value_mismatches;
+  smol_workload_mailbox.key_mismatches=smol_key_mismatches;
+  smol_workload_mailbox.value_mismatches=smol_value_mismatches;
   if (!code && (context.completed != 7 || context.failed || host.active || launch_writes != 7 ||
                 !smol_selected_state.complete || !smol_selected_state.cache_valid)) code=6;
   text(code ? "ATLAS_LAYER_FAIL" : "ATLAS_LAYER_PASS"); field(" launches=", context.completed);

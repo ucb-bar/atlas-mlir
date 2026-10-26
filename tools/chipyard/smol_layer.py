@@ -61,9 +61,11 @@ def build(args):
             read(ROOT/'tools'/name, digest)
         for name in ('atlas_path_guard.py','atlas_tooling.py','host_iss/elf_image.py','host_iss/bundle.py'):
             read(ROOT/'tools'/name)
-        git = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'], check=True, capture_output=True, text=True)
+        git = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'],
+                             check=True, capture_output=True, text=True)
         if git.stdout: raise ValueError('commit all source changes before build')
-        receipt['source_commit'] = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        receipt['source_commit'] = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
         bundle = ChecksumBundle(checked(args.bundle))
         contract_raw = bundle.read('host/smol-epoch3-contract.json')
         contract = json.loads(contract_raw)
@@ -119,7 +121,8 @@ def build(args):
         for name in contract['assets']:
             blob('smol_asset_' + name, name + '.bin', (data / (name + '.bin')).read_bytes())
         for index, projection in enumerate(contract['ordered_projections']):
-            if projection['index'] != index or projection['role'] != ROLES[index]: raise ValueError('model order changed')
+            if projection['index'] != index or projection['role'] != ROLES[index]:
+                raise ValueError('model order changed')
             pair, family = families[index]
             m, k, n = pair['shape']
             exponent = projection['activation_scale'] + projection['weight_scale']
@@ -129,15 +132,18 @@ def build(args):
             if sha(initial) != family['input_sha256'] or sha(expected_output) != family['expected_sha256']:
                 raise ValueError('capture differs from qualified numerical family')
             offset = projection['output_offset']
-            if (m, k, n) != (192, projection['input_width'], projection['output_width']): raise ValueError('shape mismatch')
+            if (m, k, n) != (192, projection['input_width'], projection['output_width']):
+                raise ValueError('shape mismatch')
             if offset != m*k+k*n+256 or len(initial) != offset+2*m*n+256: raise ValueError('DRAM layout mismatch')
             if len(expected_output) != 2*m*n: raise ValueError('physical output extent mismatch')
             expected = initial[:offset] + expected_output + initial[offset+len(expected_output):]
             asm = assembly(m, k, n, offset, exponent, traffic_reuse=True)
             words = assemble(io.StringIO(asm)).assemble()
             raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
-            if sha(raw) != family['proofs']['candidate']['program_sha256']: raise ValueError('reuse generator differs from receipt')
-            if len(words) > 8192 or len(words)+5 > 32768 or words[-1] != 0x73: raise ValueError('program capacity/terminal failed')
+            if sha(raw) != family['proofs']['candidate']['program_sha256']:
+                raise ValueError('reuse generator differs from receipt')
+            if len(words) > 8192 or len(words)+5 > 32768 or words[-1] != 0x73:
+                raise ValueError('program capacity/terminal failed')
             rescale = [i for i, word in enumerate(words) if word == ((exponent+127)<<23)|0x25f]
             if len(rescale) != 1: raise ValueError('rescale literal must be unique')
             weights = initial[m*k:m*k+k*n]
@@ -148,7 +154,8 @@ def build(args):
             (data / f'program_{index}.S').write_text(asm)
             (data / f'initial_{index}.bin').write_bytes(initial)
             (data / f'output_{index}.bin').write_bytes(expected_output)
-            rows.append('{(const uint32_t *)smol_asset_program_%d,smol_asset_weights_%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d}' %
+            rows.append('{(const uint32_t *)smol_asset_program_%d,smol_asset_weights_%d,'
+                        '%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d}' %
                         (index,index,len(words),rescale[0],k,n,m*k,k*n,2*m*n,offset,len(initial),
                          projection['activation_scale'],projection['weight_scale']))
             captures.append(dict(index=index, role=ROLES[index], shape=[m,k,n], exponent=exponent,
@@ -160,7 +167,8 @@ def build(args):
         end = assets.index('};', start)+2
         assets = assets[:start] + 'const smol_raw_kernel smol_kernels[7]={\n' + ',\n'.join(rows) + '\n};' + assets[end:]
         assets += '\n' + '\n'.join(f'extern const uint8_t smol_expected_{i}[];' for i in range(7))
-        assets += '\nconst uint8_t *const smol_capture_expected[7]={' + ','.join(f'smol_expected_{i}' for i in range(7)) + '};\n'
+        assets += ('\nconst uint8_t *const smol_capture_expected[7]={'
+                   + ','.join(f'smol_expected_{i}' for i in range(7)) + '};\n')
         (source / 'smol_selected_assets.c').write_text(assets)
         (source / 'images.S').write_text('\n'.join(image_lines)+'\n')
         # Freeze all generated build inputs before invoking the compiler.
@@ -179,7 +187,8 @@ def build(args):
                  '-fno-builtin','-fno-stack-protector','-fno-pic','-fno-vectorize','-fno-slp-vectorize',
                  '-DATLAS_SMOL_CAPTURE_CHECK=1','-I'+str(source/'include'),'-I'+str(source)]
         compiled = []
-        for name in (*RETAINED,'atlas_host','smol_block_raw_adapter','smol_selected_assets','smol_layer_host','rv64_support','start','images'):
+        for name in (*RETAINED, 'atlas_host', 'smol_block_raw_adapter', 'smol_selected_assets',
+                     'smol_layer_host', 'rv64_support', 'start', 'images'):
             src = source/(name+('.S' if name in ('start','images') else '.c'))
             obj = objects/(name+'.o'); compiled.append(str(obj))
             cmd = flags+['-c',str(src),'-o',str(obj)]
@@ -204,10 +213,12 @@ def build(args):
             for symbol, filename in ((f'smol_asset_program_{i}',f'program_{i}.bin'),
                                      (f'smol_expected_{i}',f'expected_{i}.bin')):
                 raw=(data/filename).read_bytes()
-                if image.bytes_at(image.symbols[symbol]['address'],len(raw)) != raw: raise ValueError('ELF asset differs')
+                if image.bytes_at(image.symbols[symbol]['address'],len(raw)) != raw:
+                    raise ValueError('ELF asset differs')
         for name,asset in contract['assets'].items():
             raw=(data/(name+'.bin')).read_bytes()
-            if image.bytes_at(image.symbols['smol_asset_'+name]['address'],len(raw)) != raw: raise ValueError('ELF layer asset differs')
+            if image.bytes_at(image.symbols['smol_asset_'+name]['address'],len(raw)) != raw:
+                raise ValueError('ELF layer asset differs')
         bundle.verify_bookends()
         for p,digest in {**pins,**generated}.items():
             if sha(checked(p).read_bytes()) != digest: raise ValueError('source bookend changed')

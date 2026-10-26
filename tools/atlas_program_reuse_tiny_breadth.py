@@ -33,8 +33,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
     spec = allocation(m, k, n)
     if type(output_offset) is not int or output_offset != m * k + k * n + 256:
         raise ValueError("Tiny breadth requires the original guarded output offset")
-    if rescale_exponent is not None and (type(rescale_exponent) is not int or
-                                         not -126 <= rescale_exponent <= 127):
+    if rescale_exponent is not None and (type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127):
         raise ValueError("VPU rescale factor must be normal finite integer BF16")
     rows = spec['rows']
     b0, b1 = (p[0] // 4 for p in spec['b_buffers'])
@@ -69,8 +68,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
         if label == 'first_tile':
             lines += [label + ':']
         for row in range(rows):
-            lines += [f"vload m0, 0(x{4 if row == 0 else 7})", "delay 34",
-                      f"{opcode} acc{row}, m0, w0", "delay 96"]
+            lines += [f"vload m0, 0(x{4 if row == 0 else 7})", "delay 34", f"{opcode} acc{row}, m0, w0", "delay 96"]
         if label == 'accumulate':
             lines += ["jal x0, tile_done", "nop"]
     lines += ["tile_done:", "addi x25, x25, 1", "addi x4, x4, 256"]
