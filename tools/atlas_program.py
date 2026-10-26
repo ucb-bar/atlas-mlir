@@ -11,6 +11,11 @@ _TRAFFIC_REUSE_MODULES = {
     (128, 768, 768): "atlas_program_reuse_resident",
     (128, 2048, 2048): "atlas_program_reuse_tiny",
     (128, 3072, 768): "atlas_program_reuse_stream",
+    (128, 5632, 1024): "atlas_program_reuse_tiny_breadth",
+    (32, 2048, 2048): "atlas_program_reuse_tiny_breadth",
+    (224, 2304, 256): "atlas_program_reuse_resnet",
+    (64, 4608, 512): "atlas_program_reuse_resnet",
+    (800, 1152, 128): "atlas_program_reuse_resnet",
 }
 
 
@@ -30,7 +35,7 @@ def _reuse_module(m, k, n, *, resident_a=False, resident_b=False,
     try:
         return _TRAFFIC_REUSE_MODULES[(m, k, n)]
     except KeyError:
-        raise ValueError("traffic reuse is supported only for the three qualified shapes") from None
+        raise ValueError("traffic reuse is supported only for the qualified shapes") from None
 
 
 def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False, traffic_reuse=False):
@@ -40,7 +45,10 @@ def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False, traffic_reuse
     enforce this precondition and resident bank capacity before accounting.
     """
     if _reuse_enabled(traffic_reuse):
-        _reuse_module(m, k, n, resident_a=resident_a, resident_b=resident_b)
+        module = _reuse_module(m, k, n, resident_a=resident_a, resident_b=resident_b)
+        if module in ("atlas_program_reuse_tiny_breadth", "atlas_program_reuse_resnet"):
+            from importlib import import_module
+            return import_module(module).dma_load_bytes(m, k, n)
         return m * k + k * n
     if resident_a and resident_b:
         raise ValueError("resident A and resident B are mutually exclusive")
@@ -130,5 +138,5 @@ def preflight_bundle(args):
 def code_sources(*, traffic_reuse=False):
     names = ("atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py")
     if _reuse_enabled(traffic_reuse):
-        names += tuple(module + ".py" for module in _TRAFFIC_REUSE_MODULES.values())
+        names += tuple(module + ".py" for module in dict.fromkeys(_TRAFFIC_REUSE_MODULES.values()))
     return {name: sha256(Path(__file__).with_name(name)) for name in names}

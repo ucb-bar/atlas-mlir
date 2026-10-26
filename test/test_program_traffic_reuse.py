@@ -18,6 +18,11 @@ TARGETS = {
     (128, 768, 768): "atlas_program_reuse_resident",
     (128, 2048, 2048): "atlas_program_reuse_tiny",
     (128, 3072, 768): "atlas_program_reuse_stream",
+    (128, 5632, 1024): "atlas_program_reuse_tiny_breadth",
+    (32, 2048, 2048): "atlas_program_reuse_tiny_breadth",
+    (224, 2304, 256): "atlas_program_reuse_resnet",
+    (64, 4608, 512): "atlas_program_reuse_resnet",
+    (800, 1152, 128): "atlas_program_reuse_resnet",
 }
 
 
@@ -39,7 +44,7 @@ class TrafficReuseTests(unittest.TestCase):
                 self.assertEqual(program.dma_load_bytes(m, k, n, **flags,
                                                        traffic_reuse=False), old_loads)
 
-    def test_exact_dispatch_and_compulsory_loads(self):
+    def test_exact_dispatch_and_recipe_loads(self):
         for dims, name in TARGETS.items():
             m, k, n = dims
             helper = importlib.import_module(name)
@@ -48,7 +53,10 @@ class TrafficReuseTests(unittest.TestCase):
                     args = (*dims, m*k+k*n+256, exponent)
                     self.assertEqual(program.assembly(*args, traffic_reuse=True),
                                      helper.assembly(*args))
-            self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), m*k+k*n)
+            expected = {(128,5632,1024): 12255232, (32,2048,2048): 4259840,
+                        (224,2304,256): 1695744, (64,4608,512): 2654208,
+                        (800,1152,128): 1216512}.get(dims, m*k+k*n)
+            self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), expected)
 
     def test_reject_unsupported_dimensions_and_legacy_flags(self):
         for dims in ((32,32,32), (0,768,768), (True,768,768), (128.0,768,768),
