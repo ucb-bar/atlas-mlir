@@ -61,7 +61,7 @@ Operation *cloneBefore(Operation *op, Operation *anchor) {
 }
 
 // The lowered loop: its shape, the facts the decoded stream adds, and the
-// VMEM its 32 iterations touch.
+// VMEM its 32 rows touch.
 void decoded(MLIRContext &context, StringRef pipeline) {
   auto module = runPipeline(context, sourceText, pipeline);
   check(bool(module), "PACK source lowers through " + pipeline.str());

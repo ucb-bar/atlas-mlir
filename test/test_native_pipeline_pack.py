@@ -89,7 +89,7 @@ class NativePipelinePackTest(unittest.TestCase):
         registers = {0: 0, 10: 131072, 11: 131584, 12: 132096, 13: 0, 14: 32}
         memory = {131072 + i: tuple(range(i, i + 4)) for i in range(0, 1024, 4)}
         stores = {}
-        for _ in range(32):
+        for _ in range(32 // self.binding._PACK_RELAYOUT_ROWS_PER_ITERATION):
             for row in rows[start:branch]:
                 op, fields = row["operation"], row["fields"]
                 if op == "atlas.scalar_load":
@@ -112,19 +112,33 @@ class NativePipelinePackTest(unittest.TestCase):
                                      tuple(range(source, source + 4)))
 
     def test_pack_rejects_corrupt_address_temporary_and_branch(self) -> None:
-        for case in ("address", "temporary", "branch"):
+        for case in ("address", "second-row-address", "temporary", "branch"):
             with self.subTest(case=case):
                 program = copy.deepcopy(self.program)
                 if case == "address":
                     row = next(row for row in program["instructions"]
                                if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw")
                     row["fields"]["offset"] += 4
+                elif case == "second-row-address":
+                    row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_load"
+                        and row["fields"].get("kind") == "lw" and row["fields"]["offset"] == 16)
+                    row["fields"]["offset"] += 4
                 elif case == "temporary":
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_store")
                     row["fields"]["src"] = 17 if row["fields"]["src"] == 16 else 16
                 else:
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.branch")
-                    row["fields"]["offset_bytes"] = -56
+                    row["fields"]["offset_bytes"] += 2
+                with self.assertRaises(self.binding.NativeCompilationError):
+                    self.check_pack(program)
+
+    def test_pack_rejects_one_row_advances(self) -> None:
+        for register in (13, 10, 11, 12):
+            with self.subTest(register=register):
+                program = copy.deepcopy(self.program)
+                row = next(row for row in program["instructions"] if row["operation"] == "atlas.alu_imm"
+                    and row["fields"].get("dst") == register and row["fields"].get("src") == register)
+                row["fields"]["immediate"] //= 2
                 with self.assertRaises(self.binding.NativeCompilationError):
                     self.check_pack(program)
 

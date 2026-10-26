@@ -18,7 +18,7 @@ tile (npu_model main):
 | 4 independent tiles | 27,182 | 76.5% | 21% of cycles |
 | 4 tiles, shared weights | 23,690 | 49.8% | 45% of cycles |
 
-## Why the loop is slow
+## Original serial loop
 
 Each row copies eight words, two halves of four (`lowerPack`):
 
@@ -37,9 +37,9 @@ each word waits for its load: eight RAW delays per row, about 43 cycles a row.
 The floor for a word-at-a-time copy is the load path: 256 loads at three
 cycles each, 768 cycles per PACK.
 
-## Change
+## Pipelined copy and two-row iterations
 
-Software-pipeline the body by one copy, inside the iteration:
+The original improvement software-pipelined one row by one copy:
 
 ```
 lw(0)
@@ -59,10 +59,9 @@ after the first load, each source pointer once its half's last word is loaded,
 and the destination pointer after the last store. The stream scheduler keeps
 scalar loads and stores in program order (it cannot prove the scratch halves
 disjoint), so both timing passes keep this order. The loop's registers, trip
-count, branch and instruction count are unchanged; nothing is unrolled or
-duplicated.
+count, branch and instruction count were unchanged in that first improvement.
 
-A row now takes 29 cycles under `--insert-atlas-delays`, and 28 under
+That one-row loop took 29 cycles under `--insert-atlas-delays`, and 28 under
 `--schedule-atlas-stream`, which moves the destination step into the
 back-edge's delay slot, against about 43. (An earlier experiment that kept
 loads ahead of stores with eight temporaries reached about 36, because its
@@ -70,11 +69,19 @@ stores still issued after all eight loads.)
 
 The virtual scheduler's PACK cost (`costOf` in `AtlasVirtualScheduling.cpp`)
 modelled the old serial copy, each word's load latency plus its store latency.
-It now models a row as seven load intervals, then the last word's load and
-store latencies and the row's two control instructions (the back-edge, and
-its delay slot holding the destination step), which gives the measured 28
-cycles.
+It models an iteration as one fewer load intervals than copied words, then
+the last word's load and store latencies and two control instructions (the
+back-edge and its delay slot holding the destination step).
 `kPackRelayoutRowWords` (`AtlasVirtualAllocation.h`) is the row size both use.
+
+Two rows now share an iteration (`kPackRelayoutUnrollFactor`): 16 copies, one
+back-edge and one load/store tail per pair, 16 iterations. The virtual cost
+uses the same factor. Copy `i` loads from row `i / 8`, word `(i % 8) / 2`,
+half `i % 2`; source halves advance 32 bytes and the destination advances 64
+bytes per iteration. The mandatory native stream has 51 instruction words
+from the first load to the branch, so its B immediate is -102; the binding
+checks that stream and its encoded branch using the same rows-per-iteration
+value. These counts include the load-path delays.
 
 ## What does not change
 
@@ -88,15 +95,15 @@ cycles.
 ## Tests
 
 - `test_buffer_contract_verification.py::test_relayout_stores_follow_the_next_copy_load`:
-  the lowered copy order is `lw, (lw, sw) x 7, sw`, and after either timing
-  pass a row has at most one store waiting on its load (the last) and takes at
-  most 29 cycles.
-- The buffer-contract mutations (31 or 33 rows, a shifted source word, an
+  the lowered copy order is `lw, (lw, sw) x 15, sw`, and after either timing
+  pass an iteration has at most one store waiting on its load (the last) and
+  takes at most 53 cycles.
+- The buffer-contract mutations (30 or 33 rows, a shifted source word, an
   interior back-edge) keep their diagnostics. The reordering case now moves
   every store back up to its own load, the old serial order, and still proves
   the interleave.
 
-## Results
+## Earlier one-row results
 
 Full ctest passes (104 skips, as on main). Each program was lowered through
 `tools/lower_atlas_program.py` (every verifier, `--timing
@@ -131,9 +138,8 @@ cheaper PACK cost tips the other way.
 ## Next
 
 - Shared-weight programs are still PACK-bound (61% DMA busy at 4 tiles), and
-  29 cycles a row is within five of the word-at-a-time floor of 24 (eight
-  loads at three cycles). Going further needs fewer, wider moves, or no
-  relayout at all.
+  the current two-row loop amortizes its tail and control across 16 copies.
+  Going further needs fewer, wider moves, or no relayout at all.
 
 ## Not in this change
 

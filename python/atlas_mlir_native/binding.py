@@ -1389,18 +1389,30 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
         raise NativeCompilationError("unqualified_target", "BF16 scratch store has no DMA completion")
 
 
+# Match lowerPack's kPackRelayoutUnrollFactor. The selected mandatory stream has two memory instructions per copy, four
+# pointer/counter advances, and one load-path delay per copy except the first.
+_PACK_RELAYOUT_ROWS_PER_ITERATION = 2
+_PACK_RELAYOUT_COPIES = 8 * _PACK_RELAYOUT_ROWS_PER_ITERATION
+_PACK_RELAYOUT_BRANCH_DISTANCE = 2 * _PACK_RELAYOUT_COPIES + 4 + (_PACK_RELAYOUT_COPIES - 1)
+_PACK_RELAYOUT_BRANCH_OFFSET = -2 * _PACK_RELAYOUT_BRANCH_DISTANCE
+_PACK_RELAYOUT_ADVANCES = [("addi", 13, 13, _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 10, 10,
+    16 * _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 11, 11, 16 * _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 12, 12,
+    32 * _PACK_RELAYOUT_ROWS_PER_ITERATION),]
+
+
 def _pack_relayout_effects() -> list[tuple]:
     """Current selected scalar copy: two live temporaries overlap load/store."""
     def load(copy: int) -> tuple:
-        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 2) * 4)
+        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 8) * 16 + ((copy % 8) // 2) * 4)
 
     def store(copy: int) -> tuple:
-        return ("sw", 16 + copy % 2, 132096 + (copy % 2) * 16 + (copy // 2) * 4)
+        return ("sw", 16 + copy % 2, 132096 + (copy // 8) * 32 + (copy % 2) * 16 + ((copy % 8) // 2) * 4)
 
     effects = [load(0)]
-    for copy in range(1, 8):
+    for copy in range(1, _PACK_RELAYOUT_COPIES):
         effects.extend((load(copy), store(copy - 1)))
-    effects.extend((store(7), ("blt", 13, 14, 1, 32, -54)))
+    effects.extend((store(_PACK_RELAYOUT_COPIES - 1), ("blt", 13, 14, _PACK_RELAYOUT_ROWS_PER_ITERATION, 32,
+        _PACK_RELAYOUT_BRANCH_OFFSET)))
     return effects
 
 
@@ -1446,11 +1458,12 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
                       and row["fields"].get("kind") == "lw")
     # ScalarCore's PC is word-indexed. The RISC-V B immediate encodes halfword
     # units, so the selected emitter uses two, not four, per instruction word.
-    if branch - first_load != 27 or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch) or (
+    if (branch - first_load != _PACK_RELAYOUT_BRANCH_DISTANCE
+        or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch) or (
         branch + 1 >= len(rows) or rows[branch + 1]["operation"] != "atlas.alu_imm"
         or any(rows[branch + 1]["fields"].get(key) != value for key, value in
                {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
-    ):
+    )):
         raise NativeCompilationError("unqualified_target", "pack loop target or delay slot changed")
     branch_word = rows[branch]["word_u32"]
     immediate = (((branch_word >> 31) & 1) << 12) | (((branch_word >> 7) & 1) << 11) | (
@@ -1458,21 +1471,17 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
     immediate = immediate - 8192 if immediate & 4096 else immediate
     if (branch_word & 0x7f, (branch_word >> 12) & 7,
         (branch_word >> 15) & 31, (branch_word >> 20) & 31,
-        immediate) != (0x63, 4, 13, 14, -54):
+        immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
         raise NativeCompilationError("unqualified_target", "pack loop word has a wrong branch target")
-    # Require 32 iterations, 16-byte advancement in each source half and
-    # 32-byte advancement in the destination. The one-iteration effects above
-    # then cover 32*32 bytes without touching the source or adjacent slots.
+    # Require the selected rows per iteration and matching pointer advances. Repeating these effects to row 32 covers
+    # 32*32 bytes without touching the source or adjacent slots.
     before = rows[first_load - 1]["fields"]
     if before.get("cycles", 0) < 0:
         raise NativeCompilationError("unqualified_target", "pack loop has invalid delay")
     advances = [row["fields"] for row in rows[first_load:branch]
                 if row["operation"] == "atlas.alu_imm"]
     if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
-        for row in advances] != [
-            ("addi", 13, 13, 1), ("addi", 10, 10, 16),
-            ("addi", 11, 11, 16), ("addi", 12, 12, 32),
-        ]:
+        for row in advances] != _PACK_RELAYOUT_ADVANCES:
         raise NativeCompilationError("unqualified_target", "pack loop does not advance every row")
     cycle = 0
     issued: dict[str, list[int]] = {}
@@ -2400,29 +2409,26 @@ def _check_interlayer_pack_words(program: dict, pack_registers: tuple[tuple[int,
             word & 0x7f) != (0x44, source_pair, 3, destination, 0x57):
             raise NativeCompilationError("unqualified_target", "interlayer pack word changed")
     for branch in branches:
-        first_load = branch - 27
+        first_load = branch - _PACK_RELAYOUT_BRANCH_DISTANCE
         if (first_load < 0 or rows[first_load]["operation"] != "atlas.scalar_load"
                 or rows[first_load]["fields"].get("kind") != "lw"
                 or branch + 1 >= len(rows)
                 or rows[branch + 1]["operation"] != "atlas.alu_imm"
                 or any(rows[branch + 1]["fields"].get(key) != value for key, value in
                        {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
-                or rows[branch]["fields"].get("offset_bytes") != -54):
+                or rows[branch]["fields"].get("offset_bytes") != _PACK_RELAYOUT_BRANCH_OFFSET):
             raise NativeCompilationError("unqualified_target", "interlayer pack loop changed")
         word = rows[branch]["word_u32"]
         immediate = (((word >> 31) & 1) << 12) | (((word >> 7) & 1) << 11) | (
             ((word >> 25) & 0x3f) << 5) | (((word >> 8) & 0xf) << 1)
         immediate = immediate - 8192 if immediate & 4096 else immediate
         if (word & 0x7f, (word >> 12) & 7, (word >> 15) & 31,
-            (word >> 20) & 31, immediate) != (0x63, 4, 13, 14, -54):
+            (word >> 20) & 31, immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
             raise NativeCompilationError("unqualified_target", "interlayer pack branch word changed")
         advances = [row["fields"] for row in rows[first_load:branch]
                     if row["operation"] == "atlas.alu_imm"]
         if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
-            for row in advances] != [
-                ("addi", 13, 13, 1), ("addi", 10, 10, 16),
-                ("addi", 11, 11, 16), ("addi", 12, 12, 32),
-        ]:
+            for row in advances] != _PACK_RELAYOUT_ADVANCES:
             raise NativeCompilationError("unqualified_target", "interlayer pack row increments changed")
 
 

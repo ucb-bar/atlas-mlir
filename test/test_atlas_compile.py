@@ -62,7 +62,7 @@ class AtlasCompileTest(unittest.TestCase):
         self.assertIn("atlas.delay_slots_pending", lowered.stdout)
         self.assertNotIn("dst = 0 : i32", after_back_edge(lowered.stdout))
         self.assertNotIn("atlas.delay_slots_pending", timed.stdout)
-        self.assertRegex(after_back_edge(timed.stdout), r'"atlas\.alu_imm".*immediate = 32 : i32')
+        self.assertRegex(after_back_edge(timed.stdout), r'"atlas\.alu_imm".*immediate = 64 : i32')
 
 
 if __name__ == "__main__":

@@ -105,12 +105,15 @@ void pack(MLIRContext &context) {
   auto copyLoad = [&](Operation &op) { auto l = dyn_cast<ScalarLoadOp>(op); return l && helper(op) && l.getKind() == "lw"; };
   struct Case { StringRef name, diagnostic; std::function<void(ModuleOp)> corrupt; };
   const std::vector<Case> cases = {
-      {"31-row copy leaves the last relayout row stale", stale, [&](ModuleOp m) { set(find(m, limit), "immediate", 31); }},
+      {"30-row copy leaves the last two relayout rows stale", stale,
+       [&](ModuleOp m) { set(find(m, limit), "immediate", 30); }},
       {"33-row copy writes past its relayout scratch", "buffer contract: PACK copy loop store is not proven inside its relayout scratch", [&](ModuleOp m) { set(find(m, limit), "immediate", 33); }},
       {"a copy that stops advancing never exits", "buffer contract: PACK copy loop does not exit within 256 iterations", [&](ModuleOp m) {
          for (Operation &op : m.getBody()->getOperations())
-           if (auto a = dyn_cast<ALUImmOp>(op); a && helper(op) && a.getDst() == a.getSrc() && llvm::is_contained({1, 16, 32}, i32(&op, "immediate"))) set(&op, "immediate", 0); }},
-      {"inverted exit copies one row", stale, [&](ModuleOp m) { find(m, backedge)->setAttr("kind", StringAttr::get(&context, "bge")); }},
+           if (auto a = dyn_cast<ALUImmOp>(op); a && helper(op) && a.getDst() == a.getSrc() &&
+               llvm::is_contained({2, 32, 64}, i32(&op, "immediate"))) set(&op, "immediate", 0); }},
+      {"inverted exit copies only the first row group", stale,
+       [&](ModuleOp m) { find(m, backedge)->setAttr("kind", StringAttr::get(&context, "bge")); }},
       {"unknown row limit is undecidable", "buffer contract: PACK copy loop branch depends on an unknown register", [&](ModuleOp m) { set(find(m, limit), "src", f.scalarTemporary); }},
       {"shifted source word breaks the interleave", interleave, [&](ModuleOp m) { set(find(m, copyLoad), "offset", 4); }},
       {"forward helper branch is not a counted copy", loopShape, [&](ModuleOp m) { set(find(m, backedge), "offset_bytes", 4); }},
@@ -138,7 +141,7 @@ void pack(MLIRContext &context) {
     if (copyLoad(op)) loads.push_back(&op);
     if (copyStore(op)) stores.push_back(&op);
   }
-  check(loads.size() == 8 && stores.size() == 8, "one row of eight copies");
+  check(loads.size() == 16 && stores.size() == 16, "two rows of eight copies");
   for (size_t n = 0; n + 1 < loads.size() && n < stores.size(); ++n) moveBefore(stores[n], loads[n + 1]);
   check(accepts(*module), "each store moved up to its own load keeps the interleave", diagnostics);
 }

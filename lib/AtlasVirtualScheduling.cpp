@@ -476,16 +476,15 @@ Cost costOf(Operation *op) {
     return {Unit::Xlu, t.interval, t.latency};
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
-    // words a row (lowerPack). Each store hides behind the next word's load,
-    // so a row takes a load per load-path interval, then the last word's load
-    // and store, and the back-edge, whose delay slot takes the destination step.
+    // Pack, then relayout through VMEM in lowerPack's scalar loop of kPackRelayoutUnrollFactor rows an iteration. Each
+    // store hides behind the next word's load, so an iteration takes a load per load-path interval, then the last
+    // word's load and store, and the back-edge, whose delay slot takes the destination step.
     static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
-    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 2;
-    int rows = registersOf(true) * kAtlasRegisterBytes / 4 / rowWords;
-    int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
+    constexpr int words = kPackRelayoutRowWords * kPackRelayoutUnrollFactor, control = 2;
+    int iterations = registersOf(true) * kAtlasRegisterBytes / 4 / words;
+    int iteration = (words - 1) * lw.interval + lw.latency + sw.latency + control;
     return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
-                                   vstore.latency + rows * row + vload.latency);
+                                   vstore.latency + iterations * iteration + vload.latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
   return {Unit::Scalar, 1, timingOf("addi").latency};
