@@ -7,12 +7,41 @@ from run_model_tile import validate_archive_members
 import zipfile
 
 
-def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False):
+_TRAFFIC_REUSE_MODULES = {
+    (128, 768, 768): "atlas_program_reuse_resident",
+    (128, 2048, 2048): "atlas_program_reuse_tiny",
+    (128, 3072, 768): "atlas_program_reuse_stream",
+}
+
+
+def _reuse_enabled(value):
+    if type(value) is not bool:
+        raise ValueError("traffic_reuse must be a boolean")
+    return value
+
+
+def _reuse_module(m, k, n, *, resident_a=False, resident_b=False,
+                  pretranspose_resident_b=False):
+    if any(type(d) is not int or d <= 0 or d % 32 for d in (m, k, n)):
+        raise ValueError("traffic reuse requires positive integer dimensions divisible by 32")
+    if any(flag is not False for flag in
+           (resident_a, resident_b, pretranspose_resident_b)):
+        raise ValueError("traffic reuse excludes legacy residency and pretranspose flags")
+    try:
+        return _TRAFFIC_REUSE_MODULES[(m, k, n)]
+    except KeyError:
+        raise ValueError("traffic reuse is supported only for the three qualified shapes") from None
+
+
+def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False, traffic_reuse=False):
     """Requested FP8 input bytes for a complete tiled contraction.
 
     m, k and n must be positive physical dimensions divisible by 32. Callers
     enforce this precondition and resident bank capacity before accounting.
     """
+    if _reuse_enabled(traffic_reuse):
+        _reuse_module(m, k, n, resident_a=resident_a, resident_b=resident_b)
+        return m * k + k * n
     if resident_a and resident_b:
         raise ValueError("resident A and resident B are mutually exclusive")
     if resident_b:
@@ -23,7 +52,16 @@ def dma_load_bytes(m, k, n, *, resident_a=False, resident_b=False):
 
 
 def assembly(m, k, n, output_offset, rescale_exponent=None, *, resident_b=False, pretranspose_resident_b=False,
-    resident_a=False):
+    resident_a=False, traffic_reuse=False):
+    if _reuse_enabled(traffic_reuse):
+        module = _reuse_module(m, k, n, resident_a=resident_a, resident_b=resident_b,
+                               pretranspose_resident_b=pretranspose_resident_b)
+        if type(output_offset) is not int or output_offset != m * k + k * n + 256:
+            raise ValueError("traffic reuse must preserve the original output offset and guard")
+        if type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127:
+            raise ValueError("traffic reuse requires a normal finite BF16 integer rescale")
+        from importlib import import_module
+        return import_module(module).assembly(m, k, n, output_offset, rescale_exponent)
     if resident_a and resident_b:
         raise ValueError("resident A and resident B are mutually exclusive")
     if pretranspose_resident_b and not resident_b:
@@ -89,6 +127,8 @@ def preflight_bundle(args):
         validate_archive_members(archive.infolist())
 
 
-def code_sources():
-    return {name: sha256(Path(__file__).with_name(name)) for name in ("atlas_program.py", "run_model_tile.py",
-        "atlas_tile_arithmetic.py")}
+def code_sources(*, traffic_reuse=False):
+    names = ("atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py")
+    if _reuse_enabled(traffic_reuse):
+        names += tuple(module + ".py" for module in _TRAFFIC_REUSE_MODULES.values())
+    return {name: sha256(Path(__file__).with_name(name)) for name in names}
