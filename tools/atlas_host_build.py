@@ -6,6 +6,9 @@ from pathlib import Path
 from atlas_path_guard import checked
 from atlas_host_layout import ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
 
+GRAPH_PROGRAM_WORDS = 8192
+_UNDECLARED_WORDS = object()
+
 TEMPLATES = checked(Path(__file__).absolute().parents[1] / "runtime/host_templates")
 TEMPLATE_BYTES = {name: checked(TEMPLATES / name).read_bytes() for name in ("smol_start.S", "smol_link.ld")}
 START = TEMPLATE_BYTES["smol_start.S"].decode()
@@ -26,6 +29,17 @@ def wrap(raw):
             if kind in (1, 5) or kind and source:
                 raise ValueError("raw program writes a reserved mailbox")
     return raw[:-4] + struct.pack("<6I", 0x13, 0xC1102FF3, 0x13, 0xC10F9073, 0x13, 0x73)
+
+
+def validate_graph_program(raw, declared_words=_UNDECLARED_WORDS):
+    """Admit actual raw bytes to the graph runtime's bounded copy buffer."""
+    wrap(raw)  # Preserve structural, mailbox and hardware IMEM admission.
+    actual_words = len(raw) // 4
+    if actual_words > GRAPH_PROGRAM_WORDS:
+        raise ValueError("raw graph program exceeds runtime program buffer")
+    if declared_words is not _UNDECLARED_WORDS and (type(declared_words) is not int or declared_words != actual_words):
+        raise ValueError("declared graph program words differ from actual bytes")
+    return actual_words
 
 
 def elf_sections(raw):

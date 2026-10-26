@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
-from atlas_host_build import START, LINK, TEMPLATES, TEMPLATE_BYTES, audit_elf, wrap
+from atlas_host_build import START, LINK, TEMPLATES, TEMPLATE_BYTES, audit_elf, validate_graph_program
 from atlas_host_layout import HEADER as LAYOUT_HEADER, HEADER_SHA256
 from atlas_path_guard import checked
 
@@ -169,9 +169,8 @@ def main():
         if k["template"] != t or k["kernel_index"] != i or t["base_rescale_exponent"] != 0:
             raise ValueError("template graph mismatch")
         raw = ad.read(t["program"]["path"], t["program"]["sha256"])
-        wrap(raw)
-        if (len(raw) != t["program_words"] * 4
-            or struct.unpack_from("<I", raw, t["rescale_patch_word_index"] * 4)[0] != words[126]):
+        validate_graph_program(raw, t["program_words"])
+        if struct.unpack_from("<I", raw, t["rescale_patch_word_index"] * 4)[0] != words[126]:
             raise ValueError("base patch not canonical")
         weight = ad.read(t["weight"]["fp8_tiled"]["path"], t["weight"]["fp8_tiled"]["sha256"])
         mp, kp, np = t["padded_mkn"]

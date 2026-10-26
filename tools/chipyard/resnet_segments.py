@@ -19,6 +19,7 @@ TOOLS = Path(__file__).absolute().parent
 sys.path.insert(0, str(TOOLS.parent))
 from run_sim import safe_path as admitted_path
 from atlas_tooling import sha, write_json
+from atlas_host_build import validate_graph_program
 
 RUNTIME = TOOLS.parents[1] / "runtime"
 SOURCES = ("atlas_host.c", "atlas_resnet_graph_math.c", "atlas_resnet_graph_device.c")
@@ -261,6 +262,10 @@ def build(args):
     receipts = []
     for k in args.segments:
         seg = p["segments"][k]
+        declared = re.findall(r"\.program_words=(\d+)(?=[,}])", kernels[k])
+        if len(declared) != 1:
+            raise ValueError("segment kernel must declare exactly one program word count")
+        validate_graph_program(bound_host_file(args.host / f"graph_program_{k}.bin", digests), int(declared[0]))
         out = args.out / f"seg-{k:02d}"
         out.mkdir(parents=True)
         state, expected, arena_start = segment_inputs(args.host, capture, manifest, p, seg, digests)
