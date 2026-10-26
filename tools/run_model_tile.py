@@ -2,7 +2,7 @@
 """Run a source-bound 32xK by Kx32 tile with the pinned Atlas Python model."""
 
 from atlas_host_layout import ATLAS_DRAM_BASE
-from atlas_tooling import run_command
+from atlas_tooling import preflight_archive, run_command
 
 
 import argparse

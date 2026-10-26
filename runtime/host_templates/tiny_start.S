@@ -39,3 +39,12 @@ trap_entry:
   li t1,7
   sd t1,0(t0)
 4: j 4b
+
+/* The Tiny C harness supplies tohost; HTIF loaders also require fromhost. */
+.section .tohost,"aw",@progbits
+.balign 64
+.global fromhost
+.type fromhost,@object
+.size fromhost,8
+fromhost:
+  .dword 0
