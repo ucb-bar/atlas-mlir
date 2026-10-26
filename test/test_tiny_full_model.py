@@ -1,4 +1,11 @@
-"""Compile the full-model host and exercise advancing KV and greedy feedback."""
+"""Exercise the production C orchestrator with two explicit source providers.
+
+FullModelTest always runs with test-only ABI stubs: it checks routing, cache
+ownership, state commits and the production BF16 argmax, not host arithmetic.
+FullModelIntegrationTest additionally runs with real host primitives when
+TINY_MERLIN_COMPARISONS names their source directory. Neither suite qualifies
+full-model numerical equivalence: projections here are synthetic callbacks.
+"""
 import ctypes as ct
 import _ctypes
 import os
@@ -25,34 +32,23 @@ Projection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void
                          ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p)
 
 
-class FullModelTest(unittest.TestCase):
+class FullModelChecks:
     @classmethod
-    def setUpClass(cls):
-        value = os.environ.get("TINY_MERLIN_COMPARISONS")
-        if value is None:
-            raise unittest.SkipTest("set TINY_MERLIN_COMPARISONS to the explicit source provider")
-        provider = Path(value)
-        if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
-            raise ValueError("restricted source provider")
+    def compile_host(cls, provider, names):
         cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
         source = Path(__file__).absolute().parents[1] / "tools/tiny_full/tiny_full_model.c"
-        names = ("smol_host_ops.c", "llama_host_attention.c", "llama_host_layout.c",
-                 "llama_rotary_table.c", "llama_host_bmm.c", "smol_host_softmax.c")
         command = ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC", "-I", str(provider),
                    str(source), *(str(provider / name) for name in names), "-lm", "-o", str(cls.root / "host.so")]
         subprocess.run(command, check=True, capture_output=True, timeout=120)
         cls.lib = ct.CDLL(str(cls.root / "host.so"))
+        cls.addClassCleanup(_ctypes.dlclose, cls.lib._handle)
         cls.lib.tiny_full_workspace_bytes.restype = ct.c_size_t
         cls.lib.tiny_full_argmax_bf16.argtypes = [ct.c_void_p, ct.c_size_t, ct.POINTER(ct.c_uint32)]
         cls.lib.tiny_full_model_step.argtypes = [ct.POINTER(Parameters), ct.POINTER(State), ct.c_void_p,
             ct.c_size_t, Projection, ct.c_void_p, ct.c_void_p, ct.c_size_t, ct.c_void_p, ct.c_size_t]
-
-    @classmethod
-    def tearDownClass(cls):
-        _ctypes.dlclose(cls.lib._handle)
-        cls.temp.cleanup()
 
     def fixture(self):
         self.embedding = np.zeros((32000, 2048), np.uint16)
@@ -120,7 +116,12 @@ class FullModelTest(unittest.TestCase):
                     self.assertTrue(np.all(cache[:, 129] == 0x4000))
         expected = [(layer, role) for layer in range(22) for role in range(7)] + [(22, 7)]
         self.assertEqual([(layer, role) for layer, role, *_ in observed], expected * 2)
-        self.assertEqual(observed[-1], (22, 7, 1, 2048, 32000))
+        shapes = [(2048, 2048), (2048, 256), (2048, 256), (2048, 2048),
+                  (2048, 5632), (2048, 5632), (5632, 2048)]
+        expected_calls = [(layer, role, 1, k, width) for layer in range(22)
+                          for role, (k, width) in enumerate(shapes)]
+        expected_calls.append((22, 7, 1, 2048, 32000))
+        self.assertEqual(observed, expected_calls * 2)
 
     def test_teacher_forcing_rejected_before_projection(self):
         p, s = self.fixture()
@@ -188,6 +189,91 @@ class FullModelTest(unittest.TestCase):
         self.assertEqual((s.position, s.bank, s.next_token), (128, 0, 7))
         self.assertTrue(np.all(self.keys[s.bank] == 0))
         self.assertTrue(np.all(self.values[s.bank] == 0))
+
+    def test_late_failure_preserves_committed_cache_and_state(self):
+        # Reach a later layer, the LM head, and argmax after earlier layers have
+        # already written the inactive bank. None may commit a partial step.
+        for failure in ("later_layer", "lm_head", "nonfinite_logits"):
+            with self.subTest(failure=failure):
+                p, s = self.fixture()
+                self.keys[0][:] = 0x3f00
+                self.values[0][:] = 0x3f80
+                observed = []
+
+                @Projection
+                def callback(_, layer, logical, incoming, rows, k, width, output):
+                    observed.append((layer, logical))
+                    words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)),
+                                                 shape=(rows * width,))
+                    words[:] = 0
+                    if failure == "later_layer" and (layer, logical) == (11, 6):
+                        return -1
+                    if failure == "lm_head" and layer == 22:
+                        return -1
+                    if failure == "nonfinite_logits" and layer == 22:
+                        words[-1] = 0x7fc1
+                    return 0
+
+                expected_status = {"later_layer": -2, "lm_head": -4, "nonfinite_logits": -5}
+                self.assertEqual(self.step(p, s, 7, callback), expected_status[failure])
+                self.assertEqual((s.position, s.bank, s.next_token), (128, 0, 7))
+                self.assertTrue(np.all(self.keys[0] == 0x3f00))
+                self.assertTrue(np.all(self.values[0] == 0x3f80))
+                self.assertTrue(np.any(self.values[1] != 0))
+                self.assertEqual(observed[-1], (11, 6) if failure == "later_layer" else (22, 7))
+
+
+class FullModelTest(FullModelChecks, unittest.TestCase):
+    """Default, self-contained C orchestration coverage with nonnumerical stubs."""
+
+    @classmethod
+    def setUpClass(cls):
+        provider = Path(__file__).absolute().parent / "fixtures/tiny_full_host_stubs"
+        cls.compile_host(provider, ("host_stubs.c",))
+
+    def test_embedding_rows_feed_first_projection(self):
+        p, s = self.fixture()
+        self.embedding[7] = 0x3f00
+        observed = []
+
+        @Projection
+        def callback(_, layer, logical, incoming, rows, k, width, output):
+            words = np.ctypeslib.as_array(ct.cast(incoming, ct.POINTER(ct.c_uint16)),
+                                         shape=(rows * k,))
+            observed.append(words.copy())
+            return -1
+
+        self.assertEqual(self.step(p, s, 7, callback), -2)
+        self.assertEqual(len(observed), 1)
+        np.testing.assert_array_equal(observed[0], self.embedding[7])
+
+        s.position = 0
+        tokens = np.arange(128, dtype=np.uint32)[::-1].copy()
+        self.embedding[:128] = np.arange(128, dtype=np.uint16)[:, None]
+        logits = np.zeros((128, 32000), np.uint16)
+        observed.clear()
+        status = self.lib.tiny_full_model_step(ct.byref(p), ct.byref(s), tokens.ctypes.data, 128,
+            callback, None, self.workspace.ctypes.data, self.workspace.nbytes,
+            logits.ctypes.data, logits.size)
+        self.assertEqual(status, -2)
+        self.assertEqual(len(observed), 1)
+        np.testing.assert_array_equal(observed[0].reshape(128, 2048), self.embedding[tokens])
+
+
+class FullModelIntegrationTest(FullModelChecks, unittest.TestCase):
+    """Explicit integration with Merlin's real host primitives and synthetic projections."""
+
+    @classmethod
+    def setUpClass(cls):
+        value = os.environ.get("TINY_MERLIN_COMPARISONS")
+        if value is None:
+            raise unittest.SkipTest("set TINY_MERLIN_COMPARISONS to the explicit source provider")
+        provider = Path(value)
+        if any(word in part.lower() for part in provider.parts for word in ("hammer", "vlsi")):
+            raise ValueError("restricted source provider")
+        names = ("smol_host_ops.c", "llama_host_attention.c", "llama_host_layout.c",
+                 "llama_rotary_table.c", "llama_host_bmm.c", "smol_host_softmax.c")
+        cls.compile_host(provider, names)
 
 
 if __name__ == "__main__":
