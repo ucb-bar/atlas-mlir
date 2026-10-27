@@ -156,27 +156,33 @@ def emit_assets(bundle, data, host):
             for field in ('keys','values'):
                 name=f'tiny_full_cache_{step:02d}_{layer:02d}_{field}'
                 size = 4 * (128 + step) * 64 * 2
-                lines.append(f'memcpy({name},tiny_full_state_global.{field}[tiny_full_state_global.bank]+{layer}*TINY_FULL_CACHE_WORDS,{size});')
-        lines.append(f'for(size_t i=0;i<32000;++i){{uint32_t bits=(uint32_t)logits[i]<<16;memcpy(tiny_full_logits_{step:02d}+i,&bits,4);}}')
+                lines.append(f'memcpy({name},tiny_full_state_global.{field}[tiny_full_state_global.bank]'
+                             f'+{layer}*TINY_FULL_CACHE_WORDS,{size});')
+        lines.append('for(size_t i=0;i<32000;++i){uint32_t bits=(uint32_t)logits[i]<<16;'
+                     f'memcpy(tiny_full_logits_{step:02d}+i,&bits,4);}}')
         for item in refs:
             name = item['actual_symbol']
             if name.startswith(f'tiny_full_cache_{step:02d}_') or name == f'tiny_full_logits_{step:02d}':
                 lines.append(f'if(!equal({name},{item["expected_symbol"]},{item["bytes"]}))return 1;')
-        lines.append(f'if(tiny_full_greedy_tokens[{step}]!=((const uint32_t*)tiny_full_greedy_tokens_expected)[{step}])return 1;')
+        lines.append(f'if(tiny_full_greedy_tokens[{step}]!='
+                     f'((const uint32_t*)tiny_full_greedy_tokens_expected)[{step}])return 1;')
         if step:
-            lines.append(f'if(tiny_full_decode_inputs[{step-1}]!=((const uint32_t*)tiny_full_decode_inputs_expected)[{step-1}])return 1;')
+            lines.append(f'if(tiny_full_decode_inputs[{step-1}]!='
+                         f'((const uint32_t*)tiny_full_decode_inputs_expected)[{step-1}])return 1;')
         lines.append('break;');cases.extend(lines)
     parameters = data['host_parameters']
     word = lambda key: '(const uint16_t*)' + parameters[key]['symbol']
     norms = lambda suffix: '{'+','.join(word(f'model.layers.{i}.{suffix}.weight') for i in range(22))+'}'
     parameter_init = '{'+','.join((word('model.embed_tokens.weight'), norms('input_layernorm'),
-        norms('post_attention_layernorm'), word('model.norm.weight'),word('rotary_cosine'),word('rotary_sine'),'0x1.4f8b588e368f1p-17f'))+'}'
+        norms('post_attention_layernorm'), word('model.norm.weight'),word('rotary_cosine'),word('rotary_sine'),
+        '0x1.4f8b588e368f1p-17f'))+'}'
     header = '''#ifndef TINY_FULL_ASSETS_H
 #define TINY_FULL_ASSETS_H
 #include "tiny_full_model.h"
 #include "tiny_projection.h"
 '''
-    header += f'#define TINY_FULL_KERNELS {len(kernels)}\n#define TINY_FULL_STEPS {data["decode_count"]+1}\n#define TINY_FULL_DRAM_BYTES {max(k["total_dram_bytes"] for k in kernels)}\n'
+    header += (f'#define TINY_FULL_KERNELS {len(kernels)}\n#define TINY_FULL_STEPS {data["decode_count"]+1}\n'
+               f'#define TINY_FULL_DRAM_BYTES {max(k["total_dram_bytes"] for k in kernels)}\n')
     header += f'#define TINY_FULL_ARENA_BASE UINT64_C({kernels[0]["dram_base"]})\n'
     header += '''extern volatile uint64_t tohost,fromhost;
 extern const tiny_panel tiny_full_panels[TINY_FULL_KERNELS];
@@ -196,8 +202,10 @@ int tiny_full_save_check_step(unsigned,const uint16_t *);
     source += 'static uint16_t keys[2][22*TINY_FULL_CACHE_WORDS],values[2][22*TINY_FULL_CACHE_WORDS];\n'
     source += 'tiny_full_state tiny_full_state_global={{keys[0],keys[1]},{values[0],values[1]},0,0,0};\n'
     source += 'const int64_t *const tiny_full_prefill_tokens=(const int64_t*)'+parameters['prefill_tokens']['symbol']+';\n'
-    source += 'static int equal(const void*a,const void*b,size_t n){const uint8_t*x=a,*y=b;for(size_t i=0;i<n;++i)if(x[i]!=y[i])return 0;return 1;}\n'
-    source += 'int tiny_full_save_check_step(unsigned step,const uint16_t*logits){switch(step){\n'+'\n'.join(cases)+'\ndefault:return 1;}return 0;}\n'
+    source += ('static int equal(const void*a,const void*b,size_t n){const uint8_t*x=a,*y=b;'
+               'for(size_t i=0;i<n;++i)if(x[i]!=y[i])return 0;return 1;}\n')
+    source += ('int tiny_full_save_check_step(unsigned step,const uint16_t*logits){switch(step){\n'
+               +'\n'.join(cases)+'\ndefault:return 1;}return 0;}\n')
     (host/'tiny_full_assets.h').write_text(header)
     (host/'tiny_full_assets.c').write_text(source)
     (host/'images.S').write_text('\n'.join(assembly)+'\n.section .note.GNU-stack,"",@progbits\n')
@@ -336,7 +344,8 @@ def build(args):
             pin(pins,path)
         pin(pins,host/obj)
     if any(sha256(checked(path))!=digest for path,digest in pins.items()):raise ValueError('prelink source changed')
-    link_placement = [] if placement == dict(arena_base=arena.DEFAULT_ARENA, dram_base=0x80000000, dram_bytes=64 << 30) else [
+    default_placement = dict(arena_base=arena.DEFAULT_ARENA, dram_base=0x80000000, dram_bytes=64 << 30)
+    link_placement = [] if placement == default_placement else [
         '--defsym=TINY_FULL_RAM_BASE='+str(args.dram_base),
         '--defsym=TINY_FULL_RAM_BYTES='+str(args.dram_bytes),
         '--defsym=TINY_FULL_DEVICE_BASE='+str(arena_base),
