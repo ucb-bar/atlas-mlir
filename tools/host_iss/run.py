@@ -175,7 +175,8 @@ def run(args):
             if uart_profile is not None:
                 uart_raw = (out / "uart.log").read_bytes()
                 completion["uart"] = dict(profile=uart_profile, sha256=digest(uart_raw),
-                    **verify_result_lines(uart_raw, build["result_name"], device.kernel_count))
+                    **verify_result_lines(uart_raw, build["result_name"], device.kernel_count,
+                        progress_launches=build["result_progress_launches"]))
             bundle.verify_bookends()
             device.verify_bookends()
             assert all(sha(Path(path)) == expected_hash for path, expected_hash in pins.items())

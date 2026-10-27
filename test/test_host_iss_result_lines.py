@@ -16,6 +16,9 @@ class ResultLinesTest(unittest.TestCase):
 
     def test_complete_uart_transcript(self):
         self.assertEqual(verify(self.lines(), "tiny-full", 2)["progress_records"], 1)
+        self.assertEqual(verify(self.lines(), "tiny-full", 2, progress_launches=[2])["final"], "PASS")
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            verify(self.lines(), "tiny-full", 2, progress_launches=[1, 2])
 
     def test_missing_failure_reordered_duplicate_and_wrong_workload_refused(self):
         raw = self.lines()

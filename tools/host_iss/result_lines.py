@@ -3,10 +3,11 @@
 import re
 
 
-def verify(raw, name, launches):
+def verify(raw, name, launches, *, progress_launches=None):
     if type(launches) is not int or launches <= 0:
         raise ValueError("positive result launch count required")
     records = []
+    progress = []
     completed = 0
     finished = False
     for line in raw.decode("ascii").splitlines():
@@ -37,6 +38,7 @@ def verify(raw, name, launches):
             if not completed < count <= launches or not values.get("boundary"):
                 raise ValueError("UART progress order or boundary differs")
             completed = count
+            progress.append(count)
         elif kind == "PASS":
             if count != completed or count != launches:
                 raise ValueError("UART completed launch count differs")
@@ -46,4 +48,6 @@ def verify(raw, name, launches):
         records.append(dict(kind=kind, **values))
     if not finished:
         raise ValueError("UART final PASS record missing")
+    if progress_launches is not None and progress != progress_launches:
+        raise ValueError("UART workload layer/segment progress coverage differs")
     return dict(begin=True, progress_records=len(records) - 2, final="PASS", launches_completed=completed)

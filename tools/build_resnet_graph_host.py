@@ -352,7 +352,7 @@ def main():
         "dram_bytes": dram, "arena_base": arena_base,
         "placement": {"arena_base": arena_base, "dram_base": args.dram_base, "dram_bytes": args.dram_bytes},
         "physical_dram": {"base": args.dram_base, "bytes": args.dram_bytes}, "target": args.target,
-        "uart": uart, "result_name": "resnet50-full"}
+        "uart": uart, "result_name": "resnet50-full", "result_progress_launches": list(range(1, 55))}
     if not report["returncode"]:
         raw = (args.out / "host.elf").read_bytes()
         report["elf_sha256"] = sha(raw)
