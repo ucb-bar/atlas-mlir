@@ -588,39 +588,32 @@ private:
     materializeScalar(fixed().packRowsReg, 32, loc);
     unsigned loop = newLabel();
     mark(loop);
-    // Copy kPackRelayoutUnrollFactor rows an iteration: copy i moves word (i % 8) / 2 of half i % 2 in row i / 8,
-    // through temporary i % 2. Each store follows the next copy's load, not its own: the load path is still busy, its
-    // own load has landed, and the next load reuses the temporary it just read. The row counter advances in the first
-    // load's busy cycles, each source pointer once its last word is loaded, the destination after the last store.
-    static_assert(kPackRelayoutRowWords == 8,
-                  "the copy loop moves two halves of four words a row");
-    constexpr unsigned packRelayoutRows = kPackRelayoutUnrollFactor;
-    static_assert(32 % packRelayoutRows == 0, "the PACK row group must divide the 32-row tile");
+    // Copy one row an iteration: copy i moves word i / 2 of half i % 2 through temporary i % 2. Each store follows the
+    // next copy's load, not its own: the load path is still busy, its own load has landed, and the next load reuses the
+    // temporary it just read. The row counter advances in the first load's busy cycles, each source pointer once its
+    // last word is loaded, the destination after the last store.
+    static_assert(kPackRelayoutRowWords == 8, "the copy loop moves two halves of four words a row");
     constexpr unsigned rowBytes = kPackRelayoutRowWords * 4;
-    constexpr unsigned copies = packRelayoutRows * kPackRelayoutRowWords;
-    auto rowOf = [&](unsigned copy) { return copy / kPackRelayoutRowWords; };
-    auto wordOf = [&](unsigned copy) { return (copy % kPackRelayoutRowWords) / 2; };
     auto copyLoad = [&](unsigned copy) {
       emit<ScalarLoadOp>(loc, "lw", /*dst=*/fixed().packTemporaryRegs[copy % 2],
-          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/rowOf(copy) * (rowBytes / 2) + 4 * wordOf(copy));
+          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/4 * (copy / 2));
     };
     auto copyStore = [&](unsigned copy) {
       emit<ScalarStoreOp>(loc, "sw", /*src=*/fixed().packTemporaryRegs[copy % 2],
-          /*base=*/fixed().packDestinationReg,
-          /*offset=*/rowOf(copy) * rowBytes + 4 * wordOf(copy) + (rowBytes / 2) * (copy % 2));
+          /*base=*/fixed().packDestinationReg, /*offset=*/4 * (copy / 2) + (rowBytes / 2) * (copy % 2));
     };
     auto advance = [&](unsigned reg, int32_t step) {
       emit<ALUImmOp>(loc, "addi", /*dst=*/reg, /*src=*/reg, /*immediate=*/step);
     };
     copyLoad(0);
-    advance(fixed().packRowReg, packRelayoutRows);
-    for (unsigned copy = 1; copy < copies; ++copy) {
+    advance(fixed().packRowReg, 1);
+    for (unsigned copy = 1; copy < kPackRelayoutRowWords; ++copy) {
       copyLoad(copy);
       copyStore(copy - 1);
-      if (copy >= copies - 2) advance(fixed().packSourceRegs[copy % 2], packRelayoutRows * (rowBytes / 2));
+      if (copy >= kPackRelayoutRowWords - 2) advance(fixed().packSourceRegs[copy % 2], rowBytes / 2);
     }
-    copyStore(copies - 1);
-    advance(fixed().packDestinationReg, packRelayoutRows * rowBytes);
+    copyStore(kPackRelayoutRowWords - 1);
+    advance(fixed().packDestinationReg, rowBytes);
     redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
                             /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0),
              loop);

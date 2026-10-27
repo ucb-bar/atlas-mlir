@@ -35,8 +35,6 @@ struct DMATransferPlacement {
 // which lowerPack copies one word at a time. It is fixed by the selected PACK
 // layout, not a parameter: lowerPack's loop is written for exactly this row.
 constexpr unsigned kPackRelayoutRowWords = 8;
-// Rows the relayout loop copies per iteration; the virtual PACK cost and lowerPack share it.
-constexpr unsigned kPackRelayoutUnrollFactor = 2;
 
 struct FixedResourcePlacement {
   unsigned tensorTemporary;

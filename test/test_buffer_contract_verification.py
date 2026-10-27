@@ -124,9 +124,9 @@ def overwritten_mailbox(machine: str) -> str:
 
 
 def row_stride(machine: str) -> str:
-    """The relayout pointer advances only one row for a two-row group."""
-    return rewrite_line(machine, lambda line: '"atlas.alu_imm"' in line and "dst = 12 : i32, immediate = 64 : i32" in
-        line, lambda line: line.replace("immediate = 64 : i32", "immediate = 32 : i32"))
+    """The relayout pointer advances only half a row after each copy."""
+    return rewrite_line(machine, lambda line: '"atlas.alu_imm"' in line and "dst = 12 : i32, immediate = 32 : i32" in
+        line, lambda line: line.replace("immediate = 32 : i32", "immediate = 16 : i32"))
 
 
 def stale_raw_store(machine: str) -> str:
@@ -188,7 +188,7 @@ class BufferContractVerificationTest(unittest.TestCase):
         # still busy, so in a timed iteration only the last store waits on its load.
         untimed = lower(STRAIGHT, timed=False)
         copies = [re.search(r'kind = "(lw|sw)"', line)[1] for line in relayout_row(untimed) if 'kind = "lw"' in line or 'kind = "sw"' in line]
-        self.assertEqual(copies, ["lw"] + ["lw", "sw"] * 15 + ["sw"])
+        self.assertEqual(copies, ["lw"] + ["lw", "sw"] * 7 + ["sw"])
         for timing in ("--insert-atlas-delays", "--schedule-atlas-stream"):
             with self.subTest(timing=timing):
                 timed = run("atlas-opt", untimed, timing)
@@ -197,7 +197,7 @@ class BufferContractVerificationTest(unittest.TestCase):
                 waits = [line for line in row if re.search(r"RAW on x1[67] after atlas.scalar_load", line)]
                 cycles = sum(int(re.search(r"cycles = (\d+)", line)[1]) + 1 if '"atlas.delay"' in line else 1 for line in row)
                 self.assertLessEqual(len(waits), 1, row)
-                self.assertLessEqual(cycles, 53, row)
+                self.assertLessEqual(cycles, 29, row)
 
     def test_contract_records_every_dma_store_capture(self) -> None:
         machine = lower(STRAIGHT, timed=False)

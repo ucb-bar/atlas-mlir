@@ -1389,30 +1389,24 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
         raise NativeCompilationError("unqualified_target", "BF16 scratch store has no DMA completion")
 
 
-# Match lowerPack's kPackRelayoutUnrollFactor. The selected mandatory stream has two memory instructions per copy, four
-# pointer/counter advances, and one load-path delay per copy except the first.
-_PACK_RELAYOUT_ROWS_PER_ITERATION = 2
-_PACK_RELAYOUT_COPIES = 8 * _PACK_RELAYOUT_ROWS_PER_ITERATION
-_PACK_RELAYOUT_BRANCH_DISTANCE = 2 * _PACK_RELAYOUT_COPIES + 4 + (_PACK_RELAYOUT_COPIES - 1)
+# lowerPack copies one row with eight load/store pairs, four pointer/counter advances, and seven load-path delays.
+_PACK_RELAYOUT_BRANCH_DISTANCE = 27
 _PACK_RELAYOUT_BRANCH_OFFSET = -2 * _PACK_RELAYOUT_BRANCH_DISTANCE
-_PACK_RELAYOUT_ADVANCES = [("addi", 13, 13, _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 10, 10,
-    16 * _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 11, 11, 16 * _PACK_RELAYOUT_ROWS_PER_ITERATION), ("addi", 12, 12,
-    32 * _PACK_RELAYOUT_ROWS_PER_ITERATION),]
+_PACK_RELAYOUT_ADVANCES = [("addi", 13, 13, 1), ("addi", 10, 10, 16), ("addi", 11, 11, 16), ("addi", 12, 12, 32)]
 
 
 def _pack_relayout_effects() -> list[tuple]:
     """Current selected scalar copy: two live temporaries overlap load/store."""
     def load(copy: int) -> tuple:
-        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 8) * 16 + ((copy % 8) // 2) * 4)
+        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 2) * 4)
 
     def store(copy: int) -> tuple:
-        return ("sw", 16 + copy % 2, 132096 + (copy // 8) * 32 + (copy % 2) * 16 + ((copy % 8) // 2) * 4)
+        return ("sw", 16 + copy % 2, 132096 + (copy % 2) * 16 + (copy // 2) * 4)
 
     effects = [load(0)]
-    for copy in range(1, _PACK_RELAYOUT_COPIES):
+    for copy in range(1, 8):
         effects.extend((load(copy), store(copy - 1)))
-    effects.extend((store(_PACK_RELAYOUT_COPIES - 1), ("blt", 13, 14, _PACK_RELAYOUT_ROWS_PER_ITERATION, 32,
-        _PACK_RELAYOUT_BRANCH_OFFSET)))
+    effects.extend((store(7), ("blt", 13, 14, 1, 32, _PACK_RELAYOUT_BRANCH_OFFSET)))
     return effects
 
 
@@ -1473,7 +1467,7 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
         (branch_word >> 15) & 31, (branch_word >> 20) & 31,
         immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
         raise NativeCompilationError("unqualified_target", "pack loop word has a wrong branch target")
-    # Require the selected rows per iteration and matching pointer advances. Repeating these effects to row 32 covers
+    # Require one-row counter and pointer advances. Repeating these effects to row 32 covers
     # 32*32 bytes without touching the source or adjacent slots.
     before = rows[first_load - 1]["fields"]
     if before.get("cycles", 0) < 0:
