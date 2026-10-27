@@ -11,6 +11,8 @@ atlas_program.py: VLOAD/VSTORE/POP 34, transpose/VLI/MUL 66, weight push 32,
 and MXU0 matmul 96. They are not fitted to a benchmark or memory profile.
 """
 
+from atlas_program_reuse_blocked import load_b_column
+
 BANK_BYTES = 256 * 1024
 RESIDENT_BYTE_BASE = BANK_BYTES
 TILE_BYTES = 32 * 32
@@ -63,7 +65,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
         f"li x14, {n // 32}", f"li x15, {m * k}",
         f"li x16, {a_row_words}", f"li x17, {out_row_bytes}",
         f"li x18, {2 * a_row_words}", f"li x23, {output_offset}",
-        f"li x26, {2 * out_row_bytes}", "li x30, 1", "dma.config x30, ch0",
+        f"li x26, {2 * out_row_bytes}", "li x30, 1", "dma.config x30, ch0", *(["dma.config x30, ch1"] if k > 32 else []),
         # Exactly one VLI m4 preserves the existing 0x25f rescale patch protocol.
         # m4/m5 remain dedicated scale registers throughout the invocation.
         f"vli.all m4, {(rescale_exponent + 127) << 7}", "delay 66",
@@ -73,12 +75,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
         "beq x21, x0, reuse_a_loaded", "nop", "jal x0, reuse_a_load", "nop",
         "reuse_a_loaded:", "reuse_column:",
         "add x19, x2, x0", "add x20, x15, x0", f"li x21, {k // 32}",
-        "reuse_b_load:", "dma.load x19, x20, x5, ch0", "dma.wait ch0",
-        "vload m1, 0(x19)", "delay 34", "vtrpose.xlu m1, m1", "delay 66",
-        "vstore m1, 0(x19)", "delay 34",
-        "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
-        "beq x21, x0, reuse_b_loaded", "nop", "jal x0, reuse_b_load", "nop",
-        "reuse_b_loaded:", "add x15, x20, x0",
+        *load_b_column("reuse_b_load"), "add x15, x20, x0",
         "add x10, x1, x0", "add x11, x10, x16", "add x24, x23, x0",
         f"li x13, {m // 64}", "reuse_row_pair:",
         "add x4, x10, x0", "add x7, x11, x0", "add x6, x2, x0",

@@ -5,6 +5,8 @@ Each accumulator finishes its ordered full K reduction before its sole pop.
 The delays are the existing conservative atlas_program.py instruction recipe.
 """
 
+from atlas_program_reuse_blocked import load_b_column
+
 BANK_BYTES = 256 * 1024
 TILE_BYTES = 1024
 
@@ -40,7 +42,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
         raise ValueError("VPU rescale factor must be normal finite BF16")
     b, out = plan['b_word'], plan['output_word']
     lines = ["li x5, 1024", "li x8, 2048", f"li x3, {out}", f"li x9, {out + 256}",
-             "li x30, 1", "dma.config x30, ch0", f"li x15, {m * k}",
+             "li x30, 1", "dma.config x30, ch0", *(["dma.config x30, ch1"] if k > 32 else []), f"li x15, {m * k}",
              f"li x12, {output_offset}", f"li x17, {n // 32}", f"li x16, {n * 64}"]
     # One patchable scale immediate preserves the captured host template protocol.
     if rescale_exponent is not None:
@@ -55,11 +57,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                   f"beq x21, x0, preload_a_{part}_done", "nop", f"jal x0, preload_a_{part}", "nop",
                   f"preload_a_{part}_done:"]
     lines += ["columns_loop:", f"li x19, {b}", "add x20, x15, x0", f"li x21, {k // 32}",
-              "preload_b:", "dma.load x19, x20, x5, ch0", "dma.wait ch0",
-              "vload m1, 0(x19)", "delay 34", "vtrpose.xlu m1, m1", "delay 66",
-              "vstore m1, 0(x19)", "delay 34", "addi x19, x19, 256", "addi x20, x20, 1024",
-              "addi x21, x21, -1", "beq x21, x0, preload_b_done", "nop", "jal x0, preload_b", "nop",
-              "preload_b_done:", "add x15, x20, x0", "add x22, x12, x0"]
+              *load_b_column("preload_b"), "add x15, x20, x0", "add x22, x12, x0"]
     for row in range(0, m // 32, 2):
         rows = min(2, m // 32 - row)
         lines += [f"li x6, {b}"]

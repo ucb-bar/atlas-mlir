@@ -26,10 +26,14 @@ def prove(source, exponent=-14):
     labels = {line[:-1]: i for i, line in enumerate(lines) if line.endswith(':')}
     regs, memory, mregs, scales, weights, accs = {'x0': 0}, {}, {}, {}, {}, {}
     loads, stores, popped, products = [], [], set(), Counter()
-    pending, configured, pc = False, False, 0
+    pending, configured, pc = {}, set(), 0
+
+    def accessible(base, size=1024):
+        assert all(base + size <= start or end <= base for start, end in pending.values()), 'pending DMA hazard'
+        return base
 
     def address(arg):
-        return regs[re.fullmatch(r'0\((x\d+)\)', arg).group(1)] * 4
+        return accessible(regs[re.fullmatch(r'0\((x\d+)\)', arg).group(1)] * 4)
 
     def put(base, values, scale=None):
         assert base % 1024 == 0 and 0 <= base <= 524288 - 1024
@@ -51,15 +55,16 @@ def prove(source, exponent=-14):
             if op == 'jal' or regs[args[0]] == regs[args[1]]:
                 pc = labels[args[-1]]
         elif op == 'dma.config':
-            assert regs[args[0]] == 1 and args[1] == 'ch0', '4-GiB DRAM page'
-            configured = True
+            assert regs[args[0]] == 1 and args[1] in ('ch0', 'ch1'), '4-GiB DRAM page'
+            configured.add(args[1])
         elif op == 'dma.wait':
-            assert args == ['ch0']
-            pending = False
+            assert args[0] in configured and args[0] in pending
+            pending.pop(args[0])
         elif op == 'dma.load':
-            assert configured and not pending and args[3] == 'ch0'
+            assert args[3] in configured and args[3] not in pending
             dest, origin, size = (regs[x] for x in args[:3])
             dest *= 4
+            accessible(dest)
             assert size == 1024 and origin % 1024 == 0 and 0 <= origin < 4456448
             if origin < 262144:
                 assert dest == 262144 + origin, 'A bank capacity/address'
@@ -67,9 +72,8 @@ def prove(source, exponent=-14):
                 assert dest == (origin - 262144) % 65536, 'B column panel address'
             put(dest, tuple(range(origin, origin + size)))
             loads.append((dest, origin, size))
-            pending = True
+            pending[args[3]] = (dest, dest + size)
         elif op == 'vload':
-            assert not pending
             mregs[args[0]], scales[args[0]] = memory[address(args[1])]
         elif op == 'vtrpose.xlu':
             mregs[args[0]] = transpose(mregs[args[1]])
@@ -114,24 +118,24 @@ def prove(source, exponent=-14):
             scales['m2'] = scales['m3'] = exponent
         elif op == 'vstore':
             dest = address(args[1])
-            assert not pending
             if args[0] == 'm1':
                 assert 0 <= dest < 65536, 'B cache stays below output scratch'
             else:
                 assert args[0] in ('m2', 'm3') and dest in (65536, 66560), 'output scratch bound'
             put(dest, mregs[args[0]], scales.get(args[0]))
         elif op == 'dma.store':
-            assert configured and not pending and args[3] == 'ch0'
+            assert args[3] in configured and args[3] not in pending
             dest, src, size = (regs[x] for x in args[:3])
             assert size == 2048 and src * 4 == 65536
             assert OUTPUT <= dest < OUTPUT + 524288 and (dest - OUTPUT) % 2048 == 0
+            accessible(src * 4, size)
             low, high = memory[src * 4], memory[src * 4 + 1024]
             output = (dest - OUTPUT) // 2048
             expected = tuple(-(output * 2048 + i + 1) for i in range(2048))
             assert low[0] + high[0] == expected, 'output tile and BF16 half ordering'
             assert low[1] == high[1] == exponent, 'exact rescale before store'
             stores.append((dest, src, size))
-            pending = True
+            pending[args[3]] = (src * 4, src * 4 + size)
         elif op == 'ecall':
             assert not pending and configured
             assert len(loads) == 4352 and [x[1] for x in loads] == list(range(0, 4456448, 1024))
@@ -185,6 +189,7 @@ class TinyReuseTests(unittest.TestCase):
             'output row stride': ('li x22, 131072', 'li x22, 2048'),
             'output column alias': ('add x12, x12, x8', 'add x12, x12, x0'),
             'undrained DMA': ('dma.wait ch0', 'nop'),
+            'unwaited prefetch': ('dma.wait ch1', 'nop'),
             'wrong DRAM page': ('li x30, 1', 'li x30, 0'),
         }
         for name, (old, new) in changes.items():

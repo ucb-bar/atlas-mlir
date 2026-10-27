@@ -7,6 +7,8 @@ All spacing is the conservative established atlas_program schedule: load /
 store / pop 34, transpose / BF16 arithmetic 66, weight push 32, compute 96.
 """
 
+from atlas_program_reuse_blocked import load_b_column
+
 
 SHAPES = ((128, 2048, 2048), (128, 2048, 256), (128, 2048, 1280), (128, 2048, 1536))
 
@@ -20,18 +22,13 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
     lines = [
         "li x1, 0x10000", "li x3, 0x4000", "li x9, 0x4100",
         "li x5, 1024", "li x8, 2048", f"li x12, {output_offset}",
-        f"li x14, {n // 32}", f"li x22, {64 * n}", "li x30, 1", "dma.config x30, ch0",
+        f"li x14, {n // 32}", f"li x22, {64 * n}", "li x30, 1", "dma.config x30, ch0", "dma.config x30, ch1",
         "add x19, x1, x0", "li x20, 0", "li x21, 256", "resident_a_loop:",
         "dma.load x19, x20, x5, ch0", "dma.wait ch0",
         "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
         "beq x21, x0, resident_a_done", "nop", "jal x0, resident_a_loop", "nop",
         "resident_a_done:", "columns_loop:", "li x19, 0", "li x21, 64",
-        "column_load_loop:", "dma.load x19, x20, x5, ch0", "dma.wait ch0",
-        "vload m1, 0(x19)", "delay 34", "vtrpose.xlu m1, m1", "delay 66",
-        "vstore m1, 0(x19)", "delay 34",
-        "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
-        "beq x21, x0, column_load_done", "nop", "jal x0, column_load_loop", "nop",
-        "column_load_done:", "add x23, x12, x0",
+        *load_b_column("column_load_loop"), "add x23, x12, x0",
     ]
     # One static VLI preserves the existing single-word host rescale patch.
     # m4 remains live until all four outputs in the column are scaled.

@@ -34,7 +34,7 @@ def prove(source, m, k, n, exponent):
         if op in ('nop', 'delay', 'dma.wait'):
             pass
         elif op == 'dma.config':
-            assert regs[args[0]] == 1 and args[1] == 'ch0'
+            assert regs[args[0]] == 1 and args[1] in ('ch0', 'ch1')
         elif op == 'li':
             regs[args[0]] = int(args[1], 0)
         elif op in ('add', 'addi'):

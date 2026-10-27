@@ -59,6 +59,7 @@ class ReuseProofTests(unittest.TestCase):
                 ('add x22, x22, x16', 'add x22, x22, x8'),
                 ('addi x19, x19, 256', 'addi x19, x19, 512'),
                 ('dma.wait ch0', 'nop'),
+                ('dma.wait ch1', 'nop'),
                 ('vmul.bf16 m2, m2, m4', 'nop')])
 
     def test_compact_resnet_pair_loop_negative_controls(self):
@@ -74,6 +75,7 @@ class ReuseProofTests(unittest.TestCase):
                 ('vmatmul.acc.mxu0', 'vmatmul.mxu0'),
                 ('vstore m3, 0(x9)', 'vstore m2, 0(x9)'),
                 ('dma.wait ch0', 'nop'),
+                ('dma.wait ch1', 'nop'),
                 ('vmul.bf16 m2, m2, m4', 'nop'),
                 ('li x30, 1', 'li x30, 0')]
             if shape[0] != 32:
@@ -83,6 +85,14 @@ class ReuseProofTests(unittest.TestCase):
             if shape == (128, 5632, 1024):
                 changes += [('addi x7, x7, 256', 'addi x7, x7, 512'), ('add x12, x12, x22', 'add x12, x12, x0')]
             self.reject_mutations(shape, changes)
+
+    def test_column_prefetch_ownership(self):
+        for shape in ((64, 736, 2048), (128, 768, 768), (128, 2048, 2048),
+                      (128, 3072, 768), (12544, 160, 64)):
+            self.reject_mutations(shape, [
+                ('dma.load x24, x20, x5, ch1', 'dma.load x19, x20, x5, ch1'),
+                ('addi x24, x19, 256', 'addi x24, x19, 512'),
+                ('dma.wait ch1', 'nop')])
 
     def test_scale_and_memory_boundary_negative_controls(self):
         self.reject_mutations((128, 2048, 256), [
