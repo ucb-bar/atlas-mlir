@@ -22,8 +22,7 @@ from atlas_model_timing import (configuration, encoded, isa_cases, numerical_dat
 
 
 def safe_path(value):
-    return source_path(value, ValueError, "prohibited path",
-                       "model and output paths must not contain symlinks",
+    return source_path(value, ValueError, "model and output paths must not contain symlinks",
                        absolute=True, parent_error=ValueError)
 
 

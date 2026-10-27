@@ -1,4 +1,4 @@
-"""Refusal diagnostics and access checks run before any excluded-path lookup."""
+"""Refusal diagnostics preserve error types and update guidance."""
 from pathlib import Path
 import sys
 import unittest

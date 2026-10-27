@@ -9,7 +9,7 @@ from atlas_derive_scratchpad import source_path
 
 
 def safe_path(value):
-    return source_path(value, ValueError, "prohibited path", "symlink paths are not supported", absolute=True)
+    return source_path(value, ValueError, "symlink paths are not supported", absolute=True)
 
 
 def load_model(model, message="imported native model differs from --model", error=ValueError):

@@ -1,13 +1,11 @@
 """Selection provenance identities and fail-closed completion snapshots."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -154,22 +152,11 @@ class RunProvenanceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "archive:"):
             capture.complete()
 
-    def test_prohibited_and_parent_paths_rejected_before_filesystem_access(self):
-        # Only lexical strings are constructed; these paths are never inspected.
-        for path in ("HaMmEr", "outer/VlSi-data/x", "safe/../source.mlir"):
+    def test_parent_paths_rejected_before_filesystem_access(self):
+        for path in ("safe/../source.mlir",):
             with self.subTest(path=path), patch.object(Path, "is_symlink", side_effect=AssertionError("filesystem touched")):
                 with self.assertRaises(ValueError):
                     safe_path(path)
-
-    def test_tree_prohibited_names_rejected_before_entry_inspection(self):
-        entry = SimpleNamespace(name="HaMmEr-must-not-be-inspected",
-                                is_symlink=lambda: self.fail("entry inspected"))
-        @contextmanager
-        def entries(_):
-            yield iter([entry])
-        with patch("atlas_run_provenance.os.scandir", side_effect=entries):
-            with self.assertRaisesRegex(ValueError, "prohibited provenance tree entry"):
-                self.capture()
 
     def test_linked_input_and_parent_rejected_without_following(self):
         linked = self.directory / "linked.mlir"

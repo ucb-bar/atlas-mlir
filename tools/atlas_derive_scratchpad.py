@@ -21,24 +21,19 @@ def scratchpad_assumptions():
     return {"scratchpad_read_latency": 1}
 
 
-def source_path(path, error, prohibited, symlink, *, absolute=False, parent_error=None):
+def source_path(path, error, symlink, *, absolute=False, parent_error=None):
     path = Path(path)
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise error(prohibited)
     if parent_error and ".." in path.parts:
         raise parent_error("parent traversal is unsupported")
     if absolute:
         path = Path(os.path.abspath(path))
-        if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-            raise error(prohibited)
     if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
         raise error(symlink)
     return path
 
 
 def read_source(path):
-    return source_path(path, UnsupportedScratchpad, "prohibited source path",
-                       "source symlinks are unsupported", absolute=True,
+    return source_path(path, UnsupportedScratchpad, "source symlinks are unsupported", absolute=True,
                        parent_error=UnsupportedScratchpad).read_text()
 
 

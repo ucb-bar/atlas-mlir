@@ -43,12 +43,6 @@ class VocabularyContractTest(unittest.TestCase):
                     with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, diagnostic):
                         vocabulary._isa_directions(Instruction)
 
-    def test_prohibited_path_refused_before_filesystem_access(self):
-        with patch.object(Path, "is_symlink", side_effect=AssertionError("filesystem access")):
-            for path in ("/tmp/HAMMER/source.py", "/tmp/vLsI/../source.py"):
-                with self.assertRaisesRegex(vocabulary.UnsupportedVocabulary, "prohibited"):
-                    vocabulary._safe(path)
-
     def test_dimensions_come_from_row_requests(self):
         requests = [(age, age // 2, age % 2) for age in range(4)]
         self.assertEqual(vocabulary._dimensions(requests, 0, 2),

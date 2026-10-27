@@ -25,16 +25,11 @@ def _json_copy(value):
 
 
 def safe_path(value):
-    """Reject prohibited names and links before following any filesystem path."""
+    """Reject parent traversal and links before following any filesystem path."""
     path = Path(value)
-    def lexical(candidate):
-        if any(word in part.lower() for part in candidate.parts for word in ("hammer", "vlsi")):
-            raise ValueError("prohibited provenance path")
-        if ".." in candidate.parts:
-            raise ValueError("parent traversal is unsupported")
-    lexical(path)
+    if ".." in path.parts:
+        raise ValueError("parent traversal is unsupported")
     path = Path(os.path.abspath(path))
-    lexical(path)
     # Root-first inspection must stop at a link, including dangling links.
     for ancestor in reversed((path, *path.parents)):
         if ancestor.is_symlink():
@@ -61,9 +56,6 @@ def _tree(root, suffixes=None):
     def visit(directory):
         with os.scandir(directory) as stream:
             entries = sorted(stream, key=lambda entry: entry.name)
-        # Check names before calling any entry method, even is_symlink().
-        if any(word in entry.name.lower() for entry in entries for word in ("hammer", "vlsi")):
-            raise ValueError("prohibited provenance tree entry")
         for entry in entries:
             if entry.is_symlink():
                 raise ValueError("provenance trees must not contain symlinks")

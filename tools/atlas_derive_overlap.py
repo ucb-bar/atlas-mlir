@@ -23,8 +23,7 @@ CONTRACT = "source-resource-occupancy-v1"
 
 
 def safe_path(value):
-    return source_path(value, ValueError, "prohibited overlap source/output path",
-                       "overlap source/output path contains a symlink", absolute=True)
+    return source_path(value, ValueError, "overlap source/output path contains a symlink", absolute=True)
 
 
 def load(path):

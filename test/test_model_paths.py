@@ -1,4 +1,4 @@
-"""Access checks run before any excluded-path or symlink lookup."""
+"""Symlink and parent traversal checks run before filesystem access."""
 from pathlib import Path
 import sys
 import tempfile
@@ -32,17 +32,6 @@ def path_checks(path, manifest):
 
 
 class AccessBoundaryTest(unittest.TestCase):
-    def test_all_path_exclusions_precede_filesystem_access(self):
-        for name in ("/tmp/HaMmEr-source/facts.json", "/tmp/vLsI/../facts.json"):
-            for check in path_checks(name, lambda: timing.manifest(Path(name), "npu_model")):
-                with self.subTest(name=name, check=check), \
-                        patch.object(vpu.inspect, "getsourcefile", return_value=name), \
-                        patch.object(Path, "is_symlink", side_effect=AssertionError("looked up excluded path")), \
-                        patch.object(Path, "read_text", side_effect=AssertionError("read excluded path")), \
-                        patch.object(timing.os, "scandir", side_effect=AssertionError("traversed excluded path")):
-                    with self.assertRaises((ValueError, RuntimeError)):
-                        check()
-
     def test_native_model_loader_refuses_an_import_from_another_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -61,28 +50,6 @@ class AccessBoundaryTest(unittest.TestCase):
         with patch.object(Path, "is_symlink", side_effect=AssertionError("premature lookup")):
             with self.assertRaisesRegex(ValueError, "parent traversal"):
                 scratchpad.read_source("/tmp/model/../source.py")
-
-    def test_manifest_refuses_mock_excluded_entries_before_metadata_or_reads(self):
-        # These are synthetic directory entries only, never paths on disk.
-        for name in ("HaMmEr-data", "prefix-vLsI.py", "HAMMER.txt", "vlsi-cache"):
-            for suffixes in (None, {".py", ".json", ".yaml"}):
-                bad = SimpleNamespace(name=name,
-                                      is_symlink=Mock(side_effect=AssertionError("entry lookup")),
-                                      is_dir=Mock(side_effect=AssertionError("entry lookup")))
-                allowed = SimpleNamespace(name="allowed.py",
-                                          is_symlink=Mock(side_effect=AssertionError("premature entry lookup")),
-                                          is_dir=Mock(side_effect=AssertionError("premature entry lookup")))
-                with self.subTest(name=name, suffixes=suffixes), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    (root / "npu_model").mkdir()
-                    with patch.object(timing.os, "scandir") as scandir, \
-                            patch.object(Path, "read_bytes", side_effect=AssertionError("partial manifest read")):
-                        scandir.return_value.__enter__.return_value = iter((allowed, bad))
-                        with self.assertRaisesRegex(RuntimeError, "prohibited entry name"):
-                            timing.manifest(root, "npu_model", suffixes)
-                        scandir.assert_called_once_with(root / "npu_model")
-                    bad.is_symlink.assert_not_called()
-                    bad.is_dir.assert_not_called()
 
     def test_all_path_helpers_check_symlink_ancestors_before_descendants(self):
         leaf = Path("/tmp/model-access-test/link/child.py")

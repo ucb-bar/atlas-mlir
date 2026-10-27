@@ -133,8 +133,6 @@ def evidence_option(model_facts: Path | None = None) -> list[str]:
         return []  # A library caller may supply IR with selected evidence.
     def bundle_path(value: Path) -> Path:
         path = Path(value)
-        if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-            raise ValueError("prohibited path")
         if ".." in path.parts:
             raise ValueError("parent traversal is unsupported")
         path = Path(os.path.abspath(path))

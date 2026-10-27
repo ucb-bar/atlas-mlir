@@ -49,8 +49,7 @@ def _normalize_slot_capacity(tree):
 
 
 def _check_source(module, *, latency_table=False):
-    path = source_path(inspect.getsourcefile(module), UnsupportedVPU, "prohibited model source path",
-                       "model source path contains a symlink", parent_error=ValueError)
+    path = source_path(inspect.getsourcefile(module), UnsupportedVPU, "model source path contains a symlink", parent_error=ValueError)
     tree = ast.parse(path.read_text())
     if latency_table:
         tree.body = [node for node in tree.body if not (

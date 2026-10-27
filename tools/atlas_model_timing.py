@@ -22,17 +22,14 @@ from atlas_model_schema import VPU_BLOCKS, MXU_BLOCKS, BINARY, mreg_event, canon
 def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
     records = []
     kind = "model source" if suffixes else "model numerical data"
-    root = source_path(model_root / subdir, RuntimeError, "prohibited manifest path",
-                       kind + " root contains a symlink", absolute=True, parent_error=RuntimeError)
+    root = source_path(model_root / subdir, RuntimeError, kind + " root contains a symlink", absolute=True, parent_error=RuntimeError)
     if not root.is_dir():
         raise RuntimeError(kind + " root is missing")
     def visit(directory):
-        # Inspect names before any entry lookup. os.walk classifies entries before
-        # yielding them and can follow a directory symlink while doing so.
+        # Check symlinks before classifying entries; os.walk can follow a
+        # directory symlink while classifying it.
         with os.scandir(directory) as stream:
             entries = list(stream)
-        if any(word in entry.name.lower() for entry in entries for word in ("hammer", "vlsi")):
-            raise RuntimeError(kind + " contains a prohibited entry name")
         directories = []
         for entry in sorted(entries, key=lambda entry: entry.name):
             if suffixes and entry.name == "__pycache__":

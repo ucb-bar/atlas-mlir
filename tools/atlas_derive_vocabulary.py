@@ -167,8 +167,7 @@ def _isa_directions(cls):
 
 
 def _safe(path):
-    return source_path(path, UnsupportedVocabulary, "prohibited vocabulary source/output path",
-                       "vocabulary source/output path contains a symlink")
+    return source_path(path, UnsupportedVocabulary, "vocabulary source/output path contains a symlink")
 
 
 def _parameters(cls):

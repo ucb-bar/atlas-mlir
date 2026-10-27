@@ -22,8 +22,7 @@ class UnsupportedMXU(UnsupportedModelTiming):
 
 
 def _read(path):
-    return source_path(path, UnsupportedMXU, "unsupported model source path",
-                       "model source symlinks are unsupported", parent_error=ValueError).read_text()
+    return source_path(path, UnsupportedMXU, "model source symlinks are unsupported", parent_error=ValueError).read_text()
 
 
 def _sources(cfg):

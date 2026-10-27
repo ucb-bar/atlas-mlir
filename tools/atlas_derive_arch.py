@@ -16,8 +16,7 @@ def _source(module):
     value = inspect.getsourcefile(module)
     if value is None:
         raise UnsupportedArchitecture("architecture source file is unavailable")
-    path = source_path(value, UnsupportedArchitecture, "prohibited architecture source path",
-                       "architecture source path contains a symlink", absolute=True)
+    path = source_path(value, UnsupportedArchitecture, "architecture source path contains a symlink", absolute=True)
     return ast.parse(path.read_text())
 
 

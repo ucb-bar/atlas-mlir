@@ -100,8 +100,7 @@ def _check_curve_configuration(cfg, params, data):
 
 
 def _safe(path):
-    return source_path(path, UnsupportedCurve, "prohibited DMA source or curve path",
-                       "DMA source or curve path contains a symlink", absolute=True, parent_error=ValueError)
+    return source_path(path, UnsupportedCurve, "DMA source or curve path contains a symlink", absolute=True, parent_error=ValueError)
 
 
 def _review(module):
