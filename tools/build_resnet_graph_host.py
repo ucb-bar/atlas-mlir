@@ -6,12 +6,19 @@ from atlas_tooling import Admission, sha, write_json, run_command
 import argparse
 import json
 import os
+import re
+import sys
 from pathlib import Path
 import struct
 import subprocess
 from atlas_host_build import START, LINK, TEMPLATES, TEMPLATE_BYTES, audit_elf, validate_graph_program
-from atlas_host_layout import HEADER as LAYOUT_HEADER, HEADER_SHA256
+from atlas_host_layout import ATLAS_DRAM_BASE, HEADER as LAYOUT_HEADER, HEADER_SHA256
 from atlas_path_guard import checked
+
+for directory in ("chipyard", "host_iss"):
+    sys.path.insert(0, str(Path(__file__).absolute().parent / directory))
+import arena
+from firesim_target import package as package_firesim
 
 HOST = r"""
 
@@ -112,6 +119,48 @@ void atlas_workload_main(void) {
 """
 
 
+def relocate_program(raw, patch_word, arena_base):
+    """Relocate DMA operands and track the one runtime rescale patch."""
+    validate_graph_program(raw)
+    if type(patch_word) is not int or not 0 <= patch_word < len(raw) // 4:
+        raise ValueError("rescale patch outside raw program")
+    offset = patch_word * 4
+    word = struct.unpack_from("<I", raw, offset)[0]
+    if word & 0x7fffff != 0x25f:
+        raise ValueError("rescale patch must be VLI_ALL m4")
+    relocated = arena.relocate(raw, ATLAS_DRAM_BASE, arena_base)
+    validate_graph_program(relocated)
+    if arena_base == ATLAS_DRAM_BASE:
+        return relocated, patch_word
+    # A second exponent follows exactly the same audited instruction mapping.
+    probe = bytearray(raw)
+    struct.pack_into("<I", probe, offset, word ^ (1 << 23))
+    changed = arena.relocate(bytes(probe), ATLAS_DRAM_BASE, arena_base)
+    indices = [i // 4 for i in range(0, len(relocated), 4) if relocated[i:i + 4] != changed[i:i + 4]]
+    if len(changed) != len(relocated) or len(indices) != 1:
+        raise ValueError("rescale relocation is not unique")
+    patch_word = indices[0]
+    if struct.unpack_from("<I", relocated, patch_word * 4)[0] != word:
+        raise ValueError("relocation changed rescale instruction")
+    return relocated, patch_word
+
+
+def placed_layout(raw, arena_base):
+    text, count = re.subn(r"^#define ATLAS_DRAM_BASE 0x[0-9a-fA-F]+$",
+        f"#define ATLAS_DRAM_BASE {hex(arena_base)}", raw.decode(), flags=re.M)
+    if count != 1:
+        raise ValueError("runtime DMA arena constant is not unique")
+    return text.encode()
+
+
+def placed_link(dram_bytes, arena_base):
+    arena.window(arena_base, dram_bytes)
+    text = LINK.replace("@DRAM_BYTES@", str(dram_bytes))
+    text = re.sub(r"(\.atlas_dram )0x[0-9a-fA-F]+", lambda m: m[1] + hex(arena_base), text)
+    return re.sub(r"(__atlas_dram_end <= )0x[0-9a-fA-F]+",
+        lambda m: m[1] + hex(((arena_base >> 32) + 1) << 32), text)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("generated", "replay-gate", "reference", "templates", "rescale-table", "atlas-root", "clang", "lld", "out"):
@@ -119,7 +168,10 @@ def main():
     parser.add_argument("--max-polls", type=int, default=100000000)
     parser.add_argument("--skip-bss-clear", action="store_true",
                         help="omit the startup BSS clear; only valid when the loader zero-fills memory (Chipyard LOADMEM)")
+    parser.add_argument("--target", choices=("sim", "firesim"), default="sim")
+    arena.add_arguments(parser)
     args = parser.parse_args()
+    arena_base = ATLAS_DRAM_BASE if args.arena_base is None else args.arena_base
     for value in vars(args).values():
         if isinstance(value, Path):
             checked(value)
@@ -176,6 +228,8 @@ def main():
         mp, kp, np = t["padded_mkn"]
         if len(weight) != kp * np:
             raise ValueError("weight extent differs")
+        raw, patch_word = relocate_program(raw, t["rescale_patch_word_index"], arena_base)
+        t = dict(t, program_words=len(raw) // 4, rescale_patch_word_index=patch_word, dram_base=arena_base)
         assets["graph_program_" + str(i)] = raw
         assets["graph_weight_" + str(i)] = weight
         rows.append(t)
@@ -185,15 +239,24 @@ def main():
     if str(mathpath) not in gate["inputs_sha256"]:
         raise ValueError("math gate must bind current exact math source")
     for path in [args.clang, args.lld, Path(__file__).absolute(), Path(checked.__code__.co_filename).absolute(),
-        Path(Admission.read.__code__.co_filename).absolute()] + [args.atlas_root / "runtime" / name for name in sources]:
+        Path(Admission.read.__code__.co_filename).absolute(), Path(audit_elf.__code__.co_filename).absolute(),
+        Path(arena.__file__).absolute(), Path(arena.Image.__init__.__code__.co_filename).absolute(),
+        Path(package_firesim.__code__.co_filename).absolute()] + [args.atlas_root / "runtime" / name for name in sources]:
         ad.read(path)
     for name, data in TEMPLATE_BYTES.items():
         ad.read(TEMPLATES / name, sha(data))
+    dram = max(t["total_dram_bytes"] for t in rows)
+    link = placed_link(dram, arena_base)
+    if args.dram_base < 0 or args.dram_bytes <= 0 or args.dram_base + args.dram_bytes > 1 << 64:
+        raise ValueError("invalid physical DRAM range")
+    if not args.dram_base <= arena_base <= args.dram_base + args.dram_bytes - dram:
+        raise ValueError("DMA arena outside physical DRAM range")
     args.out.mkdir(parents=True)
     snapshot = args.out / "runtime"
     snapshot.mkdir()
     for name in sources:
-        (snapshot / name).write_bytes(ad.read(args.atlas_root / "runtime" / name))
+        data = ad.read(args.atlas_root / "runtime" / name)
+        (snapshot / name).write_bytes(placed_layout(data, arena_base) if name == "atlas_host_layout.h" else data)
     # Copy graph/parameters into a self-contained bundle and rewrite incbin paths.
     graphdir = args.out / "graph"
     graphdir.mkdir()
@@ -205,9 +268,8 @@ def main():
     (graphdir / "graph.c").write_bytes(ad.read(args.generated / "graph.c"))
     constants = ad.read(args.generated / "constants.S").decode().replace(str(args.generated), str(graphdir))
     (graphdir / "constants.S").write_text(constants)
-    dram = max(t["total_dram_bytes"] for t in rows)
     (args.out / "start.S").write_text(START)
-    (args.out / "link.ld").write_text(LINK.replace("@DRAM_BYTES@", str(dram)))
+    (args.out / "link.ld").write_text(link)
     (args.out / "host.c").write_text(HOST)
     assembly = ['.section .rodata,"a",@progbits']
     definitions = ['#include "assets.h"']
@@ -258,11 +320,17 @@ def main():
         "firmpolicy": (
         "FS enabled, FRM RNE, FP32 separate multiply/add; sequential average "
         "policy; no cohort quality equivalence claim"), "kernel_count": 54, "captured_successor_A_embedded": False,
-        "dram_bytes": dram}
+        "dram_bytes": dram, "arena_base": arena_base,
+        "placement": {"arena_base": arena_base, "dram_base": args.dram_base, "dram_bytes": args.dram_bytes},
+        "physical_dram": {"base": args.dram_base, "bytes": args.dram_bytes}, "target": args.target}
     if not report["returncode"]:
         raw = (args.out / "host.elf").read_bytes()
         report["elf_sha256"] = sha(raw)
-        report["elf_audit"] = audit_elf(raw, assets, dram)
+        report["elf_audit"] = audit_elf(raw, assets, dram, arena_base=arena_base)
+        report["physical_audit"] = arena.audit(args.out, args.dram_base, args.dram_bytes)
+        if args.target == "firesim":
+            report["firesim_contract"] = package_firesim(args.out, "atlas-resnet50-full",
+                args.dram_base, args.dram_bytes)
     write_json(args.out / "build.json", report)
     print(json.dumps({key: report[key] for key in ("returncode", "source_bookends_equal", "kernel_count")}))
     raise SystemExit(report["returncode"])

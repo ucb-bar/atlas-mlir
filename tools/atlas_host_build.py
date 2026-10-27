@@ -64,7 +64,7 @@ def elf_sections(raw):
     return entry, sections, symbols
 
 
-def audit_elf(raw, assets, dram_bytes):
+def audit_elf(raw, assets, dram_bytes, *, arena_base=ATLAS_DRAM_BASE):
     entry, sections, symbols = elf_sections(raw)
     if entry != 0x80000000 or symbols["__stack_top"][0] - symbols["__stack_bottom"][0] != 65536:
         raise ValueError("entry/stack differs")
@@ -72,8 +72,8 @@ def audit_elf(raw, assets, dram_bytes):
         if symbols[name][0] % 64:
             raise ValueError("mailbox/HTIF alignment differs")
     dram = sections[".atlas_dram"]
-    if dram[1] != 8 or dram[3] != ATLAS_DRAM_BASE or dram[5] != dram_bytes:
-        raise ValueError("NOLOAD high-half 1 DRAM reservation differs")
+    if dram[1] != 8 or dram[3] != arena_base or dram[5] != dram_bytes:
+        raise ValueError("NOLOAD DMA arena reservation differs")
     for label, data in assets.items():
         address, size, index = symbols[label]
         # Resolve by section index without depending on dict ordering.
@@ -94,7 +94,7 @@ def audit_elf(raw, assets, dram_bytes):
             if (filesz > memsz or off + filesz > len(raw) or va != pa or va + memsz > 1 << 64 or flags & 3 == 3 or align
                 and (align & (align - 1) or va % align != off % align)):
                 raise ValueError("invalid physical load segment")
-            if not (0x80000000 <= va and va + memsz <= 0x90000000 or va == ATLAS_DRAM_BASE and memsz == dram_bytes
+            if not (0x80000000 <= va and va + memsz <= 0x90000000 or va == arena_base and memsz == dram_bytes
                 and filesz == 0):
                 raise ValueError("load segment outside declared host/device DRAM")
             segments.append(dict(address=va, file_bytes=filesz, memory_bytes=memsz, flags=flags))
