@@ -91,6 +91,15 @@ def parameter_geometry():
 def validate_plan(data, provenance):
     physical = placement(provenance)
     require(placement(data) == physical, "Tiny full contract placement binding")
+    policy = provenance.get('program_policy','original')
+    require(policy in ('original','traffic-reuse-v1') and data.get('program_policy','original') == policy,
+            'Tiny full program policy binding')
+    if policy == 'traffic-reuse-v1':
+        from atlas_program import dma_load_bytes
+        require(isinstance(provenance.get('reuse'),dict) and data.get('reuse') == provenance['reuse']
+                and provenance['reuse'].get('captured_data_unchanged') is True
+                and provenance['reuse'].get('instruction_execution') is False,
+                'Tiny full reuse preparation binding')
     count = data["decode_count"]
     expected = plan(count)
     require(data["schema"] == "atlas.tiny_full_contract.v1" and data["cycle_cap"] == CYCLE_CAP,
@@ -107,6 +116,8 @@ def validate_plan(data, provenance):
         m, k, n = geometry["physical_mkn"]
         load = (m*k*(n//32) + k*n if k*n <= 262144 else
                 m*k + k*n*(m//32) if m*k <= 262144 else (m//32)*(n//32)*(2*k//32*1024))
+        if policy == 'traffic-reuse-v1':
+            load = dma_load_bytes(m,k,n,traffic_reuse=True)
         require(item["dram_base"] == physical["arena_base"] and item["output_offset"] == m*k+k*n+256
                 and item["total_dram_bytes"] == m*k+k*n+512+2*m*n
                 and item["requested_dma"] == {"load_bytes": load, "store_bytes": 2*m*n},
@@ -194,6 +205,8 @@ def validate_bundle(bundle, image):
     require(bool(build["source_sha256"]), "Tiny full build source pins")
     physical = placement(bundle.provenance)
     require(placement(build) == physical, "Tiny full build placement binding")
+    require(build.get('program_policy','original') == bundle.provenance.get('program_policy','original'),
+            'Tiny full build program policy binding')
     arena = physical["arena_base"]
     capacity = max(item["total_dram_bytes"] for item in data["kernels"])
     for segment in image.segments:

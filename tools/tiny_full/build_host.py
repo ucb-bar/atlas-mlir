@@ -274,6 +274,12 @@ def build(args):
     helper_pins(pins)
     bundle = KernelAssets(args.assets,'tiny-full')
     data = staged_contract(bundle)
+    if bundle.provenance.get('program_policy','original') == 'traffic-reuse-v1':
+        from atlas_program import code_sources
+        for name,digest in code_sources(traffic_reuse=True).items():
+            pin(pins,ROOT/'tools'/name,digest)
+        for path,digest in bundle.provenance['reuse']['generator_source_sha256'].items():
+            pin(pins,path,digest)
     if (bundle.provenance['capture']['sha256'] != gate['capture_sha256']
             or data['greedy_tokens'] != gate['greedy_tokens']):
         raise ValueError("kernel capture/C gate extent or greedy identity differs")
@@ -365,6 +371,7 @@ def build(args):
         'source_sha256':pins,'commands':commands,'fresh_instruction_execution':False,
         'gate_sha256':args.gate_sha256,'capture_sha256':gate['capture_sha256'],
         'placement':placement,'placement_audit':placement_audit,
+        'program_policy':copied.provenance.get('program_policy','original'),
         'rodata_after_arena':args.rodata_after_arena,
         'target':args.target,'firesim_package':package_record,
         'result_transport':transport_record,'uart':transport_record,'result_name':'tiny-full',
