@@ -29,6 +29,25 @@ typedef struct {
  * every BF16 row-major word produced by the actual preceding host stage. */
 typedef int (*tiny_full_projection)(void *, unsigned, unsigned,
                                     const uint16_t *, size_t, size_t, size_t, uint16_t *);
+/* Pointer-free continuation ABI. active is 0 before begin/after commit,
+ * 1 during a step, and 2 after a failed arithmetic operation. */
+typedef struct {
+    uint64_t position;
+    uint32_t bank, next_token, next_layer, rows, active, reserved;
+} tiny_full_phase;
+
+/* Offsets come from the compiled workspace type, never guessed by a runner. */
+typedef struct {
+    uint64_t version, workspace_bytes, hidden_offset[2], hidden_bytes;
+    uint64_t cache_bank_bytes, phase_bytes, state_bytes;
+} tiny_full_live_layout;
+int tiny_full_get_live_layout(tiny_full_live_layout *);
+int tiny_full_model_begin(const tiny_full_parameters *, const tiny_full_state *,
+                         tiny_full_phase *, const uint32_t *, size_t, void *, size_t);
+int tiny_full_model_layer(const tiny_full_parameters *, const tiny_full_state *, tiny_full_phase *, unsigned,
+                         tiny_full_projection, void *, void *, size_t);
+int tiny_full_model_finish(const tiny_full_parameters *, tiny_full_state *, tiny_full_phase *,
+                          tiny_full_projection, void *, void *, size_t, uint16_t *, size_t);
 size_t tiny_full_workspace_bytes(void);
 int tiny_full_argmax_bf16(const uint16_t *logits, size_t count, uint32_t *token);
 int tiny_full_model_step(const tiny_full_parameters *, tiny_full_state *,

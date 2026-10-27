@@ -96,47 +96,98 @@ int tiny_full_argmax_bf16(const uint16_t *logits, size_t count, uint32_t *token)
     return 0;
 }
 
-int tiny_full_model_step(const tiny_full_parameters *p, tiny_full_state *s,
-                         const uint32_t *tokens, size_t rows,
-                         tiny_full_projection project, void *context,
-                         void *workspace, size_t workspace_bytes,
-                         uint16_t *logits, size_t logits_words) {
-    if (!p || !s || !tokens || !project || !workspace || !logits
-        || workspace_bytes < sizeof(tiny_full_workspace)
+_Static_assert(sizeof(tiny_full_phase) == 32, "Tiny continuation ABI size");
+_Static_assert(sizeof(tiny_full_live_layout) == 64, "Tiny layout ABI size");
+
+int tiny_full_get_live_layout(tiny_full_live_layout *layout) {
+    if (!layout) return -1;
+    *layout = (tiny_full_live_layout){1, sizeof(tiny_full_workspace),
+        {offsetof(tiny_full_workspace, hidden[0]), offsetof(tiny_full_workspace, hidden[1])},
+        sizeof(((tiny_full_workspace *)0)->hidden[0]),
+        TINY_FULL_LAYERS * TINY_FULL_CACHE_WORDS * sizeof(uint16_t),
+        sizeof(tiny_full_phase), sizeof(tiny_full_state)};
+    return 0;
+}
+
+static int valid_context(const tiny_full_parameters *p, const tiny_full_state *s,
+                         void *workspace, size_t workspace_bytes) {
+    if (!p || !s || !workspace || workspace_bytes < sizeof(tiny_full_workspace)
         || (uintptr_t)workspace % _Alignof(tiny_full_workspace)
         || s->bank > 1 || s->position > 159 || (s->position && s->position < 128)
-        || (s->position == 0 ? rows != 128 : rows != 1)
-        || logits_words < rows * 32000 || !p->embedding || !p->final_norm
-        || !p->cosine || !p->sine || !isfinite(p->epsilon) || p->epsilon <= 0
-        || !s->keys[0] || !s->keys[1] || !s->values[0] || !s->values[1]) return -1;
+        || !p->embedding || !p->final_norm || !p->cosine || !p->sine
+        || !isfinite(p->epsilon) || p->epsilon <= 0
+        || !s->keys[0] || !s->keys[1] || !s->values[0] || !s->values[1]) return 0;
+    for (size_t layer = 0; layer < TINY_FULL_LAYERS; ++layer)
+        if (!p->input_norm[layer] || !p->post_norm[layer]) return 0;
+    return 1;
+}
+
+static int valid_phase(const tiny_full_state *s, const tiny_full_phase *phase) {
+    return phase && phase->active == 1 && !phase->reserved
+        && phase->position == s->position && phase->bank == s->bank && phase->next_token == s->next_token
+        && phase->rows == (s->position ? 1u : 128u) && phase->next_layer <= TINY_FULL_LAYERS;
+}
+
+int tiny_full_model_begin(const tiny_full_parameters *p, const tiny_full_state *s, tiny_full_phase *phase,
+                         const uint32_t *tokens, size_t rows, void *workspace, size_t workspace_bytes) {
+    if (!valid_context(p, s, workspace, workspace_bytes) || !phase || phase->active || !tokens
+        || (s->position == 0 ? rows != 128 : rows != 1)) return -1;
     for (size_t i = 0; i < rows; ++i)
         if (tokens[i] >= 32000 || (rows == 1 && tokens[i] != s->next_token)) return -1;
-    for (size_t layer = 0; layer < TINY_FULL_LAYERS; ++layer)
-        if (!p->input_norm[layer] || !p->post_norm[layer]) return -1;
     tiny_full_workspace *w = workspace;
     for (size_t i = 0; i < rows; ++i)
         memcpy(w->hidden[0] + i * 2048, p->embedding + (size_t)tokens[i] * 2048, 2048 * 2);
-    projection_bridge bridge = {project, context, 0};
-    unsigned next_bank = 1 - s->bank;
-    for (unsigned layer = 0; layer < TINY_FULL_LAYERS; ++layer) {
-        bridge.layer = layer;
-        size_t offset = (size_t)layer * TINY_FULL_CACHE_WORDS;
-        int status = full_block_run(rows, s->position, w->hidden[layer % 2],
-            p->input_norm[layer], p->post_norm[layer], p->epsilon, p->cosine, p->sine,
-            s->position ? s->keys[s->bank] + offset : NULL,
-            s->position ? s->values[s->bank] + offset : NULL,
-            project_layer, &bridge, &w->block, block_workspace_bytes(),
-            s->keys[next_bank] + offset, s->values[next_bank] + offset,
-            w->hidden[1 - layer % 2]);
-        if (status) return -2;
-    }
+    *phase = (tiny_full_phase){s->position, s->bank, s->next_token, 0, (uint32_t)rows, 1, 0};
+    return 0;
+}
+
+int tiny_full_model_layer(const tiny_full_parameters *p, const tiny_full_state *s, tiny_full_phase *phase,
+                         unsigned layer, tiny_full_projection project, void *context,
+                         void *workspace, size_t workspace_bytes) {
+    if (!valid_context(p, s, workspace, workspace_bytes) || !valid_phase(s, phase) || !project
+        || layer >= TINY_FULL_LAYERS || phase->next_layer != layer) return -1;
+    tiny_full_workspace *w = workspace;
+    projection_bridge bridge = {project, context, layer};
+    size_t offset = (size_t)layer * TINY_FULL_CACHE_WORDS;
+    int status = full_block_run(phase->rows, s->position, w->hidden[layer % 2],
+        p->input_norm[layer], p->post_norm[layer], p->epsilon, p->cosine, p->sine,
+        s->position ? s->keys[s->bank] + offset : NULL,
+        s->position ? s->values[s->bank] + offset : NULL,
+        project_layer, &bridge, &w->block, block_workspace_bytes(),
+        s->keys[1 - s->bank] + offset, s->values[1 - s->bank] + offset, w->hidden[1 - layer % 2]);
+    if (status) { phase->active = 2; return -2; }
+    ++phase->next_layer;
+    return 0;
+}
+
+int tiny_full_model_finish(const tiny_full_parameters *p, tiny_full_state *s, tiny_full_phase *phase,
+                          tiny_full_projection project, void *context, void *workspace, size_t workspace_bytes,
+                          uint16_t *logits, size_t logits_words) {
+    if (!valid_context(p, s, workspace, workspace_bytes) || !valid_phase(s, phase) || !project || !logits
+        || phase->next_layer != TINY_FULL_LAYERS || logits_words < (size_t)phase->rows * 32000) return -1;
+    tiny_full_workspace *w = workspace;
+    size_t rows = phase->rows;
     if (smol_host_rmsnorm_bf16(w->hidden[0], p->final_norm, p->epsilon,
-                             w->normalized, rows, 2048)) return -3;
-    if (project(context, 22, 7, w->normalized, rows, 2048, 32000, logits)) return -4;
+                             w->normalized, rows, 2048)) { phase->active = 2; return -3; }
+    if (project(context, 22, 7, w->normalized, rows, 2048, 32000, logits)) { phase->active = 2; return -4; }
     uint32_t next_token;
-    if (tiny_full_argmax_bf16(logits + (rows - 1) * 32000, 32000, &next_token)) return -5;
-    s->bank = next_bank;
+    if (tiny_full_argmax_bf16(logits + (rows - 1) * 32000, 32000, &next_token)) {
+        phase->active = 2; return -5;
+    }
+    s->bank = 1 - s->bank;
     s->position += rows;
     s->next_token = next_token;
+    phase->active = 0;
     return 0;
+}
+
+int tiny_full_model_step(const tiny_full_parameters *p, tiny_full_state *s,
+                         const uint32_t *tokens, size_t rows, tiny_full_projection project, void *context,
+                         void *workspace, size_t workspace_bytes, uint16_t *logits, size_t logits_words) {
+    tiny_full_phase phase = {0};
+    if (!project || !logits || logits_words < rows * 32000
+        || tiny_full_model_begin(p, s, &phase, tokens, rows, workspace, workspace_bytes)) return -1;
+    for (unsigned layer = 0; layer < TINY_FULL_LAYERS; ++layer)
+        if (tiny_full_model_layer(p, s, &phase, layer, project, context, workspace, workspace_bytes)) return -2;
+    return tiny_full_model_finish(p, s, &phase, project, context, workspace, workspace_bytes, logits, logits_words);
 }
