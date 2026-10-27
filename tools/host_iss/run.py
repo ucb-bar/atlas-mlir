@@ -28,6 +28,14 @@ from result_lines import verify as verify_result_lines
 FULL_CONTRACTS = {"tiny-full": "tiny_full_contract", "smol-full": "smol_full_contract"}
 
 
+def resnet_stop_sites(image):
+    names = ["atlas_workload_main", "atlas_block_trap_report"]
+    if "finish" in image.symbols:
+        names.append("finish")
+    return {pc: length for name in names for pc, length, word in image.instructions(name)
+            if length == 4 and word == 0x10500073}
+
+
 def mmio_access_cap(device, workload):
     if workload not in FULL_CONTRACTS:
         return 100000
@@ -88,8 +96,7 @@ def run(args):
             raise ValueError("generic QEMU virt requires a full host built for NS16550 UART at 0x10000000")
         sites = mmio_sites(image)
         if contract is None:
-            stop_sites = {pc: length for name in ("atlas_workload_main", "atlas_block_trap_report")
-                for pc, length, word in image.instructions(name) if length == 4 and word == 0x10500073}
+            stop_sites = resnet_stop_sites(image)
         else:
             if workload == "smol-full":
                 from run_model_tile import configure_model
