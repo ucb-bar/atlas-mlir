@@ -5,8 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import asdict, replace
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
+from time import monotonic
 
 from merlin.semantic_compiler.model import (
     KernelRequest,
@@ -21,6 +25,53 @@ from merlin.semantic_compiler.ordered_k_tiling import (
 )
 from merlin.semantic_compiler.ordered_mnk_tiling import LoopedMNKTiling
 from merlin.semantic_compiler.target_binding import NativeCompilationError
+
+
+# Half the selected allocator frame is a policy split, leaving space for edges and spills.
+OPERAND_CACHE_CAPACITY_BYTES = json.loads(
+    (Path(__file__).resolve().parents[2] / "runtime/selected-host-map.json").read_text()
+)["vmem_spill_frame_bytes"] // 2
+_operand_reuse_enabled = ContextVar("atlas_operand_reuse", default=True)
+_operand_cache_used = ContextVar("atlas_operand_cache_used", default=None)
+
+
+def retry_without_operand_reuse(compile_program):
+    """Retry an owned, unpublished compilation once after cache resource exhaustion."""
+    @wraps(compile_program)
+    def compile_with_retry(*args, **kwargs):
+        # The outer compilation owns the fallback and includes all child cache selections.
+        if _operand_cache_used.get() is not None:
+            return compile_program(*args, **kwargs)
+        destination = kwargs["destination"]
+        owned = not destination.exists()
+        limits = kwargs.get("limits")
+        deadline = monotonic() + limits.wall_timeout_s if limits is not None else None
+        used = [False]
+        attempt_token = _operand_cache_used.set(used)
+        try:
+            return compile_program(*args, **kwargs)
+        except NativeCompilationError as error:
+            reason = str(error)
+            exhausted = "VMEM spill frame exhausted" in reason or "-word policy limit" in reason
+            if not owned or not used[0] or not _operand_reuse_enabled.get() or not exhausted:
+                raise
+            if destination.exists():
+                shutil.rmtree(destination)
+            if deadline is not None:
+                remaining = int(deadline - monotonic())
+                if remaining <= 0:
+                    raise NativeCompilationError(
+                        "search_timeout", "compact retry exhausted its time budget"
+                    ) from error
+                kwargs = {**kwargs, "limits": replace(limits, wall_timeout_s=remaining)}
+            token = _operand_reuse_enabled.set(False)
+            try:
+                return compile_program(*args, **kwargs)
+            finally:
+                _operand_reuse_enabled.reset(token)
+        finally:
+            _operand_cache_used.reset(attempt_token)
+    return compile_with_retry
 
 
 def is_looped_request(request: KernelRequest) -> bool:
@@ -160,15 +211,19 @@ def prepare_execution_plan(request):
 
 
 def _operand_cache(plan, enabled=True):
-    # The allocator owns bank 2 after eight BF16 DMA windows; reserve half its
-    # remaining frame for edge values and spills. Other VMEM banks stay private.
     mc, nc, kc = plan.counts
-    capacity = (256 * 1024 - 8 * 2048) // 2
-    if not enabled or kc * plan.tile_bytes[0] > capacity:
+    capacity = OPERAND_CACHE_CAPACITY_BYTES
+    size = plan.tile_bytes[0] if nc > 1 else plan.tile_bytes[1]
+    if not enabled or not _operand_reuse_enabled.get() or kc * size > capacity:
         return None
     if mc > 1 and nc > 1 and kc * (plan.tile_bytes[0] + nc * plan.tile_bytes[1]) <= capacity:
-        return "aw"
-    return "a" if nc > 1 else "w" if mc > 1 else None
+        reuse = "aw"
+    else:
+        reuse = "a" if nc > 1 else "w" if mc > 1 else None
+    used = _operand_cache_used.get()
+    if reuse and used is not None:
+        used[0] = True
+    return reuse
 
 
 def _virtual(
@@ -186,6 +241,8 @@ def _virtual(
         raise ValueError("K unroll factor must be an integer in [1,64]")
     mc, nc, kc = plan.counts
     ab, wb, ob = plan.tile_bytes
+    if ab != wb:
+        raise ValueError("selected MXU requires equal A and W tile sizes")
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"
     # Static slots keep A across N and, when capacity permits, all W columns across M.
@@ -230,8 +287,7 @@ def _virtual(
                    ["i32", "i32"], (prefix + "_w", fp8))
         else:
             index = kc * (column + 1) + cached if reuse == "aw" else cached
-            effect("restore", prefix + "_a_s", prefix + "_w_s", [f"operand_cache_{index}"],
-                   [slot], (prefix + "_w", fp8))
+            effect("restore", prefix + "_a_s", prefix + "_w_s", [f"operand_cache_{index}"], [slot], (prefix + "_w", fp8))
         weight, accum = "!atlas.virtual_mxu_weight<0>", "!atlas.virtual_mxu_acc<0>"
         effect(
             "mxu_load_weight",
@@ -317,15 +373,18 @@ def _virtual(
                                          acc_is_handle=index > 0, readout=index == kc - 1)
         return before, value
 
+    out_stored = "out_stored" if reuse else "stored"
+
     def store_tile(prefix, before, value, address):
         if epilogue is not None:
-            lines.append(f'    %{prefix}_activated = "atlas.virtual_vpu_unary"(%{value}) '
+            activated = prefix + "_activated" if reuse else "activated"
+            lines.append(f'    %{activated} = "atlas.virtual_vpu_unary"(%{value}) '
                          f'{{kind = "relu"}} : ({bf16}) -> {bf16}')
-            value = prefix + "_activated"
+            value = activated
         c(prefix + "_bytes", ob)
-        effect("dma_store_bf16", before, prefix + "_stored", [value, address, prefix + "_bytes"],
-               [bf16, "i32", "i32"])
-        return prefix + "_stored"
+        stored = out_stored if prefix == "out" else prefix + "_stored"
+        effect("dma_store_bf16", before, stored, [value, address, prefix + "_bytes"], [bf16, "i32", "i32"])
+        return stored
 
     entry_state = "start"
     if reuse in ("w", "aw"):
@@ -511,10 +570,10 @@ def _virtual(
         "    %nn = arith.addi %n, %one_n : i32",
         "    %wnext = arith.addi %wrow, %w_row_step : i32",
         "    %ynext = arith.addi %ytile, %out_bytes : i32",
-        f"    cf.br ^n_header(%out_stored, %nn, %wnext, %ynext{seed_n_next} : {state}, i32, i32, i32{seed_type})",
+        f"    cf.br ^n_header(%{out_stored}, %nn, %wnext, %ynext{seed_n_next} : {state}, i32, i32, i32{seed_type})",
     ]
     if nc == 1:
-        n_next = [f"    cf.br ^m_next(%out_stored : {state})"]
+        n_next = [f"    cf.br ^m_next(%{out_stored} : {state})"]
     if reuse != "aw":
         lines += n_next
     lines.append(f"  ^m_next(%mn: {state}):")
@@ -568,9 +627,13 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "pipeline": _native_pipeline(),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
+        "operand_reuse_enabled": (
+            _operand_reuse_enabled.get() and codegen.current_codegen_options().program_size_limit_bytes is None
+        ),
     }
 
 
+@retry_without_operand_reuse
 def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
     from merlin.semantic_compiler.codegen import choose_reduction_unroll
 
@@ -585,7 +648,9 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         dram_slots,
     )
 
-    unroll, codegen = choose_reduction_unroll(tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits))
+    key = tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits)
+    unroll, codegen = choose_reduction_unroll(key)
+    codegen["operand_reuse_enabled"] = key["operand_reuse_enabled"]
     geometry, seed = split_seeded_request(request)
     contraction, epilogue = split_epilogue(geometry)
     full_plan, plan, streaming = prepare_execution_plan(request)
@@ -724,6 +789,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             "candidate_attempts": picked.candidate_attempts,
             "ordering_attempts": picked.ordering_attempts,
         }
+    reuse_enabled = codegen["program_size_limit_bytes"] is None
     virtual = _virtual(
         plan,
         (ranges[0][0], ranges[1][0]),
@@ -731,11 +797,11 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         epilogue,
         seed_address=ranges[2][0] if seed else None,
         k_unroll=unroll,
-        operand_reuse=codegen["program_size_limit_bytes"] is None,
+        operand_reuse=reuse_enabled,
     )
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     pipeline = _native_pipeline()
-    if codegen["program_size_limit_bytes"] is not None:
+    if not reuse_enabled:
         virtual = virtual.replace(
             "attributes {",
             f"attributes {{atlas.program_size_limit_bytes = {codegen['program_size_limit_bytes']} : i64, ",
@@ -806,7 +872,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
                 {
                     "schema": "atlas.looped_mnk_execution_plan.v1",
                     "codegen": codegen,
-                    "operand_reuse": _operand_cache(plan, codegen["program_size_limit_bytes"] is None),
+                    "operand_reuse": _operand_cache(plan, reuse_enabled),
                     "scope": "diagnostic_selected_standalone_core",
                     "shape": list(plan.extents[:2]),
                     "reduction_extent": plan.extents[2],

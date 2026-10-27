@@ -42,6 +42,7 @@ from .binding import (
     dram_slots,
 )
 from .pack_tiling import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY
+from .looped_tiling import retry_without_operand_reuse
 
 
 def _bf16_body_work(request):
@@ -447,6 +448,7 @@ def compose_fragments(fragments, *, tools, boundaries_lowered=False):
     )
 
 
+@retry_without_operand_reuse
 def compile_resident(
     snapshot,
     request,
@@ -482,11 +484,9 @@ def compile_resident(
     from merlin.frontends.linalg_mlir import parse_mlir_text
 
     fragments, records = [], []
-    unroll, codegen = choose_reduction_unroll(
-        AtlasNativeBinding.tuning_key(
-            snapshot, request, fixed_inputs, fixed_outputs, limits
-        )
-    )
+    key = AtlasNativeBinding.tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits)
+    unroll, codegen = choose_reduction_unroll(key)
+    codegen["operand_reuse_enabled"] = key["operand_reuse_enabled"]
     for i, region in enumerate(cuts):
         if deadline is not None and monotonic() >= deadline:
             raise NativeCompilationError("search_timeout", "staged compilation exceeded its total time budget")
@@ -578,7 +578,9 @@ def compile_resident(
             count = body_execution["tiling"]["loop_counts"][2]
             records[-1].update(
                 reduction_tiles=count,
-                effective_K_unroll=count if body_execution.get("operand_reuse") else min(unroll, max(1, count - 1)),
+                effective_K_unroll=(
+                    max(1, count - 1) if body_execution.get("operand_reuse") else min(unroll, max(1, count - 1))
+                ),
                 operand_reuse=body_execution.get("operand_reuse"),
             )
     # Staged fragments have already checked their local boundaries. Their

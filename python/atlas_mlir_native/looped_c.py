@@ -151,7 +151,9 @@ def prepare_c_package(
         if codegen.get("reduction_unroll") not in (1, 2, 4, 8):
             raise ValueError("unrecognized reduction unroll factor")
         expected["codegen"] = codegen
-    expected["operand_reuse"] = _operand_cache(device_tiling, not codegen or codegen["program_size_limit_bytes"] is None)
+    reuse_enabled = bool(execution.get("operand_reuse"))
+    if "operand_reuse" in execution:
+        expected["operand_reuse"] = _operand_cache(device_tiling, reuse_enabled)
     virtual = _virtual(
         device_tiling,
         tuple(addresses[:2]),
@@ -159,7 +161,7 @@ def prepare_c_package(
         epilogue,
         seed_address=addresses[2] if seed else None,
         k_unroll=codegen["reduction_unroll"] if codegen else 1,
-        operand_reuse=not codegen or codegen["program_size_limit_bytes"] is None,
+        operand_reuse=reuse_enabled,
     )
     if codegen and codegen["program_size_limit_bytes"] is not None:
         virtual = virtual.replace(
