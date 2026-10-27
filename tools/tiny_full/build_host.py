@@ -359,6 +359,8 @@ def build(args):
         'rodata_after_arena':args.rodata_after_arena,
         'target':args.target,'firesim_package':package_record,
         'result_transport':transport_record,'uart':transport_record,'result_name':'tiny-full',
+        'result_progress_launches': [index+1 for index,shape in enumerate(plan(data['decode_count']))
+                                    if shape['logical'] in (6,7) and shape['columns'][1] == shape['width']],
         'source_path_relocations': [{'old':str(old),'new':str(new)} for old,new in mappings]}
     sums=dict(copied.sums);sums['host/host.elf']=record['elf']['sha256']
     for name in ('atlas_result_transport.h','result-transport.json'):

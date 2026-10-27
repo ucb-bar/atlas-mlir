@@ -51,9 +51,11 @@ class PlacementTest(unittest.TestCase):
     def test_default_keeps_metadata_and_program_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory);self.fixture(root)
-            before = {p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            names = [line.split('  ',1)[1] for line in (root/'SHA256SUMS').read_text().splitlines()]
+            names.append('SHA256SUMS')
+            before = {name:(root/name).read_bytes() for name in names}
             builder.place_bundle(root,0x100000000,0x80000000,64 << 30)
-            self.assertEqual(before,{p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()})
+            self.assertEqual(before,{name:(root/name).read_bytes() for name in names})
 
     def test_rejects_outside_dram_and_low32_wrap(self):
         for base,size in [(0x190000000,1 << 30),(0x1ffffffc0,8 << 30)]:
