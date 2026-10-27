@@ -52,24 +52,26 @@ constexpr VloadTiming kVloadTiming = {1, 3, 35, {0, 34}, {1, 32}};
 constexpr VstoreTiming kVstoreTiming = {1, 3, 34, {0, 34}, {3, 34}};
 
 // MXU0 is the systolic array, MXU1 the inner-product trees. A matmul writes accumulator rows from accumulatorRow0 - 1
-// for 32 cycles and holds its in-flight slot until the last of those writes.
+// for 32 cycles and holds its in-flight slot until the last of those writes. weightOverwriteAfterCompute is the
+// sequencer's earliest weight push into a slot that a matmul is still reading.
 struct MxuTiming {
   struct {
     int accumulatorRow0, poppedMreg;
   } defUseLatency;
-  int weightReadAge, sourceReadRelease, computeCapacity;
+  int weightReadAge, sourceReadRelease, computeCapacity, weightOverwriteAfterCompute;
   struct {
     CycleWindow sourcePorts, resultPorts, pushStream, accumulatorRead;
   } resourceOccupancy;
-  struct {
-    int weightOverwriteAfterCompute, weightUseAfterPush, accumulatorUseAfterPush; // last two MXU1 only
-  } sequencerSeparation;
 };
 constexpr MxuTiming kMxuTiming[] = {
-    {{64, 33}, 1, 32, 3, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}, {63, 0, 0}},
-    {{4, 33}, 1, 32, 2, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}, {32, 32, 33}},
+    // {accumulatorRow0, poppedMreg}, weightReadAge, sourceReadRelease, computeCapacity, weightOverwriteAfterCompute,
+    // {sourcePorts, resultPorts, pushStream, accumulatorRead}
+    {{64, 33}, 1, 32, 3, 63, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}}, // MXU0
+    {{4, 33}, 1, 32, 2, 32, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}},  // MXU1
 };
 constexpr int kMxuSourceReadAge = 0, kMxuPushResultAge = 1, kMxuPopResultAge = 1;
+// MXU1's sequencer also blocks a weight or accumulator slot while a push into it is still writing.
+constexpr int kMxu1WeightUseAfterPush = 32, kMxu1AccumulatorUseAfterPush = 33;
 
 // VPU. An instruction holds its issue slot through its last destination write, one cycle before defUseLatency
 // (npu_model vpu.py issue_cycles).
@@ -87,15 +89,6 @@ constexpr VpuTiming kVpuLoadImmPairTiming = {{0}, {1, 33}, 0, 65};
 constexpr VpuTiming kVpuLoadImmSingleTiming = {{0}, {1}, 0, 33};
 constexpr int kVpuColReducePassInterval = 64;
 constexpr unsigned kVpuIssueSlots = 2;
-const std::vector<std::vector<std::string>> kVpuLogicGroups = {
-    {"vadd.bf16", "vsub.bf16", "vredsum.row.bf16"},
-    {"vexp.bf16", "vexp2.bf16"},
-    {"vsin.bf16", "vcos.bf16"},
-    {"vsquare.bf16", "vcube.bf16"},
-    {"vmaximum.bf16", "vredmax.bf16"},
-    {"vminimum.bf16", "vredmin.bf16"},
-    {"vli.all", "vli.row", "vli.col", "vli.one"},
-};
 
 // XLU transpose: 32-row fill, transpose, 32-row result stream.
 struct XluTiming {
@@ -104,7 +97,8 @@ struct XluTiming {
 };
 constexpr XluTiming kXluTiming = {1, 34, 33, 66, {0, 65}};
 
-// DMA cost calibrated on npu_model 337e9f2, not an RTL latency. 1 KiB costs 781 cycles to load and 724 to store.
+// DMA cost calibrated on npu_model 337e9f2, not an RTL latency. For 1 KiB the formula gives 781 cycles to load and
+// 724 to store; npu_model measured 781 and 723.
 struct DmaTiming {
   long long coreMHz, readPeakMBps, writePeakMBps, startCycles, beatBytes;
 };
@@ -360,8 +354,17 @@ bool mlir::atlas::timing::vpuUsesBothSlots(const OpInfo &op) {
 
 // Lane-logic groups from npu_model's vpu.py; members cannot overlap.
 static int vpuLogicGroup(const std::string &name) {
-  for (size_t g = 0; g < kVpuLogicGroups.size(); g++)
-    for (const std::string &n : kVpuLogicGroups[g])
+  static const std::vector<std::vector<std::string>> groups = {
+      {"vadd.bf16", "vsub.bf16", "vredsum.row.bf16"},
+      {"vexp.bf16", "vexp2.bf16"},
+      {"vsin.bf16", "vcos.bf16"},
+      {"vsquare.bf16", "vcube.bf16"},
+      {"vmaximum.bf16", "vredmax.bf16"},
+      {"vminimum.bf16", "vredmin.bf16"},
+      {"vli.all", "vli.row", "vli.col", "vli.one"},
+  };
+  for (size_t g = 0; g < groups.size(); g++)
+    for (const std::string &n : groups[g])
       if (n == name)
         return static_cast<int>(g);
   return -1;
@@ -901,7 +904,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
   // npu_model mxu.py sequencer rules.
   if (A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
-    const auto &separation = kMxuTiming[m].sequencerSeparation;
+    const MxuTiming &mt = kMxuTiming[m];
     std::string mx = "MXU" + std::to_string(m) + ": ";
     auto isCompute = [](const OpInfo &o) {
       return o.opClass == OpClass::MatMul || o.opClass == OpClass::MatMulAcc;
@@ -927,24 +930,24 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
     };
     bool bWeight = B.opClass == OpClass::WeightPush;
     if (isCompute(A) && !bWeight && accOf(a) == accOf(b))
-      consider(kMxuTiming[m].defUseLatency.accumulatorRow0, EdgeKind::Rule,
+      consider(mt.defUseLatency.accumulatorRow0, EdgeKind::Rule,
                mx + "wait until row 0 of the matmul on acc" +
                    std::to_string(accOf(a)) + " is written");
     if (m == 0 && isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-      consider(separation.weightOverwriteAfterCompute, EdgeKind::Rule,
+      consider(mt.weightOverwriteAfterCompute, EdgeKind::Rule,
                mx + "weight slot still feeding the systolic array");
     if (m == 1) {
       bool aWeight = A.opClass == OpClass::WeightPush;
       if (aWeight && (bWeight || isCompute(B)) && slotOf(a) == slotOf(b))
-        consider(separation.weightUseAfterPush, EdgeKind::Rule,
+        consider(kMxu1WeightUseAfterPush, EdgeKind::Rule,
                  mx + "weight push still active on w" +
                      std::to_string(slotOf(a)));
       if (isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-        consider(separation.weightOverwriteAfterCompute, EdgeKind::Rule,
+        consider(mt.weightOverwriteAfterCompute, EdgeKind::Rule,
                  mx + "matmul still reading w" + std::to_string(slotOf(a)));
       if (isAccPush(A) && (isCompute(B) || B.opClass == OpClass::AccPushFp8) &&
           accOf(a) == accOf(b))
-        consider(separation.accumulatorUseAfterPush, EdgeKind::Rule,
+        consider(kMxu1AccumulatorUseAfterPush, EdgeKind::Rule,
                  mx + "accumulator push still active on acc" +
                      std::to_string(accOf(a)));
     }
