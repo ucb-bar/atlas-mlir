@@ -8,6 +8,7 @@ from atlas_tooling import write_json, sha as digest
 from collections import Counter
 from dataclasses import replace
 import json
+import re
 import struct
 import time
 
@@ -58,7 +59,21 @@ class Device:
         """Keep the existing bundle-style segment-capture provider compatible."""
         prefix = f"kernels/{index:02d}/model/"
         receipt = json.loads(self.payload(prefix + "receipt.json"))
-        assert receipt["status"] == "passed_model_only"
+        if receipt.get("status") != "passed_model_only":
+            assert (receipt.get("schema") == "atlas.resnet_kernel_preparation.v1"
+                and receipt.get("status") == "PREPARED_NOT_EXECUTED"
+                and receipt.get("numerical_execution_performed") is False), "unadmitted ResNet kernel preparation"
+            sources = receipt.get("source_inputs_sha256")
+            assert isinstance(sources, dict) and sources, "missing ResNet preparation source pins"
+            assert all(isinstance(name, str) and name and isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{64}", value) for name, value in sources.items()), "invalid source pins"
+            artifacts = receipt.get("artifacts_sha256")
+            assert isinstance(artifacts, dict) and set(artifacts) == {
+                "program.S", "program.bin", "initial-dram.bin", "expected-bf16-tiles.bin"}, "missing artifact pins"
+            for name, expected_hash in artifacts.items():
+                assert (isinstance(expected_hash, str) and re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+                    and digest(self.payload(prefix + name)) == expected_hash), "preparation artifact digest differs"
+
         initial = self.payload(prefix + "initial-dram.bin")
         expected = self.payload(prefix + "expected-bf16-tiles.bin")
         return dict(source=prefix + "program.S", original=prefix + "program.bin",

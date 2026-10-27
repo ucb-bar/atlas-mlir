@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate an explicit batch1 host graph with a replaceable device callback."""
 from atlas_host_layout import ATLAS_DRAM_BASE
+from atlas_host_build import GRAPH_PROGRAM_WORDS
 from pathlib import Path
 import json
 import math
@@ -109,7 +110,7 @@ def validate_graph(plan, templates, read_asset, *, require_full=True):
                 "output_offset": mp * kp + kp * np + 256, "total_dram_bytes": mp * kp + kp * np + mp * np * 2 + 512}
             if (t.get("dram_base") != ATLAS_DRAM_BASE or any(t.get(key) != value for key, value in extents.items())
                 or extents["total_dram_bytes"] > 64 * 1024**2 or type(t.get("program_words")) is not int
-                or not 1 <= t["program_words"] <= 8192 or type(t.get("rescale_patch_word_index")) is not int
+                or not 1 <= t["program_words"] <= GRAPH_PROGRAM_WORDS or type(t.get("rescale_patch_word_index")) is not int
                 or not 0 <= t["rescale_patch_word_index"] < t["program_words"] - 1):
                 raise ValueError("template physical extents/patch bounds differ")
             raw = read_asset(weight["fp8_tiled"])

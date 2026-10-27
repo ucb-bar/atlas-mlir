@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 import generate_resnet_graph as generate
+from atlas_host_build import GRAPH_PROGRAM_WORDS
 from atlas_tile_arithmetic import f32_to_bf16_bits, pack_bf16, tensor_scale_exponent
 
 
@@ -67,7 +68,7 @@ class GraphAdmissionTest(unittest.TestCase):
 
     def test_template_physical_and_patch_refusals(self):
         for key, value in [("output_offset", 4351), ("total_dram_bytes", 6655), ("dram_base", 0),
-            ("rescale_patch_word_index", 3), ("program_words", 8193)]:
+            ("rescale_patch_word_index", 3), ("program_words", GRAPH_PROGRAM_WORDS + 1)]:
             p, t = fixture()
             t[0][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):

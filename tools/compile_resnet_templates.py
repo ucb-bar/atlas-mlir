@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 import struct
 
-from atlas_program import assembly
+from atlas_program import assembly, code_sources, dma_load_bytes
+from atlas_host_build import GRAPH_PROGRAM_WORDS, validate_graph_program
 from atlas_path_guard import checked as safe_path
 from atlas_tooling import sha256, write_json
 from run_model_tile import configure_model, model_binding
@@ -18,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("model-root", "host-plan", "out"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--traffic-reuse", action="store_true", help="select the qualified public traffic-reuse dispatch")
     args = parser.parse_args()
     out, plan_path = safe_path(args.out), safe_path(args.host_plan)
     if out.exists():
@@ -29,6 +31,8 @@ def main():
     own = safe_path(Path(__file__).absolute().parent)
     bindings = {str(path): sha256(path) for path in (Path(__file__).absolute(), own / "atlas_program.py",
         own / "run_model_tile.py", own / "atlas_tile_arithmetic.py")}
+    bindings.update({str(own / name): digest for name, digest in code_sources(traffic_reuse=args.traffic_reuse).items()})
+    bindings[str(own / "atlas_host_build.py")] = sha256(own / "atlas_host_build.py")
     root = safe_path(args.model_root)
     _, _, assemble, _ = configure_model(root)
     before = model_binding(root)
@@ -64,12 +68,12 @@ def main():
         total = offset + m * n * 2 + 256
         if total > 64 * 1024 * 1024:
             raise ValueError("DRAM resource bound exceeded")
-        resident_b = k * n <= 256 * 1024
-        resident_a = not resident_b and m * k <= 256 * 1024
+        resident_b = not args.traffic_reuse and k * n <= 256 * 1024
+        resident_a = not args.traffic_reuse and not resident_b and m * k <= 256 * 1024
 
         def source(exponent):
             return assembly(m, k, n, offset, exponent, resident_b=resident_b, pretranspose_resident_b=resident_b,
-                resident_a=resident_a)
+                resident_a=resident_a, traffic_reuse=args.traffic_reuse)
 
         text = source(0)
         base, alternate = words(text), words(source(1))
@@ -79,8 +83,7 @@ def main():
         index = positions[0]
         if base[index] != table[126] or alternate[index] != table[127]:
             raise ValueError("full program rescale differs from isolated instruction")
-        if len(base) > 8192 or not base or base[-1] != 0x73:
-            raise ValueError("program exceeds 8192 words or lacks ECALL")
+        validate_graph_program(struct.pack(f"<{len(base)}I", *base))
         for exponent in (-126, -1, 1, 127):
             patched = base.copy()
             patched[index] = table[exponent + 126]
@@ -96,6 +99,9 @@ def main():
             "rescale_patch_word_index": index, "base_rescale_exponent": 0,
             "b_scale_exponent": node["weight"]["b_scale_exponent"],
             "required_runtime_rescale": "A_scale_exponent + B_scale_exponent; refuse outside [-126,127] before START",
+            "traffic_reuse": args.traffic_reuse,
+            "requested_dma": {"load_bytes": dma_load_bytes(m, k, n, resident_b=resident_b, resident_a=resident_a,
+                traffic_reuse=args.traffic_reuse), "store_bytes": m * n * 2},
             "resident_b": resident_b, "resident_a": resident_a, "dram_base": ATLAS_DRAM_BASE, "input_bytes": m * k + k * n,
             "output_offset": offset, "output_bytes": m * n * 2, "total_dram_bytes": total, "weight": node["weight"],
             "zero_tail_contract": (
@@ -106,6 +112,7 @@ def main():
         or any(sha256(path) != digest for path, digest in bindings.items())):
         raise ValueError("input or source changed during compilation")
     report = {"status": "passed_compile_only", "scope": "54 declared dense contractions; no numerical execution",
+        "traffic_reuse": args.traffic_reuse, "raw_program_word_limit": GRAPH_PROGRAM_WORDS,
         "host_plan": plan_id, "source_bindings": bindings, "model_binding": before, "kernels": kernels,
         "rescale_table_sha256": sha256(out / "rescale-words.bin"),
         "checks": {"all254_legal_exponents_assembled_as_one_word": True,
