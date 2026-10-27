@@ -40,7 +40,7 @@ def mmio_access_cap(device, workload):
     if workload not in FULL_CONTRACTS:
         return 100000
     # Count actual admitted IMEM writes plus bounded CSR traffic per launch.
-    return 100000 + sum(len(words) // 4 + 64 for _, words, _ in device.programs)
+    return 100000 + sum(len(words) // 4 + 64 for _, words, _ in device.programs.values())
 
 
 def interrupted(signum, frame):

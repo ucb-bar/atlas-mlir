@@ -19,12 +19,28 @@ from run_model_tile import configure_model, model_binding
 from bundle import runtime_program
 
 
+def launch_bounds(kernel_count, selected=None):
+    """Admit a nonempty global interval before importing or creating a device."""
+    if type(kernel_count) is not int or not 0 < kernel_count < 1 << 32:
+        raise ValueError("invalid device kernel count")
+    if selected is None:
+        return 0, kernel_count
+    if not isinstance(selected, (tuple, list)) or len(selected) != 2:
+        raise ValueError("device launch range requires start and exclusive end")
+    start, end = selected
+    if type(start) is not int or type(end) is not int or not 0 <= start < end <= kernel_count:
+        raise ValueError("device launch range is outside the workload")
+    return start, end
+
+
 class Device:
-    def __init__(self, remote, out, wall_deadline, bundle, model_root, cycle_cap=20000000):
+    def __init__(self, remote, out, wall_deadline, bundle, model_root, cycle_cap=20000000, *, launch_range=None):
         self.remote, self.out = remote, checked(out)
         self.deadline, self.cycle_cap = wall_deadline, cycle_cap
         self.bundle = bundle
         self.kernel_count = getattr(bundle, "kernel_count", 54)
+        self.launch_start, self.launch_end = launch_bounds(self.kernel_count, launch_range)
+        self.launch_count = self.launch_end - self.launch_start
         self.pins = {}
         self.model_root = checked(model_root)
         _, self.torch, self.assemble, _ = configure_model(self.model_root)
@@ -38,6 +54,15 @@ class Device:
         assert config.dma_memory_backend == "curve", "whole-host qualification requires the SoC curve backend"
         self.memory_backend = dict(backend=config.dma_memory_backend, parameters=dict(config.dma_memory_params))
         config.arch_state_config = replace(config.arch_state_config, numerics="rtl", randomize_init=True, init_seed=42)
+        self.programs = {}
+        for index in range(self.launch_start, self.launch_end):
+            paths = (bundle.kernel_paths(index) if hasattr(bundle, "kernel_paths")
+                else self.resnet_kernel_paths(index))
+            source = self.payload(paths["source"]).decode()
+            original = self.payload(paths["original"])
+            program, words = runtime_program(source, original, self.assemble)
+            self.programs[index] = (program, words, paths)
+
         self.logger = Logger(LoggerConfig(filename="/dev/null"))
         self.core = Core(config, self.logger)
         self.core.arch_state.halted = True
@@ -45,14 +70,6 @@ class Device:
         self.imem = bytearray(ATLAS_IMEM_BYTES)
         self.written = set()
         self.completed = []
-        self.programs = []
-        for index in range(self.kernel_count):
-            paths = (bundle.kernel_paths(index) if hasattr(bundle, "kernel_paths")
-                else self.resnet_kernel_paths(index))
-            source = self.payload(paths["source"]).decode()
-            original = self.payload(paths["original"])
-            program, words = runtime_program(source, original, self.assemble)
-            self.programs.append((program, words, paths))
 
     def resnet_kernel_paths(self, index):
         """Keep the existing bundle-style segment-capture provider compatible."""
@@ -100,8 +117,8 @@ class Device:
         self.core.arch_state.write_csrf(table[offset], value)
 
     def start(self):
-        index = len(self.completed)
-        assert index < self.kernel_count
+        index = self.launch_start + len(self.completed)
+        assert index < self.launch_end, "device launch exceeds the admitted segment range"
         core, state = self.core, self.core.arch_state
         assert state.halted and not any(exu.has_in_flight for exu in core.exus)
         assert not any(state.check_flag(channel) for channel in range(8))
