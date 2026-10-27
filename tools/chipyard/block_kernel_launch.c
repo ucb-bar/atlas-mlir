@@ -11,9 +11,7 @@
 #include "atlas_host_check.h"
 static atlas_host_check_result first_failure;
 static size_t first_failure_base;
-#endif
 
-#if ATLAS_FAST_CHECK
 static inline uint64_t check_cycles(void) {
   uint64_t value;
   __asm__ volatile("fence rw,rw\nrdcycle %0" : "=r"(value) : : "memory");
@@ -100,8 +98,6 @@ int main(void) {
 #if ATLAS_FAST_CHECK
   const uint64_t check_elapsed = check_cycles() - check_begin;
   printf("ATLAS_KERNEL_CHECK_TIMING fast=%u check_cpu_cycles=%" PRIu64 "\n", ATLAS_FAST_CHECK, check_elapsed);
-#endif
-#if ATLAS_FAST_CHECK
   if (first_failure.mismatch_bytes) {
     if (first_failure.first_offset == SIZE_MAX)
       printf("ATLAS_KERNEL_BYTE_FAILURE unstable=1 offset=unknown\n");

@@ -7,6 +7,8 @@ The first K operation overwrites, all later operations accumulate, and each
 output has one BF16 pop/rescale. Delays match the established generator.
 """
 
+from atlas_program_reuse_common import load_b_column, store_output
+
 BANK_BYTES = 262144
 SHAPES = {
     (32, 32, 960),
@@ -84,22 +86,6 @@ def a_word(offset, bank0_base):
     return (BANK_BYTES + offset if offset < BANK_BYTES else bank0_base + offset - BANK_BYTES) // 4
 
 
-def load_b_column(label):
-    """Load/transpose a resident column, prefetching only its next disjoint tile.
-
-    x19/x20/x21 hold VMEM words, DRAM bytes and remaining tiles; x24 is scratch.
-    ch0 supplies the first tile, ch1 the following tiles. Each DMA is waited
-    before use, and the final tile issues no speculative request.
-    """
-    transpose = ['vload m1, 0(x19)', 'delay 34', 'vtrpose.xlu m1, m1', 'delay 66',
-                 'vstore m1, 0(x19)', 'delay 34']
-    return ['dma.load x19, x20, x5, ch0', 'dma.wait ch0', label + ':',
-            'addi x24, x19, 256', 'addi x20, x20, 1024', 'addi x21, x21, -1',
-            f'beq x21, x0, {label}_last', 'nop', 'dma.load x24, x20, x5, ch1',
-            *transpose, 'dma.wait ch1', 'add x19, x24, x0', f'jal x0, {label}', 'nop',
-            label + '_last:', *transpose, label + '_done:']
-
-
 def assembly(m, k, n, output_offset, rescale_exponent=0):
     plan = layout(m, k, n)
     if type(output_offset) is not int or output_offset != m * k + k * n + 256:
@@ -175,10 +161,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                     lines += ['addi x21, x21, -1', f'beq x21, x0, {label}_done', 'nop',
                               f'jal x0, {label}', 'nop', label + '_done:']
             for acc in range(rows):
-                lines += [f'vmatpop.bf16.acc.mxu0 m2, acc{acc}', 'delay 34',
-                          'vmul.bf16 m2, m2, m4', 'delay 66', 'vstore m2, 0(x3)', 'delay 34',
-                          'vstore m3, 0(x9)', 'delay 34', 'dma.store x22, x3, x8, ch0',
-                          'dma.wait ch0', 'add x22, x22, x16']
+                lines += store_output(acc, 22, rescale_exponent) + ['add x22, x22, x16']
             if repeats > 1:
                 lines += ['add x23, x23, x25', 'addi x24, x24, -1',
                           f'beq x24, x0, {pair_loop}_done', 'nop', f'jal x0, {pair_loop}', 'nop',

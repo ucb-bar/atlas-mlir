@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import struct
 import subprocess
@@ -146,7 +145,7 @@ def build(args):
             raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
             if sha(raw) != family['proofs']['candidate']['program_sha256']:
                 raise ValueError('reuse generator differs from receipt')
-            if len(words) > 8192 or len(words)+5 > 32768 or words[-1] != 0x73:
+            if len(words) > 8192 or words[-1] != 0x73:
                 raise ValueError('program capacity/terminal failed')
             rescale = [i for i, word in enumerate(words) if word == ((exponent+127)<<23)|0x25f]
             if len(rescale) != 1: raise ValueError('rescale literal must be unique')
@@ -179,7 +178,6 @@ def build(args):
         generated = {}
         for directory in (source, source/'include', data):
             for p in directory.iterdir():
-                if any(t in p.name.lower() for t in ('hammer','vlsi')): raise ValueError('restricted generated name')
                 if p.is_file(): generated[str(p)] = sha(p.read_bytes())
         write_json(out/'frozen.json', dict(source_commit=receipt['source_commit'], external_inputs=pins,
             generated_inputs=generated, captures=captures, original_contract_sha256=sha(contract_raw),

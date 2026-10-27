@@ -126,6 +126,8 @@ def prepare_encoded(a, b, exponent, assemble):
 
 def checked_layout():
     header = checked(Path(__file__).absolute().parents[2] / "runtime/atlas_host_layout.h")
+    if checked(atlas_host_layout.HEADER) != header:
+        raise ValueError("host layout imported from another header")
     atlas_host_layout.recheck()
     return header
 
@@ -173,6 +175,9 @@ def export(args):
                  "atlas_program.py", "atlas_path_guard.py", "atlas_tooling.py", "atlas_tile_arithmetic.py",
                  "atlas_vector_arithmetic.py", "atlas_host_layout.py"):
         path = checked(Path(__file__).absolute().parents[1] / name)
+        module = sys.modules.get(Path(name).stem)
+        if module is None or checked(module.__file__) != path:
+            raise ValueError("export helper imported from another source")
         digest = sha256(path)
         if str(path) in pins and pins[str(path)] != digest:
             raise ValueError("conflicting export helper source pin")

@@ -7,6 +7,8 @@ waited before its first use. All matrix/LSU spacing is the established
 atlas_program spacing; no numerical reassociation or partial pop occurs.
 VMEM addresses in the assembly are four-byte words, DRAM offsets bytes.
 """
+from atlas_program_reuse_common import store_output
+
 SHAPES = ((128, 5632, 1024), (32, 2048, 2048), (32, 2048, 1024),
           (32, 5632, 1024), (32, 2048, 1536), (32, 2048, 256),
           (32, 2048, 1280))
@@ -79,11 +81,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
               "dma.wait ch1", "add x18, x16, x0", "add x16, x17, x0", "add x17, x18, x0",
               "addi x24, x24, -1", "jal x0, blocks", "nop", "column_done:", "add x23, x12, x0"]
     for row in range(rows):
-        lines += [f"vmatpop.bf16.acc.mxu0 m2, acc{row}", "delay 34"]
-        if rescale_exponent is not None:
-            lines += ["vmul.bf16 m2, m2, m4", "delay 66"]
-        lines += ["vstore m2, 0(x3)", "delay 34", "vstore m3, 0(x9)", "delay 34",
-                  "dma.store x23, x3, x8, ch0", "dma.wait ch0", "add x23, x23, x22"]
+        lines += store_output(row, 23, rescale_exponent) + ["add x23, x23, x22"]
     lines += ["add x12, x12, x8", "addi x14, x14, -1", "beq x14, x0, pair_done", "nop",
               "jal x0, columns", "nop", "pair_done:"]
     if rows == 2:

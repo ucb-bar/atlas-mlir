@@ -5,11 +5,12 @@ import re
 import atlas_program as program
 
 
-def prove(source, m, k, n, exponent):
+def prove(source, m, k, n, exponent, load_budget=None):
     """Execute scalar flow and track complete 1-KiB input/output tile identities.
 
     B traffic comes from the public accounting API, independently anchored by
-    the receipt-derived table in test_program_traffic_reuse. A is loaded once.
+    the receipt-derived table in test_program_traffic_reuse. Direct helper tests
+    supply their compulsory-traffic budget explicitly. A is loaded once.
     DMA regions remain inaccessible until their own channel is waited. Output
     tokens retain both BF16 halves and whether rescaling preceded each store.
     """
@@ -17,7 +18,8 @@ def prove(source, m, k, n, exponent):
     labels = {line[:-1]: i for i, line in enumerate(lines) if line.endswith(':')}
     assert len(labels) == sum(line.endswith(':') for line in lines)
     assert sum(line.startswith('vli.all ') for line in lines) == (exponent is not None)
-    load_budget = program.dma_load_bytes(m, k, n, traffic_reuse=True)
+    if load_budget is None:
+        load_budget = program.dma_load_bytes(m, k, n, traffic_reuse=True)
     repeats, remainder = divmod(load_budget - m * k, k * n)
     assert repeats >= 1 and remainder == 0
     regs, memory, matrix, accum = {'x0': 0}, {}, {}, {}

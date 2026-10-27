@@ -2,7 +2,7 @@
   "schema": "atlas.model-platform.v1",
   "name": "EE290GenericIOSimConfig",
   "scope": "EE290 VCS software memory contract; no FPGA bitstream or FireSim AGFI",
-  "soc_config_source": "EE290 generic-I/O simulation software memory-map contract",
+  "soc_config_source": "generators/chipyard/src/main/scala/config/EE290Configs.scala::EE290GenericIOSimConfig",
   "bitstream_identity": null,
   "firesim_agfi": null,
   "vmem_base": 536870912,

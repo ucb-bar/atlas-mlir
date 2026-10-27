@@ -8,63 +8,29 @@ import zipfile
 
 
 _TRAFFIC_REUSE_MODULES = {
-    (128, 768, 768): "atlas_program_reuse_resident",
-    (128, 2048, 2048): "atlas_program_reuse_tiny",
-    (128, 3072, 768): "atlas_program_reuse_stream",
-    (128, 5632, 1024): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 2048): "atlas_program_reuse_tiny_breadth",
-    (224, 2304, 256): "atlas_program_reuse_blocked",
-    (64, 4608, 512): "atlas_program_reuse_blocked",
-    (800, 1152, 128): "atlas_program_reuse_blocked",
-    (224, 256, 1024): "atlas_program_reuse_blocked",
-    (3136, 576, 64): "atlas_program_reuse_blocked",
-    (3136, 64, 256): "atlas_program_reuse_blocked",
-    (224, 1024, 256): "atlas_program_reuse_blocked",
-    (800, 128, 512): "atlas_program_reuse_blocked",
-    (64, 512, 2048): "atlas_program_reuse_blocked",
-    (800, 512, 128): "atlas_program_reuse_blocked",
-    (12544, 160, 64): "atlas_program_reuse_blocked",
-    (64, 2048, 512): "atlas_program_reuse_blocked",
-    (64, 1024, 2048): "atlas_program_reuse_blocked",
-    (224, 512, 1024): "atlas_program_reuse_blocked",
-    (224, 1024, 512): "atlas_program_reuse_blocked",
-    (800, 256, 512): "atlas_program_reuse_blocked",
-    (3136, 256, 64): "atlas_program_reuse_blocked",
-    (3136, 256, 128): "atlas_program_reuse_blocked",
-    (800, 512, 256): "atlas_program_reuse_blocked",
-    (3136, 64, 64): "atlas_program_reuse_blocked",
-    (32, 2048, 1024): "atlas_program_reuse_tiny_breadth",
-    (64, 320, 320): "atlas_program_reuse_blocked",
-    (128, 320, 320): "atlas_program_reuse_blocked",
-    (64, 32, 736): "atlas_program_reuse_blocked",
-    (32, 32, 960): "atlas_program_reuse_blocked",
-    (128, 768, 3072): "atlas_program_reuse_blocked",
-    (64, 736, 2048): "atlas_program_reuse_blocked",
-    (64, 2048, 736): "atlas_program_reuse_blocked",
-    (128, 960, 2560): "atlas_program_reuse_blocked",
-    (128, 2560, 960): "atlas_program_reuse_blocked",
-    (64, 960, 736): "atlas_program_reuse_blocked",
-    (64, 736, 960): "atlas_program_reuse_blocked",
-    (64, 736, 320): "atlas_program_reuse_blocked",
-    (64, 960, 2560): "atlas_program_reuse_blocked",
-    (128, 960, 960): "atlas_program_reuse_blocked",
-    (64, 2560, 960): "atlas_program_reuse_blocked",
-    (64, 960, 960): "atlas_program_reuse_blocked",
-    (128, 960, 320): "atlas_program_reuse_blocked",
-    (64, 1440, 736): "atlas_program_reuse_blocked",
-    (64, 960, 320): "atlas_program_reuse_blocked",
-    (64, 736, 736): "atlas_program_reuse_blocked",
-    (192, 960, 320): "atlas_program_reuse_blocked",
-    (192, 960, 960): "atlas_program_reuse_blocked",
-    (192, 960, 2560): "atlas_program_reuse_blocked",
-    (192, 2560, 960): "atlas_program_reuse_blocked",
-    (128, 2048, 1536): "atlas_program_reuse_tiny",
-    (32, 5632, 1024): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 1536): "atlas_program_reuse_tiny_breadth",
-    (128, 2048, 256): "atlas_program_reuse_tiny",
-    (32, 2048, 256): "atlas_program_reuse_tiny_breadth",
-    (32, 2048, 1280): "atlas_program_reuse_tiny_breadth",
-    (128, 2048, 1280): "atlas_program_reuse_tiny",
+    shape: "atlas_program_reuse_" + recipe
+    for recipe, shapes in (
+        ("resident", ((128, 768, 768),)),
+        ("tiny", (
+            (128, 2048, 2048), (128, 2048, 1536), (128, 2048, 256), (128, 2048, 1280),
+        )),
+        ("stream", ((128, 3072, 768),)),
+        ("tiny_breadth", (
+            (128, 5632, 1024), (32, 2048, 2048), (32, 2048, 1024), (32, 5632, 1024), (32, 2048, 1536),
+            (32, 2048, 256), (32, 2048, 1280),
+        )),
+        ("blocked", (
+            (224, 2304, 256), (64, 4608, 512), (800, 1152, 128), (224, 256, 1024), (3136, 576, 64),
+            (3136, 64, 256), (224, 1024, 256), (800, 128, 512), (64, 512, 2048), (800, 512, 128), (12544, 160, 64),
+            (64, 2048, 512), (64, 1024, 2048), (224, 512, 1024), (224, 1024, 512), (800, 256, 512),
+            (3136, 256, 64), (3136, 256, 128), (800, 512, 256), (3136, 64, 64), (64, 320, 320), (128, 320, 320),
+            (64, 32, 736), (32, 32, 960), (128, 768, 3072), (64, 736, 2048), (64, 2048, 736), (128, 960, 2560),
+            (128, 2560, 960), (64, 960, 736), (64, 736, 960), (64, 736, 320), (64, 960, 2560), (128, 960, 960),
+            (64, 2560, 960), (64, 960, 960), (128, 960, 320), (64, 1440, 736), (64, 960, 320), (64, 736, 736),
+            (192, 960, 320), (192, 960, 960), (192, 960, 2560), (192, 2560, 960),
+        )),
+    )
+    for shape in shapes
 }
 
 
@@ -184,4 +150,5 @@ def code_sources(*, traffic_reuse=False):
     names = ("atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py")
     if _reuse_enabled(traffic_reuse):
         names += tuple(module + ".py" for module in dict.fromkeys(_TRAFFIC_REUSE_MODULES.values()))
+        names += ("atlas_program_reuse_common.py",)
     return {name: sha256(Path(__file__).with_name(name)) for name in names}

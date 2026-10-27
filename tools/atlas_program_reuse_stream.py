@@ -5,10 +5,9 @@ Each accumulator finishes its ordered full K reduction before its sole pop.
 The delays are the existing conservative atlas_program.py instruction recipe.
 """
 
-from atlas_program_reuse_blocked import load_b_column
+from atlas_program_reuse_common import load_b_column, store_output
 
 BANK_BYTES = 256 * 1024
-TILE_BYTES = 1024
 
 
 def layout(m, k, n):
@@ -70,11 +69,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                           "delay 96"]
             lines += ["addi x6, x6, 256"]
         for acc in range(rows):
-            lines += [f"vmatpop.bf16.acc.mxu0 m2, acc{acc}", "delay 34"]
-            if rescale_exponent is not None:
-                lines += ["vmul.bf16 m2, m2, m4", "delay 66"]
-            lines += ["vstore m2, 0(x3)", "delay 34", "vstore m3, 0(x9)", "delay 34",
-                      "dma.store x22, x3, x8, ch0", "dma.wait ch0", "add x22, x22, x16"]
+            lines += store_output(acc, 22, rescale_exponent) + ["add x22, x22, x16"]
     lines += ["add x12, x12, x8", "addi x17, x17, -1", "beq x17, x0, finished", "nop",
               "jal x0, columns_loop", "nop", "finished:", "nop", "ecall"]
     return "\n".join(lines) + "\n"

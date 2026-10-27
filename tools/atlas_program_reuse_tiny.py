@@ -1,4 +1,4 @@
-"""Opt-in Tiny 128x2048xN compulsory-DMA assembly prototype.
+"""Opt-in Tiny 128x2048xN compulsory-DMA reuse recipe.
 
 VMEM operands are four-byte words, while DRAM operands are bytes. A occupies
 bank 1 exactly; bank 0 holds a 64-KiB transposed B column panel and 2-KiB
@@ -7,7 +7,7 @@ All spacing is the conservative established atlas_program schedule: load /
 store / pop 34, transpose / BF16 arithmetic 66, weight push 32, compute 96.
 """
 
-from atlas_program_reuse_blocked import load_b_column
+from atlas_program_reuse_common import load_b_column, store_output
 
 
 SHAPES = ((128, 2048, 2048), (128, 2048, 256), (128, 2048, 1280), (128, 2048, 1536))
@@ -45,11 +45,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                 "addi x4, x4, 256", "addi x7, x7, 256", "addi x6, x6, 256",
             ]
         for acc in range(2):
-            lines += [f"vmatpop.bf16.acc.mxu0 m2, acc{acc}", "delay 34"]
-            if rescale_exponent is not None:
-                lines += ["vmul.bf16 m2, m2, m4", "delay 66"]
-            lines += ["vstore m2, 0(x3)", "delay 34", "vstore m3, 0(x9)", "delay 34",
-                      "dma.store x23, x3, x8, ch0", "dma.wait ch0", "add x23, x23, x22"]
+            lines += store_output(acc, 23, rescale_exponent) + ["add x23, x23, x22"]
     lines += ["add x12, x12, x8", "addi x14, x14, -1", "beq x14, x0, finished", "nop",
               "jal x0, columns_loop", "nop", "finished:", "nop", "ecall"]
     return "\n".join(lines) + "\n"

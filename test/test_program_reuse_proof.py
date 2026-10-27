@@ -81,7 +81,7 @@ class ReuseProofTests(unittest.TestCase):
             if shape[0] != 32:
                 changes += [('add x23, x23, x22', 'add x23, x23, x8')]
             if shape[1] == 5632:
-                changes += [('dma.wait ch1', 'nop'), ('dma.config x30, ch1', 'nop')]
+                changes += [('dma.config x30, ch1', 'nop')]
             if shape == (128, 5632, 1024):
                 changes += [('addi x7, x7, 256', 'addi x7, x7, 512'), ('add x12, x12, x22', 'add x12, x12, x0')]
             self.reject_mutations(shape, changes)

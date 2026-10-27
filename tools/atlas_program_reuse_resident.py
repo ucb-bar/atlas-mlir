@@ -11,7 +11,7 @@ atlas_program.py: VLOAD/VSTORE/POP 34, transpose/VLI/MUL 66, weight push 32,
 and MXU0 matmul 96. They are not fitted to a benchmark or memory profile.
 """
 
-from atlas_program_reuse_blocked import load_b_column
+from atlas_program_reuse_common import load_b_column, store_output
 
 BANK_BYTES = 256 * 1024
 RESIDENT_BYTE_BASE = BANK_BYTES
@@ -65,7 +65,8 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
         f"li x14, {n // 32}", f"li x15, {m * k}",
         f"li x16, {a_row_words}", f"li x17, {out_row_bytes}",
         f"li x18, {2 * a_row_words}", f"li x23, {output_offset}",
-        f"li x26, {2 * out_row_bytes}", "li x30, 1", "dma.config x30, ch0", *(["dma.config x30, ch1"] if k > 32 else []),
+        f"li x26, {2 * out_row_bytes}", "li x30, 1", "dma.config x30, ch0",
+        *(["dma.config x30, ch1"] if k > 32 else []),
         # Exactly one VLI m4 preserves the existing 0x25f rescale patch protocol.
         # m4/m5 remain dedicated scale registers throughout the invocation.
         f"vli.all m4, {(rescale_exponent + 127) << 7}", "delay 66",
@@ -93,12 +94,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
     for acc in (0, 1):
         # Pops are deliberately sequential: m2/m3 are drained to DRAM before
         # reusing them for the other accumulator. m4/m5 never overlap a pop.
-        lines += [
-            f"vmatpop.bf16.acc.mxu0 m2, acc{acc}", "delay 34",
-            "vmul.bf16 m2, m2, m4", "delay 66",
-            "vstore m2, 0(x3)", "delay 34", "vstore m3, 0(x9)", "delay 34",
-            "dma.store x12, x3, x8, ch0", "dma.wait ch0",
-        ]
+        lines += store_output(acc, 12, rescale_exponent)
         if acc == 0:
             lines += ["add x12, x12, x17"]
     lines += [

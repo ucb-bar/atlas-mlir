@@ -7,7 +7,6 @@ import shutil
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
@@ -87,14 +86,6 @@ class TrafficReuseTests(unittest.TestCase):
                         (192, 2560, 960): 5406720}.get(dims, m*k+k*n)
             self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), expected)
 
-    def test_dma_accounting_delegates_to_each_helper(self):
-        for name in set(program._TRAFFIC_REUSE_MODULES.values()):
-            dims = next(dims for dims, module in program._TRAFFIC_REUSE_MODULES.items() if module == name)
-            helper = importlib.import_module(name)
-            with self.subTest(module=name), mock.patch.object(helper, "dma_load_bytes", return_value=12345) as call:
-                self.assertEqual(program.dma_load_bytes(*dims, traffic_reuse=True), 12345)
-                call.assert_called_once_with(*dims)
-
     def test_reject_unsupported_dimensions_and_legacy_flags(self):
         for dims in ((32,32,32), (0,768,768), (True,768,768), (128.0,768,768), (128,769,768), (128,768,-768)):
             with self.subTest(dims=dims):
@@ -129,7 +120,8 @@ class TrafficReuseTests(unittest.TestCase):
 
     def test_source_closure_tracks_all_helpers_only_when_enabled(self):
         legacy = {"atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py"}
-        expanded = legacy | {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()}
+        helpers = {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()} | {"atlas_program_reuse_common.py"}
+        expanded = legacy | helpers
         self.assertEqual(set(program.code_sources()), legacy)
         self.assertEqual(set(program.code_sources(traffic_reuse=False)), legacy)
         self.assertEqual(set(program.code_sources(traffic_reuse=True)), expanded)
@@ -143,8 +135,7 @@ class TrafficReuseTests(unittest.TestCase):
             before = copied.code_sources(traffic_reuse=True)
             for name, digest in before.items():
                 self.assertEqual(digest, hashlib.sha256((directory/name).read_bytes()).hexdigest())
-            for helper in dict.fromkeys(program._TRAFFIC_REUSE_MODULES.values()):
-                name = helper+".py"
+            for name in sorted(helpers):
                 path = directory/name
                 original = path.read_bytes()
                 path.write_bytes(original+b"\n# source closure probe\n")

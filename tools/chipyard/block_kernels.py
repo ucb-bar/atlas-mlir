@@ -14,8 +14,7 @@ import sys
 
 from run_sim import add_simulator_arguments, positive, run_simulator, safe_path
 
-sys.path.insert(0, str(safe_path(Path(__file__).absolute().parents[1] / "host_iss")))
-import full_bundle as provider
+sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 from atlas_host_build import elf_sections, wrap
 from atlas_tooling import Admission, sha, write_json
 
@@ -40,6 +39,23 @@ def integer(value):
 
 def full_bundle(root, workload):
     """Use the existing checksum/image provider without importing a model."""
+    directory = safe_path(ROOT / "tools/host_iss")
+    sys.path.insert(0, str(directory))
+    modules = {name: ROOT / "tools" / (name + ".py") for name in
+               ("atlas_host_layout", "atlas_path_guard", "atlas_tooling")}
+    modules.update({name: directory / (name + ".py") for name in
+                    ("full_bundle", "bundle", "block_bundle")})
+    modules["run_sim"] = ROOT / "tools/chipyard/run_sim.py"
+
+    def check_imports():
+        for name, expected in modules.items():
+            module = sys.modules.get(name)
+            if module is not None and safe_path(module.__file__) != expected:
+                raise ValueError("full bundle helper imported from another source: " + name)
+
+    check_imports()
+    import full_bundle as provider
+    check_imports()
     layout = sys.modules["atlas_host_layout"]
     if (safe_path(layout.HEADER) != ROOT / "runtime/atlas_host_layout.h"
             or sha(safe_path(layout.HEADER).read_bytes()) != layout.HEADER_SHA256):

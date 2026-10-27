@@ -11,6 +11,8 @@ Start with the [repository README](../README.md) for the build, and the
 | [PACK relayout loop](pack-relayout-loop.md) | The software-pipelined copy that repairs PACK's row layout, and the measured effect. |
 | [Native Merlin binding](native-merlin-binding.md) | Compiling graphs through Merlin: supported graphs, CLI, outputs, precision policies, and limits. |
 | [Host launch](host-launch.md) | Host C runtime, memory map, mailbox, cache hooks, reset entry, and board builds. |
+| [Traffic reuse](traffic-reuse.md) | Opt-in DMA reuse recipes, admission and validation. |
+| [Host BF16 bit copies](host-bit-copies.md) | Exact BF16 conversion and freestanding host checks. |
 | [Model tile runner](model-tile-runner.md) | Source-bound model arithmetic, contraction providers and workload execution. |
 | [Contraction capsule](contraction-capsule.md) | Package matching recorded model and standalone RTL evidence. |
 | [Complete ResNet50 host](resnet-full-host.md) | Generate templates, replay the graph, build an ELF and prepare RTL execution. |

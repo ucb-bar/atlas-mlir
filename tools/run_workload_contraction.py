@@ -73,6 +73,11 @@ def code_sources():
     names = ("run_workload_contraction.py", "atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py",
         "atlas_vector_arithmetic.py")
     expected = Path(__file__).absolute().parent
+    for name in names:
+        module = sys.modules.get(Path(name).stem)
+        filename = __file__ if name == "run_workload_contraction.py" else getattr(module, "__file__", None)
+        if filename is None or safe_path(filename) != safe_path(expected / name):
+            raise ValueError("Workload helper imported outside bound producer source: " + name)
     return {name: sha256(expected / name) for name in names}
 
 
