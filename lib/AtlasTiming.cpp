@@ -8,6 +8,104 @@
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
 
+namespace {
+
+// Per-unit timing in cycles after issue. defUseLatency is the earliest issue gap for a consumer of the whole result;
+// a CycleWindow is an inclusive [from, to] reservation of a unit, port or bank.
+constexpr int kDefaultUnitCapacity = 1;
+
+struct CycleWindow {
+  int from, to;
+};
+struct RowStream {
+  int firstAge;
+  int secondAge = 0;
+  int step = 1;
+};
+
+// ALU and SELI write the scalar port in the issue cycle.
+struct ScalarTiming {
+  int defUseLatency;
+  CycleWindow resourceOccupancy;
+};
+constexpr ScalarTiming kScalarTiming = {1, {0, 0}};
+
+// Scalar load and store; only loads use the load path and the scalar write port.
+struct ScalarLsuTiming {
+  int sourceReadAge, memoryAccessAge;
+  CycleWindow bank;
+  int loadDefUseLatency;
+  CycleWindow loadPath, loadWriteback;
+};
+constexpr ScalarLsuTiming kScalarLsuTiming = {0, 1, {1, 1}, 4, {0, 2}, {3, 3}};
+
+// VLOAD and VSTORE. resultWriteAge is the first destination row.
+struct VloadTiming {
+  int memoryAccessAge, resultWriteAge, defUseLatency;
+  CycleWindow path, bank;
+};
+struct VstoreTiming {
+  int sourceReadAge, memoryAccessAge, sourceReadRelease;
+  CycleWindow path, bank;
+};
+constexpr VloadTiming kVloadTiming = {1, 3, 35, {0, 34}, {1, 32}};
+constexpr VstoreTiming kVstoreTiming = {1, 3, 34, {0, 34}, {3, 34}};
+
+// MXU0 is the systolic array, MXU1 the inner-product trees. A matmul writes accumulator rows from accumulatorRow0 - 1
+// for 32 cycles and holds its in-flight slot until the last of those writes. weightOverwriteAfterCompute is the
+// sequencer's earliest weight push into a slot that a matmul is still reading.
+struct MxuTiming {
+  struct {
+    int accumulatorRow0, poppedMreg;
+  } defUseLatency;
+  int weightReadAge, sourceReadRelease, computeCapacity, weightOverwriteAfterCompute;
+  struct {
+    CycleWindow sourcePorts, resultPorts, pushStream, accumulatorRead;
+  } resourceOccupancy;
+};
+constexpr MxuTiming kMxuTiming[] = {
+    // {accumulatorRow0, poppedMreg}, weightReadAge, sourceReadRelease, computeCapacity, weightOverwriteAfterCompute,
+    // {sourcePorts, resultPorts, pushStream, accumulatorRead}
+    {{64, 33}, 1, 32, 3, 63, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}}, // MXU0
+    {{4, 33}, 1, 32, 2, 32, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}},  // MXU1
+};
+constexpr int kMxuSourceReadAge = 0, kMxuPushResultAge = 1, kMxuPopResultAge = 1;
+// MXU1's sequencer also blocks a weight or accumulator slot while a push into it is still writing.
+constexpr int kMxu1WeightUseAfterPush = 32, kMxu1AccumulatorUseAfterPush = 33;
+
+// VPU. An instruction holds its issue slot through its last destination write, one cycle before defUseLatency
+// (npu_model vpu.py issue_cycles).
+struct VpuTiming {
+  RowStream sourceReads, resultWrites;
+  int sourceReadRelease, defUseLatency;
+};
+constexpr VpuTiming kVpuElementwiseTiming = {{0, 32}, {2, 34}, 63, 66};
+constexpr VpuTiming kVpuPackTiming = {{0, 32}, {3, 0, 2}, 63, 66};
+constexpr VpuTiming kVpuUnpackTiming = {{0}, {3, 35}, 31, 67};
+constexpr VpuTiming kVpuRowSumTiming = {{0, 0}, {7, 7}, 31, 39};
+constexpr VpuTiming kVpuRowMinMaxTiming = {{0, 0}, {2, 2}, 31, 34};
+constexpr VpuTiming kVpuColReduceTiming = {{0, 32}, {66, 98}, 127, 130};
+constexpr VpuTiming kVpuLoadImmPairTiming = {{0}, {1, 33}, 0, 65};
+constexpr VpuTiming kVpuLoadImmSingleTiming = {{0}, {1}, 0, 33};
+constexpr int kVpuColReducePassInterval = 64;
+constexpr unsigned kVpuIssueSlots = 2;
+
+// XLU transpose: 32-row fill, transpose, 32-row result stream.
+struct XluTiming {
+  int sourceReadAge, resultWriteAge, sourceReadRelease, defUseLatency;
+  CycleWindow resourceOccupancy;
+};
+constexpr XluTiming kXluTiming = {1, 34, 33, 66, {0, 65}};
+
+// DMA cost calibrated on npu_model 337e9f2, not an RTL latency. For 1 KiB the formula gives 781 cycles to load and
+// 724 to store; npu_model measured 781 and 723.
+struct DmaTiming {
+  long long coreMHz, readPeakMBps, writePeakMBps, startCycles, beatBytes;
+};
+constexpr DmaTiming kDmaTiming = {500, 682, 738, 30, 32};
+
+} // namespace
+
 static std::vector<OpInfo> buildTable() {
   std::vector<OpInfo> t;
   auto add = [&](const std::string &name, const char *operands, OpClass c,
@@ -219,20 +317,16 @@ void mlir::atlas::timing::applyScalar(const Instr &in, RegValues &regs) {
 }
 
 int mlir::atlas::timing::dmaTransferCycles(long long bytes, bool store) {
-  // The curves' peak bandwidths at the 500 MHz core clock they were measured
-  // with, and the start of an unloaded transfer; calibrated end to end on
-  // npu_model 337e9f2 (1 KiB: 781 cycles to load, 723 to store).
-  constexpr long long kCoreMHz = 500, kReadPeakMBps = 682, kWritePeakMBps = 738;
-  constexpr long long kStartCycles = 30, kBeatBytes = 32;
-  long long beats = std::max(1LL, (bytes + kBeatBytes - 1) / kBeatBytes);
-  long long peak = store ? kWritePeakMBps : kReadPeakMBps;
-  return static_cast<int>(kStartCycles + (beats * kBeatBytes * kCoreMHz + peak - 1) / peak);
+  const DmaTiming &t = kDmaTiming;
+  long long beats = std::max(1LL, (bytes + t.beatBytes - 1) / t.beatBytes);
+  long long peak = store ? t.writePeakMBps : t.readPeakMBps;
+  return static_cast<int>(t.startCycles + (beats * t.beatBytes * t.coreMHz + peak - 1) / peak);
 }
 
 int mlir::atlas::timing::unitCapacity(Unit u, int index) {
   if (u == Unit::MxuCompute)
-    return index == 0 ? 3 : 2;
-  return 1;
+    return kMxuTiming[index == 0 ? 0 : 1].computeCapacity;
+  return kDefaultUnitCapacity;
 }
 
 const char *mlir::atlas::timing::unitName(Unit u) {
@@ -313,6 +407,7 @@ struct Builder {
   void hold(Unit u, int index, int from, int to, int alt = -1) {
     f.holds.push_back({u, index, from, to, alt});
   }
+  void hold(Unit u, int index, CycleWindow w, int alt = -1) { hold(u, index, w.from, w.to, alt); }
   void needEven(int reg, const char *what) {
     if (reg & 1)
       f.error = std::string(what) + " must name an even register (m" +
@@ -348,6 +443,7 @@ struct Builder {
         hold(Unit::VmemBank, b, from, to);
     }
   }
+  void bankHold(std::optional<long long> byteAddr, CycleWindow w) { bankHold(byteAddr, w.from, w.to); }
 };
 
 std::optional<long long> reg(const RegValues &regs, int r) {
@@ -383,9 +479,9 @@ void scalarRegs(Builder &b, const Instr &in) {
   if (hasOperand(op, "x2"))
     b.x(in.rs2, false, 0);
   if (hasOperand(op, "xd")) {
-    b.x(in.rd, true, 0);
+    b.x(in.rd, true, kScalarTiming.defUseLatency - 1);
     if (in.rd != 0)
-      b.hold(Unit::ScalarWriteback, 0, 0, 0);
+      b.hold(Unit::ScalarWriteback, 0, kScalarTiming.resourceOccupancy);
   }
 }
 
@@ -409,7 +505,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     return b.f;
   }
   int mxu = op.mxu;
-  int cf = mxu == 0 ? 63 : 3; // age of a matmul's first accumulator write
+  const MxuTiming &mt = kMxuTiming[mxu == 0 ? 0 : 1];
+  const auto &occ = mt.resourceOccupancy;
 
   switch (op.opClass) {
   case OpClass::Alu:
@@ -424,30 +521,32 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
   case OpClass::DmaWait:
     break;
   case OpClass::ScaleImm:
-    b.e(in.rd, true, 0);
-    b.hold(Unit::ScalarWriteback, 0, 0, 0);
+    b.e(in.rd, true, kScalarTiming.defUseLatency - 1);
+    b.hold(Unit::ScalarWriteback, 0, kScalarTiming.resourceOccupancy);
     break;
 
   case OpClass::ScalarLoad:
   case OpClass::ScaleLoad: {
+    const ScalarLsuTiming &t = kScalarLsuTiming;
     ScalarAccess access = scalarAccess(in, regs);
-    b.x(in.rs1, false, 0);
-    b.vmem(access.first, access.bytes, false, 1, 1);
+    b.x(in.rs1, false, t.sourceReadAge);
+    b.vmem(access.first, access.bytes, false, t.memoryAccessAge, 1);
     if (op.opClass == OpClass::ScaleLoad)
-      b.e(in.rd, true, 3);
+      b.e(in.rd, true, t.loadDefUseLatency - 1);
     else
-      b.x(in.rd, true, 3);
-    b.hold(Unit::ScalarLoad, 0, 0, 2);
-    b.hold(Unit::ScalarWriteback, 0, 3, 3);
-    b.bankHold(access.first, 1, 1);
+      b.x(in.rd, true, t.loadDefUseLatency - 1);
+    b.hold(Unit::ScalarLoad, 0, t.loadPath);
+    b.hold(Unit::ScalarWriteback, 0, t.loadWriteback);
+    b.bankHold(access.first, t.bank);
     break;
   }
   case OpClass::ScalarStore: {
+    const ScalarLsuTiming &t = kScalarLsuTiming;
     ScalarAccess access = scalarAccess(in, regs);
-    b.x(in.rs1, false, 0);
-    b.x(in.rs2, false, 0);
-    b.vmem(access.first, access.bytes, true, 1, 1);
-    b.bankHold(access.first, 1, 1);
+    b.x(in.rs1, false, t.sourceReadAge);
+    b.x(in.rs2, false, t.sourceReadAge);
+    b.vmem(access.first, access.bytes, true, t.memoryAccessAge, 1);
+    b.bankHold(access.first, t.bank);
     break;
   }
   case OpClass::VLoad:
@@ -460,175 +559,191 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
           "vload/vstore address must be 1 KiB aligned inside one VMEM bank";
     b.x(in.rs1, false, 0);
     if (load) {
-      b.vmem(addr, kAtlasRegisterBytes, false, 1, 1);
-      b.mrows(in.rd, true, 3);
+      const VloadTiming &t = kVloadTiming;
+      b.vmem(addr, kAtlasRegisterBytes, false, t.memoryAccessAge, 1);
+      b.mrows(in.rd, true, t.resultWriteAge);
       b.f.mregWrites = {in.rd};
-      b.f.writeRelease = 34;
+      b.f.writeRelease = t.defUseLatency - 1;
       b.f.writeDuringRead = true;
-      b.hold(Unit::VloadPath, 0, 0, 34);
-      b.bankHold(addr, 1, 32);
+      b.hold(Unit::VloadPath, 0, t.path);
+      b.bankHold(addr, t.bank);
     } else {
-      b.mrows(in.rd, false, 1);
-      b.vmem(addr, kAtlasRegisterBytes, true, 3, 1);
+      const VstoreTiming &t = kVstoreTiming;
+      b.mrows(in.rd, false, t.sourceReadAge);
+      b.vmem(addr, kAtlasRegisterBytes, true, t.memoryAccessAge, 1);
       b.f.mregReads = {in.rd};
-      b.f.readRelease = b.f.writeRelease = 34;
-      b.hold(Unit::VstorePath, 0, 0, 34);
-      b.bankHold(addr, 3, 34);
+      b.f.readRelease = b.f.writeRelease = t.sourceReadRelease;
+      b.hold(Unit::VstorePath, 0, t.path);
+      b.bankHold(addr, t.bank);
     }
     break;
   }
 
   case OpClass::WeightPush:
-    b.mrows(in.rs1, false, 0);
-    b.mxuRows(Res::Weight, mxu, in.rd, true, 1);
+    b.mrows(in.rs1, false, kMxuSourceReadAge);
+    b.mxuRows(Res::Weight, mxu, in.rd, true, kMxuPushResultAge);
     b.f.mregReads = {in.rs1};
-    b.f.readRelease = b.f.writeRelease = 32;
-    b.hold(Unit::MxuPort, mxu * 4 + 1, 0, 31, mxu * 4 + 0);
-    b.hold(Unit::MxuWeightStream, mxu, 1, 32);
+    b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
+    b.hold(Unit::MxuPort, mxu * 4 + 1, occ.sourcePorts, mxu * 4 + 0);
+    b.hold(Unit::MxuWeightStream, mxu, occ.pushStream);
     break;
   case OpClass::AccPushFp8:
   case OpClass::AccPushBf16: {
     bool pair = op.opClass == OpClass::AccPushBf16;
-    b.mrows(in.rs1, false, 0);
+    b.mrows(in.rs1, false, kMxuSourceReadAge);
     if (pair)
-      b.mrows(in.rs1 + 1, false, 0);
-    b.mxuRows(Res::Acc, mxu, in.rd, true, 1);
+      b.mrows(in.rs1 + 1, false, kMxuSourceReadAge);
+    b.mxuRows(Res::Acc, mxu, in.rd, true, kMxuPushResultAge);
     b.f.mregReads = pair ? std::vector<int>{in.rs1, in.rs1 + 1}
                          : std::vector<int>{in.rs1};
-    b.f.readRelease = b.f.writeRelease = 32;
+    b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
     if (pair) {
-      b.hold(Unit::MxuPort, mxu * 4 + 0, 0, 31);
-      b.hold(Unit::MxuPort, mxu * 4 + 1, 0, 31);
+      b.hold(Unit::MxuPort, mxu * 4 + 0, occ.sourcePorts);
+      b.hold(Unit::MxuPort, mxu * 4 + 1, occ.sourcePorts);
     } else {
-      b.hold(Unit::MxuPort, mxu * 4 + 1, 0, 31, mxu * 4 + 0);
+      b.hold(Unit::MxuPort, mxu * 4 + 1, occ.sourcePorts, mxu * 4 + 0);
     }
-    b.hold(Unit::MxuAccStream, mxu, 1, 32);
-    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, 1, 32);
+    b.hold(Unit::MxuAccStream, mxu, occ.pushStream);
+    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, occ.pushStream);
     break;
   }
   case OpClass::PopFp8:
   case OpClass::PopBf16: {
     bool pair = op.opClass == OpClass::PopBf16;
-    b.mxuRows(Res::Acc, mxu, in.rs2, false, 0);
+    b.mxuRows(Res::Acc, mxu, in.rs2, false, kMxuSourceReadAge);
     if (!pair)
-      b.e(in.rs1, false, 0);
-    b.mrows(in.rd, true, 1);
+      b.e(in.rs1, false, kMxuSourceReadAge);
+    b.mrows(in.rd, true, kMxuPopResultAge);
     if (pair)
-      b.mrows(in.rd + 1, true, 1);
+      b.mrows(in.rd + 1, true, kMxuPopResultAge);
     b.f.mregWrites = pair ? std::vector<int>{in.rd, in.rd + 1}
                           : std::vector<int>{in.rd};
-    b.f.readRelease = b.f.writeRelease = 32;
-    b.hold(Unit::MxuPort, mxu * 4 + 2, 0, 31);
+    b.f.readRelease = mt.sourceReadRelease;
+    b.f.writeRelease = mt.defUseLatency.poppedMreg - 1;
+    b.hold(Unit::MxuPort, mxu * 4 + 2, occ.resultPorts);
     if (pair)
-      b.hold(Unit::MxuPort, mxu * 4 + 3, 0, 31);
-    b.hold(Unit::MxuAccRead, mxu * 2 + in.rs2, 0, 31);
+      b.hold(Unit::MxuPort, mxu * 4 + 3, occ.resultPorts);
+    b.hold(Unit::MxuAccRead, mxu * 2 + in.rs2, occ.accumulatorRead);
     break;
   }
   case OpClass::MatMul:
-  case OpClass::MatMulAcc:
-    b.mrows(in.rs1, false, 0);
-    b.mxuRows(Res::Weight, mxu, in.rs2, false, 1);
+  case OpClass::MatMulAcc: {
+    CycleWindow accumulatorWrite = {mt.defUseLatency.accumulatorRow0 - 1, mt.defUseLatency.accumulatorRow0 + 30};
+    b.mrows(in.rs1, false, kMxuSourceReadAge);
+    b.mxuRows(Res::Weight, mxu, in.rs2, false, mt.weightReadAge);
     if (op.opClass == OpClass::MatMulAcc)
-      b.mxuRows(Res::Acc, mxu, in.rd, false, 0);
-    b.mxuRows(Res::Acc, mxu, in.rd, true, cf);
+      b.mxuRows(Res::Acc, mxu, in.rd, false, kMxuSourceReadAge);
+    b.mxuRows(Res::Acc, mxu, in.rd, true, accumulatorWrite.from);
     b.f.mregReads = {in.rs1};
-    b.f.readRelease = b.f.writeRelease = 32;
-    b.hold(Unit::MxuPort, mxu * 4 + 0, 0, 31);
-    b.hold(Unit::MxuCompute, mxu, 0, cf + 31);
+    b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
+    b.hold(Unit::MxuPort, mxu * 4 + 0, occ.sourcePorts);
+    b.hold(Unit::MxuCompute, mxu, 0, accumulatorWrite.to);
     if (op.opClass == OpClass::MatMulAcc)
-      b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, 0, 31);
-    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, cf, cf + 31);
+      b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, occ.accumulatorRead);
+    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, accumulatorWrite);
     break;
+  }
 
   case OpClass::VpuElementwise: {
+    const VpuTiming &t = kVpuElementwiseTiming;
     std::vector<int> sources = {in.rs1};
     if (op.twoInput)
       sources.push_back(in.rs2);
     for (int s : sources) {
       b.needEven(s, "BF16 source");
-      b.mrows(s, false, 0);
-      b.mrows(s + 1, false, 32);
+      b.mrows(s, false, t.sourceReads.firstAge);
+      b.mrows(s + 1, false, t.sourceReads.secondAge);
       b.f.mregReads.push_back(s);
       b.f.mregReads.push_back(s + 1);
     }
     b.needEven(in.rd, "BF16 destination");
-    b.mrows(in.rd, true, 2);
-    b.mrows(in.rd + 1, true, 34);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 63;
-    b.f.writeRelease = 65;
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
     break;
   }
-  case OpClass::VpuPack:
+  case OpClass::VpuPack: {
+    const VpuTiming &t = kVpuPackTiming;
     b.needEven(in.rs2, "BF16 source");
-    b.mrows(in.rs2, false, 0);
-    b.mrows(in.rs2 + 1, false, 32);
+    b.mrows(in.rs2, false, t.sourceReads.firstAge);
+    b.mrows(in.rs2 + 1, false, t.sourceReads.secondAge);
     b.e(in.rs1, false, 0);
-    b.mrows(in.rd, true, 3, 2);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
     b.f.mregReads = {in.rs2, in.rs2 + 1};
     b.f.mregWrites = {in.rd};
-    b.f.readRelease = 63;
-    b.f.writeRelease = 65;
-    break;
-  case OpClass::VpuUnpack:
-    b.needEven(in.rd, "BF16 destination");
-    b.mrows(in.rs2, false, 0);
-    b.e(in.rs1, false, 0);
-    b.mrows(in.rd, true, 3);
-    b.mrows(in.rd + 1, true, 35);
-    b.f.mregReads = {in.rs2};
-    b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 31;
-    b.f.writeRelease = 66;
-    break;
-  case OpClass::VpuRowReduce: {
-    int lag = op.name == "vredsum.row.bf16" ? 7 : 2;
-    b.needEven(in.rs1, "BF16 source");
-    b.needEven(in.rd, "BF16 destination");
-    b.mrows(in.rs1, false, 0);
-    b.mrows(in.rs1 + 1, false, 0);
-    b.mrows(in.rd, true, lag);
-    b.mrows(in.rd + 1, true, lag);
-    b.f.mregReads = {in.rs1, in.rs1 + 1};
-    b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 31;
-    b.f.writeRelease = 31 + lag;
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
     break;
   }
-  case OpClass::VpuColReduce:
+  case OpClass::VpuUnpack: {
+    const VpuTiming &t = kVpuUnpackTiming;
+    b.needEven(in.rd, "BF16 destination");
+    b.mrows(in.rs2, false, t.sourceReads.firstAge);
+    b.e(in.rs1, false, 0);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
+    b.f.mregReads = {in.rs2};
+    b.f.mregWrites = {in.rd, in.rd + 1};
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
+    break;
+  }
+  case OpClass::VpuRowReduce: {
+    const VpuTiming &t = op.name == "vredsum.row.bf16" ? kVpuRowSumTiming : kVpuRowMinMaxTiming;
+    b.needEven(in.rs1, "BF16 source");
+    b.needEven(in.rd, "BF16 destination");
+    b.mrows(in.rs1, false, t.sourceReads.firstAge);
+    b.mrows(in.rs1 + 1, false, t.sourceReads.secondAge);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
+    b.f.mregReads = {in.rs1, in.rs1 + 1};
+    b.f.mregWrites = {in.rd, in.rd + 1};
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
+    break;
+  }
+  case OpClass::VpuColReduce: {
+    const VpuTiming &t = kVpuColReduceTiming;
     b.needEven(in.rs1, "BF16 source");
     b.needEven(in.rd, "BF16 destination");
     for (int pass = 0; pass < 2; pass++) {
-      b.mrows(in.rs1, false, pass * 64);
-      b.mrows(in.rs1 + 1, false, pass * 64 + 32);
+      b.mrows(in.rs1, false, pass * kVpuColReducePassInterval + t.sourceReads.firstAge);
+      b.mrows(in.rs1 + 1, false, pass * kVpuColReducePassInterval + t.sourceReads.secondAge);
     }
-    b.mrows(in.rd, true, 66);
-    b.mrows(in.rd + 1, true, 98);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
     b.f.mregReads = {in.rs1, in.rs1 + 1};
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.readRelease = 127;
-    b.f.writeRelease = 129;
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
     break;
-  case OpClass::VpuLoadImmPair:
+  }
+  case OpClass::VpuLoadImmPair: {
+    const VpuTiming &t = kVpuLoadImmPairTiming;
     b.needEven(in.rd, "BF16 destination");
-    b.mrows(in.rd, true, 1);
-    b.mrows(in.rd + 1, true, 33);
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
     b.f.mregWrites = {in.rd, in.rd + 1};
-    b.f.writeRelease = 64;
+    b.f.writeRelease = t.defUseLatency - 1;
     break;
-  case OpClass::VpuLoadImmSingle:
-    b.mrows(in.rd, true, 1);
+  }
+  case OpClass::VpuLoadImmSingle: {
+    const VpuTiming &t = kVpuLoadImmSingleTiming;
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
     b.f.mregWrites = {in.rd};
-    b.f.writeRelease = 32;
+    b.f.writeRelease = t.defUseLatency - 1;
     break;
+  }
   case OpClass::Transpose:
-    b.mrows(in.rs1, false, 1);
-    b.mrows(in.rd, true, 34);
+    b.mrows(in.rs1, false, kXluTiming.sourceReadAge);
+    b.mrows(in.rd, true, kXluTiming.resultWriteAge);
     b.f.mregReads = {in.rs1};
     b.f.mregWrites = {in.rd};
-    b.f.readRelease = 33;
-    b.f.writeRelease = 65;
-    b.hold(Unit::Xlu, 0, 0, 65);
+    b.f.readRelease = kXluTiming.sourceReadRelease;
+    b.f.writeRelease = kXluTiming.defUseLatency - 1;
+    b.hold(Unit::Xlu, 0, kXluTiming.resourceOccupancy);
     break;
 
   case OpClass::DmaLoad:
@@ -789,6 +904,7 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
   // npu_model mxu.py sequencer rules.
   if (A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
+    const MxuTiming &mt = kMxuTiming[m];
     std::string mx = "MXU" + std::to_string(m) + ": ";
     auto isCompute = [](const OpInfo &o) {
       return o.opClass == OpClass::MatMul || o.opClass == OpClass::MatMulAcc;
@@ -814,24 +930,24 @@ Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
     };
     bool bWeight = B.opClass == OpClass::WeightPush;
     if (isCompute(A) && !bWeight && accOf(a) == accOf(b))
-      consider(m == 0 ? 64 : 4, EdgeKind::Rule,
+      consider(mt.defUseLatency.accumulatorRow0, EdgeKind::Rule,
                mx + "wait until row 0 of the matmul on acc" +
                    std::to_string(accOf(a)) + " is written");
     if (m == 0 && isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-      consider(63, EdgeKind::Rule,
+      consider(mt.weightOverwriteAfterCompute, EdgeKind::Rule,
                mx + "weight slot still feeding the systolic array");
     if (m == 1) {
       bool aWeight = A.opClass == OpClass::WeightPush;
       if (aWeight && (bWeight || isCompute(B)) && slotOf(a) == slotOf(b))
-        consider(32, EdgeKind::Rule,
+        consider(kMxu1WeightUseAfterPush, EdgeKind::Rule,
                  mx + "weight push still active on w" +
                      std::to_string(slotOf(a)));
       if (isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-        consider(32, EdgeKind::Rule,
+        consider(mt.weightOverwriteAfterCompute, EdgeKind::Rule,
                  mx + "matmul still reading w" + std::to_string(slotOf(a)));
       if (isAccPush(A) && (isCompute(B) || B.opClass == OpClass::AccPushFp8) &&
           accOf(a) == accOf(b))
-        consider(33, EdgeKind::Rule,
+        consider(kMxu1AccumulatorUseAfterPush, EdgeKind::Rule,
                  mx + "accumulator push still active on acc" +
                      std::to_string(accOf(a)));
     }
@@ -1052,7 +1168,7 @@ std::string ReservationTable::conflict(const Instr &in, const Footprint &f,
   if (f.vpuLive > 0) {
     auto it = vpu_.find(cycle);
     if (it != vpu_.end()) {
-      if (it->second.size() >= 2)
+      if (it->second.size() >= kVpuIssueSlots)
         return "both VPU slots busy";
       for (const OpInfo *other : it->second)
         if (!vpuCanOverlap(*other, *in.op))
