@@ -1,7 +1,7 @@
 """Experimental captured connector: one A row panel resident, B tiles streamed.
 
-This helper is not public dispatch admission. Qualification requires both
-captured launches on the pinned model before changing the public allowlist.
+Both captured connector launches were qualified against complete DRAM on
+the pinned model before admission through the explicit traffic-reuse option.
 """
 from atlas_program_reuse_common import store_output
 

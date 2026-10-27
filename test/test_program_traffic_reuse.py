@@ -62,7 +62,7 @@ class TrafficReuseTests(unittest.TestCase):
                 with self.subTest(dims=dims, exponent=exponent):
                     args = (*dims, m*k+k*n+256, exponent)
                     self.assertEqual(program.assembly(*args, traffic_reuse=True), helper.assembly(*args))
-            expected = {(128,5632,1024): 12255232, (32,2048,2048): 4259840,
+            expected = {(64,12288,960): 24379392, (128,5632,1024): 12255232, (32,2048,2048): 4259840,
                         (224,2304,256): 1695744, (64,4608,512): 2654208,
                         (800,1152,128): 1216512,
                         (224, 256, 1024): 319488,
