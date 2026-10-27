@@ -63,7 +63,8 @@ class Device:
         expected = self.payload(prefix + "expected-bf16-tiles.bin")
         return dict(source=prefix + "program.S", original=prefix + "program.bin",
             initial=prefix + "initial-dram.bin", expected=prefix + "expected-bf16-tiles.bin",
-            output_offset=len(initial) - len(expected) - 256, dram_base=ATLAS_DRAM_BASE,
+            output_offset=len(initial) - len(expected) - 256,
+            dram_base=getattr(self.bundle, "placement", {}).get("arena_base", ATLAS_DRAM_BASE),
             requested_dma=receipt["requested_dma"])
 
     def payload(self, name):

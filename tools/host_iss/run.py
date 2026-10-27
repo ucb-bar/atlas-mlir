@@ -23,6 +23,7 @@ from elf_image import Image, mmio_sites
 from gdb_remote import Remote
 from model_device import Device, checked
 from bundle import Bundle, sha, verify_completion
+from result_lines import verify as verify_result_lines
 
 FULL_CONTRACTS = {"tiny-full": "tiny_full_contract"}
 
@@ -80,6 +81,11 @@ def run(args):
         qemu = checked(Path(args.qemu).absolute())
         assert sha(elf) == bundle.sums["host/host.elf"], "ELF differs from supplied bundle"
         image = Image(elf.read_bytes())
+        build = getattr(bundle, "build", {})
+        uart_profile = build.get("uart")
+        if uart_profile is not None and (uart_profile.get("kind"), uart_profile.get("base")) != (
+                "ns16550", 0x10000000):
+            raise ValueError("generic QEMU virt requires a full host built for NS16550 UART at 0x10000000")
         sites = mmio_sites(image)
         if contract is None:
             stop_sites = {pc: length for name in ("atlas_workload_main", "atlas_block_trap_report")
@@ -88,7 +94,8 @@ def run(args):
             contract.validate_bundle(bundle, image)
             stop_sites = contract.stop_sites(image)
         assert stop_sites, "completion WFI instruction missing"
-        helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py"]
+        helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py", "placement.py",
+                   "result_lines.py"]
         if contract is not None:
             helpers.append("block_bundle.py")
             if workload in FULL_CONTRACTS:
@@ -100,6 +107,8 @@ def run(args):
         for name in helpers:
             path = checked(Path(__file__).absolute().parent / name)
             pins[str(path)] = sha(path)
+        arena_helper = checked(Path(__file__).absolute().parents[1] / "chipyard/arena.py")
+        pins[str(arena_helper)] = sha(arena_helper)
         for path in (elf, qemu):
             pins[str(path)] = sha(path)
         pins[str(LAYOUT_HEADER)] = HEADER_SHA256
@@ -109,7 +118,7 @@ def run(args):
         model_root = checked(Path(args.model_root).absolute())
         sock = checked(out / "qemu.sock")
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single", "-bios", "none",
-            "-nodefaults", "-nographic", "-monitor", "none", "-serial", "none", "-S", "-gdb",
+            "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:uart.log", "-S", "-gdb",
             "unix:qemu.sock,server=on,wait=off", "-kernel", str(elf)]
         receipt.update(qemu_command=command, inputs_sha256=pins, bundle_sha256sums_sha256=bundle.checksums_sha256,
             mmio_sites=sites, completion_breakpoints=sorted(stop_sites))
@@ -163,6 +172,10 @@ def run(args):
                 raise TimeoutError("host graph wall cap")
             completion = (resnet_completion(remote, image, device, out) if contract is None
                 else contract.verify_completion(remote, image, device, bundle, out))
+            if uart_profile is not None:
+                uart_raw = (out / "uart.log").read_bytes()
+                completion["uart"] = dict(profile=uart_profile, sha256=digest(uart_raw),
+                    **verify_result_lines(uart_raw, build["result_name"], device.kernel_count))
             bundle.verify_bookends()
             device.verify_bookends()
             assert all(sha(Path(path)) == expected_hash for path, expected_hash in pins.items())

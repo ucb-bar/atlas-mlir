@@ -7,7 +7,8 @@ import struct
 import numpy as np
 
 from bundle import EPILOGUE
-from tiny_contract import stop_sites
+from tiny_contract import stop_sites as block_stop_sites
+from placement import arena_extent, placement
 
 CYCLE_CAP = 200_000_000
 MAGIC = 0x54494E5946554C4C
@@ -15,6 +16,22 @@ ROLES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.
          "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
 WIDTHS = (2048, 256, 256, 2048, 5632, 5632, 2048)
 CACHE_WORDS = 22 * 4 * 160 * 64
+
+
+def stop_sites(image):
+    if "tiny_full_trap_stop" not in image.symbols:
+        return block_stop_sites(image)
+    sites = {pc: length for pc, length, word in image.instructions("main")
+             if length == 4 and word == 0x10500073}
+    require(bool(sites), "Tiny full completion WFI missing")
+    trap = image.symbols["tiny_full_trap_stop"]
+    recorder = image.symbols["trap_entry"]
+    require(recorder["size"] > 0 and recorder["address"] <= trap["address"]
+            and trap["address"] + 2 <= recorder["address"] + recorder["size"]
+            and image.bytes_at(trap["address"], 2) == b"\x01\xa0"
+            and trap["address"] not in sites, "Tiny full named trap stop changed")
+    sites[trap["address"]] = 2
+    return sites
 
 
 def require(value, message):
@@ -72,6 +89,8 @@ def parameter_geometry():
 
 
 def validate_plan(data, provenance):
+    physical = placement(provenance)
+    require(placement(data) == physical, "Tiny full contract placement binding")
     count = data["decode_count"]
     expected = plan(count)
     require(data["schema"] == "atlas.tiny_full_contract.v1" and data["cycle_cap"] == CYCLE_CAP,
@@ -88,10 +107,11 @@ def validate_plan(data, provenance):
         m, k, n = geometry["physical_mkn"]
         load = (m*k*(n//32) + k*n if k*n <= 262144 else
                 m*k + k*n*(m//32) if m*k <= 262144 else (m//32)*(n//32)*(2*k//32*1024))
-        require(item["dram_base"] == 0x100000000 and item["output_offset"] == m*k+k*n+256
+        require(item["dram_base"] == physical["arena_base"] and item["output_offset"] == m*k+k*n+256
                 and item["total_dram_bytes"] == m*k+k*n+512+2*m*n
                 and item["requested_dma"] == {"load_bytes": load, "store_bytes": 2*m*n},
                 "Tiny full physical layout or DMA")
+        arena_extent(provenance, item["total_dram_bytes"])
         require(all(type(item[name]) is int and -126 <= item[name] <= 127
                     for name in ("A_scale", "B_scale", "rescale"))
                 and item["rescale"] == item["A_scale"] + item["B_scale"], "Tiny full scales")
@@ -172,10 +192,16 @@ def validate_bundle(bundle, image):
             and build["elf"]["sha256"] == digest(image.raw)
             and build["contract_sha256"] == bundle.provenance["contract_sha256"], "Tiny full build identity")
     require(bool(build["source_sha256"]), "Tiny full build source pins")
+    physical = placement(bundle.provenance)
+    require(placement(build) == physical, "Tiny full build placement binding")
+    arena = physical["arena_base"]
+    capacity = max(item["total_dram_bytes"] for item in data["kernels"])
     for segment in image.segments:
         require(segment["address"] == segment["physical"] and segment["address"] >= 0x80000000
-                and segment["address"] + segment["memory_bytes"] < 0x100000000,
-                "Tiny full ELF host/DMA separation")
+                and physical["dram_base"] <= segment["address"]
+                and segment["address"] + segment["memory_bytes"] <= physical["dram_base"] + physical["dram_bytes"]
+                and disjoint((segment["address"], segment["memory_bytes"]), (arena, capacity)),
+                "Tiny full ELF physical DRAM or host/DMA separation")
     for index, left in enumerate(image.segments):
         for right in image.segments[:index]:
             require(left["address"] + left["memory_bytes"] <= right["address"]

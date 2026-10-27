@@ -71,10 +71,18 @@ class Bundle(ChecksumBundle):
         provenance = json.loads(self.read("provenance.json"))
         if provenance.get("schema") != "atlas.full_resnet_bundle.v3" or provenance.get("kernel_count") != 54:
             raise ValueError("only the complete ResNet v3 development bundle is supported")
+        from placement import arena_extent, placement
+        self.placement = placement(provenance)
+        self.kernel_count = 54
         build = json.loads(self.read("host/build.json"))
+        self.build = build
         if (build.get("returncode") != 0 or build.get("source_bookends_equal") is not True or build.get("kernel_count") != 54
             or build.get("elf_sha256") != self.sums.get("host/host.elf")):
             raise ValueError("host build identity disagrees with bundle")
+        if "placement" in provenance or "placement" in build:
+            if placement(build) != self.placement:
+                raise ValueError("ResNet build placement disagrees with bundle")
+            arena_extent(provenance, build["dram_bytes"])
         for index in range(54):
             for name in ("receipt.json", "program.S", "program.bin", "initial-dram.bin", "expected-bf16-tiles.bin"):
                 if f"kernels/{index:02d}/model/{name}" not in self.sums:

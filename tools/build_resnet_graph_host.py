@@ -14,6 +14,7 @@ import subprocess
 from atlas_host_build import START, LINK, TEMPLATES, TEMPLATE_BYTES, audit_elf, validate_graph_program
 from atlas_host_layout import ATLAS_DRAM_BASE, HEADER as LAYOUT_HEADER, HEADER_SHA256
 from atlas_path_guard import checked
+from chipyard import result_transport
 
 for directory in ("chipyard", "host_iss"):
     sys.path.insert(0, str(Path(__file__).absolute().parent / directory))
@@ -23,6 +24,7 @@ from firesim_target import package as package_firesim
 HOST = r"""
 
 #include "assets.h"
+#include "atlas_result_transport.h"
 #include <stddef.h>
 #include <stdint.h>
 __attribute__((section(".tohost"), aligned(64))) volatile uint64_t tohost;
@@ -37,6 +39,8 @@ typedef struct {
 __attribute__((section(".handoff"), aligned(64))) volatile atlas_graph_mailbox atlas_workload_mailbox;
 __attribute__((aligned(64))) atlas_graph_device_context atlas_resnet_state;
 static atlas_host host;
+static atlas_result result_report;
+static atlas_result_uart result_uart;
 __attribute__((aligned(64))) static uint32_t program_buffer[ATLAS_GRAPH_PROGRAM_WORDS];
 __attribute__((aligned(64))) static float logits[1000];
 int atlas_resnet_graph_run(const float *, float *, void *,
@@ -55,6 +59,8 @@ void *memcpy(void *p, const void *q, size_t n) {
   return p;
 }
 static void finish(uint32_t result) {
+  if (!result && !atlas_result_pass(&result_report)) result = 3;
+  if (result && !result_report.failures) atlas_result_fail(&result_report, "host-result", result, 0);
   atlas_workload_mailbox.status = result;
   __asm__ volatile("fence iorw,iorw" ::: "memory");
   tohost = ((uint64_t)result << 1) | 1;
@@ -63,13 +69,27 @@ static void finish(uint32_t result) {
     __asm__ volatile("wfi");
 }
 void atlas_block_trap_report(uint64_t cause, uint64_t pc, uint64_t value) {
+  if (!result_report.putchar) {
+    atlas_result_uart_init(&result_uart);
+    atlas_result_begin(&result_report, atlas_result_uart_putchar, &result_uart, "resnet50-full", 54);
+  }
+  atlas_result_fail(&result_report, "trap-mcause", cause, 0);
   atlas_workload_mailbox.magic = 0x41544c53;
   atlas_workload_mailbox.trap_mcause = cause;
   atlas_workload_mailbox.trap_mepc = pc;
   atlas_workload_mailbox.trap_mtval = value;
   finish(0xff);
 }
+static int launch(void *context, unsigned index, const uint8_t *a, size_t a_bytes, int scale,
+                  uint8_t *out, size_t out_bytes) {
+  int result = atlas_resnet_graph_device(context, index, a, a_bytes, scale, out, out_bytes);
+  if (!result) atlas_result_progress(&result_report, atlas_resnet_state.completed, "contraction");
+  else atlas_result_fail(&result_report, "device-launch", result, 0);
+  return result;
+}
 void atlas_workload_main(void) {
+  atlas_result_uart_init(&result_uart);
+  atlas_result_begin(&result_report, atlas_result_uart_putchar, &result_uart, "resnet50-full", 54);
   atlas_workload_mailbox.magic = 0x41544c53;
   atlas_workload_mailbox.version = 3;
   atlas_workload_mailbox.status = UINT32_MAX;
@@ -87,9 +107,10 @@ void atlas_workload_main(void) {
                                         (atlas_host_memory){1, 0, 0});
   if (r != ATLAS_HOST_OK) {
     atlas_workload_mailbox.runtime_result = r;
+    atlas_result_fail(&result_report, "host-init", r, ATLAS_HOST_OK);
     finish(0xfe);
   }
-  int result = atlas_resnet_graph_run(graph_entry, logits, &atlas_resnet_state, atlas_resnet_graph_device);
+  int result = atlas_resnet_graph_run(graph_entry, logits, &atlas_resnet_state, launch);
   atlas_workload_mailbox.graph_result = (uint32_t)result;
   atlas_workload_mailbox.completed = atlas_resnet_state.completed;
   atlas_workload_mailbox.failing_index = atlas_resnet_state.failing_index;
@@ -102,8 +123,11 @@ void atlas_workload_main(void) {
     atlas_workload_mailbox.activation_scale[i] = atlas_resnet_state.activation_scale[i];
     atlas_workload_mailbox.rescale_exponent[i] = atlas_resnet_state.rescale_exponent[i];
   }
-  if (result || atlas_resnet_state.completed != 54)
+  if (result || atlas_resnet_state.completed != 54) {
+    if (result) atlas_result_fail(&result_report, "graph-result", result, 0);
+    atlas_result_check(&result_report, "launch-count", atlas_resnet_state.completed, 54);
     finish(1);
+  }
   for (unsigned i = 0; i < 1000; ++i) {
     union {
       float f;
@@ -111,6 +135,7 @@ void atlas_workload_main(void) {
     } v = {.f = logits[i]};
     if (v.u != graph_expected[i]) {
       atlas_workload_mailbox.first_bad_word = i;
+      atlas_result_fail(&result_report, "logit-word", v.u, graph_expected[i]);
       finish(2);
     }
   }
@@ -170,6 +195,7 @@ def main():
                         help="omit the startup BSS clear; only valid when the loader zero-fills memory (Chipyard LOADMEM)")
     parser.add_argument("--target", choices=("sim", "firesim"), default="sim")
     arena.add_arguments(parser)
+    result_transport.add_arguments(parser)
     args = parser.parse_args()
     arena_base = ATLAS_DRAM_BASE if args.arena_base is None else args.arena_base
     for value in vars(args).values():
@@ -234,14 +260,15 @@ def main():
         assets["graph_weight_" + str(i)] = weight
         rows.append(t)
     sources = ["atlas_host.c", "atlas_host.h", "atlas_host_layout.h", "atlas_resnet_graph_math.c", "atlas_numeric.h",
-        "atlas_resnet_graph_device.c", "atlas_resnet_graph_device.h"]
+        "atlas_resnet_graph_device.c", "atlas_resnet_graph_device.h", "atlas_result.h"]
     mathpath = args.atlas_root / "runtime/atlas_resnet_graph_math.c"
     if str(mathpath) not in gate["inputs_sha256"]:
         raise ValueError("math gate must bind current exact math source")
     for path in [args.clang, args.lld, Path(__file__).absolute(), Path(checked.__code__.co_filename).absolute(),
         Path(Admission.read.__code__.co_filename).absolute(), Path(audit_elf.__code__.co_filename).absolute(),
         Path(arena.__file__).absolute(), Path(arena.Image.__init__.__code__.co_filename).absolute(),
-        Path(package_firesim.__code__.co_filename).absolute()] + [args.atlas_root / "runtime" / name for name in sources]:
+        Path(package_firesim.__code__.co_filename).absolute(), Path(result_transport.__file__).absolute()
+        ] + [args.atlas_root / "runtime" / name for name in sources]:
         ad.read(path)
     for name, data in TEMPLATE_BYTES.items():
         ad.read(TEMPLATES / name, sha(data))
@@ -252,6 +279,7 @@ def main():
     if not args.dram_base <= arena_base <= args.dram_base + args.dram_bytes - dram:
         raise ValueError("DMA arena outside physical DRAM range")
     args.out.mkdir(parents=True)
+    uart = result_transport.write_config(args.out, args)
     snapshot = args.out / "runtime"
     snapshot.mkdir()
     for name in sources:
@@ -297,7 +325,8 @@ def main():
     (args.out / "assets.h").write_text("\n".join(declarations) + "\n")
     (args.out / "assets.c").write_text("\n".join(definitions) + "\n")
     generated = ([args.out / n for n in ("start.S", "link.ld", "host.c", "images.S", "assets.h",
-        "assets.c")] + [snapshot / n for n in sources] + [graphdir / "graph.c",
+        "assets.c", "atlas_result_transport.h", "result-transport.json")] + [snapshot / n for n in sources]
+        + [graphdir / "graph.c",
         graphdir / "constants.S"] + [graphdir / n for n in graph["params_sha256"]]
         + [args.out / (label + ".bin") for label in assets if not label.startswith("params_")])
     sourcepins = {str(path): sha(path.read_bytes()) for path in generated}
@@ -322,7 +351,8 @@ def main():
         "policy; no cohort quality equivalence claim"), "kernel_count": 54, "captured_successor_A_embedded": False,
         "dram_bytes": dram, "arena_base": arena_base,
         "placement": {"arena_base": arena_base, "dram_base": args.dram_base, "dram_bytes": args.dram_bytes},
-        "physical_dram": {"base": args.dram_base, "bytes": args.dram_bytes}, "target": args.target}
+        "physical_dram": {"base": args.dram_base, "bytes": args.dram_bytes}, "target": args.target,
+        "uart": uart, "result_name": "resnet50-full"}
     if not report["returncode"]:
         raw = (args.out / "host.elf").read_bytes()
         report["elf_sha256"] = sha(raw)
@@ -330,7 +360,7 @@ def main():
         report["physical_audit"] = arena.audit(args.out, args.dram_base, args.dram_bytes)
         if args.target == "firesim":
             report["firesim_contract"] = package_firesim(args.out, "atlas-resnet50-full",
-                args.dram_base, args.dram_bytes)
+                args.dram_base, args.dram_bytes, uart=uart)
     write_json(args.out / "build.json", report)
     print(json.dumps({key: report[key] for key in ("returncode", "source_bookends_equal", "kernel_count")}))
     raise SystemExit(report["returncode"])

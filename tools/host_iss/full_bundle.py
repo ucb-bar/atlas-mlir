@@ -8,6 +8,7 @@ import struct
 from atlas_host_layout import fp8_output_offset, ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
 from block_bundle import integer
 from bundle import ChecksumBundle
+from placement import arena_extent, placement
 
 
 class KernelAssets(ChecksumBundle):
@@ -27,6 +28,7 @@ class KernelAssets(ChecksumBundle):
                 or self.provenance.get("workload") != workload):
             raise ValueError("unsupported full-model bundle")
         self.workload = workload
+        self.placement = placement(self.provenance)
         self.kernel_count = integer(self.provenance.get("kernel_count"), 1)
         if self.kernel_count > 20000:
             raise ValueError("full-model launch count exceeds bound")
@@ -55,12 +57,13 @@ class KernelAssets(ChecksumBundle):
         m, k, n = dimensions
         offset = integer(item.get("output_offset"))
         total = integer(item.get("total_dram_bytes"), 1)
-        if (item.get("dram_base") != ATLAS_DRAM_BASE
+        if (item.get("dram_base") != self.placement["arena_base"]
                 or type(item.get("dram_base")) is not int
                 or offset != fp8_output_offset(m, k, n)
                 or total != offset + 2 * m * n + 256
                 or total > 64 * 1024 * 1024):
             raise ValueError("full-model staging extent differs")
+        arena_extent(self.provenance, total)
         if not isinstance(item.get("initial_sha256"), str) or not re.fullmatch(
                 r"[0-9a-f]{64}", item["initial_sha256"]):
             raise ValueError("missing full-model initial image identity")

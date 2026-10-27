@@ -1,0 +1,37 @@
+# Full-model host contracts
+
+Full ResNet keeps `atlas.full_resnet_bundle.v3`; full Tiny and full Smol use `atlas.full_bundle.v1`. `atlas.block_bundle.v1` remains limited to its existing selected block/layer workloads. `atlas.full_kernel_assets.v1` is preparation-only and cannot admit execution. Smol full-policy execution remains rejected until its actual host contract is implemented; accepting asset metadata is not host qualification.
+
+Every full bundle includes checksum-listed `host/host.elf`, `host/build.json`, workload metadata and every launch's source, original words, captured initial inputs and expected physical output. Full Tiny/Smol deduplicate immutable weights and reconstruct each guarded launch image. Checksum bookends bind unchanged bytes; workload admission must separately establish the actual guest computation, launch order, geometry, output coverage and source identity.
+
+## Placement and packaging
+
+Optional metadata `placement` has exactly the integer fields `arena_base`, `dram_base` and `dram_bytes`. It must agree in provenance, contract and build. Legacy metadata omitting it retains arena `0x100000000` and physical DDR starting at `0x80000000` for 64 GiB. Every descriptor uses the selected arena, whose extent must be aligned, fit one DMA low32 window and remain inside the end-exclusive physical DDR range.
+
+Full ResNet's `tools/build_resnet_graph_host.py` and Tiny's `tools/tiny_full/build_host.py` accept `--arena-base`, `--dram-base` and `--dram-bytes`. They relocate device words and their source/patch descriptors, set the host arena pointer, and audit actual physical PT_LOAD memory extents, allocated sections, stack and arena overlap. Relocating only a C pointer is insufficient. A changed build has a new ELF hash and needs its own numerical receipt.
+
+For VCU118 request `--arena-base 0x90000000 --dram-base 0x80000000 --dram-bytes 0x80000000`. Tiny can additionally use `--rodata-after-arena` to place large immutable assets after the arena with separate load segments. Capacity admission uses complete resident memory and address extents rather than ELF file size or weight size alone. A successful static audit establishes placement only.
+
+Both full builders accept `--target firesim` and reuse `tools/chipyard/firesim_target.py:package` after source bookends and physical audits. Supply `--dram-base 0x80000000 --dram-bytes 0x400000000` for the proposed 16 GiB FireSim memory contract. The generated `marshal.json` and `firesim-contract.json` describe a prebuilt ELF and remain preparation-only. Full builders pass the physical UART profile to packaging; legacy block/kernel package metadata is unchanged.
+
+## Result transport
+
+`runtime/atlas_result.h` emits `ATLAS_KERNEL_BEGIN`, `ATLAS_KERNEL_PROGRESS`, `ATLAS_KERNEL_PASS` and `ATLAS_KERNEL_FAIL`, with workload name, launches completed and launches expected. Progress identifies its layer, contraction or segment boundary. Failure records identify the check and observed/expected values; failure is sticky, and PASS requires the complete launch count. Full hosts retain their detailed mailbox and HTIF exit alongside physical UART text.
+
+Full builders use `tools/chipyard/result_transport.py` to select an explicit MMIO transport. Default SiFive UART base `0x10020000` comes from the selected EE290 device tree. `--uart-kind ns16550 --uart-base 0x10000000` selects QEMU virt's diagnostic UART. Baud configuration is preserved unless an explicit divisor is supplied. No clock or timing constant is inferred. New physical UART output does not use a blocking HTIF write syscall.
+
+The generic QEMU runner captures `uart.log` and, when the build declares a UART profile, requires the admitted name/count, monotone progress and a final PASS with no FAIL. It currently requires the QEMU virt UART profile. An ELF built for a board's different UART controller cannot be silently substituted for that QEMU ELF; a board-profile smoke needs an explicit corresponding UART mapping. UART helper diagnostics are separate from a full-model numerical run.
+
+## Segmented execution
+
+`tools/host_iss/segment_boundary.py:SegmentChain` defines `atlas.segment_chain.v1`, stored as checksum-listed `segments.json` with `SHA256SUMS`. It binds the exact full ELF, workload contract and original capture receipt by member name and digest. `qualification` must be `REFERENCE_BOUNDARIES_ONLY`; a capture bundle never declares its own numerical execution pass. `model_profile` binds revision `9e6313bddecb8ba936206eb347f5cd4e5335282c`, backend `curve` and its actual curve digest.
+
+`live_regions` is a list of named, nonoverlapping physical spans with `name`, `address` and `bytes`. A workload's admitted entry/exit contract must supply the complete live inventory independently through `admit_layout`; restore, compare and receipt verification refuse to run before that admission. The inventory must cover KV state, activations, greedy feedback, counters or other state that can affect the next segment. A missing region cannot be justified merely because a smaller snapshot compares exactly. Segment-specific entry code must establish registers and all scratch/device state before using them; a CPU-resume harness would additionally need an admitted architectural-register snapshot.
+
+`boundaries` is ordered, with zero-based `index`, `launch_cursor`, and a `regions` dictionary mapping every live name to an exact checksum-listed binary member. The first cursor is zero, the last equals `kernel_count`, and every consecutive pair is a nonempty segment launch range. Shared boundary objects make each end exactly the next start. `final_outputs` names captured live regions containing final tokens/logits/actions; workload admission must enforce their full expected extents.
+
+A segment starts from its captured boundary, executes the actual admitted host segment code with a fresh device, and compares every live-out byte with the next boundary through `compare`. Captured device replies are never substituted during a live segment run. A segment harness must check actual per-launch staging, IMEM, output/input/guards, DMA accounting and drained completion just as the whole-host bridge does. Workload-specific segment code and actual Tiny/Smol boundary capture are separate checkpoints; this shared format alone proves neither live-state completeness nor numerical execution.
+
+Each actual execution receipt has schema `atlas.segment_execution.v1`, status `PASS_SEGMENT_WITH_MODEL_DEVICE`, its `segment_index`, exact half-open `launch_range`, bound ELF/contract/chain checksum digest and `model_profile`, `host_elf_executed`, `fresh_device`, `source_bookends_equal`, and explicit `segmented: true` / `continuous: false`. Its `kernels` covers every global launch index in order with exact/drained checks and a positive measured cycle count; `boundaries` maps every live region to its observed end-state SHA-256. `verify_receipts` refuses missing links, mixed profiles, missing regions or inexact launches before summing measured cycles.
+
+Receipts are evidence produced by the trusted execution harness, not authenticated assertions merely because a JSON document contains true fields. Harness/source bookends and independent review remain necessary. A successful chain must always be described as segmented, never continuous, and does not establish hardware execution or timing.

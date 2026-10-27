@@ -10,7 +10,7 @@ from atlas_tooling import sha
 from elf_image import Image
 
 
-def package(out, name, base, dram_bytes):
+def package(out, name, base, dram_bytes, *, uart=None):
     raw = (out / 'host.elf').read_bytes()
     image = Image(raw)
     if image.entry != base:
@@ -38,6 +38,9 @@ def package(out, name, base, dram_bytes):
         elf_sha256=sha(raw), entry=image.entry,
         tohost=addresses[0], fromhost=addresses[1], segments=image.segments,
         host_elf_executed=False, hardware_execution=False)
+    if uart is not None:
+        contract['console'] = 'physical UART MMIO; manager captures uartlog'
+        contract['uart'] = uart
     (out / 'firesim-contract.json').write_text(json.dumps(contract, indent=2) + '\n')
     # No host-init hook: the binary already exists. Marshal install is an owner action.
     workload = dict(name=name, distro=dict(name='bare', opts={}), workdir='.',
