@@ -25,7 +25,7 @@ from model_device import Device, checked
 from bundle import Bundle, sha, verify_completion
 from result_lines import verify as verify_result_lines
 
-FULL_CONTRACTS = {"tiny-full": "tiny_full_contract"}
+FULL_CONTRACTS = {"tiny-full": "tiny_full_contract", "smol-full": "smol_full_contract"}
 
 
 def mmio_access_cap(device, workload):
@@ -91,7 +91,12 @@ def run(args):
             stop_sites = {pc: length for name in ("atlas_workload_main", "atlas_block_trap_report")
                 for pc, length, word in image.instructions(name) if length == 4 and word == 0x10500073}
         else:
-            contract.validate_bundle(bundle, image)
+            if workload == "smol-full":
+                from run_model_tile import configure_model
+                _, _, assemble, _ = configure_model(checked(Path(args.model_root).absolute()))
+                contract.validate_bundle(bundle, image, assemble=assemble)
+            else:
+                contract.validate_bundle(bundle, image)
             stop_sites = contract.stop_sites(image)
         assert stop_sites, "completion WFI instruction missing"
         helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py", "placement.py",
@@ -106,6 +111,15 @@ def run(args):
             pins[str(path)] = sha(path)
         for name in helpers:
             path = checked(Path(__file__).absolute().parent / name)
+            pins[str(path)] = sha(path)
+        if workload == "smol-full":
+            from atlas_program import code_sources
+            tools = Path(__file__).absolute().parents[1]
+            for name, expected_hash in code_sources(traffic_reuse=True).items():
+                path = checked(tools / name)
+                assert sha(path) == expected_hash, "changed full Smol generator helper"
+                pins[str(path)] = expected_hash
+            path = checked(tools / "smol_full_plan.py")
             pins[str(path)] = sha(path)
         arena_helper = checked(Path(__file__).absolute().parents[1] / "chipyard/arena.py")
         pins[str(arena_helper)] = sha(arena_helper)
