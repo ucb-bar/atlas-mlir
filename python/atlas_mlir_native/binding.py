@@ -1643,10 +1643,8 @@ def check_mxu_stream(program: dict, *, unit: int, activation_address: int,
     gaps = [
         ("atlas.vload", 0, "atlas.mxu_matmul", 0, 34),
         ("atlas.vload", 1, "atlas.mxu_push", 0, 34),
-        # MXU1's anchor tree starts accumulator writes at age 3, whereas
-        # MXU0's systolic path starts at age 63. The streams can overlap
-        # once each read row follows its matching write row.
-        ("atlas.mxu_matmul", 0, "atlas.mxu_pop", 0, 64 if unit == 0 else 32),
+        # accumulatorRow0 in lib/AtlasTiming.cpp: the first cycle a pop may read the matmul's accumulator.
+        ("atlas.mxu_matmul", 0, "atlas.mxu_pop", 0, (64, 4)[unit]),
         ("atlas.vstore", 0, "atlas.dma", 0, 34),
         ("atlas.vstore", 1, "atlas.dma", 1, 34),
     ]

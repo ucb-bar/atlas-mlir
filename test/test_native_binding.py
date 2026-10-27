@@ -6682,6 +6682,12 @@ class NativeBindingTest(unittest.TestCase):
                   "weight_address": 0x90002000, "output_address": 0x90011800,
                   "activation": 0, "weight": 1, "pair": 32}
         check_mxu_stream(program, **kwargs)
+        cycle = 0
+        issued = {}
+        for row in program["instructions"]:
+            issued[row["operation"]] = cycle
+            cycle += 1 + (row["fields"]["cycles"] if row["operation"] == "atlas.delay" else 0)
+        self.assertEqual(issued["atlas.mxu_pop"] - issued["atlas.mxu_matmul"], 4)
         for kind in ("unit", "early_readout"):
             changed = copy.deepcopy(program)
             rows = changed["instructions"]
