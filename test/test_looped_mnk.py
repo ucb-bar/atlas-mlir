@@ -342,24 +342,25 @@ class LoopedMNKTest(unittest.TestCase):
         tools = Path(os.environ["ATLAS_OOT_BIN_DIR"])
         addresses, output = (0x90000000, 0x90040000), 0x90080000
         for shape in ((65, 97, 65), (65, 7, 65), (1, 65, 1), (65, 1, 1), (1, 1, 65),
-                      (32, 64, 3840), (32, 64, 3841)):
+                      (32, 64, 3840), (32, 64, 3841), (64, 128, 768), (64, 128, 769)):
             plan = prepare_plan(source_request(*shape))
             mc, nc, kc = plan.counts
             cached = (mc > 1 or nc > 1) and kc <= 120
+            both = mc > 1 and nc > 1 and (1 + nc) * kc <= 120
             for seed in (None, 0x90070000):
                 with self.subTest(shape=shape, seed=seed):
                     virtual = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4)
                     compact = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4, operand_reuse=False)
-                    self.assertEqual(virtual.count('"atlas.virtual_slot"'), kc if cached else 0)
-                    self.assertEqual(virtual.count('"atlas.virtual_restore"'), kc if cached else 0)
+                    self.assertEqual(virtual.count('"atlas.virtual_slot"'), kc * (1 + nc if both else 1) if cached else 0)
+                    self.assertEqual(virtual.count('"atlas.virtual_restore"'), 2 * nc * kc if both else kc if cached else 0)
                     if cached:
-                        self.assertEqual(virtual.count('"atlas.virtual_dma_load_fp8"'), 2 * kc)
-                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), 1)
-                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'), int(seed is not None))
+                        self.assertEqual(virtual.count('"atlas.virtual_dma_load_fp8"'), (1 + nc) * kc if both else 2 * kc)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), nc if both else 1)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'),
+                                         (nc if both else 1) * int(seed is not None))
                         entry, row = virtual.split("^m_body(", 1)
-                        # A is refreshed for each row; a single W column is
-                        # initialized once before any output-row iteration.
-                        self.assertEqual('"atlas.virtual_save"' in entry, nc == 1)
+                        # A is refreshed per row; retained W is initialized before M.
+                        self.assertEqual('"atlas.virtual_save"' in entry, nc == 1 or both)
                         self.assertEqual('"atlas.virtual_save"' in row, nc > 1)
                     else:
                         self.assertEqual(virtual, compact)

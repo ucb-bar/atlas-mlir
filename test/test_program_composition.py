@@ -69,13 +69,13 @@ class ProgramCompositionTest(unittest.TestCase):
 
     def test_composed_operand_caches_share_only_between_initialized_fragments(self):
         tools = Path(os.environ["ATLAS_OOT_BIN_DIR"])
-        for shape in ((65, 35, 65), (65, 7, 65), (32, 64, 2592)):
+        for shape in ((65, 35, 65), (65, 7, 65), (32, 64, 2592), (64, 128, 768)):
             source = composed_source(4, shape=shape, entries=3)
             joined = subprocess.run([str(tools / "atlas-opt"), "--compose-atlas-program", "-"],
                                     input=source, text=True, capture_output=True)
             self.assertEqual(joined.returncode, 0, joined.stderr)
             slots = joined.stdout.count('"atlas.virtual_slot"')
-            self.assertEqual(slots, (shape[2] + 31) // 32)
+            self.assertEqual(slots, source.count('"atlas.virtual_slot"') // 3)
             for pipeline in ("mandatory", "optimized"):
                 self.compile(source, pipeline=pipeline)
         source = composed_source(4, shape=(65, 35, 65))
