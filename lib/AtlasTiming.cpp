@@ -51,38 +51,40 @@ struct VstoreTiming {
 constexpr VloadTiming kVloadTiming = {1, 3, 35, {0, 34}, {1, 32}};
 constexpr VstoreTiming kVstoreTiming = {1, 3, 34, {0, 34}, {3, 34}};
 
-// MXU0 is the systolic array, MXU1 the inner-product trees; a matmul writes accumulator row 0 at accumulatorRow0 - 1.
+// MXU0 is the systolic array, MXU1 the inner-product trees. A matmul writes accumulator rows from accumulatorRow0 - 1
+// for 32 cycles and holds its in-flight slot until the last of those writes.
 struct MxuTiming {
   struct {
     int accumulatorRow0, poppedMreg;
   } defUseLatency;
   int weightReadAge, sourceReadRelease, computeCapacity;
   struct {
-    CycleWindow sourcePorts, resultPorts, pushStream, accumulatorRead, compute, accumulatorWrite;
+    CycleWindow sourcePorts, resultPorts, pushStream, accumulatorRead;
   } resourceOccupancy;
   struct {
     int weightOverwriteAfterCompute, weightUseAfterPush, accumulatorUseAfterPush; // last two MXU1 only
   } sequencerSeparation;
 };
 constexpr MxuTiming kMxuTiming[] = {
-    {{64, 33}, 1, 32, 3, {{0, 31}, {0, 31}, {1, 32}, {0, 31}, {0, 94}, {63, 94}}, {63, 0, 0}},
-    {{4, 33}, 1, 32, 2, {{0, 31}, {0, 31}, {1, 32}, {0, 31}, {0, 34}, {3, 34}}, {32, 32, 33}},
+    {{64, 33}, 1, 32, 3, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}, {63, 0, 0}},
+    {{4, 33}, 1, 32, 2, {{0, 31}, {0, 31}, {1, 32}, {0, 31}}, {32, 32, 33}},
 };
 constexpr int kMxuSourceReadAge = 0, kMxuPushResultAge = 1, kMxuPopResultAge = 1;
 
-// VPU. resourceOccupancy is the issue-slot reservation [0, n), separate from whole-result readiness.
+// VPU. An instruction holds its issue slot through its last destination write, one cycle before defUseLatency
+// (npu_model vpu.py issue_cycles).
 struct VpuTiming {
   RowStream sourceReads, resultWrites;
-  int sourceReadRelease, defUseLatency, resourceOccupancy;
+  int sourceReadRelease, defUseLatency;
 };
-constexpr VpuTiming kVpuElementwiseTiming = {{0, 32}, {2, 34}, 63, 66, 65};
-constexpr VpuTiming kVpuPackTiming = {{0, 32}, {3, 0, 2}, 63, 66, 65};
-constexpr VpuTiming kVpuUnpackTiming = {{0}, {3, 35}, 31, 67, 66};
-constexpr VpuTiming kVpuRowSumTiming = {{0, 0}, {7, 7}, 31, 39, 38};
-constexpr VpuTiming kVpuRowMinMaxTiming = {{0, 0}, {2, 2}, 31, 34, 33};
-constexpr VpuTiming kVpuColReduceTiming = {{0, 32}, {66, 98}, 127, 130, 129};
-constexpr VpuTiming kVpuLoadImmPairTiming = {{0}, {1, 33}, 0, 65, 64};
-constexpr VpuTiming kVpuLoadImmSingleTiming = {{0}, {1}, 0, 33, 32};
+constexpr VpuTiming kVpuElementwiseTiming = {{0, 32}, {2, 34}, 63, 66};
+constexpr VpuTiming kVpuPackTiming = {{0, 32}, {3, 0, 2}, 63, 66};
+constexpr VpuTiming kVpuUnpackTiming = {{0}, {3, 35}, 31, 67};
+constexpr VpuTiming kVpuRowSumTiming = {{0, 0}, {7, 7}, 31, 39};
+constexpr VpuTiming kVpuRowMinMaxTiming = {{0, 0}, {2, 2}, 31, 34};
+constexpr VpuTiming kVpuColReduceTiming = {{0, 32}, {66, 98}, 127, 130};
+constexpr VpuTiming kVpuLoadImmPairTiming = {{0}, {1, 33}, 0, 65};
+constexpr VpuTiming kVpuLoadImmSingleTiming = {{0}, {1}, 0, 33};
 constexpr int kVpuColReducePassInterval = 64;
 constexpr unsigned kVpuIssueSlots = 2;
 const std::vector<std::vector<std::string>> kVpuLogicGroups = {
@@ -622,20 +624,22 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     break;
   }
   case OpClass::MatMul:
-  case OpClass::MatMulAcc:
+  case OpClass::MatMulAcc: {
+    CycleWindow accumulatorWrite = {mt.defUseLatency.accumulatorRow0 - 1, mt.defUseLatency.accumulatorRow0 + 30};
     b.mrows(in.rs1, false, kMxuSourceReadAge);
     b.mxuRows(Res::Weight, mxu, in.rs2, false, mt.weightReadAge);
     if (op.opClass == OpClass::MatMulAcc)
       b.mxuRows(Res::Acc, mxu, in.rd, false, kMxuSourceReadAge);
-    b.mxuRows(Res::Acc, mxu, in.rd, true, mt.defUseLatency.accumulatorRow0 - 1);
+    b.mxuRows(Res::Acc, mxu, in.rd, true, accumulatorWrite.from);
     b.f.mregReads = {in.rs1};
     b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
     b.hold(Unit::MxuPort, mxu * 4 + 0, occ.sourcePorts);
-    b.hold(Unit::MxuCompute, mxu, occ.compute);
+    b.hold(Unit::MxuCompute, mxu, 0, accumulatorWrite.to);
     if (op.opClass == OpClass::MatMulAcc)
       b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, occ.accumulatorRead);
-    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, occ.accumulatorWrite);
+    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, accumulatorWrite);
     break;
+  }
 
   case OpClass::VpuElementwise: {
     const VpuTiming &t = kVpuElementwiseTiming;
@@ -655,7 +659,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.mregWrites = {in.rd, in.rd + 1};
     b.f.readRelease = t.sourceReadRelease;
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuPack: {
@@ -669,7 +672,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.mregWrites = {in.rd};
     b.f.readRelease = t.sourceReadRelease;
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuUnpack: {
@@ -683,7 +685,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.mregWrites = {in.rd, in.rd + 1};
     b.f.readRelease = t.sourceReadRelease;
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuRowReduce: {
@@ -698,7 +699,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.mregWrites = {in.rd, in.rd + 1};
     b.f.readRelease = t.sourceReadRelease;
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuColReduce: {
@@ -715,7 +715,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.mregWrites = {in.rd, in.rd + 1};
     b.f.readRelease = t.sourceReadRelease;
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuLoadImmPair: {
@@ -725,7 +724,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd + 1, true, t.resultWrites.secondAge);
     b.f.mregWrites = {in.rd, in.rd + 1};
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::VpuLoadImmSingle: {
@@ -733,7 +731,6 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step);
     b.f.mregWrites = {in.rd};
     b.f.writeRelease = t.defUseLatency - 1;
-    b.f.vpuLive = t.resourceOccupancy;
     break;
   }
   case OpClass::Transpose:
@@ -777,6 +774,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
   }
 
   Footprint &f = b.f;
+  if (op.engine == Engine::Vpu)
+    f.vpuLive = f.writeRelease;
   f.doneAge = std::max(f.readRelease, f.writeRelease);
   for (const Access &a : f.accesses)
     if (!a.atCompletion)
