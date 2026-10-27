@@ -21,7 +21,8 @@ CACHE_WORDS = 22 * 4 * 160 * 64
 def stop_sites(image):
     if "tiny_full_trap_stop" not in image.symbols:
         return block_stop_sites(image)
-    sites = {pc: length for pc, length, word in image.instructions("main")
+    names = ["main"] + (["complete"] if "complete" in image.symbols else [])
+    sites = {pc: length for name in names for pc, length, word in image.instructions(name)
              if length == 4 and word == 0x10500073}
     require(bool(sites), "Tiny full completion WFI missing")
     trap = image.symbols["tiny_full_trap_stop"]
