@@ -9,13 +9,13 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
 from block_bundle import BlockBundle
 from bundle import ChecksumBundle, relative_name
-from model_device import Device
+from model_device import Device, launch_bounds
 
 
 class BlockBundleTest(unittest.TestCase):
@@ -124,6 +124,7 @@ class DeviceLaunchTest(unittest.TestCase):
         device.deadline = time.monotonic() + 10
         device.cycle_cap = 2
         device.kernel_count = 1
+        device.launch_start, device.launch_end, device.launch_count = 0, 1, 1
         device.completed, device.pins = [], {}
         words = struct.pack("<I", 0x73)
         device.imem, device.written = bytearray(words), {0}
@@ -165,6 +166,42 @@ class DeviceLaunchTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             device.start()
 
+    def test_nonzero_segment_uses_actual_global_index_and_sequence(self):
+        device, initial, expected = self.device()
+        device.kernel_count = 840
+        device.launch_start, device.launch_end, device.launch_count = 12, 13, 1
+        device.programs = {12: device.programs[0]}
+        device.bundle = SimpleNamespace(read=device.bundle.read, initial_dram=Mock(return_value=initial))
+        state = device.core.arch_state
+        state._csr_values[0xC11] = 13
+        original_tick = device.core.tick.side_effect
+
+        def tick():
+            original_tick()
+            state._csr_values[0xC10] = 13
+
+        device.core.tick.side_effect = tick
+        device.start()
+        self.assertEqual([item["index"] for item in device.completed], [12])
+        self.assertEqual(device.completed[0]["sequence"], 13)
+        device.bundle.initial_dram.assert_called_once_with(12)
+        self.assertTrue((device.out/"kernel-12.json").is_file())
+        self.assertFalse((device.out/"kernel-00.json").exists())
+        with self.assertRaisesRegex(AssertionError, "admitted segment range"):
+            device.start()
+        self.assertEqual(len(device.completed), 1)
+
+    def test_nonzero_segment_rejects_local_instead_of_global_sequence(self):
+        device, _, _ = self.device()
+        device.kernel_count = 840
+        device.launch_start, device.launch_end, device.launch_count = 12, 13, 1
+        device.programs = {12: device.programs[0]}
+        with self.assertRaises(AssertionError):
+            device.start()
+        device.remote.read.assert_not_called()
+        device.core.tick.assert_not_called()
+        self.assertEqual(device.completed, [])
+
     def test_shared_initial_hook_keeps_real_execution_and_checks(self):
         device, initial, expected = self.device()
         device.bundle = SimpleNamespace(read=device.bundle.read, initial_dram=Mock(return_value=initial))
@@ -198,6 +235,25 @@ class DeviceLaunchTest(unittest.TestCase):
                 device.start()
             self.assertFalse(device.completed)
             device.remote.write.assert_not_called()
+
+
+class DeviceRangeTest(unittest.TestCase):
+    def test_default_and_global_intervals(self):
+        self.assertEqual(launch_bounds(840), (0, 840))
+        self.assertEqual(launch_bounds(840, (12, 24)), (12, 24))
+        self.assertEqual(launch_bounds(2715, [2714, 2715]), (2714, 2715))
+
+    def test_invalid_interval_fails_before_model_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary, patch("model_device.configure_model") as configure:
+            for selected in ((-1, 1), (0, 841), (12, 12), (24, 12), (True, 12), (0, True),
+                             (0,), "12:24", (0.0, 12), (0, 12, 24)):
+                with self.subTest(selected=selected), self.assertRaises(ValueError):
+                    Device(None, Path(temporary), 0, SimpleNamespace(kernel_count=840),
+                           Path(temporary), launch_range=selected)
+            configure.assert_not_called()
+        for count in (0, -1, True, 1.0, 1 << 32):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                launch_bounds(count)
 
 
 if __name__ == "__main__":

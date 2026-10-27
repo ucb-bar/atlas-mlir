@@ -122,6 +122,7 @@ class FullBundleTest(unittest.TestCase):
         bundle = FullBundle(root, "tiny-full")
         device = Device.__new__(Device)
         device.bundle, device.completed, device.kernel_count, device.pins = bundle, [], 2, {}
+        device.launch_start, device.launch_end, device.launch_count = 0, 2, 2
         device.core = Mock()
         device.core.exus = []
         device.core.arch_state.halted = True
@@ -160,9 +161,11 @@ class FullBudgetTest(unittest.TestCase):
 
     def test_full_mmio_budget_uses_actual_admitted_program_sizes(self):
         device = Mock()
-        device.programs = [(None, bytes(20000), {})] * 840
+        device.programs = {index: (None, bytes(20000), {}) for index in range(840)}
         self.assertEqual(mmio_access_cap(device, "tiny-full"), 100000 + 840 * 5064)
         self.assertEqual(mmio_access_cap(device, "tiny"), 100000)
+        device.programs = {index: (None, bytes(20000), {}) for index in range(12, 24)}
+        self.assertEqual(mmio_access_cap(device, "tiny-full"), 100000 + 12 * 5064)
 
 
 if __name__ == "__main__":
