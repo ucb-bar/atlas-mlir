@@ -20,6 +20,8 @@ from atlas_path_guard import checked
 from atlas_program import assembly, code_sources, dma_load_bytes
 from elf_image import Image, mmio_sites
 from bundle import ChecksumBundle
+from firesim_target import package as package_firesim
+from arena import audit
 
 ROLES = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
          'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
@@ -56,6 +58,8 @@ def build(args):
     started = time.monotonic()
     try:
         read(__file__)
+        read(Path(__file__).with_name("arena.py"))
+        if args.target == 'firesim': read(Path(__file__).with_name('firesim_target.py'))
         for name, digest in code_sources(traffic_reuse=True).items():
             read(ROOT/'tools'/name, digest)
         for name in ('atlas_path_guard.py','atlas_tooling.py','host_iss/elf_image.py','host_iss/bundle.py'):
@@ -71,6 +75,14 @@ def build(args):
         old_build = json.loads(bundle.read('host/build.json'))
         old_pins = {r['path']: r['sha256'] for r in old_build['source_inputs']}
         results = json.loads(read(args.results))
+        retained_programs = None
+        if args.program_build:
+            retained_programs = json.loads(read(args.program_build))
+            if (retained_programs['status'] != 'PASS_BUILD_STATIC_ONLY'
+                    or retained_programs['source_bookends_equal'] is not True
+                    or len(retained_programs['captures']) != 7):
+                raise ValueError('successful seven-projection program build required')
+            receipt['retained_program_build'] = str(args.program_build)
         frozen = json.loads(read(results['frozen_manifest']['path'], results['frozen_manifest']['sha256']))
         if frozen['artifacts'].get(str(checked(args.bundle) / 'host/smol-epoch3-contract.json')) != sha(contract_raw):
             raise ValueError('selected contract is not bound by frozen qualification')
@@ -140,9 +152,22 @@ def build(args):
             if offset != m*k+k*n+256 or len(initial) != offset+2*m*n+256: raise ValueError('DRAM layout mismatch')
             if len(expected_output) != 2*m*n: raise ValueError('physical output extent mismatch')
             expected = initial[:offset] + expected_output + initial[offset+len(expected_output):]
-            asm = assembly(m, k, n, offset, exponent, traffic_reuse=True)
-            words = assemble(io.StringIO(asm)).assemble()
-            raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
+            if retained_programs:
+                capture = retained_programs['captures'][index]
+                if (capture['index'] != index or capture['role'] != ROLES[index]
+                        or capture['shape'] != [m,k,n] or capture['exponent'] != exponent):
+                    raise ValueError('retained program geometry differs')
+                previous = args.program_build.parent / 'data'
+                raw = read(previous / f'program_{index}.bin', capture['program_sha256'])
+                words = [w[0] for w in struct.iter_unpack('<I', raw)]
+                asm_path = previous / f'program_{index}.S'
+                asm = read(asm_path, retained_programs['generated_inputs'][str(asm_path)]).decode()
+                if b''.join(struct.pack('<I',w & 0xffffffff) for w in assemble(io.StringIO(asm)).assemble()) != raw:
+                    raise ValueError('retained assembly and binary differ')
+            else:
+                asm = assembly(m, k, n, offset, exponent, traffic_reuse=True)
+                words = assemble(io.StringIO(asm)).assemble()
+                raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
             if sha(raw) != family['proofs']['candidate']['program_sha256']:
                 raise ValueError('reuse generator differs from receipt')
             if len(words) > 8192 or words[-1] != 0x73:
@@ -221,10 +246,13 @@ def build(args):
             raw=(data/(name+'.bin')).read_bytes()
             if image.bytes_at(image.symbols['smol_asset_'+name]['address'],len(raw)) != raw:
                 raise ValueError('ELF layer asset differs')
+        audit(out, 0x80000000, 64 << 30)
         bundle.verify_bookends()
         for p,digest in {**pins,**generated}.items():
             if sha(checked(p).read_bytes()) != digest: raise ValueError('source bookend changed')
+        if args.target == 'firesim': package_firesim(out, 'atlas-smol-selected-layer', 0x80000000, 64 << 30)
         receipt.update(status='PASS_BUILD_STATIC_ONLY', elf_sha256=sha(image.raw), captures=captures,
+            target=args.target,
             source_bookends_equal=True, sources=pins, generated_inputs=generated,
             mmio_sites=mmio_sites(image), static=dict(imem_words=32768, software_program_words=8192,
               max_wrapped_words=max(c['wrapped_words'] for c in captures), dram_base=arena, dram_capacity=extent,
@@ -243,6 +271,9 @@ def arguments():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('out','retained','bundle','results','model-root','compiler','linker'):
         p.add_argument('--'+name,type=checked,required=True)
+    p.add_argument('--target', choices=('sim', 'firesim'), default='sim')
+    p.add_argument('--program-build', type=checked,
+                   help='retain hash-bound programs from a previous build when generator HEAD has advanced')
     return p.parse_args()
 
 if __name__=='__main__': build(arguments())
