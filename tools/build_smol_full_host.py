@@ -207,19 +207,24 @@ def select_programs(args, captured, bundle, out, products, read):
     selected = copy.deepcopy(captured)
     selected['placement'] = args.physical
     selected['program_policy'] = 'qualified-reuse-v1' if args.traffic_reuse else 'captured-baseline-v1'
+    assembled = {}
+    def encode(source):
+        if source not in assembled:
+            words = assemble(io.StringIO(source)).assemble()
+            assembled[source] = (words, b''.join(struct.pack('<I', word) for word in words))
+        return assembled[source]
     for item in selected['kernels']:
         original_source = bundle.read(item['source'])
         original_raw = bundle.read(item['original'])
-        original = assemble(io.StringIO(original_source.decode())).assemble()
-        if b''.join(struct.pack('<I', word) for word in original) != original_raw:
+        _, admitted_raw = encode(original_source.decode())
+        if admitted_raw != original_raw:
             raise ValueError('Captured source differs from original binary')
         m, k, n = item['physical_mkn']
         reuse = args.traffic_reuse and (m, k, n) in _TRAFFIC_REUSE_MODULES
         source = (assembly(m, k, n, item['output_offset'], item['output_rescale_exponent'],
                            traffic_reuse=True) if reuse else original_source.decode())
         source = relocate_assembly(source, item['dram_base'], args.arena_base)
-        words = assemble(io.StringIO(source)).assemble()
-        raw = b''.join(struct.pack('<I', word) for word in words)
+        words, raw = encode(source)
         if not words or words[-1] != 0x73 or len(words) > 8192:
             raise ValueError('Selected Smol program exceeds raw adapter capacity or lacks ECALL')
         for field, payload, suffix in (('source', source.encode(), '.S'), ('original', raw, '.bin')):
@@ -548,6 +553,31 @@ def full_link(template, dram_bytes, arena_base=0x100000000, *, rodata_after_aren
     return value
 
 
+def copy_header_closure(starts, target, providers, copy, read):
+    """Close flat quoted includes across explicitly selected source providers."""
+    queue, seen = list(starts), set()
+    while queue:
+        path = safe(queue.pop())
+        if path in seen:
+            continue
+        seen.add(path)
+        for name in re.findall(r'^\s*#\s*include\s+"([^"\n]+)"', read(path).decode(), re.MULTILINE):
+            if Path(name).name != name or name in ('.', '..'):
+                raise ValueError('Quoted source headers must be flat members')
+            destination = safe(target/name)
+            if destination.exists():
+                queue.append(destination)
+                continue
+            candidates = []
+            for provider in providers:
+                candidate = safe(provider/name)
+                if candidate.exists():
+                    candidates.append((candidate, read(candidate)))
+            if not candidates or any(raw != candidates[0][1] for _, raw in candidates):
+                raise ValueError('Missing or conflicting quoted source header: '+name)
+            queue.append(copy(candidates[0][0], destination))
+
+
 def finish_build(args, bundle, manifest, replay, out, work, parameters, references,
                  symbols, products, payload_labels, dram_bytes, pins, read, pin):
     from elf_image import Image
@@ -569,7 +599,7 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
         copied[str(target.relative_to(work))] = sha(raw)
         return target
 
-    merlin_names = ('smol_host_ops', 'smol_host_attention', 'smol_host_rope', 'smol_host_controls',
+    merlin_names = ('smol_host_ops', 'smol_host_attention', 'smol_host_softmax', 'smol_host_rope', 'smol_host_controls',
         'host_matrix_fp8pack', 'smol_policy_ops', 'smol_policy_block', 'smol_policy_graph',
         'smol_vision_ops', 'smol_vision_graph')
     compile_sources = [safe(work/'main.c')]
@@ -589,6 +619,9 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     for name in ('atlas_host.c', 'atlas_host.h', 'atlas_host_layout.h', 'atlas_numeric.h', 'atlas_resnet_graph_math.c'):
         target = copy(args.runtime/'runtime'/name, source_dir/name)
         if name == 'atlas_host.c': compile_sources.append(target)
+    copy_header_closure([work/'main.c', *[work/name for name in copied
+        if name.startswith('source/') and Path(name).suffix in ('.c', '.h')]], source_dir,
+                        (args.attention, args.merlin, Path(__file__).absolute().parents[1]/'runtime'), copy, read)
     support_dir = safe(work/'support')
     copy(args.support/'rv64_support.c', support_dir/'rv64_support.c')
     copy(args.support/'expf_bf16_values.inc', support_dir/'expf_bf16_values.inc')
@@ -721,6 +754,9 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     final.verify_bookends()
     if args.target == 'firesim':
         package_firesim(out/'host', 'atlas-smol-full-policy', args.dram_base, args.dram_bytes, uart=args.uart)
+    for name, expected in tuple(pins.items()):
+        pin(name, expected)
+    final.verify_bookends()
     print(json.dumps(dict(status='BUILT_AUDITED_ONLY', elf_sha256=sha(elf_raw), footprint=footprint), sort_keys=True))
     return receipt
 

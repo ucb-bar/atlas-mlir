@@ -52,6 +52,24 @@ class BuilderTest(unittest.TestCase):
                                builder.relocation_mapper([(Path('/old'),Path('/new')),
                                                           (Path('/other'),Path('/new'))]))
 
+    def test_quoted_header_closure_rejects_conflicting_sources(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target, first, second = [root/name for name in ('target','first','second')]
+            for path in (target,first,second): path.mkdir()
+            (target/'unit.c').write_text('#include "top.h"\n')
+            (first/'top.h').write_text('#include "leaf.h"\n')
+            (first/'leaf.h').write_text('typedef int leaf;\n')
+            copy = lambda source,destination: (shutil.copyfile(source,destination),destination)[1]
+            builder.copy_header_closure([target/'unit.c'],target,(first,second),copy,Path.read_bytes)
+            self.assertTrue((target/'leaf.h').exists())
+            (target/'top.h').unlink()
+            (target/'leaf.h').unlink()
+            (second/'top.h').write_text('typedef float changed;\n')
+            with self.assertRaisesRegex(ValueError,'conflicting'):
+                builder.copy_header_closure([target/'unit.c'],target,(first,second),copy,Path.read_bytes)
+
     @unittest.skipUnless(os.environ.get('SMOL_MERLIN'), 'Smol C graph sources are not configured')
     def test_generated_real_host_has_current_c_abi_and_uart_closure(self):
         names = ['vision.position','gelu','cosine','sine','language.embedding','timestep','time.embedding']
