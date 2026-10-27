@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'host_iss'))
 from atlas_host_build import elf_sections, wrap
 from atlas_tooling import Admission, sha, write_json
 from firesim_target import package as package_firesim
-from arena import audit as audit_dram
+from arena import add_arguments, audit as audit_dram, relocate, window
 
 ROOT = Path(__file__).absolute().parents[2]
 LAUNCH = Path(__file__).absolute().with_name("block_kernel_launch.c")
@@ -223,7 +223,7 @@ def audit_loadmem(raw, program, initial, expected, base):
 
 
 def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, fast_check=False,
-                 target='sim'):
+                 target='sim', arena_base=None, dram_base=0x80000000, dram_bytes=64 << 30):
     out, compiler = (safe_path(p) for p in (out, compiler))
     if target not in ('sim', 'firesim'):
         raise ValueError('unknown ELF target')
@@ -236,6 +236,10 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
         raise ValueError("fast_check must be boolean")
     admission = Admission()
     program, runtime_program, initial, expected, base, ranges = admit(row, admission)
+    new_base = base if arena_base is None else arena_base
+    window(new_base, len(initial))
+    program = relocate(program, base, new_base)
+    base, runtime_program = new_base, wrap(program)
     runtime = safe_path(ROOT / "runtime")
     helpers = [Path(__file__).absolute()] + [Path(sys.modules[module].__file__).absolute()
                for module in ("atlas_host_build", "atlas_tooling", "atlas_path_guard", "atlas_host_layout", "run_sim")]
@@ -245,7 +249,6 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
         admission.read(safe_path(path))
     if target == 'firesim':
         admission.read(safe_path(Path(__file__).with_name('firesim_target.py')))
-        admission.read(safe_path(Path(sys.modules['elf_image'].__file__)))
     if fast_check:
         admission.read(safe_path(runtime / "atlas_host_check.h"))
     if any(c in str(out) for c in ('"', "\\", "\n", "\r")):
@@ -283,7 +286,7 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
                                   env=dict(os.environ, TMPDIR=str(out))).returncode
             if code == 0:
                 audit_loadmem((out / "host.elf").read_bytes(), program, initial, expected, base)
-                audit_dram(out, 0x80000000, 64 << 30)
+                audit_dram(out, dram_base, dram_bytes)
         except subprocess.TimeoutExpired:
             code = 124
         except (OSError, ValueError, KeyError, struct.error) as exc:
@@ -292,7 +295,7 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
     bookends = admission.recheck()
     if code == 0 and bookends and target == 'firesim':
         try:
-            package_firesim(out, row['id'], 0x80000000, 64 << 30)
+            package_firesim(out, row['id'], dram_base, dram_bytes)
         except (OSError, ValueError, KeyError, struct.error) as exc:
             code, error = 127, str(exc)
     receipt = dict(kernel=row["id"], command=command, returncode=code or int(not bookends),
@@ -302,6 +305,7 @@ def build_kernel(row, out, compiler, *, max_polls=100000000, wall_seconds=1500, 
                    dram_base=base, dram_bytes=len(initial), max_polls=max_polls,
                    wall_limit_seconds=wall_seconds, full_soc_executed=False)
     receipt['target'] = target
+    receipt.update(physical_dram_base=dram_base, physical_dram_bytes=dram_bytes)
     if fast_check:
         receipt.update(fast_check=True, mismatch_metric="bytes",
                        check_algorithm="exact-or-of-word-xors-with-byte-fallback")
@@ -385,7 +389,7 @@ def main():
     build.add_argument("--fast-check", action="store_true",
                        help="opt in to exact wide comparison with byte diagnostics")
     build.add_argument('--target', choices=('sim', 'firesim'), default='sim',
-                       help='firesim preserves HTIF and audits the proposed 16 GiB EE290 target')
+                       help='export an HTIF FireSim package with the selected physical DRAM bounds')
     run = actions.add_parser("run")
     run.add_argument("--build-root", required=True, type=Path)
     run.add_argument("--out", required=True, type=Path)
@@ -396,6 +400,7 @@ def main():
     results.add_argument("--build-root", required=True, type=Path)
     results.add_argument("--runs-root", required=True, type=Path)
     results.add_argument("--out", required=True, type=Path)
+    add_arguments(build)
     args = parser.parse_args()
     if args.action == "prepare-full":
         print(json.dumps(prepare_full(args.bundle_root, args.workload, args.out), sort_keys=True))
@@ -409,7 +414,9 @@ def main():
         write_json(out / "batch.json", dict(schema=SCHEMA, kernels=[row["id"] for row in rows], kernel_count=len(rows)))
         for row in rows:
             receipt = build_kernel(row, out / row["id"], compiler, max_polls=args.max_polls,
-                                   wall_seconds=args.wall_seconds, fast_check=args.fast_check, target=args.target)
+                                   wall_seconds=args.wall_seconds, fast_check=args.fast_check,
+                                   target=args.target, arena_base=args.arena_base,
+                                   dram_base=args.dram_base, dram_bytes=args.dram_bytes)
             print(json.dumps(receipt, sort_keys=True), flush=True)
             if receipt["returncode"]:
                 return 1

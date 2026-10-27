@@ -21,7 +21,7 @@ from atlas_program import assembly, code_sources, dma_load_bytes
 from elf_image import Image, mmio_sites
 from bundle import ChecksumBundle
 from firesim_target import package as package_firesim
-from arena import audit
+from arena import add_arguments, audit, relocate_assembly, window, DEFAULT_ARENA
 
 ROLES = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
          'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
@@ -34,6 +34,12 @@ HEADERS = ('smol_host_bits.h', 'smol_selected_assets.h', 'smol_selected_workload
 
 def sha(raw): return hashlib.sha256(raw).hexdigest()
 def write_json(path, value): checked(path).write_text(json.dumps(value, indent=2) + '\n')
+
+
+def replace_once(source, old, new):
+    if source.count(old) != 1:
+        raise ValueError('expected exactly one patch target: ' + old)
+    return source.replace(old, new)
 
 
 def build(args):
@@ -59,6 +65,8 @@ def build(args):
     try:
         read(__file__)
         read(Path(__file__).with_name("arena.py"))
+        arena_base = DEFAULT_ARENA if args.arena_base is None else args.arena_base
+        window(arena_base, 3625472)
         if args.target == 'firesim': read(Path(__file__).with_name('firesim_target.py'))
         for name, digest in code_sources(traffic_reuse=True).items():
             read(ROOT/'tools'/name, digest)
@@ -113,6 +121,14 @@ def build(args):
             copy(ROOT / 'runtime' / name, source / name)
         copy(ROOT / 'tools/chipyard/smol_layer_host.c', source / 'smol_layer_host.c')
         for name in ('start.S', 'link.ld'): retained_copy('elf/' + name, source / name)
+        if arena_base != DEFAULT_ARENA:
+            header = source / 'atlas_host_layout.h'
+            header.write_text(replace_once(header.read_text(), '#define ATLAS_DRAM_BASE 0x100000000',
+                              f'#define ATLAS_DRAM_BASE {arena_base:#x}'))
+            link = source / 'link.ld'
+            link_text = replace_once(link.read_text(), '.atlas_dram 0x100000000', f'.atlas_dram {arena_base:#x}')
+            link.write_text(replace_once(link_text, '__atlas_dram_end <= 0x200000000',
+                            f'__atlas_dram_end <= {((arena_base >> 32) + 1) << 32:#x}'))
         # Retain immutable nonlinear/final-reference data and parameter declarations.
         for name, asset in contract['assets'].items():
             raw = bundle.read('data/' + name + '.bin')
@@ -170,6 +186,10 @@ def build(args):
                 raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
             if sha(raw) != family['proofs']['candidate']['program_sha256']:
                 raise ValueError('reuse generator differs from receipt')
+            if arena_base != DEFAULT_ARENA:
+                asm = relocate_assembly(asm, DEFAULT_ARENA, arena_base)
+                words = assemble(io.StringIO(asm)).assemble()
+                raw = b''.join(struct.pack('<I', w & 0xffffffff) for w in words)
             if len(words) > 8192 or words[-1] != 0x73:
                 raise ValueError('program capacity/terminal failed')
             rescale = [i for i, word in enumerate(words) if word == ((exponent+127)<<23)|0x25f]
@@ -189,7 +209,8 @@ def build(args):
             captures.append(dict(index=index, role=ROLES[index], shape=[m,k,n], exponent=exponent,
                 rescale_word=rescale[0], program_words=len(words), wrapped_words=len(words)+5,
                 program_sha256=sha(raw), initial_sha256=sha(initial), expected_sha256=sha(expected),
-                expected_output_sha256=sha(expected_output), dram_bytes=len(initial), output_offset=offset,
+                expected_output_sha256=sha(expected_output), dram_base=arena_base,
+                dram_bytes=len(initial), output_offset=offset,
                 requested_dma=dict(load_bytes=dma_load_bytes(m,k,n,traffic_reuse=True),store_bytes=2*m*n)))
         start = assets.index('const smol_raw_kernel smol_kernels[7]={')
         end = assets.index('};', start)+2
@@ -233,7 +254,7 @@ def build(args):
         if image.entry != 0x80000000: raise ValueError('unexpected entry')
         arena = image.symbols['__atlas_dram_start']['address']
         extent = image.symbols['__atlas_dram_end']['address']-arena
-        if arena != 0x100000000 or extent != 3625472: raise ValueError('arena mismatch')
+        if arena != arena_base or extent != 3625472: raise ValueError('arena mismatch')
         if image.symbols['__stack_top']['address'] >= 0x90000000: raise ValueError('host memory overflow')
         for c in captures:
             i = c['index']
@@ -246,13 +267,13 @@ def build(args):
             raw=(data/(name+'.bin')).read_bytes()
             if image.bytes_at(image.symbols['smol_asset_'+name]['address'],len(raw)) != raw:
                 raise ValueError('ELF layer asset differs')
-        audit(out, 0x80000000, 64 << 30)
+        dram_audit = audit(out, args.dram_base, args.dram_bytes)
         bundle.verify_bookends()
         for p,digest in {**pins,**generated}.items():
             if sha(checked(p).read_bytes()) != digest: raise ValueError('source bookend changed')
-        if args.target == 'firesim': package_firesim(out, 'atlas-smol-selected-layer', 0x80000000, 64 << 30)
+        if args.target == 'firesim': package_firesim(out, 'atlas-smol-selected-layer', args.dram_base, args.dram_bytes)
         receipt.update(status='PASS_BUILD_STATIC_ONLY', elf_sha256=sha(image.raw), captures=captures,
-            target=args.target,
+            target=args.target, physical_dram=dram_audit,
             source_bookends_equal=True, sources=pins, generated_inputs=generated,
             mmio_sites=mmio_sites(image), static=dict(imem_words=32768, software_program_words=8192,
               max_wrapped_words=max(c['wrapped_words'] for c in captures), dram_base=arena, dram_capacity=extent,
@@ -274,6 +295,7 @@ def arguments():
     p.add_argument('--target', choices=('sim', 'firesim'), default='sim')
     p.add_argument('--program-build', type=checked,
                    help='retain hash-bound programs from a previous build when generator HEAD has advanced')
+    add_arguments(p)
     return p.parse_args()
 
 if __name__=='__main__': build(arguments())
