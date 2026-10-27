@@ -535,7 +535,8 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     b.f.readRelease = b.f.writeRelease = 32;
     b.hold(Unit::MxuPort, mxu * 4 + 0, 0, 31);
     b.hold(Unit::MxuCompute, mxu, 0, cf + 31);
-    b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, 0, 31);
+    if (op.opClass == OpClass::MatMulAcc)
+      b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, 0, 31);
     b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, cf, cf + 31);
     break;
 
