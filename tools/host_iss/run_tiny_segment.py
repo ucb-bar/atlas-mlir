@@ -1,5 +1,6 @@
 """Execute one admitted full Tiny layer/head segment in a fresh RV64 guest."""
 import argparse
+from contextlib import suppress
 import datetime
 import json
 import os
@@ -22,6 +23,7 @@ from full_bundle import FullBundle
 from gdb_remote import Remote
 from model_device import Device
 from result_lines import verify as verify_uart
+from segment_uart import Transport
 from run_model_tile import configure_model, model_binding
 import tiny_segment_contract as contract
 
@@ -86,7 +88,7 @@ def execute(args):
     receipt = dict(schema="atlas.segment_execution.v1", status="FAILED", segmented=True, continuous=False,
         fresh_device=False, host_elf_executed=False, source_bookends_equal=False, hardware_execution=False,
         segment_index=args.segment_index, command=[sys.executable, *sys.argv], kernels=[], captured_replies=args.captured_replies)
-    remote = process = device = None
+    remote = process = device = uart = None
     pins, previous_cwd = {}, Path.cwd()
     def progress(stage):
         state = dict(stage=stage, status=receipt["status"] if stage == "finished" else "RUNNING", runner_pid=os.getpid(),
@@ -104,31 +106,9 @@ def execute(args):
         raise InterruptedError("segment interrupted by signal " + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        bundle = FullBundle(checked(args.bundle_root), "tiny-full")
-        elf, qemu, model_root = (checked(p) for p in (bundle.root / "host/host.elf", args.qemu, args.model_root))
-        image = Image(bundle.read("host/host.elf"))
-        # Assembler/profile and the entire immutable chain are admitted before Core creation.
-        before = model_binding(model_root)
-        _, _, assembler, _ = configure_model(model_root)
-        binding = model_binding(model_root)
-        assert binding["tracked_source_diff_exit"] == 0 and before["tracked_source_diff_exit"] == 0
-        assert binding["revision"] == before["revision"] and binding["curve_sha256"] == before["curve_sha256"]
-        profile = dict(revision=binding["revision"], backend="curve", curve_sha256=binding["curve_sha256"])
-        chain, data = contract.validate_bundle(bundle, image, assembler, profile)
-        assert 0 <= args.segment_index < len(chain.boundaries) - 1
-        launch_range = tuple(b["launch_cursor"] for b in chain.boundaries[args.segment_index:args.segment_index+2])
-        count = launch_range[1] - launch_range[0]
-        assert (bundle.build["uart"]["kind"], bundle.build["uart"]["base"]) == ("ns16550", 0x10000000)
-        ready, stops, success = contract.runtime_sites(image)
-        sites = mmio_sites(image)
-        qemu_low, qemu_high = 0x80000000, 0x80000000 + (8 << 30)
-        assert all(qemu_low <= s["address"] < s["address"] + s["memory_bytes"] <= qemu_high
-                   for s in image.segments), "ELF exceeds actual QEMU virt8GiB DRAM"
-        assert qemu_low <= chain.placement["arena_base"] <= qemu_high - max(
-            item["total_dram_bytes"] for item in data["kernels"]), "arena exceeds actual QEMU DRAM"
-        if args.corrupt_region:
-            assert args.corrupt_region in ("hidden_0", "hidden_1")
-            assert 0 <= args.corrupt_offset < chain.layout[args.corrupt_region]["bytes"]
+        bundle_root = checked(args.bundle_root)
+        elf, qemu, model_root = (checked(p) for p in (bundle_root / "host/host.elf", args.qemu, args.model_root))
+        Transport.pin(pins)
         for name, digest in code_sources(traffic_reuse=True).items():
             path = checked(Path(__file__).absolute().parents[1] / name)
             pins[str(path)] = digest
@@ -140,12 +120,39 @@ def execute(args):
             pins[str(path)] = sha256(path)
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER)):
             pins[str(path)] = sha256(path)
+        bundle = FullBundle(bundle_root, "tiny-full")
+        image = Image(bundle.read("host/host.elf"))
+        # Assembler/profile and the entire immutable chain are admitted before Core creation.
+        uart = Transport(bundle.build["uart"], getattr(args, "sifive_uart_bridge", False), image, out)
+        before = model_binding(model_root)
+        _, _, assembler, _ = configure_model(model_root)
+        binding = model_binding(model_root)
+        assert binding["tracked_source_diff_exit"] == 0 and before["tracked_source_diff_exit"] == 0
+        assert binding["revision"] == before["revision"] and binding["curve_sha256"] == before["curve_sha256"]
+        profile = dict(revision=binding["revision"], backend="curve", curve_sha256=binding["curve_sha256"])
+        chain, data = contract.validate_bundle(bundle, image, assembler, profile)
+        assert all(sha256(checked(path)) == h for path, h in pins.items()), "admission helper changed"
+        assert model_binding(model_root) == binding, "admission model source changed"
+        assert 0 <= args.segment_index < len(chain.boundaries) - 1
+        launch_range = tuple(b["launch_cursor"] for b in chain.boundaries[args.segment_index:args.segment_index+2])
+        count = launch_range[1] - launch_range[0]
+        ready, stops, success = contract.runtime_sites(image)
+        sites = mmio_sites(image)
+        qemu_low, qemu_high = 0x80000000, 0x80000000 + (8 << 30)
+        assert all(qemu_low <= s["address"] < s["address"] + s["memory_bytes"] <= qemu_high
+                   for s in image.segments), "ELF exceeds actual QEMU virt8GiB DRAM"
+        assert qemu_low <= chain.placement["arena_base"] <= qemu_high - max(
+            item["total_dram_bytes"] for item in data["kernels"]), "arena exceeds actual QEMU DRAM"
+        if args.corrupt_region:
+            assert args.corrupt_region in ("hidden_0", "hidden_1")
+            assert 0 <= args.corrupt_offset < chain.layout[args.corrupt_region]["bytes"]
         receipt.update(launch_range=list(launch_range), elf_sha256=bundle.sums["host/host.elf"],
             contract_sha256=bundle.sums["contract.json"], model_profile=profile,
             chain_sha256sums_sha256=chain.checksums_sha256, full_static_admission=True,
             live_regions=chain.data["live_regions"], model_binding=binding)
+        serial = uart.prepare()
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single",
-            "-bios", "none", "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:uart.log",
+            "-bios", "none", "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:"+serial,
             "-S", "-gdb", "unix:qemu.sock,server=on,wait=off", "-kernel", str(elf)]
         receipt["qemu_command"] = command
         progress("static-admitted")
@@ -168,7 +175,12 @@ def execute(args):
         for pc, access in sites.items():
             assert remote.read(pc, access["length"]) == image.bytes_at(pc, access["length"])
             remote.breakpoint(pc, access["length"])
-        pc, _ = remote.resume()
+        uart.register(remote, image, set(ready) | set(stops) | set(sites))
+        while True:
+            pc, _ = remote.resume()
+            if pc in ready:
+                break
+            assert uart.handle(remote, pc), "unexpected guest stop before initialized segment entry"
         receipt["host_elf_executed"] = True
         assert pc in ready, "guest did not reach normal initialized segment entry"
         assert remote.reg(2) % 16 == 0 and image.symbols["__stack_bottom"]["address"] <= remote.reg(2) < image.symbols["__stack_top"]["address"]
@@ -202,6 +214,8 @@ def execute(args):
             pc, stop = remote.resume()
             if pc in stops:
                 break
+            if uart.handle(remote, pc):
+                continue
             assert pc in sites, ("unexpected segment guest stop", pc, stop)
             access = sites[pc]
             address = remote.reg(access["base"]) + access["offset"]
@@ -255,8 +269,8 @@ def execute(args):
         compared = chain.compare(args.segment_index, remote.read)
         receipt["boundaries"] = {row["name"]: row["sha256"] for row in compared}
         receipt["boundary_comparisons"] = compared
-        uart = (out / "uart.log").read_bytes()
-        receipt["uart"] = verify_uart(uart, "tiny-segment", count, progress_launches=[count])
+        uart_raw = (out / "uart.log").read_bytes()
+        receipt["uart"] = verify_uart(uart_raw, "tiny-segment", count, progress_launches=[count])
         bundle.verify_bookends()
         chain.verify_bookends()
         device.verify_bookends()
@@ -283,7 +297,22 @@ def execute(args):
                 receipt["qemu_peak_rss_kib"] = int(next(l.split()[1] for l in status.splitlines() if l.startswith("VmHWM:")))
             except (FileNotFoundError, StopIteration):
                 pass
-        for obj in (device, remote):
+        if process:
+            try:
+                if process.poll() is None:
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=10)
+                receipt["qemu_child_reaped"] = process.poll() is not None
+            except Exception as error:
+                receipt.setdefault("cleanup_errors", []).append(str(error))
+                receipt["status"] = "FAILED"
+        for obj in (remote, device):
             if obj:
                 try:
                     obj.close()
@@ -291,13 +320,13 @@ def execute(args):
                     receipt.setdefault("cleanup_errors", []).append(str(error))
                     receipt["status"] = "FAILED"
         os.chdir(previous_cwd)
-        if process and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
+        if uart:
+            receipt["uart_transport"] = uart.summary()
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
+                uart.close()
+            except Exception as error:
+                receipt.setdefault("cleanup_errors", []).append(str(error))
+                receipt["status"] = "FAILED"
         receipt["wall_seconds"] = time.monotonic() - started
         (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({k: receipt[k] for k in ("status", "error") if k in receipt}), flush=True)
@@ -311,6 +340,7 @@ def main():
     parser.add_argument("--segment-index", type=int, required=True, choices=range(69))
     parser.add_argument("--wall-seconds", type=int, required=True)
     parser.add_argument("--captured-replies", action="store_true")
+    parser.add_argument("--sifive-uart-bridge", action="store_true")
     parser.add_argument("--corrupt-region", choices=("hidden_0", "hidden_1"))
     parser.add_argument("--corrupt-offset", type=int, default=1)
     args = parser.parse_args()
