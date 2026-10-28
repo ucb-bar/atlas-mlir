@@ -253,6 +253,7 @@ def main():
     uart_arguments(parser)
     parser.add_argument('--target', choices=('sim', 'firesim'), default='sim')
     parser.add_argument('--traffic-reuse', action='store_true')
+    parser.add_argument('--phase-reference', type=safe)
     parser.add_argument('--rodata-after-arena', action='store_true')
     parser.add_argument('--relocate', action='append', default=[], metavar='OLD=NEW')
     parser.add_argument('--model-root', required=True, type=safe)
@@ -527,6 +528,12 @@ def main():
     dram_bytes = max(item['total_dram_bytes'] for item in manifest['kernels'])
     source = make_main(len(panel_rows), parameters, references, panel_rows, call_rows,
                        {'dram':dram_bytes, 'vocabulary':language.shape[0], 'arena':args.arena_base})
+    if args.phase_reference:
+        from smol_full_driver_emit import emit
+        read(Path(__file__).parent/'smol_full_driver_emit.py')
+        read(Path(__file__).parent/'smol_full_phases.py')
+        source, args.phase_data = emit(source, parameters, references, language.shape[0],
+            args.phase_reference, read, asset)
     safe(work/'main.c').write_text(source)
     # Remaining source-copy, compilation and strict full-host ELF admission are
     # below; source and artifact bookends cover generated inputs as well.
@@ -611,6 +618,10 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     for name in ('smol_policy_raw.c', 'smol_policy_raw.h', 'atlas_result.h'):
         target = copy(Path(__file__).absolute().parents[1]/'runtime'/name, source_dir/name)
         if name.endswith('.c'): compile_sources.append(target)
+    if args.phase_reference:
+        for name in ('smol_full_driver.c','smol_full_driver.h','smol_full_phase.h'):
+            target = copy(Path(__file__).absolute().parents[1]/'runtime'/name, source_dir/name)
+            if name.endswith('.c'): compile_sources.append(target)
     read(source_dir/'atlas_result_transport.h')
     read(source_dir/'result-transport.json')
     for name in ('smol_vision_attention.c', 'smol_vision_attention.h', 'smol_host_bits.h'):
@@ -724,6 +735,14 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     contract_raw = (json.dumps(value, sort_keys=True, indent=2)+'\n').encode()
     (out/contract_name).write_bytes(contract_raw)
     products[contract_name] = sha(contract_raw)
+    if args.phase_reference:
+        (out/'contract.json').write_bytes(contract_raw)
+        products['contract.json'] = sha(contract_raw)
+        for name in ('smol_full_driver.c','smol_full_driver.h','smol_policy_graph.c','smol_policy_graph.h',
+                     'smol_vision_graph.c','smol_vision_graph.h'):
+            raw = read(source_dir/name)
+            (out/'host'/name).write_bytes(raw)
+            products['host/'+name] = sha(raw)
     for name, expected in tuple(pins.items()): pin(name, expected)
     for name, expected in products.items(): pin(out/name, expected)
     receipt = dict(schema='atlas.smol_full_host_build.v1', status='BUILT_AUDITED_ONLY',
@@ -735,6 +754,9 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
         linker_sha256=pins[str(args.linker)], kernel_count=len(manifest['kernels']), projection_calls=1421,
         placement=args.physical, source_relocations=args.relocate, native_table_provider=args.table_worker, uart=args.uart, result_name='smol-full',
         result_progress_launches=progress_launches(manifest))
+    if args.phase_reference:
+        receipt.update(segment_mode=True, segment_result_name='smol-segment',
+            capture_sha256=args.phase_data['reference_sha256'])
     build_raw = (json.dumps(receipt, sort_keys=True, indent=2)+'\n').encode()
     (out/'host/build.json').write_bytes(build_raw)
     products.update({'host/build.json':sha(build_raw), 'host/host.elf':sha(elf_raw)})
@@ -745,6 +767,9 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     raw = (json.dumps(provenance, sort_keys=True, indent=2)+'\n').encode()
     (out/'provenance.json').write_bytes(raw)
     products['provenance.json'] = sha(raw)
+    if args.phase_reference:
+        from smol_full_driver_emit import write_pending_chain
+        write_pending_chain(out, args, image, value, sha(elf_raw), sha(contract_raw), products)
     (out/'SHA256SUMS').write_text(''.join(digest+'  '+name+'\n' for name,digest in sorted(products.items())))
     # Admit the concrete final ELF through the same model-specific contract the
     # continuous runner will use, before publishing build-only success.
