@@ -83,7 +83,7 @@ def run(args):
         portable_adaptation=True, full_soc_executed=False, host_elf_executed=False, verbose_rsp_trace_enabled=False,
         kernels=[])
     signal.signal(signal.SIGTERM, interrupted)
-    process = remote = device = uart_stream = broker = None
+    process = remote = device = uart_stream = broker = physical = prefix = None
     deadline = time.monotonic() + args.wall_seconds
     pins = {}
     try:
@@ -119,6 +119,12 @@ def run(args):
                 contract.validate_bundle(bundle, image)
             stop_sites = contract.stop_sites(image)
         assert stop_sites, "completion WFI instruction missing"
+        if getattr(args, "tiny_prefix_chain", None):
+            from tiny_prefix import PrefixBoundary
+            prefix = PrefixBoundary(Path(args.tiny_prefix_chain).absolute(), bundle, image)
+            pins[str(Path(__file__).with_name("tiny_prefix.py"))] = sha(Path(__file__).with_name("tiny_prefix.py"))
+            pins[str(Path(__file__).with_name("segment_boundary.py"))] = sha(Path(__file__).with_name("segment_boundary.py"))
+            pins[str(Path(__file__).with_name("qmp_memory.py"))] = sha(Path(__file__).with_name("qmp_memory.py"))
         uart_sites = {}
         if bridge:
             from uart_device import sites as find_uart_sites,SifiveUART
@@ -166,12 +172,14 @@ def run(args):
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single", "-bios", "none",
             "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:"+serial_file, "-S", "-gdb",
             "unix:qemu.sock,server=on,wait=off", "-kernel", str(elf)]
+        if prefix:
+            command.extend(["-qmp", "unix:qmp.sock,server=on,wait=off"])
         receipt.update(qemu_command=command, inputs_sha256=pins, bundle_sha256sums_sha256=bundle.checksums_sha256,
             mmio_sites=sites, completion_breakpoints=sorted(stop_sites))
         with (out / "qemu.log").open("wb") as qlog:
             process = subprocess.Popen(command, cwd=out, stdout=qlog, stderr=subprocess.STDOUT, start_new_session=True)
             startup_deadline = min(deadline, time.monotonic() + 30)
-            while not sock.exists():
+            while not sock.exists() or (prefix and not (out / "qmp.sock").exists()):
                 if process.poll() is not None:
                     raise RuntimeError("QEMU exited before debugger socket")
                 if time.monotonic() >= startup_deadline:
@@ -181,6 +189,15 @@ def run(args):
             os.chdir(out)
             remote = Remote("qemu.sock", trace=None, timeout=min(args.wall_seconds, 1800), deadline=deadline)
             assert remote.request("?")[:1] in (b"S", b"T")
+            receipt["qemu_pid"] = process.pid
+            if prefix:
+                from qmp_memory import PhysicalMemory
+                physical = PhysicalMemory(out / "qmp.sock", out, deadline)
+                prefix.attach(remote, physical, out)
+                receipt["prefix_admission"] = prefix.admission
+                # Bulk reads are physical because this admitted bare-metal image uses identity addressing.
+                small_read = remote.read
+                remote.read = lambda address, size: physical.read(address, size) if size >= 4096 else small_read(address, size)
             remote.set_reg(32, image.entry)
             for pc, site in sites.items():
                 assert remote.read(pc, site["length"]) == image.bytes_at(pc, site["length"])
@@ -192,7 +209,10 @@ def run(args):
                 remote.breakpoint(pc, length)
             cycle_cap = getattr(args, "kernel_cycle_cap", None) or (
                 contract.CYCLE_CAP if contract is not None else 20000000)
-            device = Device(remote, out, deadline, bundle, model_root, cycle_cap=cycle_cap)
+            device = Device(remote, out, deadline, bundle, model_root, cycle_cap=cycle_cap,
+                **(dict(launch_range=(0, prefix.launches), progress_callback=prefix.heartbeat) if prefix else {}))
+            if prefix:
+                prefix.admit_device(device)
             access_cap = mmio_access_cap(device, workload)
             receipt["kernel_cycle_cap"] = cycle_cap
             receipt["mmio_access_cap"] = access_cap
@@ -202,6 +222,14 @@ def run(args):
                 receipt["host_elf_execution_attempted"] = True
                 pc, stop = remote.resume()
                 receipt["host_elf_executed"] = True
+                if prefix and pc == prefix.pc:
+                    if prefix.at_boundary(remote, device):
+                        break
+                    # Layer zero must execute its original first instruction once, then retain the entry breakpoint.
+                    assert remote.request(f"z0,{prefix.pc:x},{prefix.length:x}") == b"OK"
+                    remote.request("s")
+                    remote.breakpoint(prefix.pc, prefix.length)
+                    continue
                 if pc in stop_sites:
                     break
                 if pc in uart_sites:
@@ -224,22 +252,27 @@ def run(args):
                 assert accesses < access_cap, "MMIO access cap"
             else:
                 raise TimeoutError("host graph wall cap")
-            completion = (resnet_completion(remote, image, device, out) if contract is None
-                else contract.verify_completion(remote, image, device, bundle, out))
+            completion = (prefix.verify(remote, device) if prefix else
+                resnet_completion(remote, image, device, out) if contract is None else
+                contract.verify_completion(remote, image, device, bundle, out))
             if uart_profile is not None:
                 uart_raw = (out / "uart.log").read_bytes()
                 completion["uart"] = dict(profile=uart_profile, sha256=digest(uart_raw),
-                    **verify_result_lines(uart_raw, build["result_name"], device.kernel_count,
-                        progress_launches=build["result_progress_launches"]))
+                    **(prefix.verify_uart(uart_raw, build) if prefix else
+                        verify_result_lines(uart_raw, build["result_name"], device.kernel_count,
+                            progress_launches=build["result_progress_launches"])))
             if broker is not None:
                 completion['uart']['bridge'] = broker.summary()
                 completion['uart_mmio_accesses'] = uart_accesses
                 completion['uart_sites'] = uart_sites
             bundle.verify_bookends()
+            if prefix:
+                prefix.chain.verify_bookends()
             device.verify_bookends()
             assert all(sha(Path(path)) == expected_hash for path, expected_hash in pins.items())
             assert time.monotonic() < deadline, "absolute completion deadline"
-            receipt.update(status="PASS_RV64_HOST_WITH_MODEL_DEVICE", kernels=device.completed, mmio_accesses=accesses,
+            receipt.update(status="PASS_RV64_HOST_PREFIX_WITH_MODEL_DEVICE" if prefix else "PASS_RV64_HOST_WITH_MODEL_DEVICE",
+                kernels=device.completed, mmio_accesses=accesses,
                 one_device_reset=True, model_binding=device.binding, device_payloads_sha256=device.pins,
                 source_bookends_equal=True, **completion)
     except Exception as error:
@@ -260,6 +293,8 @@ def run(args):
                 process.wait(timeout=10)
 
         cleanup = [terminate_qemu]
+        if physical:
+            cleanup.append(physical.close)
         if device:
             cleanup.append(device.close)
         if remote:
@@ -279,6 +314,7 @@ def run(args):
         if broker is not None:
             receipt['uart_transport'] = broker.summary()
             receipt['uart_stream_sha256'] = sha(out/'uart.log')
+        receipt["qemu_reaped"] = process is not None and process.poll() is not None
         receipt["wall_remaining_seconds"] = deadline - time.monotonic()
         write_json(out / "receipt.json", receipt)
     print(json.dumps({k: receipt[k] for k in ("status", "error") if k in receipt}), flush=True)
@@ -291,11 +327,14 @@ def arguments(argv=None):
     parser.add_argument("--wall-seconds", type=int)
     parser.add_argument("--workload", choices=("resnet", "tiny", "smol", *FULL_CONTRACTS), default="resnet")
     parser.add_argument("--kernel-cycle-cap", type=int)
+    parser.add_argument("--tiny-prefix-chain", help="opt-in continuous Tiny layer-zero boundary qualification")
     parser.add_argument('--sifive-uart-bridge',action='store_true',
                         help='model admitted board SiFive UART accesses; no hardware or baud-timing claim')
     for name in ("elf", "bundle-root", "model-root", "qemu"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args(argv)
+    if args.tiny_prefix_chain and args.workload != "tiny-full":
+        parser.error("--tiny-prefix-chain requires --workload tiny-full")
     if args.wall_seconds is None:
         if args.workload in FULL_CONTRACTS:
             parser.error("full models require an explicit forecasted --wall-seconds budget")

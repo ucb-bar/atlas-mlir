@@ -35,7 +35,8 @@ def launch_bounds(kernel_count, selected=None):
 
 
 class Device:
-    def __init__(self, remote, out, wall_deadline, bundle, model_root, cycle_cap=20000000, *, launch_range=None):
+    def __init__(self, remote, out, wall_deadline, bundle, model_root, cycle_cap=20000000, *,
+                 launch_range=None, progress_callback=None):
         self.remote, self.out = remote, checked(out)
         self.deadline, self.cycle_cap = wall_deadline, cycle_cap
         self.bundle = bundle
@@ -71,6 +72,8 @@ class Device:
         self.imem = bytearray(ATLAS_IMEM_BYTES)
         self.written = set()
         self.completed = []
+        self.progress_callback = progress_callback
+        self.progress_time = 0
 
     def resnet_kernel_paths(self, index):
         """Keep the existing bundle-style segment-capture provider compatible."""
@@ -164,8 +167,13 @@ class Device:
         before = core.cycle_count
         events = Counter()
         while not core.is_finished() and core.cycle_count - before < self.cycle_cap:
-            if core.cycle_count % 1024 == 0 and time.monotonic() >= self.deadline:
-                raise TimeoutError("model bridge wall cap")
+            if core.cycle_count % 1024 == 0:
+                now = time.monotonic()
+                if now >= self.deadline:
+                    raise TimeoutError("model bridge wall cap")
+                if self.progress_callback and now - self.progress_time >= 10:
+                    self.progress_callback(self)
+                    self.progress_time = now
             core.tick()
             event = self.dma.last_cycle
             if event.a:
@@ -191,6 +199,8 @@ class Device:
             exact=True, drained=True, observed_dma=dict(events), reset_count=1)
         write_json(self.out / f"kernel-{index:02d}.json", result)
         self.completed.append(result)
+        if self.progress_callback:
+            self.progress_callback(self)
         self.written.clear()
 
     def close(self):
