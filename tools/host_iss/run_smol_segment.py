@@ -119,28 +119,6 @@ def execute(args):
         bundle = FullBundle(checked(args.bundle_root), "smol-full")
         elf, qemu, model_root = (checked(p) for p in (bundle.root / "host/host.elf", args.qemu, args.model_root))
         image = Image(bundle.read("host/host.elf"))
-        # Assembler/profile and the entire immutable chain are admitted before Core creation.
-        before = model_binding(model_root)
-        _, _, assembler, _ = configure_model(model_root)
-        binding = model_binding(model_root)
-        assert binding["tracked_source_diff_exit"] == 0 and before["tracked_source_diff_exit"] == 0
-        assert binding["revision"] == before["revision"] and binding["curve_sha256"] == before["curve_sha256"]
-        profile = dict(revision=binding["revision"], backend="curve", curve_sha256=binding["curve_sha256"])
-        chain, data = contract.validate_bundle(bundle, image, assembler, profile)
-        assert 0 <= args.segment_index < len(chain.boundaries) - 1
-        launch_range = tuple(b["launch_cursor"] for b in chain.boundaries[args.segment_index:args.segment_index+2])
-        count = launch_range[1] - launch_range[0]
-        assert (bundle.build["uart"]["kind"], bundle.build["uart"]["base"]) == ("ns16550", 0x10000000)
-        ready, stops, success = contract.runtime_sites(image)
-        sites = mmio_sites(image)
-        qemu_low, qemu_high = 0x80000000, 0x80000000 + (8 << 30)
-        assert all(qemu_low <= s["address"] < s["address"] + s["memory_bytes"] <= qemu_high
-                   for s in image.segments), "ELF exceeds actual QEMU virt8GiB DRAM"
-        assert qemu_low <= chain.placement["arena_base"] <= qemu_high - max(
-            item["total_dram_bytes"] for item in data["kernels"]), "arena exceeds actual QEMU DRAM"
-        if args.corrupt_region:
-            assert args.corrupt_region in chain.layout
-            assert 0 <= args.corrupt_offset < chain.layout[args.corrupt_region]["bytes"]
         for module in (contract, sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["smol_full_contract"],
                        sys.modules["smol_full_plan"],
@@ -159,6 +137,30 @@ def execute(args):
             pins[str(path)] = expected
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER), checked(tools / "chipyard/arena.py")):
             pins[str(path)] = sha256(path)
+        # Assembler/profile and the entire immutable chain are admitted before Core creation.
+        before = model_binding(model_root)
+        _, _, assembler, _ = configure_model(model_root)
+        binding = model_binding(model_root)
+        assert binding["tracked_source_diff_exit"] == 0 and before["tracked_source_diff_exit"] == 0
+        assert binding["revision"] == before["revision"] and binding["curve_sha256"] == before["curve_sha256"]
+        profile = dict(revision=binding["revision"], backend="curve", curve_sha256=binding["curve_sha256"])
+        chain, data = contract.validate_bundle(bundle, image, assembler, profile)
+        assert all(sha256(checked(path)) == h for path, h in pins.items()), "admission helper changed"
+        assert model_binding(model_root) == binding, "admission model source changed"
+        assert 0 <= args.segment_index < len(chain.boundaries) - 1
+        launch_range = tuple(b["launch_cursor"] for b in chain.boundaries[args.segment_index:args.segment_index+2])
+        count = launch_range[1] - launch_range[0]
+        assert (bundle.build["uart"]["kind"], bundle.build["uart"]["base"]) == ("ns16550", 0x10000000)
+        ready, stops, success = contract.runtime_sites(image)
+        sites = mmio_sites(image)
+        qemu_low, qemu_high = 0x80000000, 0x80000000 + (8 << 30)
+        assert all(qemu_low <= s["address"] < s["address"] + s["memory_bytes"] <= qemu_high
+                   for s in image.segments), "ELF exceeds actual QEMU virt8GiB DRAM"
+        assert qemu_low <= chain.placement["arena_base"] <= qemu_high - max(
+            item["total_dram_bytes"] for item in data["kernels"]), "arena exceeds actual QEMU DRAM"
+        if args.corrupt_region:
+            assert args.corrupt_region in chain.layout
+            assert 0 <= args.corrupt_offset < chain.layout[args.corrupt_region]["bytes"]
         receipt.update(launch_range=list(launch_range), elf_sha256=bundle.sums["host/host.elf"],
             contract_sha256=bundle.sums[bundle.provenance["contract"]], model_profile=profile,
             chain_sha256sums_sha256=chain.checksums_sha256, full_static_admission=True,
