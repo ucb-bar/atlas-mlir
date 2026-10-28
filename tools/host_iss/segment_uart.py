@@ -14,7 +14,8 @@ class Transport:
         self.profile, self.out = dict(profile), out
         self.accesses, self.stream, self.broker = 0, None, None
 
-    def pin(self, pins):
+    @staticmethod
+    def pin(pins):
         for name in ("segment_uart.py", "uart_device.py", "run.py"):
             path = checked(Path(__file__).absolute().with_name(name))
             pins[str(path)] = sha256(path)
