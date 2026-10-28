@@ -12,7 +12,7 @@ def emit(source, parameters, references, vocabulary, reference, read, asset):
     inventory.update((r['actual_symbol'], r['bytes']) for r in references)
     boundaries = [evidence['initial_boundary'], *evidence['boundaries']]
     if len(boundaries) != 201: raise ValueError('Complete boundary set required')
-    data = [source.split('static int vision_launch(', 1)[0], '#include "smol_full_driver.h"']
+    data = [source, '#include "smol_full_driver.h"']
     data += ['const smol_full_phase_descriptor smol_full_phase_plan[200]={']
     for p in segments():
         values = [{'vision':0,'prefix':1,'expert':2}[p['kind']], *[p[k] for k in

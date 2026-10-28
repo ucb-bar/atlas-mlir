@@ -88,11 +88,11 @@ class BuilderTest(unittest.TestCase):
             for extent in shape: elements *= extent
             references.append(dict(name=name,actual_symbol='actual_'+name,expected_symbol='expected_'+name,
                 bytes=elements*dict(float32=4,uint16=2,bool=1)[dtype],dtype=dtype))
-        source = builder.make_main(2715,parameters,references,[],[],
+        source = builder.make_globals(2715,parameters,references,[],[],
                                    dict(dram=12706304,vocabulary=32000,arena=0x100000000))
-        self.assertIn('vision_launch',source)
-        self.assertIn('policy_launch',source)
-        self.assertIn('atlas_result_pass',source)
+        self.assertIn('smol_full_vision_frame',source)
+        self.assertIn('smol_full_policy_frame',source)
+        self.assertIn('smol_full_raw',source)
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
             write_config(out,argparse.Namespace(uart_kind='ns16550',uart_base=0x10000000,uart_divisor=None))

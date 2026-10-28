@@ -37,8 +37,8 @@ def dtype_name(value):
     return {'torch.bfloat16': 'uint16', 'torch.float32': 'float32'}[value]
 
 
-def make_main(kernel_count, parameters, references, panel_rows, call_rows, sizes):
-    """Generate the product entry point, without any replay/backend substitution."""
+def make_globals(kernel_count, parameters, references, panel_rows, call_rows, sizes):
+    """Generate shared production declarations for the full and segmented driver."""
     ctype = {'uint16': 'uint16_t', 'float32': 'float', 'bool': 'uint8_t', 'uint8': 'uint8_t', 'int64': 'int64_t'}
     declarations, arrays = [], {}
     for name, item in parameters.items():
@@ -123,45 +123,6 @@ def make_main(kernel_count, parameters, references, panel_rows, call_rows, sizes
         '.time_activated=smol_g_time_activated,.suffix_input=smol_g_suffix_input,.velocity=smol_g_velocity};']
     for field in ('input_state', 'output_state', 'velocity', 'timestep'):
         data.append('float *const smol_step_'+field+'[10]={'+','.join(ref(f'step_{step:02d}_{field}') for step in range(10))+'};')
-    data += [
-        'static int vision_launch(void *w,unsigned layer,unsigned role,const uint16_t *input,size_t rows,size_t k,uint16_t *output,size_t n){int code=smol_policy_raw_vision(w,layer,role,input,rows,k,output,n);if(!code&&(role==6||role==7))atlas_result_progress(&smol_result,smol_full_raw.panel_cursor,role==7?"connector":"vision-layer");return code;}',
-        'static int policy_launch(void *w,unsigned site,unsigned layer,unsigned role,unsigned dtype,const void *input,size_t rows,size_t k,unsigned output_dtype,void *output,size_t n){int code=smol_policy_raw_graph(w,site,layer,role,dtype,input,rows,k,output_dtype,output,n);if(!code&&(((site==5||site==6)&&role==6)||site==4))atlas_result_progress(&smol_result,smol_full_raw.panel_cursor,site==4?"step":site==5?"vlm-layer":"expert-layer");return code;}',
-        'static int same(const unsigned char *a,const unsigned char *b,size_t n){for(size_t i=0;i<n;++i)if(a[i]!=b[i])return 0;return 1;}',
-        'static void report_init(void){atlas_result_uart_init(&smol_result_uart);atlas_result_begin(&smol_result,atlas_result_uart_putchar,&smol_result_uart,"smol-full",2715);}',
-        'static void fail(unsigned code){if(!smol_result.putchar)report_init();smol_result.completed=smol_full_raw.panel_cursor;atlas_result_fail(&smol_result,"host-check",code,0);atlas_workload_mailbox[1]=3;atlas_workload_mailbox[8]=code;__asm__ volatile("fence rw,rw":::"memory");tohost=((uint64_t)code<<1)|1;}',
-        'void atlas_block_trap_report(uint64_t cause,uint64_t pc,uint64_t value){atlas_workload_mailbox[12]=cause;atlas_workload_mailbox[13]=pc;atlas_workload_mailbox[14]=value;fail(255);}',
-        'void atlas_workload_main(void){', 'report_init();atlas_workload_mailbox[1]=1;',
-        'for(size_t i=0;i<48;++i)if('+p('observation.language_tokens', 'int64_t')+'[i]<0||'+p('observation.language_tokens', 'int64_t')+f'[i]>={sizes["vocabulary"]}){{fail(7);return;}}',
-        'atlas_host_map map={(uintptr_t)ATLAS_IMEM_BASE,(uintptr_t)ATLAS_CSR_BASE,ATLAS_IMEM_BYTES};',
-        'atlas_host_mmio mmio={atlas_host_direct_read32,atlas_host_direct_write32,0};',
-        'atlas_host_memory memory={1,0,0};',
-        'if(atlas_host_init(&smol_full_host,map,mmio,memory)!=ATLAS_HOST_OK){fail(1);return;}',
-        'for(unsigned image=0;image<2;++image){smol_full_raw.image=image;',
-        'for(size_t i=0;i<786432;++i)smol_full_image[i]=float_to_bf16('+p('observation.images', 'float')+'[image*786432+i]);',
-        'if(smol_vision_image(smol_full_image,&smol_full_vision_parameters,&smol_full_vision_frame,&smol_full_vision_states[image],vision_launch,&smol_full_raw)){fail(2);return;}',
-        'memcpy(smol_full_image_output[image],smol_v_output,sizeof(smol_v_output));}',
-        'for(size_t i=0;i<128;++i)'+ref('prefix_pad_mask')+'[i]='+p('observation.image_masks', 'uint8_t')+'[i/64];',
-        'for(size_t i=0;i<48;++i)'+ref('prefix_pad_mask')+'[128+i]='+p('observation.language_mask', 'uint8_t')+'[i];',
-        ref('prefix_pad_mask')+'[176]=1;for(size_t i=0;i<177;++i)'+ref('prefix_attention_mask')+'[i]=(i==176);',
-        'if(smol_policy_prefix(smol_full_image_output[0],smol_full_image_output[1],'+p('observation.state', 'float')+','
-        +ref('prefix_pad_mask')+','+ref('prefix_attention_mask')+',&smol_full_policy_parameters,&smol_full_policy_frame,&smol_full_graph_state,policy_launch,&smol_full_raw)){fail(3);return;}',
-        'const float *current='+p('observation.noise', 'float')+';',
-        'for(unsigned step=0;step<10;++step){',
-        'float time=(float)(1.0+(double)step*(-1.0/10.0));smol_step_timestep[step][0]=time;',
-        'memcpy(smol_step_input_state[step],current,1600*sizeof(float));',
-        'if(smol_policy_step(current,time,smol_step_output_state[step],'+ref('prefix_pad_mask')+',&smol_full_policy_parameters,&smol_full_policy_frame,&smol_full_graph_state,policy_launch,&smol_full_raw)){fail(4);return;}',
-        'memcpy(smol_step_velocity[step],smol_g_velocity,1600*sizeof(float));current=smol_step_output_state[step];}',
-        'memcpy('+ref('final_full_state')+',current,1600*sizeof(float));',
-        'for(size_t row=0;row<50;++row)for(size_t col=0;col<6;++col)'+ref('final_actions')+'[row*6+col]=current[row*32+col];']
-    for index, item in enumerate(references):
-        data.append(f'if(!same((const unsigned char*){item["actual_symbol"]},{item["expected_symbol"]},{item["bytes"]})){{fail({32+index});return;}}')
-    data += [f'if(smol_full_raw.failed||smol_full_raw.panel_cursor!={kernel_count}||smol_full_raw.call_cursor!=1421||smol_full_host.active||smol_full_host.active_buffer_count||smol_full_host.active_buffers){{fail(5);return;}}',
-        f'for(size_t i=0;i<{kernel_count};++i)if(!smol_full_cycles[i]){{fail(6);return;}}',
-        f'atlas_workload_mailbox[2]={kernel_count};atlas_workload_mailbox[3]=1421;',
-        'atlas_workload_mailbox[4]=smol_full_graph_state.prefix_ready;atlas_workload_mailbox[5]=smol_full_graph_state.steps;',
-        'atlas_workload_mailbox[6]=1;atlas_workload_mailbox[9]=smol_full_raw.panel_cursor;atlas_workload_mailbox[10]=smol_full_raw.call_cursor;',
-        'atlas_workload_mailbox[11]=smol_full_host.invocation_sequence;atlas_workload_mailbox[1]=2;',
-        'if(!atlas_result_pass(&smol_result)){fail(8);return;}__asm__ volatile("fence rw,rw":::"memory");tohost=1;', '}']
     return '\n'.join(data)+'\n'
 
 
@@ -253,7 +214,7 @@ def main():
     uart_arguments(parser)
     parser.add_argument('--target', choices=('sim', 'firesim'), default='sim')
     parser.add_argument('--traffic-reuse', action='store_true')
-    parser.add_argument('--phase-reference', type=safe)
+    parser.add_argument('--phase-reference', type=safe, required=True)
     parser.add_argument('--rodata-after-arena', action='store_true')
     parser.add_argument('--relocate', action='append', default=[], metavar='OLD=NEW')
     parser.add_argument('--model-root', required=True, type=safe)
@@ -526,14 +487,13 @@ def main():
             str(manifest['kernels'][indices[0]]['a_scale'])]
         call_rows.append('{'+','.join(values)+'}')
     dram_bytes = max(item['total_dram_bytes'] for item in manifest['kernels'])
-    source = make_main(len(panel_rows), parameters, references, panel_rows, call_rows,
+    source = make_globals(len(panel_rows), parameters, references, panel_rows, call_rows,
                        {'dram':dram_bytes, 'vocabulary':language.shape[0], 'arena':args.arena_base})
-    if args.phase_reference:
-        from smol_full_driver_emit import emit
-        read(Path(__file__).parent/'smol_full_driver_emit.py')
-        read(Path(__file__).parent/'smol_full_phases.py')
-        source, args.phase_data = emit(source, parameters, references, language.shape[0],
-            args.phase_reference, read, asset)
+    from smol_full_driver_emit import emit
+    read(Path(__file__).parent/'smol_full_driver_emit.py')
+    read(Path(__file__).parent/'smol_full_phases.py')
+    source, args.phase_data = emit(source, parameters, references, language.shape[0],
+        args.phase_reference, read, asset)
     safe(work/'main.c').write_text(source)
     # Remaining source-copy, compilation and strict full-host ELF admission are
     # below; source and artifact bookends cover generated inputs as well.
@@ -618,10 +578,9 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     for name in ('smol_policy_raw.c', 'smol_policy_raw.h', 'atlas_result.h'):
         target = copy(Path(__file__).absolute().parents[1]/'runtime'/name, source_dir/name)
         if name.endswith('.c'): compile_sources.append(target)
-    if args.phase_reference:
-        for name in ('smol_full_driver.c','smol_full_driver.h','smol_full_phase.h'):
-            target = copy(Path(__file__).absolute().parents[1]/'runtime'/name, source_dir/name)
-            if name.endswith('.c'): compile_sources.append(target)
+    for name in ('smol_full_driver.c','smol_full_driver.h','smol_full_phase.h'):
+        target = copy(Path(__file__).absolute().parents[1]/'runtime'/name, source_dir/name)
+        if name.endswith('.c'): compile_sources.append(target)
     read(source_dir/'atlas_result_transport.h')
     read(source_dir/'result-transport.json')
     for name in ('smol_vision_attention.c', 'smol_vision_attention.h', 'smol_host_bits.h'):
@@ -735,14 +694,13 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     contract_raw = (json.dumps(value, sort_keys=True, indent=2)+'\n').encode()
     (out/contract_name).write_bytes(contract_raw)
     products[contract_name] = sha(contract_raw)
-    if args.phase_reference:
-        (out/'contract.json').write_bytes(contract_raw)
-        products['contract.json'] = sha(contract_raw)
-        for name in ('smol_full_driver.c','smol_full_driver.h','smol_policy_graph.c','smol_policy_graph.h',
-                     'smol_vision_graph.c','smol_vision_graph.h'):
-            raw = read(source_dir/name)
-            (out/'host'/name).write_bytes(raw)
-            products['host/'+name] = sha(raw)
+    (out/'contract.json').write_bytes(contract_raw)
+    products['contract.json'] = sha(contract_raw)
+    for name in ('smol_full_driver.c','smol_full_driver.h','smol_policy_graph.c','smol_policy_graph.h',
+                 'smol_vision_graph.c','smol_vision_graph.h'):
+        raw = read(source_dir/name)
+        (out/'host'/name).write_bytes(raw)
+        products['host/'+name] = sha(raw)
     for name, expected in tuple(pins.items()): pin(name, expected)
     for name, expected in products.items(): pin(out/name, expected)
     receipt = dict(schema='atlas.smol_full_host_build.v1', status='BUILT_AUDITED_ONLY',
@@ -754,9 +712,8 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
         linker_sha256=pins[str(args.linker)], kernel_count=len(manifest['kernels']), projection_calls=1421,
         placement=args.physical, source_relocations=args.relocate, native_table_provider=args.table_worker, uart=args.uart, result_name='smol-full',
         result_progress_launches=progress_launches(manifest))
-    if args.phase_reference:
-        receipt.update(segment_mode=True, segment_result_name='smol-segment',
-            capture_sha256=args.phase_data['reference_sha256'])
+    receipt.update(segment_mode=True, segment_result_name='smol-segment',
+        capture_sha256=args.phase_data['reference_sha256'])
     build_raw = (json.dumps(receipt, sort_keys=True, indent=2)+'\n').encode()
     (out/'host/build.json').write_bytes(build_raw)
     products.update({'host/build.json':sha(build_raw), 'host/host.elf':sha(elf_raw)})
@@ -767,9 +724,8 @@ def finish_build(args, bundle, manifest, replay, out, work, parameters, referenc
     raw = (json.dumps(provenance, sort_keys=True, indent=2)+'\n').encode()
     (out/'provenance.json').write_bytes(raw)
     products['provenance.json'] = sha(raw)
-    if args.phase_reference:
-        from smol_full_driver_emit import write_pending_chain
-        write_pending_chain(out, args, image, value, sha(elf_raw), sha(contract_raw), products)
+    from smol_full_driver_emit import write_pending_chain
+    write_pending_chain(out, args, image, value, sha(elf_raw), sha(contract_raw), products)
     (out/'SHA256SUMS').write_text(''.join(digest+'  '+name+'\n' for name,digest in sorted(products.items())))
     # Admit the concrete final ELF through the same model-specific contract the
     # continuous runner will use, before publishing build-only success.
