@@ -38,6 +38,16 @@ def validate(chain, data, preparation, phases, sources, compiled_layout):
     require({k:v for k,v in old.items() if k != "capture_receipt_sha256"}
             == {k:v for k,v in chain.data.items() if k != "capture_receipt_sha256"}, "input chain differs")
     replay = json.loads(chain.read(data["source_reference"]))
+    build = json.loads(chain.read("host/build.json"))
+    units = [argv[argv.index("-c")+1] for argv in build["commands"] if "-c" in argv]
+    mains = [path for path in units if path.endswith("/main.c")]
+    require(len(mains) == 1, "one actual guest generated main")
+    work = mains[0].rsplit("/", 1)[0]
+    production = {work+"/"+relative:checksum for relative,checksum in build["compilation_inputs"].items()}
+    for name in ("main.c", "assets.S"):
+        path = work+"/"+name
+        require(path in units and path in build["source_sha256"], "actual guest main/assets compilation")
+        production[path] = build["source_sha256"][path]
     predecessors = [dict(index=i, sha256=row["input"]["sha256"], dtype=row["input"]["dtype"],
                          bytes=row["input"]["bytes"]) for i,row in enumerate(replay["calls"])]
     modes = ("full", "phased", "corrupt")
@@ -53,6 +63,8 @@ def validate(chain, data, preparation, phases, sources, compiled_layout):
                 and compiled.get("guest_execution") is False and compiled.get("device_execution") is False
                 and compiled.get("bundle_manifest_sha256") == preparation["native_input_checksums_sha256"],
                 "exact-driver scope/input/ABI binding")
+        require(all(compiled["source_sha256"].get(path) == checksum for path,checksum in production.items()),
+                "complete actual guest production/main/assets source binding")
         for path, checksum in compiled["source_sha256"].items():
             if path.rsplit(".", 1)[-1] in ("c", "h", "py"):
                 require(sources.get(path) == checksum, "compile source snapshot coverage")
