@@ -26,6 +26,7 @@ class SegmentUARTTest(unittest.TestCase):
                       uart_register=base+8, uart_role="initialize")
         with tempfile.TemporaryDirectory() as directory, mock.patch("segment_uart.sites", return_value={100:access}):
             transport = Transport(dict(kind="sifive", base=base), True, mock.Mock(), Path(directory))
+            self.assertEqual(transport.summary()["backend"], "modeled-sifive-uart-not-started")
             self.assertEqual(transport.prepare(), "qemu-native-uart.log")
             remote = mock.Mock()
             remote.reg.side_effect = {5:base, 6:1}.__getitem__

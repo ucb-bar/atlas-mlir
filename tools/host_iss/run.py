@@ -37,14 +37,6 @@ def resnet_stop_sites(image):
             if length == 4 and word == 0x10500073}
 
 
-def resnet_stop_sites(image):
-    names = ["atlas_workload_main", "atlas_block_trap_report"]
-    if "finish" in image.symbols:
-        names.append("finish")
-    return {pc: length for name in names for pc, length, word in image.instructions(name)
-            if length == 4 and word == 0x10500073}
-
-
 def mmio_access_cap(device, workload):
     if workload not in FULL_CONTRACTS:
         return 100000
