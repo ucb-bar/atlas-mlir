@@ -341,15 +341,6 @@ def validate_bundle(bundle, image, *, assemble=None):
 
 def verify_completion(remote, image, device, bundle, out):
     data,_ = contract(bundle)
-    require(remote.reg(32) in stop_sites(image), 'normal startup WFI completion')
-    def actual(name,size):
-        raw = remote.read(image.symbols[name]['address'],size)
-        require(len(raw) == size, 'actual read extent '+name)
-        return raw
-    mailbox = actual('atlas_workload_mailbox',128)
-    words = struct.unpack('<16Q',mailbox)
-    require(words == (MAGIC,2,2715,1421,1,10,1,0,0,2715,1421,2715,0,0,0,0), 'full policy self-check completion')
-    require(actual('tohost',8) == struct.pack('<Q',1) and actual('fromhost',8) == bytes(8), 'HTIF completion')
     require(len(device.completed) == 2715, 'all2715 fresh model starts')
     for index,(summary,item) in enumerate(zip(device.completed,data['kernels'])):
         require(all(type(summary[name]) is int and summary[name] == value for name,value in
@@ -364,6 +355,21 @@ def verify_completion(remote, image, device, bundle, out):
                 and summary['actual_output_sha256'] == summary['expected_output_sha256'] == digest(expected)
                 and summary['observed_dma'] == dict(dma,response_beats=(dma['load_bytes']+dma['store_bytes'])//32),
                 'actual runtime program/staged input/output/DMA identity')
+    return verify_host_completion(remote, image, bundle, out)
+
+
+def verify_host_completion(remote, image, bundle, out):
+    """Check actual host state independently of any accelerator execution claim."""
+    data,_ = contract(bundle)
+    require(remote.reg(32) in stop_sites(image), 'normal startup WFI completion')
+    def actual(name,size):
+        raw = remote.read(image.symbols[name]['address'],size)
+        require(len(raw) == size, 'actual read extent '+name)
+        return raw
+    mailbox = actual('atlas_workload_mailbox',128)
+    words = struct.unpack('<16Q',mailbox)
+    require(words == (MAGIC,2,2715,1421,1,10,1,0,0,2715,1421,2715,0,0,0,0), 'full policy self-check completion')
+    require(actual('tohost',8) == struct.pack('<Q',1) and actual('fromhost',8) == bytes(8), 'HTIF completion')
     require(struct.unpack('<4I',actual('smol_full_graph_state',16)) == (1,10,1273,0), 'actual policy graph state')
     require(struct.unpack('<8I',actual('smol_full_vision_states',32)) == (1,74,1,0)*2, 'both actual vision graph states')
     raw_context = actual('smol_full_raw',160)
