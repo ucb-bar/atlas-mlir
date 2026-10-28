@@ -225,8 +225,9 @@ class ProtocolTest(unittest.TestCase):
         remote.deadline = time.monotonic() - 1
         remote._buffer = b"+"
         remote._offset = 0
+        self.assertEqual(remote.byte(), b"+")
         with self.assertRaises(TimeoutError):
-            remote.byte()
+            remote.receive()
         with self.assertRaises(TimeoutError):
             remote.send(b"?")
 
