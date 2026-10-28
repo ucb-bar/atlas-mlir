@@ -364,8 +364,8 @@ def main():
     parser.add_argument("--corrupt-region", help="explicit semantic-region corruption control after restore")
     parser.add_argument("--corrupt-offset", type=int, default=1)
     args = parser.parse_args()
-    if not 0 < args.wall_seconds <= 7200:
-        parser.error("explicit segment wall cap must be1..7200seconds")
+    if not 0 < args.wall_seconds <= 28800:
+        parser.error("explicit segment wall cap must be1..28800 seconds")
     raise SystemExit(execute(args))
 
 
