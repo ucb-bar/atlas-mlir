@@ -7,7 +7,7 @@ import zipfile
 
 import numpy as np
 
-from bundle import EPILOGUE
+from bundle import EPILOGUE, verify_kernel_receipt
 from smol_full_plan import calls, reference_geometry, validate_reference
 from atlas_program import assembly, dma_load_bytes
 from chipyard.arena import DEFAULT_ARENA, relocate, relocate_assembly
@@ -342,19 +342,9 @@ def validate_bundle(bundle, image, *, assemble=None):
 def verify_completion(remote, image, device, bundle, out):
     data,_ = contract(bundle)
     require(len(device.completed) == 2715, 'all2715 fresh model starts')
-    for index,(summary,item) in enumerate(zip(device.completed,data['kernels'])):
-        require(all(type(summary[name]) is int and summary[name] == value for name,value in
-                    (('index',index),('sequence',index+1),('reset_count',1)))
-                and summary['exact'] is True and summary['drained'] is True
-                and type(summary['cycles']) is int and 0 < summary['cycles'] <= CYCLE_CAP,
-                'ordered live exact/drained ledger')
-        original,expected = bundle.read(item['original']),bundle.read(item['expected'])
-        dma = item['requested_dma']
-        require(summary['program_sha256'] == digest(original[:-4]+EPILOGUE)
-                and summary['host_input_sha256'] == item['initial_sha256']
-                and summary['actual_output_sha256'] == summary['expected_output_sha256'] == digest(expected)
-                and summary['observed_dma'] == dict(dma,response_beats=(dma['load_bytes']+dma['store_bytes'])//32),
-                'actual runtime program/staged input/output/DMA identity')
+    for index, (summary, item) in enumerate(zip(device.completed, data['kernels'])):
+        verify_kernel_receipt(summary, dict(item, program=bundle.read(item['original']),
+            expected_sha256=digest(bundle.read(item['expected']))), index, CYCLE_CAP)
     require(remote.reg(32) in stop_sites(image), 'normal startup WFI completion')
     def actual(name,size):
         raw = remote.read(image.symbols[name]['address'],size)

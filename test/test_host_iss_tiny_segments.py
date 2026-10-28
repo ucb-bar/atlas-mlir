@@ -131,7 +131,8 @@ class TinySegmentContractTest(unittest.TestCase):
             observed_dma=dict(load_bytes=32, store_bytes=32, response_beats=2))
         segment.verify_kernel(receipt, item, 292)
         for name, value in (("index", 0), ("sequence", 1), ("cycles", 0), ("drained", False),
-                            ("host_input_sha256", "c"*64), ("program_sha256", "d"*64)):
+                            ("host_input_sha256", "c"*64), ("program_sha256", "d"*64),
+                            ("index", True), ("cycles", True)):
             changed = copy.deepcopy(receipt)
             changed[name] = value
             with self.subTest(name=name), self.assertRaises(ValueError):

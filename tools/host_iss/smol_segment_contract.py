@@ -2,7 +2,7 @@
 import json
 import struct
 
-from bundle import runtime_program
+from bundle import runtime_program, verify_kernel_receipt
 from placement import placement
 from segment_boundary import SegmentChain
 from smol_full_plan import calls
@@ -207,14 +207,4 @@ def validate_bundle(bundle, image, assemble, model_profile):
 
 
 def verify_kernel(summary, item, index):
-    require(all(type(summary.get(name)) is int and summary[name] == value for name, value in
-                (("index", index), ("sequence", index+1), ("reset_count", 1)))
-            and summary.get("exact") is True and summary.get("drained") is True
-            and type(summary.get("cycles")) is int and 0 < summary["cycles"] <= full.CYCLE_CAP,
-            "ordered exact/drained phase kernel")
-    original, expected, dma = item["program"], item["expected_sha256"], item["requested_dma"]
-    require(summary["program_sha256"] == full.digest(original[:-4]+full.EPILOGUE)
-            and summary["host_input_sha256"] == item["initial_sha256"]
-            and summary["actual_output_sha256"] == summary["expected_output_sha256"] == expected
-            and summary["observed_dma"] == dict(dma,
-                response_beats=(dma["load_bytes"]+dma["store_bytes"])//32), "phase actual payload/DMA identity")
+    return verify_kernel_receipt(summary, item, index, full.CYCLE_CAP)

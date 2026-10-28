@@ -14,6 +14,21 @@ from atlas_path_guard import checked
 EPILOGUE = struct.pack("<6I", 0x13, 0xC1102FF3, 0x13, 0xC10F9073, 0x13, 0x73)
 
 
+def verify_kernel_receipt(summary, item, index, cycle_cap):
+    if not (all(type(summary.get(name)) is int and summary[name] == value for name, value in
+                (("index", index), ("sequence", index + 1), ("reset_count", 1)))
+            and summary.get("exact") is True and summary.get("drained") is True
+            and type(summary.get("cycles")) is int and 0 < summary["cycles"] <= cycle_cap):
+        raise ValueError("ordered exact/drained kernel")
+    requested = item["requested_dma"]
+    if not (summary["program_sha256"] == digest(item["program"][:-4] + EPILOGUE)
+            and summary["host_input_sha256"] == item["initial_sha256"]
+            and summary["actual_output_sha256"] == summary["expected_output_sha256"] == item["expected_sha256"]
+            and summary["observed_dma"] == dict(requested,
+                response_beats=(requested["load_bytes"] + requested["store_bytes"]) // 32)):
+        raise ValueError("kernel live payload/DMA identity")
+
+
 def relative_name(name):
     if (not isinstance(name, str) or not name or "\\" in name or ":" in name
         or any(ord(c) < 32 or ord(c) == 127 for c in name) or name.startswith("/")

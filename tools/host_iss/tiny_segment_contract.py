@@ -3,7 +3,7 @@ import hashlib
 import json
 import struct
 
-from bundle import runtime_program
+from bundle import runtime_program, verify_kernel_receipt
 from placement import placement
 from segment_boundary import SegmentChain
 from atlas_program import assembly
@@ -199,12 +199,4 @@ def validate_bundle(bundle, image, assemble, model_profile):
 
 
 def verify_kernel(summary, item, index):
-    require(summary["index"] == index and summary["sequence"] == index + 1 and summary["reset_count"] == 1
-        and summary["exact"] is True and summary["drained"] is True
-        and 0 < summary["cycles"] <= full.CYCLE_CAP, "ordered exact/drained segment kernel")
-    requested = item["requested_dma"]
-    require(summary["program_sha256"] == digest(item["program"][:-4] + full.EPILOGUE)
-        and summary["host_input_sha256"] == item["initial_sha256"]
-        and summary["actual_output_sha256"] == summary["expected_output_sha256"] == item["expected_sha256"]
-        and summary["observed_dma"] == dict(requested,
-            response_beats=(requested["load_bytes"] + requested["store_bytes"]) // 32), "segment live payload/DMA identity")
+    return verify_kernel_receipt(summary, item, index, full.CYCLE_CAP)
