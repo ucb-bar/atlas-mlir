@@ -314,8 +314,8 @@ def main():
     parser.add_argument("--corrupt-region", choices=("hidden_0", "hidden_1"))
     parser.add_argument("--corrupt-offset", type=int, default=1)
     args = parser.parse_args()
-    if not 0 < args.wall_seconds <= 7200:
-        parser.error("explicit segment wall cap must be1..7200seconds")
+    if not 0 < args.wall_seconds <= 43200:
+        parser.error("explicit segment wall cap must be1..43200seconds")
     raise SystemExit(execute(args))
 
 
