@@ -149,10 +149,12 @@ class FullBudgetTest(unittest.TestCase):
         self.assertEqual(arguments(self.cli()).wall_seconds, 21600)
         self.assertEqual(arguments(self.cli("--workload", "tiny-full", "--wall-seconds", "1209600")).wall_seconds,
                          1209600)
+        self.assertEqual(arguments(self.cli("--workload", "smol-full", "--wall-seconds", "86400")).workload,
+                         "smol-full")
         for extra in [("--workload", "tiny-full"),
                       ("--workload", "tiny", "--wall-seconds", "86401"),
                       ("--workload", "tiny-full", "--wall-seconds", "2592001"),
-                      ("--workload", "smol-full", "--wall-seconds", "86400"),
+                      ("--workload", "smol-full"),
                       ("--wall-seconds", "0"), ("--kernel-cycle-cap", "0")]:
             with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 arguments(self.cli(*extra))
