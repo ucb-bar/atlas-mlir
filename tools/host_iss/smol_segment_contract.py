@@ -6,6 +6,7 @@ from bundle import runtime_program
 from placement import placement
 from segment_boundary import SegmentChain
 from smol_full_plan import calls
+from smol_native_controls import validate as validate_native_controls
 import smol_full_contract as full
 
 require = full.require
@@ -187,6 +188,7 @@ def validate_bundle(bundle, image, assemble, model_profile):
     for name in required:
         require({value for path, value in sources.items() if path.rsplit("/", 1)[-1] == name}
                 == {chain.sums["host/"+name]}, "native/RV64 shared arithmetic/driver source: "+name)
+    validate_native_controls(chain, data, preparation, phases, sources, COMPILED_LAYOUT)
     require(preparation.get("semantic_regions") == {r["name"]: r["bytes"] for r in regions},
             "native/RV64 complete live inventory")
     refs = {row["actual_symbol"]: row for row in data["reference_buffers"]}
