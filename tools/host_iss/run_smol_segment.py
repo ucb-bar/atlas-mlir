@@ -1,5 +1,6 @@
 """Execute one admitted full Smol layer segment in a fresh RV64 guest."""
 import argparse
+from contextlib import suppress
 import datetime
 import json
 import os
@@ -22,6 +23,19 @@ from model_device import Device
 from result_lines import verify as verify_uart
 from run_model_tile import configure_model, model_binding
 import smol_segment_contract as contract
+
+
+def reap_qemu(process):
+    if process.poll() is None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+    return process.poll() is not None
 
 
 def verify_observations(raw, completed, launch_range, kernel_count=2715):
@@ -300,7 +314,13 @@ def execute(args):
                     l.split()[1] for l in status.splitlines() if l.startswith("VmHWM:")))
             except (FileNotFoundError, StopIteration):
                 pass
-        for obj in (device, remote):
+        if process:
+            try:
+                receipt["qemu_child_reaped"] = reap_qemu(process)
+            except Exception as error:
+                receipt.setdefault("cleanup_errors", []).append(str(error))
+                receipt["status"] = "FAILED"
+        for obj in (remote, device):
             if obj:
                 try:
                     obj.close()
@@ -308,13 +328,6 @@ def execute(args):
                     receipt.setdefault("cleanup_errors", []).append(str(error))
                     receipt["status"] = "FAILED"
         os.chdir(previous_cwd)
-        if process and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
         receipt["wall_seconds"] = time.monotonic() - started
         (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({k: receipt[k] for k in ("status", "error") if k in receipt}), flush=True)

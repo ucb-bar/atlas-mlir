@@ -5,6 +5,7 @@ import struct
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 TOOLS = Path(__file__).absolute().parents[1]/"tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS/"host_iss")]
@@ -12,6 +13,18 @@ import smol_segment_contract as contract
 
 
 class SmolSegmentTest(unittest.TestCase):
+    def test_qemu_exit_race_is_reaped_and_timeout_escalates(self):
+        import run_smol_segment as runner
+        for race in (True, False):
+            process = mock.Mock(pid=123)
+            process.poll.side_effect = [None, 0]
+            if not race:
+                process.wait.side_effect = [runner.subprocess.TimeoutExpired("qemu", 10), 0]
+            with mock.patch.object(runner.os, "killpg", side_effect=ProcessLookupError if race else None) as kill:
+                self.assertTrue(runner.reap_qemu(process))
+                self.assertEqual(kill.call_count, 1 if race else 2)
+                self.assertEqual(process.wait.call_count, 1 if race else 2)
+
     def test_phase_partition_covers_all_calls_in_source_order(self):
         phases = contract.partitions()
         self.assertEqual([sum(p["identity"][0] == kind for p in phases) for kind in range(3)], [24, 16, 160])
