@@ -13,6 +13,21 @@ import smol_segment_contract as contract
 
 
 class SmolSegmentTest(unittest.TestCase):
+    def test_debugger_rendezvous_does_not_halt_default_full_program(self):
+        instructions = {
+            "smol_full_segment_ready": [(100, 4, 0x13), (104, 2, 0x8082)],
+            "smol_full_segment_done": [(200, 4, 0x10500073)],
+            "smol_full_segment_failed": [(300, 4, 0x10500073)],
+        }
+        image = SimpleNamespace(instructions=instructions.__getitem__)
+        with mock.patch.object(contract.full, "stop_sites", return_value={400: 4}):
+            ready, stops, success = contract.runtime_sites(image)
+            self.assertEqual((ready, success), ({100: 4}, {200: 4}))
+            self.assertEqual(set(stops), {200, 300, 400})
+            instructions["smol_full_segment_ready"].append((106, 4, 0x10500073))
+            with self.assertRaisesRegex(ValueError, "must not halt"):
+                contract.runtime_sites(image)
+
     def test_qemu_exit_race_is_reaped_and_timeout_escalates(self):
         import run_smol_segment as runner
         for race in (True, False):
