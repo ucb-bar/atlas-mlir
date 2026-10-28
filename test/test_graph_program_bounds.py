@@ -116,7 +116,8 @@ class ProgramBoundTest(unittest.TestCase):
                     "inputs_sha256": {str(graphpath): "graph", str(receiptpath): "reference"}}
             reference = {"nodes": [{"payload": {"path": str(root / "entry"), "sha256": "entry"}}],
                          "final_logits": {"sha256": "logits"}}
-            for count, declared in ((8193, 8193), (8193, 8192), (4, 3), (4, None)):
+            for count, declared in ((GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS + 1),
+                                    (GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS), (4, 3), (4, None)):
                 template = {"base_rescale_exponent": 0, "program_words": declared,
                             "program": {"path": str(root / "program"), "sha256": "program"}}
                 graph = {"input_sha256": {str(paths["templates"]): "templates"},
@@ -149,7 +150,8 @@ class ProgramBoundTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="atlas-program-bounds-") as directory:
             root = Path(directory)
             args = SimpleNamespace(host=root / "host", capture=root / "capture", out=root / "out", segments=[0])
-            for count, declared in ((8193, 8193), (8193, 8192), (4, 3), (4, None)):
+            for count, declared in ((GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS + 1),
+                                    (GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS), (4, 3), (4, None)):
                 descriptor = "" if declared is None else f".program_words={declared},"
                 assets = ("graph_kernels[54]={\n{" + descriptor + "}\n};").encode()
                 def bound_file(path, digests):

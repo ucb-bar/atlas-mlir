@@ -1,7 +1,7 @@
 #ifndef ATLAS_RESNET_GRAPH_DEVICE_H
 #define ATLAS_RESNET_GRAPH_DEVICE_H
 #include "atlas_host.h"
-enum { ATLAS_GRAPH_KERNELS = 54, ATLAS_GRAPH_PROGRAM_WORDS = 8192 };
+enum { ATLAS_GRAPH_KERNELS = 54, ATLAS_GRAPH_PROGRAM_WORDS = 32763 };
 typedef struct {
   const uint32_t *program;
   const uint8_t *weights;

@@ -195,3 +195,23 @@ python tools/chipyard/resnet_segments.py results --host "$FULL_HOST" \
 Recorded evidence: QEMU passed all 54 segment ELFs; stitching matched 69 producer-to-consumer tensor regions with every statement covered once. A live npu_model capture matched the replay capture in all 356 boundary regions, context fields and final logits.
 
 Short SoC segment results on EE290GenericIOSimConfig with VCS: segments 52 and 53 pass with exact end state. Segment 52 (pack, launch 52, decode, affine, residual add, ReLU, average pool) matched tensor_174 (1,024 words) and the Atlas output (32,768 words) with zero mismatches in 49,851,169 CPU cycles and 2,516,093 Atlas cycles. Segment 53 (pack, launch 53, decode, FC bias, logits) matched the Atlas output (8,192 words) and all 1,000 logits against both the captured and the reference values with zero mismatches in 54,827,923 CPU cycles and 2,358,785 Atlas cycles. Runtime state (completion count, sequence, markers, scale and exponent) was correct in both. Wall time was about 6.4 and 7.1 hours at about 2,300 simulated cycles per second.
+
+## Opt-in full-graph traffic reuse
+
+`compile_resnet_templates.py --traffic-reuse` selects the qualified public generator dispatch for every declared contraction while preserving the plan, physical operand layout and arithmetic references. This remains compile-only preparation. The graph runtime admits at most 32,763 raw words, reserving five additional words for the sequenced completion wrapper inside the 32,768-word instruction memory; relocated programs are checked again after expansion.
+
+Generate the graph and run the native captured-reply gate with the selected templates as above, then build the host with an explicit physical DRAM contract. For a generic QEMU UART profile, pass `--uart-kind ns16550 --uart-base 0x10000000`; a hardware UART profile produces a separately bound ELF. The physical DRAM options validate all load segments, allocated sections and stack space, and `--arena-base` relocates the program, runtime layout and linker reservation together.
+
+```sh
+python tools/compile_resnet_templates.py --traffic-reuse --model-root "$MODEL" \
+  --host-plan "$PROVIDER/host-plan.json" --out out/resnet-reuse-templates
+# Generate, replay-check and link using this template receipt and rescale table.
+python tools/prepare_resnet_graph_bundle.py --host out/resnet-reuse-host \
+  --templates out/resnet-reuse-templates/receipt.json --reference "$PROVIDER/reference" \
+  --model-root "$MODEL" --out out/resnet-reuse-bundle
+python tools/host_iss/run.py --workload resnet --elf out/resnet-reuse-bundle/host/host.elf \
+  --bundle-root out/resnet-reuse-bundle --model-root "$MODEL" --qemu "$QEMU" \
+  --wall-seconds 21600 --out out/resnet-reuse-live
+```
+
+The bundle preparer regenerates each scaled program from the current public dispatch, checks it against the host image, preserves all 1,000 expected logit words, and binds captured inputs, immutable weights, guards and expected replies with checksums. Its new kernel receipts use `atlas.resnet_kernel_preparation.v1` and `PREPARED_NOT_EXECUTED`; these are inputs for future execution, never successful numerical receipts. The live bridge accepts this preparation schema as well as legacy `passed_model_only` payloads, then executes every launch and checks its actual DMA counts, preserved bytes and output. Only a fresh successful whole-host run qualifies the reuse graph.

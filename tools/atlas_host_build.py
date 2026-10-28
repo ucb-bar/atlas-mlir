@@ -6,7 +6,7 @@ from pathlib import Path
 from atlas_path_guard import checked
 from atlas_host_layout import ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
 
-GRAPH_PROGRAM_WORDS = 8192
+GRAPH_PROGRAM_WORDS = ATLAS_IMEM_BYTES // 4 - 5
 _UNDECLARED_WORDS = object()
 
 TEMPLATES = checked(Path(__file__).absolute().parents[1] / "runtime/host_templates")

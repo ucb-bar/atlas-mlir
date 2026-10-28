@@ -41,7 +41,7 @@ class ResNetPlacementTest(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 build.relocate_program(program(), patch, 0x90000000)
         raw = program()[:-4] + struct.pack("<I", 0x13) * (GRAPH_PROGRAM_WORDS - 7) + struct.pack("<I", 0x73)
-        with self.assertRaisesRegex(ValueError, "program buffer"):
+        with self.assertRaisesRegex(ValueError, "program"):
             build.relocate_program(raw, 4, 0x90000000)
 
     def test_link_and_runtime_constants_agree_and_default_is_retained(self):
