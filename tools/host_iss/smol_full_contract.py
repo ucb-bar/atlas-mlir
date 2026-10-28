@@ -43,6 +43,12 @@ def stop_sites(image):
         if length == 4 and raw[offset:offset+4] == struct.pack('<I', 0x10500073): sites[start+offset] = 4
         offset += length
     require(len(sites) == 1, 'one normal startup WFI')
+    for name in ('smol_full_segment_done', 'smol_full_segment_failed'):
+        if name in image.symbols:
+            named = {pc:length for pc,length,word in image.instructions(name)
+                     if length == 4 and word == 0x10500073}
+            require(len(named) == 1 and not set(named) & set(sites), 'distinct named full-policy park: '+name)
+            sites.update(named)
     return sites
 
 
