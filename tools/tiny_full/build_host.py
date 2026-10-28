@@ -103,7 +103,7 @@ def staged_contract(bundle):
     return contract(SimpleNamespace(provenance=full,read=bundle.read))
 
 
-def emit_assets(bundle, data, host):
+def emit_assets(bundle, data, host, segment=False):
     """Materialize immutable blobs and actual writable buffers with fixed ABI."""
     declarations, assembly, symbols, locations = [], [], {}, {}
     def blob(name, member):
@@ -206,6 +206,11 @@ int tiny_full_save_check_step(unsigned,const uint16_t *);
                'for(size_t i=0;i<n;++i)if(x[i]!=y[i])return 0;return 1;}\n')
     source += ('int tiny_full_save_check_step(unsigned step,const uint16_t*logits){switch(step){\n'
                +'\n'.join(cases)+'\ndefault:return 1;}return 0;}\n')
+    if segment:
+        source = source.replace('static uint16_t keys[2][22*TINY_FULL_CACHE_WORDS],values[2][22*TINY_FULL_CACHE_WORDS];',
+                                'uint16_t tiny_full_keys[2][22*TINY_FULL_CACHE_WORDS],tiny_full_values[2][22*TINY_FULL_CACHE_WORDS];')
+        source = source.replace('{keys[0],keys[1]},{values[0],values[1]}',
+                                '{tiny_full_keys[0],tiny_full_keys[1]},{tiny_full_values[0],tiny_full_values[1]}')
     (host/'tiny_full_assets.h').write_text(header)
     (host/'tiny_full_assets.c').write_text(source)
     (host/'images.S').write_text('\n'.join(assembly)+'\n.section .note.GNU-stack,"",@progbits\n')
@@ -251,6 +256,16 @@ def place_bundle(out, arena_base, dram_base, dram_bytes):
 
 
 def build(args):
+    segment_root = getattr(args, 'segment_boundaries', None)
+    reference = reference_metadata = assembler = model_before = None
+    if segment_root is not None:
+        if not getattr(args, 'segment_sha256', None) or not getattr(args, 'segment_model_root', None):
+            raise ValueError('segment build requires reference checksum pin and pinned model root')
+        import segment_assets
+        from run_model_tile import configure_model, model_binding
+        reference, reference_metadata = segment_assets.prepare(segment_root, args.segment_sha256)
+        model_before = model_binding(args.segment_model_root)
+        _, _, assembler, _ = configure_model(args.segment_model_root)
     out = checked(args.out)
     if out.exists():
         raise ValueError("fresh complete full bundle required")
@@ -303,6 +318,12 @@ def build(args):
     qualified_sources(pins,sources,gate)
     for path in sources.values():pin(pins,path)
     pin(pins,__file__)
+    if reference is not None:
+        pin(pins,Path(__file__).with_name('segment_assets.py'))
+        pin(pins,ROOT/'tools/host_iss/tiny_segment_contract.py')
+        pin(pins,ROOT/'tools/host_iss/segment_boundary.py')
+        sources['tiny_full_segment_target.c'] = Path(__file__).with_name('tiny_full_segment_target.c')
+        pin(pins,sources['tiny_full_segment_target.c'])
     compiler,linker=pin(pins,args.cc),pin(pins,args.ld)
     resource=checked(args.resource_include)
     out.mkdir(parents=True)
@@ -316,7 +337,7 @@ def build(args):
     host=out/'host';host.mkdir()
     for name,path in sources.items():
         dest=host/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(checked(path).read_bytes())
-    emit_assets(copied,data,host)
+    emit_assets(copied,data,host,segment=reference is not None)
     transport_record = result_transport.write_config(host,args)
     commands=[]
     def run(command,label):
@@ -331,6 +352,8 @@ def build(args):
         'llama_host_attention.c','llama_host_layout.c','llama_rotary_table.c','llama_host_bmm.c',
         'host_matrix_fp8pack.c','smol_host_ops.c','smol_host_softmax.c','rv64_support.c','atlas_host.c',
         'images.S','tiny_full_start.S']
+    if reference is not None:
+        units[units.index('tiny_full_target.c')] = 'tiny_full_segment_target.c'
     for path in host.iterdir():
         if path.is_file():pin(pins,path)
     for name in ('string.h','math.h','fenv.h'):pin(pins,host/'include'/name)
@@ -378,12 +401,20 @@ def build(args):
         'result_progress_launches': [index+1 for index,shape in enumerate(plan(data['decode_count']))
                                     if shape['logical'] in (6,7) and shape['columns'][1] == shape['width']],
         'source_path_relocations': [{'old':str(old),'new':str(new)} for old,new in mappings]}
+    if reference is not None:
+        record.update(segment_mode=True,result_name='tiny-segment',result_progress_launches=[],
+                      reference_sha256sums_sha256=reference.checksums_sha256)
     sums=dict(copied.sums);sums['host/host.elf']=record['elf']['sha256']
     for name in ('atlas_result_transport.h','result-transport.json'):
         sums['host/'+name]=sha256(host/name)
     if package_record is not None:
         for name in ('firesim-contract.json','marshal.json'):
             sums['host/'+name]=sha256(host/name)
+    if reference is not None:
+        for name in [*sources, 'tiny_full_assets.c', 'tiny_full_assets.h', 'images.S']:
+            sums['host/'+name] = sha256(host/name)
+        record['segment_chain_sha256'] = segment_assets.bind(out,reference,reference_metadata,
+            Image((host/'host.elf').read_bytes()),data,copied.provenance,sums)
     def receipt():
         raw=json.dumps(record,indent=2).encode()+b'\n';(host/'build.json').write_bytes(raw)
         sums['host/build.json']=hashlib.sha256(raw).hexdigest()
@@ -391,7 +422,15 @@ def build(args):
     receipt()
     try:
         complete=FullBundle(out,'tiny-full')
-        validate_bundle(complete,Image(complete.read('host/host.elf')))
+        image = Image(complete.read('host/host.elf'))
+        validate_bundle(complete,image)
+        if reference is not None:
+            from tiny_segment_contract import validate_bundle as validate_segments
+            model_after = model_binding(args.segment_model_root)
+            if model_after['revision'] != model_before['revision'] or model_after['curve_sha256'] != model_before['curve_sha256']:
+                raise ValueError('segment model profile changed')
+            profile = dict(revision=model_after['revision'],backend='curve',curve_sha256=model_after['curve_sha256'])
+            validate_segments(complete,image,assembler,profile)
         if any(sha256(checked(path))!=digest for path,digest in pins.items()):
             raise ValueError('admission source bookend changed')
     except BaseException:
@@ -408,6 +447,9 @@ def main():
     for name in ('assets','gate','merlin','support','cc','ld','resource-include','out'):
         parser.add_argument('--'+name,type=checked,required=True)
     parser.add_argument('--gate-sha256',required=True)
+    parser.add_argument('--segment-boundaries',type=checked)
+    parser.add_argument('--segment-sha256')
+    parser.add_argument('--segment-model-root',type=checked)
     parser.add_argument('--relocate',action='append',default=[],metavar='OLD=NEW',
                         help='explicit physical-path rebinding for retained gate inputs')
     arena.add_arguments(parser)

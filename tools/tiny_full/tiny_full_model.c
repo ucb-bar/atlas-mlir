@@ -99,13 +99,15 @@ int tiny_full_argmax_bf16(const uint16_t *logits, size_t count, uint32_t *token)
 _Static_assert(sizeof(tiny_full_phase) == 32, "Tiny continuation ABI size");
 _Static_assert(sizeof(tiny_full_live_layout) == 64, "Tiny layout ABI size");
 
+const tiny_full_live_layout tiny_full_compiled_live_layout = {1, sizeof(tiny_full_workspace),
+    {offsetof(tiny_full_workspace, hidden[0]), offsetof(tiny_full_workspace, hidden[1])},
+    sizeof(((tiny_full_workspace *)0)->hidden[0]),
+    TINY_FULL_LAYERS * TINY_FULL_CACHE_WORDS * sizeof(uint16_t),
+    sizeof(tiny_full_phase), sizeof(tiny_full_state)};
+
 int tiny_full_get_live_layout(tiny_full_live_layout *layout) {
     if (!layout) return -1;
-    *layout = (tiny_full_live_layout){1, sizeof(tiny_full_workspace),
-        {offsetof(tiny_full_workspace, hidden[0]), offsetof(tiny_full_workspace, hidden[1])},
-        sizeof(((tiny_full_workspace *)0)->hidden[0]),
-        TINY_FULL_LAYERS * TINY_FULL_CACHE_WORDS * sizeof(uint16_t),
-        sizeof(tiny_full_phase), sizeof(tiny_full_state)};
+    *layout = tiny_full_compiled_live_layout;
     return 0;
 }
 

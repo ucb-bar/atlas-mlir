@@ -41,6 +41,7 @@ typedef struct {
     uint64_t version, workspace_bytes, hidden_offset[2], hidden_bytes;
     uint64_t cache_bank_bytes, phase_bytes, state_bytes;
 } tiny_full_live_layout;
+extern const tiny_full_live_layout tiny_full_compiled_live_layout;
 int tiny_full_get_live_layout(tiny_full_live_layout *);
 int tiny_full_model_begin(const tiny_full_parameters *, const tiny_full_state *,
                          tiny_full_phase *, const uint32_t *, size_t, void *, size_t);
