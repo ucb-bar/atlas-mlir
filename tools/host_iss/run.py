@@ -5,6 +5,7 @@ Whole-model qualification requires a final live receipt. No SoC/FPGA binding.
 """
 
 import argparse
+from contextlib import suppress
 import importlib
 import json
 import os
@@ -43,6 +44,20 @@ def mmio_access_cap(device, workload):
     return 100000 + sum(len(words) // 4 + 64 for _, words, _ in device.programs.values())
 
 
+def select_uart_bridge(profile, requested):
+    if profile is None:
+        if requested:raise ValueError('SiFive UART bridge requires an explicit full-host UART profile')
+        return False
+    if (profile.get('kind'),profile.get('base')) == ('ns16550',0x10000000):
+        if requested:raise ValueError('SiFive UART bridge cannot replace the NS16550 profile')
+        return False
+    if requested and profile.get('kind') == 'sifive':
+        from uart_device import validate_profile
+        validate_profile(profile)
+        return True
+    raise ValueError('generic QEMU requires NS16550 at0x10000000 or explicit --sifive-uart-bridge')
+
+
 def interrupted(signum, frame):
     raise InterruptedError("host ISA replay terminated by signal " + str(signum))
 
@@ -68,7 +83,7 @@ def run(args):
         portable_adaptation=True, full_soc_executed=False, host_elf_executed=False, verbose_rsp_trace_enabled=False,
         kernels=[])
     signal.signal(signal.SIGTERM, interrupted)
-    process = remote = device = None
+    process = remote = device = uart_stream = broker = None
     deadline = time.monotonic() + args.wall_seconds
     pins = {}
     try:
@@ -91,9 +106,7 @@ def run(args):
         image = Image(elf.read_bytes())
         build = getattr(bundle, "build", {})
         uart_profile = build.get("uart")
-        if uart_profile is not None and (uart_profile.get("kind"), uart_profile.get("base")) != (
-                "ns16550", 0x10000000):
-            raise ValueError("generic QEMU virt requires a full host built for NS16550 UART at 0x10000000")
+        bridge = select_uart_bridge(uart_profile,getattr(args,'sifive_uart_bridge',False))
         sites = mmio_sites(image)
         if contract is None:
             stop_sites = resnet_stop_sites(image)
@@ -106,6 +119,14 @@ def run(args):
                 contract.validate_bundle(bundle, image)
             stop_sites = contract.stop_sites(image)
         assert stop_sites, "completion WFI instruction missing"
+        uart_sites = {}
+        if bridge:
+            from uart_device import sites as find_uart_sites,SifiveUART
+            helper = checked(Path(__file__).absolute().with_name('uart_device.py'))
+            pins[str(helper)] = sha(helper)
+            uart_sites = find_uart_sites(image,uart_profile)
+            if set(uart_sites) & (set(sites) | set(stop_sites)):
+                raise ValueError('UART sites overlap accelerator accessors or completion stops')
         helpers = ["run.py", "bundle.py", "model_device.py", "elf_image.py", "gdb_remote.py", "placement.py",
                    "result_lines.py"]
         if contract is not None:
@@ -138,8 +159,12 @@ def run(args):
             pins[str(path)] = sha(path)
         model_root = checked(Path(args.model_root).absolute())
         sock = checked(out / "qemu.sock")
+        serial_file = 'qemu-native-uart.log' if bridge else 'uart.log'
+        if bridge:
+            uart_stream = (out/'uart.log').open('wb')
+            broker = SifiveUART(uart_profile,uart_stream)
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single", "-bios", "none",
-            "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:uart.log", "-S", "-gdb",
+            "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:"+serial_file, "-S", "-gdb",
             "unix:qemu.sock,server=on,wait=off", "-kernel", str(elf)]
         receipt.update(qemu_command=command, inputs_sha256=pins, bundle_sha256sums_sha256=bundle.checksums_sha256,
             mmio_sites=sites, completion_breakpoints=sorted(stop_sites))
@@ -160,6 +185,9 @@ def run(args):
             for pc, site in sites.items():
                 assert remote.read(pc, site["length"]) == image.bytes_at(pc, site["length"])
                 remote.breakpoint(pc, site["length"])
+            for pc, site in uart_sites.items():
+                assert remote.read(pc,site['length']) == image.bytes_at(pc,site['length'])
+                remote.breakpoint(pc,site['length'])
             for pc, length in stop_sites.items():
                 remote.breakpoint(pc, length)
             cycle_cap = getattr(args, "kernel_cycle_cap", None) or (
@@ -169,13 +197,18 @@ def run(args):
             receipt["kernel_cycle_cap"] = cycle_cap
             receipt["mmio_access_cap"] = access_cap
             receipt["memory_backend"] = device.memory_backend
-            accesses = 0
+            accesses = uart_accesses = 0
             while time.monotonic() < deadline:
                 receipt["host_elf_execution_attempted"] = True
                 pc, stop = remote.resume()
                 receipt["host_elf_executed"] = True
                 if pc in stop_sites:
                     break
+                if pc in uart_sites:
+                    broker.access(remote,uart_sites[pc])
+                    remote.set_reg(32,pc+uart_sites[pc]['length'])
+                    uart_accesses += 1
+                    continue
                 assert pc in sites, ("unexpected debugger stop", hex(pc), stop)
                 access = sites[pc]
                 address = remote.reg(access["base"]) + access["offset"]
@@ -198,6 +231,10 @@ def run(args):
                 completion["uart"] = dict(profile=uart_profile, sha256=digest(uart_raw),
                     **verify_result_lines(uart_raw, build["result_name"], device.kernel_count,
                         progress_launches=build["result_progress_launches"]))
+            if broker is not None:
+                completion['uart']['bridge'] = broker.summary()
+                completion['uart_mmio_accesses'] = uart_accesses
+                completion['uart_sites'] = uart_sites
             bundle.verify_bookends()
             device.verify_bookends()
             assert all(sha(Path(path)) == expected_hash for path, expected_hash in pins.items())
@@ -215,21 +252,22 @@ def run(args):
         def terminate_qemu():
             if not process or process.poll() is not None:
                 return
-            os.killpg(process.pid, signal.SIGTERM)
+            with suppress(ProcessLookupError):os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                with suppress(ProcessLookupError):os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=10)
 
-        cleanup = []
+        cleanup = [terminate_qemu]
         if device:
             cleanup.append(device.close)
         if remote:
             cleanup.append(remote.close)
         if "original_cwd" in locals():
             cleanup.append(lambda: os.chdir(original_cwd))
-        cleanup.append(terminate_qemu)
+        if uart_stream:
+            cleanup.append(uart_stream.close)
         for close in cleanup:
             try:
                 close()
@@ -238,6 +276,9 @@ def run(args):
                 receipt.setdefault("cleanup_errors", []).append(detail)
                 receipt.setdefault("error", detail)
                 receipt["status"] = "FAILED"
+        if broker is not None:
+            receipt['uart_transport'] = broker.summary()
+            receipt['uart_stream_sha256'] = sha(out/'uart.log')
         receipt["wall_remaining_seconds"] = deadline - time.monotonic()
         write_json(out / "receipt.json", receipt)
     print(json.dumps({k: receipt[k] for k in ("status", "error") if k in receipt}), flush=True)
@@ -250,6 +291,8 @@ def arguments(argv=None):
     parser.add_argument("--wall-seconds", type=int)
     parser.add_argument("--workload", choices=("resnet", "tiny", "smol", *FULL_CONTRACTS), default="resnet")
     parser.add_argument("--kernel-cycle-cap", type=int)
+    parser.add_argument('--sifive-uart-bridge',action='store_true',
+                        help='model admitted board SiFive UART accesses; no hardware or baud-timing claim')
     for name in ("elf", "bundle-root", "model-root", "qemu"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args(argv)
