@@ -58,7 +58,13 @@ def runtime_sites(image):
                  if length == 4 and word == 0x10500073}
         require(len(sites) == 1, "one named phase WFI: "+name)
         return sites
-    ready, success = wfi("smol_full_segment_ready"), wfi("smol_full_segment_done")
+    ready = {pc: length for pc, length, word in image.instructions("smol_full_segment_ready")
+             if length == 4 and word == 0x13}
+    require(len(ready) == 1, "one returning phase load hook NOP")
+    require(not any(length == 4 and word == 0x10500073
+                    for _, length, word in image.instructions("smol_full_segment_ready")),
+            "phase ready hook must not halt a debugger-free full run")
+    success = wfi("smol_full_segment_done")
     stops = dict(full.stop_sites(image))
     stops.update(success)
     stops.update(wfi("smol_full_segment_failed"))
@@ -120,7 +126,8 @@ def embedded_boundaries(chain, image, phases, regions):
 def validate_image(bundle, image, assemble):
     require(callable(assemble), "pinned assembler required before phase admission")
     data = full.validate_bundle(bundle, image, assemble=assemble)
-    require(bundle.build.get("segment_mode") is True and bundle.build.get("result_name") == "smol-segment",
+    require(bundle.build.get("segment_mode") is True and bundle.build.get("result_name") == "smol-full"
+            and bundle.build.get("segment_result_name") == "smol-segment",
             "explicit dual-mode full policy/phase build")
     regions = layout(image, data)
     runtime_sites(image)
