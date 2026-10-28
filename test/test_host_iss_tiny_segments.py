@@ -40,6 +40,19 @@ def image_fixture():
 
 
 class TinySegmentContractTest(unittest.TestCase):
+    def test_reassembled_alternate_program_is_not_a_public_reuse_recipe(self):
+        for arena in (0x100000000, 0x90000000):
+            item = dict(physical_mkn=[32, 2048, 256], output_offset=32*2048+2048*256+256,
+                        rescale=-15, source="selected.S")
+            source = segment.relocate_assembly(segment.assembly(*item["physical_mkn"],
+                item["output_offset"], -15, traffic_reuse=True), segment.DEFAULT_ARENA, arena).encode()
+            bundle = SimpleNamespace(build=dict(placement=dict(arena_base=arena, dram_base=0x80000000,
+                dram_bytes=16 << 30)), read=lambda _: source)
+            segment.admit_public_source(bundle, item)
+            bundle.read = lambda _: source+b"nop\n"
+            with self.assertRaisesRegex(ValueError, "public reuse source"):
+                segment.admit_public_source(bundle, item)
+
     def test_all145_regions_derived_from_compiled_abi(self):
         image, data = image_fixture()
         regions, values = segment.layout(image, data)

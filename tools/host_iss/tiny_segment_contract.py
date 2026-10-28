@@ -6,6 +6,8 @@ import struct
 from bundle import runtime_program
 from placement import placement
 from segment_boundary import SegmentChain
+from atlas_program import assembly
+from chipyard.arena import DEFAULT_ARENA, relocate_assembly
 import tiny_full_contract as full
 
 require = full.require
@@ -76,6 +78,13 @@ def runtime_sites(image):
     return ready, stops, success
 
 
+def admit_public_source(bundle, item):
+    source = assembly(*item["physical_mkn"], item["output_offset"],
+                      item["rescale"], traffic_reuse=True)
+    source = relocate_assembly(source, DEFAULT_ARENA, placement(bundle.build)["arena_base"])
+    require(bundle.read(item["source"]) == source.encode(), "segment selected public reuse source")
+
+
 def validate_image(bundle, image, assemble):
     require(callable(assemble), "pinned assembler required before segment admission")
     data = full.validate_bundle(bundle, image)
@@ -117,6 +126,8 @@ def validate_image(bundle, image, assemble):
     for item in data["kernels"]:
         key = item["source"], item["original"]
         if key not in verified:
+            if data.get("program_policy") == "traffic-reuse-v1":
+                admit_public_source(bundle, item)
             runtime_program(bundle.read(key[0]).decode(), bundle.read(key[1]), assemble)
             verified.add(key)
     return data, regions, compiled

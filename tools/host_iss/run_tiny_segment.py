@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 from atlas_path_guard import checked
 from atlas_tooling import sha256
 import atlas_host_layout as hal
+from atlas_program import code_sources
 from bundle import runtime_program
 from elf_image import Image, mmio_sites
 from full_bundle import FullBundle
@@ -128,7 +129,10 @@ def execute(args):
         if args.corrupt_region:
             assert args.corrupt_region in ("hidden_0", "hidden_1")
             assert 0 <= args.corrupt_offset < chain.layout[args.corrupt_region]["bytes"]
-        for module in (contract, sys.modules["segment_boundary"], sys.modules["model_device"],
+        for name, digest in code_sources(traffic_reuse=True).items():
+            path = checked(Path(__file__).absolute().parents[1] / name)
+            pins[str(path)] = digest
+        for module in (contract, sys.modules["chipyard.arena"], sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["tiny_full_contract"],
                        sys.modules["full_bundle"], sys.modules["bundle"], sys.modules["result_lines"],
                        sys.modules["run_model_tile"], sys.modules["atlas_host_layout"], sys.modules["atlas_path_guard"]):
