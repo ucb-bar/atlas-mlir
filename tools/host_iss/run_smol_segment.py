@@ -21,6 +21,7 @@ from full_bundle import FullBundle
 from gdb_remote import Remote
 from model_device import Device
 from result_lines import verify as verify_uart
+from segment_uart import Transport
 from run_model_tile import configure_model, model_binding
 import smol_segment_contract as contract
 
@@ -97,7 +98,7 @@ def execute(args):
         workload="smol-full", full_soc_executed=False,
         scope="one semantic phase through normal RV64 entry and a fresh Model Device",
         segment_index=args.segment_index, command=[sys.executable, *sys.argv], kernels=[])
-    remote = process = device = None
+    remote = process = device = uart = None
     pins, previous_cwd = {}, Path.cwd()
     def progress(stage):
         state = dict(stage=stage, status=receipt["status"] if stage == "finished" else "RUNNING",
@@ -119,6 +120,7 @@ def execute(args):
         bundle = FullBundle(checked(args.bundle_root), "smol-full")
         elf, qemu, model_root = (checked(p) for p in (bundle.root / "host/host.elf", args.qemu, args.model_root))
         image = Image(bundle.read("host/host.elf"))
+        Transport.pin(pins)
         for module in (contract, sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["smol_full_contract"],
                        sys.modules["smol_full_plan"], sys.modules["smol_native_controls"],
@@ -138,6 +140,7 @@ def execute(args):
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER), checked(tools / "chipyard/arena.py")):
             pins[str(path)] = sha256(path)
         # Assembler/profile and the entire immutable chain are admitted before Core creation.
+        uart = Transport(bundle.build["uart"], getattr(args, "sifive_uart_bridge", False), image, out)
         before = model_binding(model_root)
         _, _, assembler, _ = configure_model(model_root)
         binding = model_binding(model_root)
@@ -150,7 +153,6 @@ def execute(args):
         assert 0 <= args.segment_index < len(chain.boundaries) - 1
         launch_range = tuple(b["launch_cursor"] for b in chain.boundaries[args.segment_index:args.segment_index+2])
         count = launch_range[1] - launch_range[0]
-        assert (bundle.build["uart"]["kind"], bundle.build["uart"]["base"]) == ("ns16550", 0x10000000)
         ready, stops, success = contract.runtime_sites(image)
         sites = mmio_sites(image)
         qemu_low, qemu_high = 0x80000000, 0x80000000 + (8 << 30)
@@ -165,8 +167,9 @@ def execute(args):
             contract_sha256=bundle.sums[bundle.provenance["contract"]], model_profile=profile,
             chain_sha256sums_sha256=chain.checksums_sha256, full_static_admission=True,
             live_regions=chain.data["live_regions"], model_binding=binding)
+        serial = uart.prepare()
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single",
-            "-bios", "none", "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:uart.log",
+            "-bios", "none", "-nodefaults", "-nographic", "-monitor", "none", "-serial", "file:"+serial,
             "-S", "-gdb", "unix:qemu.sock,server=on,wait=off", "-kernel", str(elf)]
         receipt["qemu_command"] = command
         progress("static-admitted")
@@ -189,7 +192,12 @@ def execute(args):
         for pc, access in sites.items():
             assert remote.read(pc, access["length"]) == image.bytes_at(pc, access["length"])
             remote.breakpoint(pc, access["length"])
-        pc, _ = remote.resume()
+        uart.register(remote, image, set(ready) | set(stops) | set(sites))
+        while True:
+            pc, _ = remote.resume()
+            if pc in ready:
+                break
+            assert uart.handle(remote, pc), "unexpected guest stop before initialized segment entry"
         receipt["host_elf_executed"] = True
         assert pc in ready, "guest did not reach normal initialized segment entry"
         stack_pointer = remote.reg(2)
@@ -235,6 +243,8 @@ def execute(args):
             pc, stop = remote.resume()
             if pc in stops:
                 break
+            if uart.handle(remote, pc):
+                continue
             assert pc in sites, ("unexpected segment guest stop", pc, stop)
             access = sites[pc]
             address = remote.reg(access["base"]) + access["offset"]
@@ -329,6 +339,13 @@ def execute(args):
                 except Exception as error:
                     receipt.setdefault("cleanup_errors", []).append(str(error))
                     receipt["status"] = "FAILED"
+        if uart:
+            receipt["uart_transport"] = uart.summary()
+            try:
+                uart.close()
+            except Exception as error:
+                receipt.setdefault("cleanup_errors", []).append(str(error))
+                receipt["status"] = "FAILED"
         os.chdir(previous_cwd)
         receipt["wall_seconds"] = time.monotonic() - started
         (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -342,6 +359,7 @@ def main():
         parser.add_argument("--" + name, type=checked, required=True)
     parser.add_argument("--segment-index", type=int, required=True, choices=range(200), metavar="0..199")
     parser.add_argument("--wall-seconds", type=int, required=True)
+    parser.add_argument("--sifive-uart-bridge", action="store_true")
     parser.add_argument("--corrupt-region", help="explicit semantic-region corruption control after restore")
     parser.add_argument("--corrupt-offset", type=int, default=1)
     args = parser.parse_args()
