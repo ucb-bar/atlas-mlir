@@ -149,8 +149,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           firstUse = c;
         }
       }
-      // Without a non-terminator successor for which this wait is the last missing predecessor, defer it while
-      // graph-ready non-wait work remains, even if that work must wait for an engine or register.
+      // Without a non-terminator successor for which this wait is the last
+      // missing predecessor, defer it while graph-ready non-wait work remains,
+      // even if that work must wait for an engine or register.
       if ((firstUse == INT_MAX && !otherWork) || firstUse - 1 <= cycle)
         best = bestWait;
     }

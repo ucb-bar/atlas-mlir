@@ -1389,10 +1389,14 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
         raise NativeCompilationError("unqualified_target", "BF16 scratch store has no DMA completion")
 
 
-# lowerPack copies one row with eight load/store pairs, four pointer/counter advances, and seven load-path delays.
+# lowerPack copies one row an iteration: eight load/store pairs, four counter
+# and pointer advances, and seven load-path delays.
 _PACK_RELAYOUT_BRANCH_DISTANCE = 27
 _PACK_RELAYOUT_BRANCH_OFFSET = -2 * _PACK_RELAYOUT_BRANCH_DISTANCE
-_PACK_RELAYOUT_ADVANCES = [("addi", 13, 13, 1), ("addi", 10, 10, 16), ("addi", 11, 11, 16), ("addi", 12, 12, 32)]
+_PACK_RELAYOUT_ADVANCES = [
+    ("addi", 13, 13, 1), ("addi", 10, 10, 16),
+    ("addi", 11, 11, 16), ("addi", 12, 12, 32),
+]
 
 
 def _pack_relayout_effects() -> list[tuple]:
@@ -1453,11 +1457,10 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
     # ScalarCore's PC is word-indexed. The RISC-V B immediate encodes halfword
     # units, so the selected emitter uses two, not four, per instruction word.
     if (branch - first_load != _PACK_RELAYOUT_BRANCH_DISTANCE
-        or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch) or (
-        branch + 1 >= len(rows) or rows[branch + 1]["operation"] != "atlas.alu_imm"
-        or any(rows[branch + 1]["fields"].get(key) != value for key, value in
-               {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
-    )):
+            or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch)
+            or branch + 1 >= len(rows) or rows[branch + 1]["operation"] != "atlas.alu_imm"
+            or any(rows[branch + 1]["fields"].get(key) != value for key, value in
+                   {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())):
         raise NativeCompilationError("unqualified_target", "pack loop target or delay slot changed")
     branch_word = rows[branch]["word_u32"]
     immediate = (((branch_word >> 31) & 1) << 12) | (((branch_word >> 7) & 1) << 11) | (
@@ -1467,8 +1470,9 @@ def check_pack_stream(program: dict, *, input_address: int, output_address: int,
         (branch_word >> 15) & 31, (branch_word >> 20) & 31,
         immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
         raise NativeCompilationError("unqualified_target", "pack loop word has a wrong branch target")
-    # Require one-row counter and pointer advances. Repeating these effects to row 32 covers
-    # 32*32 bytes without touching the source or adjacent slots.
+    # Require 32 iterations, 16-byte advancement in each source half and
+    # 32-byte advancement in the destination. The one-iteration effects above
+    # then cover 32*32 bytes without touching the source or adjacent slots.
     before = rows[first_load - 1]["fields"]
     if before.get("cycles", 0) < 0:
         raise NativeCompilationError("unqualified_target", "pack loop has invalid delay")

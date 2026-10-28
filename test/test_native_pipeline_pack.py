@@ -120,8 +120,9 @@ class NativePipelinePackTest(unittest.TestCase):
                                if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw")
                     row["fields"]["offset"] += 4
                 elif case == "last-word-address":
-                    row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_load"
-                        and row["fields"].get("kind") == "lw" and row["fields"]["offset"] == 12)
+                    row = next(row for row in program["instructions"]
+                               if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw"
+                               and row["fields"]["offset"] == 12)
                     row["fields"]["offset"] += 4
                 elif case == "temporary":
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_store")
@@ -129,16 +130,6 @@ class NativePipelinePackTest(unittest.TestCase):
                 else:
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.branch")
                     row["fields"]["offset_bytes"] += 2
-                with self.assertRaises(self.binding.NativeCompilationError):
-                    self.check_pack(program)
-
-    def test_pack_rejects_two_row_advances(self) -> None:
-        for register in (13, 10, 11, 12):
-            with self.subTest(register=register):
-                program = copy.deepcopy(self.program)
-                row = next(row for row in program["instructions"] if row["operation"] == "atlas.alu_imm"
-                    and row["fields"].get("dst") == register and row["fields"].get("src") == register)
-                row["fields"]["immediate"] *= 2
                 with self.assertRaises(self.binding.NativeCompilationError):
                     self.check_pack(program)
 

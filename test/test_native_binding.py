@@ -1623,7 +1623,7 @@ class NativeBindingTest(unittest.TestCase):
         check_pack_stream(program, input_address=0x90001800, output_address=0x90011800)
         for operation, field, new_value in (
             ("atlas.vpu_pack", "src", 0),
-            ("atlas.branch", "offset_bytes", -100),
+            ("atlas.branch", "offset_bytes", -52),
             ("atlas.scalar_store", "offset", 4),
         ):
             changed = copy.deepcopy(program)

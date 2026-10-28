@@ -135,7 +135,8 @@ class LowerAtlasProgramTest(unittest.TestCase):
             self.assertLessEqual(report["untimed_words"]["words"], 2048)
 
             # 32 BF16 tiles live across one edge exceed 31 register pairs. The
-            # spill stage recovers them, and the compact timed schedule fits the instruction limit.
+            # spill stage recovers them, and the compact timed schedule fits
+            # the instruction limit.
             source = Path(temp) / "wide.mlir"
             source.write_text(wide_return_block(32))
             spilled = Path(temp) / "wide"

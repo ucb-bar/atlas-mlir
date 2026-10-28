@@ -476,15 +476,16 @@ Cost costOf(Operation *op) {
     return {Unit::Xlu, t.interval, t.latency};
   }
   if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout through VMEM in lowerPack's one-row scalar loop. Each store hides behind the next word's
-    // load, so an iteration takes a load per load-path interval, then the last word's load and store, and the
-    // back-edge, whose delay slot takes the destination step.
+    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
+    // words a row (lowerPack). Each store hides behind the next word's load,
+    // so a row takes a load per load-path interval, then the last word's load
+    // and store, and the back-edge, whose delay slot takes the destination step.
     static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
-    constexpr int words = kPackRelayoutRowWords, control = 2;
-    int iterations = registersOf(true) * kAtlasRegisterBytes / 4 / words;
-    int iteration = (words - 1) * lw.interval + lw.latency + sw.latency + control;
+    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 2;
+    int rows = registersOf(true) * kAtlasRegisterBytes / 4 / rowWords;
+    int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
     return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
-                                   vstore.latency + iterations * iteration + vload.latency);
+                                   vstore.latency + rows * row + vload.latency);
   }
   // Scalar control, a DMA wait, or nothing at all.
   return {Unit::Scalar, 1, timingOf("addi").latency};
@@ -725,19 +726,26 @@ public:
       cost.drains = isImplicitMemory(op);
       costs.push_back(cost);
     }
-    // The earliest output each value reaches through non-state operands, or n for none. Among equal starts, prefer it:
-    // shared operands load for their first tile, and an available tile finishes before another tile's first layer
-    // advances.
+    // The earliest output each value reaches through non-state operands, or n
+    // for none. Among equal starts, prefer it: shared operands load for their
+    // first tile, and an available tile finishes before another tile's first
+    // layer advances.
     firstOutput.assign(n, n);
     llvm::DenseMap<Operation *, unsigned> index;
-    for (unsigned i = 0; i < n; ++i) index[g.nodes[i]] = i;
+    for (unsigned i = 0; i < n; ++i)
+      index[g.nodes[i]] = i;
     for (unsigned i = n; i-- > 0;) {
       Operation *op = g.nodes[i];
-      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualOutputBF16Op>(op)) firstOutput[i] = i;
+      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
+              VirtualOutputBF16Op>(op))
+        firstOutput[i] = i;
       for (Value operand : op->getOperands()) {
-        if (isa<VirtualStateType>(operand.getType())) continue;
+        if (isa<VirtualStateType>(operand.getType()))
+          continue;
         auto found = index.find(operand.getDefiningOp());
-        if (found != index.end()) firstOutput[found->second] = std::min(firstOutput[found->second], firstOutput[i]);
+        if (found != index.end())
+          firstOutput[found->second] =
+              std::min(firstOutput[found->second], firstOutput[i]);
       }
     }
     // The longest path from each node to the block's end, counting its own
@@ -769,9 +777,10 @@ public:
   // Of the operations whose dependences are placed, take the one that starts
   // first, counting the spills it adds as delay: a value beyond `capacity`
   // costs VMEM saves and reloads, worth it only when the alternatives wait
-  // longer (Pressure::spillCost). Then the one feeding the earliest output; then the one that frees the frontend first,
-  // so a blocking transfer waits for work that can run beside it; then the one with the longest path to the block's
-  // end; then the earliest in source order.
+  // longer (Pressure::spillCost). Then the one feeding the earliest output;
+  // then the one that frees the frontend first, so a blocking transfer waits
+  // for work that can run beside it; then the one with the longest path to the
+  // block's end; then the earliest in source order.
   // A load starts as soon as the frontend is free, so with `lookahead` loaded
   // tiles awaiting their first use, another load waits while anything else
   // is ready: a boundary tile must not drain transfers whose users all come
