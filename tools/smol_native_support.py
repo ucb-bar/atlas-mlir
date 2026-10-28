@@ -7,16 +7,16 @@ assets.S and source/ must match host/build.json source and compilation hashes.
 Each mode uses a fresh process and an exclusive fixed-address arena mapping.
 """
 from __future__ import annotations
-import argparse
 import ctypes as ct
 import hashlib
 import importlib
 import inspect
 import json
 import mmap
-import os
 from pathlib import Path
 import re
+import struct
+from types import SimpleNamespace
 import subprocess
 import sys
 import time
@@ -31,7 +31,7 @@ from result_lines import verify as verify_result_lines
 
 STEMS = ('smol_host_ops','smol_host_attention','smol_host_softmax','smol_host_rope','smol_host_controls',
          'host_matrix_fp8pack','smol_policy_ops','smol_policy_block','smol_policy_graph',
-         'smol_vision_ops','smol_vision_graph','smol_policy_raw','smol_vision_attention','atlas_host')
+         'smol_vision_ops','smol_vision_graph','smol_policy_raw','smol_vision_attention','atlas_host','smol_full_driver')
 SCOPE = 'native generated host and production raw adapter with captured MMIO replies; no device execution'
 
 
@@ -364,37 +364,49 @@ def execute(args,bundle,data):
         payloads.close();host.smol_native_unmap()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('bundle','work','out'):
-        parser.add_argument('--'+name,type=checked,required=True)
-    parser.add_argument('--validator-tools',type=checked,default=TOOLS)
-    parser.add_argument('--model-root',type=checked)
-    parser.add_argument('--cc',type=checked,default='/usr/bin/gcc')
-    parser.add_argument('--timeout',type=int,default=1800)
-    parser.add_argument('--mode',choices=('both','positive','negative'),default='both')
-    parser.add_argument('--execute',action='store_true',help=argparse.SUPPRESS)
-    args = parser.parse_args()
-    require(0 < args.timeout <= 1800,'bounded native gate timeout required')
-    bundle,data = inputs(args)
-    if args.execute:
-        result = execute(args,bundle,data);print(json.dumps({k:result[k] for k in ('status','starts','elapsed_seconds')}))
-        return
-    validate_static(args,bundle)
-    compile_host(args,bundle,data)
-    modes = ('positive','negative') if args.mode == 'both' else (args.mode,)
-    results = []
-    for mode in modes:
-        command = [sys.executable,'-B',str(Path(__file__).absolute()),'--bundle',str(args.bundle),
-                   '--work',str(args.work),'--out',str(args.out),'--validator-tools',str(args.validator_tools),
-                   '--mode',mode,'--execute']
-        with (args.out/('process-'+mode+'.log')).open('w') as log:
-            process = subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,timeout=args.timeout)
-        results.append(dict(mode=mode,returncode=process.returncode,command=command))
-        require(process.returncode == 0,'native '+mode+' gate failed; see process log')
-    bundle.verify_bookends()
-    (args.out/'gate.json').write_text(json.dumps(dict(status='PASS_NATIVE_CAPTURED_REPLY_GATES',scope=SCOPE,
-        processes=results,device_execution=False,guest_execution=False,hardware_execution=False),indent=2)+'\n')
+
+def predecessor_wrapper():
+    """Observe original projection inputs without replacing production graph bodies."""
+    return '''#include "smol_policy_raw.h"
+typedef int (*predecessor_callback)(unsigned,unsigned,const void*,size_t,size_t,unsigned,unsigned,unsigned);
+static predecessor_callback predecessor_observe;
+void smol_predecessor_configure(predecessor_callback callback) { predecessor_observe=callback; }
+extern int __real_smol_policy_raw_vision(void*,unsigned,unsigned,const uint16_t*,size_t,size_t,uint16_t*,size_t);
+extern int __real_smol_policy_raw_graph(void*,unsigned,unsigned,unsigned,unsigned,const void*,size_t,size_t,
+    unsigned,void*,size_t);
+int __wrap_smol_policy_raw_vision(void *context,unsigned layer,unsigned role,const uint16_t *input,
+    size_t rows,size_t k,uint16_t *output,size_t n) {
+    smol_policy_raw_context *raw=context;
+    if(!predecessor_observe || predecessor_observe((unsigned)raw->call_cursor,0,input,rows,k,7,layer,role))
+        return SMOL_RAW_INPUT;
+    return __real_smol_policy_raw_vision(context,layer,role,input,rows,k,output,n);
+}
+int __wrap_smol_policy_raw_graph(void *context,unsigned site,unsigned layer,unsigned role,unsigned dtype,
+    const void *input,size_t rows,size_t k,unsigned output_dtype,void *output,size_t n) {
+    smol_policy_raw_context *raw=context;
+    if(!predecessor_observe || predecessor_observe((unsigned)raw->call_cursor,dtype,input,rows,k,site,layer,role))
+        return SMOL_RAW_INPUT;
+    return __real_smol_policy_raw_graph(context,site,layer,role,dtype,input,rows,k,output_dtype,output,n);
+}
+'''
 
 
-if __name__ == '__main__': main()
+def native_image(path):
+    raw = path.read_bytes()
+    header = struct.unpack_from('<16sHHIQQQIHHHHHH',raw)
+    if header[0][:7] != b'\x7fELF\x02\x01\x01' or header[1:3] != (3,62) or header[11] != 64:
+        raise ValueError('native AMD64 shared library required')
+    sections = [struct.unpack_from('<IIQQQQIIQQ',raw,header[6]+i*64) for i in range(header[12])]
+    symbols = {}
+    for section in sections:
+        if section[1] != 2: continue
+        if section[9] != 24: raise ValueError('native symbol entry size')
+        strings = sections[section[6]]
+        table = raw[strings[4]:strings[4]+strings[5]]
+        for offset in range(section[4],section[4]+section[5],24):
+            no,info,other,index,value,size = struct.unpack_from('<IBBHQQ',raw,offset)
+            if no:
+                name = table[no:table.index(b'\0',no)].decode()
+                symbols[name] = dict(address=value,size=size,section=index)
+    return SimpleNamespace(symbols=symbols)
+

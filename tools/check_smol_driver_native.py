@@ -5,13 +5,8 @@ this checks arithmetic/predecessor/state boundaries, never Model timing or RV64.
 """
 import argparse
 import ctypes as ct
-import hashlib
-import importlib.util
 import json
-import mmap
-import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
@@ -22,20 +17,18 @@ from atlas_path_guard import checked
 from atlas_tooling import sha256
 from smol_full_plan import calls as graph_calls
 from smol_full_phases import segments, live_regions, scratch_regions, check_observations
-from check_smol_phase_reference import provider, wrapper, native_image
+import smol_native_support as native
+from smol_native_support import native_image
 
 
 def compile_control(args,native,bundle,data):
-    native.STEMS=(*native.STEMS,'smol_full_driver')
-    for path in (__file__,ROOT/'tools/check_smol_phase_reference.py',ROOT/'tools/smol_full_phases.py',np.__file__):
+    for path in (__file__,ROOT/'tools/smol_native_support.py',ROOT/'tools/smol_full_phases.py',np.__file__):
         native.pin(args.validator_binding,path)
     record=native.compile_host(args,bundle,data)
     # Only raw projection entry points are wrapped. The production driver and
     # graph bodies are the same compilation units used for the RV64 ELF.
-    extra=wrapper(None)
-    extra=extra[extra.index('typedef int (*predecessor_callback)'):extra.index('extern uint16_t smol_full_image_output')]
     source=args.out/'native-source/predecessors.c'
-    source.write_text('#include "smol_policy_raw.h"\n'+extra)
+    source.write_text(native.predecessor_wrapper())
     native.pin(record['source_sha256'],source)
     command=list(record['command'])
     command[1:1]=['-Wl,--wrap=smol_policy_raw_vision','-Wl,--wrap=smol_policy_raw_graph',str(source)]
@@ -44,7 +37,7 @@ def compile_control(args,native,bundle,data):
     native.require(result.returncode==0,'native predecessor compilation failed')
     native.pin(record['source_sha256'],source)
     native.pin(record['source_sha256'],__file__)
-    native.pin(record['source_sha256'],ROOT/'tools/check_smol_phase_reference.py')
+    native.pin(record['source_sha256'],ROOT/'tools/smol_native_support.py')
     native.pin(record['source_sha256'],ROOT/'tools/smol_full_phases.py')
     native.pin(record['source_sha256'],np.__file__)
     native.bookends(record['source_sha256']);bundle.verify_bookends()
@@ -230,16 +223,16 @@ def execute_phases(args,native,bundle,data):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    for name in ('bundle','work','out','native-tools'):
+    for name in ('bundle','work','out'):
         p.add_argument('--'+name,type=checked,required=True)
     p.add_argument('--validator-tools',type=checked,default=ROOT/'tools')
     p.add_argument('--model-root',type=checked,required=True)
     p.add_argument('--cc',type=checked,default=Path('/usr/bin/gcc'))
     p.add_argument('--timeout',type=int,default=900)
     p.add_argument('--control',choices=('full','phased','corrupt'),default='phased')
-    p.add_argument('--execution-cpus',choices=('40-47','48-55','56-63'),default='40-47')
+    p.add_argument('--execution-cpus',default='0-7')
     p.add_argument('--execute',action='store_true')
-    args=p.parse_args();native=provider(args.native_tools);args.mode='positive'
+    args=p.parse_args();args.mode='positive'
     native.require(0<args.timeout<=1200,'bounded native timeout')
     bundle,data=native.inputs(args)
     if args.execute:

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).absolute().parents[1]
-spec = importlib.util.spec_from_file_location('smol_native_check',ROOT/'tools/check_smol_full_host.py')
+spec = importlib.util.spec_from_file_location('smol_native_check',ROOT/'tools/smol_native_support.py')
 checker = importlib.util.module_from_spec(spec);spec.loader.exec_module(checker)
 
 
