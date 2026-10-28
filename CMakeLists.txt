@@ -26,6 +26,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.
 file(GLOB atlas_python_tests CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/test/test_*.py)
+set(atlas_python_paths
+  PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python
+  PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/tools)
 foreach(test_file IN LISTS atlas_python_tests)
   get_filename_component(module ${test_file} NAME_WE)
   file(STRINGS ${test_file} unittest_suite REGEX "unittest\\.TestCase")
@@ -39,5 +42,6 @@ foreach(test_file IN LISTS atlas_python_tests)
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test)
   set_tests_properties(atlas-python-${module} PROPERTIES
     ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
-    ENVIRONMENT_MODIFICATION PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python)
+    ENVIRONMENT_MODIFICATION
+      "${atlas_python_paths}")
 endforeach()

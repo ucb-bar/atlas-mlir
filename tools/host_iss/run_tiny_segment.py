@@ -1,6 +1,5 @@
 """Execute one admitted full Tiny layer/head segment in a fresh RV64 guest."""
 import argparse
-from contextlib import suppress
 import datetime
 import json
 import os
@@ -22,6 +21,7 @@ from elf_image import Image, mmio_sites
 from full_bundle import FullBundle
 from gdb_remote import Remote
 from model_device import Device
+from process_cleanup import reap_qemu
 from result_lines import verify as verify_uart
 from segment_uart import Transport
 from run_model_tile import configure_model, model_binding
@@ -112,10 +112,11 @@ def execute(args):
         for name, digest in code_sources(traffic_reuse=True).items():
             path = checked(Path(__file__).absolute().parents[1] / name)
             pins[str(path)] = digest
-        for module in (contract, sys.modules["chipyard.arena"], sys.modules["segment_boundary"], sys.modules["model_device"],
+        for module in (contract, sys.modules["process_cleanup"], sys.modules["chipyard.arena"], sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["tiny_full_contract"],
                        sys.modules["full_bundle"], sys.modules["bundle"], sys.modules["result_lines"],
-                       sys.modules["run_model_tile"], sys.modules["atlas_host_layout"], sys.modules["atlas_path_guard"]):
+                       sys.modules["run_model_tile"], sys.modules["atlas_host_layout"], sys.modules["atlas_path_guard"],
+                       sys.modules["atlas_tooling"]):
             path = checked(Path(module.__file__).absolute())
             pins[str(path)] = sha256(path)
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER)):
@@ -299,16 +300,7 @@ def execute(args):
                 pass
         if process:
             try:
-                if process.poll() is None:
-                    with suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        with suppress(ProcessLookupError):
-                            os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=10)
-                receipt["qemu_child_reaped"] = process.poll() is not None
+                receipt["qemu_child_reaped"] = reap_qemu(process)
             except Exception as error:
                 receipt.setdefault("cleanup_errors", []).append(str(error))
                 receipt["status"] = "FAILED"

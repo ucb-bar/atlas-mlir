@@ -58,8 +58,8 @@ def program(words):
 
 
 class ProgramBoundTest(unittest.TestCase):
-    def test_all_57_dispatch_shapes_fit_hardware_and_graph(self):
-        self.assertEqual(len(atlas_program._TRAFFIC_REUSE_MODULES), 57)
+    def test_all_public_dispatch_shapes_fit_hardware_and_graph(self):
+        self.assertEqual(len(atlas_program._TRAFFIC_REUSE_MODULES), 58)
         graph_exceptions = set()
         for m, k, n in atlas_program._TRAFFIC_REUSE_MODULES:
             with self.subTest(shape=(m, k, n)):

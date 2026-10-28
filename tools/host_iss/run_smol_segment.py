@@ -1,6 +1,5 @@
 """Execute one admitted full Smol layer segment in a fresh RV64 guest."""
 import argparse
-from contextlib import suppress
 import datetime
 import json
 import os
@@ -20,23 +19,11 @@ from elf_image import Image, mmio_sites
 from full_bundle import FullBundle
 from gdb_remote import Remote
 from model_device import Device
+from process_cleanup import reap_qemu
 from result_lines import verify as verify_uart
 from segment_uart import Transport
 from run_model_tile import configure_model, model_binding
 import smol_segment_contract as contract
-
-
-def reap_qemu(process):
-    if process.poll() is None:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-    return process.poll() is not None
 
 
 def verify_observations(raw, completed, launch_range, kernel_count=2715):
@@ -120,7 +107,7 @@ def execute(args):
         bundle_root = checked(args.bundle_root)
         elf, qemu, model_root = (checked(p) for p in (bundle_root / "host/host.elf", args.qemu, args.model_root))
         Transport.pin(pins)
-        for module in (contract, sys.modules["segment_boundary"], sys.modules["model_device"],
+        for module in (contract, sys.modules["process_cleanup"], sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["smol_full_contract"],
                        sys.modules["smol_full_plan"], sys.modules["smol_native_controls"],
                        sys.modules["atlas_program"], sys.modules["placement"],
