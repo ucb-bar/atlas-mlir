@@ -160,7 +160,7 @@ def execute(args):
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER), checked(tools / "chipyard/arena.py")):
             pins[str(path)] = sha256(path)
         receipt.update(launch_range=list(launch_range), elf_sha256=bundle.sums["host/host.elf"],
-            contract_sha256=bundle.sums["contract.json"], model_profile=profile,
+            contract_sha256=bundle.sums[bundle.provenance["contract"]], model_profile=profile,
             chain_sha256sums_sha256=chain.checksums_sha256, full_static_admission=True,
             live_regions=chain.data["live_regions"], model_binding=binding)
         command = [str(qemu), "-machine", "virt", "-m", "8G", "-smp", "1", "-accel", "tcg,thread=single",
