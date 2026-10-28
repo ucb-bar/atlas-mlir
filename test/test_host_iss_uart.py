@@ -1,14 +1,18 @@
 """Fail-closed admission and functional transport for exact SiFive UART sites."""
 import io
+import tempfile
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 from unittest.mock import Mock
 
 TOOLS=Path(__file__).absolute().parents[1]/'tools'
 sys.path[:0]=[str(TOOLS),str(TOOLS/'host_iss')]
 from run import select_uart_bridge
+from result_lines import verify
+from segment_uart import Transport
 from uart_device import MASK,SifiveUART,constants,sites,validate_profile
 BASE=0x10020000
 
@@ -104,6 +108,59 @@ class TransportTest(unittest.TestCase):
         registers[5]=BASE+4;registers[6]=65
         with self.assertRaises(ValueError):broker.access(remote,site(0))
         self.assertEqual(stream.getvalue(),b'')
+
+
+class ResultLinesTest(unittest.TestCase):
+    def lines(self):
+        return ("ATLAS_KERNEL_BEGIN name=tiny-full launches_completed=0 launches_expected=2\n"
+                "ATLAS_KERNEL_PROGRESS name=tiny-full launches_completed=2 launches_expected=2 boundary=layer\n"
+                "ATLAS_KERNEL_PASS name=tiny-full launches_completed=2 launches_expected=2\n").encode()
+
+    def test_complete_uart_transcript(self):
+        self.assertEqual(verify(self.lines(), "tiny-full", 2)["progress_records"], 1)
+        self.assertEqual(verify(self.lines(), "tiny-full", 2, progress_launches=[2])["final"], "PASS")
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            verify(self.lines(), "tiny-full", 2, progress_launches=[1, 2])
+
+    def test_missing_failure_reordered_duplicate_and_wrong_workload_refused(self):
+        raw = self.lines()
+        for altered in (b"", raw.splitlines(keepends=True)[0], raw + raw.splitlines(keepends=True)[-1],
+                        raw.replace(b"_PASS", b"_FAIL"), raw.replace(b"completed=2", b"completed=1"),
+                        raw.replace(b"name=tiny-full", b"name=smol-full"),
+                        b"".join(raw.splitlines(keepends=True)[::2]),
+                        raw.replace(b"boundary=layer", b"boundary=layer name=tiny-full")):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                verify(altered, "tiny-full", 2)
+
+class SegmentUARTTest(unittest.TestCase):
+    def test_native_transport_preserves_existing_guest_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = Transport(dict(kind="ns16550", base=0x10000000), False, mock.Mock(), Path(directory))
+            self.assertEqual(transport.prepare(), "uart.log")
+            self.assertFalse(transport.handle(mock.Mock(), 12))
+            transport.register(mock.Mock(), mock.Mock(), {1,2,3})
+            self.assertEqual(transport.summary()["backend"], "qemu-native-ns16550")
+            transport.close()
+
+    def test_sifive_initialization_precedes_ready_without_a_device(self):
+        base = 0x10020000
+        access = dict(base=5, reg=6, offset=8, store=True, signed=False, length=4,
+                      uart_register=base+8, uart_role="initialize")
+        with tempfile.TemporaryDirectory() as directory, mock.patch("segment_uart.sites", return_value={100:access}):
+            transport = Transport(dict(kind="sifive", base=base), True, mock.Mock(), Path(directory))
+            self.assertEqual(transport.summary()["backend"], "modeled-sifive-uart-not-started")
+            self.assertEqual(transport.prepare(), "qemu-native-uart.log")
+            remote = mock.Mock()
+            remote.reg.side_effect = {5:base, 6:1}.__getitem__
+            image = mock.Mock()
+            remote.read.return_value = image.bytes_at.return_value = b"abcd"
+            transport.register(remote, image, {200})
+            self.assertTrue(transport.handle(remote, 100))
+            self.assertTrue(transport.summary()["tx_enabled"])
+            remote.set_reg.assert_called_once_with(32, 104)
+            with self.assertRaisesRegex(ValueError, "aliases"):
+                transport.register(remote, image, {100})
+            transport.close()
 
 
 if __name__=='__main__':unittest.main()
