@@ -61,6 +61,7 @@ def validate(chain, data, preparation, phases, sources, compiled_layout):
                 and record.get("synthetic_counter_is_timing") is False
                 and record.get("compiled_phase_layout") == list(compiled_layout)
                 and compiled.get("guest_execution") is False and compiled.get("device_execution") is False
+                and compiled.get("source_bookends") is True
                 and compiled.get("bundle_manifest_sha256") == preparation["native_input_checksums_sha256"],
                 "exact-driver scope/input/ABI binding")
         require(all(compiled["source_sha256"].get(path) == checksum for path,checksum in production.items()),
@@ -97,7 +98,8 @@ def validate(chain, data, preparation, phases, sources, compiled_layout):
         else:
             mailbox = record.get("negative_mailbox")
             lines = uart.decode("ascii").splitlines()
-            require(record.get("starts") == record.get("boundaries") == 0
+            require(record.get("source_bookends_verified") is True
+                    and record.get("starts") == record.get("boundaries") == 0
                     and isinstance(mailbox, list) and len(mailbox) == 16 and mailbox[0] == 0x534D4F4C46554C4C
                     and mailbox[1] == 3 and mailbox[8] == 11 and record.get("negative_tohost") == 23
                     and len(lines) == 2 and lines[0].startswith("ATLAS_KERNEL_BEGIN name=smol-segment ")
