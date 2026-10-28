@@ -409,4 +409,3 @@ def native_image(path):
                 name = table[no:table.index(b'\0',no)].decode()
                 symbols[name] = dict(address=value,size=size,section=index)
     return SimpleNamespace(symbols=symbols)
-
