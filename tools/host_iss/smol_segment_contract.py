@@ -75,6 +75,12 @@ def runtime_sites(image):
 def layout(image, data):
     address, size = symbol(image, "smol_full_compiled_phase_layout", 96, False)
     require(struct.unpack("<12Q", image.bytes_at(address, size)) == COMPILED_LAYOUT, "compiled phase ABI")
+    address, size = symbol(image, "smol_full_driver_observation", 56, False)
+    observation = struct.unpack("<7Q", image.bytes_at(address, size))
+    parameters = data["host_parameters"]
+    require(observation[:6] == tuple(image.symbols[parameters["observation."+name]["symbol"]]["address"]
+        for name in ("images", "state", "noise", "image_masks", "language_mask", "language_tokens"))
+        and 0 < observation[6] < 1 << 32, "compiled driver observation pointers")
     expected = dict(EXTRA_LIVE)
     for row in data["reference_buffers"]:
         require(row["actual_symbol"] not in expected, "duplicate semantic symbol")
@@ -146,7 +152,8 @@ def validate_bundle(bundle, image, assemble, model_profile):
     chain.admit_layout(regions)
     require(chain.kernel_count == 2715 and chain.placement == placement(bundle.build)
             and chain.model_profile == model_profile and chain.data["elf"] == "host/host.elf"
-            and chain.data["contract"] == "contract.json" and chain.data["capture_receipt"] == "segments/receipt.json",
+            and chain.data["contract"] == bundle.provenance["contract"]
+            and chain.data["capture_receipt"] == "segments/receipt.json",
             "phase chain image/placement/model binding")
     phases = partitions()
     for entry in phases:
@@ -169,7 +176,7 @@ def validate_bundle(bundle, image, assemble, model_profile):
                  "full_and_phases_exact", "scratch_reset_each_phase", "arena_reset_each_phase",
                  "canonical_zero_observations", "live_corruption_rejected"):
         require(preparation.get(name) is True, "native phase gate missing: "+name)
-    require(preparation.get("capture_sha256") == bundle.build["capture_sha256"], "phase capture identity")
+    require(preparation.get("source_reference_sha256") == data["source_reference_sha256"], "phase capture identity")
     sources, snapshots = preparation.get("source_sha256"), preparation.get("source_snapshots")
     require(isinstance(sources, dict) and sources and isinstance(snapshots, dict) and snapshots,
             "phase source snapshots required")
