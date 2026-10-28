@@ -6,8 +6,9 @@ import struct
 import time
 
 from atlas_tooling import sha as digest, write_json
+from bundle import verify_kernel_receipt
 from segment_boundary import SegmentChain
-from tiny_full_contract import contract, require, EPILOGUE
+from tiny_full_contract import CYCLE_CAP, contract, require, EPILOGUE
 
 
 def live_mapping(image, data):
@@ -152,14 +153,8 @@ class PrefixBoundary:
         require(all(item['exact'] for item in results), 'all145 live prefix regions must match captured boundary exactly')
         for index, summary in enumerate(device.completed):
             item = self.data['kernels'][index]
-            requested = item['requested_dma']
-            require(summary['index'] == index and summary['sequence'] == index + 1 and summary['reset_count'] == 1
-                and summary['exact'] is True and summary['drained'] is True
-                and summary['program_sha256'] == digest(self.bundle.read(item['original'])[:-4] + EPILOGUE)
-                and summary['host_input_sha256'] == item['initial_sha256']
-                and summary['actual_output_sha256'] == summary['expected_output_sha256'] == self.bundle.sums[item['expected']]
-                and summary['observed_dma'] == dict(requested,
-                    response_beats=(requested['load_bytes']+requested['store_bytes'])//32), 'prefix exact kernel ledger')
+            verify_kernel_receipt(summary, dict(item, program=self.bundle.read(item['original']),
+                expected_sha256=self.bundle.sums[item['expected']]), index, CYCLE_CAP)
         require(device.core.arch_state.read_csrf(0xC10) == device.core.arch_state.read_csrf(0xC11)
             == self.launches, 'guest invocation and device publication markers agree')
         cycles = sum(k['cycles'] for k in device.completed)

@@ -79,7 +79,7 @@ class TinyPrefixTest(unittest.TestCase):
             prefix.at_boundary(remote, SimpleNamespace(completed=[{}]*12))
 
     def test_all_regions_dumped_and_scalar_corruption_or_cycle_disagreement_rejected(self):
-        for failure in (None, 'hidden', 'cycles'):
+        for failure in (None, 'hidden', 'cycles', 'boolean_cycles', 'excess_cycles'):
             image, data = full_image()
             mapping, _ = live_mapping(image, data)
             image.symbols.update({name:dict(address=address) for name, address in
@@ -117,13 +117,20 @@ class TinyPrefixTest(unittest.TestCase):
                 program_sha256=digest(EPILOGUE), host_input_sha256=digest(b'I'),
                 actual_output_sha256=digest(b'E'*32), expected_output_sha256=digest(b'E'*32),
                 observed_dma=dict(load_bytes=32, store_bytes=32, response_beats=2)) for i in range(12)]
-            device = SimpleNamespace(completed=completed, core=SimpleNamespace(cycle_count=13 if failure == 'cycles' else 12,
-                arch_state=SimpleNamespace(read_csrf=lambda _:12)))
+            if failure in ('boolean_cycles', 'excess_cycles'):
+                for kernel in completed:
+                    kernel['cycles'] = True if failure == 'boolean_cycles' else 200_000_001
+            cycles = sum(kernel['cycles'] for kernel in completed)
+            device = SimpleNamespace(completed=completed, core=SimpleNamespace(
+                cycle_count=cycles+1 if failure == 'cycles' else cycles,
+                arch_state=SimpleNamespace(read_csrf=lambda _:cycles)))
             remote = SimpleNamespace(reg=lambda r:prefix.pc if r == 32 else 1)
             with tempfile.TemporaryDirectory() as directory:
                 prefix.out = Path(directory)
                 if failure:
-                    with self.assertRaisesRegex(ValueError, 'live prefix' if failure == 'hidden' else 'cycle counters'):
+                    message = ('live prefix' if failure == 'hidden' else 'ordered exact/drained kernel'
+                               if failure in ('boolean_cycles', 'excess_cycles') else 'cycle counters')
+                    with self.assertRaisesRegex(ValueError, message):
                         prefix.verify(remote, device)
                 else:
                     self.assertTrue(prefix.verify(remote, device)['all_live_regions_exact'])

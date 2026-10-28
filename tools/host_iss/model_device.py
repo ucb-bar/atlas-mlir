@@ -135,6 +135,7 @@ class Device:
         self.core.arch_state.write_csrf(table[offset], value)
 
     def start(self):
+        progress_callback = getattr(self, "progress_callback", None)
         index = self.launch_start + len(self.completed)
         assert index < self.launch_end, "device launch exceeds the admitted segment range"
         core, state = self.core, self.core.arch_state
@@ -171,8 +172,8 @@ class Device:
                 now = time.monotonic()
                 if now >= self.deadline:
                     raise TimeoutError("model bridge wall cap")
-                if self.progress_callback and now - self.progress_time >= 10:
-                    self.progress_callback(self)
+                if progress_callback and now - self.progress_time >= 10:
+                    progress_callback(self)
                     self.progress_time = now
             core.tick()
             event = self.dma.last_cycle
@@ -199,8 +200,8 @@ class Device:
             exact=True, drained=True, observed_dma=dict(events), reset_count=1)
         write_json(self.out / f"kernel-{index:02d}.json", result)
         self.completed.append(result)
-        if self.progress_callback:
-            self.progress_callback(self)
+        if progress_callback:
+            progress_callback(self)
         self.written.clear()
 
     def close(self):
