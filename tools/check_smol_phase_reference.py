@@ -144,7 +144,7 @@ def compile_reference(args,native,bundle,data):
             queue.append(str(checked(merlin/name)))
     copied = out/'native-source/smol_full_phase.h'
     copied.write_bytes((ROOT/'runtime/smol_full_phase.h').read_bytes());native.pin(pins,copied)
-    source = out/'native-source/main.c' 
+    source = out/'native-source/main.c'
     original = source.read_text()
     text = original
     for name, replacement in (('smol_vision_image','phased_vision'),
