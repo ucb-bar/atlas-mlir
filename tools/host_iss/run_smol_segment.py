@@ -117,9 +117,8 @@ def execute(args):
         raise InterruptedError("segment interrupted by signal " + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        bundle = FullBundle(checked(args.bundle_root), "smol-full")
-        elf, qemu, model_root = (checked(p) for p in (bundle.root / "host/host.elf", args.qemu, args.model_root))
-        image = Image(bundle.read("host/host.elf"))
+        bundle_root = checked(args.bundle_root)
+        elf, qemu, model_root = (checked(p) for p in (bundle_root / "host/host.elf", args.qemu, args.model_root))
         Transport.pin(pins)
         for module in (contract, sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["smol_full_contract"],
@@ -139,6 +138,8 @@ def execute(args):
             pins[str(path)] = expected
         for path in (checked(__file__), elf, qemu, checked(hal.HEADER), checked(tools / "chipyard/arena.py")):
             pins[str(path)] = sha256(path)
+        bundle = FullBundle(bundle_root, "smol-full")
+        image = Image(bundle.read("host/host.elf"))
         # Assembler/profile and the entire immutable chain are admitted before Core creation.
         uart = Transport(bundle.build["uart"], getattr(args, "sifive_uart_bridge", False), image, out)
         before = model_binding(model_root)
@@ -287,8 +288,8 @@ def execute(args):
         compared = chain.compare(args.segment_index, remote.read)
         receipt["boundaries"] = {row["name"]: row["sha256"] for row in compared}
         receipt["boundary_comparisons"] = compared
-        uart = (out / "uart.log").read_bytes()
-        receipt["uart"] = verify_uart(uart, "smol-segment", count, progress_launches=[count])
+        uart_raw = (out / "uart.log").read_bytes()
+        receipt["uart"] = verify_uart(uart_raw, "smol-segment", count, progress_launches=[count])
         bundle.verify_bookends()
         chain.verify_bookends()
         device.verify_bookends()

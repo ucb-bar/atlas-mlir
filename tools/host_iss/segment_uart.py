@@ -45,6 +45,9 @@ class Transport:
     def summary(self):
         if self.broker:
             return dict(self.broker.summary(), mmio_accesses=self.accesses)
+        if self.modeled:
+            return dict(backend="modeled-sifive-uart-not-started", profile=self.profile,
+                        hardware_execution=False, baud_timing=False, mmio_accesses=0)
         return dict(backend="qemu-native-ns16550", hardware_execution=False, baud_timing=False)
 
     def close(self):
