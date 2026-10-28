@@ -355,12 +355,6 @@ def verify_completion(remote, image, device, bundle, out):
                 and summary['actual_output_sha256'] == summary['expected_output_sha256'] == digest(expected)
                 and summary['observed_dma'] == dict(dma,response_beats=(dma['load_bytes']+dma['store_bytes'])//32),
                 'actual runtime program/staged input/output/DMA identity')
-    return verify_host_completion(remote, image, bundle, out)
-
-
-def verify_host_completion(remote, image, bundle, out):
-    """Check actual host state independently of any accelerator execution claim."""
-    data,_ = contract(bundle)
     require(remote.reg(32) in stop_sites(image), 'normal startup WFI completion')
     def actual(name,size):
         raw = remote.read(image.symbols[name]['address'],size)

@@ -101,7 +101,7 @@ class TinySegmentContractTest(unittest.TestCase):
             bundle = mock.Mock(root=root)
             bundle.read.return_value = b"unadmitted-elf"
             args = SimpleNamespace(out=root/"out", wall_seconds=30, segment_index=24,
-                captured_replies=False, bundle_root=root, qemu=root/"qemu", model_root=root,
+                bundle_root=root, qemu=root/"qemu", model_root=root,
                 corrupt_region=None, corrupt_offset=1)
             prior = signal.getsignal(signal.SIGTERM)
             try:

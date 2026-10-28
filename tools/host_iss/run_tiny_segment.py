@@ -16,7 +16,6 @@ from atlas_path_guard import checked
 from atlas_tooling import sha256
 import atlas_host_layout as hal
 from atlas_program import code_sources
-from bundle import runtime_program
 from elf_image import Image, mmio_sites
 from full_bundle import FullBundle
 from gdb_remote import Remote
@@ -28,66 +27,13 @@ from run_model_tile import configure_model, model_binding
 import tiny_segment_contract as contract
 
 
-class CapturedReplies:
-    """Host-only control: no Core, modeled cycles or numerical qualification."""
-    def __init__(self, remote, bundle, assembler, launch_range):
-        self.remote, self.bundle = remote, bundle
-        self.launch_start, self.launch_end = launch_range
-        self.launch_count = self.launch_end - self.launch_start
-        self.kernel_count = bundle.kernel_count
-        self.completed, self.programs, self.written = [], {}, set()
-        self.imem = bytearray(hal.ATLAS_IMEM_BYTES)
-        self.csrs = {hal.ATLAS_CSR_CYCLES: 0, hal.ATLAS_CSR_RETIRED: 0, hal.ATLAS_CSR_STATUS: 5,
-                     hal.ATLAS_CSR_PC: 0, hal.ATLAS_CSR_DBG0: 0, hal.ATLAS_CSR_DBG1: 0}
-        for i in range(*launch_range):
-            item = bundle.kernel_paths(i)
-            program, words = runtime_program(bundle.read(item["source"]).decode(), bundle.read(item["original"]), assembler)
-            self.programs[i] = program, words, item
-
-    def read32(self, address):
-        return self.csrs[address - hal.ATLAS_CSR_BASE]
-
-    def write32(self, address, value):
-        if hal.ATLAS_IMEM_BASE <= address < hal.ATLAS_IMEM_BASE + hal.ATLAS_IMEM_BYTES:
-            offset = address - hal.ATLAS_IMEM_BASE
-            struct.pack_into("<I", self.imem, offset, value)
-            self.written.add(offset // 4)
-            return
-        offset = address - hal.ATLAS_CSR_BASE
-        if offset != hal.ATLAS_CSR_EXEC_CONTROL:
-            assert offset in self.csrs
-            self.csrs[offset] = value
-            return
-        assert value == 1
-        i = self.launch_start + len(self.completed)
-        assert i < self.launch_end
-        _, words, item = self.programs[i]
-        assert self.written == set(range(len(words) // 4)) and self.imem[:len(words)] == words
-        assert self.csrs[hal.ATLAS_CSR_DBG0] == 0 and self.csrs[hal.ATLAS_CSR_DBG1] == i + 1
-        initial = self.bundle.initial_dram(i)
-        actual = self.remote.read(item["dram_base"], len(initial))
-        assert actual == initial, "actual guest packed projection input differs from capture"
-        expected = self.bundle.read(item["expected"])
-        output = item["output_offset"]
-        self.remote.write(item["dram_base"], actual[:output] + expected + actual[output + len(expected):])
-        self.csrs[hal.ATLAS_CSR_DBG0] = i + 1
-        self.completed.append(dict(index=i, sequence=i+1, exact=True, drained=True, cycles=0, captured_reply=True))
-        self.written.clear()
-
-    def verify_bookends(self):
-        self.bundle.verify_bookends()
-
-    def close(self):
-        pass
-
-
 def execute(args):
     out = checked(args.out)
     out.mkdir(parents=True, exist_ok=False)
     started, deadline = time.monotonic(), time.monotonic() + args.wall_seconds
     receipt = dict(schema="atlas.segment_execution.v1", status="FAILED", segmented=True, continuous=False,
         fresh_device=False, host_elf_executed=False, source_bookends_equal=False, hardware_execution=False,
-        segment_index=args.segment_index, command=[sys.executable, *sys.argv], kernels=[], captured_replies=args.captured_replies)
+        segment_index=args.segment_index, command=[sys.executable, *sys.argv], kernels=[], captured_replies=False)
     remote = process = device = uart = None
     pins, previous_cwd = {}, Path.cwd()
     def progress(stage):
@@ -198,15 +144,12 @@ def execute(args):
             remote.write(address, bytes([original[0] ^ 1]))
             receipt["negative_control"] = dict(region=args.corrupt_region, byte_offset=args.corrupt_offset, xor=1)
         remote.write(image.symbols["tiny_full_segment_request"]["address"], struct.pack("<Q", args.segment_index))
-        if args.captured_replies:
-            device = CapturedReplies(remote, bundle, assembler, launch_range)
-        else:
-            device = Device(remote, out, deadline, bundle, model_root, cycle_cap=contract.full.CYCLE_CAP,
-                            launch_range=launch_range)
-            receipt["fresh_device"] = True
-            receipt["memory_backend"] = device.memory_backend
-            binding = device.binding
-            receipt["model_binding"] = binding
+        device = Device(remote, out, deadline, bundle, model_root, cycle_cap=contract.full.CYCLE_CAP,
+                        launch_range=launch_range)
+        receipt["fresh_device"] = True
+        receipt["memory_backend"] = device.memory_backend
+        binding = device.binding
+        receipt["model_binding"] = binding
         progress("device-ready")
         remote.set_reg(32, pc + ready[pc])
         access_cap = 100000 + sum(len(words)//4 + 64 for _, words, _ in device.programs.values())
@@ -249,11 +192,10 @@ def execute(args):
         assert remote.read(image.symbols["fromhost"]["address"], 8) == bytes(8)
         assert len(device.completed) == device.launch_count == count
         assert [k["index"] for k in device.completed] == list(range(*launch_range))
-        if not args.captured_replies:
-            for summary in device.completed:
-                item = dict(data["kernels"][summary["index"]])
-                item.update(program=bundle.read(item["original"]), expected_sha256=bundle.sums[item["expected"]])
-                contract.verify_kernel(summary, item, summary["index"])
+        for summary in device.completed:
+            item = dict(data["kernels"][summary["index"]])
+            item.update(program=bundle.read(item["original"]), expected_sha256=bundle.sums[item["expected"]])
+            contract.verify_kernel(summary, item, summary["index"])
         # Mutable cursors/state are checked in addition to every serialized semantic byte.
         state = struct.unpack("<5QII", remote.read(image.symbols["tiny_full_state_global"]["address"], 48))
         initial = struct.unpack("<5QII", image.bytes_at(image.symbols["tiny_full_state_global"]["address"], 48))
@@ -278,8 +220,7 @@ def execute(args):
         assert all(sha256(checked(path)) == h for path, h in pins.items())
         assert model_binding(model_root) == binding, "model source bookends differ"
         assert time.monotonic() < deadline
-        receipt.update(status="PASS_RV64_SEGMENT_WITH_CAPTURED_REPLIES" if args.captured_replies
-            else "PASS_SEGMENT_WITH_MODEL_DEVICE", source_bookends_equal=True, inputs_sha256=pins,
+        receipt.update(status="PASS_SEGMENT_WITH_MODEL_DEVICE", source_bookends_equal=True, inputs_sha256=pins,
             measured_kernel_cycles=sum(k["cycles"] for k in device.completed))
     except Exception as error:
         receipt["error"] = dict(type=type(error).__name__, message=str(error))
@@ -331,7 +272,6 @@ def main():
         parser.add_argument("--" + name, type=checked, required=True)
     parser.add_argument("--segment-index", type=int, required=True, choices=range(69))
     parser.add_argument("--wall-seconds", type=int, required=True)
-    parser.add_argument("--captured-replies", action="store_true")
     parser.add_argument("--sifive-uart-bridge", action="store_true")
     parser.add_argument("--corrupt-region", choices=("hidden_0", "hidden_1"))
     parser.add_argument("--corrupt-offset", type=int, default=1)
