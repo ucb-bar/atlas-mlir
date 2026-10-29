@@ -1,7 +1,6 @@
 #ifndef ATLAS_GENERATED_ARTIFACT_H
 #define ATLAS_GENERATED_ARTIFACT_H
 
-#include "Atlas/AtlasSearchPolicy.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -10,7 +9,7 @@
 namespace mlir::atlas {
 
 // Bounded virtual-to-machine policy, including instructions added by timing.
-constexpr unsigned kAtlasGeneratedWordLimit = search_policy::kGeneratedWordLimit;
+constexpr unsigned kAtlasGeneratedWordLimit = 2048;
 
 // Module attributes stamped by virtual-to-machine lowering.
 constexpr llvm::StringLiteral kAtlasGeneratedMarker = "atlas.generated_from_virtual";

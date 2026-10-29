@@ -1,4 +1,3 @@
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
@@ -17,7 +16,7 @@ using namespace mlir::atlas::timing;
 
 namespace {
 
-constexpr int kMaxIdle = search_policy::kTimingSearchCycles;
+constexpr int kMaxIdle = 100000;
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.

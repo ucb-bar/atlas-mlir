@@ -1,4 +1,3 @@
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
@@ -16,7 +15,7 @@ struct Issued {
   int cycle;
 };
 
-constexpr int kMaxSearch = search_policy::kTimingSearchCycles;
+constexpr int kMaxSearch = 100000;
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p,

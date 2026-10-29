@@ -1,4 +1,3 @@
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasTimingProvider.h"
 #include "Atlas/AtlasModelTables.h"
 #include "llvm/ADT/StringMap.h"
@@ -240,7 +239,8 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   if (!isolated.value.empty()) return error("representative instruction can never issue: " + isolated.value);
   std::string why = table.value->reserveWithContext(first, a, 0, firstContext);
   if (!why.empty()) return error(why);
-  constexpr int kMaximumInterval = mlir::atlas::search_policy::kTimingSearchCycles;
+  // Compiler policy: bound the same-unit issue interval search.
+  constexpr int kMaximumInterval = 100000;
   for (int interval = gap.value; interval <= kMaximumInterval; ++interval) {
     auto conflict = table.value->conflictWithContext(second, b, interval, secondContext);
     if (!conflict.error.empty()) return error(conflict.error);

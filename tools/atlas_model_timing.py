@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError
-from atlas_search_policy import POLICY, fixed_execution_contract
 
 from collections import defaultdict
 from contextlib import closing
@@ -91,9 +90,7 @@ def isa_cases(cfg):
 def configuration():
     from npu_model.configs.hardware.default import DefaultHardwareConfig
     cfg = DefaultHardwareConfig()
-    contract = fixed_execution_contract(POLICY["execution_contract"])
-    cfg.arch_state_config = replace(cfg.arch_state_config, numerics=contract["numerics"],
-                                    randomize_init=contract["randomize_init"])
+    cfg.arch_state_config = replace(cfg.arch_state_config, numerics="rtl", randomize_init=False)
     return cfg, configuration_values(cfg)
 
 
@@ -110,7 +107,7 @@ def configuration_values(cfg):
             values[key] = value
         elif isinstance(value, type):
             values[key] = value.__module__ + "." + value.__qualname__
-    values["ignore_runtime_errors"] = fixed_execution_contract(POLICY["execution_contract"])["ignore_runtime_errors"]
+    values["ignore_runtime_errors"] = False
     return values
 
 

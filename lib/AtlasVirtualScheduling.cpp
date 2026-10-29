@@ -1,4 +1,3 @@
-#include "Atlas/AtlasSearchPolicy.h"
 // Pre-allocation scheduling of virtual Atlas operations. Each block is list
 // scheduled onto the functional units its operations occupy, keeping every
 // SSA and implicit-state dependence. Costs are rough on purpose: registers
@@ -1061,7 +1060,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   };
   std::vector<unsigned> order;
   int64_t best = 0;
-  for (unsigned lookahead : search_policy::kVirtualLookaheads) {
+  for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
     std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
     int64_t estimate = cycles(candidate);
     if (order.empty() || estimate < best) {

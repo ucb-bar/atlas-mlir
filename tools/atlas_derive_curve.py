@@ -14,7 +14,6 @@ from copy import deepcopy
 
 from atlas_derive_mxu import _one, _method
 from atlas_model_schema import (LOCK, SOURCE_SHAPES, DMA_SOURCE_SHAPES, ast_digest)
-from atlas_search_policy import POLICY
 
 
 class UnsupportedCurve(UnsupportedModelTiming):
@@ -229,9 +228,10 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, inter
         raise UnsupportedCurve("unsupported DMA bound service/positive response latency")
     if quantum > maximum_cycle:
         raise UnsupportedCurve("unsupported DMA proposal arithmetic domain")
+    # Compiler policy: serialize DMA estimates by one cycle between commands.
+    intercommand_serialization_cycles = 1
     return dict(retire_to_wait_issue_cycles=interval, per_beat_bound_cycles=quantum,
-                policy=dict(intercommand_serialization_cycles=
-                            POLICY["dma_proposal"]["intercommand_serialization_cycles"]))
+                policy=dict(intercommand_serialization_cycles=intercommand_serialization_cycles))
 
 
 def derive_curve(cfg):

@@ -3,11 +3,6 @@
 
 from __future__ import annotations
 
-if __package__:
-    from .atlas_search_policy import POLICY
-else:
-    from atlas_search_policy import POLICY
-
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
@@ -30,9 +25,20 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[1]
 
 
-POOLS = POLICY["pools"]
-CANDIDATES = POLICY["candidates"]
-DEFAULTS = POLICY["defaults"]
+# Compiler policy: candidate pools and search work limits.
+RANDOM_SEEDS = tuple(range(8))
+MREG_SEEDS = tuple(range(8))
+MREG_RANK_CHOICES = tuple(range(32))
+MREG_VECTOR_LENGTH = 64
+NEIGHBOR_SHUFFLE_SEED = 0
+GROUP_MAX_NODES = 4
+BATCH_WIDTH = 12
+API_INITIAL_ATTEMPTS = 32
+API_GROUP_ATTEMPTS = 0
+FULL_INITIAL_ATTEMPTS = 18
+FULL_GROUP_ATTEMPTS = 134
+INITIAL_WAIT_PLACEMENT = "source"
+CURVE_GROUP_WAIT_PLACEMENTS = ("default", "source")
 
 
 @dataclass(frozen=True)
@@ -85,7 +91,7 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
 
 
 def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...],
-                          max_nodes: int = POOLS["group_max_nodes"]):
+                          max_nodes: int = GROUP_MAX_NODES):
     """Move a node together with the dependencies crossed by its insertion."""
     moves = []
     seen = set()
@@ -125,7 +131,7 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
                 if moved != order and signature not in seen:
                     seen.add(signature)
                     moves.append((block, tuple(group), insertion))
-    random.Random(POOLS["neighbor_shuffle_seed"]).shuffle(moves)
+    random.Random(NEIGHBOR_SHUFFLE_SEED).shuffle(moves)
     for block, group, insertion in moves:
         members = set(group)
         remaining = [node for node in orders[block] if node not in members]
@@ -153,7 +159,7 @@ class SelectionConfig:
     def resolved(self) -> SelectionConfig:
         profile = self.profile
         if profile is None:
-            profile = DEFAULTS["model_profile"] if self.provider == "model" else DEFAULTS["builtin_profile"]
+            profile = "curve" if self.provider == "model" else "fifo43"
         if self.provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
             raise ValueError("unsupported provider or memory profile")
         if self.max_candidates < 1 or self.workers < 1 or self.boundary not in ("boundary", "none"):
@@ -163,8 +169,8 @@ class SelectionConfig:
         mreg_candidates = self.mreg_candidates
         if mreg_candidates is None:
             mreg_candidates = tuple(tuple(random.Random(seed).choices(
-                POOLS["mreg_rank_choices"], k=POOLS["mreg_vector_length"]))
-                for seed in POOLS["mreg_seeds"])
+                MREG_RANK_CHOICES, k=MREG_VECTOR_LENGTH))
+                for seed in MREG_SEEDS)
         return replace(self, profile=profile, mreg_candidates=mreg_candidates)
 
     def policy(self) -> dict:
@@ -331,7 +337,7 @@ class Selection:
         if self.best is None:
             self.fail("no legal candidate: every initial candidate was refused")
 
-        self.evaluate_batch([(replace(self.winner(), wait_placement=CANDIDATES["initial_wait_placement"]),
+        self.evaluate_batch([(replace(self.winner(), wait_placement=INITIAL_WAIT_PLACEMENT),
                               "wait-placement")], limit=self.config.max_candidates)
         register_base = self.winner()
         self.receipt["mreg_pool_size"] = len(self.config.mreg_candidates)
@@ -340,7 +346,7 @@ class Selection:
 
     @staticmethod
     def group_candidates(base: Candidate, orders, profile: str):
-        placements = (CANDIDATES["curve_group_wait_placements"]
+        placements = (CURVE_GROUP_WAIT_PLACEMENTS
                       if profile == "curve" else (base.wait_placement,))
         for order in orders:
             for placement in placements:
@@ -362,7 +368,7 @@ class Selection:
             pending = self.group_candidates(base, proposed, self.config.profile)
             while len(self.receipt["candidates"]) < limit:
                 batch = []
-                width = min(CANDIDATES["batch_width"], limit - len(self.receipt["candidates"]))
+                width = min(BATCH_WIDTH, limit - len(self.receipt["candidates"]))
                 while len(batch) < width:
                     candidate = next(pending, None)
                     if candidate is None:
@@ -413,16 +419,16 @@ class Selection:
 
 
 def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
-                   provider: str = DEFAULTS["selection_provider"],
+                   provider: str = "model",
                    profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
-                   spill: bool = DEFAULTS["spill"], spill_mxu: bool = DEFAULTS["spill_mxu"],
-                   boundary: str = DEFAULTS["boundary"],
-                   guarded_pack: bool = DEFAULTS["guarded_pack"],
+                   spill: bool = True, spill_mxu: bool = True,
+                   boundary: str = "boundary",
+                   guarded_pack: bool = False,
                    model_facts: Path | None = None,
-                   max_candidates: int = DEFAULTS["api_max_candidates"],
-                   random_seeds: tuple[int, ...] = tuple(POOLS["random_seeds"]), workers: int = DEFAULTS["workers"],
+                   max_candidates: int = API_INITIAL_ATTEMPTS,
+                   random_seeds: tuple[int, ...] = RANDOM_SEEDS, workers: int = 12,
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
-                   search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
+                   search_group_evaluations: int = API_GROUP_ATTEMPTS,
                    scorer: Callable | None = None) -> dict:
     """Verify candidates and publish the lowest-cycle program in canonical order."""
     config = SelectionConfig(
@@ -436,7 +442,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
 
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--provider", choices=("builtin", "model"), default=DEFAULTS["lower_provider"])
+    parser.add_argument("--provider", choices=("builtin", "model"), default="builtin")
     parser.add_argument("--profile", choices=("fifo43", "curve"),
                         help="memory scoring profile (model default: curve)")
     parser.add_argument("--npu-model", type=Path, help="npu_model source tree used for native scoring")
@@ -446,19 +452,18 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="model facts directory (default: regenerate from --npu-model)")
     parser.add_argument("--search-budget", choices=("full", "single"), default="full",
                         help="full search (18 initial and 134 group attempts) or one default candidate")
-    parser.add_argument("--max-candidates", type=int, default=18,
+    parser.add_argument("--max-candidates", type=int, default=FULL_INITIAL_ATTEMPTS,
                         help="initial attempt limit in full mode (default: 18)")
-    parser.add_argument("--workers", type=int, default=min(DEFAULTS["workers"], os.cpu_count() or 1))
+    parser.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1))
     parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=True,
                         help="score eight legal MREG rank vectors in full mode")
-    parser.add_argument("--search-group-evaluations", type=int, default=134,
+    parser.add_argument("--search-group-evaluations", type=int, default=FULL_GROUP_ATTEMPTS,
                         help="group attempt limit in full mode (default: 134)")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:
     single = args.search_budget == "single"
-    profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model"
-                               else DEFAULTS["builtin_profile"])
+    profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
     return {
         "provider": args.provider, "profile": profile,
         "model": args.npu_model, "model_regions": tuple(args.model_region),
@@ -475,11 +480,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--boundary", choices=("boundary", "none"), default=DEFAULTS["boundary"])
-    parser.add_argument("--no-spill", action="store_true", default=not DEFAULTS["spill"])
-    parser.add_argument("--guarded-pack", action="store_true", default=DEFAULTS["guarded_pack"])
+    parser.add_argument("--boundary", choices=("boundary", "none"), default="boundary")
+    parser.add_argument("--no-spill", action="store_true", default=False)
+    parser.add_argument("--guarded-pack", action="store_true", default=False)
     add_model_arguments(parser)
-    parser.set_defaults(provider=DEFAULTS["selection_provider"])
+    parser.set_defaults(provider="model")
     args = parser.parse_args()
     try:
         receipt = select_program(args.source, args.output_dir, args.atlas_bin_dir,
