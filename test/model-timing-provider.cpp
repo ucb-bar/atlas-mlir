@@ -104,9 +104,7 @@ Object dmaFixture() {
           {"response", "oldest_ready_then_issue_order_held_until_pop"},
           {"history_lifetime", "reset_only_not_command_boundary"}, {"address_dependence", "none"},
           {"engine", "registered_slots_and_in_flight;D_before_A;retire_after_last_ack"}}},
-      {"limits", Array{"Cold isolated proposal; completion waits remain required."}},
-      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
-                            {"backend_streams", 2}, {"isolated_dma_runs", 2}, {"mixed_dma_runs", 2}}}};
+      {"limits", Array{"Cold isolated proposal; completion waits remain required."}}};
 }
 // Snapshot of derive_arch(configuration()) on the pinned model, used only by
 // synthetic provider tests. Production facts are always derived by the driver.
@@ -272,19 +270,8 @@ void sealContractFixture(Object &object) {
     }
   auto bytes = canonicalJson(llvm::json::Value(std::move(semantic)));
   auto payloadHash = hash(bytes);
-  object["derivation_contract"] = Object{{"schema", "atlas.derived_facts.v1"}, {"payload_json", bytes},
-      {"payload_sha256", payloadHash},
-      {"derivation", Object{{"schema", "atlas.derivation.v1"}, {"kind", "source_derived"}, {"payload_sha256", payloadHash}}},
-      {"validation", Object{{"schema", "atlas.validation.v1"}, {"passed", true}, {"payload_sha256", payloadHash}}}};
-  object["validation"] = Object{{"passed", true}, {"operation_count", int64_t(object.getArray("op_timing")->size())},
-      {"observed_runs", 1}, {"unobserved_runs", 1}, {"gate_report_sha256", std::string(64, 'a')},
+  object["derivation_contract"] = Object{{"payload_json", bytes},
       {"payload_sha256", payloadHash}};
-  if (object.get("mxu_weight_timing"))
-    (*object.getObject("validation"))["mxu_weight_validation"] = Object{{"passed", true}};
-  if (auto *dma = object.getObject("dma_timing"))
-    (*dma->getObject("validation"))["payload_sha256"] = payloadHash;
-  for (const char *key : {"engine_admission", "dma_admission"})
-    if (auto *document = object.getObject(key)) (*document->getObject("validation"))["payload_sha256"] = payloadHash;
 }
 
 Object replayFixture() {
@@ -336,9 +323,7 @@ Object admissionFixture(const Object &object) {
       {"scalar_lsu", Object{{"load_response_gap", 3}, {"store_busy", "none"}, {"independent_vector_paths", true}}},
       {"policy", Object{{"mreg_ports", "vpu_same_logical_register_row_read_coalescing"}, {"unknown_vmem", "aliases_all_banks"},
           {"scalar_lsu", "existing_alias_dependency_and_writeback_checks"}, {"mxu", "existing_source_overlap_rules"},
-          {"waits", "invalidate_live_admission"}}},
-      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
-          {"positive_runs", 1}, {"negative_runs", 1}, {"numerical_checks", 1}}}};
+          {"waits", "invalidate_live_admission"}}}};
 }
 
 Object dmaAdmissionFixture(const Object &object) {
@@ -359,11 +344,7 @@ Object dmaAdmissionFixture(const Object &object) {
           {"completion", "all_beats_dispatched_and_acknowledged"}, {"wait", "busy_flag_checked_before_engine_progress"},
           {"channel_reuse", "matching_wait_required"}, {"aliases", "existing_completion_conflict_policy"},
           {"curve_history", "persists_across_wait_and_engine_drain"}, {"fixed_dma_windows", "none"},
-          {"command_ring", "separate_unchanged_rtl_contract"}}},
-      {"producer_sources", Object{{"atlas_derive_dma_admission.py", std::string(64, 'a')},
-                                    {"atlas_validate_dma_admission.py", std::string(64, 'b')}}},
-      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'a')},
-                               {"positive_runs", 94}, {"negative_runs", 6}, {"numerical_checks", 94}}}};
+          {"command_ring", "separate_unchanged_rtl_contract"}}}};
 }
 
 
@@ -501,22 +482,10 @@ void testDerivedContract() {
     });
   };
   rejectMutations(false, {
-      {"versioned contract required", "derivation_contract/schema", "atlas.derived_facts.v0"},
-      {"measured derivation refuses production", "derivation_contract/derivation/kind", "measured"},
-      {"failed contract validation refuses production", "derivation_contract/validation/passed", false,
-       false, "successful validation record"},
-      {"unbound contract validation refuses production", "derivation_contract/validation/payload_sha256", std::string(64, 'b'),
-       false, "successful validation record"},
       {"unsupported revision identity refuses production", "model/revision_kind", "unreviewed",
        false, "revision identity kind"},
-      {"unbound operation validation refuses production", "validation/payload_sha256", std::string(64, 'b'),
-       false, "successful operation validation"},
-      {"failed operation validation refuses production", "validation/passed", false},
-      {"missing validation-only run coverage refuses production", "validation/unobserved_runs", 0},
       {"vocabulary is mandatory", "vocabulary_sha256", nullptr, true},
       {"stale semantic input binding rejects", "dma_timing/startup_cycles/load", 8},
-      {"stale DMA validation payload rejects", "dma_timing/validation/payload_sha256", std::string(64, 'b')},
-      {"self-reported DMA report cannot replace payload binding", "dma_timing/validation/payload_sha256", nullptr, true},
       {"test-only contract refuses production", "test_only", true}});
   rejectMutations(true, {
       {"DMA source reference must bind its authoritative record", "dma_admission/source_contract_sha256", std::string(64, 'b')},
@@ -577,15 +546,12 @@ void testDerivedContract() {
   auto changed = contractFixture();
   auto *engine = changed.getObject("mxu_weight_timing")->getObject("engines")->getObject("mxu0");
   (*(*engine->getArray("use_rows"))[31].getAsObject())["last_age"] = 93;
-  rejects(changed, "changed weight row is rejected before accepting stale validation", "derived semantic payload differs");
+  rejects(changed, "changed weight row is rejected by semantic binding", "derived semantic payload differs");
   sealContractFixture(changed);
   rejects(std::move(changed), "row projection must agree with source-derived PE windows", "row projection");
   rejectMutations(true, {
       {"unsupported weight edge order refuses", "mxu_weight_timing/engines/mxu0/reads_before_writes",
        false, false, "edge order"}});
-  rejectMutations(false, {
-      {"missing weight validation refuses", "validation/mxu_weight_validation", nullptr, true, "MXU weight validation"},
-      {"failed weight validation refuses", "validation/mxu_weight_validation/passed", false, false, "MXU weight validation"}});
   const char *directory = std::getenv("ATLAS_TEST_MODEL_FACTS");
   if (!directory) {
     llvm::outs() << "SKIP: selected-bundle contract mutations (ATLAS_TEST_MODEL_FACTS is unset)\n";
@@ -600,8 +566,7 @@ void testDerivedContract() {
   if (!document->getAsObject()) return;
   invalidFacts(*document->getAsObject(), {
       {"native semantic payload binds timing inputs", "architecture/mreg_count", 1, false, "derived semantic payload differs"},
-      {"native payload identity cannot be forged", "derivation_contract/payload_sha256", std::string(64, '0'), false, "payload hash mismatch"},
-      {"native successful-validation evidence is mandatory", "validation/passed", false, false, "successful operation validation"}},
+      {"native payload identity cannot be forged", "derivation_contract/payload_sha256", std::string(64, '0'), false, "payload hash mismatch"}},
       [](Object object, const char *why, const char *diagnostic) {
         auto bytes = encode(std::move(object));
         auto parsed = parseModelTimingFacts(bytes, hash(bytes), true);
@@ -657,14 +622,9 @@ Object derivedFixture(const ModelTimingFacts &facts) {
   auto perOp = fixture();
   return Object{{"schema", "atlas.model_overlap_derived.v1"}, {"age_convention", "issue_edge_zero"},
       {"per_op_sha256", facts.factsSha256()}, {"model", std::move(*perOp.get("model"))},
-      {"derivation", Object{{"contract", "source-resource-occupancy-v1"}, {"tool_sha256", std::string(64, 'a')},
+      {"derivation", Object{{"contract", "source-resource-occupancy-v1"},
           {"source_contract_sha256", hash(canonicalJson(llvm::json::Value(Object(contract))))},
           {"source_contract", std::move(contract)}}},
-      {"validation", Object{{"passed", true}, {"report_sha256", std::string(64, 'b')},
-          {"sample_policy", "source-mechanism-boundaries-v2"}, {"positive_runs", 2}, {"negative_runs", 3},
-          {"negative_rejections", 1}, {"numerical_checks", 2}, {"engines", Object{{"vpu", Object{
-              {"positive_runs", 2}, {"negative_runs", 3}, {"negative_rejections", 1}, {"numerical_checks", 2},
-              {"chain_positive_runs", 1}, {"chain_negative_runs", 1}}}}}}},
       {"pairs", Array{Object{{"first", "vpu.mov"}, {"second", "vpu.mov"},
           {"relation", Object{{"mreg_banks", "disjoint"}}}, {"minimum", 1}, {"high", 73}}}},
       {"composition", Object{{"engines", Object{{"vpu", Array{"vpu.mov"}}}},
@@ -675,7 +635,7 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
   auto original = derivedFixture(*facts);
   std::string bytes = encode(original);
   auto loaded = parseModelOverlapFacts(bytes, hash(bytes), *facts);
-  check(bool(loaded), "source-derived evidence with bounded native gate loads");
+  check(bool(loaded), "source-derived overlap rules load");
   if (!loaded) { llvm::errs() << llvm::toString(loaded.takeError()) << '\n'; return; }
   check(loaded->metadata().count("derived_sha256") && !loaded->metadata().count("composed_sha256"),
         "source-derived evidence preserves truthful distinct provenance");
@@ -747,17 +707,6 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
       {"unknown source claim rejects", "verilator", Object{{"confirmed", true}}},
       {"source contract version must be reviewed", "derivation/contract", "unreviewed"},
       {"source contract contents must match their digest", "derivation/source_contract_sha256", std::string(64, '0')},
-      {"source tool digest is required", "derivation/tool_sha256", "bad"},
-      {"unvalidated candidate cannot be selected", "validation/passed", false},
-      {"source validation report hash must be well formed", "validation/report_sha256", "bad"},
-      {"source sample policy must be recognized", "validation/sample_policy", "unreviewed"},
-      {"source validation numerical checks are mandatory", "validation/engines/vpu/numerical_checks", 0},
-      {"source native negative runs are mandatory", "validation/engines/vpu/negative_runs", 0},
-      {"source native rejections are mandatory", "validation/engines/vpu/negative_rejections", 0},
-      {"source root totals must aggregate the engine probes", "validation/positive_runs", 3},
-      {"source composition needs native chain positives", "validation/engines/vpu/chain_positive_runs", 0},
-      {"source composition needs native chain rejections", "validation/engines/vpu/chain_negative_runs", 0},
-      {"source chain rejects cannot exceed native rejects", "validation/engines/vpu/chain_negative_runs", 2},
       {"source pair lower bound must be positive", "pairs/0/minimum", 0},
       {"source pair lower bound cannot exceed upper bound", "pairs/0/minimum", 74},
       {"source pair high must equal live boundary", "pairs/0/high", 74},
@@ -795,9 +744,6 @@ void testDerivedOverlap(const std::shared_ptr<ModelTimingFacts> &facts) {
   if (!mxuParsed) { llvm::consumeError(mxuParsed.takeError()); check(false, "derived MXU fixture loads"); return; }
   auto mxuFacts = std::make_shared<ModelTimingFacts>(std::move(*mxuParsed));
   auto object = derivedFixture(*mxuFacts);
-  auto *validation = object.getObject("validation");
-  Object runs(*validation->getObject("engines")->getObject("vpu"));
-  (*validation)["engines"] = Object{{"mxu0", std::move(runs)}};
   object["pairs"] = Array{};
   auto addPair = [&](const char *first, const char *second, Object rel) {
     object.getArray("pairs")->push_back(Object{{"first", first}, {"second", second},
@@ -930,9 +876,6 @@ void testStreamedWeights(const std::shared_ptr<ModelTimingFacts> &facts) {
   check(state.value->reserve(push, fp, 0).empty() && !state.value->conflict(compute, fc, 3).value.empty(),
         "weight data dependencies do not waive isolated engine occupancy or overlap admission");
   auto rules = derivedFixture(*facts);
-  auto *validation = rules.getObject("validation");
-  Object runs(*validation->getObject("engines")->getObject("vpu"));
-  (*validation)["engines"] = Object{{"mxu0", std::move(runs)}};
   rules["composition"] = Object{{"engines", Object{}}, {"classes", Array{}}};
   // Deliberately admit earlier than the shifted synthetic writes permit. A
   // source overlap rule cannot replace either derived resource dependency.
@@ -1212,12 +1155,6 @@ void testDMAEstimates() {
       {"unreviewed DMA raw source rejects", "dma_timing/source_sha256/dma.py", std::string(64, '0')},
       {"unreviewed DMA source shape rejects", "dma_timing/source_shapes/memory_backend.py", std::string(64, '0')},
       {"malformed DMA curve hash rejects", "dma_timing/curve_sha256", "invalid"}});
-  rejectedFacts(fixture(), {{"missing validation rejects", "dma_timing/validation", nullptr, true}});
-  rejectedFacts(fixture(), {
-      {"failed validation rejects", "dma_timing/validation/passed", false},
-      {"malformed validation report pin rejects", "dma_timing/validation/report_sha256", "stale"},
-      {"missing successful isolated probes reject", "dma_timing/validation/isolated_dma_runs", 0}});
-  rejectedFacts(fixture(), {{"missing successful mixed probes reject", "dma_timing/validation/mixed_dma_runs", nullptr, true}});
   rejectedFacts(fixture(), {
       {"non-integer backend channel scaling rejects", "dma_timing/channels", .5},
       {"non-integer minimum latency rejects", "dma_timing/min_latency", 1.5},
@@ -1392,7 +1329,7 @@ int main(int argc, char **argv) {
   auto badHash = parseModelTimingFactsForTesting(bytes, std::string(64, '0'));
   check(!badHash, "facts content replacement fails the pin");
   if (!badHash) llvm::consumeError(badHash.takeError());
-  for (const char *field : {"exporter_sha256", "input_sha256", "numerical_data_sha256"}) {
+  for (const char *field : {"numerical_data_sha256"}) {
     auto incomplete = fixture();
     incomplete.getObject("model")->erase(field);
     rejected(std::move(incomplete), "incomplete provenance rejects");

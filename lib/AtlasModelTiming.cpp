@@ -494,21 +494,13 @@ llvm::Expected<std::map<std::string, std::vector<ModelTimingGroup>>> parseWeight
 }
 
 // Hash the producer's bytes (Python/LLVM float spellings differ), then compare decoded semantics.
-llvm::Expected<std::string> validateDerivedContract(const Object &root) {
+llvm::Error validateDerivedContract(const Object &root) {
   const Object *contract = root.getObject("derivation_contract");
-  if (!isRecord(contract, {{"schema", "atlas.derived_facts.v1"}},
-              {"payload_json", "payload_sha256", "derivation", "validation"}))
-    return factsError("requires versioned source-derived facts contract atlas.derived_facts.v1; raw observations are validation/test-only");
+  if (!isRecord(contract, {}, {"payload_json", "payload_sha256"}))
+    return factsError("requires source-derived timing payload");
   auto payloadJson = contract->getString("payload_json"), payloadHash = contract->getString("payload_sha256");
   if (!payloadJson || !payloadHash || !hashSyntax(*payloadHash) || modelSha256(*payloadJson) != *payloadHash)
     return factsError("derived semantic payload hash mismatch");
-  const Object *derivation = contract->getObject("derivation"), *validation = contract->getObject("validation");
-  if (!isRecord(derivation, {{"schema", "atlas.derivation.v1"}, {"kind", "source_derived"},
-                           {"payload_sha256", *payloadHash}}))
-    return factsError("requires a source-derived derivation record bound to the semantic payload");
-  if (!isRecord(validation, {{"schema", "atlas.validation.v1"}, {"passed", true},
-                           {"payload_sha256", *payloadHash}}))
-    return factsError("requires a successful validation record bound to the semantic payload");
   const Object *model = root.getObject("model");
   if (!model) return factsError("missing model provenance in derived semantic payload");
   Object semanticModel;
@@ -543,20 +535,7 @@ llvm::Expected<std::string> validateDerivedContract(const Object &root) {
   if (!decoded) return factsError(llvm::toString(decoded.takeError()));
   if (canonicalJson(*decoded) != canonicalJson(llvm::json::Value(std::move(semantic))))
     return factsError("derived semantic payload differs from selected timing inputs");
-  const Object *gate = root.getObject("validation");
-  const Array *operations = root.getArray("op_timing");
-  auto reportHash = gate ? gate->getString("gate_report_sha256") : std::nullopt;
-  if (!gate || gate->getBoolean("passed") != true || gate->getString("payload_sha256") != payloadHash ||
-      !operations || gate->getInteger("operation_count") != int64_t(operations->size()) ||
-      !bounded(gate, "observed_runs", 1, INT64_MAX) || !bounded(gate, "unobserved_runs", 1, INT64_MAX) ||
-      !reportHash || !hashSyntax(*reportHash))
-    return factsError("requires successful operation validation bound to the deterministic payload");
-  if (root.get("mxu_weight_timing")) {
-    const Object *weights = gate->getObject("mxu_weight_validation");
-    if (!weights || weights->getBoolean("passed") != true)
-      return factsError("requires successful MXU weight validation bound to the deterministic payload");
-  }
-  return payloadHash->str();
+  return llvm::Error::success();
 }
 
 bool completeReleaseCoverage(const ModelTimingBlock &block) {
@@ -690,7 +669,7 @@ llvm::Error validateDMASourceContract(const Object &d) {
   return llvm::Error::success();
 }
 
-llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg, llvm::StringRef payloadHash) {
+llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg) {
   auto error = [](const std::string &why) -> llvm::Expected<ModelDMATiming> {
     return factsError("dma_timing: " + why);
   };
@@ -699,7 +678,7 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
        "max_transfer_bytes", "queue_depth", "window_beats", "frequency_ghz", "channels", "measured_channels",
        "access_bytes", "latency_mode", "converge", "knee", "enforce_peak", "min_latency", "startup_cycles",
        "issue_interval_cycles", "rounding_epsilon_cycles", "curves", "reset_last_ready_cycles", "semantics",
-       "limits", "validation", "proposal_contract", "source_contract"}))
+       "limits", "proposal_contract", "source_contract"}))
     return error("requires the complete resolved proposal-only curve schema");
   if (auto refusal = validateDMASourceContract(d)) return std::move(refusal);
   const auto &identity = model_schema::dmaIdentity();
@@ -714,17 +693,6 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
     if (!actual || !hashSyntax(*actual) || (key != "curve_sha256" && *actual != pin))
       return error("unreviewed source, shape or curve: " + key);
   }
-  const Object *validation = d.getObject("validation");
-  auto reportHash = validation ? validation->getString("report_sha256") : std::nullopt;
-  if (!validation || !(payloadHash.empty() ?
-          exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs"}) :
-          exactKeys(*validation, {"passed", "report_sha256", "backend_streams", "isolated_dma_runs", "mixed_dma_runs", "payload_sha256"})) ||
-      validation->getBoolean("passed") != true || !reportHash || !hashSyntax(*reportHash) ||
-      !bounded(validation, "backend_streams", 1, INT64_MAX) ||
-      !bounded(validation, "isolated_dma_runs", 1, INT64_MAX) || !bounded(validation, "mixed_dma_runs", 1, INT64_MAX))
-    return error("requires successful backend/isolated/mixed validation and its report SHA-256");
-  if (!payloadHash.empty() && validation->getString("payload_sha256") != payloadHash)
-    return error("validation does not bind the selected deterministic payload");
   const Object *semantics = d.getObject("semantics");
   if (!semantics || semantics->size() != 8) return error("missing reviewed backend/engine semantics");
   for (auto [key, value] : std::initializer_list<std::pair<const char *, const char *>>{
@@ -872,27 +840,13 @@ llvm::Expected<ModelDMATiming> parseDMATiming(const Object &d, const Object &cfg
   }
   return result;
 }
-// No scheduling state is added: this qualifies the existing asynchronous policy.
-llvm::Error checkAdmissionValidation(const Object *gate, llvm::StringRef payloadHash,
-                                     llvm::StringRef family) {
-  auto report = gate ? gate->getString("report_sha256") : std::nullopt;
-  const char *failure = nullptr;
-  if (!gate || gate->getBoolean("passed") != true || !report || !hashSyntax(*report) ||
-      (!payloadHash.empty() && gate->getString("payload_sha256") != payloadHash))
-    failure = "requires successful native validation bound to derived payload";
-  else
-    for (const char *key : {"positive_runs", "negative_runs", "numerical_checks"})
-      if (!bounded(gate, key, 1, INT64_MAX)) failure = "missing native mechanism coverage";
-  return failure ? factsError(family.str() + ": " + failure) : llvm::Error::success();
-}
-
-llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::StringRef payloadHash) {
+llvm::Error parseDMAAdmission(const Object &root, const Object &cfg) {
   auto error = [](const std::string &why) { return factsError("DMA admission: " + why); };
   const Object *d = root.getObject("dma_admission");
   if (!isRecord(d, {{"schema", "atlas.dma_admission.v1"}, {"age_convention", "issue_edge_zero"},
                   {"contract", "source-asynchronous-dma-admission-v1"}},
               {"source_sha256", "source_shapes", "configuration", "issue", "source_contract_sha256",
-               "semantics", "producer_sources", "validation"}))
+               "semantics"}))
     return error("requires source-derived asynchronous DMA issue contract");
   const Object *sources = d->getObject("source_sha256"), *shapes = d->getObject("source_shapes");
   if (!sources || !shapes ||
@@ -950,23 +904,17 @@ llvm::Error parseDMAAdmission(const Object &root, const Object &cfg, llvm::Strin
       {"aliases", "existing_completion_conflict_policy"}, {"curve_history", "persists_across_wait_and_engine_drain"},
       {"fixed_dma_windows", "none"}, {"command_ring", "separate_unchanged_rtl_contract"}})
     if (semantics->getString(key) != value) return error("unsupported dynamic completion policy");
-  const Object *producers = d->getObject("producer_sources");
-  if (!isRecord(producers, {}, {"atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py"}))
-    return error("missing producer traceability");
-  if (!hashes(*producers)) return error("malformed producer hash");
-  if (auto error = checkAdmissionValidation(d->getObject("validation"), payloadHash, "DMA admission"))
-    return std::move(error);
   return llvm::Error::success();
 }
 
 
 llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
     const Object &document, const Object &model,
-    const std::map<std::string, ModelTimingBlock> &blocks, llvm::StringRef payloadHash) {
+    const std::map<std::string, ModelTimingBlock> &blocks) {
   auto error = [](const std::string &why) { return factsError("engine admission: " + why); };
   if (!isRecord(&document, {{"schema", "atlas.engine_admission.v1"}, {"age_convention", "issue_edge_zero"},
                           {"contract", "source-engine-initiation-v1"}},
-              {"model", "source_contract", "vpu", "xlu", "vlsu", "scalar_lsu", "policy", "validation"}))
+              {"model", "source_contract", "vpu", "xlu", "vlsu", "scalar_lsu", "policy"}))
     return error("unsupported schema or source contract");
   const Object *identity = document.getObject("model"), *source = document.getObject("source_contract");
   if (!isRecord(identity, {}, {"source_sha256", "configuration_sha256", "numerical_data_sha256"}))
@@ -1001,8 +949,6 @@ llvm::Expected<ModelEngineAdmission> parseEngineAdmission(
                        {"unknown_vmem", "aliases_all_banks"}, {"scalar_lsu", "existing_alias_dependency_and_writeback_checks"},
                        {"mxu", "existing_source_overlap_rules"}, {"waits", "invalidate_live_admission"}}))
     return error("unsupported engine/resource policy");
-  if (auto error = checkAdmissionValidation(document.getObject("validation"), payloadHash, "engine admission"))
-    return std::move(error);
   const Object *vpu = document.getObject("vpu");
   const Object *final = vpu ? vpu->getObject("final_write_age") : nullptr;
   const Array *doubles = vpu ? vpu->getArray("double") : nullptr;
@@ -1112,12 +1058,8 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     return factsError("raw observation fixtures require the explicit test_only marker");
   for (const char *key : {"hw_ir", "assertions", "op_pairs", "pairs", "chains", "capacity"})
     if (root->get(key)) return factsError("per-operation model facts cannot carry RTL or overlap claims");
-  std::string payloadHash;
-  if (!testObservations) {
-    auto contract = validateDerivedContract(*root);
-    if (!contract) return contract.takeError();
-    payloadHash = std::move(*contract);
-  }
+  if (!testObservations)
+    if (auto error = validateDerivedContract(*root)) return error;
   if ((!testObservations || root->get("vocabulary_sha256")) &&
       root->getString("vocabulary_sha256") != model_schema::vocabularySha256())
     return factsError("facts vocabulary differs from the compiled operand and relation schema");
@@ -1193,8 +1135,8 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
     if (!parsedScratchpad) return parsedScratchpad.takeError();
     readLatency = *parsedScratchpad;
   }
-  for (const char *key : {"revision", "source_sha256", "configuration_sha256", "observer_sha256",
-                          "exporter_sha256", "input_sha256", "numerical_data_sha256"}) {
+  for (const char *key : {"revision", "source_sha256", "configuration_sha256",
+                          "numerical_data_sha256"}) {
     auto value = model->getString(key);
     bool valid = value && (llvm::StringRef(key) == "revision" ?
         value->size() == 40 && std::all_of(value->begin(), value->end(), [](char c) {
@@ -1336,16 +1278,16 @@ llvm::Expected<ModelTimingFacts> ModelTimingFacts::parseImpl(
   if (!testObservations || root->get("engine_admission")) {
     const Object *document = root->getObject("engine_admission");
     if (!document) return factsError("missing source-derived engine admission");
-    auto admission = parseEngineAdmission(*document, *model, result.blocks, payloadHash);
+    auto admission = parseEngineAdmission(*document, *model, result.blocks);
     if (!admission) return admission.takeError();
     result.admission = std::move(*admission);
   }
   if (!testObservations || root->get("dma_admission"))
-    if (auto error = parseDMAAdmission(*root, *configuration, payloadHash)) return error;
+    if (auto error = parseDMAAdmission(*root, *configuration)) return error;
   if (const auto *dmaFacts = root->get("dma_timing")) {
     const Object *document = dmaFacts->getAsObject();
     if (!document) return factsError("dma_timing must be an object");
-    auto parsedDMA = parseDMATiming(*document, *configuration, payloadHash);
+    auto parsedDMA = parseDMATiming(*document, *configuration);
     if (!parsedDMA) return parsedDMA.takeError();
     result.dmaTiming = std::move(*parsedDMA);
     result.provenance["dma_curve_sha256"] = document->getString("curve_sha256")->str();

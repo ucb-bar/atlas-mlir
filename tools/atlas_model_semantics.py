@@ -121,7 +121,7 @@ def module_contract(source):
 
 
 def check_model_semantics(model):
-    """Check source before importing or executing Core; return its provenance."""
+    """Refuse unsupported source before importing or executing Core."""
     if sys.version_info[:2] != (3, 14):
         raise UnsupportedModelSemantics(
             "model timing requires Python 3.14 for reviewed AST fingerprints; "
@@ -140,5 +140,4 @@ def check_model_semantics(model):
         if actual["bindings"] != expected["bindings"]:
             raise UnsupportedModelSemantics(f"unsupported semantics: {filename}:module/class bindings")
         checked[filename] = actual
-    return dict(schema=contract["schema"], files=checked,
-                binding="model.source_sha256 in atlas.derived_facts.v1 semantic payload")
+    return checked

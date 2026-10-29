@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 from copy import deepcopy
 
-from atlas_derive_overlap import extract_contract, safe_path, _source, _named, _method
+from atlas_derive_overlap import extract_contract, _source, _named, _method
 from atlas_derive_memory import _source as memory_source
 from atlas_derive_frontend import derive_frontend
 from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_schema import sha256
-from atlas_model_timing import configuration, source_digest
+from atlas_model_timing import configuration
 
 CORE_INIT_SHAPE = "5abd67591485003d3f345e7b4f15564b3b3d8a4ff8449ed3efd5a392cf03adf9"
 CONTRACT = "source-engine-initiation-v1"
@@ -41,7 +42,7 @@ def _vpu_live_ages(cfg, blocks):
 
 def derive_admission(model, per_op):
     """Pure source derivation; native validation never supplies a predicate."""
-    model = safe_path(model)
+    model = Path(model)
     try:
         structural = extract_contract(model, per_op)
     except ValueError as error:
@@ -87,10 +88,7 @@ def derive_admission(model, per_op):
                         store_busy="none", independent_vector_paths=True),
         policy=dict(mreg_ports="vpu_same_logical_register_row_read_coalescing", unknown_vmem="aliases_all_banks",
                     scalar_lsu="existing_alias_dependency_and_writeback_checks", mxu="existing_source_overlap_rules",
-                    waits="invalidate_live_admission"),
-        validation=dict(passed=False))
-    if source_digest(model)[0] != per_op["model"]["source_sha256"]:
-        raise UnsupportedAdmission("model changed during engine admission derivation")
+                    waits="invalidate_live_admission"))
     return result
 
 

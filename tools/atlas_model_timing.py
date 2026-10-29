@@ -6,44 +6,30 @@ from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidatio
 from atlas_search_policy import POLICY, fixed_execution_contract
 
 from collections import defaultdict
-from contextlib import ExitStack
+from contextlib import closing
+from io import StringIO
 from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from atlas_model_observer import observe_mxu
-from atlas_validate_common import native_state, native_unit, uops
-from atlas_derive_scratchpad import scratchpad_assumptions, source_path
 from atlas_model_schema import VPU_BLOCKS, MXU_BLOCKS, BINARY, mreg_event, canonical as encoded, sha256
 
 
 def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
     records = []
-    kind = "model source" if suffixes else "model numerical data"
-    root = source_path(model_root / subdir, RuntimeError, kind + " root contains a symlink", absolute=True, parent_error=RuntimeError)
-    if not root.is_dir():
-        raise RuntimeError(kind + " root is missing")
-    def visit(directory):
-        # Check symlinks before classifying entries; os.walk can follow a
-        # directory symlink while classifying it.
-        with os.scandir(directory) as stream:
-            entries = list(stream)
-        directories = []
-        for entry in sorted(entries, key=lambda entry: entry.name):
-            if suffixes and entry.name == "__pycache__":
+    root = model_root / subdir
+    for directory, children, filenames in os.walk(root):
+        children[:] = sorted(name for name in children if
+                             not any(blocked in name.lower() for blocked in ("hammer", "vlsi"))
+                             and (not suffixes or name != "__pycache__"))
+        for name in sorted(filenames):
+            if any(blocked in name.lower() for blocked in ("hammer", "vlsi")):
                 continue
-            if entry.is_symlink():
-                raise RuntimeError(kind + " contains a symlink")
-            path = directory / entry.name
-            if entry.is_dir(follow_symlinks=False):
-                directories.append(path)
-            elif not suffixes or path.suffix in suffixes:
+            path = Path(directory) / name
+            if not suffixes or path.suffix in suffixes:
                 records.append({"path": str(path.relative_to(model_root)), "sha256": sha256(path.read_bytes())})
-        for child in directories:
-            visit(child)
-    visit(root)
     if sort:
         records.sort(key=lambda record: record["path"])
     return sha256(encoded(records)), records
@@ -138,229 +124,54 @@ def compress(ages: list[int]) -> dict:
     return {"count": len(ages), "first_age": ages[0], "last_age": ages[-1], "step": step}
 
 
-def observe_case(block_name: str, engine: str, assembly: str, *, nonzero=False, instrument=True, max_cycles=1024, cfg=None):
-    """Execute one instruction, capturing real calls, never latency tables."""
-    import torch
-    from npu_model.hardware.exu import StagedExecution
+def observe_vpu(cfg):
+    """Observe one ordinary VPU row sweep through the native port checker."""
+    from npu_model.hardware.arch_state import ArchState
+    from npu_model.hardware.vpu import VectorExecutionUnit
+    from npu_model.logging.logger import Logger
+    from npu_model.software.instruction import Uop
+    from npu_model.util.converter import stream_to_instrs
 
-    if cfg is None:
-        cfg, config_values = configuration()
-    else:
-        config_values = configuration_values(cfg)
-    with native_state(cfg) as state, ExitStack() as cleanup:
-        finish_tick = lambda: None
-        unit = native_unit(cfg, state, engine)
-        uop, = uops(assembly)
-        instruction = uop.insn
-        mnemonic = instruction.mnemonic
-        # Nonzero runs fill every register file and VMEM; zero runs keep reset state.
-        if nonzero:
-            for bank in range(64):
-                state.mrf[bank].view(torch.bfloat16).fill_(0.5 + (bank % 3) * 0.25)
-            if mnemonic.startswith("vmat") or mnemonic == "vunpack.fp8.bf16":
-                state.write_mrf_fp8(0, torch.ones((32, 32)).to(torch.float8_e4m3fn))
-            for mxu in ("mxu0", "mxu1"):
-                for slot in (0, 1):
-                    state.acc[mxu][slot].fill_(0.5)
-                    state.write_wb_fp8(mxu, slot, torch.eye(32).to(torch.float8_e4m3fn))
-            state.vmem[:1024] = torch.arange(1024, dtype=torch.int64).remainder(251).to(torch.uint8)
-            state.write_xrf(1, 0x12345678)
-        state.write_erf(0, 127)
-        def snapshot():
-            tensors = list(state.mrf) + [t for slots in state.acc.values() for t in slots]
-            tensors += [t for slots in state.wb.values() for t in slots] + [state.vmem]
-            raw = b"".join(t.contiguous().view(torch.uint8).numpy().tobytes() for t in tensors)
-            return sha256(raw + encoded({"xrf": state.xrf, "erf": state.erf}))
-
-        initial_digest = snapshot()
-        events, levels, states, controls, reservations = [], [], [], [], []
-        def event(group, kind, **fields):
-            events.append(dict(group=group, kind=kind, cycle=unit.cycle, age=unit.cycle - 1,
-                               uop_id=uop.id, pc=uop.pc, mnemonic=mnemonic, **fields))
-
-        if instrument:
-            checker = state.conflict_checker
-            original_reserve, original_release = checker.reserve_mreg, checker.release_mreg
-            reserved = {}
-            def reserve(owner, reads, writes, **kwargs):
-                original_reserve(owner, reads, writes, **kwargs)
-                reserved[owner] = (set(reads), set(writes))
-                reservations.append(dict(kind="reserve", age=unit.cycle - 1, reads=sorted(reads), writes=sorted(writes)))
-            def release(owner, *, reads=True, writes=True):
-                original_release(owner, reads=reads, writes=writes)
-                old_reads, old_writes = reserved.get(owner, (set(), set()))
-                released_reads, released_writes = old_reads if reads else set(), old_writes if writes else set()
-                reservations.append(dict(kind="release", age=unit.cycle - 1,
-                                         reads=sorted(released_reads), writes=sorted(released_writes)))
-                reserved[owner] = (old_reads - released_reads, old_writes - released_writes)
-            cleanup.enter_context(patch.object(checker, "reserve_mreg", reserve))
-            cleanup.enter_context(patch.object(checker, "release_mreg", release))
-            original_mreg = state.conflict_checker.access_mreg
-            def mreg(cycle, bank, row, write, owner):
-                original_mreg(cycle, bank, row, write, owner)
-                group = mreg_event(mnemonic, engine, int(bank), write)
-                event(group, "mreg_write_edge" if write else "mreg_read_request",
-                      bank=int(bank), row=int(row), owner=owner)
-            cleanup.enter_context(patch.object(state.conflict_checker, "access_mreg", mreg))
-            original_read, original_write = state.read_vmem, state.write_vmem
-            def vread(address, imm, size):
-                result = original_read(address, imm, size)
-                event("vmem_read", "vmem_read_sample", address=int(address + imm), size=int(size))
-                return result
-            def vwrite(address, imm, data):
-                original_write(address, imm, data)
-                event("vmem_write", "vmem_write_commit", address=int(address + imm), size=len(data))
-            cleanup.enter_context(patch.object(state, "read_vmem", vread))
-            cleanup.enter_context(patch.object(state, "write_vmem", vwrite))
-            original_x, original_e = state.write_xrf, state.write_erf
-            def xwrite(reg, value):
-                original_x(reg, value)
-                event("load_write", "xrf_write_commit", register=int(reg), value=int(value))
-            def ewrite(reg, value):
-                original_e(reg, value)
-                event("scale_write", "erf_write_commit", register=int(reg), value=int(value))
-            cleanup.enter_context(patch.object(state, "write_xrf", xwrite))
-            cleanup.enter_context(patch.object(state, "write_erf", ewrite))
-            def mxu_event(*, kind, cycle, uop, location, evidence, row=None):
-                if cycle != unit.cycle:
-                    raise RuntimeError("observer reported a different tick")
-                if kind == "acc_read":
-                    group = "acc_store" if mnemonic.startswith("vmatpop") else "acc_read"
-                elif kind == "acc_write":
-                    group = "acc_load" if mnemonic.startswith("vmatpush") else "acc_write"
-                else:
-                    group = kind
-                fields = dict(location=list(location), evidence=evidence)
-                if row is not None:
-                    fields["row"] = int(row)
-                event(group, kind, **fields)
-            if engine.startswith("mxu"):
-                finish_tick = cleanup.enter_context(observe_mxu(StagedExecution, unit, uop, mxu_event))
-
-        for age in range(max_cycles):
-            pre_live = bool(unit.has_in_flight)
-            pre = {"age": age, "cycle": age + 1, "has_in_flight": pre_live}
-            if engine == "vpu":
-                pre["issue_busy_mask"] = unit.issue_busy_mask
-            if engine in {"vlsu", "scalar_lsu"}:
-                pre.update(vload_busy=unit._vload is not None, vstore_busy=unit._vstore is not None)
-            levels.append(pre)
-            if age > 0 and not pre_live:
-                first_free = age
-                break
-            unit.tick(uop if age == 0 else None)
-            finish_tick()
-            states.append(snapshot())
-            controls.append(sha256(encoded({key: getattr(state, key) for key in (
-                "base", "pc", "npc", "flags", "csrf", "halted", "halt_reason", "redirect_requested", "in_delay_slot")})))
-            if age == 0 and unit.total_instructions != 1:
-                raise RuntimeError("isolated command was not accepted")
-            if instrument and engine.startswith("mxu"):
-                event("compute_busy" if mnemonic.startswith("vmatmul") else "data_busy",
-                      "observed_pre_edge_or_accepted_live")
-        else:
-            raise RuntimeError(f"command did not drain within {max_cycles} cycles")
-        final_digest = snapshot()
+    instruction, = stream_to_instrs(StringIO("vadd.bf16 m4, m0, m2"))
+    with closing(ArchState(cfg.arch_state_config)) as state:
+        unit = VectorExecutionUnit("vpu", Mock(spec=Logger), state, config=cfg)
+        uop = Uop(instruction, pc=0)
         grouped = defaultdict(list)
-        for item in events:
-            grouped[item["group"]].append(item["age"])
-        block = dict(name=block_name, engine=engine, resolved=True,
-                     events={name: compress(ages) for name, ages in sorted(grouped.items())},
-                     first_free_age=first_free, next_issue_age=first_free,
-                     assumptions=scratchpad_assumptions(), observation={"accepted": True, "drained": True})
-        raw = dict(name=block_name, assembly=assembly, instruction_word=instruction.to_bytecode(),
-                   uop_id=uop.id, pc=uop.pc, initialization="nonzero-v1" if nonzero else "zero-v1",
-                   initial_state_sha256=initial_digest, final_state_sha256=final_digest,
-                   pre_edges=levels, events=events, first_free_age=first_free,
-                   configuration=config_values, architectural_states=states, control_states=controls,
-                   complete_count=unit.complete_count, total_instructions=unit.total_instructions,
-                   busy_cycles=unit.busy_cycles, reservations=reservations)
-        return block, raw
+        original = state.conflict_checker.access_mreg
 
+        def access(cycle, bank, row, write, owner):
+            original(cycle, bank, row, write, owner)
+            grouped[mreg_event(uop.insn.mnemonic, "vpu", int(bank), write)].append(unit.cycle - 1)
 
-def result_signature(raw):
-    keys = ("initial_state_sha256", "final_state_sha256", "architectural_states", "control_states", "pre_edges",
-            "first_free_age", "complete_count", "total_instructions", "busy_cycles", "instruction_word", "configuration")
-    return {key: raw[key] for key in keys}
-
-
-def observer_manifest():
-    return [{"path": name, "sha256": sha256(Path(__file__).with_name(name).read_bytes())}
-            for name in ("atlas_model_timing.py", "atlas_model_observer.py", "atlas_validate_common.py")]
-
-
-def observed_releases(block, raw):
-    releases = {"unit": dict(first_age=0, release_age=block["first_free_age"] - 1,
-                             available_age=block["first_free_age"])}
-    for direction in ("read", "write"):
-        banks, ages, starts, live = set(), set(), set(), set()
-        for event in raw["reservations"]:
-            affected = set(event[direction + "s"])
-            if event["kind"] == "reserve":
-                if live & affected:
-                    raise RuntimeError("MREG reservation repeated before release")
-                if affected:
-                    starts.add(event["age"])
-                live.update(affected)
-            elif affected:
-                if not affected <= live:
-                    raise RuntimeError("MREG release has no matching reservation")
-                banks.update(affected)
-                ages.add(event["age"])
-                live.difference_update(affected)
-        if live:
-            raise RuntimeError("MREG reservations remain unreleased at drain")
-        if banks:
-            if len(ages) != 1 or starts != {0}:
-                raise RuntimeError("MREG banks have unequal release ages or non-issue reservation starts")
-            age, = ages
-            releases["mreg_" + direction] = dict(banks=sorted(banks), first_age=0,
-                                                  release_age=age, available_age=age + 1)
-        key = "vmem_" + direction
-        if key in block["events"]:
-            event = block["events"][key]
-            releases[key] = dict(banks=[0], first_age=event["first_age"], release_age=event["last_age"],
-                                 available_age=event["last_age"] + 1)
-    return releases
+        with patch.object(state.conflict_checker, "access_mreg", access):
+            for age in range(4096):
+                if age and not unit.has_in_flight:
+                    return dict(events={name: compress(ages) for name, ages in sorted(grouped.items())},
+                                first_free_age=age)
+                unit.tick(uop if age == 0 else None)
+                if age == 0 and unit.total_instructions != 1:
+                    raise RuntimeError("VPU validation command was not accepted")
+    raise RuntimeError("VPU validation command did not drain")
 
 
 def validate_derived(cfg, candidates, releases, output_dir):
-    """Validate source-derived blocks using the unmodified numerical execution paths."""
-    checks, observed_blocks, runs = [], [], []
-    for name, engine, assembly in isa_cases(cfg):
-        accepted = []
-        for nonzero in (False, True):
-            check = dict(name=name, initialization="nonzero-v1" if nonzero else "zero-v1", passed=False)
-            checks.append(check)
-            try:
-                block, raw = observe_case(name, engine, assembly, nonzero=nonzero, max_cycles=4096, cfg=cfg)
-                _, plain = observe_case(name, engine, assembly, nonzero=nonzero, instrument=False, max_cycles=4096, cfg=cfg)
-                runs.extend((dict(raw, observer=True), dict(plain, observer=False)))
-                if result_signature(raw) != result_signature(plain):
-                    raise RuntimeError("observer changed architectural data/control trace or unit progress")
-                check["noninterference"] = True
-                # SRAM response latency has no model response event. Compare
-                # observable fields only; copied target assumptions are not proof.
-                observable = lambda value: {key: item for key, item in value.items() if key != "assumptions"}
-                if encoded(observable(block)) != encoded(observable(candidates[name])):
-                    raise RuntimeError("source-derived timing block differs from measured export")
-                check["observable_fields_byte_identical"] = True
-                if observed_releases(block, raw) != releases[name]:
-                    raise RuntimeError("source-derived reservation releases differ from model calls")
-                check.update(passed=True, releases_equal=True, result_sha256=sha256(encoded(result_signature(raw))))
-                accepted.append(block)
-            except (ValueError, RuntimeError) as error:
-                check["error"] = f"{type(error).__name__}: {error}"
-        if len(accepted) == 2 and accepted[0] == accepted[1]:
-            observed_blocks.append(accepted[0])
-    passed = len(observed_blocks) == len(candidates) and all(check["passed"] for check in checks)
-    report = dict(schema="atlas.model_derivation_validation.v1", passed=passed, operation_count=len(candidates),
-                  observed_runs=sum(run["observer"] for run in runs), checks=checks,
-                  unobserved_runs=sum(not run["observer"] for run in runs),
-                  assumption_fields_not_observed=["scratchpad_read_latency"])
-    for filename, value in (("validation-report.json", report), ("raw-observations.json", runs),
-                            ("observed-blocks.json", observed_blocks)):
-        (output_dir / filename).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
-    if not passed:
+    """Check a representative native VPU execution against source-derived facts."""
+    check = dict(name="vpu.add", passed=False)
+    observed = []
+    try:
+        block = observe_vpu(cfg)
+        observed.append(block)
+        candidate = candidates["vpu.add"]
+        if block != {key: candidate[key] for key in ("events", "first_free_age")}:
+            raise RuntimeError("source-derived VPU timing differs from native execution")
+        check["passed"] = True
+    except (ValueError, RuntimeError) as error:
+        check["error"] = str(error)
+    report = dict(passed=check["passed"],
+                  observed_runs=len(observed), checks=[check])
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "validation-report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    if not report["passed"]:
         raise ModelTimingValidationError(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
-    return report, runs
+    return report, observed

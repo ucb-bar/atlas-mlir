@@ -19,6 +19,34 @@ from check_program_decode import decode_binary
 from model_evidence import isolate_model_imports
 
 
+def _stream(backend, stores, *, translation=0, stalls=False, gap=0):
+    from npu_model.hardware.memory_backend import BeatRequest
+    issued, completed, blocked, held = [], [], 0, 0
+    max_pending = 0
+    index = 0
+    for cycle in range(200000):
+        response = backend.response(cycle)
+        if response is not None:
+            if stalls and cycle % 31 < 7:
+                held += 1
+                assert backend.response(cycle) == response
+            else:
+                completed.append([cycle, response.source, response.is_store])
+                backend.pop_response(cycle)
+        if index < len(stores) and cycle >= index * gap:
+            if backend.can_accept(cycle):
+                backend.issue(BeatRequest(index, translation + index * 32, stores[index], cycle))
+                issued.append([cycle, index, stores[index]])
+                index += 1
+            else:
+                blocked += 1
+        max_pending = max(max_pending, backend.outstanding)
+        if index == len(stores) and not backend.outstanding:
+            return dict(issued=issued, completed=completed, blocked_cycles=blocked,
+                        held_cycles=held, max_pending=max_pending)
+    raise AssertionError("backend regression did not drain")
+
+
 class ScorerGuardsTest(unittest.TestCase):
     def test_assertions_cannot_be_disabled(self):
         with patch("atlas_model_scorer.sys.flags") as flags:
@@ -166,7 +194,6 @@ class ModelScorerTest(unittest.TestCase):
             self.scorer(self.program([0x00100093]))
 
     def test_fifo43_native_backend_matches_previous_callable_trajectories(self):
-        from atlas_validate_curve import _stream
         from npu_model.hardware.memory_backend import make_memory_backend
         old, _ = configuration()
         # Historical behavior is an independent regression oracle, not profile input.

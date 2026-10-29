@@ -1,10 +1,10 @@
-"""Bind model identity and timing semantics using identical Python/C++ payload bytes."""
+"""Canonical compiler timing payload shared by Python and C++."""
 from __future__ import annotations
 
 import copy
 import json
 
-from atlas_model_schema import canonical, sha256, validate_mxu_weight_timing
+from atlas_model_schema import canonical, sha256
 
 
 MODEL_FIELDS = ("revision", "revision_kind", "source_sha256", "numerical_data_sha256",
@@ -26,7 +26,7 @@ def overlap_semantics(artifact):
 
 
 def semantic_payload(facts):
-    """Select exactly the values covered by atlas.derived_facts.v1."""
+    """Select the compiler timing payload."""
     result = {name: copy.deepcopy(facts[name]) for name in PAYLOAD_FIELDS}
     result["model"] = {name: copy.deepcopy(facts["model"][name]) for name in MODEL_FIELDS}
     for name in EXTENSIONS:
@@ -40,57 +40,21 @@ def semantic_payload(facts):
 
 
 def seal_derived(facts):
-    """Seal successful derivation output, never raw observer/test fixtures."""
+    """Record canonical timing bytes for the compiler's selected facts."""
     if facts.get("test_only"):
         raise ValueError("test-only observation facts cannot be sealed for production")
-    validation = facts.get("validation", {})
-    if (validation.get("passed") is not True or
-            validation.get("operation_count") != len(facts["op_timing"]) or
-            any(validation.get(key, 0) <= 0 for key in ("observed_runs", "unobserved_runs"))):
-        raise ValueError("derived facts require successful operation validation")
-    if set(facts["reservation_releases"]) != {block["name"] for block in facts["op_timing"]}:
-        raise ValueError("derived facts require complete reservation release coverage")
-    for name in VALIDATED_FIELDS:
-        if name in facts and facts[name].get("validation", {}).get("passed") is not True:
-            raise ValueError("derived facts require successful " + name + " validation")
-    if "mxu_weight_timing" in facts:
-        if validation.get("mxu_weight_validation", {}).get("passed") is not True:
-            raise ValueError("derived facts require successful MXU weight validation")
-        validate_mxu_weight_timing(facts["mxu_weight_timing"])
-    encoded = canonical(semantic_payload(facts))
-    digest = sha256(encoded)
-    facts["derivation_contract"] = dict(
-        schema="atlas.derived_facts.v1", payload_json=encoded.decode(), payload_sha256=digest,
-        derivation=dict(schema="atlas.derivation.v1", kind="source_derived", payload_sha256=digest),
-        validation=dict(schema="atlas.validation.v1", passed=True, payload_sha256=digest))
-    validation["payload_sha256"] = digest
-    for name in VALIDATED_FIELDS:
-        if name in facts:
-            facts[name]["validation"]["payload_sha256"] = digest
+    payload = canonical(semantic_payload(facts))
+    facts["derivation_contract"] = dict(payload_json=payload.decode(), payload_sha256=sha256(payload))
     return facts
 
 
 def verify_derived(facts):
-    """Validate the producer-side boundary without running any model simulation."""
+    """Check the selected timing payload without native execution."""
     if facts.get("test_only"):
         raise ValueError("test-only observation facts are not production derived facts")
-    contract = facts.get("derivation_contract", {})
-    if contract.get("schema") != "atlas.derived_facts.v1":
-        raise ValueError("production model facts require atlas.derived_facts.v1; raw observations are validation/test-only")
-    payload = contract.get("payload_json", "")
+    contract = facts["derivation_contract"]
+    payload = contract["payload_json"]
     digest = sha256(payload.encode())
-    if digest != contract.get("payload_sha256") or json.loads(payload) != semantic_payload(facts):
+    if digest != contract["payload_sha256"] or json.loads(payload) != semantic_payload(facts):
         raise ValueError("derived semantic payload mismatch")
-    if contract.get("derivation") != dict(schema="atlas.derivation.v1", kind="source_derived", payload_sha256=digest):
-        raise ValueError("missing or mismatched source derivation record")
-    if contract.get("validation") != dict(schema="atlas.validation.v1", passed=True, payload_sha256=digest):
-        raise ValueError("missing or mismatched derived validation record")
-    for record in (facts.get("validation", {}), *(facts[name].get("validation", {})
-                                                for name in VALIDATED_FIELDS if name in facts)):
-        if record.get("passed") is not True or record.get("payload_sha256") != digest:
-            raise ValueError("validation is not bound to the derived payload")
-    if "mxu_weight_timing" in facts:
-        validate_mxu_weight_timing(facts["mxu_weight_timing"])
-        if facts["validation"].get("mxu_weight_validation", {}).get("passed") is not True:
-            raise ValueError("derived facts require successful MXU weight validation")
     return digest

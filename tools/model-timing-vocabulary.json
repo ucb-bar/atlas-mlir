@@ -1,5 +1,4 @@
 {
-  "schema": "atlas.model_timing.vocabulary.v1",
   "base_relation_keys": ["mreg_banks", "accumulator", "weight_slot"],
   "relation_values": {
     "accumulator": ["same", "other"],

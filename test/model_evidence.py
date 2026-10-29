@@ -70,7 +70,7 @@ def semantic_sources(model):
 
 def copy_model_sources(test_case, sources, subdirectory=""):
     """Give every test its own sparse source tree and register its cleanup."""
-    from atlas_validate_runtime import safe_path
+    safe_path = Path
     directory = tempfile.TemporaryDirectory()
     test_case.addCleanup(directory.cleanup)
     root = safe_path(directory.name)

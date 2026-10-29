@@ -6,8 +6,9 @@ from atlas_model_diagnostics import UnsupportedModelTiming
 import ast
 from copy import deepcopy
 import inspect
+from atlas_derive_scratchpad import read_source
 
-from atlas_derive_mxu import UnsupportedMXU, _read, _one, _method, _name
+from atlas_derive_mxu import UnsupportedMXU, _one, _method, _name
 from atlas_derive_vpu import UnsupportedVPU
 from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation as _reservation, timing_block
 
@@ -43,7 +44,7 @@ def _ages(predicate, rows):
 
 def _source(module):
     path = inspect.getsourcefile(module)
-    tree = ast.parse(_read(path))
+    tree = ast.parse(read_source(path))
     # Only timing predicates are evaluated below. Everything else, including row
     # indexing, completion and reservation call sites, must keep its reviewed AST.
     digest = ast_digest(tree)

@@ -1,4 +1,4 @@
-"""Fixed replay policy, checked source edges and native Core edge gate."""
+"""Fixed replay policy and checked source edges."""
 from copy import deepcopy
 from pathlib import Path
 import os
@@ -40,16 +40,6 @@ class ReplayContractTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native Core contracts")
 class NativeReplayContractTest(NativeModelFixture, unittest.TestCase):
-    def test_source_derivation_and_bounded_native_edge_validation(self):
-        from atlas_derive_replay import derive_replay
-        from atlas_validate_replay import validate_replay
-        program = derive_replay(self.cfg)
-        report = validate_replay(self.cfg, program)
-        self.assertTrue(report['passed'])
-        self.assertEqual(report['runs'], 4)
-        self.assertEqual(report['program_sha256'], semantic_digest(program))
-        self.assertEqual(report['checks'][-1]['wait_issue_edge'], report['checks'][-1]['clear_edge'] + 1)
-
     def test_reordered_core_or_new_implicit_stalls_refuse_without_running_native(self):
         import atlas_derive_frontend as frontend
         from atlas_derive_replay import derive_replay

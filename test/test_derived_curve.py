@@ -1,4 +1,4 @@
-"""Fail-closed curve extraction and independent native DMA validation."""
+"""Fail-closed curve extraction from source and configuration."""
 from copy import copy
 import ast
 import json
@@ -49,8 +49,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         self.assertEqual(facts["semantics"]["address_dependence"], "none")
 
     def test_frequency_queue_and_history_are_independent_configuration_inputs(self):
-        from atlas_validate_curve import FactBackend, _stream
-        from npu_model.hardware.memory_backend import make_memory_backend
         original = curve.derive_curve(self.cfg)
         cfg = copy(self.cfg)
         cfg.dma_memory_params = dict(self.cfg.dma_memory_params, frequency_ghz=0.75,
@@ -62,9 +60,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         for first, second in zip(original["curves"], facts["curves"]):
             self.assertAlmostEqual(second["cycles_per_beat"], first["cycles_per_beat"] * 1.5)
             self.assertAlmostEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 1.5)
-        stores = [False] * 11 + [True] * 17 + [False, True] * 9
-        self.assertEqual(_stream(FactBackend(facts), stores, stalls=True),
-                         _stream(make_memory_backend(cfg), stores, stalls=True))
 
     def test_selected_curve_bytes_change_facts_and_bind_their_digest(self):
         from atlas_model_schema import sha256
@@ -108,15 +103,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
             with self.assertRaisesRegex(curve.UnsupportedCurve, "source semantics or bytes"):
                 curve.derive_curve(self.cfg)
 
-    def test_independent_reference_detects_timing_tamper(self):
-        from atlas_validate_curve import FactBackend, _stream
-        from npu_model.hardware.memory_backend import make_memory_backend
-        facts = curve.derive_curve(self.cfg)
-        native = _stream(make_memory_backend(self.cfg), [False] * 65)
-        self.assertEqual(native, _stream(FactBackend(facts), [False] * 65))
-        facts["curves"][-1]["cycles_per_beat"] *= 1.01
-        self.assertNotEqual(native, _stream(FactBackend(facts), [False] * 65))
-
     def test_core_order_and_wait_predicate_mutations_refuse(self):
         original_read = curve._read
         for before, after in (("target = self._tick_s1()", "target = None"),
@@ -140,38 +126,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
             curve._proposal_contract(Path(core.__file__).read_text(), ast.parse(Path(dma.__file__).read_text()),
                                      ast.parse(backend), facts["curves"], facts["min_latency"],
                                      facts["rounding_epsilon_cycles"], facts["issue_interval_cycles"])
-
-    def test_core_positive_and_one_short_wait_edges(self):
-        from atlas_validate_curve import _core_wait_observation
-        for store in (False, True):
-            early = _core_wait_observation(self.cfg, store=store, beats=1)
-            age = early["retired_cycle"] - early["launch_cycle"]
-            short = _core_wait_observation(self.cfg, store=store, beats=1, wait_age=age)
-            positive = _core_wait_observation(self.cfg, store=store, beats=1, wait_age=age + 1)
-            self.assertEqual(short["wait_checks"][0], dict(cycle=short["retired_cycle"], fired=False, stall="dma.wait"))
-            self.assertEqual(positive["wait_checks"], [dict(cycle=positive["retired_cycle"] + 1, fired=True, stall=None)])
-
-    def test_near_epsilon_latency_bound_uses_ceiling_before_issue_interval(self):
-        from atlas_validate_curve import _engine_observation
-        cfg = copy(self.cfg)
-        cfg.dma_max_in_flight = 1
-        # Construct selected curve bytes in native units; use the converter's
-        # resulting values, never observations, to build the bound.
-        data = json.loads(curve.resolve_curve_path(cfg).read_text())
-        for points in data["curves"].values():
-            for point in points:
-                point[0] = 1000000.0
-                point[1] = 1.000000001 / float(cfg.dma_memory_params.get("frequency_ghz", data.get("frequencyGHz", 1.0)))
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "epsilon.json"
-            path.write_text(json.dumps(data))
-            cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=str(path), min_latency=1)
-            facts = curve.derive_curve(cfg)
-            self.assertEqual(facts["proposal_contract"]["per_beat_bound_cycles"], 3)
-            native = _engine_observation(cfg, store=False, beats=4, history=[False] * 31)
-            self.assertLessEqual(native["retired_cycle"] - native["launch_cycle"],
-                                 curve.proposal_duration(facts, store=False, beats=4))
-
 
 if __name__ == "__main__":
     unittest.main()

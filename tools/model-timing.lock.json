@@ -1,10 +1,6 @@
 {
-  "schema": "atlas.model_timing.lock.v1",
   "model_revision": "74982e7c68bd28ba6505b4df37290f198102ccce",
   "source_sha256": "29960d71c11e8fee75fbed481f15f24f509080b42d27678907371c6980539562",
-  "reference_configuration_sha256": "bdb127152c1ab4b174b2f628687f3b166dad48ea6f00be124ed8351443885e94",
-  "configuration_sha256": "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a",
-  "numerical_data_sha256": "9a279452a0e4115e1096f7cb01a99aa2796de4d33cccf76c378513bb55616ccd",
   "source_shapes": {
     "vpu.py": "47e798d3597c02b5982741ff9a0b21104919dcbe474382de3948f54d110bcb11",
     "bank_conflict.py": "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467",

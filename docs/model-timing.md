@@ -1,70 +1,44 @@
-# Model timing
+# NPU Model timing facts
 
-`builtin` uses handwritten Atlas timing rules. Opt-in `model` derives timing, architecture, operand vocabulary, frontend edges, MXU weight windows, curve/DMA costs and overlap rules from selected [NPU Model](https://github.com/ucb-ee194-tapeout/npu_model) source/data/configuration; native execution validates facts and scores emitted candidates. Compiler adapters/policy, numerical/RTL contracts, synthetic targets, workload oracles and Python remain explicit inputs.
-
-## Regenerate and validate
-
-Use Python 3.14 in the selected model's environment and a new output directory:
+Generate compiler facts from an npu_model source checkout and its default
+configuration with one command:
 
 ```sh
-python -B tools/atlas_model_facts.py --npu-model /path/to/npu_model --out /path/to/new-facts
+python -B tools/atlas_model_facts.py --npu-model /path/to/npu_model \
+  --out /path/to/new-facts
 ```
 
-Success publishes `model-timing.json`, `model-overlap.json` and `facts.lock.json` after operation, curve/DMA, weight, overlap, admission and runtime validation; refusals may leave diagnostics without a lock. Regenerate for another revision instead of relabeling `tools/model-timing.lock.json`. Observations and benchmark winners never supply timing facts or admission gaps.
+The output contains model-timing.json, model-overlap.json, facts.lock.json,
+and a compact validation-report.json. The compiler reads the timing and
+overlap files; the lock selects their hashes. Regeneration derives operation
+ages, reservation releases, architecture, operands, frontend spacing, DMA
+costs, weight windows, engine admission, replay edges, and overlap rules.
+The supported source and configuration must pass the extractors' structural
+checks. Unsupported control flow, geometry, operand mappings, or timing
+expressions refuse with model-update guidance. Recognized latency and
+capacity changes are extracted from the model rather than fitted to runs.
 
-The finite supported contract checks reviewed AST/planner structures, configuration, ISA membership/order, 32×32 geometry, storage, memory map, RTL numerics, initialization and controller semantics. Unsupported structures/capabilities and other Python versions refuse. Before model imports, `atlas_model_semantics.check_model_semantics` checks `tools/model-semantics.json` across 17 frontend/storage/ISA modules, with separate engine/bank/backend guards. Refusals use `unsupported semantics: FILE:HELPER`. `lineage.semantic_dependencies` and source/generator/inventory hashes bind checked helpers. Normalization ignores comments/locations/leading docstrings and permits limited local renames/adjacent method reordering in reviewed simple scopes; VPU guards refuse even those refactors. Executable statements, arguments, external bindings and unsafe order remain checked. Python/PyTorch and selected numerical routines require identity/numerical validation. The closure below records the roots and guards behind the inventory; callees stay inside the guarded modules or the explicit runtime/numerical boundary.
+One native VPU row-sweep probe checks extracted port-event ages and drain.
+It rejects a wrong timing fact. This is a representative extraction check,
+not exhaustive numerical qualification. Extraction does not run separate
+runtime, DMA, replay, admission, weight, or overlap validation suites and
+does not publish receipts claiming that those suites ran.
 
-| Domain | Roots and closure guard |
-| --- | --- |
-| architecture memory | `ArchState.initialize_buffers`, `ArchState.read_mrf_bf16_tile`, `ArchState.write_mrf_bf16_tile`, `Core.load_program`; complete arch_state/sparse_memory/program/ifu modules; atlas_derive_arch extracts mappings. |
-| banking | `BankConflictChecker.*`, `module operand access classifiers`; whole bank_conflict.py AST in atlas_derive_vpu._check_source, atlas_derive_mxu._check_checker, atlas_derive_memory and atlas_derive_overlap; not inferred from callers. |
-| boundary | `configuration`, `tensor arithmetic`, `logger`; configuration capabilities/effective digest; source and numerical manifests bind selected routines/data; existing numerical validation only, no new arithmetic equivalence proof; Python/PyTorch are trusted execution dependencies, logger has no model state effects. |
-| engines | `VectorExecutionUnit.*`, `_MatrixExecutionUnit.*`, `MatrixExecutionUnitSystolic.*`, `MatrixExecutionUnitInner.*`, `LoadStoreUnit.*`, `CrossLaneExecutionUnit.*`, `DmaExecutionUnit.*`; vpu whole AST after latency-table extraction; mxu whole AST after planner expression extraction; lsu/xlu whole AST; DMA/backend guards in atlas_derive_curve; shared exu helpers guarded here. |
-| fatal errors | `Core.__init__`, `Core.tick`, `Core._handle_runtime_error`; hardware/core.py; complete helpers and module/class bindings. |
-| frontend | `Core._tick_s1`, `Core.is_finished`, `InstructionFetch.tick`; complete core/ifu/stage_data/software/instruction/arch_state/configs/isa_definition modules; atlas_derive_frontend extracts issue/control timing. |
-| initialization reset dispatch | `Core.__init__`, `Core.reset`, `Core._reset_s1`; core, arch_state, ifu, exu, isa_types helpers; exact configuration execution_units order; engine owners below. |
-| isa dispatch execution | `IsaSpec`, `Instruction.__init_subclass__`, `InstructionPatternMeta`, `InstructionPattern`, `scalar exec methods`; complete isa.py/isa_types.py/isa_patterns.py/configs/isa_definition.py; vocabulary and ISA metadata cross-check effective configuration. |
-| scalar storage | `ArchState.write_xrf`, `ArchState.read_xrf`, `ArchState.write_erf`, `ArchState.read_erf`, `ArchState.write_csrf`, `ArchState.read_csrf`; complete hardware/arch_state.py; atlas_derive_arch extracts width/capacity only after guard. |
+The compiler retains configuration and semantic payload checks when loading
+facts. It checks fact structure and scheduling obligations independently of
+regeneration. It does not require producer manifests, native-run counters,
+validation hashes, or qualification reports. Existing bundles should be
+regenerated when updating the compiler.
 
-`runtime-validation.json` requires five full-Core positive/negative pairs covering VPU busy, VMEM/MRF conflicts, invalid VPU operands and branch delay slots. Positives drain to ECALL; negatives propagate specified exceptions without changing the fatal flag. Operands, slack and the 512-cycle bound are validation policy. The pre-import guard and native controls qualify supported runtime-error behavior; a false flag alone would not establish it. Core-edge gates check phase order, ordinary/DELAY issue and DMA.WAIT visibility against traces; ISA-derived probes check data, observer noninterference, state/progress, drain, ages and releases. Curve gates compare an independent interpreter with native mixed-DMA/backpressure/translation/scaling streams. Inputs must stay unchanged during generation.
+The extracted events describe the supported model's isolated operations.
+Overlap pairs and composition classes govern concurrent admission. DMA
+completion remains dynamic and requires matching waits, channel ownership,
+and the separate eight-command RTL ring rule. DMA curve costs are
+conservative proposal bounds under drained, no-denial preconditions.
+Scratchpad response latency has no independent model event; its compatibility
+assumption is inactive when complete reservation releases are available.
 
-Production requires `atlas.derived_facts.v1`, binding successful validation to semantic inputs, vocabulary, complete releases and weight windows. Admission semantic payloads exclude validation receipts/producer identities. Canonical `overlap_rules_sha256` covers `{schema, age_convention, contract, source_contract, pairs, composition}`, excluding `producer_sources`; C++ recomputes it independently. `suite-validation.json` binds revision/scope/limits/completed gates; the lock binds its report and file/semantic hashes. Preserve manifests, frozen candidates, samples and native reports; elapsed times belong in `timing-receipt.json`. Integrity receipts neither rerun derivation nor authenticate execution claims; bounded coverage proves neither exhaustiveness nor RTL equivalence. Raw observations/synthetic fixtures remain validation-only.
-
-## Source facts and assumptions
-
-Configuration plus storage/banking supplies capacities, memory map, DMA channels/beat/transfer/in-flight limits, fetch width and bus/link geometry. `BankConflictChecker`, BF16 layout helpers and `ArchState.write_xrf` supply bank/row mapping, pair layout, scalar width and X0 behavior. Supported layout requires 32 physical MREG banks, 32 rows, 1024-byte registers and six 262144-byte VMEM banks. ISA roles and VPU/MXU planners supply directions, counts/offsets, row passes and accumulator/weight/exponent accesses; exponent sampling remains at issue. Compiler adapters retain encoding/query syntax, names and resource translations. After reviewing an adapter change, update the compatibility snapshot with `python -B tools/atlas_derive_vocabulary.py --npu-model /path/to/npu_model --output tools/model-timing-vocabulary.json`, then regenerate facts.
-
-Frontend extraction derives ordinary issue, scalar accesses, branch/JAL delay slots and DELAY semantics from Core/scalar execution and redirect order. Scheduling supports base gap one and `1 + (imm & 0xFFF)`; other values refuse. Curve facts contain unloaded latency, all read/write mixes' pacing, queue/history limits, channel/frequency scaling, DMA startup/request intervals and rounding/reset behavior. The supported controller uses unloaded latency, converge=1 and peak pacing. Backend queues and engine in-flight capacities differ; dormant hashed overrides do not drive timing.
-
-`scratchpad_read_latency=1` is inactive compatibility metadata; production requires complete derived releases. VPU/MXU/LSU/XLU sample tensors synchronously on request edges, and DMA `cycle + 2` store staging combines SRAM/queue effects: no independent response event yields standalone SRAM latency. `scratchpad_contract.limitation` records this limit; observers exclude the inactive field.
-
-## DMA admission and proposals
-
-DMA can issue on a free channel at the frontend gap while independent work remains live. State-dependent completion requires completion-scoped VMEM ownership, matching waits, channel reuse and the independent RTL ring rule. `atlas_derive_curve.py` owns shared source/phase/startup/geometry `dma_timing`; admission cross-checks it and channel/grant/alias/wait obligations. Its semantic `proposal_contract` checks pacing, registered occupancy, source-ID reuse and retirement. S1 observes channel state before DMA clears it: nonstalling waits see retirement on the next edge. Positive backend latency allows final-response-edge retirement through the registered dispatched bit. Native boundary/one-short controls validate these edges.
-
-C++ recomputes the analytic envelope over every converted curve row: `quantum = ceil(M) + I`, with maximum unloaded latency/curve spacing/minimum latency `M` and extracted issue interval `I`; isolated retirement is bounded by `startup[direction] + beats * quantum`. Preconditions are drained engine/backend, no denied VMEM grants and signed 32-bit cycle/arithmetic operands. Do not subtract rounding epsilon before ceiling. Arbitrary grant denial has no finite source-only bound; mixed-stream gates test excluded history/grant behavior separately. This conservative proposal cost cannot establish completion or drop waits. Compiler policy serializes proposals after preceding retirement plus one, shared by physical critical height/wait placement; native commands may overlap. Curve data may be empirical, and scope/validation bounds are authored choices. Builtin retains its separate DMA policy.
-
-## Source-derived overlap
-
-`atlas_derive_overlap.py` and `atlas_overlap_rules.py` interpret reviewed source predicates, isolated event ages and deferred releases to compute suffix-safe pair gaps and composition classes. Native runs validate frozen rules rather than fit minima. Supported configuration changes regenerate matching rules; production does not silently fall back to isolated-only scheduling.
-
-Structural checks extract MXU compute tracker depths and VPU slot capacity from source. This model revision has no configuration fields for these capacities: MXU `inflight_depth` class literals and the matching VPU `len(live)` predicate/contiguous slot tuple are the supported parameters. Reviewed AST normalization permits MXU depths 1..64 and VPU slots 1..3; those bounds are compiler qualification limits, not timing facts. Changed parameters regenerate pair bounds, composition capacity and native saturation controls. The consumer reads the generated capacities. Geometry remains 32×32 with 64 logical MREGs and 32-cycle MXU sequencers: model constructors, row planners and physical banking contain fixed structure, so changing these still refuses with an unsupported-source/geometry diagnostic.
-
-VPU issue liveness and retirement use the guarded native operation's `write_last` field, selected latency minus one; engine metadata retains this endpoint under the existing `final_write_age` key. Physical row writes may finish earlier. For example, changing row-sum latency from 39 to 40 leaves its last row write at age 38 while keeping the operation live until age 39. Admission derives this endpoint from the inert source issue plan, requires every row write to fit within it, and uses the same endpoint as the authoritative overlap rules; the last observed or derived row-write event cannot shorten it.
-
-Scalar LSU admission uses the extracted load-response spacing; stores and scalar/vector combinations are constrained by their actual bank, register and writeback obligations. VPU commands can coalesce reads of the same logical register and row on one edge, as the native read cache does; other engines and uncertain intervals across waits cannot use that exception. Unsupported internal operand layouts remain explicit compiler capability limits.
-
-The catalog retains complete MXU pair relations and disjoint VPU pairs, plus their composition classes. It omits inter-command VPU aliases, cross-unit pairs and scalar LSU pair rows; unsupported live pairs remain conservative. Standalone VPU/XLU operand legality remains complete, including duplicate sources, in-place operands and internal physical aliases. Scalar spacing and contextual address dependencies remain enforced.
-
-The bounded native gate uses versioned policy `source-mechanism-boundaries-v2`: complete standalone VPU/XLU internal alias checks against the ISA, followed by retained operation/mechanism boundary samples independent of benchmarks. Pair checks cover minima and later suffix points, one-short controls, zero/nonzero operands, exact issue ages, complete drain and serial-reference final state. Chains exercise slot/tracker limits, nonadjacent aliases and retired-prefix port history. Enumeration, coverage bounds and data patterns are validation policy; source predicates/configuration supply the admission facts. All regenerate through the command above.
-
-The retained pair and composition rules are the overlap admission authority; engine metadata cannot bypass them. Admission requires the exact relation/gap; larger live sets require every live pair, supported composition and dynamic capacity. Port/register holds, retired history, weight/accumulator ownership, alias proofs and epoch boundaries remain enforced. Waits invalidate earlier eligibility. DMA history/grants/backpressure exclude it from fixed overlap windows. Bounded samples do not prove arbitrary operand/data cases, mixed chains or RTL equivalence.
-
-## MXU weight-use lifetime
-
-`mxu_weight_timing` (`atlas.mxu_weight_timing.v1`) checks `hardware/mxu.py:_MatrixExecutionUnit._weight_uses`, mapping and sample/push-write order. Inner-engine reads occur at ages 1..32; systolic PE(i,j) at `1+i+j`..`32+i+j`. Weight-buffer output-column row i has union `1+i`..`63+i`. Facts bind affine PE windows and all 32 row windows; unsupported mappings/masks/order refuse, and missing/inconsistent windows fail production loading. At the pinned push ages 1..32, windows yield push-to-matmul/matmul-to-push gaps 1/63 for MXU0 and 32/32 for MXU1. Both modes/slots use them; another slot adds no dependency. Reads precede writes on an edge; strict order, issue predicates and independent occupancy/ports/releases/epochs/capacity checks remain. Generation validates PE masks, first/last-use mutations and streamed push boundaries with one-cycle-early rejection.
-
-## Compile and select
+Compile and select using the generated facts:
 
 ```sh
 python -B tools/lower_atlas_program.py input.mlir \
@@ -73,28 +47,17 @@ python -B tools/lower_atlas_program.py input.mlir \
   --model-facts /path/to/new-facts
 ```
 
-The loader checks fixed filenames/locked digests; omit `--model-facts` to regenerate. `--select-atlas-model-evidence="facts=DIR"` selects compiler evidence. Repeated `--model-region FILE` supplies disjoint DRAM regions with `address`, `initial_hex`, optional `expected_hex`; output directories must be empty. Model paths reject traversal, symlink ancestry and prohibited names before traversal.
-
-Facts guide scheduling, allocation, delay slots, waits and lowering. Python/C++ projected-Core replay uses checked edge facts and a fixed compiler recurrence, schema `atlas.projected_core_replay.v2`, with checked source clock step 1; older bundles require regeneration. Dependency waits, serial virtual engines, anonymous DMA channels and drained-transfer serialization are proposal policy. Core does not automatically stall for dependencies/conflicts. Virtual graphs omit emitted setup, branches, allocation, ports, exact waits and memory history; replay is no full Core simulation. Prediction errors against native scores change neither facts nor completion obligations.
-
-Every production candidate passes compiler verification and native scoring through drained ECALL; winning words are the scored words. Identity mismatches, native faults, incomplete drain and supplied output mismatches fail selection. Expected bytes cover only supplied regions; injected scorers are test hooks. DMA requires matching waits. The model lacks the RTL eight-slot `kAtlasDMACommandSlots` rule: the compiler waits before launch n reuses n−8's slot and rejects overwrite. Builtin behavior is unchanged.
-
-Policy is reproducible from the compiler checkout; it is not extracted from the NPU Model. Algorithm names identify reviewed implementations rather than claiming arbitrary algorithms are configurable. `tools/model-search-policy.json` defines budgets/seeds/pools/ranking/wait/PACK alternatives/objectives/ties/bounds. Python consumes it; CMake generates compiler constants/identity. `provenance.semantic.search_policy` binds canonical hash, invocation overrides and compiler identity, with no selector-hash fallback. Facts semantically bind only the replay projection; producer provenance binds the complete policy. Default `full` permits 32/204 initial/group attempts, batches of 12 and groups up to four; `selection` permits 24 initial attempts without group search/PACK alternatives. Refusals consume budget; native scores select winners. `--guarded-pack` rewrites eligible PACKs to MXU operations; remaining scale codes 122..128 are an empirical numerical gate, not a universal proof.
-
-Selection is deterministic for every budget. Candidates come from a fixed order and the policy's fixed seeds, each gets its canonical index before parallel scoring, the lowest selected-profile cycle count wins, and exact ties go to the earliest index, so the same inputs, facts, policy, and flags produce the same program for any worker count or wall time. Budgets change only how many candidates are tried: `--search-budget selection --max-candidates 1` emits the single default candidate, `--search-budget selection` adds the initial candidates, and the default `full` adds group search and PACK alternatives.
-
-Proposal probes use ISA roles/capacities/register spans; checked planners establish representative operand-independent isolated ages. Exact footprints, dependencies, reservations and overlap govern scheduling. Scalar composition/address materialization, PACK interleaving/setup/fillers, block drains and uncertainty invalidation are policy; dimensions/frontend spacing derive from facts. Reload motion requires one block, a final trailing reload, no intervening label and an independent pending weight; preload requires adjacent matching matmul and weight register disjoint from source pair/output. Scalar overlap proves aligned immutable loop addresses. Proposal costs cannot bypass these checks.
-
-## Scoring and invocation identity
-
-Default `curve` uses the checked backend. Synthetic `--profile fifo43` selects `standalone-atlascore-fifo43` in `tools/model-scoring-targets.json`: latency 43, one cycle/beat, accepts absolute backend cycles 0–3 of each 11 through versioned `accept_fn`. This is neither default model nor extracted RTL timing. Only the selected profile is scored; default curve selection never scores FIFO43. Exact ties use earliest canonical candidate index assigned before parallel execution, including parents/restarts/patience.
-
-`selection.json` binds effective configuration, source/numerical/base identity, synthetic provenance and canonical SHA-256 (sorted-key compact JSON excluding `sha256`); callback receipts bind adapter/descriptor, curve receipts curve bytes. Hashed objective `selected-profile-cycles-then-index-v1` binds comparison fields, `canonical-candidate-index-v1` and effective configuration; unsupported secondary objectives refuse. Builtin/injected scorers are separately labeled. Workers use invocation snapshots of regions/targets, import the model independently and compare configuration to evidence.
-
-Production `atlas.run_provenance.v1` binds program, ordered region addresses/decoded initial/expected bytes, model source/numerical manifests, configuration/curves, facts, compiler source/executables, adapters, Python/Torch/NumPy versions, invocation and used profiles. Original region JSON/decoded bytes are archived by hash in `provenance/objects/`; absent expected bytes supply no oracle, empty regions use cold deterministic reset, and injected scorers claim no production provenance. `provenance.evidence` records paths, Git labels (null for source copies), artifact hashes and original profile receipts. Moving unchanged inputs preserves semantic identity; changed executable bytes changes it. Curves use content identity; `provider_facts_sha256` retains the sealed provider digest. Git labels prove no binary/source correspondence; reports/times do not affect ranking.
-
-Selection snapshots before preparation and rehashes inputs/model/tool rosters after workers exit, before publication. Persistent changes/additions/removals and unsafe paths refuse. Model source/data and compiler lib/include/tools rosters reject all symlinks, including unused suffixes; inputs reject symlink ancestry. Builtin resolves normal paths. Completion checks miss changes restored before completion and cannot prevent later changes; external immutability is required. Package versions identify numerical runtime, not the OS/container.
+Omit --model-facts to regenerate. Candidate search and proposal policy are
+compiler policy, defined in model-search-policy.json, rather than source
+timing facts. Every production candidate still passes compiler verification
+and native scoring through drained ECALL; winning words are the scored words.
+Supplied expected regions provide the numerical oracle. The curve profile
+uses the configured backend; fifo43 is a synthetic scoring target.
 
 ## Updating for NPU Model changes
 
-Regenerate supported frequency/queue/history/channel scaling, capacities, curve data and recognized latency changes together with weight/overlap validation. An unchanged score can be a valid result; dormant backend fields cannot change active timing. Unsupported geometry/tracker/slot/sequencer/ISA/helper changes require reviewed extractor/consumer updates; normalization conservatively refuses some benign refactors. Rerun compiler/evidence tests, representative searches, numerical gates and DMA ring checks with preserved identities. Historical results do not qualify new bundles, search bounds prove neither optimality nor physical timing, and curve bandwidth omits address sensitivity, so close rankings may reverse on a SoC.
+The model is not an RTL timing proof. Structural checks can conservatively
+refuse benign refactors, and the representative native check does not prove
+arbitrary mixed streams or arithmetic equivalence. After extractor changes,
+regenerate, run compiler tests, compare consumed timing fields, and rerun
+representative selections with exact numerical checks.

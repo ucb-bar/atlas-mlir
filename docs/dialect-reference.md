@@ -171,12 +171,12 @@ Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 
 `--select-atlas-model-evidence="facts=DIR"` selects source-derived
-operation/overlap rules bound by `DIR/facts.lock.json` after native validation.
+operation/overlap rules selected by `DIR/facts.lock.json`.
 Set `provider=model` explicitly in virtual/physical scheduling; selecting
 evidence leaves the default unchanged. Missing coverage, unsupported
 operands/configurations, stale hashes and replacing timed evidence fail.
 Verification, emission and LLVM handoff retain selection. See [model
-timing](model-timing.md) for derivation, numerical validation, admission,
+timing](model-timing.md) for derivation, representative validation, admission,
 scalar PACK proofs, regeneration and model-scored search.
 
 ## Machine operations

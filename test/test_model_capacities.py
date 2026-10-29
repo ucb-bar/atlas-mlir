@@ -35,7 +35,7 @@ class CapacityRulesTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for reviewed source guards")
 class CapacitySourceTests(unittest.TestCase):
     def source(self, name):
-        return overlap.safe_path(Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model" / "hardware" / name).read_text()
+        return (Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model" / "hardware" / name).read_text()
 
     def test_depth_changes_preserve_isolated_timing_but_not_control_flow(self):
         source = self.source("mxu.py")

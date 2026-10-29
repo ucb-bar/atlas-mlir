@@ -13,7 +13,6 @@ import sys
 from types import FunctionType, SimpleNamespace
 import textwrap
 
-from atlas_derive_scratchpad import source_path
 from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_schema import VOCABULARY, canonical
 
@@ -88,7 +87,6 @@ def _isa_directions(cls):
     def visit(function, bindings, active):
         if function in active:
             raise UnsupportedVocabulary(f"recursive ISA resource helper for {cls.mnemonic}")
-        _safe(inspect.getsourcefile(function))
         tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
         root = tree.body[0]
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -166,10 +164,6 @@ def _isa_directions(cls):
     return directions
 
 
-def _safe(path):
-    return source_path(path, UnsupportedVocabulary, "vocabulary source/output path contains a symlink")
-
-
 def _parameters(cls):
     try:
         result = []
@@ -240,8 +234,6 @@ def _metadata(cfg, adapter):
     from npu_model.isa import EXU
     from atlas_derive_mxu import _plan
     import npu_model.configs.isa_definition  # noqa: F401
-    for module in (vpu, mxu):
-        _safe(inspect.getsourcefile(module))
     mxu_windows = _plan(Path(inspect.getsourcefile(mxu)).read_text())
     specs = [(entry, "vpu", vpu.VectorExecutionUnit) for entry in adapter["vpu_blocks"]]
     specs += [(dict(entry, mnemonic=entry["mnemonic"] + "." + engine), engine, cls)
@@ -258,7 +250,6 @@ def _metadata(cfg, adapter):
         expected_exu = EXU.VECTOR if engine == "vpu" else unit_cls.exu_type
         if cls.mnemonic != mnemonic or cls.exu != expected_exu:
             raise UnsupportedVocabulary(f"unsupported ISA dispatch for {mnemonic}: expected {expected_exu}")
-        _safe(inspect.getsourcefile(cls))
         operands = _parameters(cls)
         insn, values = _instruction(cls, operands)
         unit, plan, staged = _issue(cfg, unit_cls, insn, engine)
@@ -428,7 +419,7 @@ def main():
     parser.add_argument("--npu-model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    model, output = _safe(args.npu_model), _safe(args.output)
+    model, output = args.npu_model, args.output
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(model))
     from atlas_model_timing import configuration

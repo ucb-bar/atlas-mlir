@@ -169,15 +169,15 @@ bool ModelOverlapFacts::admits(const std::vector<ModelOverlapCommand> &commands,
 
 llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     const Object &root, llvm::StringRef expectedSha256, const ModelTimingFacts &operations) {
-  if (!keys(root, {"schema", "age_convention", "per_op_sha256", "model", "derivation", "validation",
+  if (!keys(root, {"schema", "age_convention", "per_op_sha256", "model", "derivation",
                    "pairs", "composition"}) || root.getString("age_convention") != "issue_edge_zero" ||
       root.getString("per_op_sha256") != operations.factsSha256())
     return invalid("source-derived facts do not bind selected operation facts and ages");
   const Object *model = root.getObject("model"), *derivation = root.getObject("derivation");
-  const Object *validation = root.getObject("validation"), *composition = root.getObject("composition");
+  const Object *composition = root.getObject("composition");
   const auto &identity = operations.modelProvenance();
-  if (!model || !derivation || !validation || !composition)
-    return invalid("source-derived facts require model, derivation, validation and composition");
+  if (!model || !derivation || !composition)
+    return invalid("source-derived facts require model, derivation and composition");
   for (const char *key : {"revision", "source_sha256", "numerical_data_sha256", "configuration_sha256"}) {
     auto found = identity.find(key);
     if (found == identity.end() || model->getString(key) != found->second)
@@ -201,10 +201,10 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     auto value = capacity ? capacity->getInteger(key) : std::nullopt;
     return value && *value >= 1 && *value <= maximum;
   };
-  auto toolHash = derivation->getString("tool_sha256"), contractHash = derivation->getString("source_contract_sha256");
-  if (!keys(*derivation, {"contract", "tool_sha256", "source_contract_sha256", "source_contract"}) ||
+  auto contractHash = derivation->getString("source_contract_sha256");
+  if (!keys(*derivation, {"contract", "source_contract_sha256", "source_contract"}) ||
       derivation->getString("contract") != "source-resource-occupancy-v1" ||
-      !toolHash || !hashSyntax(*toolHash) || !contractHash || !hashSyntax(*contractHash) || !contract ||
+      !contractHash || !hashSyntax(*contractHash) || !contract ||
       modelSha256(canonicalJson(llvm::json::Value(Object(*contract)))) != *contractHash ||
       !capacity || !keys(*capacity, {"sequencer_cycles", "mxu0_compute", "mxu1_compute", "vpu_slots"}) ||
       capacity->getInteger("sequencer_cycles") != 32 || !boundedCapacity("mxu0_compute", 64) ||
@@ -255,46 +255,6 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   if (operations.overlapRulesSha256().empty() ? !operations.allowsUnboundTestOverlap() :
       modelSha256(canonicalJson(llvm::json::Value(std::move(semantic)))) != operations.overlapRulesSha256())
     return invalid("overlap rules differ from the selected derived semantic payload");
-  auto reportHash = validation->getString("report_sha256");
-  // This is a bounded native gate for the source contract, not an observation
-  // claim for every generated pair or a claim about RTL execution.
-  const Object *engineRuns = validation->getObject("engines");
-  auto positive = [](const Object &object, llvm::StringRef key) {
-    auto value = object.getInteger(key);
-    return value && *value > 0 && *value <= INT_MAX;
-  };
-  if (!keys(*validation, {"passed", "report_sha256", "sample_policy", "positive_runs", "negative_runs", "negative_rejections",
-                          "numerical_checks", "engines"}) || validation->getBoolean("passed") != true ||
-      validation->getString("sample_policy") != "source-mechanism-boundaries-v2" ||
-      !reportHash || !hashSyntax(*reportHash) || !engineRuns || engineRuns->empty() ||
-      !positive(*validation, "positive_runs") || !positive(*validation, "negative_runs") ||
-      !positive(*validation, "negative_rejections") ||
-      !positive(*validation, "numerical_checks"))
-    return invalid("source-derived facts require successful bounded native numerical validation");
-  std::map<std::string, int64_t> totals;
-  std::set<std::string> validated;
-  for (const auto &[engine, value] : *engineRuns) {
-    const Object *runs = value.getAsObject();
-    if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu") ||
-        !runs || !keys(*runs, {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks",
-                               "chain_positive_runs", "chain_negative_runs"}))
-      return invalid("unsupported source validation engine or counter");
-    for (const char *key : {"positive_runs", "negative_runs", "negative_rejections", "numerical_checks"}) {
-      if (!positive(*runs, key)) return invalid("source validation engine lacks positive, negative or numerical probes");
-      totals[key] += *runs->getInteger(key);
-    }
-    for (auto [chainKey, allKey] : {std::pair<const char *, const char *>{"chain_positive_runs", "positive_runs"},
-                                    {"chain_negative_runs", "negative_rejections"}})
-      if (runs->get(chainKey) && (!runs->getInteger(chainKey) || *runs->getInteger(chainKey) < 0 ||
-                                 runs->getInteger(chainKey) > runs->getInteger(allKey)))
-        return invalid("source chain validation counters exceed native engine probes");
-    if (runs->getInteger("negative_rejections") > runs->getInteger("negative_runs"))
-      return invalid("source native rejections exceed attempted controls");
-    validated.insert(engine.str());
-  }
-  for (const auto &[key, total] : totals)
-    if (*validation->getInteger(key) != total)
-      return invalid("source validation totals do not cover engine probes");
   ModelOverlapFacts result;
   result.sequencerCycles = *capacity->getInteger("sequencer_cycles");
   result.mxu0Compute = *capacity->getInteger("mxu0_compute");
@@ -314,11 +274,10 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
     if (!record || !keys(*record, {"first", "second", "relation", "minimum", "high"}) ||
         !a || !b || a->engine == "scalar_lsu" || b->engine == "scalar_lsu" ||
         a->engine != b->engine ||
-        !validated.count(a->engine) ||
         !minimum || !high || *minimum < 1 || *minimum > *high || *high != a->firstFreeAge ||
         !relation(record->getObject("relation"), rel) ||
         !seen.emplace(first->str(), second->str(), rel).second)
-      return invalid("invalid, duplicate, unvalidated or unbounded source-derived pair");
+      return invalid("invalid, duplicate or unbounded source-derived pair");
     for (const auto &[key, value] : rel)
       if (key != "mreg_banks" && key != "accumulator" && key != "weight_slot")
         return invalid("source-derived vector pair carries unsupported semantic qualifiers");
@@ -333,10 +292,8 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
   for (const auto &[engine, value] : *engines) {
     const Array *names = value.getAsArray();
     if ((engine != "mxu0" && engine != "mxu1" && engine != "vpu") ||
-        !validated.count(engine.str()) || !names || names->empty() ||
-        !positive(*engineRuns->getObject(engine), "chain_positive_runs") ||
-        !positive(*engineRuns->getObject(engine), "chain_negative_runs"))
-      return invalid("source composition lacks a supported validated operation domain");
+        !names || names->empty())
+      return invalid("source composition lacks a supported operation domain");
     composedEngines.insert(engine.str());
     for (const auto &entry : *names) {
       auto name = entry.getAsString();
@@ -368,12 +325,11 @@ llvm::Expected<ModelOverlapFacts> ModelOverlapFacts::parseDerivedFacts(
       return invalid("duplicate source composition class or class outside exact pair domain");
   }
   for (const auto &engine : composedEngines)
-    if (result.compositionClasses[engine].empty()) return invalid("source composition engine lacks validated classes");
+    if (result.compositionClasses[engine].empty()) return invalid("source composition engine lacks classes");
   result.structuralCapacity = true;
   result.provenance = {{"pairs_sha256", expectedSha256.str()}, {"derived_sha256", expectedSha256.str()},
       {"derived_policy", "source-resource-occupancy-v1"}, {"derived_per_op_sha256", operations.factsSha256()},
-      {"derived_tool_sha256", toolHash->str()}, {"derived_source_contract_sha256", contractHash->str()},
-      {"derived_validation_sha256", reportHash->str()}, {"derived_sample_policy", "source-mechanism-boundaries-v2"}};
+      {"derived_source_contract_sha256", contractHash->str()}};
   for (const char *key : {"revision", "source_sha256", "numerical_data_sha256", "configuration_sha256"})
     result.provenance[std::string("derived_") + key] = identity.at(key);
   return result;

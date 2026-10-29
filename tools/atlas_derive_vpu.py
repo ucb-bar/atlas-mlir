@@ -1,7 +1,7 @@
 """Derive VectorFSM timing from its issue metadata and pure row planners."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import source_path
+from pathlib import Path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
@@ -49,7 +49,7 @@ def _normalize_slot_capacity(tree):
 
 
 def _check_source(module, *, latency_table=False):
-    path = source_path(inspect.getsourcefile(module), UnsupportedVPU, "model source path contains a symlink", parent_error=ValueError)
+    path = Path(inspect.getsourcefile(module))
     tree = ast.parse(path.read_text())
     if latency_table:
         tree.body = [node for node in tree.body if not (

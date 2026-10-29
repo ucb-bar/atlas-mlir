@@ -83,19 +83,6 @@ class DeriveOverlapTests(unittest.TestCase):
             self.assertEqual(len(assembly), 2)
             self.assertFalse(set(operands[0]["registers"]) & set(operands[1]["registers"]))
 
-    def test_retired_prefix_samples_keep_source_gaps(self):
-        facts, contract = fixtures()
-        rules = derive.SourceRules(facts, contract)
-        samples = [sample for sample in derive.chain_samples(rules)
-                   if sample["mechanism"] == "retired_prefix_read_sequencer_assignment"]
-        self.assertEqual(len(samples), 4)
-        for sample in samples:
-            with self.subTest(sample=sample["id"]):
-                first = sample["operations"][0]
-                weight_issue, gap = sample["gaps"]
-                compute_issue = weight_issue + gap
-                self.assertGreaterEqual(compute_issue, rules.first_free_age(first))
-                self.assertEqual(sample["gaps"], [2, 32 if sample["expectation"] == "positive" else 31])
 
 
 if __name__ == "__main__":

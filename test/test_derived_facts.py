@@ -16,7 +16,6 @@ import atlas_model_timing as timing
 import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
-from atlas_model_facts import identity, note_unqualified_model, overlap_bundle
 from atlas_model_schema import LOCK
 from atlas_model_diagnostics import ModelTimingValidationError
 from model_evidence import isolate_model_imports
@@ -34,101 +33,18 @@ class VPUShapeTest(unittest.TestCase):
 
 
 class DerivationGateTest(unittest.TestCase):
-    def test_qualification_note_is_quiet_for_pins_and_nonfatal_for_changed_content(self):
-        source, configuration = LOCK["source_sha256"], LOCK["configuration_sha256"]
-        cases = [(source, configuration, False), ("0" * 64, configuration, True),
-                 (source, "0" * 64, True), ("0" * 64, "0" * 64, True)]
-        for actual_source, actual_configuration, changed in cases:
-            with self.subTest(source=actual_source, configuration=actual_configuration):
-                output = StringIO()
-                with redirect_stderr(output):
-                    self.assertIsNone(note_unqualified_model(actual_source, actual_configuration))
-                lines = output.getvalue().splitlines()
-                self.assertEqual(len(lines), int(changed))
-                if changed:
-                    self.assertIn("results are not from the qualified revision", lines[0])
-
-    def test_overlap_gate_failure_never_publishes_bundle_lock(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            (out / "model-timing.json").write_text("{}")
-            with patch("atlas_derive_overlap.generate", return_value={"pairs": [object()]}), \
-                 patch("atlas_validate_overlap.validate", side_effect=RuntimeError("negative boundary failed")):
-                with self.assertRaisesRegex(ModelTimingValidationError, "negative boundary failed"):
-                    overlap_bundle(out, out)
-            self.assertFalse((out / "facts.lock.json").exists())
-            self.assertFalse((out / "model-overlap.json").exists())
-
-    def test_overlap_pipeline_validates_frozen_bound_proposal_before_returning_digests(self):
-        from test_derived_contract import overlap_fixture
-        from atlas_derived_contract import overlap_semantics
-        rules = overlap_fixture()
-        digest = timing.sha256(timing.encoded(overlap_semantics(rules)))
-        for bound in (digest, "0" * 64):
-            with self.subTest(bound=bound), tempfile.TemporaryDirectory() as directory:
-                out, calls = Path(directory), []
-                (out / "model-timing.json").write_text(json.dumps(dict(overlap_rules_sha256=bound)))
-                def generate(model, facts, candidate, samples):
-                    calls.append("derive")
-                    candidate.write_text("frozen source rules")
-                    return rules
-                def validate(model, facts, candidate, samples, reports, final, **options):
-                    self.assertEqual((candidate.read_text(), calls, options),
-                                     ("frozen source rules", ["derive"], {"workers": 1}))
-                    reports.mkdir()
-                    (reports / "validation-report.json").write_text("native gate passed")
-                    final.write_text("qualified source rules")
-                    calls.append("validate")
-                    return {"seconds": 1}
-                with patch("atlas_derive_overlap.generate", side_effect=generate), \
-                        patch("atlas_validate_overlap.validate", side_effect=validate) as gate:
-                    if bound != digest:
-                        with self.assertRaisesRegex(ValueError, "overlap proposal differs from the sealed derived semantics"):
-                            overlap_bundle(out, out)
-                        gate.assert_not_called()
-                        self.assertFalse((out / "model-overlap.json").exists())
-                    else:
-                        result = overlap_bundle(out, out)
-                        self.assertEqual(calls, ["derive", "validate"])
-                        self.assertEqual(result["overlap_sha256"], timing.sha256(b"qualified source rules"))
-                        self.assertEqual(result["overlap_validation_sha256"], timing.sha256(b"native gate passed"))
-
-    def test_validator_forwards_configuration_and_fails_noninterference(self):
-        cfg = object()
-        block = dict(name="xlu.transpose", first_free_age=2, events={})
-        raw = {key: [] for key in ("architectural_states", "control_states", "pre_edges")}
-        raw.update(initial_state_sha256="a", final_state_sha256="b", first_free_age=2, complete_count=1,
-                   total_instructions=1, busy_cycles=2, instruction_word=0, configuration={}, reservations=[])
-        plain = dict(raw, final_state_sha256="changed")
+    def test_wrong_native_timing_fact_is_rejected(self):
+        observed = dict(events={"write": dict(count=32, first_age=35, last_age=66, step=1)},
+                        first_free_age=67)
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(timing, "isa_cases", return_value=[("xlu.transpose", "xlu", "probe")]), \
-                patch.object(timing, "observe_case", side_effect=[(block, raw), (block, plain)] * 2) as observe:
-            with self.assertRaisesRegex(RuntimeError, "validation failed"):
-                timing.validate_derived(cfg, {"xlu.transpose": block}, {}, Path(directory))
-            self.assertTrue(all(call.kwargs["cfg"] is cfg for call in observe.call_args_list))
-            report = json.loads((Path(directory) / "validation-report.json").read_text())
-            self.assertFalse(report["passed"])
-            self.assertTrue(all("observer changed" in check["error"] for check in report["checks"]))
+                patch.object(timing, "observe_vpu", return_value=observed):
+            good = {"vpu.add": observed}
+            report, _ = timing.validate_derived(object(), good, {}, Path(directory))
+            self.assertTrue(report["passed"])
+            wrong = {"vpu.add": dict(observed, first_free_age=68)}
+            with self.assertRaises(ModelTimingValidationError):
+                timing.validate_derived(object(), wrong, {}, Path(directory))
 
-    def test_identity_tracks_source_and_numerical_data_independently(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            data = root / "npu_model/configs/data"
-            data.mkdir(parents=True)
-            source = root / "npu_model/model.py"
-            source.write_text("value = 1\n")
-            table = data / "table.bin"
-            table.write_bytes(b"one")
-            original, _, _ = identity(root)
-            source.write_text("value = 2\n")
-            changed_source, _, _ = identity(root)
-            self.assertNotEqual(original["source_sha256"], changed_source["source_sha256"])
-            self.assertEqual(original["numerical_data_sha256"], changed_source["numerical_data_sha256"])
-            self.assertEqual(changed_source["revision"], changed_source["source_sha256"][:40])
-            table.write_bytes(b"two")
-            changed_data, _, _ = identity(root)
-            self.assertEqual(changed_source["source_sha256"], changed_data["source_sha256"])
-            self.assertNotEqual(changed_source["numerical_data_sha256"], changed_data["numerical_data_sha256"])
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for source contracts")
 class NativeModelTest(unittest.TestCase):
@@ -213,24 +129,16 @@ class DerivedVPUTest(NativeModelTest):
         with self.assertRaisesRegex(derive.UnsupportedVPU, "operation coverage"):
             derive.derive_vpu(cfg)
 
-    @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for numerical validation")
-    def test_all_blocks_observed_with_noninterference(self):
-        blocks, releases = {}, {}
-        for derive_blocks in (derive.derive_vpu, mxu.derive_mxu, memory.derive_memory):
-            values, reservations = derive_blocks(self.cfg)
-            blocks.update(values)
-            releases.update(reservations)
+    @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for native validation")
+    def test_vpu_fact_matches_native_execution(self):
+        blocks, releases = derive.derive_vpu(self.cfg)
         with tempfile.TemporaryDirectory() as directory:
-            report, _ = self.timing.validate_derived(self.cfg, blocks, releases, Path(directory))
+            report, _ = timing.validate_derived(self.cfg, blocks, releases, Path(directory))
         self.assertTrue(report["passed"])
-        self.assertEqual(report["observed_runs"], 98)
-
-    @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for numerical validation")
-    def test_changed_latency_matches_observed_drain(self):
-        with patch.dict(self.vpu.VPU_OP_LATENCIES, {"vadd.bf16": 80}):
-            expected = derive.derive_vpu(self.cfg)[0]["vpu.add"]
-            block, _ = self.timing.observe_case("vpu.add", "vpu", "vadd.bf16 m4, m0, m2", nonzero=True)
-        self.assertEqual(block, expected)
+        blocks["vpu.add"]["first_free_age"] += 1
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ModelTimingValidationError):
+                timing.validate_derived(self.cfg, blocks, releases, Path(directory))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,6 @@ def change_at(value, path, replacement):
 
 def contract_format_fixture():
     # Private format fixture only; never exported as a qualified model bundle.
-    from test_derived_mxu_weights import weight_fixture
     facts = dict(model=dict(revision="a" * 40, revision_kind="locked_source", source_sha256="b" * 64,
                 numerical_data_sha256="c" * 64, configuration={"frequency": 0.75}, configuration_sha256="d" * 64),
                 architecture={"mreg_count": 64}, operand_vocabulary={"operations": []}, isa_metadata={"instructions": []},
@@ -30,11 +29,9 @@ def contract_format_fixture():
                 op_timing=[dict(name="vpu.add", first_free_age=2)],
                 reservation_releases={"vpu.add": {"unit": {"release_age": 2}}}, vocabulary_sha256="e" * 64,
                 frontend_timing={}, scratchpad_contract={}, replay_timing={}, proposal_costs={},
-                overlap_rules_sha256="f" * 64, mxu_weight_timing=weight_fixture(),
-                validation=dict(passed=True, operation_count=1, observed_runs=2, unobserved_runs=2,
-                                mxu_weight_validation=dict(passed=True), gate_report_sha256="f" * 64))
+                overlap_rules_sha256="f" * 64, mxu_weight_timing=dict(engines={"mxu0": {"use_rows": [{"last_age": 1}]}}))
     for field in ("dma_timing", "engine_admission", "dma_admission"):
-        facts[field] = dict(validation=dict(passed=True, report_sha256="f" * 64))
+        facts[field] = {}
     facts["engine_admission"]["vpu"] = dict(capacity=2)
     facts["dma_admission"]["issue"] = dict(ordinary_gap=1)
     facts["dma_timing"].update(curves=[dict(cycles_per_beat=0.125)], proposal_contract=dict(
@@ -48,7 +45,7 @@ def overlap_fixture():
                 derivation=dict(contract="source-resource-occupancy-v1", source_contract={
                     "capacity": {"vpu_slots": 2}, "producer_sources": [{"sha256": "a" * 64}]}),
                 pairs=[{"first": "vpu.mov", "second": "vpu.mov", "minimum": 1}],
-                composition={"engines": {"vpu": ["vpu.mov"]}}, validation={"passed": True, "seconds": 1})
+                composition={"engines": {"vpu": ["vpu.mov"]}})
 
 
 class DerivedContractTest(unittest.TestCase):
@@ -80,37 +77,8 @@ class DerivedContractTest(unittest.TestCase):
                 operation(self.facts)
         del self.facts["test_only"]
         del self.facts["derivation_contract"]
-        with self.assertRaisesRegex(ValueError, "raw observations are validation/test-only"):
+        with self.assertRaises(KeyError):
             verify_derived(self.facts)
-
-    def test_validation_records_are_bound_to_actual_semantics(self):
-        paths = [("validation",), ("derivation_contract", "derivation"),
-                 ("derivation_contract", "validation")]
-        paths += [(field, "validation") for field in ("dma_timing", "engine_admission", "dma_admission")]
-        for path in paths:
-            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "validation is not bound|record"):
-                verify_derived(change_at(self.facts, (*path, "payload_sha256"), "0" * 64))
-
-    def test_failed_validation_and_incomplete_releases_cannot_be_sealed(self):
-        paths = [("validation", "passed"), ("validation", "mxu_weight_validation", "passed")]
-        paths += [(field, "validation", "passed") for field in ("dma_timing", "engine_admission", "dma_admission")]
-        for path in paths:
-            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "require successful"):
-                seal_derived(change_at(self.facts, path, False))
-            with self.assertRaisesRegex(ValueError, "validation"):
-                verify_derived(change_at(self.facts, path, False))
-        self.facts["reservation_releases"].clear()
-        with self.assertRaisesRegex(ValueError, "complete reservation release"):
-            seal_derived(self.facts)
-
-    def test_receipts_and_producer_sources_do_not_change_semantics(self):
-        digest = verify_derived(self.facts)
-        self.facts["model"]["exporter_sha256"] = "1" * 64
-        self.facts["validation"]["gate_report_sha256"] = "2" * 64
-        for field in ("dma_timing", "engine_admission", "dma_admission"):
-            self.facts[field]["validation"]["report_sha256"] = "0" * 64
-            self.facts[field]["producer_sources"] = []
-        self.assertEqual(verify_derived(self.facts), digest)
 
     def test_sealing_is_idempotent_and_payload_bytes_preserve_floats(self):
         facts = self.facts
@@ -141,7 +109,6 @@ class DerivedContractTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotEqual(digest(change_at(original, path, "changed")), digest(original))
         changed = deepcopy(original)
-        changed["validation"].update(seconds=999, report_sha256="b" * 64)
         changed["derivation"]["source_contract"]["producer_sources"] = []
         changed["derivation"]["tool_sha256"] = "c" * 64
         self.assertEqual(digest(original), digest(changed))

@@ -31,7 +31,6 @@ int testEngineAdmission() {
   auto mismatch = [&](bool capacity) {
     auto changed = llvm::json::parse((*bytes)->getBuffer());
     if (!changed) { llvm::consumeError(changed.takeError()); check(false, "parse facts for metadata mismatch fixture"); return; }
-    changed->getAsObject()->getObject("dma_timing")->getObject("validation")->erase("payload_sha256");
     auto *engine = changed->getAsObject()->getObject("engine_admission");
     if (capacity) (*engine->getObject("vpu"))["capacity"] = 3;
     else (*engine->getObject("source_contract")->getObject("source_sha256"))["vpu.py"] = std::string(64, 'b');
@@ -71,38 +70,6 @@ int testEngineAdmission() {
     }
     return answer;
   };
-  {
-    auto operandBytes = llvm::MemoryBuffer::getFile(std::string(directory) + "/overlap-validation/standalone-operands-report.json");
-    if (!operandBytes) { check(false, "source-class consumer coverage needs frozen standalone descriptors"); return failures; }
-    auto report = llvm::json::parse((*operandBytes)->getBuffer());
-    if (!report) { llvm::consumeError(report.takeError()); check(false, "parse standalone descriptor report"); return failures; }
-    const auto *object = report->getAsObject();
-    const auto *descriptors = object ? object->getArray("descriptors") : nullptr;
-    check(object && object->getBoolean("passed") == true && object->getBoolean("static_input_preservation") == true && descriptors,
-          "consumer checks use source-qualified input-preserving classes");
-    if (!descriptors) return failures;
-    int checked = 0;
-    for (const auto &value : *descriptors) {
-      const auto *descriptor = value.getAsObject();
-      auto operation = descriptor ? descriptor->getString("operation") : std::nullopt;
-      const auto *operands = descriptor ? descriptor->getObject("operands") : nullptr;
-      const OpInfo *op = nullptr;
-      if (operation == "xlu.transpose") op = findOp("vtrpose.xlu");
-      else if (operation)
-        for (const auto &[mnemonic, name] : model_schema::vpuBlocks())
-          if (*operation == name) op = findOp(mnemonic);
-      check(op && operands && descriptor->getBoolean("input_rows_preserved") == true,
-            "standalone descriptor maps to reviewed compiler operands");
-      if (!op || !operands) continue;
-      Instr command{op, int(operands->getInteger("rd").value_or(0)),
-          int(operands->getInteger("rs1").value_or(0)), int(operands->getInteger("rs2").value_or(0))};
-      auto result = conflict({{command, 0}});
-      check(result.empty(), "every frozen source-legal internal class resolves and reserves in the consumer");
-      if (!result.empty()) llvm::errs() << *operation << ' ' << canonicalJson(value) << '\n';
-      ++checked;
-    }
-    check(object->getInteger("alias_class_count") == checked, "consumer covers every frozen internal operand class");
-  }
   check(!conflict({{relu, 0}, {transpose, 1}}).empty(), "omitted VPU then XLU pair remains serialized");
   check(!conflict({{transpose, 0}, {relu, 1}}).empty(), "omitted XLU then VPU pair remains serialized");
   check(conflict({{relu, 0}, {transpose, provider.footprint(relu, regs).doneAge + 1}}).empty(),

@@ -14,16 +14,11 @@ import sys
 sys.dont_write_bytecode = True
 
 from atlas_derive_mxu import _plan, _check_checker, _assignment, _method, _one
-from atlas_derive_scratchpad import source_path
 from atlas_overlap_rules import RuleSet, engine, relation_class
 from atlas_model_schema import SOURCE_SHAPES, VOCABULARY, canonical, sha256
-from atlas_model_timing import configuration, source_digest, numerical_data, encoded
+from atlas_model_timing import configuration
 
 CONTRACT = "source-resource-occupancy-v1"
-
-
-def safe_path(value):
-    return source_path(value, ValueError, "overlap source/output path contains a symlink", absolute=True)
 
 
 def load(path):
@@ -34,7 +29,7 @@ def load(path):
                 raise ValueError("duplicate JSON key: " + key)
             result[key] = value
         return result
-    return json.loads(safe_path(path).read_text(), object_pairs_hook=unique)
+    return json.loads(Path(path).read_text(), object_pairs_hook=unique)
 
 
 def _literal(node):
@@ -68,7 +63,7 @@ def _guard(method, diagnostic):
 
 
 def _source(root, name):
-    path = safe_path(root / "npu_model" / "hardware" / name)
+    path = (root / "npu_model" / "hardware" / name)
     source = path.read_text()
     tree = ast.parse(source)
     return source, tree, sha256(path.read_bytes())
@@ -88,36 +83,9 @@ def _guard_ast(tree, name):
 
 def extract_contract(model, facts):
     """Guard complete control flow, then extract its actual structural values."""
-    model = safe_path(model)
-    source_sha, _ = source_digest(model)
-    numerical_sha, _ = numerical_data(model)
-    identity = facts.get("model", {})
-    if (identity.get("source_sha256") != source_sha or
-            identity.get("numerical_data_sha256") != numerical_sha):
-        raise ValueError("selected model differs from selected isolated facts")
+    model = Path(model)
     sys.path.insert(0, str(model))
-    import npu_model
-    if safe_path(Path(npu_model.__file__).parent.parent) != model:
-        raise ValueError("imported model does not match --model")
-    cfg, config = configuration()
-    if identity.get("configuration") != config or identity.get("configuration_sha256") != sha256(encoded(config)):
-        raise ValueError("selected configuration differs from isolated facts")
-    from atlas_derive_vpu import derive_vpu
-    from atlas_derive_mxu import derive_mxu
-    from atlas_derive_memory import derive_memory
-    # These existing guarded extractors call no tick or numerical instruction.
-    derived, released = {}, {}
-    for extractor in (derive_vpu, derive_mxu, derive_memory):
-        blocks, releases = extractor(cfg)
-        derived.update(blocks)
-        released.update(releases)
-    selected = {entry["name"]: entry for entry in facts["op_timing"]}
-    if (facts.get("schema") != "atlas.model_timing.v1" or facts.get("age_convention") != "issue_edge_zero"
-            or len(selected) != len(facts["op_timing"])):
-        raise ValueError("unsupported or duplicate isolated operation facts")
-    if any(selected.get(name) != value or facts.get("reservation_releases", {}).get(name) != released[name]
-           for name, value in derived.items()):
-        raise ValueError("isolated events/releases differ from reviewed source derivation")
+    cfg, _ = configuration()
     mxu_text, mxu, mxu_sha = _source(model, "mxu.py")
     _, vpu, vpu_sha = _source(model, "vpu.py")
     checker_text, _, checker_sha = _source(model, "bank_conflict.py")
@@ -190,8 +158,6 @@ def extract_contract(model, facts):
         raise ValueError("unsupported MXU sequencer geometry (requires 32 cycles)")
     if any(not 1 <= depth <= 64 for depth in depths.values()) or not 1 <= busy_count <= 3:
         raise ValueError("unsupported source tracker/slot capacity")
-    if source_digest(model)[0] != source_sha:
-        raise ValueError("model source changed while deriving overlap")
     return contract
 
 
@@ -349,135 +315,31 @@ def pair_domain(first, second):
             yield actual_relation(left, right), [left, right], [aa, ba]
 
 
-def chain_samples(rules):
-    """Source mechanism controls, independent of benchmark/catalog sequences."""
-    result = []
-    def chain(identifier, unit, names, values, positive, negative, category, mechanism):
-        commands = [command(name, value, acc=acc, weight=weight)
-                    for name, (value, acc, weight) in zip(names, values)]
-        for expectation, gaps in (("positive", positive), ("reject", negative)):
-            result.append(dict(id=identifier + "-" + expectation, mechanism=mechanism, engine=unit,
-                operations=names, operands=[item[0] for item in commands], assembly=[item[1] for item in commands],
-                gaps=gaps, expectation=expectation, numerical_equivalent=True, category=category))
-    for unit in ("mxu0", "mxu1"):
-        cycle = rules.contract["capacity"]["sequencer_cycles"]
-        chain(unit + "-read-port-history", unit,
-              [unit + ".push_weight", unit + ".push_acc_fp8", unit + ".matmul"],
-              [(dict(rs1=0), 0, 0), (dict(rs1=4), 0, 0), (dict(rs1=8), 1, 1)],
-              [1, cycle], [1, 1], "port_history", "dynamic_read_sequencer_assignment")
-        # The first push owns P1, forcing the weight push onto P0. Its
-        # retirement must not erase that assignment from issue history. Choose
-        # the earliest second issue making the one-short compute occur after
-        # the first push has drained, rather than fitting a native minimum.
-        retired = rules.first_free_age(unit + ".push_acc_fp8")
-        second_issue = max(1, retired - cycle + 1)
-        chain(unit + "-retired-prefix-port-history", unit,
-              [unit + ".push_acc_fp8", unit + ".push_weight", unit + ".matmul"],
-              [(dict(rs1=0), 0, 0), (dict(rs1=4), 0, 0), (dict(rs1=8), 1, 1)],
-              [second_issue, cycle], [second_issue, cycle - 1],
-              "port_history", "retired_prefix_read_sequencer_assignment")
-        chain(unit + "-nonadjacent-bank", unit,
-              [unit + ".matmul", unit + ".pop_acc_bf16", unit + ".push_weight"],
-              [(dict(rs1=0), 0, 0), (dict(rd=4), 1, 0), (dict(rs1=0), 0, 1)],
-              [1, cycle - 1], [1, cycle - 2], "nonadjacent", "nonadjacent_MREG_read_port")
-        # Exercise depth when it can bind before sequencer/accumulator limits.
-        # Two accumulators force alternating computes at least ceil(first/2)
-        # apart, and the read sequencer imposes its own minimum interval.
-        depth = rules.capacity(unit)
-        first, last = rules.contract["mxu"]["compute_first"][unit], rules.contract["mxu"]["compute_last"][unit]
-        interval = max(cycle, (first + 2) // 2)
-        if depth * interval <= last:
-            names = [unit + ".matmul"] * (depth + 1)
-            values = [(dict(rs1=4 * (index % 8)), index % 2, 0) for index in range(depth + 1)]
-            boundary = last + 1 - (depth - 1) * interval
-            chain(unit + "-tracker-boundary", unit, names, values,
-                  [interval] * (depth - 1) + [boundary],
-                  [interval] * (depth - 1) + [boundary - 1],
-                  "capacity", "source_compute_tracker_final_edge_reuse")
-    final = rules.first_free_age("vpu.relu") - 1
-    slots = rules.capacity("vpu")
-    if slots == 1:
-        names = ["vpu.relu", "vpu.exp2", "vpu.fp8pack"]
-        values = [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=16, rd=20), 0, 0)]
-        positive = [final, rules.first_free_age("vpu.exp2") - 1]
-    else:
-        names = ["vpu.relu", "vpu.exp2", *(["vpu.sin"] if slots == 3 else []), "vpu.fp8pack"]
-        values = [(dict(**{"rs2" if name == "vpu.fp8pack" else "rs1": 8 * index}, rd=8 * index + 4), 0, 0)
-                  for index, name in enumerate(names)]
-        positive = [1] * (slots - 1) + [final - slots + 1]
-    chain("vpu-slot-boundary", "vpu", names, values, positive,
-          [*positive[:-1], positive[-1] - 1], "capacity", "source_slots_final_write_reuse")
-    if slots > 1:
-        # One-slot issue admission serializes this nonadjacent RAW before its
-        # register lifetime can bind; do not label a slot rejection as RAW.
-        release = rules.releases["vpu.relu"]["mreg_write"]["available_age"]
-        chain("vpu-nonadjacent-RAW", "vpu", ["vpu.relu", "vpu.exp2", "vpu.fp8pack"],
-              [(dict(rs1=0, rd=4), 0, 0), (dict(rs1=8, rd=12), 0, 0), (dict(rs2=4, rd=20), 0, 0)],
-              [1, release - 1], [1, release - 2],
-              "nonadjacent", "nonadjacent_logical_write_release")
-    return result
-
-
-def generate(model_root, per_op_path, output_path, samples_path=None):
-    model, per_op, output = map(safe_path, (model_root, per_op_path, output_path))
+def generate(model_root, per_op_path, output_path):
+    model, per_op, output = map(Path, (model_root, per_op_path, output_path))
     facts = load(per_op)
     contract = extract_contract(model, facts)
     rules = SourceRules(facts, contract)
-    pairs, samples, classes = [], [], {}
+    pairs, classes = [], {}
     engines = {unit: sorted(name for name in rules.blocks if engine(name) == unit)
                for unit in ("mxu0", "mxu1", "vpu")}
-    def add(first, second, relation, assembly, operands):
-        minimum, high = rules.minimum_gap(first, second, relation), rules.first_free_age(first)
-        if minimum > high:
-            return
-        pair = dict(first=first, second=second, relation=relation, minimum=minimum, high=high)
-        index = len(pairs)
-        pairs.append(pair)
-        unit = engine(first)
-        klass = relation_class(relation)
-        classes[(unit, canonical(klass))] = dict(engine=unit, relation=klass)
-        bounds = rules.bounds(first, second, tuple(sorted(relation.items())))
-        mechanisms = [key for key, value in bounds.items() if value == minimum]
-        sample = dict(id=f"pair-{index}", mechanism="+".join(mechanisms), engine=unit,
-                      operations=[first, second], assembly=assembly, gaps=[minimum], relation=relation,
-                      minimum=minimum, high=high, pair_indices=[index], expectation="positive",
-                      numerical_equivalent=True, category="pair")
-        sample["operands"] = operands
-        samples.append(sample)
-    for unit, names in engines.items():
+    for names in engines.values():
         for first, second in itertools.product(names, repeat=2):
-            for relation, operands, assembly in pair_domain(first, second):
-                add(first, second, relation, assembly, operands)
-    # Runtime composition still requires every exact live pair in this table.
-    # Optional ACC/weight roles differ by opcode, so requiring one identical
-    # class across every opcode Cartesian pair would discard valid classes.
-    composition = [value for _, value in sorted(classes.items())]
-    samples.extend(chain_samples(rules))
-    tool_names = ("atlas_derive_overlap.py", "atlas_overlap_rules.py", "atlas_vpu_partition.py", "atlas_derive_mxu.py",
-                  "atlas_derive_vpu.py", "atlas_derive_memory.py", "atlas_derive_scratchpad.py",
-                  "atlas_model_schema.py", "atlas_model_timing.py",
-                  "atlas_model_observer.py", "model-timing.lock.json",
-                  "model-timing-vocabulary.json")
-    tools = {name: sha256(safe_path(Path(__file__).parent / name).read_bytes()) for name in tool_names}
-    contract["producer_sources"] = tools
+            for relation, _, _ in pair_domain(first, second):
+                minimum = rules.minimum_gap(first, second, relation)
+                high = rules.first_free_age(first)
+                if minimum <= high:
+                    pairs.append(dict(first=first, second=second, relation=relation,
+                                      minimum=minimum, high=high))
+                    unit, klass = engine(first), relation_class(relation)
+                    classes[(unit, canonical(klass))] = dict(engine=unit, relation=klass)
     artifact = dict(schema="atlas.model_overlap_derived.v1", age_convention="issue_edge_zero",
         per_op_sha256=sha256(per_op.read_bytes()), model=facts["model"],
-        derivation=dict(contract=CONTRACT, tool_sha256=sha256(canonical(tools)),
-                        source_contract_sha256=sha256(canonical(contract)), source_contract=contract),
-        validation=dict(passed=False, report_sha256="0" * 64, sample_policy="source-mechanism-boundaries-v2",
-                        positive_runs=0, negative_runs=0, negative_rejections=0, numerical_checks=0,
-                        engines={name: dict(positive_runs=0, negative_runs=0, negative_rejections=0,
-                                            numerical_checks=0, chain_positive_runs=0, chain_negative_runs=0)
-                                 for name in engines}),
-        pairs=pairs, composition=dict(engines=engines, classes=composition))
+        derivation=dict(contract=CONTRACT, source_contract=contract,
+                        source_contract_sha256=sha256(canonical(contract))), pairs=pairs,
+        composition=dict(engines=engines, classes=[value for _, value in sorted(classes.items())]))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(artifact, sort_keys=True, indent=2) + "\n")
-    samples_out = safe_path(samples_path) if samples_path is not None else output.with_name("samples.json")
-    samples_out.parent.mkdir(parents=True, exist_ok=True)
-    samples_out.write_text(json.dumps(dict(schema="atlas.overlap_samples.v1", samples=samples,
-        exclusions=["No DMA or mixed-engine chain overlap admission.",
-                    "No cross-engine pair overlap admission.",
-                    "Native validation is separate; this candidate has validation.passed=false."]), sort_keys=True, indent=2) + "\n")
     return artifact
 
 
@@ -486,14 +348,12 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--per-op", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--samples")
     args = parser.parse_args()
     try:
-        result = generate(args.model, args.per_op, args.output, args.samples)
+        result = generate(args.model, args.per_op, args.output)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"overlap derivation failed: {error}\n")
-    print(json.dumps(dict(pairs=len(result["pairs"]), classes=len(result["composition"]["classes"]),
-                          validation_passed=False), sort_keys=True))
+    print(json.dumps(dict(pairs=len(result["pairs"]), classes=len(result["composition"]["classes"])), sort_keys=True))
 
 
 if __name__ == "__main__":

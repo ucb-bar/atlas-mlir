@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 import inspect
 
-from atlas_derive_scratchpad import source_path
+from pathlib import Path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 
@@ -16,7 +16,7 @@ def _source(module):
     value = inspect.getsourcefile(module)
     if value is None:
         raise UnsupportedArchitecture("architecture source file is unavailable")
-    path = source_path(value, UnsupportedArchitecture, "architecture source path contains a symlink", absolute=True)
+    path = Path(value)
     return ast.parse(path.read_text())
 
 

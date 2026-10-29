@@ -41,8 +41,7 @@ class DiagnosticBoundaryTest(unittest.TestCase):
     def test_validator_does_not_turn_programming_errors_into_refusals(self):
         for error in (TypeError("observer bug"), KeyError("observer bug")):
             with self.subTest(error=error), \
-                    patch.object(timing, "isa_cases", return_value=[("probe", "xlu", "probe")]), \
-                    patch.object(timing, "observe_case", side_effect=error), \
+                    patch.object(timing, "observe_vpu", side_effect=error), \
                     self.assertRaises(type(error)) as raised:
                 timing.validate_derived(object(), {"probe": {}}, {}, Path("unused"))
             self.assertIs(raised.exception, error)

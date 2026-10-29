@@ -1,7 +1,7 @@
 """Derive proposal-only curve DMA facts from the reviewed source and curve bytes."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import source_path
+from atlas_derive_scratchpad import read_source as _read
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 from copy import deepcopy
 
-from atlas_derive_mxu import _read, _one, _method
+from atlas_derive_mxu import _one, _method
 from atlas_model_schema import (LOCK, SOURCE_SHAPES, DMA_SOURCE_SHAPES, DMA_EDGE_ORDER,
                                 ast_digest, sha256)
 from atlas_search_policy import POLICY
@@ -37,12 +37,12 @@ def resolve_curve_path(cfg):
         _unsupported("dma_memory_params.curves")
     path = Path(curves)
     if not path.is_absolute():
-        local = _safe(Path.cwd() / path)
+        local = (Path.cwd() / path)
         if local.exists():
             path = local
         else:
             path = Path(inspect.getsourcefile(memory_backend)).parent.parent / "configs" / "memory_curves" / path
-    return _safe(path)
+    return path.absolute()
 
 
 def _positive(value, field, *, integral=False):
@@ -99,12 +99,8 @@ def _check_curve_configuration(cfg, params, data):
                 _positive(value, "curve.points")
 
 
-def _safe(path):
-    return source_path(path, UnsupportedCurve, "DMA source or curve path contains a symlink", absolute=True, parent_error=ValueError)
-
-
 def _review(module):
-    path = _safe(inspect.getsourcefile(module))
+    path = Path(inspect.getsourcefile(module))
     source = _read(path)
     tree = ast.parse(source)
     shape = ast_digest(tree)
@@ -335,9 +331,9 @@ def derive_curve(cfg):
         rows.append(dict(read_percentage=pct, unloaded_latency_cycles=backend.latency_at(0.0, pct),
                          peak_beats_per_cycle=peak, cycles_per_beat=1.0 / peak,
                          points=[list(point) for point in points]))
-    core_source = _read(_safe(inspect.getsourcefile(core)))
+    core_source = _read(Path(inspect.getsourcefile(core)))
     shared = review_dma_sources({module.__name__.rsplit(".", 1)[-1] + ".py":
-                                 _read(_safe(inspect.getsourcefile(module)))
+                                 _read(Path(inspect.getsourcefile(module)))
                                  for module in (core, dma, memory_backend, lsu, bank_conflict)})
     proposal = _proposal_contract(core_source, dma_tree, backend_tree, rows, backend.min_latency,
                                   epsilon, issue_interval)

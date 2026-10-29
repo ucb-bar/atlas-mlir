@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 
 from atlas_derive_curve import review_dma_sources, UnsupportedCurve
-from atlas_derive_overlap import safe_path
+from pathlib import Path
 from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_schema import DMA_SOURCE_SHAPES, canonical, sha256
 
@@ -39,8 +38,8 @@ def review_sources(sources):
 
 def derive_dma_admission(model, per_op):
     """Return frozen, unvalidated admission facts; no Core allocation or ticks."""
-    model = safe_path(model)
-    sources = {name: safe_path(model / "npu_model" / "hardware" / name).read_text() for name in SOURCE_NAMES}
+    model = Path(model)
+    sources = {name: (model / "npu_model" / "hardware" / name).read_text() for name in SOURCE_NAMES}
     shared = review_sources(sources)
     timing = per_op.get("dma_timing", {})
     if timing.get("source_contract") != shared:
@@ -72,8 +71,4 @@ def derive_dma_admission(model, per_op):
                 source_sha256={name: sha256(sources[name].encode()) for name in SOURCE_NAMES},
                 source_shapes=shapes, configuration=configuration, issue=issue,
                 source_contract_sha256=sha256(canonical(shared)),
-                semantics=deepcopy(SEMANTICS),
-                producer_sources={name: sha256(safe_path(Path(__file__).with_name(name)).read_bytes())
-                                  for name in ("atlas_derive_dma_admission.py", "atlas_validate_dma_admission.py")},
-                validation=dict(passed=False, report_sha256="0" * 64, positive_runs=0,
-                                negative_runs=0, numerical_checks=0))
+                semantics=deepcopy(SEMANTICS))

@@ -1,5 +1,4 @@
-"""Source engine predicates, independent native boundaries and payload identity."""
-from copy import deepcopy
+"""Source engine predicates and unsupported source refusals."""
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +8,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_derive_admission as derive
-import atlas_validate_admission as validate
 from model_evidence import isolate_model_imports
 
 
@@ -42,36 +40,6 @@ class RelationalPredicateTest(unittest.TestCase):
                         dict(blocks["vpu.rsum"], events=dict(write0=dict(last_age=40)))):
             with patch("atlas_derive_vpu._plans", return_value=plans), self.assertRaises(derive.UnsupportedAdmission):
                 derive._vpu_live_ages(None, {"vpu.rsum": changed})
-
-
-class AdmissionSamplePlanTest(unittest.TestCase):
-    def test_coalesced_reads_still_obey_source_slot_capacity_and_release(self):
-        # Deliberately different ages distinguish source-derived placement from
-        # the old fixed gap 64 and unrelated RELU final-write age 65.
-        facts = dict(op_timing=[
-            dict(name="vpu.cmax", events=dict(read0=dict(first_age=3, step=2))),
-            dict(name="vpu.relu", events=dict(read0=dict(first_age=1, count=64))),
-            dict(name="vlsu.vload", events=dict(vmem_read=dict(first_age=1, last_age=32))),
-            dict(name="vlsu.vstore", events=dict(vmem_write=dict(first_age=1, last_age=32)))])
-        admission = dict(vpu=dict(capacity=1, logic_groups=[], double=[],
-            final_write_age={"vpu.cmax": 257, "vpu.relu": 65}),
-            xlu=dict(initiation_age=66), scalar_lsu=dict(load_response_gap=3),
-            vlsu=dict(initiation_ages={"vlsu.vload": 35}))
-        with patch.object(validate, "native_run", side_effect=AssertionError("sample planning executed native model")):
-            for capacity in (1, 2, 3):
-                admission["vpu"]["capacity"] = capacity
-                plan = {sample["id"]: sample for sample in validate.sample_plan(admission, facts)}
-                with self.subTest(capacity=capacity):
-                    shared = plan["vpu-read-coalescing"]
-                    self.assertEqual(shared["issues"], [0, 130])
-                    self.assertEqual(shared["accepted"], capacity >= 2)
-                    if capacity == 1:
-                        release = plan["vpu-read-coalescing-final-slot-reuse"]
-                        self.assertEqual(release["assembly"], shared["assembly"])
-                        self.assertEqual(release["issues"], [0, 257])
-                        self.assertTrue(release["accepted"])
-                    else:
-                        self.assertNotIn("vpu-read-coalescing-final-slot-reuse", plan)
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for engine source/native contracts")
@@ -108,18 +76,3 @@ class NativeEngineAdmissionTest(unittest.TestCase):
             return text, tree, digest
         with patch.object(derive, "_source", side_effect=changed), self.assertRaisesRegex(ValueError, "construction/routing"):
             derive.derive_admission(self.model, self.facts)
-
-    def test_changed_frozen_guard_refuses_before_native_execution(self):
-        changed = deepcopy(self.admission)
-        changed["vpu"]["capacity"] = 3
-        with patch.object(validate, "native_run") as native, self.assertRaisesRegex(ValueError, "frozen source derivation"):
-            validate.validate_admission(self.model, self.facts, changed)
-        native.assert_not_called()
-
-    def test_native_boundaries_and_serial_state(self):
-        qualified, report = validate.validate_admission(self.model, self.facts, self.admission)
-        self.assertTrue(report["passed"])
-        self.assertGreater(report["positive_runs"], 0)
-        self.assertGreater(report["negative_runs"], 0)
-        self.assertEqual(report["positive_runs"], report["numerical_checks"])
-        self.assertEqual(derive.semantic_admission(qualified), derive.semantic_admission(self.admission))

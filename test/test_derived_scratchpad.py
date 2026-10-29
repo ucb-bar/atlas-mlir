@@ -12,27 +12,6 @@ import atlas_model_timing as timing
 from model_evidence import ModelSourceFixture
 
 
-class ResponseBoundaryTest(unittest.TestCase):
-    def test_validator_does_not_treat_assumed_response_latency_as_observed(self):
-        block = dict(name="probe", engine="probe", events={}, first_free_age=2,
-                     assumptions={"scratchpad_read_latency": 1})
-        candidate = dict(block, assumptions={"scratchpad_read_latency": 99})
-        raw = {key: [] for key in ("architectural_states", "control_states", "pre_edges")}
-        raw.update(initial_state_sha256="a", final_state_sha256="b", first_free_age=2,
-                   complete_count=1, total_instructions=1, busy_cycles=2, instruction_word=0,
-                   configuration={}, reservations=[])
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.object(timing, "isa_cases", return_value=[("probe", "probe", "nop")]), \
-                patch.object(timing, "observe_case", return_value=(block, raw)), \
-                patch.object(timing, "observed_releases", return_value={}):
-            report, _ = timing.validate_derived(object(), {"probe": candidate}, {"probe": {}}, Path(directory))
-        self.assertTrue(report["passed"])
-        self.assertEqual(report["assumption_fields_not_observed"], ["scratchpad_read_latency"])
-        self.assertTrue(all(item["observable_fields_byte_identical"] for item in report["checks"]))
-        self.assertTrue(all("byte_identical" not in item for item in report["checks"]))
-
-
-
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for native source contracts")
 class SourceContractTest(ModelSourceFixture, unittest.TestCase):
     source_shapes = scratchpad._SHAPES

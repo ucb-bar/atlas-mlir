@@ -421,6 +421,5 @@
         "Program.is_finished": "262a1f7b735d33020cfdcec13b31f359f110c520b24713c55fc3cc0b895cb155"
       }
     }
-  },
-  "schema": "atlas.model_semantics.v1"
+  }
 }

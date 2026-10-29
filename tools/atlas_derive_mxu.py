@@ -1,7 +1,7 @@
 """Derive isolated MXU row windows and logical MREG releases from model source."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import source_path, shape
+from atlas_derive_scratchpad import read_source, shape
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
@@ -10,7 +10,7 @@ import inspect
 from pathlib import Path
 
 from atlas_model_timing import MXU_BLOCKS
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block, validate_mxu_weight_timing
+from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block
 
 
 _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic", "MatrixExecutionUnitInner")
@@ -21,13 +21,9 @@ class UnsupportedMXU(UnsupportedModelTiming):
     """Selected source or metadata has no supported MXU timing interpretation."""
 
 
-def _read(path):
-    return source_path(path, UnsupportedMXU, "model source symlinks are unsupported", parent_error=ValueError).read_text()
-
-
 def _sources(cfg):
     root = Path(inspect.getfile(cfg.isa)).parent
-    return (_read(root / "hardware" / "mxu.py"), _read(root / "hardware" / "bank_conflict.py"))
+    return (read_source(root / "hardware" / "mxu.py"), read_source(root / "hardware" / "bank_conflict.py"))
 
 
 def _one(values, label):
@@ -265,4 +261,4 @@ def derive_weight_timing(cfg):
             raise UnsupportedMXU("MXU completes before its last weight use")
         engines[engine] = dict(use_window=window, use_rows=rows,
                                reads_before_writes=True, resource_row_axis="output_column")
-    return validate_mxu_weight_timing(dict(schema="atlas.mxu_weight_timing.v1", engines=engines))
+    return dict(schema="atlas.mxu_weight_timing.v1", engines=engines)
