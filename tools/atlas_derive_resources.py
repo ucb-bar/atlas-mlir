@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import ast
-from copy import deepcopy
 from pathlib import Path
 import sys
 
 sys.dont_write_bytecode = True
 
 from atlas_derive_mxu import _assignment, _method, _one
-from atlas_model_schema import VOCABULARY
 
 
 def _literal(node):
@@ -77,15 +75,10 @@ def derive_resources(model):
         raise ValueError("unsupported MXU sequencer port identifiers")
     depths = {unit: _literal(_assignment(_named(mxu, cls), "inflight_depth").value)
               for unit, cls in (("mxu0", "MatrixExecutionUnitSystolic"), ("mxu1", "MatrixExecutionUnitInner"))}
-    from atlas_derive_vpu import _normalize_slot_capacity
-    slots = _normalize_slot_capacity(deepcopy(vpu))
-    busy_count = len(slots)
-    mnemonic_to_block = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["vpu_blocks"]}
-    groups = [sorted(mnemonic_to_block[name] for name in group)
-              for group in ast.literal_eval(_assignment(vpu, "_GROUPS").value)]
-    double = sorted(mnemonic_to_block[name] for name in (
-        ast.literal_eval(_assignment(vpu, "_TWO_INPUT").value) |
-        ast.literal_eval(_assignment(vpu, "_ROW_REDUCE").value)))
+    busy_count = _literal(_assignment(vpu, "ISSUE_SLOTS").value)
+    groups = [sorted(group) for group in ast.literal_eval(_assignment(vpu, "_GROUPS").value)]
+    double = sorted(ast.literal_eval(_assignment(vpu, "_TWO_INPUT").value) |
+                    ast.literal_eval(_assignment(vpu, "_ROW_REDUCE").value))
     scalar_gap = _age_bound(_guard(_method(_named(lsu, "LoadStoreUnit"), "_accept"),
                                   "prior load response pending"), ast.Lt)
     contract = dict(

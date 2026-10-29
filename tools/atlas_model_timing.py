@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from atlas_model_schema import VPU_BLOCKS, MXU_BLOCKS, BINARY, mreg_event, canonical as encoded, sha256
+from atlas_model_schema import mreg_event, canonical as encoded, sha256
 
 
 def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
@@ -39,51 +39,6 @@ def source_digest(model_root: Path) -> tuple[str, list[dict]]:
 
 def numerical_data(model_root: Path):
     return manifest(model_root, "npu_model/configs/data", sort=True)
-
-
-def isa_cases(cfg):
-    """Select supported operations from IsaSpec and instantiate its named operands."""
-    from npu_model.isa_types import Bundled, MatrixReg, ScalarReg, ExponentReg, WeightBuffer, Accumulator, EXU
-    names = {mnemonic: ("vpu." + suffix, "vpu") for mnemonic, suffix in VPU_BLOCKS.items()}
-    for engine in ("mxu0", "mxu1"):
-        names.update({mnemonic + "." + engine: (engine + "." + suffix, engine)
-                      for mnemonic, suffix in MXU_BLOCKS.items()})
-    names.update({"vload": ("vlsu.vload", "vlsu"), "vstore": ("vlsu.vstore", "vlsu"),
-                  "vtrpose.xlu": ("xlu.transpose", "xlu"), "lw": ("scalar_lsu.load", "scalar_lsu"),
-                  "seld": ("scalar_lsu.scale_load", "scalar_lsu"), "sw": ("scalar_lsu.store", "scalar_lsu")})
-    engines = {EXU.VECTOR: "vpu", EXU.MATRIX_SYSTOLIC: "mxu0", EXU.MATRIX_INNER: "mxu1", EXU.XLU: "xlu"}
-    found = {}
-    for mnemonic, operation in cfg.isa.operations.items():
-        if mnemonic not in names:
-            if operation.exu in engines:
-                raise UnsupportedModelTiming(f"ISA operation has no timing vocabulary: {mnemonic}")
-            continue
-        name, engine = names[mnemonic]
-        if operation.exu in engines and engines[operation.exu] != engine:
-            raise UnsupportedModelTiming(f"ISA execution unit differs for {mnemonic}")
-        def operand(param):
-            if isinstance(param, Bundled):
-                return f"{operand(param.imm)}({operand(param.reg)})"
-            typ, role = param.inner, param.repr
-            if typ is MatrixReg:
-                value = 4 if role == "vd" and mnemonic != "vstore" else 2 if role == "vs2" and mnemonic in BINARY else 0
-                return f"m{value}"
-            if typ is ScalarReg:
-                return "x4" if role == "rd" else "x1" if role == "rs2" else "x0"
-            if typ is ExponentReg:
-                return "e4" if role == "rd" else "e0"
-            if typ is WeightBuffer:
-                return "w0"
-            if typ is Accumulator:
-                return "acc0"
-            if issubclass(typ, int) and role == "imm":
-                return "0"
-            raise UnsupportedModelTiming(f"unsupported ISA operand {mnemonic}: {typ.__name__}/{role}")
-        assembly = mnemonic + " " + ", ".join(operand(param) for param in operation.params)
-        found[name] = (name, engine, assembly)
-    if len(found) != len(names):
-        raise UnsupportedModelTiming("selected ISA is missing supported timing operations")
-    return [found[name] for name, _ in names.values()]
 
 
 def configuration():
@@ -137,7 +92,7 @@ def observe_vpu(cfg):
 
         def access(cycle, bank, row, write, owner):
             original(cycle, bank, row, write, owner)
-            grouped[mreg_event(uop.insn.mnemonic, "vpu", int(bank), write)].append(unit.cycle - 1)
+            grouped[mreg_event(uop.insn.mnemonic, int(bank), write)].append(unit.cycle - 1)
 
         with patch.object(state.conflict_checker, "access_mreg", access):
             for age in range(4096):
@@ -152,12 +107,12 @@ def observe_vpu(cfg):
 
 def validate_derived(cfg, candidates, releases, output_dir):
     """Compare vadd MREG events and first-free age; other blocks use source guards."""
-    check = dict(name="vpu.add", passed=False)
+    check = dict(name="vadd.bf16", passed=False)
     observed = []
     try:
         block = observe_vpu(cfg)
         observed.append(block)
-        candidate = candidates["vpu.add"]
+        candidate = candidates["vadd.bf16"]
         if block != {key: candidate[key] for key in ("events", "first_free_age")}:
             raise RuntimeError("vadd timing differs from native execution")
         check["passed"] = True

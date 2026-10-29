@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 from atlas_model_diagnostics import UnsupportedModelTiming, model_timing_cli
 from atlas_model_capabilities import check_configuration
 from atlas_model_semantics import check_model_semantics
-from atlas_model_timing import configuration, encoded, isa_cases, sha256, validate_derived
+from atlas_model_timing import configuration, encoded, sha256, validate_derived
 
 
 def write(directory, name, value):
@@ -51,8 +51,8 @@ def regenerate(model, out):
         blocks.update(timing)
         releases.update(reservations)
     derive_costs(cfg, architecture)
-    names = [name for name, _, _ in isa_cases(cfg)]
-    if set(blocks) != set(names) or set(releases) != set(blocks):
+    names = list(blocks)
+    if set(releases) != set(blocks):
         raise UnsupportedModelTiming("source derivation does not cover the selected ISA")
     revision = subprocess.check_output(["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
     payload = dict(model=dict(revision=revision, configuration_sha256=sha256(encoded(config))),

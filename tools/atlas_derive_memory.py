@@ -78,6 +78,8 @@ def derive_memory(cfg):
     from npu_model.isa import EXU
 
     # The VPU extractor checks the shared bank checker digest before this phase.
+    if {name for name, op in cfg.isa.operations.items() if op.exu == EXU.XLU} != {"vtrpose.xlu"}:
+        raise UnsupportedModelTiming("unsupported XLU ISA operation coverage")
     geometry = cfg.arch_state_config
     if (geometry.mrf_depth, geometry.mrf_width, geometry.num_m_registers, cfg.vmem_bank_bytes) != (32, 32, 64, 262144):
         raise UnsupportedModelTiming("unsupported LSU/XLU bank geometry")
@@ -107,17 +109,17 @@ def derive_memory(cfg):
     read, write, finish = (_ages(node, rows) for node in vector)
     xread, xrelease, xwrite, xfinish = (_ages(node, rows) for node in transpose)
     blocks = [
-        _block("vlsu.vload", {"vmem_read": read, "mreg_write": write}, finish["last_age"]),
-        _block("vlsu.vstore", {"mreg_read": read, "vmem_write": write}, finish["last_age"]),
-        _block("xlu.transpose", {"read": xread, "write": xwrite}, xfinish["last_age"]),
-        _block("scalar_lsu.load", {"vmem_read": load, "load_write": response}, response["last_age"]),
-        _block("scalar_lsu.scale_load", {"vmem_read": load, "scale_write": response}, response["last_age"]),
-        _block("scalar_lsu.store", {"vmem_write": store}, store["last_age"]),
+        _block("vload", {"vmem_read": read, "mreg_write": write}, finish["last_age"]),
+        _block("vstore", {"mreg_read": read, "vmem_write": write}, finish["last_age"]),
+        _block("vtrpose.xlu", {"read": xread, "write": xwrite}, xfinish["last_age"]),
+        _block("lw", {"vmem_read": load, "load_write": response}, response["last_age"]),
+        _block("seld", {"vmem_read": load, "scale_write": response}, response["last_age"]),
+        _block("sw", {"vmem_write": store}, store["last_age"]),
     ]
     releases = {block["name"]: {"unit": _reservation(block["first_free_age"] - 1)} for block in blocks}
-    releases["vlsu.vload"]["mreg_write"] = _reservation(finish["last_age"])
-    releases["vlsu.vstore"]["mreg_read"] = _reservation(finish["last_age"])
-    releases["xlu.transpose"].update(mreg_read=_reservation(xrelease["last_age"]),
+    releases["vload"]["mreg_write"] = _reservation(finish["last_age"])
+    releases["vstore"]["mreg_read"] = _reservation(finish["last_age"])
+    releases["vtrpose.xlu"].update(mreg_read=_reservation(xrelease["last_age"]),
                                       mreg_write=_reservation(xfinish["last_age"]))
     for block in blocks:
         for key in ("vmem_read", "vmem_write"):

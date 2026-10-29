@@ -99,7 +99,7 @@ def _plans(cfg):
     issue = FunctionType(accept.__code__, dict(accept.__globals__, StagedExecution=lambda *args: None),
                          accept.__name__, accept.__defaults__, accept.__closure__)
     plans = []
-    for mnemonic, suffix in VPU_BLOCKS.items():
+    for mnemonic in VPU_BLOCKS:
         unit = object.__new__(vpu.VectorExecutionUnit)
         unit.name, unit.config, unit.lane_id = "vpu", cfg, 0
         unit.arch_state = SimpleNamespace(cfg=geometry, conflict_checker=bank_conflict.BankConflictChecker())
@@ -121,14 +121,14 @@ def _plans(cfg):
         written = [row for age in range(operation.write_last + 1) for row in unit._writes(operation, age)]
         if sorted(written) != [(bank, row) for bank in sorted(operation.writes) for row in range(geometry.mrf_depth)]:
             raise UnsupportedModelTiming(f"{mnemonic} lifetime truncates or duplicates destination rows")
-        plans.append(("vpu." + suffix, mnemonic, unit, operation))
+        plans.append((mnemonic, unit, operation))
     return plans
 
 
 def derive_vpu(cfg):
     """Derive blocks and deferred releases from guarded issue/row plans."""
     blocks, releases = {}, {}
-    for name, mnemonic, unit, operation in _plans(cfg):
+    for name, unit, operation in _plans(cfg):
         grouped = defaultdict(list)
         for age in range(operation.write_last + 1):
             requests = unit._reads(operation, age)
@@ -138,7 +138,7 @@ def derive_vpu(cfg):
                 for bank, row in accesses:
                     if not 0 <= bank < 64 or not 0 <= row < 32:
                         raise UnsupportedModelTiming("VPU row plan accesses unsupported geometry")
-                    group = mreg_event(mnemonic, "vpu", bank, write)
+                    group = mreg_event(name, bank, write)
                     grouped[group].append(age)
         blocks[name] = timing_block(name, {group: compress(ages) for group, ages in sorted(grouped.items())},
                                     operation.write_last)

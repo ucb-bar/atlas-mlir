@@ -21,61 +21,6 @@ namespace {
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 
-const std::map<std::string, std::string> &mnemonics() {
-  static const std::map<std::string, std::string> names = {
-      {"vpu.add", "vadd.bf16"},
-      {"vpu.sub", "vsub.bf16"},
-      {"vpu.mul", "vmul.bf16"},
-      {"vpu.pairmax", "vmaximum.bf16"},
-      {"vpu.pairmin", "vminimum.bf16"},
-      {"vpu.mov", "vmov"},
-      {"vpu.rcp", "vrecip.bf16"},
-      {"vpu.exp", "vexp.bf16"},
-      {"vpu.exp2", "vexp2.bf16"},
-      {"vpu.relu", "vrelu.bf16"},
-      {"vpu.sin", "vsin.bf16"},
-      {"vpu.cos", "vcos.bf16"},
-      {"vpu.tanh", "vtanh.bf16"},
-      {"vpu.log", "vlog2.bf16"},
-      {"vpu.sqrt", "vsqrt.bf16"},
-      {"vpu.square", "vsquare.bf16"},
-      {"vpu.cube", "vcube.bf16"},
-      {"vpu.rsum", "vredsum.row.bf16"},
-      {"vpu.rmax", "vredmax.row.bf16"},
-      {"vpu.rmin", "vredmin.row.bf16"},
-      {"vpu.csum", "vredsum.bf16"},
-      {"vpu.cmax", "vredmax.bf16"},
-      {"vpu.cmin", "vredmin.bf16"},
-      {"vpu.fp8pack", "vpack.bf16.fp8"},
-      {"vpu.fp8unpack", "vunpack.fp8.bf16"},
-      {"vpu.vliAll", "vli.all"},
-      {"vpu.vliRow", "vli.row"},
-      {"vpu.vliCol", "vli.col"},
-      {"vpu.vliOne", "vli.one"},
-      {"mxu0.push_weight", "vmatpush.weight.mxu0"},
-      {"mxu0.push_acc_fp8", "vmatpush.acc.fp8.mxu0"},
-      {"mxu0.push_acc_bf16", "vmatpush.acc.bf16.mxu0"},
-      {"mxu0.pop_acc_fp8", "vmatpop.fp8.acc.mxu0"},
-      {"mxu0.pop_acc_bf16", "vmatpop.bf16.acc.mxu0"},
-      {"mxu0.matmul", "vmatmul.mxu0"},
-      {"mxu0.matmul_acc", "vmatmul.acc.mxu0"},
-      {"mxu1.push_weight", "vmatpush.weight.mxu1"},
-      {"mxu1.push_acc_fp8", "vmatpush.acc.fp8.mxu1"},
-      {"mxu1.push_acc_bf16", "vmatpush.acc.bf16.mxu1"},
-      {"mxu1.pop_acc_fp8", "vmatpop.fp8.acc.mxu1"},
-      {"mxu1.pop_acc_bf16", "vmatpop.bf16.acc.mxu1"},
-      {"mxu1.matmul", "vmatmul.mxu1"},
-      {"mxu1.matmul_acc", "vmatmul.acc.mxu1"},
-      {"vlsu.vload", "vload"},
-      {"vlsu.vstore", "vstore"},
-      {"scalar_lsu.load", "lw"},
-      {"scalar_lsu.store", "sw"},
-      {"scalar_lsu.scale_load", "seld"},
-      {"xlu.transpose", "vtrpose.xlu"},
-  };
-  return names;
-}
-
 struct Reader {
   std::string error;
   void fail(const std::string &message) { if (error.empty()) error = message; }
@@ -107,9 +52,12 @@ struct Reader {
     return result;
   }
   std::string mnemonic(llvm::StringRef name) {
-    auto found = mnemonics().find(name.str());
-    if (found == mnemonics().end()) { fail("unsupported operation " + name.str()); return {}; }
-    return found->second;
+    const OpInfo *op = findOp(name.str());
+    if (!op || op->engine == Engine::Scalar || op->engine == Engine::Dma) {
+      fail("unsupported operation " + name.str());
+      return {};
+    }
+    return name.str();
   }
   TimingEvent event(const Object *value) {
     TimingEvent result{integer(value, "first_age"), integer(value, "last_age"),
@@ -152,7 +100,6 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
     if (!tables.operations.emplace(mnemonic, std::move(timing)).second)
       r.fail("duplicate operation timing " + mnemonic);
   }
-  if (tables.operations.size() != mnemonics().size()) r.fail("incomplete operation timing");
 }
 
 void readFrontend(Reader &r, const Object &root, TimingTables &tables,
@@ -269,7 +216,11 @@ void readVpu(Reader &r, const Object *resources, TimingTables &tables) {
     else for (const auto &entry : *array) {
       auto name = entry.getAsString();
       if (!name) r.fail("invalid VPU operation set");
-      else result.push_back(r.mnemonic("vpu." + name->str()));
+      else {
+        const OpInfo *op = findOp(name->str());
+        if (!op || op->engine != Engine::Vpu) r.fail("invalid VPU operation set");
+        else result.push_back(name->str());
+      }
     }
     return result;
   };

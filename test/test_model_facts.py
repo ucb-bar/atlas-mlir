@@ -54,9 +54,9 @@ class FactsErrors(unittest.TestCase):
     def test_native_spot_check_refuses_wrong_fact(self):
         observed = dict(events={"write0": dict(count=64, first_age=2, last_age=65, step=1)}, first_free_age=66)
         with patch("atlas_model_timing.observe_vpu", return_value=observed):
-            self.assertTrue(validate_derived(None, {"vpu.add": observed}, {}, None)[0]["passed"])
+            self.assertTrue(validate_derived(None, {"vadd.bf16": observed}, {}, None)[0]["passed"])
             with self.assertRaisesRegex(UnsupportedModelTiming, "native timing differs"):
-                validate_derived(None, {"vpu.add": dict(observed, first_free_age=67)}, {}, None)
+                validate_derived(None, {"vadd.bf16": dict(observed, first_free_age=67)}, {}, None)
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT")
@@ -160,14 +160,14 @@ class Regeneration(unittest.TestCase):
         facts = self.facts
         blocks = {block["name"]: block for block in facts["op_timing"]}
         self.assertEqual(len(blocks), 49)
-        self.assertEqual(blocks["vpu.add"]["events"]["read0"],
+        self.assertEqual(blocks["vadd.bf16"]["events"]["read0"],
                          dict(count=64, first_age=0, last_age=63, step=1))
-        self.assertEqual(blocks["vpu.add"]["events"]["write0"],
+        self.assertEqual(blocks["vadd.bf16"]["events"]["write0"],
                          dict(count=64, first_age=2, last_age=65, step=1))
-        self.assertEqual((blocks["vpu.add"]["first_free_age"], blocks["vlsu.vload"]["first_free_age"]), (66, 35))
-        self.assertEqual(blocks["vlsu.vload"]["events"]["vmem_read"],
+        self.assertEqual((blocks["vadd.bf16"]["first_free_age"], blocks["vload"]["first_free_age"]), (66, 35))
+        self.assertEqual(blocks["vload"]["events"]["vmem_read"],
                          dict(count=32, first_age=1, last_age=32, step=1))
-        self.assertEqual([blocks[f"mxu{i}.matmul"]["events"]["acc_write"]["first_age"] for i in (0, 1)], [63, 3])
+        self.assertEqual([blocks[f"vmatmul.mxu{i}"]["events"]["acc_write"]["first_age"] for i in (0, 1)], [63, 3])
         weights = facts["mxu_weight_timing"]["engines"]
         self.assertEqual((weights["mxu0"]["use_rows"][0], weights["mxu0"]["use_rows"][-1]),
                          (dict(first_age=1, last_age=63), dict(first_age=32, last_age=94)))
@@ -182,7 +182,7 @@ class Regeneration(unittest.TestCase):
         self.assertEqual(len(facts["architecture"]), 16)
         self.assertEqual([facts["architecture"][key] for key in
                           ("mreg_count", "mreg_bytes", "vmem_bank_count", "scalar_word_bytes")], [64, 1024, 6, 4])
-        self.assertEqual(facts["reservation_releases"]["vpu.add"]["mreg_write"],
+        self.assertEqual(facts["reservation_releases"]["vadd.bf16"]["mreg_write"],
                          dict(first_age=0, release_age=65))
         roles = facts["frontend_timing"]["instructions"]["add"]
         self.assertEqual(roles, dict(reads=[dict(resource="xreg", operand="rs1"),

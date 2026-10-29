@@ -40,32 +40,24 @@ _DIRECTORY = Path(__file__).resolve().parent
 LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
 SOURCE_SHAPES = LOCK["source_shapes"]
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
-VPU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["vpu_blocks"]}
-MXU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["mxu_blocks"]}
+VPU_BLOCKS = tuple(entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"])
+MXU_BLOCKS = tuple(VOCABULARY["mxu_blocks"])
 BINARY = {entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"] if entry["two_input"]}
 
 
-def mreg_event(mnemonic, engine, bank, write):
-    """Map a disjoint ISA probe's MREG access through the shared operand roles."""
-    if engine in {"vpu", "mxu0", "mxu1"}:
-        family = "vpu" if engine == "vpu" else "mxu"
-        base = mnemonic if family == "vpu" else mnemonic.rsplit(".", 1)[0]
-        operation, = [entry for entry in VOCABULARY[family + "_blocks"] if entry["mnemonic"] == base]
-        operands = dict(rd=4, rs1=0, rs2=2 if mnemonic in BINARY else 0)
-        matches = []
-        for event in VOCABULARY[family + "_operand_roles"][operation["op_class"]]:
-            if event["key"] is None or event.get("resource", "MReg") != "MReg" or event["write"] != write:
-                continue
-            if event["two_input"] and mnemonic not in BINARY:
-                continue
-            first = operands[event["operand"]] + event["offset"]
-            if first <= bank < first + event["registers"]:
-                matches.append(event["key"])
-        if len(matches) != 1:
-            raise ValueError(f"MREG event is outside the operand vocabulary: {mnemonic}/{bank}/{write}")
-        return matches[0]
-    if engine == "xlu":
-        return "write" if write else "read"
-    if engine == "vlsu":
-        return "mreg_write" if write else "mreg_read"
-    raise ValueError(f"unexpected MREG event from {engine}")
+def mreg_event(mnemonic, bank, write):
+    """Name a disjoint VPU probe's MREG access using its operand roles."""
+    operation, = [entry for entry in VOCABULARY["vpu_blocks"] if entry["mnemonic"] == mnemonic]
+    operands = dict(rd=4, rs1=0, rs2=2 if mnemonic in BINARY else 0)
+    matches = []
+    for event in VOCABULARY["vpu_operand_roles"][operation["op_class"]]:
+        if event["key"] is None or event["write"] != write:
+            continue
+        if event["two_input"] and mnemonic not in BINARY:
+            continue
+        first = operands[event["operand"]] + event["offset"]
+        if first <= bank < first + event["registers"]:
+            matches.append(event["key"])
+    if len(matches) != 1:
+        raise ValueError(f"MREG event is outside the operand vocabulary: {mnemonic}/{bank}/{write}")
+    return matches[0]

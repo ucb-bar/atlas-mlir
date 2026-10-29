@@ -9,7 +9,7 @@ from copy import deepcopy
 import inspect
 from pathlib import Path
 
-from atlas_model_timing import MXU_BLOCKS
+from atlas_model_schema import MXU_BLOCKS
 from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block
 
 
@@ -168,7 +168,7 @@ def _validated(cfg):
 def _blocks(plans):
     blocks = {}
     for engine, values in plans.items():
-        for mnemonic, suffix in MXU_BLOCKS.items():
+        for mnemonic in MXU_BLOCKS:
             compute, pop = mnemonic.startswith("vmatmul"), mnemonic.startswith("vmatpop")
             bf16 = ".bf16" in mnemonic
             last = values["compute_last" if compute else "transfer_last"]
@@ -186,7 +186,7 @@ def _blocks(plans):
                 events[group] = values["compute" if compute else "transfer"]
                 if mnemonic == "vmatmul.acc":
                     events["acc_read"] = values["read"]
-            name = engine + "." + suffix
+            name = mnemonic + "." + engine
             blocks[name] = timing_block(name, deepcopy(events), last)
     return blocks
 
@@ -197,8 +197,8 @@ def derive_mxu(cfg):
     blocks = _blocks(plans)
     releases = {}
     for engine, values in plans.items():
-        for mnemonic, suffix in MXU_BLOCKS.items():
-            name = engine + "." + suffix
+        for mnemonic in MXU_BLOCKS:
+            name = mnemonic + "." + engine
             pop = mnemonic.startswith("vmatpop")
             end = blocks[name]["first_free_age"]
             releases[name] = {
