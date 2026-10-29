@@ -17,10 +17,9 @@ from test_virtual_scheduling import F, S, T, add, const, dma_load, dma_store, fu
 
 
 def fixture_evidence(directory: pathlib.Path) -> str:
-    """Use genuine derived facts through the isolated capability-test boundary."""
-    facts = pathlib.Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json"
-    return (f"--select-atlas-model-evidence=test-op-timing={facts} "
-            f"test-op-timing-sha256={hashlib.sha256(facts.read_bytes()).hexdigest()}")
+    """Select the generated facts through the production bundle interface."""
+    facts = pathlib.Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+    return f"--select-atlas-model-evidence=facts={facts}"
 
 
 BASE = -2147483648

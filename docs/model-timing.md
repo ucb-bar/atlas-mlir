@@ -1,63 +1,120 @@
-# NPU Model timing facts
+# NPU Model timing
 
-Generate compiler facts from an npu_model source checkout and its default
-configuration with one command:
+A provider supplies the timing rules used by scheduling and verification.
+The default provider uses handwritten rules ported from npu_model. The
+`model` provider uses the same rule functions with timing tables extracted
+from an npu_model checkout. Scheduling, waits, delay slots, and lowering
+use those tables. Model selection compiles candidates, runs them on
+npu_model, and keeps the fastest program. A candidate is one combination
+of scheduling and allocation choices. The default provider is unchanged.
+
+## Regenerating the facts
+
+Facts are the timing values extracted from the model source and its default
+configuration. Generate them into a new directory with one command:
 
 ```sh
 python -B tools/atlas_model_facts.py --npu-model /path/to/npu_model \
   --out /path/to/new-facts
 ```
 
-The output contains model-timing.json, model-overlap.json, facts.lock.json,
-and a compact validation-report.json. The compiler reads the timing and
-overlap files; the lock selects their hashes. Regeneration derives operation
-ages, reservation releases, architecture, operands, frontend spacing, DMA
-costs, weight windows, engine admission, replay edges, and overlap rules.
-The supported source and configuration must pass the extractors' structural
-checks. Unsupported control flow, geometry, operand mappings, or timing
-expressions refuse with model-update guidance. Recognized latency and
-capacity changes are extracted from the model rather than fitted to runs.
+Regeneration takes about ten seconds on the tested checkout.
+`model-timing.json` contains the operation events, release ages, frontend
+values, engine resources, weight windows, architecture, and DMA estimates.
+`facts.lock.json` selects the timing file by its content hash.
+`validation-report.json` records the native VPU row-sweep check.
+The check compares actual port events and drain with the extracted values
+and rejects a wrong fact. `tools/model-timing.lock.json` pins the tested
+model revision. Regenerate when changing revisions instead of editing the
+facts by hand. See `tools/atlas_model_facts.py` for the extraction entry point
+and `lib/AtlasModelTables.cpp` for the compiler reader.
 
-One native VPU row-sweep probe checks extracted port-event ages and drain.
-It rejects a wrong timing fact. This is a representative extraction check,
-not exhaustive numerical qualification. Extraction does not run separate
-runtime, DMA, replay, admission, weight, or overlap validation suites and
-does not publish receipts claiming that those suites ran.
+## What comes from npu_model and what the compiler chooses
 
-The compiler retains configuration and semantic payload checks when loading
-facts. It checks fact structure and scheduling obligations independently of
-regeneration. It does not require producer manifests, native-run counters,
-validation hashes, or qualification reports. Existing bundles should be
-regenerated when updating the compiler.
+| Origin | Values |
+| --- | --- |
+| Model source and configuration | Operation events, release windows, and frontend timing |
+| Model source and configuration | Geometry, engine capacities, ports, and VPU groups |
+| Model source and configuration | MXU weight endpoints and sequencer windows; DMA curve costs |
+| Compiler policy | Search budgets, seeds, and one-cycle DMA estimate serialization |
+| Compiler policy | Two-row PACK grouping, eight-slot DMA command ring wait, and synthetic fifo43 scoring |
 
-The extracted events describe the supported model's isolated operations.
-Overlap pairs and composition classes govern concurrent admission. DMA
-completion remains dynamic and requires matching waits, channel ownership,
-and the separate eight-command RTL ring rule. DMA curve costs are
-conservative proposal bounds under drained, no-denial preconditions.
-Scratchpad response latency has no independent model event; its compatibility
-assumption is inactive when complete reservation releases are available.
+The model provider reads every timing value used by its shared rules from
+these extracted tables. Recognized changes to ages or capacities flow into
+the compiler when facts are regenerated. The original calibrated DMA
+estimator belongs to the default provider. Model estimates use the extracted
+startups and conservative per-beat curve bound. Both endpoints of each
+MXU weight-use row are retained, including the final systolic use.
 
-Compile and select using the generated facts:
+DMA estimates guide ordering and wait placement. A matching wait still
+establishes completion, and the command ring wait remains a separate RTL
+rule. The compiler checks supported geometry and event shapes before using
+the tables. Missing events, invalid lifetimes, and unsupported geometry
+produce a diagnostic instead of using another provider's timing values.
+
+## Compiling with the model provider
+
+Compile and select a program using the generated facts:
 
 ```sh
 python -B tools/lower_atlas_program.py input.mlir \
   --output-dir selected --atlas-bin-dir build/bin \
   --provider model --npu-model /path/to/npu_model \
-  --model-facts /path/to/new-facts
+  --model-facts /path/to/new-facts --profile curve \
+  --model-region /path/to/expected-region.json
 ```
 
-Omit --model-facts to regenerate. Candidate search and proposal policy are
-compiler policy, defined in model-search-policy.json, rather than source
-timing facts. Every production candidate still passes compiler verification
-and native scoring through drained ECALL; winning words are the scored words.
-Supplied expected regions provide the numerical oracle. The curve profile
-uses the configured backend; fifo43 is a synthetic scoring target.
+Omitting `--model-facts` regenerates facts into the output directory. A
+profile is the memory configuration used to score candidates. `curve` uses
+the configured memory curves. `fifo43` uses fixed latency and a periodic
+readiness pattern for comparison. Both profiles use the same extracted
+compiler timing tables.
+
+The main selection options are:
+
+- `--profile curve|fifo43` chooses the scoring configuration.
+- `--search-budget` chooses a bounded search preset.
+- `--max-candidates` limits the initial candidate pool.
+- `--guarded-pack` enables exact PACK for supported finite inputs.
+- `--model-region` supplies an expected memory region for numerical checks.
+
+The output directory contains `selection.json`, `program.hex`,
+`program.json`, `allocation.json`, and the selected candidate's IR.
+Candidate directories retain the compiled programs and their diagnostics.
+The selection file records attempts, cycle counts, and the winning index.
+
+## How selection works
+
+1. Build candidates in a fixed order from fixed seeds and number them.
+2. Compile each candidate and run the normal compiler verifiers.
+3. Run each candidate on npu_model through drained ECALL and check the
+   supplied output regions.
+4. Keep the lowest cycle count, breaking ties by the lowest candidate index.
+5. Search dependency-group moves and PACK weight placement from the current
+   winner while the configured budget and patience allow it.
+
+Compiler refusals count toward the budget. Native execution faults and
+numerical mismatches stop selection. Scores for identical instruction words
+are reused within one search. Selection is deterministic for a fixed worker
+count and configuration, and the winner's words are exactly the scored words.
 
 ## Updating for NPU Model changes
 
-The model is not an RTL timing proof. Structural checks can conservatively
-refuse benign refactors, and the representative native check does not prove
-arbitrary mixed streams or arithmetic equivalence. After extractor changes,
-regenerate, run compiler tests, compare consumed timing fields, and rerun
+Supported latency, curve, startup, and capacity changes regenerate from the
+model. The extractors refuse helper structures they cannot interpret and
+configuration or geometry outside the supported set. For example, a changed
+MXU row schedule can report "unsupported MXU sequencer geometry (requires
+32 cycles)". A diagnostic identifies the helper or condition to inspect.
+Update the corresponding `tools/atlas_derive_*.py` extractor and, when its
+supported shape changes, the compiler reader. Then regenerate twice, run
+CTest and the native tests, compare consumed timing values, and rerun
 representative selections with exact numerical checks.
+
+## Limits
+
+npu_model is not RTL. Isolated events and extracted engine resources feed
+shared dependence and reservation rules; native scoring checks each actual
+candidate. Structural guards can refuse a harmless source refactor. The VPU
+spot check is bounded and does not cover every concurrent instruction stream.
+Curve estimates ignore address effects, so close rankings can reverse on
+hardware.

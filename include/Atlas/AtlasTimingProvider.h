@@ -14,7 +14,6 @@ namespace mlir::atlas {
 struct AtlasStream;
 
 namespace timing {
-struct ModelReplayProgram;
 
 // Missing coverage is an error, distinct from a covered rule that reports no
 // dependence or no resource conflict. No generic consumer fills missing rules.
@@ -53,8 +52,11 @@ public:
   }
 };
 
-// Geometry consumed by compiler lowering templates. Model providers populate
-// this from checked architecture facts; defaults describe builtin's target.
+std::unique_ptr<TimingReservations> createTimingReservations(
+    std::shared_ptr<const TimingTables> tables = {});
+
+// Geometry used by lowering templates. The model fills these fields from
+// checked architecture facts.
 struct ProposalGeometry {
   int registerBytes = kAtlasRegisterBytes;
   int rowBytes = kAtlasMregRowBytes;
@@ -67,8 +69,7 @@ struct ProposalGeometry {
   int packRowWords() const { return rowBytes / scalarBytes; }
 };
 
-// Model values come from the reviewed frontend ordering contract. Consumers
-// currently support one ordinary cycle and one slot, checked on fact load.
+// Frontend issue spacing and the number of delay slots.
 struct FrontendSpacing {
   int ordinaryGap = 1, delaySlots = 1;
   int successorGap() const { return (delaySlots + 1) * ordinaryGap; }
@@ -79,13 +80,11 @@ struct FrontendSpacing {
 // names policy, not RTL qualification.
 struct TimingProvider {
   std::string id;
-  // Identity of model-owned proposal operands, separate from timing admissions.
-  std::string proposalFactsSha256;
   ProposalGeometry proposalGeometry;
   unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;
-  std::shared_ptr<const ModelReplayProgram> proposalReplay;
-  int proposalDMACapacity = 0; // builtin retains its existing policy bound.
+  std::shared_ptr<const TimingTables> model;
+  int proposalDMACapacity = 0; // Zero keeps the default scheduler's bound.
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
@@ -117,8 +116,6 @@ struct TimingProvider {
   int scalarSlotProposalCycles = 0;
   // DMA wait insertion completes launch n-8 before launch n reuses its command slot.
   bool waitReusedDMASlots = false;
-  // Optional legal virtual-cost operands; absent uses the default probes.
-  std::function<TimingRuleResult<std::pair<Instr, Instr>>(const OpInfo &)> costProbes;
 };
 
 std::string validateTimingProvider(const TimingProvider &provider);
@@ -131,12 +128,10 @@ TimingRuleResult<DepGraph> buildTimingGraph(
 struct MachineOpTiming {
   int latency, interval;
 };
-// Isolated latency uses the inclusive final event/release age plus one.
-// Source-reviewed planners make those ages operand invariant within an accepted
-// operation class. Interval uses only the selected representative relation:
-// different aliases/banks still require actual reservation/overlap queries.
-// Cost probes retain representative operands and unknown bases; they are not verified instructions.
-// `contexts`, when given, proves the two probes as the instructions their lowering issues.
+// Latency is the final event or release age plus one. The issue interval uses
+// reservation queries for two representative operands. Actual instructions
+// still require their own dependence and reservation checks. Optional contexts
+// describe the two instructions issued by their lowering.
 using ProbeContexts = std::function<std::pair<TimingContext, TimingContext>(const Instr &, const Instr &)>;
 FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
                                         const std::string &name, Operation *at,

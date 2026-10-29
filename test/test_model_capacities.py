@@ -1,6 +1,5 @@
 """Structural source parameters and their bounded admission contracts."""
 import ast
-from copy import deepcopy
 import os
 from pathlib import Path
 import sys
@@ -12,24 +11,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import atlas_derive_memory as memory
-import atlas_derive_overlap as overlap
+import atlas_derive_resources as resources
 from atlas_derive_mxu import _plan, UnsupportedMXU
-from test_derive_overlap import fixtures
-
-
-class CapacityRulesTests(unittest.TestCase):
-    def test_one_slot_or_tracker_binds_pair_minimum(self):
-        facts, contract = fixtures()
-        baseline = overlap.SourceRules(facts, contract)
-        changed = deepcopy(contract)
-        changed["capacity"].update(vpu_slots=1, mxu0_compute=1)
-        strict = overlap.SourceRules(facts, changed)
-        independent = dict(mreg_banks="disjoint")
-        self.assertEqual(baseline.minimum_gap("vpu.relu", "vpu.exp2", independent), 1)
-        self.assertEqual(strict.minimum_gap("vpu.relu", "vpu.exp2", independent), 65)
-        independent.update(accumulator="other", weight_slot="same")
-        self.assertEqual(baseline.minimum_gap("mxu0.matmul", "mxu0.matmul", independent), 32)
-        self.assertEqual(strict.minimum_gap("mxu0.matmul", "mxu0.matmul", independent), 95)
 
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT for reviewed source guards")
@@ -58,14 +41,14 @@ class CapacitySourceTests(unittest.TestCase):
         source = self.source("vpu.py")
         for slots in (1, 2, 3):
             changed = source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")
-            overlap._guard_ast(ast.parse(changed), "vpu.py")
+            resources._guard_ast(ast.parse(changed), "vpu.py")
         for slots in (0, 4, True):
             with self.subTest(slots=slots), self.assertRaises(ValueError):
-                overlap._guard_ast(ast.parse(source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")), "vpu.py")
+                resources._guard_ast(ast.parse(source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")), "vpu.py")
         for old, new in (("cycle - op.issued < op.write_last", "cycle - op.issued <= op.write_last"),
                          ("return VPU_OP_LATENCIES[mnemonic] - 1", "return VPU_OP_LATENCIES[mnemonic]")):
             with self.subTest(mutation=new), self.assertRaises(ValueError):
-                overlap._guard_ast(ast.parse(source.replace(old, new)), "vpu.py")
+                resources._guard_ast(ast.parse(source.replace(old, new)), "vpu.py")
 
     def test_xlu_duration_is_resolved_after_complete_source_review(self):
         source = self.source("xlu.py")

@@ -61,24 +61,6 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(receipt["compiler_policy_sha256"], policy.COMPILER_POLICY_SHA256)
         self.assertEqual(receipt["effective"]["workers"], 2)
 
-    def test_budget_and_seed_changes_preserve_derived_projection_semantics(self):
-        from atlas_derive_replay import projection_program
-        from atlas_model_replay import semantic_digest
-        source = dict(schema="atlas.core_edges.v1", clock_step=1,
-                      phases=["s1_previous_state", "execution_units", "fetch"],
-                      dma_wait_observes="previous_edge_flags", implicit_exu_stalls=False,
-                      checked_methods=["Core.tick", "Core._tick_s1"], source_contract="atlas.model_frontend.v1")
-        baseline = projection_program(source)
-        changed = deepcopy(policy.POLICY)
-        changed["presets"]["full"]["max_candidates"] += 1
-        changed["pools"]["random_seeds"] = [103, 107]
-        changed["pools"]["neighbor_shuffle_seed"] += 1
-        with patch.object(policy, "POLICY", changed):
-            regenerated = projection_program(source)
-            changed_receipt = policy.policy_receipt({})
-        self.assertEqual(semantic_digest(baseline), semantic_digest(regenerated))
-        self.assertEqual(baseline, regenerated)
-        self.assertNotEqual(changed_receipt["definition_sha256"], policy.policy_receipt({})["definition_sha256"])
 
     def test_generated_cpp_bounds_and_projection_are_from_the_definition(self):
         header = policy.generated_header()
@@ -87,7 +69,6 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
                             ("kSpillRewriteLimit", "spill_rewrite_limit")):
             self.assertIn(f"{name} = {policy.POLICY['engineering']['compiler'][value]};", header)
         self.assertIn(policy.COMPILER_POLICY_SHA256, header)
-        self.assertIn(policy.canonical_hash(policy.POLICY["replay_projection"]), header)
         self.assertIn(f"kDMAProposalSerializationCycles = {policy.POLICY['dma_proposal']['intercommand_serialization_cycles']};", header)
         self.assertIn(policy.canonical_hash(policy.POLICY["dma_proposal"]), header)
 
@@ -120,6 +101,7 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
                        lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=True),
                        lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=2**31),
                        lambda value: value["candidates"].update(batch_width=0),
+                       lambda value: value["candidates"].update(curve_group_wait_placements=["source", "default"]),
                        lambda value: value["presets"]["full"].update(max_candidates=False)):
             changed = deepcopy(policy.POLICY)
             mutate(changed)
@@ -135,10 +117,6 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
             alternatives = list(selection.group_order_neighbors([graph], order))
         self.assertEqual(set(baseline), set(alternatives))
         self.assertNotEqual(baseline, alternatives)
-        changed = dict(selection.CANDIDATES, curve_wait_placements=["source", "default"])
-        with patch.object(selection, "CANDIDATES", changed):
-            candidates = list(selection.order_candidates(selection.Candidate(), [order], True))
-        self.assertEqual([item.wait_placement for item in candidates], ["source", "default"])
 
     def test_cli_defaults_and_effective_receipt_match_actual_attempts(self):
         parser = argparse.ArgumentParser()

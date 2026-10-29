@@ -1,5 +1,5 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;

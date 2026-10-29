@@ -131,6 +131,45 @@ struct Hold {
   int alt = -1;
 };
 
+// Extracted events are affine streams; reservation windows are inclusive.
+struct TimingEvent {
+  int firstAge = 0, lastAge = 0, count = 0, step = 1;
+};
+struct TimingWindow {
+  int from = 0, to = 0;
+};
+struct OperationTiming {
+  std::map<std::string, TimingEvent> events;
+  std::map<std::string, TimingWindow> releases;
+  int firstFreeAge = 0;
+};
+struct MxuRules {
+  int computeCapacity = 0;
+  int weightOverwriteAfterCompute = 0, weightUseAfterPush = 0;
+  int accumulatorUseAfterPush = 0, accumulatorForwardGap = 0;
+  TimingWindow sourcePorts, resultPorts;
+  std::vector<int> computePorts, pushBf16Ports, popFp8Ports, popBf16Ports;
+  std::vector<int> singlePushPriority;
+  TimingEvent weightFirst, weightLast;
+};
+struct TimingTables {
+  std::map<std::string, OperationTiming> operations;
+  int ordinaryIssueGap = 0, delayBaseGap = 0, delayImmediateMask = 0;
+  int scalarReadAge = 0, scalarWriteAge = 0, controlReadAge = 0;
+  int scalarLoadGap = 0, delaySlots = 0;
+  unsigned vpuIssueSlots = 0;
+  std::vector<std::string> vpuDouble;
+  std::vector<std::vector<std::string>> vpuLogicGroups;
+  std::array<MxuRules, 2> mxu;
+  std::function<int(long long, bool)> dmaEstimate;
+};
+
+int naturalGap(const Instr &in, const TimingTables &tables);
+bool vpuUsesBothSlots(const OpInfo &op, const TimingTables &tables);
+bool vpuCanOverlap(const OpInfo &a, const OpInfo &b,
+                   const TimingTables &tables);
+int unitCapacity(Unit unit, int index, const TimingTables &tables);
+
 struct Footprint {
   std::vector<Access> accesses;
   std::vector<Hold> holds;
@@ -144,8 +183,9 @@ struct Footprint {
 };
 
 Footprint footprintOf(const Instr &in, const RegValues &regs);
-// Supplied timing rules; the built-in footprintOf provider is the unqualified
-// npu-model rtl-match model, not an independently qualified RTL contract.
+Footprint footprintOf(const Instr &in, const RegValues &regs,
+                      const TimingTables &tables);
+// Rules supplied by the selected timing provider.
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
@@ -160,6 +200,8 @@ struct Dependence {
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
                       const Footprint &fb);
+Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
+                      const Footprint &fb, const TimingTables &tables);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
                            EdgeKind &kind);
 
@@ -187,12 +229,14 @@ bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
 int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
-// Legacy builtin DMA proposal estimate, retained for identical builtin schedules.
+// Hand-chosen DMA proposal estimate for the default provider.
 // Model providers supply their own estimates; matching waits establish completion.
 int dmaTransferCycles(long long bytes, bool store);
 
 class ReservationTable {
 public:
+  explicit ReservationTable(std::shared_ptr<const TimingTables> tables = {})
+      : tables_(std::move(tables)) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);
@@ -200,6 +244,7 @@ public:
   void extendForWait(int cycle);
 
 private:
+  std::shared_ptr<const TimingTables> tables_;
   struct PortUse {
     int reg = -1, row = -1;
     bool shareable = false;

@@ -54,16 +54,6 @@ class ScorerGuardsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "assertions"):
                 ModelScorer(Path("/tmp"))({})
 
-    def test_each_model_identity_component_is_required(self):
-        keys = ("source_sha256", "numerical_data_sha256", "configuration_sha256")
-        for key in keys:
-            evidence = dict(zip(keys, ("source", "data", "config")))
-            evidence[key] = "changed"
-            with self.subTest(key=key), patch("atlas_model_scorer.selected_model",
-                                             return_value=(Path("/tmp"), "source", "data", "config", None)):
-                with self.assertRaisesRegex(ValueError, "differs from provider evidence"):
-                    ModelScorer(Path("/tmp"))({"model_evidence": evidence})
-
     def test_configuration_identity_and_execution_use_one_instance(self):
         cfg, values = object(), {"timing": 0.75}
         factory = Mock(return_value=(cfg, values))

@@ -2,7 +2,7 @@
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"

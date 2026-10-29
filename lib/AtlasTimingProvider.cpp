@@ -1,6 +1,6 @@
 #include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasTimingProvider.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "llvm/ADT/StringMap.h"
 #include <limits>
 #include <mutex>
@@ -8,8 +8,10 @@
 using namespace mlir::atlas::timing;
 
 namespace {
-class ModelReservations final : public TimingReservations {
+class RuleReservations final : public TimingReservations {
 public:
+  explicit RuleReservations(std::shared_ptr<const TimingTables> tables)
+      : table(std::move(tables)) {}
   TimingRuleResult<std::string>
   conflict(const Instr &in, const Footprint &f, int cycle) const override {
     return {table.conflict(in, f, cycle), {}};
@@ -25,6 +27,78 @@ public:
 private:
   ReservationTable table;
 };
+} // namespace
+
+std::unique_ptr<TimingReservations>
+mlir::atlas::timing::createTimingReservations(
+    std::shared_ptr<const TimingTables> tables) {
+  return std::make_unique<RuleReservations>(std::move(tables));
+}
+
+namespace {
+using AddTimingEdge = std::function<void(int, int, int, EdgeKind, const std::string &)>;
+std::string addDMAEdges(DepGraph &g, const TimingProvider &p,
+                        const IncomingDma *incomingDma, const AddTimingEdge &add) {
+  int n = static_cast<int>(g.nodes.size());
+  int issueGap = p.frontendSpacing.ordinaryGap;
+  auto isLaunch = [&](int i) {
+    OpClass c = g.nodes[i].op->opClass;
+    return c == OpClass::DmaLoad || c == OpClass::DmaStore;
+  };
+  // A matching wait establishes DMA completion.
+  for (int d = 0; d < n; d++) {
+    if (!isLaunch(d))
+      continue;
+    const OpInfo &op = *g.nodes[d].op;
+    int wait = -1;
+    for (int k = d + 1; k < n && wait < 0; k++)
+      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel)
+        wait = k;
+    for (int k = d + 1; k < n; k++) {
+      if (k == wait)
+        continue;
+      auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
+      if (!conflict.error.empty()) return conflict.error;
+      if (!conflict.value.conflict)
+        continue;
+      if (wait >= 0 && wait < k)
+        add(wait, k, issueGap, conflict.value.kind,
+            std::string(edgeKindName(conflict.value.kind)) + " with " + op.name + " (done once the wait issues)");
+      else
+        add(d, k, issueGap, EdgeKind::Order, op.name + " may still be in flight (no dma.wait in between)");
+    }
+  }
+  // Use precise incoming DMA facts when supplied.
+  for (int w = 0; w < n; w++) {
+    const OpInfo &op = *g.nodes[w].op;
+    if (op.opClass != OpClass::DmaWait)
+      continue;
+    bool local = false;
+    for (int d = 0; d < w; d++)
+      if (isLaunch(d) && g.nodes[d].op->channel == op.channel)
+        local = true;
+    if (local)
+      continue;
+    for (int k = w + 1; k < n; k++) {
+      bool guarded = isLaunch(k);
+      if (incomingDma) {
+        guarded = guarded && g.nodes[k].op->channel == op.channel;
+        for (const Footprint &dma : (*incomingDma)[op.channel]) {
+          auto conflict = p.dmaConflict(dma, g.footprints[k]);
+          if (!conflict.error.empty()) return conflict.error;
+          guarded |= conflict.value.conflict;
+        }
+      } else {
+        for (const Access &a : g.footprints[k].accesses)
+          if (a.res == Res::Vmem)
+            guarded = true;
+      }
+      if (guarded)
+        add(w, k, issueGap, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
+    }
+  }
+  return {};
+}
 } // namespace
 
 TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
@@ -66,62 +140,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
       if (d.value.distance > 0)
         add(a, b, d.value.distance, d.value.kind, d.value.reason);
     }
-  auto isLaunch = [&](int i) {
-    OpClass c = g.nodes[i].op->opClass;
-    return c == OpClass::DmaLoad || c == OpClass::DmaStore;
-  };
-  // A matching wait establishes DMA completion.
-  for (int d = 0; d < n; d++) {
-    if (!isLaunch(d))
-      continue;
-    const OpInfo &op = *g.nodes[d].op;
-    int wait = -1;
-    for (int k = d + 1; k < n && wait < 0; k++)
-      if (g.nodes[k].op->opClass == OpClass::DmaWait && g.nodes[k].op->channel == op.channel)
-        wait = k;
-    for (int k = d + 1; k < n; k++) {
-      if (k == wait)
-        continue;
-      auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
-      if (!conflict.error.empty()) return {{}, conflict.error};
-      if (!conflict.value.conflict)
-        continue;
-      if (wait >= 0 && wait < k)
-        add(wait, k, 1, conflict.value.kind,
-            std::string(edgeKindName(conflict.value.kind)) + " with " + op.name + " (done once the wait issues)");
-      else
-        add(d, k, 1, EdgeKind::Order, op.name + " may still be in flight (no dma.wait in between)");
-    }
-  }
-  // Use precise incoming DMA facts when supplied.
-  for (int w = 0; w < n; w++) {
-    const OpInfo &op = *g.nodes[w].op;
-    if (op.opClass != OpClass::DmaWait)
-      continue;
-    bool local = false;
-    for (int d = 0; d < w; d++)
-      if (isLaunch(d) && g.nodes[d].op->channel == op.channel)
-        local = true;
-    if (local)
-      continue;
-    for (int k = w + 1; k < n; k++) {
-      bool guarded = isLaunch(k);
-      if (incomingDma) {
-        guarded = guarded && g.nodes[k].op->channel == op.channel;
-        for (const Footprint &dma : (*incomingDma)[op.channel]) {
-          auto conflict = p.dmaConflict(dma, g.footprints[k]);
-          if (!conflict.error.empty()) return {{}, conflict.error};
-          guarded |= conflict.value.conflict;
-        }
-      } else {
-        for (const Access &a : g.footprints[k].accesses)
-          if (a.res == Res::Vmem)
-            guarded = true;
-      }
-      if (guarded)
-        add(w, k, 1, EdgeKind::Order, op.name + " guards a transfer started in an earlier block");
-    }
-  }
+  if (auto error = addDMAEdges(g, p, incomingDma, add); !error.empty())
+    return {{}, error};
   g.in.assign(n, {});
   g.out.assign(n, {});
   for (int e = 0; e < static_cast<int>(g.edges.size()); e++) {
@@ -131,17 +151,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   return {std::move(g), {}};
 }
 
-mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
-    const TimingProvider &p, const std::string &name, mlir::Operation *at,
-    const ProbeContexts &contexts) {
-  auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
-    return at->emitOpError("virtual cost of ") << name << ": "
-        << (p.id == kModelTimingProviderId ? modelTimingDiagnostic(why) : why);
-  };
-  std::string missing = validateTimingProvider(p);
-  if (!missing.empty()) return error(missing);
-  const OpInfo *op = findOp(name);
-  if (!op) return error("unknown machine operation");
+namespace {
+std::pair<Instr, Instr> representativeProbes(const OpInfo *op, bool model) {
   Instr first{op, 0, 2, 4}, second{op, 6, 8, 10};
   switch (op->opClass) {
   case OpClass::WeightPush:
@@ -157,14 +168,59 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   default:
     break;
   }
-  if (p.costProbes) {
-    auto probes = p.costProbes(*op);
-    if (!probes.error.empty()) return error(probes.error);
-    if (probes.value.first.op != op || probes.value.second.op != op)
-      return error("virtual cost probes must name the requested operation");
-    first = probes.value.first;
-    second = probes.value.second;
+  if (model) {
+    if (op->engine == Engine::Scalar) {
+      if (!hasOperand(*op, "x1")) first.rs1 = second.rs1 = 0;
+      if (!hasOperand(*op, "x2")) first.rs2 = second.rs2 = 0;
+    }
+    switch (op->opClass) {
+    case OpClass::WeightPush:
+    case OpClass::AccPushFp8:
+    case OpClass::AccPushBf16:
+      second = {op, 1, 2, 0};
+      break;
+    case OpClass::PopFp8:
+    case OpClass::PopBf16:
+      second = {op, 2, 0, 1};
+      break;
+    case OpClass::VLoad:
+    case OpClass::VStore:
+    case OpClass::ScalarLoad:
+    case OpClass::ScaleLoad:
+    case OpClass::Transpose:
+    case OpClass::VpuRowReduce:
+    case OpClass::VpuColReduce:
+      first.rs2 = second.rs2 = 0;
+      break;
+    case OpClass::ScalarStore:
+      first.rd = second.rd = 0;
+      break;
+    case OpClass::VpuElementwise:
+      if (!op->twoInput) first.rs2 = second.rs2 = 0;
+      break;
+    case OpClass::VpuLoadImmPair:
+    case OpClass::VpuLoadImmSingle:
+      first.rs1 = first.rs2 = second.rs1 = second.rs2 = 0;
+      break;
+    default: break;
+    }
   }
+  return {first, second};
+}
+} // namespace
+
+mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
+    const TimingProvider &p, const std::string &name, mlir::Operation *at,
+    const ProbeContexts &contexts) {
+  auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
+    return at->emitOpError("virtual cost of ") << name << ": "
+        << (p.model ? modelTimingDiagnostic(why) : why);
+  };
+  std::string missing = validateTimingProvider(p);
+  if (!missing.empty()) return error(missing);
+  const OpInfo *op = findOp(name);
+  if (!op) return error("unknown machine operation");
+  auto [first, second] = representativeProbes(op, bool(p.model));
   auto [firstContext, secondContext] = contexts ? contexts(first, second) : std::pair<TimingContext, TimingContext>{};
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());
@@ -220,7 +276,7 @@ TimingProvider mlir::atlas::timing::builtinTimingProvider() {
   p.fillPendingDelaySlots = true;
   p.scalarSlotProposalCycles = 8;
   p.validateScope = [](const mlir::atlas::AtlasStream &) { return std::string{}; };
-  p.footprint = footprintOf;
+  p.footprint = [](const Instr &in, const RegValues &regs) { return footprintOf(in, regs); };
   p.dependence = [](const Instr &a, const Footprint &fa, const Instr &b,
                     const Footprint &fb) {
     return TimingRuleResult<Dependence>{mlir::atlas::timing::dependence(a, fa, b, fb), {}};
@@ -235,7 +291,7 @@ TimingProvider mlir::atlas::timing::builtinTimingProvider() {
   };
   p.createReservations = [] {
     TimingRuleResult<std::unique_ptr<TimingReservations>> result;
-    result.value = std::make_unique<ModelReservations>();
+    result.value = createTimingReservations();
     return result;
   };
   p.dmaProposal = [](int latency, int issue, std::optional<int> previousEnd) {

@@ -40,13 +40,9 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
                 patch.object(CurveMemoryBackend, "issue", side_effect=AssertionError("issued beat")):
             facts = curve.derive_curve(self.cfg)
         self.assertEqual(facts["curve_sha256"], schema.LOCK["curve_sha256"])
-        self.assertEqual(facts["source_sha256"], schema.LOCK["dma_source_sha256"])
-        shared = facts["source_contract"]
-        self.assertEqual(shared["source_shapes"], schema.DMA_SOURCE_SHAPES)
-        self.assertEqual(shared["edge_order"], facts["proposal_contract"]["source_evidence"]["edge_order"])
-        self.assertEqual(shared["core_tick_shape"], facts["proposal_contract"]["source_evidence"]["core_tick_shape"])
-        self.assertTrue(facts["estimate_only"])
-        self.assertEqual(facts["semantics"]["address_dependence"], "none")
+        self.assertGreater(facts["proposal_contract"]["per_beat_bound_cycles"], 0)
+        self.assertEqual(facts["beat_bytes"], self.cfg.dma_beat_bytes)
+        self.assertEqual(facts["max_transfer_bytes"], self.cfg.dma_max_transfer_bytes)
 
     def test_frequency_queue_and_history_are_independent_configuration_inputs(self):
         original = curve.derive_curve(self.cfg)
@@ -54,9 +50,6 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         cfg.dma_memory_params = dict(self.cfg.dma_memory_params, frequency_ghz=0.75,
                                      queue_depth=13, window_beats=7)
         facts = curve.derive_curve(cfg)
-        self.assertEqual(facts["queue_depth"], 13)
-        self.assertEqual(facts["window_beats"], 7)
-        self.assertEqual(facts["max_in_flight"], self.cfg.dma_max_in_flight)
         for first, second in zip(original["curves"], facts["curves"]):
             self.assertAlmostEqual(second["cycles_per_beat"], first["cycles_per_beat"] * 1.5)
             self.assertAlmostEqual(second["unloaded_latency_cycles"], first["unloaded_latency_cycles"] * 1.5)
@@ -125,7 +118,7 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         with self.assertRaisesRegex(curve.UnsupportedModelTiming, "DMA proof premise"):
             curve._proposal_contract(Path(core.__file__).read_text(), ast.parse(Path(dma.__file__).read_text()),
                                      ast.parse(backend), facts["curves"], facts["min_latency"],
-                                     facts["rounding_epsilon_cycles"], facts["issue_interval_cycles"])
+                                     facts["issue_interval_cycles"])
 
 if __name__ == "__main__":
     unittest.main()

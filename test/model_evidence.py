@@ -70,13 +70,12 @@ def semantic_sources(model):
 
 def copy_model_sources(test_case, sources, subdirectory=""):
     """Give every test its own sparse source tree and register its cleanup."""
-    safe_path = Path
     directory = tempfile.TemporaryDirectory()
     test_case.addCleanup(directory.cleanup)
-    root = safe_path(directory.name)
+    root = Path(directory.name)
     model = root / subdirectory
     for relative, source in sources.items():
-        path = safe_path(model / "npu_model" / relative)
+        path = model / "npu_model" / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
     return root, model
@@ -90,7 +89,7 @@ def model_evidence_available():
     if not value:
         raise FileNotFoundError("ATLAS_TEST_MODEL_FACTS must name a qualified bundle directory")
     directory = Path(value)
-    for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+    for name in ("facts.lock.json", "model-timing.json"):
         if not (directory / name).is_file():
             raise FileNotFoundError(f"ATLAS_TEST_MODEL_FACTS requires {name}: {value!r}")
     return True

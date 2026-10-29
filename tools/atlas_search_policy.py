@@ -37,10 +37,7 @@ def load_policy() -> dict:
         "proposal_cost_adapter": "representative-disjoint-copy-grouped-pack-setup-omitted-optimistic-filled-slot-v2",
         "selection_objective": "selected-profile-cycles-then-index-v1",
         "selection_tie": "canonical-candidate-index-v1",
-        "curve_candidates_default": "model-curve-profile-only-v1",
-        "proposal_replay": "atlas.projected_core_replay.v2",
         "group_neighbors": "dependency-closure-insertion-v1",
-        "candidate_ranking": "stable-summed-estimates-prefix-v1",
         "search_restart": "restart-on-any-objective-improvement-v1",
         "budget_accounting": "refusals-count-patience-after-batch-v1",
         "score_cache": "invocation-profile-exact-word-stream-v1",
@@ -54,7 +51,8 @@ def load_policy() -> dict:
     def keys(value, expected, label):
         if not isinstance(value, dict) or set(value) != set(expected.split()):
             raise ValueError("unsupported search policy fields: " + label)
-    keys(policy, "schema revision algorithms presets defaults pools candidates objectives engineering dma_proposal replay_projection validation execution_contract", "definition")
+    keys(policy, "schema revision algorithms presets defaults pools candidates objectives "
+         "engineering dma_proposal validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
         keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
@@ -92,22 +90,22 @@ def load_policy() -> dict:
     if not edges["delay_immediates"] or not integers(edges["delay_immediates"]) or not integers([edges["ordinary_max_cycles"], edges["dma_wait_max_cycles"]], 1):
         raise ValueError("invalid Core edge validation suite")
     pools, candidates = policy["pools"], policy["candidates"]
-    keys(pools, "supported_lookaheads initial_lookaheads virtual_scheduler_lookaheads random_seeds neighbor_shuffle_seed group_max_nodes mreg_seeds mreg_rank_choices mreg_vector_length uniform_store_ranks", "pools")
-    keys(candidates, "initial_knob_cap batch_width curve_ranking_fields curve_wait_placements initial_wait_placement pack_preload_wait_placement", "candidates")
+    keys(pools, "supported_lookaheads virtual_scheduler_lookaheads random_seeds "
+         "neighbor_shuffle_seed group_max_nodes mreg_seeds mreg_rank_choices "
+         "mreg_vector_length uniform_store_ranks", "pools")
+    keys(candidates, "initial_knob_cap batch_width initial_wait_placement "
+         "pack_preload_wait_placement curve_group_wait_placements", "candidates")
     keys(policy["objectives"], "curve fifo43", "objectives")
     keys(policy["engineering"], "compiler scorer", "engineering")
     keys(policy["engineering"]["compiler"], "timing_search_cycles generated_word_limit spill_rewrite_limit", "compiler bounds")
     keys(policy["engineering"]["scorer"], "max_cycles torch_threads assertions_required", "scorer bounds")
-    keys(policy["replay_projection"], "projection_policy", "replay projection")
-    if policy["replay_projection"]["projection_policy"].get("algorithm") != "fixed-start-capacity-place-v1":
-        raise ValueError("unsupported fixed replay recurrence")
     dma = policy["dma_proposal"]
     keys(dma, "classification intercommand_serialization_cycles", "DMA proposal")
     if (dma["classification"] != "compiler_policy"
             or type(dma["intercommand_serialization_cycles"]) is not int
             or not 1 <= dma["intercommand_serialization_cycles"] < 2**31):
         raise ValueError("invalid DMA proposal serialization policy")
-    for name in ("supported_lookaheads", "initial_lookaheads", "virtual_scheduler_lookaheads",
+    for name in ("supported_lookaheads", "virtual_scheduler_lookaheads",
                  "random_seeds", "mreg_seeds", "mreg_rank_choices", "uniform_store_ranks"):
         if not integers(pools[name]) or len(set(pools[name])) != len(pools[name]):
             raise ValueError("invalid search pool: " + name)
@@ -115,20 +113,16 @@ def load_policy() -> dict:
         raise ValueError("missing native lookahead policy")
     if not set(pools["virtual_scheduler_lookaheads"]) <= set(pools["supported_lookaheads"]):
         raise ValueError("unsupported virtual scheduler lookahead")
-    if not set(pools["initial_lookaheads"]) <= set(pools["supported_lookaheads"]):
-        raise ValueError("unsupported initial lookahead")
     if not pools["mreg_rank_choices"] or not integers([pools["mreg_vector_length"]], 1):
         raise ValueError("invalid MREG pool")
     if not integers([pools["neighbor_shuffle_seed"]]) or not integers([pools["group_max_nodes"]], 2):
         raise ValueError("invalid neighborhood bound")
     if not integers([candidates["initial_knob_cap"], candidates["batch_width"]], 1):
         raise ValueError("invalid candidate batch bound")
-    if sorted(candidates["curve_ranking_fields"]) != ["exposed_waiting", "makespan"]:
-        raise ValueError("unsupported curve ranking fields")
-    if candidates["curve_wait_placements"] not in (["default", "source"], ["source", "default"]):
-        raise ValueError("unsupported wait siblings")
     if candidates["initial_wait_placement"] not in ("default", "source") or candidates["pack_preload_wait_placement"] != "preloaded":
         raise ValueError("unsupported placement policy")
+    if candidates["curve_group_wait_placements"] != ["default", "source"]:
+        raise ValueError("unsupported curve group wait placements")
     if policy["objectives"]["curve"] != ["cycles", "index"] or policy["objectives"]["fifo43"] != ["cycles", "index"]:
         raise ValueError("unsupported selection objective")
     for section in policy["engineering"].values():
@@ -170,7 +164,6 @@ def generated_header() -> str:
     compiler = POLICY["engineering"]["compiler"]
     lookaheads = ", ".join(str(value) + "u" for value in POLICY["pools"]["virtual_scheduler_lookaheads"])
     supported = ", ".join(str(value) + "u" for value in POLICY["pools"]["supported_lookaheads"])
-    projection = json.dumps(POLICY["replay_projection"], sort_keys=True, separators=(",", ":"))
     dma = json.dumps(POLICY["dma_proposal"], sort_keys=True, separators=(",", ":"))
     return f'''// Generated from tools/model-search-policy.json; do not edit.
 #ifndef ATLAS_SEARCH_POLICY_H
@@ -186,8 +179,6 @@ inline constexpr char kCompilerPolicySHA256[] = "{COMPILER_POLICY_SHA256}";
 inline constexpr int kDMAProposalSerializationCycles = {POLICY["dma_proposal"]["intercommand_serialization_cycles"]};
 inline constexpr char kDMAProposalPolicyJson[] = R"atlas_policy({dma})atlas_policy";
 inline constexpr char kDMAProposalPolicySHA256[] = "{canonical_hash(POLICY["dma_proposal"])}";
-inline constexpr char kReplayProjectionJson[] = R"atlas_policy({projection})atlas_policy";
-inline constexpr char kReplayProjectionSHA256[] = "{canonical_hash(POLICY["replay_projection"])}";
 }} // namespace mlir::atlas::search_policy
 #endif
 '''

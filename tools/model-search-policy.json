@@ -2,16 +2,13 @@
   "schema": "atlas.search_policy.v1",
   "revision": "bounded-native-selection-v2",
   "algorithms": {
-    "proposal_replay": "atlas.projected_core_replay.v2",
     "group_neighbors": "dependency-closure-insertion-v1",
-    "candidate_ranking": "stable-summed-estimates-prefix-v1",
     "search_restart": "restart-on-any-objective-improvement-v1",
     "budget_accounting": "refusals-count-patience-after-batch-v1",
     "score_cache": "invocation-profile-exact-word-stream-v1",
     "virtual_scheduler": "start-plus-spill-frontend-negative-height-source-index-v1",
     "lowering_alternatives": "compiler-verified-pack-wait-placement-v1",
     "selection_objective": "selected-profile-cycles-then-index-v1",
-    "curve_candidates_default": "model-curve-profile-only-v1",
     "proposal_cost_adapter": "representative-disjoint-copy-grouped-pack-setup-omitted-optimistic-filled-slot-v2",
     "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride",
     "selection_tie": "canonical-candidate-index-v1"
@@ -53,7 +50,6 @@
   },
   "pools": {
     "supported_lookaheads": [0, 1, 2, 4, 8],
-    "initial_lookaheads": [1, 2, 4],
     "virtual_scheduler_lookaheads": [1, 2, 4, 8],
     "random_seeds": [0, 1, 2, 3, 4, 5, 6, 7],
     "neighbor_shuffle_seed": 0,
@@ -66,10 +62,9 @@
   "candidates": {
     "initial_knob_cap": 24,
     "batch_width": 12,
-    "curve_ranking_fields": ["makespan", "exposed_waiting"],
-    "curve_wait_placements": ["default", "source"],
     "initial_wait_placement": "source",
-    "pack_preload_wait_placement": "preloaded"
+    "pack_preload_wait_placement": "preloaded",
+    "curve_group_wait_placements": ["default", "source"]
   },
   "objectives": {"curve": ["cycles", "index"], "fifo43": ["cycles", "index"]},
   "engineering": {
@@ -77,26 +72,7 @@
     "scorer": {"max_cycles": 200000, "torch_threads": 1, "assertions_required": true}
   },
   "dma_proposal": {"classification": "compiler_policy", "intercommand_serialization_cycles": 1},
-  "replay_projection": {
-    "projection_policy": {
-      "identity": "atlas.cold_serial_graph.v1",
-      "initial_state": "empty_queues_zero_relative_clock",
-      "dependencies": "wait_for_all_predecessor_results",
-      "engines": "one_serial_lifetime_per_virtual_unit",
-      "dma": "anonymous_channels_serial_cold_transfers",
-      "exclusions": [
-        "emitted_instruction_stream",
-        "branch_paths",
-        "register_allocation",
-        "port_conflicts",
-        "mixed_memory_history",
-        "vmem_backpressure",
-        "Core_conflict_errors",
-        "exact_wait_placement"
-      ],
-      "algorithm": "fixed-start-capacity-place-v1"
-    }
-  },
+
   "validation": {
     "core_edges": {
       "schema": "atlas.core_edge_validation_policy.v1",

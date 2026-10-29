@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 if __package__:
-    from .atlas_model_diagnostics import ModelTimingEvidenceError
     from .atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
 else:
-    from atlas_model_diagnostics import ModelTimingEvidenceError
     from atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
 
 import argparse
@@ -15,9 +13,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 import hashlib
-import heapq
 import json
-from itertools import chain
 import multiprocessing
 import os
 from pathlib import Path
@@ -32,43 +28,6 @@ from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def capture_selection_inputs(source, output, binaries, model, regions, search_policy):
-    """Capture production inputs without importing the model into compiler threads."""
-    from atlas_run_provenance import capture_run_provenance, safe_path
-
-    model = safe_path(model)
-    revisions = {}
-    for role, root in (("compiler", ROOT), ("model", model)):
-        revisions[role] = None
-        # A source-only model copy must not inherit an enclosing repository's HEAD.
-        if safe_path(root / ".git").exists():
-            result = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-                                    capture_output=True, text=True)
-            revisions[role] = result.stdout.strip() if result.returncode == 0 else None
-    return capture_run_provenance(
-        source, regions=regions, archive_dir=output / "provenance", revisions=revisions,
-        search_policy=search_policy,
-        files={"compiler_build_definition": ROOT / "CMakeLists.txt",
-               "instruction_inventory": ROOT / "docs/selected-variant-inventory.json",
-               **{name: binaries / name for name in ("atlas-opt", "atlas-emit")}},
-        trees={"model_source": (model / "npu_model", (".py", ".json", ".yaml")),
-               "numerical_data": model / "npu_model/configs/data",
-               "compiler_lib": ROOT / "lib", "compiler_include": ROOT / "include",
-               "tools": (ROOT / "tools", (".py", ".json", ".yaml"))})
-
-
-def bind_selection_facts(capture, model_facts):
-    from atlas_run_provenance import safe_path, selection_facts_identity
-
-    directory = safe_path(model_facts)
-    capture.bind(evidence_files={"facts/" + name: directory / name
-                                 for name in ("facts.lock.json", "model-timing.json", "model-overlap.json")})
-    facts = json.loads((directory / "model-timing.json").read_text())
-    semantic_digest, provider_digest = selection_facts_identity(facts)
-    capture.bind(semantic={"derived_facts_sha256": semantic_digest})
-    return provider_digest
 
 
 SEARCH_BUDGETS = POLICY["presets"]
@@ -130,19 +89,11 @@ def _option_path(path: Path) -> str:
 def evidence_option(model_facts: Path | None = None) -> list[str]:
     if model_facts is None:
         return []  # A library caller may supply IR with selected evidence.
-    def bundle_path(value: Path) -> Path:
-        path = Path(value)
-        if ".." in path.parts:
-            raise ValueError("parent traversal is unsupported")
-        path = Path(os.path.abspath(path))
-        if any(parent.is_symlink() for parent in reversed((path, *path.parents))):
-            raise ValueError("model facts paths must not contain symlinks")
-        return path
-    directory = bundle_path(model_facts)
+    directory = Path(model_facts).resolve()
     if not directory.is_dir():
-        raise ValueError("--model-facts must name a qualified bundle directory")
-    for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
-        if not bundle_path(directory / name).is_file():
+        raise ValueError("--model-facts must name a bundle directory")
+    for name in ("facts.lock.json", "model-timing.json"):
+        if not (directory / name).is_file():
             raise ValueError(f"model facts bundle requires {name}")
     return ["--select-atlas-model-evidence=facts=" + _option_path(directory)]
 
@@ -166,7 +117,8 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
     return ["--atlas-compile-candidate=" + " ".join(options)]
 
 
-def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...], max_nodes: int = POOLS["group_max_nodes"]):
+def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...],
+                          max_nodes: int = POOLS["group_max_nodes"]):
     """Move a node together with the dependencies crossed by its insertion."""
     moves = []
     seen = set()
@@ -214,124 +166,341 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
         yield orders[:block] + (moved,) + orders[block + 1:]
 
 
-def proposal_estimate(graph: dict, order: tuple[int, ...]) -> tuple[int, int]:
-    """Interpret the selected common projected-Core program; proposal policy only."""
-    from atlas_model_replay import replay
-    return replay(graph, order)
+@dataclass(frozen=True)
+class SelectionConfig:
+    provider: str
+    profile: str | None
+    model: Path | None
+    model_regions: tuple[Path, ...]
+    spill: bool
+    spill_mxu: bool
+    boundary: str
+    guarded_pack: bool
+    model_facts: Path | None
+    max_candidates: int
+    random_seeds: tuple[int, ...]
+    workers: int
+    store_window_candidates: tuple[tuple[int, ...], ...]
+    mreg_candidates: tuple[tuple[int, ...], ...] | None
+    search_group_evaluations: int
+    search_patience: int
+    pack_reload_candidates: bool
+    pack_preload_candidates: bool
+
+    def resolved(self) -> SelectionConfig:
+        profile = self.profile
+        if profile is None:
+            profile = DEFAULTS["model_profile"] if self.provider == "model" else DEFAULTS["builtin_profile"]
+        if self.provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
+            raise ValueError("unsupported provider or memory profile")
+        if self.max_candidates < 1 or self.workers < 1 or self.boundary not in ("boundary", "none"):
+            raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
+        for name, value in (("search-group-evaluations", self.search_group_evaluations),
+                            ("search-patience", self.search_patience)):
+            if value < 0:
+                raise ValueError(name + " must be nonnegative")
+        mreg_candidates = self.mreg_candidates
+        if mreg_candidates is None:
+            mreg_candidates = tuple(tuple(random.Random(seed).choices(
+                POOLS["mreg_rank_choices"], k=POOLS["mreg_vector_length"]))
+                for seed in POOLS["mreg_seeds"])
+        return replace(self, profile=profile, mreg_candidates=mreg_candidates)
+
+    def policy(self, standard_scorer: bool) -> dict:
+        return policy_receipt(dict(
+            provider=self.provider, profile=self.profile, spill=self.spill, spill_mxu=self.spill_mxu,
+            boundary=self.boundary, guarded_pack=self.guarded_pack, max_candidates=self.max_candidates,
+            random_seeds=list(self.random_seeds), workers=self.workers,
+            store_window_candidates=[list(ranks) for ranks in self.store_window_candidates],
+            mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
+            search_group_evaluations=self.search_group_evaluations,
+            search_patience=self.search_patience, pack_reload_candidates=self.pack_reload_candidates,
+            pack_preload_candidates=self.pack_preload_candidates,
+            objective=POLICY["objectives"][self.profile],
+            scoring_implementation="native_model" if standard_scorer else "caller_callback"))
 
 
-def validate_proposal_graphs(graphs: list[dict], program: dict) -> None:
-    """Fail closed before ranking if metadata differs from the scored parent's facts."""
-    def reject(why):
-        raise ModelTimingEvidenceError("curve proposal metadata: " + why)
+class Selection:
+    def __init__(self, source: Path, output_dir: Path, atlas_bin_dir: Path,
+                 config: SelectionConfig, scorer: Callable | None, effective_policy: dict):
+        self.config = config
+        self.scorer = scorer
+        self.source = Path(source).resolve(strict=True)
+        self.output = Path(output_dir).resolve()
+        self.binaries = Path(atlas_bin_dir).resolve()
+        if self.output.exists() and (not self.output.is_dir() or any(self.output.iterdir())):
+            raise ValueError("output directory must be empty to prevent stale artifacts")
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.started = time.monotonic()
+        self.commands, self.logs = [], []
+        self.log_lock, self.score_lock = threading.Lock(), threading.Lock()
+        self.receipt = {
+            "schema": "atlas.model_selection.v1", "provider": config.provider, "profile": config.profile,
+            "objective": objective_receipt(config.provider, config.profile, scorer is None),
+            "guarded_pack": config.guarded_pack,
+            "max_candidates": config.max_candidates, "workers": config.workers,
+            "search_group_evaluations": config.search_group_evaluations,
+            "search_patience": config.search_patience,
+            "pack_reload_candidates": config.pack_reload_candidates,
+            "pack_preload_candidates": config.pack_preload_candidates,
+            "source_sha256": hashlib.sha256(self.source.read_bytes()).hexdigest(),
+            "search_policy": effective_policy,
+            "candidates": []}
+        self.standard_scorer = scorer is None
+        self.prepared = self.output / "1-virtual.mlir"
+        self.seen: set[Candidate] = set()
+        # Profiles must not share scores; model and regions are fixed for this selection.
+        self.score_cache: dict[tuple[str, tuple[int, ...]], int | Future] = {}
+        self.score_executor: ProcessPoolExecutor | None = None
+        self.best: dict | None = None
 
-    evidence = program.get("model_evidence") if isinstance(program, dict) else None
-    identity = evidence.get("op_timing_sha256") if isinstance(evidence, dict) else None
-    if not isinstance(identity, str) or len(identity) != 64 or any(c not in "0123456789abcdef" for c in identity):
-        reject("parent program requires its selected op_timing_sha256")
-    if not isinstance(graphs, list):
-        reject("graphs must be an array")
-    for graph in graphs:
-        if not isinstance(graph, dict) or not isinstance(graph.get("preds"), list):
-            reject("missing graph predecessors")
-        count = len(graph["preds"])
-        order = graph.get("order")
-        if not isinstance(order, list) or any(type(node) is not int for node in order) or sorted(order) != list(range(count)):
-            reject("parent order is not a complete permutation")
-        positions = {node: index for index, node in enumerate(order)}
-        for node, preds in enumerate(graph["preds"]):
-            if not isinstance(preds, list) or any(type(pred) is not int or not 0 <= pred < count for pred in preds):
-                reject("invalid graph predecessor")
-            if len(set(preds)) != len(preds) or any(positions[pred] >= positions[node] for pred in preds):
-                reject("parent order violates its graph")
-        proposal = graph.get("proposal")
-        if not isinstance(proposal, dict) or set(proposal) != {"schema", "facts_sha256", "units", "dma_capacity", "costs", "estimate", "replay"}:
-            reject("missing or unsupported proposal schema")
-        if proposal["schema"] != "atlas.virtual_proposal.v2" or proposal["facts_sha256"] != identity:
-            reject("proposal identity differs from parent model evidence")
-        from atlas_model_replay import validate_program, semantic_digest
+    def initialize_scorer(self) -> None:
+        if self.standard_scorer:
+            if self.config.model is None:
+                raise ValueError("model scoring requires --npu-model")
+            from atlas_model_scorer import ModelScorer
+            self.scorer = ModelScorer(self.config.model, self.config.model_regions)
+            # Capture configuration before preparation, keeping model imports out of compiler threads.
+            with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
+                runtime = executor.submit(self.scorer.runtime_receipt).result()
+            runtime.pop("curve_path")
+            runtime.pop("configuration")
+            self.receipt["runtime_versions"] = runtime
+
+    def prepare(self) -> None:
+        model_facts = self.config.model_facts
+        if model_facts is None and self.config.model is not None:
+            model_facts = self.output / "model-facts"
+            self.command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
+                          "--npu-model", str(self.config.model), "--out", str(model_facts)], self.output)
+        options = evidence_option(model_facts)
+        options.append("--atlas-compile-prepare=" +
+                       f"spill-mxu-state={str(self.config.spill_mxu).lower()} boundary={self.config.boundary}")
+        if self.config.guarded_pack:
+            options[-1] += " guarded-pack=true"
+        self.command([str(self.binaries / "atlas-opt"), str(self.source), *options,
+                      "--mlir-print-op-on-diagnostic=false", "-o", str(self.prepared)], self.output)
+
+    def command(self, argv: list[str], directory: Path, stdout: Path | None = None) -> str:
+        rendered = f"cd {shlex.quote(str(directory))} && " + shlex.join(argv)
+        if stdout:
+            rendered += f" > {shlex.quote(str(stdout))}"
+        with self.log_lock:
+            self.commands.append(rendered)
+            (self.output / "commands.txt").write_text("\n".join(self.commands) + "\n")
         try:
-            validate_program(proposal["replay"])
-            if semantic_digest(proposal["replay"]) != evidence.get("replay_timing_sha256"):
-                reject("replay program identity differs from parent model evidence")
-        except (ValueError, TypeError) as error:
-            reject(str(error))
-        for key in ("units", "dma_capacity"):
-            if type(proposal[key]) is not int or not 0 < proposal[key] <= 2**31 - 1:
-                reject("invalid " + key)
-        costs = proposal["costs"]
-        if not isinstance(costs, list) or len(costs) != count:
-            reject("cost coverage differs from graph")
-        cycle_bound = 0
-        for cost in costs:
-            if not isinstance(cost, dict) or set(cost) != {"unit", "busy", "latency", "frontend", "queued_dma", "drains"}:
-                reject("missing or unsupported cost fields")
-            if type(cost["unit"]) is not int or not 0 <= cost["unit"] < proposal["units"]:
-                reject("invalid functional unit")
-            for key in ("busy", "latency", "frontend"):
-                if type(cost[key]) is not int or not 0 <= cost[key] <= 2**31 - 1:
-                    reject("cost outside nonnegative native cycle domain")
-                cycle_bound += cost[key]
-            if type(cost["queued_dma"]) is not bool or type(cost["drains"]) is not bool:
-                reject("invalid DMA flags")
-            if cost["queued_dma"] and cost["frontend"] < 1:
-                reject("queued DMA must issue before its transfer starts")
-        if cycle_bound > 2**31 - 1:
-            reject("block exceeds native cycle domain")
-        estimate = proposal["estimate"]
-        if not isinstance(estimate, dict) or set(estimate) != {"makespan", "exposed_waiting"} or any(
-                type(value) is not int or value < 0 for value in estimate.values()):
-            reject("invalid native replay estimate")
-        if proposal_estimate(graph, tuple(order)) != (estimate["makespan"], estimate["exposed_waiting"]):
-            reject("native replay parity failure")
+            result = subprocess.run(argv, cwd=directory, capture_output=True, text=True,
+                                    env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        except OSError as error:
+            result = subprocess.CompletedProcess(argv, 1, "", str(error))
+        with self.log_lock:
+            self.logs.append(f"$ {rendered}\n{result.stderr}exit {result.returncode}\n")
+            (self.output / "log.txt").write_text("\n".join(self.logs))
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or f"{argv[0]} exited {result.returncode}")
+        if stdout:
+            stdout.write_text(result.stdout)
+        return result.stdout
 
+    def cached_score(self, program: dict, scoring_profile: str) -> tuple[int | Future, bool]:
+        key = scoring_profile, tuple(instruction["word_u32"] for instruction in program["instructions"])
+        with self.score_lock:
+            if self.standard_scorer:
+                profiles = self.receipt.setdefault("scoring_configurations", {})
+                if scoring_profile not in profiles:
+                    profiles[scoring_profile] = self.score_executor.submit(
+                        self.scorer.profile_receipt, program, scoring_profile).result()
+                    self.receipt["objective"] = objective_receipt(
+                        self.config.provider, self.config.profile, self.standard_scorer,
+                        profiles[scoring_profile]["sha256"])
+            hit = key in self.score_cache
+            if not hit:
+                self.score_cache[key] = (self.score_executor.submit(self.scorer, program, scoring_profile)
+                                         if self.score_executor else self.scorer(program, profile=scoring_profile))
+            return self.score_cache[key], hit
 
-def rank_order_neighbors(graphs: list[dict], neighbors, max_orders: int | None = None,
-                         eligible: Callable | None = None):
-    """Rank every unseen order, retaining only the stable prefix within the attempt budget."""
-    if max_orders is not None and max_orders < 0:
-        raise ValueError("ranked order limit must be nonnegative")
-    if max_orders == 0:
-        return iter(())
-    baseline = [tuple(graph["order"]) for graph in graphs]
-    parent_edges = [set(zip((-1,) + order, order + (-2,))) for order in baseline]
-    estimates_at_parent = [proposal_estimate(graph, order) for graph, order in zip(graphs, baseline)]
+    def compile_candidate(self, candidate: Candidate, row: dict) -> None:
+        directory = self.output / row["directory"]
+        before = time.monotonic()
+        stage = "compile"
+        try:
+            if candidate.virtual_orders:
+                (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
+            self.command([str(self.binaries / "atlas-opt"), str(self.prepared),
+                          *candidate_options(candidate, self.config.provider, self.config.spill,
+                                             graph_output=bool(self.config.search_group_evaluations)),
+                          "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
+            stage = "emit"
+            program = json.loads(self.command([str(self.binaries / "atlas-emit"), "final.mlir", "--program-json"],
+                                              directory, directory / "program.json"))
+            if self.standard_scorer or "compiler_search_policy_sha256" in program:
+                stage = "policy"
+                if program.get("compiler_search_policy_sha256") != COMPILER_POLICY_SHA256:
+                    raise ValueError("compiler search policy differs from driver; rebuild the selected compiler")
+            words = tuple(instruction["word_u32"] for instruction in program["instructions"])
+            (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
+            if self.scorer is not None:
+                stage = "score"
+                cached, row["score_cache_hit"] = self.cached_score(program, self.config.profile)
+                row["cycles"] = cached.result() if isinstance(cached, Future) else cached
+            row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
+                b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
+        except (OSError, ValueError, RuntimeError) as error:
+            row.update(status="FAIL", error=str(error), error_stage=stage)
+        finally:
+            row["elapsed_seconds"] = time.monotonic() - before
 
-    def unique_neighbors():
-        seen = set()
-        for orders in neighbors:
-            if eligible is not None and not eligible(orders):
+    def fail(self, message: str) -> None:
+        (self.output / "selection.json").write_text(json.dumps(self.receipt, indent=2) + "\n")
+        raise ValueError(message)
+
+    def evaluate_batch(self, specifications: list[tuple[Candidate, str]], limit: int | None = None) -> None:
+        if limit is None:
+            limit = self.config.max_candidates
+        pending, before = [], len(self.receipt["candidates"])
+        for candidate, category in specifications:
+            if candidate in self.seen or len(self.receipt["candidates"]) >= limit:
                 continue
-            signature = tuple((block, tuple(edge for edge in zip((-1,) + order, order + (-2,))
-                                             if edge not in parent_edges[block]))
-                              for block, order in enumerate(orders) if order != baseline[block])
-            if signature not in seen:
-                seen.add(signature)
-                yield orders
+            index = len(self.receipt["candidates"])
+            directory = self.output / "candidates" / f"{index:03d}-{category}"
+            directory.mkdir(parents=True)
+            row = {"index": index, "class": category, "options": asdict(candidate),
+                   "directory": str(directory.relative_to(self.output))}
+            pending.append((candidate, row))
+            self.seen.add(candidate)
+            self.receipt["candidates"].append(row)
+        with ThreadPoolExecutor(max_workers=min(self.config.workers, max(1, len(pending)))) as executor:
+            futures = [executor.submit(self.compile_candidate, candidate, row) for candidate, row in pending]
+            for future in futures:
+                future.result()
+        for row in self.receipt["candidates"][before:]:
+            # A verified program the model cannot score is an identity or soundness alarm.
+            if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
+                self.fail(f"candidate {row['index']} failed model scoring: {row['error']}")
+        passing = [row for row in self.receipt["candidates"] if row["status"] == "PASS"]
+        # Assign canonical indices before parallel work to preserve deterministic ties.
+        self.best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
 
-    def key(orders):
-        estimates = [estimates_at_parent[block] if order == baseline[block] else proposal_estimate(graph, order)
-                     for block, (graph, order) in enumerate(zip(graphs, orders))]
-        return tuple(sum(estimate[index] for estimate in estimates) for index in [
-            ("makespan", "exposed_waiting").index(field) for field in CANDIDATES["curve_ranking_fields"]])
-    if max_orders is None:
-        return iter(sorted(unique_neighbors(), key=key))
-    return iter(heapq.nsmallest(max_orders, unique_neighbors(), key=key))
+    def winner(self) -> Candidate:
+        return Candidate(**self.best["options"])  # asdict preserves tuple fields.
 
+    def search_initial(self) -> None:
+        self.evaluate_batch([(Candidate(), "default")])
+        initial = [(Candidate(random_seed=seed), "random-seed") for seed in self.config.random_seeds]
+        self.evaluate_batch(initial, limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
+        if self.best is None:
+            self.fail("no legal candidate: every initial candidate was refused")
 
-def order_candidates(base: Candidate, orders, curve_candidates: bool):
-    """Each wait sibling is a separate ordinary attempt under existing search limits."""
-    for order in orders:
-        if curve_candidates:
-            # Clear preloading so neither wait sibling is suppressed by inherited options.
-            for placement in CANDIDATES["curve_wait_placements"]:
+        program = json.loads((self.output / self.best["directory"] / "program.json").read_text())
+        store_count = sum(instruction.get("operation") == "atlas.dma" and
+                          instruction.get("fields", {}).get("direction") == "store"
+                          for instruction in program["instructions"])
+        # Allocation maps each free rank modulo the store's actual free set.
+        window_base = self.winner()
+        placements = [(replace(window_base, wait_placement=CANDIDATES["initial_wait_placement"]), "wait-placement")]
+        placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
+                       for ranks in self.config.store_window_candidates]
+        placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
+                       for rank in POOLS["uniform_store_ranks"] if store_count]
+        self.evaluate_batch(placements, limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
+        register_base = self.winner()
+        self.receipt["mreg_pool_size"] = len(self.config.mreg_candidates)
+        self.evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks")
+                             for ranks in self.config.mreg_candidates])
+
+    @staticmethod
+    def group_candidates(base: Candidate, orders, profile: str):
+        placements = (CANDIDATES["curve_group_wait_placements"]
+                      if profile == "curve" else (base.wait_placement,))
+        preload = False if profile == "curve" else base.pack_weight_before_pack
+        for order in orders:
+            for placement in placements:
                 yield replace(base, virtual_orders=order, wait_placement=placement,
-                              pack_weight_before_pack=False)
-        else:
-            yield replace(base, virtual_orders=order)
+                              pack_weight_before_pack=preload)
+
+    def search_groups(self) -> None:
+        search_started = time.monotonic()
+        initial_count = len(self.receipt["candidates"])
+        limit = initial_count + self.config.search_group_evaluations
+        phase = self.receipt["group_search"] = {
+            "start_index": self.best["index"], "accepted_indices": [], "stopped_for_patience": False}
+        while len(self.receipt["candidates"]) < limit:
+            parent = self.best
+            nonimproving = 0
+            graphs = json.loads((self.output / parent["directory"] / "graph.json").read_text())
+            orders = tuple(tuple(graph["order"]) for graph in graphs)
+            base = replace(self.winner(), lookahead=0, random_seed=None, virtual_orders=orders)
+            self.seen.add(base)
+            proposed = group_order_neighbors(graphs, orders)
+            pending = self.group_candidates(base, proposed, self.config.profile)
+            while len(self.receipt["candidates"]) < limit:
+                batch = []
+                width = min(CANDIDATES["batch_width"], limit - len(self.receipt["candidates"]))
+                while len(batch) < width:
+                    candidate = next(pending, None)
+                    if candidate is None:
+                        break
+                    if candidate not in self.seen and candidate not in batch:
+                        batch.append(candidate)
+                if not batch:
+                    break
+                before = len(self.receipt["candidates"])
+                self.evaluate_batch([(candidate, "group-order") for candidate in batch], limit)
+                for row in self.receipt["candidates"][before:]:
+                    row["parent_index"] = parent["index"]
+                if self.best["index"] != parent["index"]:
+                    phase["accepted_indices"].append(self.best["index"])
+                    break
+                nonimproving += len(self.receipt["candidates"]) - before
+                if self.config.search_patience and nonimproving >= self.config.search_patience:
+                    phase["stopped_for_patience"] = True
+                    break
+            if self.best["index"] == parent["index"]:
+                break
+        phase.update(evaluations=len(self.receipt["candidates"]) - initial_count,
+                     elapsed_seconds=time.monotonic() - search_started)
+
+    def search_pack(self) -> None:
+        if self.config.pack_reload_candidates:
+            self.evaluate_batch([(replace(self.winner(), pack_reload_after_weight=True), "pack-reload-order")],
+                                len(self.receipt["candidates"]) + 1)
+        if self.config.pack_preload_candidates:
+            preloaded = replace(self.winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
+            candidate = replace(preloaded, wait_placement=CANDIDATES["pack_preload_wait_placement"])
+            self.evaluate_batch([(candidate, "pack-preload-waits")], len(self.receipt["candidates"]) + 1)
+
+    def publish(self) -> dict:
+        selected = self.output / self.best["directory"]
+        for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
+            shutil.copyfile(selected / name, self.output / name)
+        self.receipt.update(selected_index=self.best["index"], selected_class=self.best["class"],
+                            default_cycles=self.receipt["candidates"][0].get("cycles"),
+                            selected_cycles=self.best.get("cycles"),
+                            score_cache_entries=sum(key[0] == self.config.profile for key in self.score_cache),
+                            score_cache_hits=sum(row.get("score_cache_hit", False)
+                                                 for row in self.receipt["candidates"]),
+                            elapsed_seconds=time.monotonic() - self.started)
+        (self.output / "selection.json").write_text(json.dumps(self.receipt, indent=2) + "\n")
+        return self.receipt
+
+    def run(self) -> dict:
+        self.initialize_scorer()
+        self.prepare()
+        # Keep model execution isolated from compiler threads.
+        with ExitStack() as stack:
+            if self.standard_scorer:
+                self.score_executor = stack.enter_context(ProcessPoolExecutor(
+                    max_workers=self.config.workers,
+                    mp_context=multiprocessing.get_context("spawn")))
+            self.search_initial()
+            if self.config.search_group_evaluations:
+                self.search_groups()
+            self.search_pack()
+        return self.publish()
 
 
-def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provider: str = DEFAULTS["selection_provider"],
+def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
+                   provider: str = DEFAULTS["selection_provider"],
                    profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
                    spill: bool = DEFAULTS["spill"], spill_mxu: bool = DEFAULTS["spill_mxu"],
                    boundary: str = DEFAULTS["boundary"],
@@ -345,316 +514,22 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                    search_patience: int = DEFAULTS["api_search_patience"],
                    pack_reload_candidates: bool = DEFAULTS["api_pack_reload_candidates"],
                    pack_preload_candidates: bool = DEFAULTS["api_pack_preload_candidates"],
-                   curve_candidates: bool | None = None, scorer: Callable | None = None,
+                   scorer: Callable | None = None,
                    search_policy=None) -> dict:
-    """Verify and score candidates; count refusals toward budgets and publish the winner with its receipt."""
-    if profile is None:
-        profile = DEFAULTS["model_profile"] if provider == "model" else DEFAULTS["builtin_profile"]
-    if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
-        raise ValueError("unsupported provider or memory profile")
-    if curve_candidates is None:
-        curve_candidates = profile == "curve"
-    if type(curve_candidates) is not bool or (curve_candidates and profile != "curve"):
-        raise ValueError("curve-candidates requires the curve profile")
-    if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
-        raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
-    for name, value in (("search-group-evaluations", search_group_evaluations), ("search-patience", search_patience)):
-        if value < 0:
-            raise ValueError(name + " must be nonnegative")
-    if mreg_candidates is None:
-        mreg_candidates = tuple(tuple(random.Random(seed).choices(POOLS["mreg_rank_choices"],
-                                                                k=POOLS["mreg_vector_length"]))
-                                for seed in POOLS["mreg_seeds"])
-    effective_policy = policy_receipt(dict(
-        provider=provider, profile=profile, spill=spill, spill_mxu=spill_mxu,
-        boundary=boundary, guarded_pack=guarded_pack, max_candidates=max_candidates,
-        random_seeds=list(random_seeds), workers=workers,
-        store_window_candidates=[list(ranks) for ranks in store_window_candidates],
-        mreg_candidates=[list(ranks) for ranks in mreg_candidates],
-        search_group_evaluations=search_group_evaluations,
+    """Verify candidates and publish the lowest-cycle program in canonical order."""
+    config = SelectionConfig(
+        provider=provider, profile=profile, model=model, model_regions=model_regions,
+        spill=spill, spill_mxu=spill_mxu, boundary=boundary,
+        guarded_pack=guarded_pack, model_facts=model_facts,
+        max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
+        store_window_candidates=store_window_candidates,
+        mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations,
         search_patience=search_patience, pack_reload_candidates=pack_reload_candidates,
-        pack_preload_candidates=pack_preload_candidates, curve_candidates=curve_candidates,
-        objective=POLICY["objectives"][profile],
-        scoring_implementation=("native_model" if scorer is None else "caller_callback")))
+        pack_preload_candidates=pack_preload_candidates).resolved()
+    effective_policy = config.policy(scorer is None)
     if search_policy is not None and search_policy != effective_policy:
         raise ValueError("search policy override does not match the versioned effective policy")
-    if provider == "model":
-        if __package__:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from atlas_run_provenance import safe_path
-        source, output, binaries = map(safe_path, (source, output_dir, atlas_bin_dir))
-    else:
-        source, output, binaries = Path(source).resolve(strict=True), Path(output_dir).resolve(), Path(atlas_bin_dir).resolve()
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise ValueError("output directory must be empty to prevent stale artifacts")
-    output.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    commands, logs = [], []
-    log_lock, score_lock = threading.Lock(), threading.Lock()
-    receipt = {"schema": "atlas.model_selection.v1", "provider": provider, "profile": profile,
-               "objective": objective_receipt(provider, profile, scorer is None),
-               "guarded_pack": guarded_pack, "curve_candidates": curve_candidates,
-               "max_candidates": max_candidates, "workers": workers,
-               "search_group_evaluations": search_group_evaluations,
-               "search_patience": search_patience,
-               "pack_reload_candidates": pack_reload_candidates,
-               "pack_preload_candidates": pack_preload_candidates,
-               "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-               "search_policy": effective_policy,
-               "candidates": []}
-    standard_scorer = scorer is None
-    capture = None
-    if standard_scorer:
-        if model is None:
-            raise ValueError("model scoring requires --npu-model")
-        capture = capture_selection_inputs(source, output, binaries, model, model_regions, effective_policy)
-        capture.bind(semantic={"invocation": {
-            key: value for key, value in receipt.items() if key not in ("candidates", "source_sha256", "workers", "search_policy")
-        } | dict(boundary=boundary, spill=spill, spill_mxu=spill_mxu,
-                 random_seeds=random_seeds, store_window_candidates=store_window_candidates,
-                 mreg_candidates=mreg_candidates)})
-        from atlas_model_scorer import ModelScorer
-        scorer = ModelScorer(model, model_regions)
-        # Capture configuration before preparation, keeping model imports out of compiler threads.
-        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
-            runtime = executor.submit(scorer.runtime_receipt).result()
-        capture.bind(files={"selected_curve": runtime.pop("curve_path")},
-                     semantic={"base_configuration": runtime.pop("configuration")})
-        receipt["runtime_versions"] = runtime
-
-    def command(argv: list[str], directory: Path, stdout: Path | None = None) -> str:
-        rendered = f"cd {shlex.quote(str(directory))} && " + shlex.join(argv)
-        if stdout:
-            rendered += f" > {shlex.quote(str(stdout))}"
-        with log_lock:
-            commands.append(rendered)
-            (output / "commands.txt").write_text("\n".join(commands) + "\n")
-        try:
-            result = subprocess.run(argv, cwd=directory, capture_output=True, text=True,
-                                    env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
-        except OSError as error:
-            result = subprocess.CompletedProcess(argv, 1, "", str(error))
-        with log_lock:
-            logs.append(f"$ {rendered}\n{result.stderr}exit {result.returncode}\n")
-            (output / "log.txt").write_text("\n".join(logs))
-        if result.returncode:
-            raise ValueError(result.stderr.strip() or f"{argv[0]} exited {result.returncode}")
-        if stdout:
-            stdout.write_text(result.stdout)
-        return result.stdout
-
-    if model_facts is None and model is not None:
-        model_facts = output / "model-facts"
-        command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
-                 "--npu-model", str(model), "--out", str(model_facts)], output)
-    if capture is not None:
-        receipt["provider_facts_sha256"] = bind_selection_facts(capture, model_facts)
-    options = evidence_option(model_facts)
-    options.append("--atlas-compile-prepare=" +
-                   f"spill-mxu-state={str(spill_mxu).lower()} boundary={boundary}")
-    if guarded_pack:
-        options[-1] += " guarded-pack=true"
-    prepared = output / "1-virtual.mlir"
-    command([str(binaries / "atlas-opt"), str(source), *options,
-             "--mlir-print-op-on-diagnostic=false", "-o", str(prepared)], output)
-    seen: set[Candidate] = set()
-    # The scorer/model/regions are fixed for this invocation; profiles must not share scores.
-    score_cache: dict[tuple[str, tuple[int, ...]], int | Future] = {}
-    score_executor: ProcessPoolExecutor | None = None
-    best: dict | None = None
-
-    def cached_score(program: dict, scoring_profile: str) -> tuple[int | Future, bool]:
-        key = scoring_profile, tuple(instruction["word_u32"] for instruction in program["instructions"])
-        with score_lock:
-            if standard_scorer:
-                profiles = receipt.setdefault("scoring_configurations", {})
-                if scoring_profile not in profiles:
-                    profiles[scoring_profile] = score_executor.submit(
-                        scorer.profile_receipt, program, scoring_profile).result()
-                    receipt["objective"] = objective_receipt(
-                        provider, profile, standard_scorer, profiles[scoring_profile]["sha256"])
-            hit = key in score_cache
-            if not hit:
-                score_cache[key] = (score_executor.submit(scorer, program, scoring_profile)
-                                    if score_executor else scorer(program, profile=scoring_profile))
-            return score_cache[key], hit
-
-    def compile_candidate(candidate: Candidate, row: dict) -> None:
-        directory = output / row["directory"]
-        before = time.monotonic()
-        stage = "compile"
-        try:
-            if candidate.virtual_orders:
-                (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
-            command([str(binaries / "atlas-opt"), str(prepared),
-                     *candidate_options(candidate, provider, spill,
-                                        graph_output=bool(search_group_evaluations)),
-                     "--mlir-print-op-on-diagnostic=false", "-o", "final.mlir"], directory)
-            stage = "emit"
-            program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
-                                         directory, directory / "program.json"))
-            if standard_scorer or "compiler_search_policy_sha256" in program:
-                stage = "policy"
-                if program.get("compiler_search_policy_sha256") != COMPILER_POLICY_SHA256:
-                    raise ValueError("compiler search policy differs from driver; rebuild the selected compiler")
-            words = tuple(instruction["word_u32"] for instruction in program["instructions"])
-            (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
-            if scorer is not None:
-                stage = "score"
-                cached, row["score_cache_hit"] = cached_score(program, profile)
-                row["cycles"] = cached.result() if isinstance(cached, Future) else cached
-                if (directory / "graph.json").is_file():
-                    from atlas_model_replay import prediction_error
-                    graphs = json.loads((directory / "graph.json").read_text())
-                    row["proposal_prediction_error"] = prediction_error(graphs, row["cycles"], profile)
-            row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
-                b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
-        except (OSError, ValueError, RuntimeError) as error:
-            row.update(status="FAIL", error=str(error), error_stage=stage)
-        finally:
-            row["elapsed_seconds"] = time.monotonic() - before
-
-    def fail(message: str) -> None:
-        (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")
-        raise ValueError(message)
-
-    def evaluate_batch(specifications: list[tuple[Candidate, str]], limit: int = max_candidates) -> None:
-        nonlocal best
-        pending, before = [], len(receipt["candidates"])
-        for candidate, category in specifications:
-            if candidate in seen or len(receipt["candidates"]) >= limit:
-                continue
-            index = len(receipt["candidates"])
-            directory = output / "candidates" / f"{index:03d}-{category}"
-            directory.mkdir(parents=True)
-            row = {"index": index, "class": category, "options": asdict(candidate),
-                   "directory": str(directory.relative_to(output))}
-            pending.append((candidate, row))
-            seen.add(candidate)
-            receipt["candidates"].append(row)
-        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(pending)))) as executor:
-            futures = [executor.submit(compile_candidate, candidate, row) for candidate, row in pending]
-            for future in futures:
-                future.result()
-        for row in receipt["candidates"][before:]:
-            # A verified program the model cannot score is an identity or soundness alarm.
-            if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
-                fail(f"candidate {row['index']} failed model scoring: {row['error']}")
-        passing = [row for row in receipt["candidates"] if row["status"] == "PASS"]
-        # Assign canonical indices before parallel work to preserve deterministic ties.
-        best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
-
-    # Model imports, configuration and execution are isolated from compiler threads.
-    with ExitStack() as stack:
-        if standard_scorer:
-            score_executor = stack.enter_context(ProcessPoolExecutor(
-                max_workers=workers, mp_context=multiprocessing.get_context("spawn")))
-        evaluate_batch([(Candidate(), "default")])
-        if provider in ("model", "builtin"):
-            evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in POOLS["initial_lookaheads"]] +
-                           [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(CANDIDATES["initial_knob_cap"], max_candidates))
-            if best is None:
-                fail("no legal candidate: every initial candidate was refused")
-            def winner() -> Candidate:
-                return Candidate(**best["options"])  # asdict preserves tuple fields.
-
-            program = json.loads((output / best["directory"] / "program.json").read_text())
-            store_count = sum(instruction.get("operation") == "atlas.dma" and
-                              instruction.get("fields", {}).get("direction") == "store"
-                              for instruction in program["instructions"])
-            # Allocation maps each free rank modulo the store's actual free set.
-            window_base = winner()
-            placements = [(replace(window_base, wait_placement=CANDIDATES["initial_wait_placement"]), "wait-placement")]
-            placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
-                           for ranks in store_window_candidates]
-            placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
-                           for rank in POOLS["uniform_store_ranks"] if store_count]
-            evaluate_batch(placements, limit=min(CANDIDATES["initial_knob_cap"], max_candidates))
-            register_base = winner()
-            receipt["mreg_pool_size"] = len(mreg_candidates)
-            evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks") for ranks in mreg_candidates])
-            if search_group_evaluations:
-                search_started = time.monotonic()
-                initial_count = len(receipt["candidates"])
-                limit = initial_count + search_group_evaluations
-                phase = receipt["group_search"] = {
-                    "start_index": best["index"], "accepted_indices": [], "stopped_for_patience": False}
-                while len(receipt["candidates"]) < limit:
-                    parent = best
-                    nonimproving = 0
-                    graphs = json.loads((output / parent["directory"] / "graph.json").read_text())
-                    orders = tuple(tuple(graph["order"]) for graph in graphs)
-                    base = replace(winner(), lookahead=0, random_seed=None, virtual_orders=orders)
-                    seen.add(base)
-                    proposed = group_order_neighbors(graphs, orders)
-                    if curve_candidates:
-                        parent_program = json.loads((output / parent["directory"] / "program.json").read_text())
-                        try:
-                            validate_proposal_graphs(graphs, parent_program)
-                        except ValueError as error:
-                            fail(str(error))
-                        # Revisit incumbent wait placement after bank/order changes. Each retained
-                        # order has an unseen sibling, so remaining attempts bound the required prefix.
-                        remaining = limit - len(receipt["candidates"])
-                        proposed = rank_order_neighbors(
-                            graphs, chain((orders,), proposed), remaining,
-                            eligible=lambda order: any(candidate not in seen for candidate in
-                                                       order_candidates(base, (order,), True)))
-                        phase["proposal_policy"] = "native-cost-rank-with-wait-siblings-v1"
-                        phase["proposal_facts_sha256"] = parent_program["model_evidence"]["op_timing_sha256"]
-                    pending = order_candidates(base, proposed, curve_candidates)
-                    while len(receipt["candidates"]) < limit:
-                        batch = []
-                        width = min(CANDIDATES["batch_width"], limit - len(receipt["candidates"]))
-                        while len(batch) < width:
-                            candidate = next(pending, None)
-                            if candidate is None:
-                                break
-                            if candidate not in seen and candidate not in batch:
-                                batch.append(candidate)
-                        if not batch:
-                            break
-                        before = len(receipt["candidates"])
-                        evaluate_batch([(candidate, "group-order") for candidate in batch], limit)
-                        for row in receipt["candidates"][before:]:
-                            row["parent_index"] = parent["index"]
-                        if best["index"] != parent["index"]:
-                            phase["accepted_indices"].append(best["index"])
-                            break
-                        nonimproving += len(receipt["candidates"]) - before
-                        if search_patience and nonimproving >= search_patience:
-                            phase["stopped_for_patience"] = True
-                            break
-                    if best["index"] == parent["index"]:
-                        break
-                phase.update(evaluations=len(receipt["candidates"]) - initial_count,
-                             elapsed_seconds=time.monotonic() - search_started)
-            if pack_reload_candidates:
-                evaluate_batch([(replace(winner(), pack_reload_after_weight=True), "pack-reload-order")],
-                               len(receipt["candidates"]) + 1)
-            if pack_preload_candidates:
-                preloaded = replace(winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
-                evaluate_batch([(replace(preloaded, wait_placement=CANDIDATES["pack_preload_wait_placement"]), "pack-preload-waits")],
-                               len(receipt["candidates"]) + 1)
-    if capture is not None:
-        try:
-            receipt["provenance"] = capture.complete(
-                scoring_configurations=receipt.get("scoring_configurations", {}),
-                runtime_versions=receipt["runtime_versions"])
-        except (OSError, ValueError) as error:
-            receipt["publication_status"] = "REFUSED"
-            fail(str(error))
-    selected = output / best["directory"]
-    for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
-        shutil.copyfile(selected / name, output / name)
-    receipt.update(selected_index=best["index"], selected_class=best["class"],
-                   default_cycles=receipt["candidates"][0].get("cycles"),
-                   selected_cycles=best.get("cycles"),
-                   score_cache_entries=sum(key[0] == profile for key in score_cache),
-                   score_cache_hits=sum(row.get("score_cache_hit", False) for row in receipt["candidates"]),
-                   elapsed_seconds=time.monotonic() - started)
-    (output / "selection.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return receipt
+    return Selection(source, output_dir, atlas_bin_dir, config, scorer, effective_policy).run()
 
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
@@ -675,9 +550,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--search-group-evaluations", type=int,
                         help="additional verified dependency-group attempts after knob selection")
     parser.add_argument("--search-patience", type=int,
-                        help="stop a phase after this many nonimproving attempts, checked after each batch; zero disables")
-    parser.add_argument("--curve-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="rank legal order proposals by derived costs and score default/source wait siblings (curve default)")
+                        help="stop a phase after this many nonimproving attempts, "
+                             "checked after each batch; zero disables")
     parser.add_argument("--pack-reload-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score loading a pending weight before an adjacent PACK reload")
     parser.add_argument("--pack-preload-candidates", action=argparse.BooleanOptionalAction, default=None,
@@ -693,7 +567,6 @@ def model_arguments(args: argparse.Namespace) -> dict:
     profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model" else DEFAULTS["builtin_profile"])
     return {"provider": args.provider, "profile": profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "model_facts": args.model_facts,
-            "curve_candidates": args.curve_candidates,
             "workers": args.workers,
             "mreg_candidates": None if banks else (), **budget,
             "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}

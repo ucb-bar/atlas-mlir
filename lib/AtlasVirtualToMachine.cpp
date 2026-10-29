@@ -1,5 +1,5 @@
 #include "llvm/ADT/Twine.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasBoundaryABI.h"
@@ -1097,7 +1097,7 @@ struct LowerAtlasVirtualToMachinePass
     auto selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
-    const bool modelProvider = selected->id == timing::kModelTimingProviderId;
+    const bool modelProvider = selected->model != nullptr;
     reuseAtlasImmutableWeights(function);
     if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
       return refuse("pack-relayout-rows must be 0, 1, or 2");

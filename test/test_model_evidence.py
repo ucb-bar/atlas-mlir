@@ -23,10 +23,10 @@ class ModelEvidenceTest(unittest.TestCase):
     def test_existing_pins_enable_tests_and_missing_file_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             bundle = Path(directory)
-            for name in ("facts.lock.json", "model-timing.json", "model-overlap.json"):
+            for name in ("facts.lock.json", "model-timing.json"):
                 (bundle / name).write_text("{}")
             with patch.dict(os.environ, {"ATLAS_TEST_MODEL_FACTS": str(bundle)}, clear=True):
                 self.assertTrue(model_evidence_available())
-                (bundle / "model-overlap.json").unlink()
+                (bundle / "model-timing.json").unlink()
                 with self.assertRaisesRegex(FileNotFoundError, "ATLAS_TEST_MODEL_FACTS"):
                     model_evidence_available()

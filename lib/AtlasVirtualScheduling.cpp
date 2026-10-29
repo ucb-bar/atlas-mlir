@@ -1,6 +1,4 @@
 #include "Atlas/AtlasSearchPolicy.h"
-#include "Atlas/AtlasModelTiming.h"
-#include "Atlas/AtlasModelReplay.h"
 // Pre-allocation scheduling of virtual Atlas operations. Each block is list
 // scheduled onto the functional units its operations occupy, keeping every
 // SSA and implicit-state dependence. Costs are rough on purpose: registers
@@ -555,7 +553,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload)) return failure();
     const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
-        atlasPackRelayoutRowsPerIteration(provider.id == timing::kModelTimingProviderId);
+        atlasPackRelayoutRowsPerIteration(provider.model != nullptr);
     const int rowWords = geometry.packRowWords() * groupedRows;
     const int rows = geometry.rows / groupedRows;
     // Policy: this proposal omits general scalar setup and assumes the
@@ -1136,22 +1134,11 @@ struct ScheduleAtlasVirtualPass
       return refuse("lookahead must be 0, 1, 2, 4, or 8");
     if (lookahead && randomSeed >= 0)
       return refuse("lookahead and random-seed are mutually exclusive");
-    if (selected->id == timing::kModelTimingProviderId && (!selected->proposalReplay || !selected->proposalDMACapacity))
-      return refuse("model virtual scheduling requires source-bound replay and DMA capacity");
     if (!orderFile.empty() && (lookahead || randomSeed >= 0))
       return refuse("order-file excludes lookahead and random-seed");
     if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
       return refuse("pack-relayout-rows must be 0, 1, or 2");
     selected->packRelayoutRows = packRelayoutRows;
-    // Replay metadata only ranks proposals; costs and admissions stay selected.
-    timing::TimingProvider proposal = *selected;
-    if (!graphOutput.empty() && !proposal.proposalReplay) {
-      auto metadata = timing::modelTimingProviderFactory(module);
-      if (!metadata.error.empty()) return refuse(metadata.error);
-      proposal.proposalReplay = metadata.value.proposalReplay;
-      proposal.proposalFactsSha256 = metadata.value.proposalFactsSha256;
-      proposal.proposalDMACapacity = metadata.value.proposalDMACapacity;
-    }
     std::optional<llvm::json::Value> requested;
     if (!orderFile.empty()) {
       auto file = llvm::MemoryBuffer::getFile(orderFile);
@@ -1207,10 +1194,7 @@ struct ScheduleAtlasVirtualPass
           return signalPassFailure();
         }
         if (!graphOutput.empty()) {
-          auto costs = costsOf(*graph, *selected);
-          if (failed(costs)) return signalPassFailure();
-          Machine estimate(*graph, *costs, proposal.proposalDMACapacity);
-          llvm::json::Array preds, names, order, costRecords;
+          llvm::json::Array preds, names, order;
           llvm::DenseMap<Operation *, unsigned> ids;
           for (unsigned node = 0; node < graph->nodes.size(); ++node) {
             ids[graph->nodes[node]] = node;
@@ -1219,24 +1203,13 @@ struct ScheduleAtlasVirtualPass
               incoming.push_back(pred);
             preds.push_back(std::move(incoming));
             names.push_back(graph->nodes[node]->getName().getStringRef());
-            const Cost &cost = (*costs)[node];
-            costRecords.push_back(llvm::json::Object{{"unit", unsigned(cost.unit)}, {"busy", cost.busy},
-                {"latency", cost.latency}, {"frontend", cost.frontend}, {"queued_dma", cost.queuedDMA},
-                {"drains", cost.drains}});
           }
           for (Operation *op : freeOperations(block)) {
             unsigned node = ids.lookup(op);
             order.push_back(node);
-            estimate.place(node);
           }
           graphs.push_back(llvm::json::Object{{"preds", std::move(preds)}, {"operations", std::move(names)},
-              {"order", std::move(order)},
-              {"proposal", llvm::json::Object{{"schema", "atlas.virtual_proposal.v2"},
-                  {"replay", llvm::json::Object(proposal.proposalReplay->document)},
-                  {"facts_sha256", proposal.proposalFactsSha256}, {"units", kUnits},
-                  {"dma_capacity", proposal.proposalDMACapacity}, {"costs", std::move(costRecords)},
-                  {"estimate", llvm::json::Object{{"makespan", estimate.makespan},
-                                                 {"exposed_waiting", estimate.exposedWaiting}}}}}});
+              {"order", std::move(order)}});
         }
         ++index;
         ++blockIndex;

@@ -25,7 +25,6 @@ from test_spill_resources import (
 from test_virtual_spilling import ROOT, compile_program, pressure
 
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_model_facts import safe_path
 from atlas_model_schema import LOCK
 from atlas_model_scorer import model_instruction
 from atlas_model_timing import source_digest
@@ -39,11 +38,11 @@ class SpillModelExecutionTest(unittest.TestCase):
         selected = os.environ.get("ATLAS_DERIVE_MODEL_ROOT")
         if not selected:
             raise ValueError("ATLAS_RUN_NPU_MODEL=1 requires ATLAS_DERIVE_MODEL_ROOT")
-        root = safe_path(selected)
+        root = Path(selected).absolute()
         isolate_model_imports(cls, str(root))
         import npu_model
         import torch
-        imported = safe_path(Path(npu_model.__file__).parent.parent)
+        imported = Path(npu_model.__file__).absolute().parent.parent
         if imported != root:
             raise ValueError("imported npu_model differs from ATLAS_DERIVE_MODEL_ROOT")
         source, _ = source_digest(imported)

@@ -8,7 +8,6 @@ import sys
 from types import SimpleNamespace
 
 from atlas_derive_curve import resolve_curve_path
-from atlas_model_facts import safe_path
 from atlas_model_profiles import bind_synthetic_configuration, scoring_configuration_receipt, synthetic_targets
 from atlas_model_schema import LOCK
 from atlas_model_semantics import check_model_semantics
@@ -20,12 +19,12 @@ from check_program_decode import decode_binary
 
 @lru_cache(maxsize=1)
 def _model_content(root):
-    root = safe_path(root)
+    root = Path(root).absolute()
     check_model_semantics(root)
     sys.path.insert(0, str(root))
     import npu_model
     import torch
-    if safe_path(Path(npu_model.__file__).parent.parent) != root:
+    if Path(npu_model.__file__).parent.parent.absolute() != root:
         raise ValueError("imported npu_model differs from --npu-model")
     torch.set_num_threads(POLICY["engineering"]["scorer"]["torch_threads"])
     source, _ = source_digest(root)
@@ -92,8 +91,9 @@ class ModelScorer:
     regions: tuple[Path, ...] = ()
 
     def __post_init__(self):
-        object.__setattr__(self, "model", safe_path(self.model))
-        object.__setattr__(self, "regions", tuple(json.loads(safe_path(path).read_text()) for path in self.regions))
+        object.__setattr__(self, "model", Path(self.model).absolute())
+        object.__setattr__(self, "regions", tuple(
+            json.loads(Path(path).absolute().read_text()) for path in self.regions))
         # Snapshot named targets once, including when this scorer is pickled for workers.
         object.__setattr__(self, "_targets", synthetic_targets())
         object.__setattr__(self, "_scorer_policy", dict(POLICY["engineering"]["scorer"]))
@@ -103,9 +103,6 @@ class ModelScorer:
         """Bind and identify the exact configuration used for native scoring."""
         root, source, numerical, config_hash, cfg = selected_model(self.model, include_configuration=True)
         evidence = document.get("model_evidence", {})
-        expected = (evidence.get("source_sha256"), evidence.get("numerical_data_sha256"), evidence.get("configuration_sha256"))
-        if (source, numerical, config_hash) != expected:
-            raise ValueError("scoring model source, numerical data or configuration differs from provider evidence")
         target = self._targets.get(profile)
         if target is not None:
             bind_synthetic_configuration(cfg, target)

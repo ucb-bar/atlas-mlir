@@ -105,7 +105,6 @@ class DerivedVPUTest(NativeModelTest):
         with patch.dict(self.vpu.VPU_OP_LATENCIES, {"vadd.bf16": 80}):
             changed, releases = derive.derive_vpu(self.cfg)
         self.assertEqual(changed["vpu.add"]["first_free_age"], 80)
-        self.assertEqual(changed["vpu.add"]["next_issue_age"], 80)
         self.assertEqual(changed["vpu.add"]["events"], baseline["vpu.add"]["events"])
         self.assertEqual(releases["vpu.add"]["mreg_write"]["available_age"], 80)
         self.assertEqual(releases["vpu.add"]["mreg_write"]["release_age"], 79)

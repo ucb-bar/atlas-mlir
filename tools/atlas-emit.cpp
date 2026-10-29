@@ -2,7 +2,7 @@
 #include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSelectedTarget.h"
 #include "Atlas/AtlasStream.h"
