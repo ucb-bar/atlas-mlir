@@ -1,5 +1,6 @@
 """Connected device buffers, pack loops and initialized temporary reads."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -88,6 +89,52 @@ def connected_request(hidden):
     "select Merlin and Atlas tools",
 )
 class ResidentGraphTest(unittest.TestCase):
+    def test_cache_exhaustion_retries_entire_resident_graph_without_stale_regions(self):
+        from unittest.mock import patch
+        from atlas_mlir_native import resident_graph
+        from atlas_mlir_native.binding import AtlasNativeBinding
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.semantic_compiler.snapshot import open_native_snapshot
+        from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+        from test_looped_mnk import build_snapshot
+        from test_virtual_ssa import ROOT
+
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            snapshot = (open_native_snapshot(Path(os.environ["MERLIN_NATIVE_SNAPSHOT"]))
+                        if os.environ.get("MERLIN_NATIVE_SNAPSHOT") else build_snapshot(root))
+            request = connected_request(64)
+            abi = AtlasNativeBinding.plan_boundary_abi(request)
+            target = root / "resident-retry"
+            attempts = []
+            run = resident_graph._run
+            def limited(command, *, input_text):
+                if "--atlas-compile-unscheduled" in command or "--atlas-compile" in command:
+                    attempts.append('"atlas.virtual_slot"' in input_text)
+                    if len(attempts) == 1:
+                        self.assertTrue((target / "regions/0/manifest.json").exists())
+                        (target / "stale").write_text("discard with published child regions")
+                        raise NativeCompilationError(
+                            "compile_error", "generated program exceeds the 32768-word policy limit after branch relaxation"
+                        )
+                    self.assertFalse((target / "stale").exists())
+                return run(command, input_text=input_text)
+            with codegen_options(CodegenOptions(reduction_unroll="4")):
+                with patch.object(resident_graph, "_run", side_effect=limited):
+                    manifest = resident_graph.compile_resident(
+                        snapshot, request, fixed_inputs=abi["fixed_inputs"], fixed_outputs=tuple(abi["fixed_outputs"]),
+                        target_source=ROOT, destination=target, limits=SearchLimits(wall_timeout_s=180),
+                    )
+            verify_native_publication(
+                target, manifest, engine="merlin_native", request_digest=request.digest(),
+                target_identity=request.target_identity,
+            )
+            self.assertEqual(attempts, [True, False])
+            execution = json.loads((target / "execution_plan.json").read_text())
+            self.assertFalse(execution["codegen"]["operand_reuse_enabled"])
+            self.assertTrue(all(region.get("operand_reuse") is None for region in execution["regions"]))
+
     def test_large_scale_constant_stays_in_device_memory(self):
         from atlas_mlir_native.binding import BF16_BINARY_ATTRS
         from atlas_mlir_native.layout import pack_bf16_matrix

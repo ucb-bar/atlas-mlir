@@ -46,7 +46,7 @@ class LoopedCPackageTest(unittest.TestCase):
             for name, data in files.items():
                 (package / name).write_bytes(data)
             cls.cases.append((shape, target, package, record, execution))
-        for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True)):
+        for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True), ((65, 7, 65), True)):
             target = cls.root / ("seeded_" + "_".join(map(str, shape)))
             _, _, _, _, execution = compile_case(cls.snapshot, shape, target, source=seeded_source_request(shape, relu))
             record, files = prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)
@@ -136,6 +136,56 @@ class LoopedCPackageTest(unittest.TestCase):
             self.assertEqual(data[:6], b"\x7fELF\x02\x01")
             self.assertEqual(struct.unpack_from("<HH", data, 16), (1, 243))
             self.assertEqual(struct.unpack_from("<I", data, 48)[0] & 6, 4)
+
+    def test_binding_rejects_context_host_overlap_without_mutation(self):
+        compiler = shutil.which("cc")
+        if not compiler:
+            self.skipTest("C compiler unavailable")
+        for shape, _, package, record, _ in self.cases:
+            if record["schema"] != "atlas.looped_c_package.v1":
+                continue
+            with self.subTest(shape=shape, seeded="LAYER_SEED_BYTES" in (package / "layer.h").read_text()):
+                source = package / "alias-bind.c"
+                source.write_text(r'''#include "layer.h"
+#include <assert.h>
+#include <string.h>
+static uint32_t read32(void *p, uintptr_t a) { (void)p; (void)a; return 5; }
+static void write32(void *p, uintptr_t a, uint32_t v) { (void)p; (void)a; (void)v; }
+static int put(void *p, uintptr_t a, const uint8_t *d, size_t n) {
+  (void)p; (void)a; (void)d; (void)n; return 0;
+}
+static int get(void *p, uintptr_t a, uint8_t *d, size_t n) {
+  (void)p; (void)a; (void)d; (void)n; return 0;
+}
+int main(void) {
+  union { atlas_host host; layer_context context;
+          unsigned char bytes[sizeof(atlas_host)+sizeof(layer_context)]; } shared;
+  unsigned char before[sizeof(shared)];
+  static unsigned char workspace[LAYER_WORKSPACE_BYTES];
+  atlas_host_map map = {0x20000u,0x40000u,131072u};
+  atlas_host_mmio mmio = {read32,write32,0};
+  atlas_host_memory memory = {.coherent=1};
+  atlas_tile_memory_io io = {put,get,0};
+  for (size_t offset=0;offset<=_Alignof(layer_context);offset+=_Alignof(layer_context)) {
+    memset(&shared,0xa5,sizeof(shared));
+    assert(atlas_host_init(&shared.host,map,mmio,memory)==ATLAS_HOST_OK);
+    memcpy(before,&shared,sizeof(shared));
+    layer_context *context=(layer_context *)(void *)(shared.bytes+offset);
+    assert(layer_bind(context,&shared.host,io,workspace,sizeof(workspace),100)==LAYER_INVALID);
+    assert(memcmp(before,&shared,sizeof(shared))==0);
+  }
+  layer_context disjoint;
+  assert(layer_bind(&disjoint,&shared.host,io,workspace,sizeof(workspace),100)==LAYER_OK);
+  return 0;
+}
+''')
+                executable = package / "alias-bind"
+                subprocess.run(
+                    [compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                     str(source), str(package / "layer.c"), "-o", str(executable)],
+                    check=True, capture_output=True,
+                )
+                subprocess.run([str(executable)], check=True, capture_output=True)
 
     def test_cli_rejects_mutated_or_stale_native_members(self):
         from atlas_mlir_native.looped_c import prepare_c_package

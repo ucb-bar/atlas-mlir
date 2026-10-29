@@ -2,6 +2,7 @@
 #define ATLAS_TARGET_CONFIG_H
 namespace mlir::atlas {
 // Selected source configuration, also consumed by the host runtime tools.
+constexpr unsigned kAtlasSpillFrameBytes = @ATLAS_SPILL_FRAME_BYTES@;
 constexpr unsigned kAtlasIMEMCapacityBytes = @ATLAS_IMEM_BYTES@;
 }
 #endif

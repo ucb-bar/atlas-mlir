@@ -7,5 +7,6 @@
   "imem_base": 131072,
   "imem_capacity_bytes": 131072,
   "csr_base": 262144,
-  "start_csr_offset": 24
+  "start_csr_offset": 24,
+  "vmem_spill_frame_bytes": 245760
 }

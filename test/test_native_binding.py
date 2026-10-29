@@ -2711,6 +2711,59 @@ class NativeBindingTest(unittest.TestCase):
         )["status"], "PASS")
         self.assertEqual(json.loads((destination / "execution_plan.json").read_text())["operation"], "mxu0_k2")
 
+    def check_generated_binding_aliases(self, directory, prefix):
+        source = self.work / (prefix + "-alias-bind.c")
+        source.write_text(r'''#include "PREFIX_data.h"
+#include <assert.h>
+#include <string.h>
+static uint32_t read32(void *p, uintptr_t a) { (void)p; (void)a; return 5; }
+static void write32(void *p, uintptr_t a, uint32_t v) { (void)p; (void)a; (void)v; }
+static int put(void *p, uintptr_t a, const uint8_t *d, size_t n) {
+  (void)p; (void)a; (void)d; (void)n; return 0;
+}
+static int get(void *p, uintptr_t a, uint8_t *d, size_t n) {
+  (void)p; (void)a; (void)d; (void)n; return 0;
+}
+int main(int argc,char **argv) {
+  assert(argc==3);
+  static union { max_align_t alignment; unsigned char bytes[8192]; } storage[4];
+  static unsigned char before[sizeof(storage)];
+  atlas_host_map map={0x20000u,0x40000u,131072u};
+  atlas_host_mmio mmio={read32,write32,0};
+  atlas_host_memory memory={.coherent=1};
+  for (size_t offset=0;offset<=_Alignof(max_align_t);offset+=_Alignof(max_align_t)) {
+    memset(storage,0,sizeof(storage));
+    void *objects[]={storage[0].bytes,storage[1].bytes,storage[2].bytes,storage[3].bytes};
+    objects[argv[1][0]-'0']=(unsigned char *)objects[argv[2][0]-'0']+offset;
+    assert(atlas_host_init(objects[1],map,mmio,memory)==ATLAS_HOST_OK);
+    memcpy(before,storage,sizeof(storage));
+    assert(PREFIX_bind(objects[0],objects[1],0,put,get,100,objects[2],2048,
+                       objects[3],UPPER_WINDOW_COUNT+1u)==1);
+    assert(memcmp(before,storage,sizeof(storage))==0);
+  }
+  memset(storage,0,sizeof(storage));
+  assert(atlas_host_init((atlas_host *)(void *)storage[1].bytes,map,mmio,memory)==ATLAS_HOST_OK);
+  assert(PREFIX_bind((atlas_ordered_k_tile *)(void *)storage[0].bytes,
+      (atlas_host *)(void *)storage[1].bytes,0,put,get,100,storage[2].bytes,2048,
+      (atlas_host_buffer *)(void *)storage[3].bytes,UPPER_WINDOW_COUNT+1u)==0);
+  return 0;
+}
+'''.replace("UPPER", prefix.upper()).replace("PREFIX", prefix))
+        executable = self.work / (prefix + "-alias-bind")
+        result = subprocess.run(
+            ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+             "-DATLAS_DIAGNOSTIC_ORDERED_K=1", "-DATLAS_DIAGNOSTIC_SOURCE_MN=1",
+             "-I", str(directory), "-I", str(ROOT / "runtime"), str(source),
+             str(ROOT / "runtime/atlas_host.c"), str(ROOT / "runtime/atlas_ordered_k.c"), "-o", str(executable)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for first in range(4):
+            for second in range(first + 1, 4):
+                with self.subTest(prefix=prefix, first=first, second=second):
+                    result = subprocess.run([str(executable), str(first), str(second)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_ordered_k_cli_rechecks_source_windows_and_refuses_bad_geometry(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
         from merlin.targetgen.cli import main as targetgen_main
@@ -2774,6 +2827,7 @@ class NativeBindingTest(unittest.TestCase):
         ], capture_output=True, text=True, check=False)
         self.assertEqual(generated.returncode, 0, generated.stderr)
         handoff = json.loads((host_data / "manifest.json").read_text())
+        self.check_generated_binding_aliases(host_data, "atlas_ordered_k")
         header = (host_data / "atlas_ordered_k_data.h").read_bytes()
         self.assertEqual((handoff["window_count"], handoff["status"]), (4, "diagnostic_unbound"))
         self.assertEqual(handoff["source_domain_coverage"], "runtime_subset_unqualified")
@@ -3362,6 +3416,7 @@ class NativeBindingTest(unittest.TestCase):
         for name, payload in files.items():
             (bundle / name).write_bytes(payload)
         (bundle / "manifest.json").write_text(json.dumps(record, sort_keys=True) + "\n")
+        self.check_generated_binding_aliases(bundle, "atlas_source_mn")
         from merlin.frontends.linalg_mlir import parse_mlir_text
         from merlin.semantic_compiler.precision_intake import (
             survey_source_f32_batched_matmuls,
@@ -4104,6 +4159,7 @@ class NativeBindingTest(unittest.TestCase):
             "-DATLAS_DIAGNOSTIC_PRECISION_POLICY=1", f"-I{static_bundle}",
             f"-I{wrapper_dir}", str(wrapper_dir / "main.c"),
             str(wrapper_dir / "atlas_source_mn_model_wrapper.c"),
+            str(static_bundle / "atlas_host.c"), str(static_bundle / "atlas_ordered_k.c"),
             "-o", str(wrapper_executable),
         ], check=False, capture_output=True, text=True)
         self.assertEqual(wrapper_build.returncode, 0, wrapper_build.stderr)

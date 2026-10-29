@@ -13,7 +13,7 @@ from pathlib import Path
 
 from test_virtual_ssa import ROOT
 
-SHAPES = ((64, 64, 64), (64, 96, 32), (31, 33, 32), (33, 65, 31), (1, 7, 65), (7, 33, 1))
+SHAPES = ((64, 64, 64), (64, 96, 32), (31, 33, 32), (33, 65, 31), (1, 7, 65), (7, 33, 1), (65, 7, 65))
 
 
 def source_request(m, n, k, *, relu=False):
@@ -307,6 +307,12 @@ class LoopedMNKTest(unittest.TestCase):
                 return looped_tiling.tuning_key(self.snapshot, request, {"a": 0, "w": 5}, (10,), SearchLimits())
             with patch.object(looped_tiling, "__file__", str(provider)), patch.object(codegen, "__file__", str(shared)):
                 initial = key()
+                token = looped_tiling._operand_reuse_enabled.set(False)
+                try:
+                    self.assertNotEqual(initial, key())
+                    self.assertFalse(key()["operand_reuse_enabled"])
+                finally:
+                    looped_tiling._operand_reuse_enabled.reset(token)
                 helper.write_text("changed helper")
                 provider_changed = key()
                 self.assertNotEqual(initial["provider_sources"], provider_changed["provider_sources"])
@@ -334,6 +340,191 @@ class LoopedMNKTest(unittest.TestCase):
         for bad in (0, -1, 65, True, 2.0):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 _virtual(plan, (0x90000000, 0x90010000), 0x90020000, k_unroll=bad)
+
+    def test_operand_cache_scope_capacity_and_compact_fallback(self):
+        from atlas_mlir_native.binding import NATIVE_CHECKS, NATIVE_PIPELINES, _run
+        from atlas_mlir_native.looped_tiling import _virtual, prepare_plan
+
+        tools = Path(os.environ["ATLAS_OOT_BIN_DIR"])
+        addresses, output = (0x90000000, 0x90040000), 0x90080000
+        for shape in ((65, 97, 65), (65, 7, 65), (1, 65, 1), (65, 1, 1), (1, 1, 65),
+                      (32, 64, 3840), (32, 64, 3841), (64, 128, 768), (64, 128, 769)):
+            plan = prepare_plan(source_request(*shape))
+            mc, nc, kc = plan.counts
+            cached = (mc > 1 or nc > 1) and kc <= 120
+            both = mc > 1 and nc > 1 and (1 + nc) * kc <= 120
+            for seed in (None, 0x90070000):
+                with self.subTest(shape=shape, seed=seed):
+                    virtual = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4)
+                    compact = _virtual(plan, addresses, output, seed_address=seed, k_unroll=4, operand_reuse=False)
+                    self.assertEqual(virtual.count('"atlas.virtual_slot"'), kc * (1 + nc if both else 1) if cached else 0)
+                    self.assertEqual(virtual.count('"atlas.virtual_restore"'), 2 * nc * kc if both else kc if cached else 0)
+                    if cached:
+                        self.assertEqual(virtual.count('"atlas.virtual_dma_load_fp8"'), (1 + nc) * kc if both else 2 * kc)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_readout_bf16"'), nc if both else 1)
+                        self.assertEqual(virtual.count('"atlas.virtual_mxu_load_acc_bf16"'),
+                                         (nc if both else 1) * int(seed is not None))
+                        entry, row = virtual.split("^m_body(", 1)
+                        # A is refreshed per row; retained W is initialized before M.
+                        self.assertEqual('"atlas.virtual_save"' in entry, nc == 1 or both)
+                        self.assertEqual('"atlas.virtual_save"' in row, nc > 1)
+                    else:
+                        self.assertEqual(virtual, compact)
+                    for pipeline in ("mandatory", "optimized"):
+                        machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
+                        _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
+
+    def test_operand_cache_keeps_explicit_code_size_budgets_compact(self):
+        from atlas_mlir_native.looped_c import prepare_c_package
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
+        with codegen_options(CodegenOptions(io_memory_bytes=1048576, reduction_unroll="4", program_size_limit_bytes=2048)):
+            snapshot = build_snapshot(self.root / "compact-snapshot")
+            target = self.root / "compact-cache-fallback"
+            _, _, _, _, execution = compile_case(snapshot, (64, 128, 512), target)
+            self.assertIsNone(execution["operand_reuse"])
+            self.assertFalse(execution["codegen"]["operand_reuse_enabled"])
+            self.assertNotIn('"atlas.virtual_slot"', (target / "atlas-virtual.mlir").read_text())
+            self.assertLessEqual((target / "program.bin").stat().st_size, 2048)
+            prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)
+
+    def test_cache_resource_exhaustion_retries_compact_and_exports(self):
+        from unittest.mock import patch
+        from atlas_mlir_native import binding, looped_tiling
+        from atlas_mlir_native.looped_c import prepare_c_package
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+
+        snapshot = self.snapshot
+        run = binding._run
+        diagnostics = (
+            "VMEM spill frame exhausted (shared temporary pool)",
+            "lowered program exceeds the 32768-word policy limit",
+            "generated program exceeds the 32768-word policy limit (including inserted delays)",
+            "generated program exceeds the 32768-word policy limit after branch relaxation",
+            "encoded program exceeds the 32768-word policy limit",
+        )
+        for index, diagnostic in enumerate(diagnostics):
+            attempts = []
+            def limited(command, *, input_text):
+                if "--atlas-compile-unscheduled" in command:
+                    attempts.append('"atlas.virtual_slot"' in input_text)
+                    if len(attempts) == 1:
+                        raise NativeCompilationError("compile_error", diagnostic)
+                return run(command, input_text=input_text)
+            target = self.root / f"retry-{index}"
+            with codegen_options(CodegenOptions(reduction_unroll="4")):
+                with patch.object(binding, "_run", side_effect=limited):
+                    _, _, _, _, execution = compile_case(snapshot, (64, 128, 512), target)
+                self.assertEqual(attempts, [True, False])
+                self.assertIsNone(execution["operand_reuse"])
+                self.assertFalse(execution["codegen"]["operand_reuse_enabled"])
+                prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)
+                plan = looped_tiling.prepare_plan(source_request(64, 128, 512))
+                self.assertIsNotNone(looped_tiling._operand_cache(plan))
+
+    def test_cache_retry_preserves_existing_destinations_and_propagates_other_errors(self):
+        from atlas_mlir_native.looped_tiling import (
+            _operand_cache, _operand_reuse_enabled, prepare_plan, retry_without_operand_reuse,
+        )
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+
+        calls = []
+        @retry_without_operand_reuse
+        def compile_owned(*, destination, diagnostic, use_cache=True, shape=(64, 128, 512)):
+            calls.append(_operand_reuse_enabled.get())
+            _operand_cache(prepare_plan(source_request(*shape)), use_cache)
+            destination.mkdir(exist_ok=True)
+            (destination / "partial").write_text("owned")
+            if calls[-1]:
+                (destination / "stale").write_text("discard on retry")
+                raise NativeCompilationError("compile_error", diagnostic)
+            self.assertFalse((destination / "stale").exists())
+            return "compact"
+        target = self.root / "owned-retry"
+        self.assertEqual(compile_owned(destination=target, diagnostic="VMEM spill frame exhausted"), "compact")
+        self.assertEqual(calls, [True, False])
+        for diagnostic in ("VMEM spill frame exhausted", "invalid operand"):
+            calls.clear()
+            with self.assertRaises(NativeCompilationError):
+                compile_owned(destination=target, diagnostic=diagnostic)
+            self.assertEqual(calls, [True])
+            self.assertEqual((target / "partial").read_text(), "owned")
+        for index, (enabled, shape) in enumerate(((False, (64, 128, 512)), (True, (32, 32, 512)),
+                                                  (True, (64, 128, 3841)))):
+            calls.clear()
+            with self.assertRaises(NativeCompilationError):
+                compile_owned(destination=self.root / f"no-cache-retry-{index}",
+                              diagnostic="VMEM spill frame exhausted", use_cache=enabled, shape=shape)
+            self.assertEqual(calls, [True])
+
+    def test_cache_retry_uses_remaining_budget_and_restores_context_after_refusal(self):
+        from unittest.mock import patch
+        from atlas_mlir_native import looped_tiling
+        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+
+        attempts = []
+        @looped_tiling.retry_without_operand_reuse
+        def refuse(*, destination, limits):
+            attempts.append((looped_tiling._operand_reuse_enabled.get(), limits.wall_timeout_s))
+            looped_tiling._operand_cache(looped_tiling.prepare_plan(source_request(64, 128, 512)))
+            raise NativeCompilationError("compile_error", "encoded program exceeds the 32768-word policy limit")
+        for elapsed, expected in ((7.25, [(True, 60), (False, 52)]), (60, [(True, 60)])):
+            attempts.clear()
+            with patch.object(looped_tiling, "monotonic", side_effect=(100, 100 + elapsed)):
+                with self.assertRaises(NativeCompilationError) as caught:
+                    refuse(destination=self.root / "budget-refusal", limits=SearchLimits())
+            self.assertEqual(attempts, expected)
+            self.assertEqual(caught.exception.status, "search_timeout" if elapsed == 60 else "compile_error")
+            self.assertTrue(looped_tiling._operand_reuse_enabled.get())
+            self.assertIsNone(looped_tiling._operand_cache_used.get())
+
+    def test_nested_compilation_has_one_outer_compact_retry(self):
+        from atlas_mlir_native import looped_tiling
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+
+        attempts = []
+        @looped_tiling.retry_without_operand_reuse
+        def child(*, destination):
+            reuse = looped_tiling._operand_cache(looped_tiling.prepare_plan(source_request(64, 128, 512)))
+            attempts.append(reuse)
+            if reuse:
+                raise NativeCompilationError("compile_error", "VMEM spill frame exhausted")
+            return "compact"
+        @looped_tiling.retry_without_operand_reuse
+        def parent(*, destination):
+            return child(destination=destination / "child")
+        self.assertEqual(parent(destination=self.root / "nested-retry"), "compact")
+        self.assertEqual(attempts, ["aw", None])
+        self.assertTrue(looped_tiling._operand_reuse_enabled.get())
+        self.assertIsNone(looped_tiling._operand_cache_used.get())
+
+    def test_old_loop_plan_without_operand_reuse_exports_with_compact_default(self):
+        from atlas_mlir_native.looped_c import prepare_c_package
+        from atlas_mlir_native.looped_tiling import _operand_reuse_enabled
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        import hashlib
+
+        with codegen_options(CodegenOptions(reduction_unroll="4")):
+            target = self.root / "legacy-cache-plan"
+            token = _operand_reuse_enabled.set(False)
+            try:
+                compile_case(self.snapshot, (64, 128, 512), target)
+            finally:
+                _operand_reuse_enabled.reset(token)
+            virtual = (target / "atlas-virtual.mlir").read_text()
+            self.assertIn("%stored =", virtual)
+            self.assertNotIn("%out_stored", virtual)
+            execution = json.loads((target / "execution_plan.json").read_text())
+            del execution["operand_reuse"]
+            payload = (json.dumps(execution, sort_keys=True, indent=2) + "\n").encode()
+            (target / "execution_plan.json").write_bytes(payload)
+            manifest = json.loads((target / "manifest.json").read_text())
+            manifest["execution_plan_sha256"] = hashlib.sha256(payload).hexdigest()
+            manifest["stage_artifacts"]["execution_plan.json"] = hashlib.sha256(payload).hexdigest()
+            (target / "manifest.json").write_text(json.dumps(manifest) + "\n")
+            prepare_c_package(target / "source-request.json", target, "layer", target_source=ROOT)
 
     def source_bound_contraction(self):
         import hashlib

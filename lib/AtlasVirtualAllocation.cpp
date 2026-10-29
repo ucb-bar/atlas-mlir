@@ -5,6 +5,7 @@
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasTarget.h"
+#include "Atlas/AtlasTargetConfig.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
@@ -67,7 +68,8 @@ FixedResourcePlacement selectedResources() {
   // Bank 2: eight DMA staging windows first, then the spill frame. The
   // boundary windows and PACK scratch use banks 0 and 1.
   resources.spillWord = resources.stagingWord + kAtlasDMAChannels * kStagingWindowWords;
-  resources.spillWindowWords = 65536 - kAtlasDMAChannels * kStagingWindowWords;
+  static_assert(kAtlasSpillFrameBytes == (65536 - kAtlasDMAChannels * kStagingWindowWords) * 4);
+  resources.spillWindowWords = kAtlasSpillFrameBytes / 4;
   resources.scaleReg = 3;
   resources.packSourceRegs = {10, 11};
   resources.packDestinationReg = 12;

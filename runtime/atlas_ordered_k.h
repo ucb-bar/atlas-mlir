@@ -63,6 +63,11 @@ typedef enum {
  * verdict for codes outside it. */
 int atlas_ordered_k_admit_code(uint8_t code);
 
+/* Require disjoint caller-owned binding storage before initializing a tile. */
+int atlas_ordered_k_binding_valid(const atlas_ordered_k_tile *tile, const atlas_host *host,
+                                const void *scratch, size_t scratch_bytes,
+                                const atlas_host_buffer *buffers, size_t buffer_capacity);
+
 /* Launch one verified reset-entry program with one or more K windows.
  * The logical FP8 sources are row-major A[32,K] and W[32,K]. Output is the
  * physical 2 KiB BF16 readout;

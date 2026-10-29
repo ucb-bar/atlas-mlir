@@ -14,8 +14,11 @@ include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include)
 add_definitions(${LLVM_DEFINITIONS})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${PROJECT_SOURCE_DIR}/runtime/selected-host-map.json")
 file(READ "${PROJECT_SOURCE_DIR}/runtime/selected-host-map.json" ATLAS_HOST_MAP)
 string(JSON ATLAS_IMEM_BYTES GET "${ATLAS_HOST_MAP}" imem_capacity_bytes)
+string(JSON ATLAS_SPILL_FRAME_BYTES GET "${ATLAS_HOST_MAP}" vmem_spill_frame_bytes)
 configure_file(include/Atlas/AtlasTargetConfig.h.in
   include/Atlas/AtlasTargetConfig.h @ONLY)
 add_subdirectory(include)
