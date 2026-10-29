@@ -66,7 +66,7 @@ def regenerate(model, out):
     out.mkdir(parents=True)
     validate_derived(cfg, blocks, releases, out)
     write(out, "model-timing.json", payload)
-    print(json.dumps(dict(operations=len(blocks), native_blocks=1, passed=True)), flush=True)
+    print(json.dumps(dict(operations=len(blocks), native_blocks=len(blocks), passed=True)), flush=True)
     return payload
 
 

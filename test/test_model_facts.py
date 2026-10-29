@@ -1,6 +1,7 @@
 """Consumed timing values, deterministic regeneration, and model refusals."""
 import ast
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 import math
 import os
@@ -51,16 +52,28 @@ class FactsErrors(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "ATLAS_TEST_MODEL_FACTS"):
                 model_evidence_available()
 
-    def test_native_spot_check_refuses_wrong_fact(self):
-        observed = dict(events={"write0": dict(count=64, first_age=2, last_age=65, step=1)}, first_free_age=66)
-        with patch("atlas_model_timing.observe_vpu", return_value=observed):
-            self.assertTrue(validate_derived(None, {"vadd.bf16": observed}, {}, None)[0]["passed"])
-            with self.assertRaisesRegex(UnsupportedModelTiming, "native timing differs"):
-                validate_derived(None, {"vadd.bf16": dict(observed, first_free_age=67)}, {}, None)
-
-
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT")
 class CostProbes(NativeModelFixture, unittest.TestCase):
+    def test_native_sweep_refuses_wrong_facts(self):
+        from atlas_derive_vpu import derive_vpu
+        from atlas_derive_mxu import derive_mxu
+        from atlas_derive_memory import derive_memory
+        blocks = {}
+        for derive in (derive_vpu, derive_mxu, derive_memory):
+            blocks.update(derive(self.cfg)[0])
+        report, _ = validate_derived(self.cfg, blocks, {}, None)
+        self.assertEqual(report["observed_runs"], 49)
+        for name, block in blocks.items():
+            for field in ("events", "first_free_age"):
+                changed = deepcopy(block)
+                if field == "events":
+                    next(iter(changed["events"].values()))["first_age"] += 1
+                else:
+                    changed[field] += 1
+                with self.subTest(name=name, field=field), self.assertRaisesRegex(
+                        UnsupportedModelTiming, "native timing differs"):
+                    validate_derived(self.cfg, {name: changed}, {}, None)
+
     def test_operands_and_capacity(self):
         architecture = derive_arch(self.cfg)
         pairs = derive_costs(self.cfg, architecture)

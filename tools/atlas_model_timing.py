@@ -5,14 +5,14 @@ from __future__ import annotations
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 from collections import defaultdict
-from contextlib import closing
-from io import StringIO
+from contextlib import ExitStack, closing
+import inspect
 from dataclasses import asdict, replace
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from atlas_model_schema import mreg_event, canonical as encoded, sha256
+from atlas_model_schema import BINARY, mreg_event, canonical as encoded, sha256
 
 
 def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
@@ -75,51 +75,106 @@ def compress(ages: list[int]) -> dict:
     return {"count": len(ages), "first_age": ages[0], "last_age": ages[-1], "step": step}
 
 
-def observe_vpu(cfg):
-    """Observe one ordinary VPU row sweep through the native port checker."""
-    from npu_model.hardware.arch_state import ArchState
-    from npu_model.hardware.vpu import VectorExecutionUnit
-    from npu_model.logging.logger import Logger
+def native_uop(cfg, mnemonic):
+    """Choose disjoint register operands for an isolated native instruction."""
+    from npu_model.isa_types import MatrixReg, ScalarReg, ExponentReg, WeightBuffer, Accumulator
     from npu_model.software.instruction import Uop
-    from npu_model.util.converter import stream_to_instrs
 
-    instruction, = stream_to_instrs(StringIO("vadd.bf16 m4, m0, m2"))
-    with closing(ArchState(cfg.arch_state_config)) as state:
-        unit = VectorExecutionUnit("vpu", Mock(spec=Logger), state, config=cfg)
-        uop = Uop(instruction, pc=0)
+    operation = cfg.isa.operations[mnemonic]
+    operands = {}
+    for role, param in inspect.signature(operation).parameters.items():
+        if param.annotation is MatrixReg:
+            operands[role] = (4 if role == "vd" and mnemonic != "vstore" else
+                              2 if role == "vs2" and mnemonic in BINARY else 0)
+        elif param.annotation in (ScalarReg, ExponentReg):
+            operands[role] = 4 if role == "rd" else 1 if role == "rs2" else 0
+        elif param.annotation in (WeightBuffer, Accumulator, int):
+            operands[role] = 0
+        else:
+            raise ValueError(f"unsupported native probe operand: {mnemonic}/{role}")
+    return Uop(operation(**operands), pc=0)
+
+
+def observe_case(cfg, mnemonic):
+    """Observe one isolated instruction through the native execution unit."""
+    from npu_model.hardware.arch_state import ArchState
+    from npu_model.hardware.exu import StagedExecution
+    from npu_model.hardware.lsu import LoadStoreUnit
+    from npu_model.hardware.mxu import MatrixExecutionUnitInner, MatrixExecutionUnitSystolic
+    from npu_model.hardware.vpu import VectorExecutionUnit
+    from npu_model.hardware.xlu import CrossLaneExecutionUnit
+    from npu_model.logging.logger import Logger
+
+    uop = native_uop(cfg, mnemonic)
+    classes = (VectorExecutionUnit, LoadStoreUnit, CrossLaneExecutionUnit,
+               MatrixExecutionUnitSystolic, MatrixExecutionUnitInner)
+    unit_class, = [cls for cls in classes if cls.__name__ == str(uop.insn.exu)]
+    with closing(ArchState(cfg.arch_state_config)) as state, ExitStack() as patches:
+        unit = unit_class(str(uop.insn.exu), Mock(spec=Logger), state, config=cfg)
+        state.write_erf(0, 127)
         grouped = defaultdict(list)
-        original = state.conflict_checker.access_mreg
 
-        def access(cycle, bank, row, write, owner):
-            original(cycle, bank, row, write, owner)
-            grouped[mreg_event(uop.insn.mnemonic, int(bank), write)].append(unit.cycle - 1)
+        def tap(target, method, group):
+            original = getattr(target, method)
+            def invoke(*args, **kwargs):
+                result = original(*args, **kwargs)
+                key = group(*args, **kwargs)
+                if key is not None:
+                    grouped[key].append(unit.cycle - 1)
+                return result
+            patches.enter_context(patch.object(target, method, invoke))
 
-        with patch.object(state.conflict_checker, "access_mreg", access):
-            for age in range(4096):
-                if age and not unit.has_in_flight:
-                    return dict(events={name: compress(ages) for name, ages in sorted(grouped.items())},
-                                first_free_age=age)
-                unit.tick(uop if age == 0 else None)
-                if age == 0 and unit.total_instructions != 1:
-                    raise RuntimeError("VPU validation command was not accepted")
-    raise RuntimeError("VPU validation command did not drain")
+        def mreg(cycle, bank, row, write, owner):
+            if unit_class is VectorExecutionUnit:
+                return mreg_event(mnemonic, int(bank), write)
+            if unit_class is CrossLaneExecutionUnit:
+                return "write" if write else "read"
+            key = "mreg_write" if write else "mreg_read"
+            if unit_class is LoadStoreUnit:
+                return key
+            index = (int(bank) % 2 if write or ".bf16." in mnemonic else
+                     0 if mnemonic.startswith("vmatmul") else 1)
+            return key + str(index)
+
+        tap(state.conflict_checker, "access_mreg", mreg)
+        for method, key in (("read_vmem", "vmem_read"), ("write_vmem", "vmem_write"),
+                            ("write_xrf", "load_write"), ("write_erf", "scale_write")):
+            tap(state, method, lambda *args, key=key: key)
+        if hasattr(unit, "mxu"):
+            def sampled(staged, location, index, value):
+                if staged.state is state and location[0] == "acc":
+                    return "acc_store" if mnemonic.startswith("vmatpop") else "acc_read"
+            def retrieved(staged, location):
+                if staged.state is state:
+                    if location[0] == "wb":
+                        return "weight_write"
+                    if location[0] == "acc":
+                        return "acc_load" if mnemonic.startswith("vmatpush") else "acc_write"
+            tap(StagedExecution, "sample", sampled)
+            tap(StagedExecution, "result", retrieved)
+        for age in range(4096):
+            if age and not unit.has_in_flight:
+                return dict(events={key: compress(ages) for key, ages in sorted(grouped.items())},
+                            first_free_age=age)
+            unit.tick(uop if age == 0 else None)
+            if age == 0 and unit.total_instructions != 1:
+                raise RuntimeError("native validation instruction was not accepted")
+    raise RuntimeError("native validation instruction did not drain")
 
 
 def validate_derived(cfg, candidates, releases, output_dir):
-    """Compare vadd MREG events and first-free age; other blocks use source guards."""
-    check = dict(name="vadd.bf16", passed=False)
+    """Compare all extracted operation events and first-free ages with native ticks."""
     observed = []
-    try:
-        block = observe_vpu(cfg)
-        observed.append(block)
-        candidate = candidates["vadd.bf16"]
-        if block != {key: candidate[key] for key in ("events", "first_free_age")}:
-            raise RuntimeError("vadd timing differs from native execution")
-        check["passed"] = True
-    except (ValueError, RuntimeError) as error:
-        check["error"] = str(error)
-    report = dict(passed=check["passed"],
-                  observed_runs=len(observed), checks=[check])
-    if not report["passed"]:
-        raise UnsupportedModelTiming("VPU native timing differs from facts: " + check["error"])
+    for name, candidate in candidates.items():
+        try:
+            block = observe_case(cfg, name)
+            observed.append(block)
+            if block != {key: candidate[key] for key in ("events", "first_free_age")}:
+                raise RuntimeError("native timing differs from facts")
+        except (ValueError, RuntimeError) as error:
+            raise UnsupportedModelTiming(f"{name}: {error}") from error
+    if not observed:
+        raise UnsupportedModelTiming("native validation has no operations")
+    report = dict(passed=True, observed_runs=len(observed),
+                  checks=[dict(name=name, passed=True) for name in candidates])
     return report, observed
