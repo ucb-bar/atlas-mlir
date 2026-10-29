@@ -101,13 +101,9 @@ std::string addDMAEdges(DepGraph &g, const TimingProvider &p,
 } // namespace
 
 TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
-    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma,
-    const std::vector<TimingContext> *contexts) {
+    const std::vector<Instr> &instrs, const RegValues &entry, const TimingProvider &p, const IncomingDma *incomingDma) {
   std::string missing = validateTimingProvider(p);
   if (!missing.empty()) return {{}, missing};
-  if (contexts && contexts->size() != instrs.size())
-    return {{}, "timing context count differs from instruction count"};
-  auto context = [&](int i) { return contexts ? (*contexts)[i] : TimingContext{}; };
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
@@ -133,7 +129,7 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
   };
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
-      auto d = p.dependenceFor(g.nodes[a], g.footprints[a], context(a), g.nodes[b], g.footprints[b], context(b));
+      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
       if (!d.error.empty()) return {{}, d.error};
       if (d.value.distance < 0) return {{}, "timing provider returned a negative dependence distance"};
       if (d.value.distance > 0)
@@ -186,8 +182,7 @@ std::pair<Instr, Instr> representativeProbes(const OpInfo *op,
 } // namespace
 
 mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
-    const TimingProvider &p, const std::string &name, mlir::Operation *at,
-    const ProbeContexts &contexts) {
+    const TimingProvider &p, const std::string &name, mlir::Operation *at) {
   auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
     return at->emitOpError("virtual cost of ") << name << ": "
         << (p.model ? modelTimingDiagnostic(why) : why);
@@ -197,7 +192,6 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   const OpInfo *op = findOp(name);
   if (!op) return error("unknown machine operation");
   auto [first, second] = representativeProbes(op, p.model ? &p.proposalGeometry : nullptr);
-  auto [firstContext, secondContext] = contexts ? contexts(first, second) : std::pair<TimingContext, TimingContext>{};
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());
   for (const Footprint *f : {&a, &b}) {
@@ -211,15 +205,15 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   auto table = p.createReservations();
   if (!table.error.empty() || !table.value)
     return error(table.error.empty() ? "timing provider returned no reservation state" : table.error);
-  auto isolated = table.value->conflictWithContext(first, a, 0, firstContext);
+  auto isolated = table.value->conflict(first, a, 0);
   if (!isolated.error.empty()) return error(isolated.error);
   if (!isolated.value.empty()) return error("representative instruction can never issue: " + isolated.value);
-  std::string why = table.value->reserveWithContext(first, a, 0, firstContext);
+  std::string why = table.value->reserve(first, a, 0);
   if (!why.empty()) return error(why);
   // Compiler policy: bound the same-unit issue interval search.
   constexpr int kMaximumInterval = 100000;
   for (int interval = gap.value; interval <= kMaximumInterval; ++interval) {
-    auto conflict = table.value->conflictWithContext(second, b, interval, secondContext);
+    auto conflict = table.value->conflict(second, b, interval);
     if (!conflict.error.empty()) return error(conflict.error);
     if (conflict.value.empty())
       // Issue-edge-zero ages include the final event/release edge. The

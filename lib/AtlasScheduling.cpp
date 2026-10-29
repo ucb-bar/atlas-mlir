@@ -60,9 +60,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return static_cast<int>(result);
   };
 
-  std::vector<TimingContext> contexts(s.timingContexts.begin() + begin, s.timingContexts.begin() + end);
-  contexts.resize(nodes.size());
-  auto built = buildTimingGraph(nodes, s.entry[block], p, nullptr, &contexts);
+  auto built = buildTimingGraph(nodes, s.entry[block], p);
   if (!built.error.empty())
     return op(0)->emitOpError(built.error);
   DepGraph g = std::move(built.value);
@@ -124,7 +122,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return op(0)->emitOpError(fault);
   std::vector<int> gaps(n);
   for (int i = 0; i < n; i++) {
-    std::string conflict = rule(alone->conflictWithContext(nodes[i], g.footprints[i], 0, contexts[i]));
+    std::string conflict = rule(alone->conflict(nodes[i], g.footprints[i], 0));
     gaps[i] = rule(p.issueGap(nodes[i]));
     if (gaps[i] <= 0)
       note("timing provider issue gap exceeds positive cycle domain");
@@ -188,13 +186,13 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     checkCycle(i, c);
     if (!fault.empty())
       return std::string();
-    return rule(table->conflictWithContext(nodes[i], g.footprints[i], c, contexts[i]));
+    return rule(table->conflict(nodes[i], g.footprints[i], c));
   };
   auto reserve = [&](TimingReservations &state, int i, int c) {
     checkCycle(i, c);
     if (!fault.empty())
       return;
-    std::string error = state.reserveWithContext(nodes[i], g.footprints[i], c, contexts[i]);
+    std::string error = state.reserve(nodes[i], g.footprints[i], c);
     if (error.empty() && isWait(i))
       error = state.onWait(nodes[i], c);
     note(error);
@@ -338,7 +336,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
-          std::string busy = rule(table->conflictWithContext(nodes[i], g.footprints[i], cycle, contexts[i]));
+          std::string busy = rule(table->conflict(nodes[i], g.footprints[i], cycle));
           if (busy.empty())
             break;
           cycle++;
@@ -397,7 +395,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           if (fault.empty())
             reserve(*withBranch, term, termCycle);
           if (fault.empty())
-            held = rule(withBranch->conflictWithContext(nodes[slot], g.footprints[slot], slotCycle, contexts[slot]));
+            held = rule(withBranch->conflict(nodes[slot], g.footprints[slot], slotCycle));
           if (!held.empty())
             held = "delay slot: " + held;
         }

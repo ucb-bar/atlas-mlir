@@ -21,7 +21,6 @@ struct AtlasStream {
   bool delaySlots = true;
   llvm::SmallVector<Operation *> ops;
   std::vector<timing::Instr> instrs;
-  std::vector<timing::TimingContext> timingContexts;
   llvm::DenseMap<Operation *, Operation *> targetOf; // nullptr: stream end
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;

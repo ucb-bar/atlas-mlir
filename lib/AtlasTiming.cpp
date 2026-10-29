@@ -1530,9 +1530,3 @@ void ReservationTable::extendForWait(int cycle) {
     w.from = std::min(w.from, cycle);
   }
 }
-
-bool mlir::atlas::timing::InstructionTimingContext::matches(const Instr &in) const {
-  return in.op == instruction.op && in.rd == instruction.rd &&
-      in.rs1 == instruction.rs1 && in.rs2 == instruction.rs2 &&
-      in.imm == instruction.imm && in.release == instruction.release;
-}

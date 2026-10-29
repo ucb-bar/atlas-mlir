@@ -536,14 +536,13 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // scalar loop as lowerPack. Each store hides behind the next word's load,
     // so a row takes a load per load-path interval, then the last word's load
     // and store, and the back-edge, whose delay slot takes the destination step.
-    // The loads are timed as the loop proof admits them (AtlasPackLoop).
     auto pack = timing::machineTimingOf(provider, "vpack.bf16.fp8", op);
     if (failed(pack))
       return failure();
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
     if (failed(vstore))
       return failure();
-    auto lw = timing::machineTimingOf(provider, "lw", op, atlasPackRelayoutCopyContexts);
+    auto lw = timing::machineTimingOf(provider, "lw", op);
     if (failed(lw))
       return failure();
     auto sw = timing::machineTimingOf(provider, "sw", op);

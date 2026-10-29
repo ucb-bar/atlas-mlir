@@ -519,15 +519,6 @@ DMACompletionConflict dmaConflict(const Footprint &dma, const Footprint &other) 
   return {};
 }
 
-bool disjointScalarContexts(const Instr &a, const TimingContext &ca,
-                            const Instr &b, const TimingContext &cb) {
-  if (!ca || !cb || !ca->matches(a) || !cb->matches(b) || !ca->sameRegion(*cb)) return false;
-  const auto &aa = ca->scalarAddresses(), &bb = cb->scalarAddresses();
-  for (size_t row = 0; row < aa.size(); ++row)
-    if (!(uint64_t(aa[row]) + 4 <= bb[row] || uint64_t(bb[row]) + 4 <= aa[row])) return false;
-  return true;
-}
-
 std::string modelScope(const AtlasStream &stream) {
   if (stream.ops.size() > 32768) return "model program exceeds instruction memory";
   struct Transfer { uint64_t first, end; bool write, waited; };
@@ -587,14 +578,6 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   p.footprint = [facts](const Instr &in, const RegValues &regs) { return modelFootprint(in, regs, *facts); };
   p.dependence = [tables = facts->timing](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     return TimingRuleResult<Dependence>{dependence(a, fa, b, fb, *tables), {}};
-  };
-  p.contextualDependence = [base = p.dependence](const Instr &a, const Footprint &fa, const TimingContext &ca,
-      const Instr &b, const Footprint &fb, const TimingContext &cb) {
-    if (!disjointScalarContexts(a, ca, b, cb)) return base(a, fa, b, fb);
-    Footprint precise = fa;
-    precise.accesses.erase(std::remove_if(precise.accesses.begin(), precise.accesses.end(),
-        [](const Access &access) { return access.res == Res::Vmem; }), precise.accesses.end());
-    return base(a, precise, b, fb);
   };
   p.dmaConflict = [](const Footprint &dma, const Footprint &other) {
     return TimingRuleResult<DMACompletionConflict>{dmaConflict(dma, other), {}};

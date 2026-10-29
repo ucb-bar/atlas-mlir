@@ -43,13 +43,6 @@ public:
   virtual std::string reserve(const Instr &in, const Footprint &footprint,
                               int cycle) = 0;
   virtual std::string onWait(const Instr &in, int cycle) = 0;
-  virtual TimingRuleResult<std::string> conflictWithContext(
-      const Instr &in, const Footprint &f, int cycle, const TimingContext &) const {
-    return conflict(in, f, cycle);
-  }
-  virtual std::string reserveWithContext(const Instr &in, const Footprint &f, int cycle, const TimingContext &) {
-    return reserve(in, f, cycle);
-  }
 };
 
 std::unique_ptr<TimingReservations> createTimingReservations(
@@ -90,15 +83,6 @@ struct TimingProvider {
   std::function<TimingRuleResult<Dependence>(
       const Instr &, const Footprint &, const Instr &, const Footprint &)>
       dependence;
-  std::function<TimingRuleResult<Dependence>(
-      const Instr &, const Footprint &, const TimingContext &,
-      const Instr &, const Footprint &, const TimingContext &)>
-      contextualDependence;
-  TimingRuleResult<Dependence> dependenceFor(
-      const Instr &a, const Footprint &fa, const TimingContext &ca,
-      const Instr &b, const Footprint &fb, const TimingContext &cb) const {
-    return contextualDependence ? contextualDependence(a, fa, ca, b, fb, cb) : dependence(a, fa, b, fb);
-  }
   std::function<TimingRuleResult<DMACompletionConflict>(
       const Footprint &, const Footprint &)> dmaConflict;
   std::function<TimingRuleResult<int>(const Instr &)> issueGap;
@@ -122,20 +106,16 @@ std::string validateTimingProvider(const TimingProvider &provider);
 // Provider graph; absent incoming DMA facts retain broad post-wait guards.
 TimingRuleResult<DepGraph> buildTimingGraph(
     const std::vector<Instr> &instrs, const RegValues &entry,
-    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr,
-    const std::vector<TimingContext> *contexts = nullptr);
+    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
 
 struct MachineOpTiming {
   int latency, interval;
 };
 // Latency is the final event or release age plus one. The issue interval uses
 // reservation queries for two representative operands. Actual instructions
-// still require their own dependence and reservation checks. Optional contexts
-// describe the two instructions issued by their lowering.
-using ProbeContexts = std::function<std::pair<TimingContext, TimingContext>(const Instr &, const Instr &)>;
+// still require their own dependence and reservation checks.
 FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
-                                        const std::string &name, Operation *at,
-                                        const ProbeContexts &contexts = {});
+                                        const std::string &name, Operation *at);
 
 constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
 constexpr llvm::StringLiteral kLegacyBuiltinTimingProviderId = "npu-model-rtl-match-v1";
