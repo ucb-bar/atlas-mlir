@@ -117,24 +117,6 @@ class ModelScorer:
     def profile_receipt(self, document, profile):
         return self.configured_profile(document, profile)[1]
 
-    def runtime_receipt(self):
-        """Identify the actual scoring interpreter and imported numerical libraries."""
-        import platform
-        import numpy
-        import torch
-
-        _, _, _, _, cfg = selected_model(self.model, include_configuration=True)
-        curve = resolve_curve_path(cfg)
-        from atlas_model_timing import configuration_values
-        values = configuration_values(cfg)
-        # The filename is location evidence; the selected bytes are semantic.
-        values["dma_memory_params"] = dict(values["dma_memory_params"],
-                                           curves={"sha256": sha256(curve.read_bytes())})
-        return {"python": platform.python_version(), "python_implementation": platform.python_implementation(),
-                "torch": str(torch.__version__), "numpy": str(numpy.__version__),
-                "python_optimization": sys.flags.optimize,
-                "curve_path": str(curve), "configuration": values}
-
     def __call__(self, document, profile="curve"):
         if self._scorer_policy["assertions_required"] and sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")

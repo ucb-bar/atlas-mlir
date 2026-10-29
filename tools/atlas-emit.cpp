@@ -1,5 +1,4 @@
 #include "Atlas/AtlasDialect.h"
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasModelTables.h"
@@ -112,7 +111,6 @@ int main(int argc, char **argv) {
     }
     llvm::json::Object root{
         {"schema", "atlas.physical_program.v1"},
-        {"compiler_search_policy_sha256", search_policy::kCompilerPolicySHA256},
         {"selected_rtl_revision", kSelectedRTLRevision},
         {"pc_unit", "instruction_word"},
         {"word_endianness", "little"},

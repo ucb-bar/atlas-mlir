@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 if __package__:
-    from .atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
+    from .atlas_search_policy import POLICY
 else:
-    from atlas_search_policy import POLICY, COMPILER_POLICY_SHA256, policy_receipt
+    from atlas_search_policy import POLICY
 
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -34,22 +34,6 @@ SEARCH_BUDGETS = POLICY["presets"]
 POOLS = POLICY["pools"]
 CANDIDATES = POLICY["candidates"]
 DEFAULTS = POLICY["defaults"]
-
-
-def objective_receipt(provider: str, profile: str, standard_scorer: bool,
-                      configuration_sha256: str | None = None) -> dict:
-    """Identify selection policy separately from model-derived timing facts."""
-    payload = {
-        "schema": "atlas.model_selection_objective.v1",
-        "policy": POLICY["algorithms"]["selection_objective"],
-        "scoring": "native-model" if standard_scorer else "injected-scorer",
-        "profile": profile,
-        "minimize": list(POLICY["objectives"][profile]),
-        "tie_rule": POLICY["algorithms"]["selection_tie"],
-        "scoring_configuration_sha256": configuration_sha256,
-    }
-    return dict(payload, sha256=hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -191,16 +175,15 @@ class SelectionConfig:
                 for seed in POOLS["mreg_seeds"])
         return replace(self, profile=profile, mreg_candidates=mreg_candidates)
 
-    def policy(self, standard_scorer: bool) -> dict:
-        return policy_receipt(dict(
+    def policy(self) -> dict:
+        return {"effective": dict(
             provider=self.provider, profile=self.profile, spill=self.spill, spill_mxu=self.spill_mxu,
             boundary=self.boundary, guarded_pack=self.guarded_pack, max_candidates=self.max_candidates,
             random_seeds=list(self.random_seeds), workers=self.workers,
             mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
             search_group_evaluations=self.search_group_evaluations,
             search_patience=self.search_patience,
-            objective=POLICY["objectives"][self.profile],
-            scoring_implementation="native_model" if standard_scorer else "caller_callback"))
+        )}
 
 
 class Selection:
@@ -219,7 +202,6 @@ class Selection:
         self.log_lock, self.score_lock = threading.Lock(), threading.Lock()
         self.receipt = {
             "schema": "atlas.model_selection.v1", "provider": config.provider, "profile": config.profile,
-            "objective": objective_receipt(config.provider, config.profile, scorer is None),
             "guarded_pack": config.guarded_pack,
             "max_candidates": config.max_candidates, "workers": config.workers,
             "search_group_evaluations": config.search_group_evaluations,
@@ -241,12 +223,6 @@ class Selection:
                 raise ValueError("model scoring requires --npu-model")
             from atlas_model_scorer import ModelScorer
             self.scorer = ModelScorer(self.config.model, self.config.model_regions)
-            # Capture configuration before preparation, keeping model imports out of compiler threads.
-            with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as executor:
-                runtime = executor.submit(self.scorer.runtime_receipt).result()
-            runtime.pop("curve_path")
-            runtime.pop("configuration")
-            self.receipt["runtime_versions"] = runtime
 
     def prepare(self) -> None:
         model_facts = self.config.model_facts
@@ -291,9 +267,6 @@ class Selection:
                 if scoring_profile not in profiles:
                     profiles[scoring_profile] = self.score_executor.submit(
                         self.scorer.profile_receipt, program, scoring_profile).result()
-                    self.receipt["objective"] = objective_receipt(
-                        self.config.provider, self.config.profile, self.standard_scorer,
-                        profiles[scoring_profile]["sha256"])
             hit = key in self.score_cache
             if not hit:
                 self.score_cache[key] = (self.score_executor.submit(self.scorer, program, scoring_profile)
@@ -314,10 +287,6 @@ class Selection:
             stage = "emit"
             program = json.loads(self.command([str(self.binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                               directory, directory / "program.json"))
-            if self.standard_scorer or "compiler_search_policy_sha256" in program:
-                stage = "policy"
-                if program.get("compiler_search_policy_sha256") != COMPILER_POLICY_SHA256:
-                    raise ValueError("compiler search policy differs from driver; rebuild the selected compiler")
             words = tuple(instruction["word_u32"] for instruction in program["instructions"])
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if self.scorer is not None:
@@ -355,8 +324,8 @@ class Selection:
             for future in futures:
                 future.result()
         for row in self.receipt["candidates"][before:]:
-            # A verified program the model cannot score is an identity or soundness alarm.
-            if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
+            # Native faults stop the search instead of hiding an invalid program.
+            if row["status"] == "FAIL" and row["error_stage"] == "score":
                 self.fail(f"candidate {row['index']} failed model scoring: {row['error']}")
         passing = [row for row in self.receipt["candidates"] if row["status"] == "PASS"]
         # Assign canonical indices before parallel work to preserve deterministic ties.
@@ -470,8 +439,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
                    search_patience: int = DEFAULTS["api_search_patience"],
-                   scorer: Callable | None = None,
-                   search_policy=None) -> dict:
+                   scorer: Callable | None = None) -> dict:
     """Verify candidates and publish the lowest-cycle program in canonical order."""
     config = SelectionConfig(
         provider=provider, profile=profile, model=model, model_regions=model_regions,
@@ -480,9 +448,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
         max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
         mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations,
         search_patience=search_patience).resolved()
-    effective_policy = config.policy(scorer is None)
-    if search_policy is not None and search_policy != effective_policy:
-        raise ValueError("search policy override does not match the versioned effective policy")
+    effective_policy = config.policy()
     return Selection(source, output_dir, atlas_bin_dir, config, scorer, effective_policy).run()
 
 

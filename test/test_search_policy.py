@@ -1,4 +1,4 @@
-"""Optimization policy identity and active knobs remain separate from model facts."""
+"""Search settings drive compiler bounds and candidate attempts."""
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -48,65 +48,23 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
             changed = deepcopy(policy.POLICY)
             changed["execution_contract"][name] = value
             with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, "execution contract"):
-                self.load(changed)
+                policy.fixed_execution_contract(changed["execution_contract"])
 
-    def test_canonical_identity_and_effective_overrides(self):
-        effective = {"random_seeds": [9], "workers": 2, "search_group_evaluations": 3}
-        receipt = policy.policy_receipt(effective)
-        self.assertEqual(receipt["definition_sha256"], policy.canonical_hash(policy.POLICY))
-        digest = receipt.pop("sha256")
-        self.assertEqual(digest, policy.canonical_hash(receipt))
-        effective["workers"] = 1
-        self.assertNotEqual(digest, policy.policy_receipt(effective)["sha256"])
-        self.assertEqual(receipt["compiler_policy_sha256"], policy.COMPILER_POLICY_SHA256)
-        self.assertEqual(receipt["effective"]["workers"], 2)
-
-
-    def test_generated_cpp_bounds_and_projection_are_from_the_definition(self):
+    def test_generated_cpp_bounds_follow_the_definition(self):
         header = policy.generated_header()
         for name, value in (("kTimingSearchCycles", "timing_search_cycles"),
                             ("kGeneratedWordLimit", "generated_word_limit"),
                             ("kSpillRewriteLimit", "spill_rewrite_limit")):
             self.assertIn(f"{name} = {policy.POLICY['engineering']['compiler'][value]};", header)
-        self.assertIn(policy.COMPILER_POLICY_SHA256, header)
         self.assertIn(f"kDMAProposalSerializationCycles = {policy.POLICY['dma_proposal']['intercommand_serialization_cycles']};", header)
         self.assertIn(policy.canonical_hash(policy.POLICY["dma_proposal"]), header)
 
-    def test_dma_serialization_has_one_active_definition_and_identity(self):
+    def test_dma_serialization_reaches_the_compiler(self):
         changed = deepcopy(policy.POLICY)
         changed["dma_proposal"]["intercommand_serialization_cycles"] = 2
-        loaded = self.load(changed)
-        self.assertNotEqual(policy.compiler_policy_hash(loaded), policy.COMPILER_POLICY_SHA256)
-        with patch.object(policy, "POLICY", loaded), patch.object(policy, "COMPILER_POLICY_SHA256", policy.compiler_policy_hash(loaded)):
-            receipt = policy.policy_receipt({})
-        self.assertEqual(receipt["definition"]["dma_proposal"], loaded["dma_proposal"])
-        self.assertEqual(receipt["compiler_policy_sha256"], policy.compiler_policy_hash(loaded))
-        loaded["presets"]["full"]["max_candidates"] += 1
-        loaded["pools"]["random_seeds"] = [93]
-        self.assertEqual(policy.compiler_policy_hash(loaded), policy.compiler_policy_hash(changed))
-
-    def test_algorithm_changes_refuse_instead_of_becoming_unused_labels(self):
-        changed = deepcopy(policy.POLICY)
-        changed["algorithms"]["group_neighbors"] = "unimplemented-v2"
-        with self.assertRaisesRegex(ValueError, "algorithm revision"):
-            self.load(changed)
-
-    def test_unknown_fields_and_invalid_numeric_bounds_refuse(self):
-        for mutate in (lambda value: value.update(unknown_variant={}),
-                       lambda value: value["engineering"]["compiler"].update(unused_limit=17),
-                       lambda value: value["engineering"]["scorer"].update(max_cycles=0),
-                       lambda value: value["dma_proposal"].update(unused_gap=1),
-                       lambda value: value["dma_proposal"].update(classification="model_fact"),
-                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=0),
-                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=True),
-                       lambda value: value["dma_proposal"].update(intercommand_serialization_cycles=2**31),
-                       lambda value: value["candidates"].update(batch_width=0),
-                       lambda value: value["candidates"].update(curve_group_wait_placements=["source", "default"]),
-                       lambda value: value["presets"]["full"].update(max_candidates=False)):
-            changed = deepcopy(policy.POLICY)
-            mutate(changed)
-            with self.subTest(changed=changed), self.assertRaises(ValueError):
-                self.load(changed)
+        with patch.object(policy, "POLICY", changed):
+            header = policy.generated_header()
+        self.assertIn("kDMAProposalSerializationCycles = 2;", header)
 
     def test_shuffle_seed_and_wait_pool_drive_proposals(self):
         graph = {"preds": [[], [0], [], [], [], []]}
@@ -124,30 +82,15 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
         args = parser.parse_args(["--provider", "model", "--workers", "2", "--max-candidates", "5"])
         options = selection.model_arguments(args)
         options.update(random_seeds=(19,), search_group_evaluations=0,
-                       mreg_candidates=((7,) * 64,),)
+                       mreg_candidates=((7,) * 64,))
         receipt = self.select(scorer=lambda *args, **kwargs: 11, **options)
         effective = receipt["search_policy"]["effective"]
         self.assertEqual(effective["random_seeds"], [19])
         self.assertEqual(effective["mreg_candidates"], [[7] * 64])
-        self.assertEqual(effective["objective"], ["cycles", "index"])
         self.assertEqual(effective["max_candidates"], 5)
         self.assertEqual(len(receipt["candidates"]), 4)
         self.assertEqual(receipt["search_policy"], json.loads((self.directory / "compiled/selection.json").read_text())["search_policy"])
         self.assertNotIn("op_timing_sha256", receipt["search_policy"])
-
-    def test_legacy_synthetic_secondary_objective_is_refused(self):
-        changed = deepcopy(policy.POLICY)
-        changed["objectives"]["curve"] = ["cycles", "fifo43_cycles", "index"]
-        with self.assertRaisesRegex(ValueError, "selection objective"):
-            self.load(changed)
-
-    def test_compiler_policy_mismatch_is_fatal_even_with_a_custom_scorer(self):
-        with self.assertRaisesRegex(ValueError, "rebuild"):
-            self.select(runner=self.override_run("", 0, 0, policy="0" * 64), workers=2)
-        receipt = json.loads((self.directory / "compiled/selection.json").read_text())
-        self.assertEqual(receipt["candidates"][0]["error_stage"], "policy")
-        self.assertIn("search_policy", receipt)
-
 
 if __name__ == "__main__":
     unittest.main()

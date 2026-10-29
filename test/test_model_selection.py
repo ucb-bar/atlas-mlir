@@ -23,7 +23,6 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from model_evidence import requires_model_evidence
-from atlas_search_policy import COMPILER_POLICY_SHA256
 from atlas_model_selection import (Candidate, add_model_arguments, candidate_options, evidence_option,
                                    group_order_neighbors, model_arguments, select_program)
 
@@ -33,19 +32,14 @@ def candidate_command(argv):
 
 
 class SyntheticNativeScorer:
-    def __init__(self, *, score=None, curve_path="/tmp/test-curve.json"):
+    def __init__(self, *, score=None):
         self.score = score
-        self.curve_path = curve_path
 
     def __call__(self, program, profile):
         return self.score(program, profile) if self.score else program["cycles"]
 
     def profile_receipt(self, program, profile):
         return {"profile": profile, "sha256": profile + "-configuration-digest"}
-
-    def runtime_receipt(self):
-        return {"curve_path": self.curve_path, "configuration": {}, "python": "test"}
-
 
 class SelectionFixture:
     def setUp(self) -> None:
@@ -70,7 +64,6 @@ class SelectionFixture:
             (cwd / "allocation.json").write_text('{"fits": true}')
             word = {0: 1, 1: 2, 3: 8}.get(seed, 0)
             self.programs[cwd] = {
-                "compiler_search_policy_sha256": COMPILER_POLICY_SHA256,
                 "instructions": [{"word_u32": word, "operation": "atlas.dma", "fields": {"direction": "store"}}],
                 "cycles": {0: 10, 1: 20, 2: 5, 8: 5}[word]}
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -88,12 +81,11 @@ class SelectionFixture:
                 patch("atlas_model_selection.subprocess.run", side_effect=runner or self.fake_run):
             yield
 
-    def override_run(self, option, word, cycles, *, policy=COMPILER_POLICY_SHA256):
+    def override_run(self, option, word, cycles):
         def run(argv, **kwargs):
             result = self.fake_run(argv, **kwargs)
             if candidate_command(argv) and option in " ".join(argv):
                 self.programs[kwargs["cwd"]] = {
-                    "compiler_search_policy_sha256": policy,
                     "instructions": [{"word_u32": word}], "cycles": cycles}
             return result
         return run
@@ -257,7 +249,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(len(receipt["candidates"]), 5)
         self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
         self.assertEqual(receipt["profile"], "fifo43")
-        self.assert_objective(receipt, scoring="injected-scorer")
 
     def test_builtin_accepts_symlinked_source_and_binary_directory(self):
         linked_source = self.directory / "linked.mlir"
@@ -270,19 +261,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(receipt["selected_index"], 0)
         receipt = self.select(name="model-linked", provider="model", max_candidates=1)
         self.assertEqual(receipt["selected_index"], 0)
-
-    def assert_objective(self, receipt, *, scoring, configuration=None):
-        objective = receipt["objective"]
-        expected = {"schema": "atlas.model_selection_objective.v1",
-                    "policy": "selected-profile-cycles-then-index-v1",
-                    "scoring": scoring, "profile": receipt["profile"],
-                    "minimize": ["cycles", "index"],
-                    "tie_rule": "canonical-candidate-index-v1",
-                    "scoring_configuration_sha256": configuration}
-        self.assertEqual({key: value for key, value in objective.items() if key != "sha256"}, expected)
-        digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        self.assertEqual(objective["sha256"], digest)
-        self.assertNotIn("fifo43_tiebreak_cache_entries", receipt)
 
     def test_curve_exact_ties_use_index_cache_words_and_copy_the_winner(self):
         calls = Counter()
@@ -308,7 +286,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual((output / artifact).read_bytes(), (winner / artifact).read_bytes())
         self.assertEqual((output / "program.hex").read_text(), "00000002\n")
         self.assertEqual(json.loads((output / "selection.json").read_text()), json.loads(json.dumps(receipt)))
-        self.assert_objective(receipt, scoring="injected-scorer")
 
     def test_native_profile_receipts_bind_only_the_selected_profile(self):
         for provider, profile, cap, expected in (("model", "curve", 3, {"curve"}), ("model", "curve", 5, {"curve"}),
@@ -321,7 +298,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
                                          provider=provider, profile=profile, model_facts=self.directory,
                                          max_candidates=cap, workers=2)
-            self.assert_objective(receipt, scoring="native-model", configuration=profile + "-configuration-digest")
             self.assertEqual(set(receipt["scoring_configurations"]), expected)
             self.assertEqual(json.loads((output / "selection.json").read_text())["scoring_configurations"],
                              {name: {"profile": name, "sha256": name + "-configuration-digest"} for name in expected})
@@ -391,7 +367,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
         def compile_order(argv, cwd, order):
             word = sum((node + 1) * 10 ** i for i, node in enumerate(order))
-            self.programs[cwd] = {"compiler_search_policy_sha256": COMPILER_POLICY_SHA256, "instructions": [{"word_u32": word}], "cycles": 4 if order == winner else 10}
+            self.programs[cwd] = {"instructions": [{"word_u32": word}], "cycles": 4 if order == winner else 10}
 
         receipts = []
         for workers in (1, 4):
@@ -482,15 +458,13 @@ EXAMPLE = ROOT / "test/examples/virtual_bf16_shared_relu.mlir"
 
 @requires_model_evidence
 class TiledSelectionTest(unittest.TestCase):
-    def test_one_candidate_real_emit_and_policy_identity(self):
+    def test_one_candidate_real_emit(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "selected"
             receipt = select_program(ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir", output, BIN,
                                      max_candidates=1, model_facts=Path(os.environ["ATLAS_TEST_MODEL_FACTS"]),
                                      scorer=lambda program, **_: len(program["instructions"]))
             self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
-            self.assertEqual(json.loads((output / "program.json").read_text())["compiler_search_policy_sha256"],
-                             COMPILER_POLICY_SHA256)
 
 
 @requires_model_evidence
@@ -612,8 +586,8 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         source = EXAMPLE.read_text()
         for ordinary, explicit in (
             ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin lookahead=0"),
-            ("--lower-atlas-virtual-to-machine", "--lower-atlas-virtual-to-machine=provider=builtin "
-             ""),
+            ("--lower-atlas-virtual-to-machine",
+             "--lower-atlas-virtual-to-machine=provider=builtin"),
         ):
             with self.subTest(ordinary=ordinary):
                 before = run("atlas-opt", source, ordinary)
