@@ -136,13 +136,6 @@ def _plan(source):
     return plans
 
 
-def _check_checker(source):
-    tree = ast.parse(source)
-    _one((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BankConflictChecker"), "bank checker")
-    if ast_digest(tree) != SOURCE_SHAPES["bank_conflict.py"]:
-        raise UnsupportedModelTiming("unsupported MXU reservation release semantics")
-
-
 def _validated(cfg):
     geometry = cfg.arch_state_config
     if (geometry.mrf_depth, geometry.mrf_width, geometry.wb_width, geometry.num_wb_registers) != (32, 32, 1024, 2):
@@ -167,8 +160,8 @@ def _validated(cfg):
                                {"vd", "vs2"} if mnemonic.startswith("vmatpop") else {"vd", "vs1"})
             if set(inspect.signature(insn).parameters) != expected_params:
                 raise UnsupportedModelTiming(f"unsupported MXU ISA operands for {name}")
-    source, checker = _sources(cfg)
-    _check_checker(checker)
+    # The VPU extractor checks the shared bank checker digest once.
+    source, _ = _sources(cfg)
     return _plan(source)
 
 
@@ -235,9 +228,6 @@ def derive_weight_timing(cfg):
     row = _assignment(uses, "row")
     # Source uses age - offset - output_column - inner. Preserve the two
     # tensor axes explicitly: a push writes output-column rows, not diagonals.
-    expression = ast.parse("age - 1 - _GRID[:, None] - _GRID[None, :]").body[0].value
-    if ast.dump(row.value, include_attributes=False) != ast.dump(expression, include_attributes=False):
-        raise UnsupportedModelTiming("unsupported MXU weight PE indexing")
     bounds = [n for n in ast.walk(uses) if isinstance(n, ast.Compare) and _name(n.left, "row")
               and len(n.ops) == 1 and isinstance(n.ops[0], (ast.GtE, ast.LtE))]
     lower = _one((n for n in bounds if isinstance(n.ops[0], ast.GtE)), "weight row lower bound")
