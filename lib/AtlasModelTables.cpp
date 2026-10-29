@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <set>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -176,8 +177,36 @@ void readFrontend(Reader &r, const Object &root, TimingTables &tables,
   facts.frontend = {tables.ordinaryIssueGap, slots};
   const Object *instructions = r.object(frontend, "instructions");
   if (instructions && instructions->empty()) r.fail("missing frontend instruction coverage");
-  if (instructions) for (const auto &[name, ignored] : *instructions)
+  if (instructions) for (const auto &[name, value] : *instructions) {
+    const OpInfo *op = findOp(name.str());
+    if (!op || op->engine != Engine::Scalar) {
+      r.fail("unsupported frontend operation " + name.str());
+      continue;
+    }
+    auto roles = [&](llvm::StringRef key) {
+      std::set<std::string> result;
+      const auto *entry = value.getAsObject();
+      const Array *accesses = entry ? entry->getArray(key) : nullptr;
+      if (!accesses) r.fail("missing frontend " + key.str() + " for " + name.str());
+      else for (const auto &access : *accesses) {
+        const auto *role = access.getAsObject();
+        auto resource = role ? role->getString("resource") : std::nullopt;
+        auto operand = role ? role->getString("operand") : std::nullopt;
+        if (!resource || !operand || !result.insert(resource->str() + "." + operand->str()).second)
+          r.fail("invalid frontend role for " + name.str());
+      }
+      return result;
+    };
+    std::set<std::string> reads, writes;
+    bool immediateCsr = op->opClass == OpClass::Csr && op->name.back() == 'i';
+    if (hasOperand(*op, "x1") && !immediateCsr) reads.insert("xreg.rs1");
+    if (hasOperand(*op, "x2")) reads.insert("xreg.rs2");
+    if (hasOperand(*op, "xd")) writes.insert("xreg.rd");
+    if (hasOperand(*op, "ed")) writes.insert("ereg.rd");
+    if (roles("reads") != reads || roles("writes") != writes)
+      r.fail("frontend register roles differ for " + name.str());
     facts.frontendInstructions.push_back(name.str());
+  }
 }
 
 void readGeometry(Reader &r, const Object &root, ModelTimingTables &facts) {

@@ -236,6 +236,14 @@ void loaderRefusal(llvm::StringRef bytes) {
     check(!bad, "unsupported geometry refuses");
     if (!bad) llvm::consumeError(bad.takeError());
   }
+  document = llvm::json::parse(bytes);
+  if (!document) { llvm::consumeError(document.takeError()); return; }
+  auto *instructions = document->getAsObject()->getObject("frontend_timing")->getObject("instructions");
+  auto *add = instructions->getObject("addi");
+  (*add)["reads"] = llvm::json::Array{};
+  auto roles = parseModelTimingTables(jsonText(*document));
+  check(!roles, "changed scalar operand roles refuse");
+  if (!roles) llvm::consumeError(roles.takeError());
   auto malformed = parseModelTimingTables("{}");
   check(!malformed, "missing timing tables refuse");
   if (!malformed) llvm::consumeError(malformed.takeError());
