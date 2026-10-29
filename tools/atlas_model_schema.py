@@ -19,16 +19,13 @@ def ast_digest(tree):
     return sha256(ast.dump(tree, include_attributes=False).encode())
 
 
-def timing_block(name, engine, events, last):
-    return dict(name=name, engine=engine, resolved=True, events=dict(sorted(events.items())),
+def timing_block(name, events, last):
+    return dict(name=name, events=dict(sorted(events.items())),
                 first_free_age=last + 1)
 
 
-def reservation(last, *, first=0, banks=None):
-    value = dict(first_age=first, release_age=last, available_age=last + 1)
-    if banks is not None:
-        value["banks"] = banks
-    return value
+def reservation(last, *, first=0):
+    return dict(first_age=first, release_age=last)
 
 
 def load_lock(path):
@@ -42,9 +39,6 @@ def load_vocabulary(path):
 _DIRECTORY = Path(__file__).resolve().parent
 LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
 SOURCE_SHAPES = LOCK["source_shapes"]
-DMA_SOURCE_SHAPES = {name: SOURCE_SHAPES[name] for name in
-                     ("dma.py", "lsu.py", "bank_conflict.py", "memory_backend.py")}
-DMA_SOURCE_SHAPES["core.py"] = "faaabbe3276439f901d643b8c32e1746d6c2642fd18630db1283095fce1201d5"
 VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
 VPU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["vpu_blocks"]}
 MXU_BLOCKS = {entry["mnemonic"]: entry["block"] for entry in VOCABULARY["mxu_blocks"]}

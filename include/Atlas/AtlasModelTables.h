@@ -11,7 +11,9 @@ constexpr llvm::StringLiteral kModelTimingProviderId = "model";
 
 struct ModelDMATiming {
   int beatBytes = 0, maxBytes = 0, loadStartup = 0, storeStartup = 0;
-  int perBeatBound = 0, retireToWait = 0, serializationGap = 0;
+  int perBeatBound = 0, retireToWait = 0;
+  // Compiler policy: serialize DMA estimates by one cycle between commands.
+  int serializationGap = 1;
   TimingRuleResult<int> estimate(int64_t bytes, bool store) const;
   TimingRuleResult<DMAProposal> propose(
       int latency, int issue, std::optional<int> previousEnd) const;

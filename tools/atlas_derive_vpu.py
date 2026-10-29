@@ -140,13 +140,13 @@ def derive_vpu(cfg):
                         raise UnsupportedModelTiming("VPU row plan accesses unsupported geometry")
                     group = mreg_event(mnemonic, "vpu", bank, write)
                     grouped[group].append(age)
-        blocks[name] = timing_block(name, "vpu", {group: compress(ages) for group, ages in sorted(grouped.items())},
+        blocks[name] = timing_block(name, {group: compress(ages) for group, ages in sorted(grouped.items())},
                                     operation.write_last)
         entry = {}
         for kind, banks, last in (("mreg_read", operation.reads, operation.read_last),
                                   ("mreg_write", operation.writes, operation.write_last)):
             if banks:
-                entry[kind] = reservation(last, banks=sorted(banks))
+                entry[kind] = reservation(last)
         entry["unit"] = reservation(operation.write_last)
         releases[name] = entry
     return blocks, releases

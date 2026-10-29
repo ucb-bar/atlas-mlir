@@ -40,7 +40,7 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
                 patch.object(CurveMemoryBackend, "issue", side_effect=AssertionError("issued beat")):
             facts = curve.derive_curve(self.cfg)
         self.assertEqual(facts["curve_sha256"], schema.LOCK["curve_sha256"])
-        self.assertGreater(facts["proposal_contract"]["per_beat_bound_cycles"], 0)
+        self.assertEqual(facts["retire_to_wait_issue_cycles"], 1)
         self.assertEqual(facts["beat_bytes"], self.cfg.dma_beat_bytes)
         self.assertEqual(facts["max_transfer_bytes"], self.cfg.dma_max_transfer_bytes)
 

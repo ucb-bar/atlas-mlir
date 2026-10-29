@@ -113,21 +113,10 @@ def derive_arch(cfg):
     fields = {
         "mreg_count": (arch, "num_m_registers"), "mreg_rows": (arch, "mrf_depth"),
         "mreg_row_bytes": (arch, "mrf_width"), "vmem_bytes": (arch, "vmem_size"),
-        "vmem_bank_bytes": (cfg, "vmem_bank_bytes"), "weight_buffer_count": (arch, "num_wb_registers"),
-        "weight_buffer_bytes": (arch, "wb_width"), "xreg_count": (arch, "num_x_registers"),
-        "ereg_count": (arch, "num_e_registers"), "csr_count": (arch, "num_csrs"),
+        "vmem_bank_bytes": (cfg, "vmem_bank_bytes"),
         "dram_bytes": (arch, "dram_size"), "dma_channels": (cfg, "dma_num_channels"),
-        "dma_beat_bytes": (cfg, "dma_beat_bytes"), "dma_max_in_flight": (cfg, "dma_max_in_flight"),
-        "dma_max_transfer_bytes": (cfg, "dma_max_transfer_bytes"), "fetch_width": (cfg, "fetch_width"),
     }
     facts = {name: _positive(owner, attribute) for name, (owner, attribute) in fields.items()}
-    # Dormant legacy estimates are recorded, not fixed-layout capabilities.
-    for name in ("offchip_link_width_bits", "offchip_link_core_cycles_per_beat", "dma_offchip_command_words",
-                 "vmem_bus_width_bits", "vmem_bus_core_cycles_per_beat", "vmem_bytes_per_cycle"):
-        value = getattr(cfg, name, None)
-        if type(value) is not int:
-            raise UnsupportedModelTiming("architecture configuration " + name + " must be an integer")
-        facts[name] = value
     base = getattr(arch, "dram_base", None)
     if type(base) is not int or base < 0:
         raise UnsupportedModelTiming("architecture configuration dram_base must be a nonnegative integer")
@@ -148,14 +137,9 @@ def derive_arch(cfg):
     if type(fp8_element_bytes) is not int or fp8_element_bytes <= 0 or facts["mreg_row_bytes"] % fp8_element_bytes:
         raise UnsupportedModelTiming("MREG row bytes do not contain whole FP8 elements")
     register_bytes = facts["mreg_rows"] * facts["mreg_row_bytes"]
-    facts.update(schema="atlas.architecture.v1", dram_base=base,
-                 mreg_bytes=register_bytes, mreg_physical_bank_count=banks,
-                 mreg_bank_modulus=banks, mreg_registers_per_bank=facts["mreg_count"] // banks,
-                 mreg_physical_row_stride=row_stride, mreg_logical_limit=logical_limit,
-                 bf16_registers_per_tile=pair_count, bf16_pair_stride=pair_stride,
-                 bf16_element_bytes=element_bytes, bf16_tile_bytes=pair_count * register_bytes,
+    facts.update(dram_base=base, mreg_bytes=register_bytes, mreg_physical_bank_count=banks,
+                 bf16_registers_per_tile=pair_count, bf16_element_bytes=element_bytes,
                  fp8_element_bytes=fp8_element_bytes, fp8_registers_per_tile=fp8_count,
-                 fp8_tile_bytes=fp8_count * register_bytes,
                  vmem_bank_count=facts["vmem_bytes"] // facts["vmem_bank_bytes"],
                  scalar_word_bytes=_scalar_bytes(arch_tree))
     return facts

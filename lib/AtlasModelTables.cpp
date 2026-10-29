@@ -127,8 +127,8 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
   for (const auto &value : *blocks) {
     const Object *block = value.getAsObject();
     auto name = block ? block->getString("name") : std::nullopt;
-    if (!name || !block || block->getBoolean("resolved") != true) {
-      r.fail("unresolved operation timing"); continue;
+    if (!name || !block) {
+      r.fail("missing operation name"); continue;
     }
     std::string mnemonic = r.mnemonic(*name);
     OperationTiming timing;
@@ -145,8 +145,7 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
       const Object *record = entry.getAsObject();
       int first = r.integer(record, "first_age");
       int release = r.integer(record, "release_age");
-      int available = r.integer(record, "available_age", 1);
-      if (release < first || available != release + 1 || available > timing.firstFreeAge)
+      if (release < first || release >= timing.firstFreeAge)
         r.fail("reservation does not fit operation lifetime: " + name->str());
       timing.releases.emplace(key.str(), TimingWindow{first, release});
     }
@@ -173,7 +172,6 @@ void readFrontend(Reader &r, const Object &root, TimingTables &tables,
       tables.delayImmediateMask != 4095 || slots != 1 ||
       r.integer(delay, "decrement_per_tick", 1) != 1)
     r.fail("unsupported frontend issue or delay encoding");
-  tables.delaySlots = slots;
   facts.frontend = {tables.ordinaryIssueGap, slots};
   const Object *instructions = r.object(frontend, "instructions");
   if (instructions && instructions->empty()) r.fail("missing frontend instruction coverage");
@@ -239,15 +237,12 @@ void readGeometry(Reader &r, const Object &root, ModelTimingTables &facts) {
 void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
   const Object *timing = r.object(&root, "dma_timing");
   const Object *startup = r.object(timing, "startup_cycles");
-  const Object *proposal = r.object(timing, "proposal_contract");
-  const Object *policy = r.object(proposal, "policy");
   dma.beatBytes = r.integer(timing, "beat_bytes", 1);
   dma.maxBytes = r.integer(timing, "max_transfer_bytes", 1);
   if (dma.beatBytes != kLineBytes) r.fail("unsupported DMA beat geometry");
   dma.loadStartup = r.integer(startup, "load", 1);
   dma.storeStartup = r.integer(startup, "store", 1);
-  dma.retireToWait = r.integer(proposal, "retire_to_wait_issue_cycles", 1);
-  dma.serializationGap = r.integer(policy, "intercommand_serialization_cycles", 1);
+  dma.retireToWait = r.integer(timing, "retire_to_wait_issue_cycles", 1);
   double maximum = r.integer(timing, "min_latency", 1, INT_MAX);
   const Array *curves = timing ? timing->getArray("curves") : nullptr;
   if (!curves || curves->empty()) r.fail("missing DMA curves");
@@ -260,9 +255,9 @@ void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
       else maximum = std::max(maximum, *number);
     }
   }
-  dma.perBeatBound = int(std::ceil(maximum)) + r.integer(timing, "issue_interval_cycles", 1);
-  if (r.integer(proposal, "per_beat_bound_cycles", 1, INT_MAX) != dma.perBeatBound)
-    r.fail("DMA per-beat bound differs from the extracted curves");
+  int interval = r.integer(timing, "issue_interval_cycles", 1);
+  if (maximum > INT_MAX - interval) r.fail("DMA per-beat bound exceeds cycle domain");
+  else dma.perBeatBound = int(std::ceil(maximum)) + interval;
   if (dma.maxBytes % std::max(dma.beatBytes, 1))
     r.fail("DMA maximum transfer size is not a whole number of beats");
   for (bool store : {false, true}) {
@@ -384,7 +379,7 @@ llvm::Expected<ModelTimingTables> mlir::atlas::timing::parseModelTimingTables(ll
   auto decoded = llvm::json::parse(bytes);
   if (!decoded) return decoded.takeError();
   const Object *root = decoded->getAsObject();
-  if (!root || root->getString("schema") != "atlas.model_timing.v1")
+  if (!root)
     return llvm::createStringError(llvm::inconvertibleErrorCode(), "unsupported model timing facts");
   Reader r;
   ModelTimingTables result;
@@ -699,8 +694,6 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
     selection.set("provider", builder.getStringAttr(kModelTimingProviderId));
     selection.set("op_timing", builder.getStringAttr(file("model-timing.json")));
     selection.set("op_timing_sha256", builder.getStringAttr(*hash));
-    selection.set("dma", builder.getStringAttr("wait"));
-    selection.set("facts", builder.getStringAttr(factsDirectory));
     auto bytes = llvm::MemoryBuffer::getFile(file("model-timing.json"));
     if (!bytes) return fail("cannot read selected model timing facts");
     auto timing = llvm::json::parse((*bytes)->getBuffer());

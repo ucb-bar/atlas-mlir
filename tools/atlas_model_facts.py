@@ -6,24 +6,14 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import subprocess
 
 sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, model_timing_cli
-from atlas_model_schema import LOCK
 from atlas_model_capabilities import check_configuration
 from atlas_model_semantics import check_model_semantics
-from atlas_model_timing import (configuration, encoded, isa_cases, numerical_data,
-                                sha256, source_digest, validate_derived)
-
-
-def identity(root):
-    source, sources = source_digest(root)
-    numerical, data = numerical_data(root)
-    revision = LOCK["model_revision"] if source == LOCK["source_sha256"] else source[:40]
-    kind = "locked_source" if source == LOCK["source_sha256"] else "source_sha256_prefix"
-    return dict(revision=revision, revision_kind=kind, source_sha256=source,
-                numerical_data_sha256=numerical), sources, data
+from atlas_model_timing import configuration, encoded, isa_cases, sha256, validate_derived
 
 
 def write(directory, name, value):
@@ -64,15 +54,9 @@ def regenerate(model, out):
     names = [name for name, _, _ in isa_cases(cfg)]
     if set(blocks) != set(names) or set(releases) != set(blocks):
         raise UnsupportedModelTiming("source derivation does not cover the selected ISA")
-    model_values = dict(identity(model)[0], configuration=config,
-                        configuration_json=encoded(config).decode(),
-                        configuration_sha256=sha256(encoded(config)))
-    payload = dict(schema="atlas.model_timing.v1", model=model_values,
-                   geometry=dict(rows=cfg.arch_state_config.mrf_depth,
-                                 columns=cfg.arch_state_config.mrf_width,
-                                 mreg_count=cfg.arch_state_config.num_m_registers),
-                   architecture=architecture, age_convention="issue_edge_zero",
-                   observation=dict(accepted=True, drained=True),
+    revision = subprocess.check_output(["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
+    payload = dict(model=dict(revision=revision, configuration_sha256=sha256(encoded(config))),
+                   architecture=architecture,
                    op_timing=[blocks[name] for name in names], reservation_releases=releases,
                    dma_timing=derive_curve(cfg), mxu_weight_timing=derive_weight_timing(cfg),
                    frontend_timing=derive_frontend(cfg), resources=derive_resources(model))
@@ -84,7 +68,7 @@ def regenerate(model, out):
     validate_derived(cfg, blocks, releases, out)
     facts_hash = write(out, "model-timing.json", payload)
     write(out, "facts.lock.json", dict(op_timing_sha256=facts_hash))
-    print(json.dumps(dict(operations=len(blocks), passed=True)), flush=True)
+    print(json.dumps(dict(operations=len(blocks), native_blocks=1, passed=True)), flush=True)
     return payload
 
 

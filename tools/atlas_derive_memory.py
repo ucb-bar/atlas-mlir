@@ -69,7 +69,7 @@ def _predicates(method):
 def _block(name, events, last):
     if last < max(event["last_age"] for event in events.values()):
         raise UnsupportedModelTiming("engine completes before its final event")
-    return timing_block(name, name.split(".")[0], events, last)
+    return timing_block(name, events, last)
 
 
 def derive_memory(cfg):
@@ -115,14 +115,14 @@ def derive_memory(cfg):
         _block("scalar_lsu.store", {"vmem_write": store}, store["last_age"]),
     ]
     releases = {block["name"]: {"unit": _reservation(block["first_free_age"] - 1)} for block in blocks}
-    releases["vlsu.vload"]["mreg_write"] = _reservation(finish["last_age"], banks=[4])
-    releases["vlsu.vstore"]["mreg_read"] = _reservation(finish["last_age"], banks=[0])
-    releases["xlu.transpose"].update(mreg_read=_reservation(xrelease["last_age"], banks=[0]),
-                                      mreg_write=_reservation(xfinish["last_age"], banks=[4]))
+    releases["vlsu.vload"]["mreg_write"] = _reservation(finish["last_age"])
+    releases["vlsu.vstore"]["mreg_read"] = _reservation(finish["last_age"])
+    releases["xlu.transpose"].update(mreg_read=_reservation(xrelease["last_age"]),
+                                      mreg_write=_reservation(xfinish["last_age"]))
     for block in blocks:
         for key in ("vmem_read", "vmem_write"):
             if key in block["events"]:
                 event = block["events"][key]
-                releases[block["name"]][key] = _reservation(event["last_age"], first=event["first_age"], banks=[0])
+                releases[block["name"]][key] = _reservation(event["last_age"], first=event["first_age"])
     return {block["name"]: deepcopy(block) for block in blocks}, releases
 

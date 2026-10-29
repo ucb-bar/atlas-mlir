@@ -165,12 +165,6 @@ def _validated(cfg):
     return _plan(source)
 
 
-def _busy(last):
-    if not 0 <= last < 4095:
-        raise UnsupportedModelTiming("unsupported MXU completion age")
-    return dict(count=last + 1, first_age=0, last_age=last, step=1)
-
-
 def _blocks(plans):
     blocks = {}
     for engine, values in plans.items():
@@ -178,7 +172,9 @@ def _blocks(plans):
             compute, pop = mnemonic.startswith("vmatmul"), mnemonic.startswith("vmatpop")
             bf16 = ".bf16" in mnemonic
             last = values["compute_last" if compute else "transfer_last"]
-            events = {"compute_busy" if compute else "data_busy": _busy(last)}
+            if not 0 <= last < 4095:
+                raise UnsupportedModelTiming("unsupported MXU completion age")
+            events = {}
             if pop:
                 events["acc_store"] = values["read"]
                 for bank in range(2 if bf16 else 1):
@@ -191,7 +187,7 @@ def _blocks(plans):
                 if mnemonic == "vmatmul.acc":
                     events["acc_read"] = values["read"]
             name = engine + "." + suffix
-            blocks[name] = timing_block(name, engine, deepcopy(events), last)
+            blocks[name] = timing_block(name, deepcopy(events), last)
     return blocks
 
 
@@ -204,11 +200,9 @@ def derive_mxu(cfg):
         for mnemonic, suffix in MXU_BLOCKS.items():
             name = engine + "." + suffix
             pop = mnemonic.startswith("vmatpop")
-            first = 4 if pop else 0
-            banks = list(range(first, first + (2 if ".bf16" in mnemonic else 1)))
             end = blocks[name]["first_free_age"]
             releases[name] = {
-                "mreg_write" if pop else "mreg_read": reservation(values["release"], banks=banks),
+                "mreg_write" if pop else "mreg_read": reservation(values["release"]),
                 "unit": reservation(end - 1),
             }
     return blocks, releases
@@ -245,6 +239,5 @@ def derive_weight_timing(cfg):
                               31 * window["column_step"]) for i in range(32)]
         if max(row["last_age"] for row in rows) > plans[engine]["compute_last"]:
             raise UnsupportedModelTiming("MXU completes before its last weight use")
-        engines[engine] = dict(use_window=window, use_rows=rows,
-                               reads_before_writes=True, resource_row_axis="output_column")
-    return dict(schema="atlas.mxu_weight_timing.v1", engines=engines)
+        engines[engine] = dict(use_rows=rows)
+    return dict(engines=engines)

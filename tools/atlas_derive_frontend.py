@@ -96,30 +96,18 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
     classes = {item.name: item for item in ast.parse(sources["isa_definition.py"]).body
                if isinstance(item, ast.ClassDef)}
     instructions = {}
-    link_offset = None
     for mnemonic, class_name in sorted(scalar_classes.items()):
         if class_name not in classes:
             raise UnsupportedModelTiming(f"missing scalar ISA source {class_name}")
         cls = classes[class_name]
         execute = _one((item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "exec"),
                        f"{class_name}.exec")
-        bases = {item.id for item in cls.bases if isinstance(item, ast.Name)}
-        kind = ("branch" if "SBType" in bases else "jump" if "UJType" in bases or "JalrPattern" in bases
-                else "delay" if mnemonic == "delay" else "halt" if mnemonic in {"ecall", "ebreak"}
-                else "control" if any("CSR" in item for item in bases) else "scalar")
-        instructions[mnemonic] = dict(kind=kind, **_accesses(execute))
-        if mnemonic == "jal":
-            addition = _one((item for item in ast.walk(execute) if isinstance(item, ast.BinOp)
-                             and _attr(item.left, "state", "execute_pc") and isinstance(item.op, ast.Add)
-                             and isinstance(item.right, ast.Constant)), "JAL link-PC offset")
-            link_offset = _positive(addition.right, "JAL link-PC offset")
-    if link_offset is None:
-        raise UnsupportedModelTiming("scalar ISA has no JAL definition")
+        instructions[mnemonic] = _accesses(execute)
     # The central Core/scalar method guards pin reads and writes to the issue edge.
-    return dict(schema="atlas.model_frontend.v1", ordinary_issue_gap=gap,
+    return dict(ordinary_issue_gap=gap,
                 delay=dict(base_gap=gap, immediate_mask=slots["delay_mask"], decrement_per_tick=slots["decrement"]),
-                scalar=dict(read_age=0, write_age=0, completion_delay=slots["completion"]),
-                control=dict(delay_slots=delay_slots, operand_read_age=0, jal_link_pc_offset=link_offset),
+                scalar=dict(read_age=0, write_age=0),
+                control=dict(delay_slots=delay_slots, operand_read_age=0),
                 instructions=instructions)
 
 

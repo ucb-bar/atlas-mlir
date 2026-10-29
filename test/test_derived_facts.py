@@ -74,7 +74,7 @@ class ModelDerivationTest(NativeModelTest):
         self.assertEqual(len(blocks), 6)
         self.assertEqual(releases["vlsu.vstore"]["mreg_read"]["release_age"], 34)
         self.assertEqual(releases["xlu.transpose"]["mreg_read"]["release_age"], 33)
-        self.assertEqual(releases["scalar_lsu.load"]["vmem_read"]["available_age"], 2)
+        self.assertEqual(releases["scalar_lsu.load"]["vmem_read"]["release_age"], 1)
 
     def test_mxu_source_latency_moves_compute_window_and_drain(self):
         source, _ = mxu._sources(self.cfg)
@@ -106,7 +106,7 @@ class DerivedVPUTest(NativeModelTest):
             changed, releases = derive.derive_vpu(self.cfg)
         self.assertEqual(changed["vpu.add"]["first_free_age"], 80)
         self.assertEqual(changed["vpu.add"]["events"], baseline["vpu.add"]["events"])
-        self.assertEqual(releases["vpu.add"]["mreg_write"]["available_age"], 80)
+        self.assertEqual(releases["vpu.add"]["mreg_write"]["release_age"] + 1, 80)
         self.assertEqual(releases["vpu.add"]["mreg_write"]["release_age"], 79)
         self.assertEqual({name: block for name, block in changed.items() if name != "vpu.add"},
                          {name: block for name, block in baseline.items() if name != "vpu.add"})

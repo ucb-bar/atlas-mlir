@@ -8,7 +8,6 @@ from collections import defaultdict
 from contextlib import closing
 from io import StringIO
 from dataclasses import asdict, replace
-import json
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -152,7 +151,7 @@ def observe_vpu(cfg):
 
 
 def validate_derived(cfg, candidates, releases, output_dir):
-    """Check a representative native VPU execution against source-derived facts."""
+    """Compare vadd MREG events and first-free age; other blocks use source guards."""
     check = dict(name="vpu.add", passed=False)
     observed = []
     try:
@@ -160,15 +159,12 @@ def validate_derived(cfg, candidates, releases, output_dir):
         observed.append(block)
         candidate = candidates["vpu.add"]
         if block != {key: candidate[key] for key in ("events", "first_free_age")}:
-            raise RuntimeError("source-derived VPU timing differs from native execution")
+            raise RuntimeError("vadd timing differs from native execution")
         check["passed"] = True
     except (ValueError, RuntimeError) as error:
         check["error"] = str(error)
     report = dict(passed=check["passed"],
                   observed_runs=len(observed), checks=[check])
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "validation-report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
     if not report["passed"]:
-        raise UnsupportedModelTiming(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
+        raise UnsupportedModelTiming("VPU native timing differs from facts: " + check["error"])
     return report, observed

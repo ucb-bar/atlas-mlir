@@ -131,27 +131,6 @@ def _engine_values(tree):
     return dict(load=edge, store=edge + delay), edge
 
 
-def _proposal_contract(rows, minimum, interval):
-    """Bound beat service under the guarded DMA/backend and Core tick ordering."""
-    maximum = max(minimum, *(r["unloaded_latency_cycles"] for r in rows),
-                  *(r["cycles_per_beat"] for r in rows))
-    maximum_cycle = 2147483647
-    if not math.isfinite(maximum) or maximum > maximum_cycle:
-        raise UnsupportedModelTiming("unsupported DMA proposal arithmetic domain")
-    # Do not subtract the backend rounding epsilon here: IEEE addition followed
-    # by subtraction can round across an integer even on small cycle counts.
-    # Rounding upward without that reduction preserves the service envelope.
-    quantum = math.ceil(maximum) + interval
-    if type(interval) is not int or interval != 1 or minimum < interval or quantum <= interval:
-        raise UnsupportedModelTiming("unsupported DMA bound service/positive response latency")
-    if quantum > maximum_cycle:
-        raise UnsupportedModelTiming("unsupported DMA proposal arithmetic domain")
-    # Compiler policy: serialize DMA estimates by one cycle between commands.
-    intercommand_serialization_cycles = 1
-    return dict(retire_to_wait_issue_cycles=interval, per_beat_bound_cycles=quantum,
-                policy=dict(intercommand_serialization_cycles=intercommand_serialization_cycles))
-
-
 def derive_curve(cfg):
     from npu_model.hardware import dma, memory_backend
     backend_tree = _review(memory_backend)
@@ -196,8 +175,9 @@ def derive_curve(cfg):
         peak, _ = backend.curve_peak(pct)
         rows.append(dict(unloaded_latency_cycles=backend.latency_at(0.0, pct),
                          cycles_per_beat=1.0 / peak))
-    proposal = _proposal_contract(rows, backend.min_latency, issue_interval)
+    if issue_interval != 1:
+        raise UnsupportedModelTiming("unsupported DMA issue interval")
     return dict(curve_sha256=curve_sha, beat_bytes=backend.beat_bytes,
                 max_transfer_bytes=cfg.dma_max_transfer_bytes, min_latency=backend.min_latency,
                 startup_cycles=startup, issue_interval_cycles=issue_interval, curves=rows,
-                proposal_contract=proposal)
+                retire_to_wait_issue_cycles=issue_interval)
