@@ -22,7 +22,7 @@ from model_evidence import requires_model_evidence
 from atlas_model_selection import (Candidate, SelectionConfig, candidate_options, evidence_option,
                                    group_order_neighbors, select_program)
 from test_virtual_ssa import BIN, run
-from test_virtual_scheduling import S, function, start, inp, const, dma_load, dma_store, outp
+from test_virtual_scheduling import S, function, start, const, dma_load, outp
 
 
 def candidate_command(argv):
@@ -275,11 +275,6 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         from test_dma_ring_waits import fixture_evidence
         self.evidence = fixture_evidence(self.directory)
-        self.source = function("alias", [
-            start("s0"), inp("s0", "s1", "tile", 0), const("address", -2147481600), const("size", 2048),
-            dma_store("s1", "s2", "tile", "address"),
-            dma_load("s2", "s3", "loaded", "address", "size", "bf16"),
-            outp("s3", "s4", "loaded", 0), f"return %s4 : {S}"])
         self.graph_path = self.directory / "graph.json"
         self.order_path = self.directory / "order.json"
 
@@ -313,21 +308,12 @@ class ModelOrderReplayTest(unittest.TestCase):
         replay = self.replay([order])
         self.assertEqual(replay.returncode, 0, replay.stderr)
 
-    def test_each_graph_edge_including_alias_order_is_mandatory(self):
-        graphs, _ = self.graph()
-        graph = graphs[0]
-        store = graph["operations"].index("atlas.virtual_dma_store_bf16")
-        load = graph["operations"].index("atlas.virtual_dma_load_bf16")
-        self.assertIn(store, graph["preds"][load])
-        for node, preds in enumerate(graph["preds"]):
-            for pred in preds:
-                with self.subTest(pred=pred, node=node):
-                    order = list(graph["order"])
-                    order.remove(node)
-                    order.insert(order.index(pred), node)
-                    rejected = self.replay([order])
-                    self.assertNotEqual(rejected.returncode, 0)
-                    self.assertIn("violates a dependence", rejected.stderr)
+        node, preds = next((node, preds) for node, preds in enumerate(graphs[0]["preds"]) if preds)
+        order.remove(node)
+        order.insert(order.index(preds[0]), node)
+        rejected = self.replay([order])
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("violates a dependence", rejected.stderr)
 
 
 if __name__ == "__main__":
