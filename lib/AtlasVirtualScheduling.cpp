@@ -404,7 +404,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   auto transferCycles = [&](int64_t bytes, bool store) -> FailureOr<int> {
     if (provider.dmaEstimate) {
       auto estimate = provider.dmaEstimate(bytes, store);
-      if (!estimate.error.empty()) return op->emitOpError(estimate.error);
+      if (!estimate.error.empty()) return op->emitOpError(provider.diagnostic(estimate.error));
       if (estimate.value < 1) return op->emitOpError("provider returned a nonpositive DMA proposal estimate");
       return estimate.value;
     }

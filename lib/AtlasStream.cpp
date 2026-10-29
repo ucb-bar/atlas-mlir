@@ -450,10 +450,10 @@ LogicalResult mlir::atlas::checkAtlasStream(
     return failure();
   std::string missing = validateTimingProvider(provider);
   if (!missing.empty())
-    return s.ops.front()->emitOpError(missing);
+    return s.ops.front()->emitOpError(provider.diagnostic(missing));
   std::string scope = provider.validateScope(s);
   if (!scope.empty())
-    return s.ops.front()->emitOpError(scope);
+    return s.ops.front()->emitOpError(provider.diagnostic(scope));
   auto name = [&](size_t i) {
     return s.ops[i]->getName().getStringRef().str();
   };
@@ -467,7 +467,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
       for (const auto &[k, dma] : pending[ch]) {
         auto conflict = provider.dmaConflict(dma, f);
         if (!conflict.error.empty())
-          return s.ops[i]->emitOpError(conflict.error);
+          return s.ops[i]->emitOpError(provider.diagnostic(conflict.error));
         if (conflict.value.conflict)
           return s.ops[i]->emitOpError()
                  << edgeKindName(conflict.value.kind) << " conflict with " << name(k)
@@ -491,7 +491,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
             Footprint f = provider.footprint(s.instrs[i], iteration);
             applyScalar(s.instrs[i], iteration);
             if (!f.error.empty())
-              return s.ops[i]->emitOpError(f.error);
+              return s.ops[i]->emitOpError(provider.diagnostic(f.error));
             return meetsPending(i, f);
           });
       if (failed(exit))
@@ -505,7 +505,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
       const OpInfo &op = *in.op;
       Footprint f = provider.footprint(in, regs);
       if (!f.error.empty())
-        return s.ops[i]->emitOpError(f.error);
+        return s.ops[i]->emitOpError(provider.diagnostic(f.error));
       if (f.doneAge < 0)
         return s.ops[i]->emitOpError("timing provider returned a negative completion age");
       if (s.delaySlots && i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
@@ -694,7 +694,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     RegValues regs = s.entry[block];
     auto reservations = provider.createReservations();
     if (!reservations.error.empty())
-      return s.ops[s.starts[block]]->emitOpError(reservations.error);
+      return s.ops[s.starts[block]]->emitOpError(provider.diagnostic(reservations.error));
     if (!reservations.value)
       return s.ops[s.starts[block]]->emitOpError("timing provider returned no reservation state");
     TimingReservations &table = *reservations.value;
@@ -705,13 +705,13 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       const Instr &in = s.instrs[i];
       Footprint f = provider.footprint(in, regs);
       if (!f.error.empty())
-        return s.ops[i]->emitOpError(f.error);
+        return s.ops[i]->emitOpError(provider.diagnostic(f.error));
       if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
         return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
       for (const Issued &prior : issued) {
         auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
         if (!rule.error.empty())
-          return s.ops[i]->emitOpError(rule.error);
+          return s.ops[i]->emitOpError(provider.diagnostic(rule.error));
         const Dependence &d = rule.value;
         if (d.distance < 0)
           return s.ops[i]->emitOpError("timing provider returned a negative issue distance");
@@ -721,7 +721,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       }
       auto conflict = table.conflict(in, f, cycle);
       if (!conflict.error.empty())
-        return s.ops[i]->emitOpError(conflict.error);
+        return s.ops[i]->emitOpError(provider.diagnostic(conflict.error));
       if (!conflict.value.empty())
         return s.ops[i]->emitOpError("timing resource conflict: ") << conflict.value;
       if (in.release && cycle < drained)
@@ -738,7 +738,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       if (reservationError.empty() && in.op->opClass == OpClass::DmaWait)
         reservationError = table.onWait(in, cycle);
       if (!reservationError.empty())
-        return s.ops[i]->emitOpError(reservationError);
+        return s.ops[i]->emitOpError(provider.diagnostic(reservationError));
       if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
         pendingDMA[in.op->channel] = s.ops[i];
       else if (in.op->opClass == OpClass::DmaWait)
@@ -748,7 +748,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       applyScalar(in, regs);
       auto gap = provider.issueGap(in);
       if (!gap.error.empty())
-        return s.ops[i]->emitOpError(gap.error);
+        return s.ops[i]->emitOpError(provider.diagnostic(gap.error));
       if (gap.value <= 0 || cycle > std::numeric_limits<int>::max() - gap.value)
         return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
       cycle += gap.value;
@@ -763,7 +763,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         for (size_t i = s.blockEnd(block); i < s.ops.size() && isa<DelayOp>(s.ops[i]); ++i) {
           auto gap = provider.issueGap(s.instrs[i]);
           if (!gap.error.empty())
-            return s.ops[i]->emitOpError(gap.error);
+            return s.ops[i]->emitOpError(provider.diagnostic(gap.error));
           if (gap.value <= 0 || idle > std::numeric_limits<int>::max() - gap.value)
             return s.ops[i]->emitOpError("timing provider boundary gap exceeds positive cycle domain");
           idle += gap.value;

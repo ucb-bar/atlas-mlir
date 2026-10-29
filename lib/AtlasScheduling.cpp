@@ -56,7 +56,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
 
   auto built = buildTimingGraph(nodes, s.entry[block], p);
   if (!built.error.empty())
-    return op(0)->emitOpError(built.error);
+    return op(0)->emitOpError(p.diagnostic(built.error));
   DepGraph g = std::move(built.value);
   if (sourceWaitPlacement) {
     auto edge = [&](int from, int to) {
@@ -113,7 +113,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   };
   std::unique_ptr<TimingReservations> alone = reservations();
   if (!fault.empty())
-    return op(0)->emitOpError(fault);
+    return op(0)->emitOpError(p.diagnostic(fault));
   if (p.frontendSpacing.ordinaryGap <= 0 || p.frontendSpacing.delaySlots < 0 ||
       (int64_t(p.frontendSpacing.delaySlots) + 1) *
               p.frontendSpacing.ordinaryGap > INT_MAX)
@@ -126,7 +126,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (gaps[i] <= 0)
       note("timing provider issue gap exceeds positive cycle domain");
     if (!fault.empty())
-      return op(i)->emitOpError(fault);
+      return op(i)->emitOpError(p.diagnostic(fault));
     if (!conflict.empty())
       return op(i)->emitOpError("can never issue: ") << conflict;
     maxSpan = std::max({maxSpan, gaps[i], g.footprints[i].doneAge + 1});
@@ -178,7 +178,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
 
   std::unique_ptr<TimingReservations> table = reservations();
   if (!fault.empty())
-    return op(0)->emitOpError(fault);
+    return op(0)->emitOpError(p.diagnostic(fault));
   auto completion = [&](int i, int c) { return c + g.footprints[i].doneAge + 1; };
   auto nextIssue = [&](int i, int c) { return c + gaps[i]; };
   auto busy = [&](int i, int c) {
@@ -264,7 +264,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         best = bestWait;
     }
     if (!fault.empty())
-      return op(0)->emitOpError(fault);
+      return op(0)->emitOpError(p.diagnostic(fault));
     if (best < 0) {
       cycle++;
       if (cycle - lastPlaced > kMaxIdle)
@@ -301,7 +301,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     }
     nextFree = nextIssue(best, cycle);
     if (!fault.empty())
-      return op(best)->emitOpError(fault);
+      return op(best)->emitOpError(p.diagnostic(fault));
     lastPlaced = cycle;
     cycle = nextFree;
     placed++;
@@ -323,7 +323,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       body.erase(std::next(filler).base());
       // Keep the chosen order, but reclaim the filler's old issue cycle.
       table = reservations();
-      if (!fault.empty()) return op(0)->emitOpError(fault);
+      if (!fault.empty()) return op(0)->emitOpError(p.diagnostic(fault));
       nextFree = 0;
       earliest.assign(n, 0);
       why.assign(n, "");
@@ -350,7 +350,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           }
         }
         nextFree = nextIssue(i, cycle);
-        if (!fault.empty()) return op(i)->emitOpError(fault);
+        if (!fault.empty()) return op(i)->emitOpError(p.diagnostic(fault));
       }
     }
   }
@@ -360,7 +360,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int drain = 0;
   for (int i : body)
     drain = std::max(drain, completion(i, issue[i]));
-  if (!fault.empty()) return op(0)->emitOpError(fault);
+  if (!fault.empty()) return op(0)->emitOpError(p.diagnostic(fault));
 
   int termCycle = nextFree;
   std::string termReason;
@@ -396,7 +396,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         }
       }
       if (!fault.empty())
-        return op(term)->emitOpError(fault);
+        return op(term)->emitOpError(p.diagnostic(fault));
       if (held.empty())
         break;
       termCycle++;
@@ -410,7 +410,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       reserve(*table, slot, termEnd);
     }
     if (!fault.empty())
-      return op(term)->emitOpError(fault);
+      return op(term)->emitOpError(p.diagnostic(fault));
   }
 
   int free = 0;

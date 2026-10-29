@@ -185,7 +185,7 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
     const TimingProvider &p, const std::string &name, mlir::Operation *at) {
   auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
     return at->emitOpError("virtual cost of ") << name << ": "
-        << (p.model ? modelTimingDiagnostic(why) : why);
+        << p.diagnostic(why);
   };
   std::string missing = validateTimingProvider(p);
   if (!missing.empty()) return error(missing);
@@ -221,6 +221,10 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
       return MachineOpTiming{a.doneAge + 1, interval};
   }
   return error("same-unit issue interval exceeds bounded timing search");
+}
+
+std::string TimingProvider::diagnostic(llvm::StringRef error) const {
+  return model ? modelTimingDiagnostic(error) : error.str();
 }
 
 std::string mlir::atlas::timing::validateTimingProvider(
