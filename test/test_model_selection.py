@@ -111,7 +111,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
     def test_explicit_overrides(self):
         parser = argparse.ArgumentParser()
         add_model_arguments(parser)
-        for budget, expected in (("full", (32, 204)), ("selection", (24, 0))):
+        for budget, expected in (("full", (18, 134)), ("single", (1, 0))):
             values = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", budget]))
             self.assertEqual(tuple(values[key] for key in
                                    ("max_candidates", "search_group_evaluations")), expected)
@@ -122,7 +122,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual((values["search_group_evaluations"], values["profile"], values["mreg_candidates"]), (72, "fifo43", ()))
         builtin = model_arguments(parser.parse_args([]))
         self.assertEqual((builtin["profile"], builtin["search_group_evaluations"],
-                          builtin["mreg_candidates"]), ("fifo43", 204, None))
+                          builtin["mreg_candidates"]), ("fifo43", 134, None))
 
     def test_guarded_pack_reaches_preparation_and_entry_points(self):
         import atlas_model_selection

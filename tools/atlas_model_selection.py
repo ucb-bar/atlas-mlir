@@ -30,7 +30,6 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[1]
 
 
-SEARCH_BUDGETS = POLICY["presets"]
 POOLS = POLICY["pools"]
 CANDIDATES = POLICY["candidates"]
 DEFAULTS = POLICY["defaults"]
@@ -328,12 +327,12 @@ class Selection:
     def search_initial(self) -> None:
         self.evaluate_batch([(Candidate(), "default")])
         initial = [(Candidate(random_seed=seed), "random-seed") for seed in self.config.random_seeds]
-        self.evaluate_batch(initial, limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
+        self.evaluate_batch(initial, limit=self.config.max_candidates)
         if self.best is None:
             self.fail("no legal candidate: every initial candidate was refused")
 
         self.evaluate_batch([(replace(self.winner(), wait_placement=CANDIDATES["initial_wait_placement"]),
-                              "wait-placement")], limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
+                              "wait-placement")], limit=self.config.max_candidates)
         register_base = self.winner()
         self.receipt["mreg_pool_size"] = len(self.config.mreg_candidates)
         self.evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks")
@@ -440,30 +439,34 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", choices=("builtin", "model"), default=DEFAULTS["lower_provider"])
     parser.add_argument("--profile", choices=("fifo43", "curve"),
                         help="memory scoring profile (model default: curve)")
-    parser.add_argument("--npu-model", type=Path, help="selected npu_model source tree; must match provider evidence")
+    parser.add_argument("--npu-model", type=Path, help="npu_model source tree used for native scoring")
     parser.add_argument("--model-region", type=Path, action="append", default=[],
                         help="DRAM region JSON with address, initial_hex and optional expected_hex")
     parser.add_argument("--model-facts", type=Path,
-                        help="qualified model facts bundle (default: regenerate from --npu-model)")
-    parser.add_argument("--search-budget", choices=tuple(SEARCH_BUDGETS), default=DEFAULTS["search_budget"],
-                        help="selection knobs only or bounded full search (default)")
-    parser.add_argument("--max-candidates", type=int)
+                        help="model facts directory (default: regenerate from --npu-model)")
+    parser.add_argument("--search-budget", choices=("full", "single"), default="full",
+                        help="full search (18 initial and 134 group attempts) or one default candidate")
+    parser.add_argument("--max-candidates", type=int, default=18,
+                        help="initial attempt limit in full mode (default: 18)")
     parser.add_argument("--workers", type=int, default=min(DEFAULTS["workers"], os.cpu_count() or 1))
-    parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="score eight legal MREG rank vectors")
-    parser.add_argument("--search-group-evaluations", type=int,
-                        help="additional verified dependency-group attempts after knob selection")
+    parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=True,
+                        help="score eight legal MREG rank vectors in full mode")
+    parser.add_argument("--search-group-evaluations", type=int, default=134,
+                        help="group attempt limit in full mode (default: 134)")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:
-    preset = SEARCH_BUDGETS[args.search_budget]
-    budget = {name: getattr(args, name) if getattr(args, name) is not None else value for name, value in preset.items()}
-    banks = budget.pop("bank_candidates")
-    profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model" else DEFAULTS["builtin_profile"])
-    return {"provider": args.provider, "profile": profile, "model": args.npu_model,
-            "model_regions": tuple(args.model_region), "model_facts": args.model_facts,
-            "workers": args.workers,
-            "mreg_candidates": None if banks else (), **budget}
+    single = args.search_budget == "single"
+    profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model"
+                               else DEFAULTS["builtin_profile"])
+    return {
+        "provider": args.provider, "profile": profile,
+        "model": args.npu_model, "model_regions": tuple(args.model_region),
+        "model_facts": args.model_facts, "workers": args.workers,
+        "mreg_candidates": () if single or not args.bank_candidates else None,
+        "max_candidates": 1 if single else args.max_candidates,
+        "search_group_evaluations": 0 if single else args.search_group_evaluations,
+    }
 
 
 def main() -> int:

@@ -2,24 +2,11 @@
   "algorithms": {
     "proposal_operand_placement": "fixed_encoded_field_order_source_pair_stride"
   },
-  "presets": {
-    "selection": {
-      "max_candidates": 24,
-      "search_group_evaluations": 0,
-      "bank_candidates": false
-    },
-    "full": {
-      "max_candidates": 32,
-      "search_group_evaluations": 204,
-      "bank_candidates": true
-    }
-  },
   "defaults": {
     "lower_provider": "builtin",
     "selection_provider": "model",
     "model_profile": "curve",
     "builtin_profile": "fifo43",
-    "search_budget": "full",
     "workers": 12,
     "guarded_pack": false,
     "spill": true,
@@ -38,7 +25,6 @@
     "mreg_vector_length": 64
   },
   "candidates": {
-    "initial_knob_cap": 24,
     "batch_width": 12,
     "initial_wait_placement": "source",
     "curve_group_wait_placements": ["default", "source"]

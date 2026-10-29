@@ -11,7 +11,8 @@ of scheduling and allocation choices. The default provider is unchanged.
 ## Regenerating the facts
 
 Facts are the timing values extracted from the model source and its default
-configuration. Generate them into a new directory with one command:
+configuration. Use Python 3.14 with the model dependencies and generate them
+into a new directory with one command:
 
 ```sh
 python -B tools/atlas_model_facts.py --npu-model /path/to/npu_model \
@@ -73,8 +74,9 @@ compiler timing tables.
 The main selection options are:
 
 - `--profile curve|fifo43` chooses the scoring configuration.
-- `--search-budget` chooses a bounded search preset.
-- `--max-candidates` limits the initial candidate pool.
+- `--search-budget full|single` chooses full search or one default candidate.
+- `--max-candidates` limits initial attempts in full mode (default: 18).
+- `--search-group-evaluations` limits group attempts in full mode (default: 134).
 - `--guarded-pack` enables exact PACK for supported finite inputs.
 - `--model-region` supplies an expected memory region for numerical checks.
 
@@ -85,7 +87,9 @@ The selection file records attempts, cycle counts, and the winning index.
 
 ## How selection works
 
-1. Build candidates in a fixed order from fixed seeds and number them.
+1. Build candidates in a fixed order from fixed seeds and number them before
+   parallel work. Full mode tries random scheduling orders, source wait
+   placement, and MREG bank choices. Single mode tries only the default.
 2. Compile each candidate and run the normal compiler verifiers.
 3. Run each candidate on npu_model through drained ECALL and check the
    supplied output regions.
@@ -95,8 +99,12 @@ The selection file records attempts, cycle counts, and the winning index.
 
 Compiler refusals count toward the budget. Native execution faults and
 numerical mismatches stop selection. Scores for identical instruction words
-are reused within one search. Selection is deterministic for a fixed worker
-count and configuration, and the winner's words are exactly the scored words.
+are reused within one search. Full mode allows 18 initial attempts and 134
+group attempts, with batches of twelve and moves of up to four operations.
+Single mode uses one initial attempt and no group or bank search; its mode
+takes precedence over budget overrides. Both modes are deterministic for
+the same inputs, facts, and flags at any worker count or machine load. The
+winner's words are exactly the scored words.
 
 ## Updating for NPU Model changes
 
