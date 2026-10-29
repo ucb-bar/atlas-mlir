@@ -38,6 +38,9 @@ def regenerate(model, out):
         raise ValueError("--out must be a new directory")
     check_model_semantics(model)
     sys.path.insert(0, str(model))
+    import npu_model
+    if Path(npu_model.__file__).resolve() != (model / "npu_model/__init__.py").resolve():
+        raise UnsupportedModelTiming("imported npu_model differs from --npu-model")
     import torch
     from atlas_derive_vpu import derive_vpu
     from atlas_derive_mxu import derive_mxu, derive_weight_timing

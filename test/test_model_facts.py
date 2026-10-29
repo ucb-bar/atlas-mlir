@@ -34,3 +34,13 @@ class CostProbeTest(NativeModelFixture, unittest.TestCase):
         for values in (dict(architecture, mreg_count=4), dict(architecture, bf16_registers_per_tile=0)):
             with self.subTest(values=values), self.assertRaises(UnsupportedModelTiming):
                 derive_costs(self.cfg, values)
+
+    def test_imported_model_path_refuses(self):
+        import npu_model
+        import tempfile
+        from unittest.mock import patch
+        from atlas_model_facts import regenerate
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(npu_model, "__file__", "/wrong/npu_model/__init__.py"):
+            with self.assertRaisesRegex(UnsupportedModelTiming, "imported npu_model differs"):
+                regenerate(os.environ["ATLAS_DERIVE_MODEL_ROOT"], Path(directory) / "facts")
