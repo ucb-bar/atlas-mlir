@@ -1,6 +1,7 @@
 #include "Atlas/AtlasTimingProvider.h"
 #include "Atlas/AtlasModelTables.h"
 #include "llvm/ADT/StringMap.h"
+#include <cassert>
 #include <limits>
 #include <mutex>
 
@@ -70,14 +71,11 @@ std::pair<Instr, Instr> representativeProbes(const OpInfo *op,
 }
 } // namespace
 
-mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
-    const TimingProvider &p, const std::string &name, mlir::Operation *at) {
-  auto error = [&](const std::string &why) -> mlir::FailureOr<MachineOpTiming> {
-    return at->emitOpError("virtual cost of ") << name << ": "
-        << p.diagnostic(why);
+TimingRuleResult<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
+    const TimingProvider &p, const std::string &name) {
+  auto error = [](const std::string &why) {
+    return TimingRuleResult<MachineOpTiming>{{}, why};
   };
-  std::string missing = validateTimingProvider(p);
-  if (!missing.empty()) return error(missing);
   const OpInfo *op = findOp(name);
   if (!op) return error("unknown machine operation");
   auto [first, second] = representativeProbes(op, p.model.get());
@@ -107,9 +105,31 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
     if (conflict.value.empty())
       // Issue-edge-zero ages include the final event/release edge. The
       // source-bound frontend advances one edge before the work is drained.
-      return MachineOpTiming{a.doneAge + 1, interval};
+      return {{a.doneAge + 1, interval}, {}};
   }
   return error("same-unit issue interval exceeds bounded timing search");
+}
+
+std::string mlir::atlas::timing::fillMachineTiming(TimingProvider &p) {
+  std::string missing = validateTimingProvider(p);
+  if (!missing.empty()) return missing;
+  std::map<std::string, MachineOpTiming> timings;
+  auto add = [&](const std::string &name) {
+    auto result = machineTimingOf(p, name);
+    if (!result.error.empty()) return name + ": " + result.error;
+    timings.emplace(name, result.value);
+    return std::string{};
+  };
+  for (const OpInfo &op : machineOperations()) {
+    if (op.engine == Engine::Dma ||
+        (op.engine == Engine::Scalar && op.name != "addi" && op.name != "lui") ||
+        (op.opClass == OpClass::ScalarLoad && op.name != "lw") ||
+        (op.opClass == OpClass::ScalarStore && op.name != "sw"))
+      continue;
+    if (auto error = add(op.name); !error.empty()) return error;
+  }
+  p.machineTiming = std::move(timings);
+  return {};
 }
 
 std::string TimingProvider::diagnostic(llvm::StringRef error) const {
@@ -164,6 +184,12 @@ TimingProvider mlir::atlas::timing::builtinTimingProvider() {
       return TimingRuleResult<DMAProposal>{{}, "DMA queue estimate exceeds cycle domain"};
     return TimingRuleResult<DMAProposal>{{int(end), int(end + 2)}, {}};
   };
+  static const auto timings = [&] {
+    std::string error = fillMachineTiming(p);
+    assert(error.empty() && "default machine timing must be complete");
+    return std::move(p.machineTiming);
+  }();
+  p.machineTiming = timings;
   return p;
 }
 
@@ -195,9 +221,16 @@ std::string mlir::atlas::timing::registerAtlasTimingProvider(
     const std::string &id, TimingProviderFactory factory) {
   if (id.empty()) return "timing provider requires an explicit policy id";
   if (!factory) return "timing provider registration requires a factory: " + id;
+  auto complete = [factory = std::move(factory)](mlir::ModuleOp module) {
+    auto result = factory(module);
+    if (!result.error.empty()) return result;
+    if (auto error = fillMachineTiming(result.value); !error.empty())
+      return TimingRuleResult<TimingProvider>{{}, result.value.diagnostic(error)};
+    return result;
+  };
   Registry &r = registry();
   std::lock_guard<std::mutex> lock(r.mutex);
-  if (!r.factories.try_emplace(id, std::move(factory)).second)
+  if (!r.factories.try_emplace(id, std::move(complete)).second)
     return "timing provider is already registered: " + id;
   return {};
 }

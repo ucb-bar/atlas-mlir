@@ -192,11 +192,15 @@ static std::vector<OpInfo> buildTable() {
   return t;
 }
 
-const OpInfo *mlir::atlas::timing::findOp(const std::string &name) {
+const std::vector<OpInfo> &mlir::atlas::timing::machineOperations() {
   static const std::vector<OpInfo> table = buildTable();
+  return table;
+}
+
+const OpInfo *mlir::atlas::timing::findOp(const std::string &name) {
   static const std::map<std::string, const OpInfo *> byName = [] {
     std::map<std::string, const OpInfo *> m;
-    for (const OpInfo &op : table)
+    for (const OpInfo &op : machineOperations())
       m[op.name] = &op;
     return m;
   }();

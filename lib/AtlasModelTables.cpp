@@ -553,7 +553,10 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory
     return {{}, "incomplete model evidence selection"};
   auto facts = loadModelTimingTables(path.getValue(), hash.getValue());
   if (!facts) return {{}, llvm::toString(facts.takeError())};
-  return {modelTimingProvider(std::make_shared<ModelTimingTables>(std::move(*facts))), {}};
+  auto result = modelTimingProvider(std::make_shared<ModelTimingTables>(std::move(*facts)));
+  if (auto error = fillMachineTiming(result); !error.empty())
+    return {{}, result.diagnostic(error)};
+  return {std::move(result), {}};
 }
 
 namespace {

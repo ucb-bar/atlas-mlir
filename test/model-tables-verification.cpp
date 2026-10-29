@@ -206,9 +206,8 @@ void dmaValues(const ModelTimingTables &facts) {
   }
 }
 
-void probeGeometry(const ModelTimingTables &facts, MLIRContext &context) {
+void probeGeometry(const ModelTimingTables &facts, MLIRContext &) {
   auto provider = modelTimingProvider(std::make_shared<ModelTimingTables>(facts));
-  auto module = mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
   auto footprint = provider.footprint;
   std::vector<Instr> probes;
   provider.footprint = [&](const Instr &in, const RegValues &regs) {
@@ -223,13 +222,12 @@ void probeGeometry(const ModelTimingTables &facts, MLIRContext &context) {
     tables->bf16RegistersPerTile = span;
     provider.model = tables;
     probes.clear();
-    auto cost = machineTimingOf(provider, "vadd.bf16", module);
-    check(succeeded(cost) && probes.size() == 2 &&
+    auto cost = machineTimingOf(provider, "vadd.bf16");
+    check(cost.error.empty() && probes.size() == 2 &&
               probes[0].rd == 0 && probes[0].rs1 == span && probes[0].rs2 == 2 * span &&
               probes[1].rd == 3 * span && probes[1].rs1 == 4 * span && probes[1].rs2 == 5 * span,
           "representative operands use the loaded BF16 span");
   }
-  module.erase();
 }
 
 void loaderRefusal(llvm::StringRef bytes) {

@@ -45,6 +45,10 @@ struct FrontendSpacing {
   int successorGap() const { return (delaySlots + 1) * ordinaryGap; }
 };
 
+struct MachineOpTiming {
+  int latency, interval;
+};
+
 // Complete inputs to final timing verification; scope validation runs first.
 // CFG and host-release obligations stay in the common verifier. A provider id
 // names policy, not RTL qualification.
@@ -55,6 +59,7 @@ struct TimingProvider {
   unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;
   std::shared_ptr<const TimingTables> model;
+  std::map<std::string, MachineOpTiming> machineTiming;
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(
@@ -81,14 +86,12 @@ struct TimingProvider {
 
 std::string validateTimingProvider(const TimingProvider &provider);
 
-struct MachineOpTiming {
-  int latency, interval;
-};
 // Latency is the final event or release age plus one. The issue interval uses
 // reservation queries for two representative operands. Actual instructions
 // still require their own dependence and reservation checks.
-FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
-                                        const std::string &name, Operation *at);
+TimingRuleResult<MachineOpTiming> machineTimingOf(
+    const TimingProvider &provider, const std::string &name);
+std::string fillMachineTiming(TimingProvider &provider);
 
 constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
 // Virtual costs and physical filling must use the same provider capability.

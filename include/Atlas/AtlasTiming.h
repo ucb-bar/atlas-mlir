@@ -47,6 +47,7 @@ struct OpInfo {
   bool twoInput = false;
 };
 
+const std::vector<OpInfo> &machineOperations();
 const OpInfo *findOp(const std::string &name);
 // The BF16 VPU instruction for an atlas.vpu_unary, vpu_binary or vpu_reduce
 // kind, such as "exp2", "max" or "row_sum".
