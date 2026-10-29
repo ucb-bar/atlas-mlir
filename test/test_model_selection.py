@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -216,6 +217,29 @@ class CandidateControlsTest(unittest.TestCase):
                 result = run("atlas-opt", source, option)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(diagnostic, result.stderr)
+
+
+@requires_model_evidence
+class ModelFactsBundleTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.bundle = Path(self.temporary.name)
+        self.facts = self.bundle / "model-timing.json"
+        self.facts.write_bytes((Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) /
+                               "model-timing.json").read_bytes())
+
+    def test_selection_binds_current_facts(self):
+        # Whitespace is valid JSON and belongs to the selected file's hash.
+        self.facts.write_bytes(self.facts.read_bytes() + b" ")
+        selected = run("atlas-opt", "module {}", *evidence_option(self.bundle))
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertIn(hashlib.sha256(self.facts.read_bytes()).hexdigest(), selected.stdout)
+
+    def test_malformed_facts_refuse(self):
+        self.facts.write_text("{")
+        selected = run("atlas-opt", "module {}", *evidence_option(self.bundle))
+        self.assertNotEqual(selected.returncode, 0, selected.stdout)
 
 
 @requires_model_evidence

@@ -19,7 +19,6 @@ from atlas_model_timing import configuration, encoded, sha256, validate_derived
 def write(directory, name, value):
     path = directory / name
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
-    return sha256(path.read_bytes())
 
 
 def regenerate(model, out):
@@ -66,8 +65,7 @@ def regenerate(model, out):
         raise UnsupportedModelTiming("engine admission requires unique independent native units")
     out.mkdir(parents=True)
     validate_derived(cfg, blocks, releases, out)
-    facts_hash = write(out, "model-timing.json", payload)
-    write(out, "facts.lock.json", dict(op_timing_sha256=facts_hash))
+    write(out, "model-timing.json", payload)
     print(json.dumps(dict(operations=len(blocks), native_blocks=1, passed=True)), flush=True)
     return payload
 

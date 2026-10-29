@@ -73,9 +73,8 @@ def model_evidence_available():
     if not value:
         raise FileNotFoundError("ATLAS_TEST_MODEL_FACTS must name a qualified bundle directory")
     directory = Path(value)
-    for name in ("facts.lock.json", "model-timing.json"):
-        if not (directory / name).is_file():
-            raise FileNotFoundError(f"ATLAS_TEST_MODEL_FACTS requires {name}: {value!r}")
+    if not (directory / "model-timing.json").is_file():
+        raise FileNotFoundError(f"ATLAS_TEST_MODEL_FACTS requires model-timing.json: {value!r}")
     return True
 
 
