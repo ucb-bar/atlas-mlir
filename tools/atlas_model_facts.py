@@ -12,13 +12,27 @@ sys.dont_write_bytecode = True
 
 from atlas_model_diagnostics import UnsupportedModelTiming, model_timing_cli
 from atlas_model_capabilities import check_configuration
-from atlas_model_semantics import check_model_semantics
+from atlas_model_semantics import check_model_semantics, source_pins
+from atlas_model_schema import GUARDS, PIN_PATH
 from atlas_model_timing import configuration, encoded, sha256, validate_derived
 
 
 def write(directory, name, value):
     path = directory / name
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def accept_source(model):
+    pins = source_pins(model)
+    pins["model_revision"] = subprocess.check_output(
+        ["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
+    for group in ("files", "source_shapes"):
+        for name, digest in pins[group].items():
+            if digest != GUARDS[group].get(name):
+                print("changed pin: " + name)
+    if pins["model_revision"] != GUARDS["model_revision"]:
+        print("changed pin: model_revision")
+    write(PIN_PATH.parent, PIN_PATH.name, pins)
 
 
 def regenerate(model, out):
@@ -74,9 +88,15 @@ def regenerate(model, out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npu-model", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--out", type=Path)
+    mode.add_argument("--accept-source", action="store_true",
+                      help="accept reviewed source changes and rewrite model-pins.json")
     args = parser.parse_args()
-    regenerate(args.npu_model, args.out)
+    if args.accept_source:
+        accept_source(args.npu_model)
+    else:
+        regenerate(args.npu_model, args.out)
 
 
 if __name__ == "__main__":

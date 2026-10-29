@@ -21,11 +21,14 @@ by the compiler. Regenerate it when changing the model checkout or supported
 configuration. The tested checkout is npu_model revision
 `74982e7c68bd28ba6505b4df37290f198102ccce`.
 
-One guard table, `tools/model-semantics.json`, records helper and binding
-fingerprints for 17 modules and whole-engine shapes for seven other files.
+One guard table, `tools/model-pins.json`, records one digest for each of 17
+modules and whole-engine shapes for seven other files.
 The checks ignore comments; helper contracts also ignore docstrings while
 retaining the structure each extractor interprets. Configuration limits are
-checked before extraction.
+checked before extraction. After reviewing source changes, update the pins
+with `python -B tools/atlas_model_facts.py --npu-model PATH --accept-source`.
+This separate command prints the changed pins; regeneration never updates
+them.
 
 | Guarded npu_model input | Facts the compiler consumes |
 | --- | --- |
@@ -108,11 +111,12 @@ count and machine load do not change the candidate order or winner.
 Supported numerical changes regenerate through the same extractors, such as
 latency literals and positive curve costs. Unsupported helper structure,
 ISA changes, or geometry outside compiler limits refuse with a diagnostic.
-For example: `unsupported semantics: hardware/core.py:Core._tick_s1`.
+For example: `unsupported semantics: hardware/core.py: module contract changed`.
 
-When refusal fires, inspect the named file and helper. Update the matching
-`tools/atlas_derive_*.py` interpretation and guard entry; update the C++ reader
-if its supported representation changes. Regenerate, run full CTest, and
+When refusal fires, inspect the named file. Update the matching
+`tools/atlas_derive_*.py` interpretation and the C++ reader if their supported
+representation changes. Review the source diff, run `--accept-source` to
+update the pins, regenerate, run full CTest, and
 rerun selections with exact numerical checks before using the new facts.
 See [the extractor](../tools/atlas_model_facts.py) and
 [the loader](../lib/AtlasModelTables.cpp) for the implementation.

@@ -1,0 +1,31 @@
+{
+  "files": {
+    "__init__.py": "6a275a427b0c4b5ad794dfd544b48d9d3747609d9d6cc933bc1a2393ce581318",
+    "configs/__init__.py": "6a275a427b0c4b5ad794dfd544b48d9d3747609d9d6cc933bc1a2393ce581318",
+    "configs/isa_definition.py": "ab19c966e646d76ecbabb60d248da568e9c96d3e08f12f26a53545c63338ae09",
+    "hardware/__init__.py": "1df917312aa37c101582d1a4de9a2cce8df60cc7a8285fc76369e681db98546c",
+    "hardware/arch_state.py": "9336e99b302795805dc2af2696df8b6f46d2020d29b81112827c988c51c837aa",
+    "hardware/core.py": "d20d3b34d3ef3dcef944f7552bd9f7e69834e6ce381378e496f456b1c48ed30a",
+    "hardware/exu.py": "bc70e72f19f70c339beddd178ceeb3a2fc17ec76b0a896382fbcafa1c08ec6c5",
+    "hardware/hardware.py": "f20fae81048046177babb1f1bfd5b38228f3ccf265fddc2a00610d521333fcc8",
+    "hardware/ifu.py": "43072c4ad4d4344e9ab4f82603cc15e6231caf105607369ebb2b8bb293703cd8",
+    "hardware/sparse_memory.py": "69c2bf4f1fb384aead00e506a4750f4ea4a4eb7fc72bc767dd6cd3e5dfb14845",
+    "hardware/stage_data.py": "9fba0fd5e8738fc7fa70a2f9c78ee7126d8c9c8e3f536ed928d110cbe5766605",
+    "isa.py": "97c7655bbd57f8bf165abb55d68196fb194abc5d5eb5768b47c9bd98d67738ae",
+    "isa_patterns.py": "35d4a1f17fddebe930ed118b3ca38db72ed0cda4fb4d1e35537e6c83ed7c6d85",
+    "isa_types.py": "5d87d869e5a119b57cd79aa79b0e91db40d2b8e723d8f14918a5a3c39d9d2fb7",
+    "software/__init__.py": "9e2434680dd71f819254009db425fec0666976715cc1cf38b1f69eec7a41e187",
+    "software/instruction.py": "76bf0886a7b31be8a6ce687925e5814088766cac822063e0e1dedc7a339a3715",
+    "software/program.py": "8b1761d3782803e195a5e5ee88357ede926c479813709cef629c229c28eb2d59"
+  },
+  "model_revision": "74982e7c68bd28ba6505b4df37290f198102ccce",
+  "source_shapes": {
+    "bank_conflict.py": "e93968432332701d9195dff520cdebfe2dd9db0ab86e0ef8e18492050c104467",
+    "dma.py": "5418b362426b6037a4838c0698924164d51b4b4b929f1f91d99ef9c3789a008d",
+    "lsu.py": "2e1943c7ead558cbd3e83a4ed9fe5fffdfbf0e1d9027cee22e6d824b9eb16722",
+    "memory_backend.py": "0417a72651a33b7de9e3c8a37a01d6b6c7e2d3cdba1db9b8ce97e42e798efe8b",
+    "mxu.py": "b9b19dc70587bcd82acabc5b62282acea1526087a889719efe07a8196154b730",
+    "vpu.py": "47e798d3597c02b5982741ff9a0b21104919dcbe474382de3948f54d110bcb11",
+    "xlu.py": "6db21bb8d4cf6da0bc7fa2e64c47d168e0a159939ae9e70cf960eccfdf617125"
+  }
+}

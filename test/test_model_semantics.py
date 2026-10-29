@@ -1,7 +1,5 @@
 """Source dependency closure and conservative semantic normalization."""
 import ast
-import builtins
-import os
 from pathlib import Path
 import sys
 import unittest
@@ -11,7 +9,6 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 import atlas_model_semantics as semantics
 from atlas_model_diagnostics import UnsupportedModelTiming
-from model_evidence import semantic_sources, copy_model_sources
 
 
 class NormalizationTest(unittest.TestCase):
@@ -101,87 +98,6 @@ class NormalizationTest(unittest.TestCase):
                          ("operation(value)", "other(value)")):
             with self.subTest(old=old):
                 self.different(before, before.replace(old, new))
-
-
-@unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"),
-                     "set ATLAS_DERIVE_MODEL_ROOT for selected source dependency contracts")
-class DependencyClosureTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.sources = semantic_sources(Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]))
-
-    def setUp(self):
-        _, self.copy = copy_model_sources(self, self.sources)
-
-    def reject_mutation(self, relative, old, new):
-        original = self.sources[relative]
-        self.assertIn(old, original, "mutation must alter the selected source")
-        path = self.copy / "npu_model" / relative
-        path.write_text(original.replace(old, new, 1))
-        try:
-            with self.assertRaises(UnsupportedModelTiming):
-                semantics.check_model_semantics(self.copy)
-        finally:
-            path.write_text(original)
-
-    def test_manifest_covers_the_explicit_transitive_dependencies(self):
-        expected = {"hardware/" + name + ".py" for name in
-                    ("core", "arch_state", "exu", "ifu", "stage_data", "hardware", "sparse_memory")}
-        expected.update({"software/instruction.py", "software/program.py", "isa.py", "isa_types.py",
-                         "isa_patterns.py", "configs/isa_definition.py"})
-        self.assertTrue(expected <= self.sources.keys(), expected - self.sources.keys())
-        # A partial source-only copy has neither a package initializer nor its
-        # numerical dependencies: acceptance cannot depend on importing it.
-        real_import = builtins.__import__
-        def guarded_import(name, *args, **kwargs):
-            if name == "npu_model" or name.startswith("npu_model."):
-                raise AssertionError("model import during source checking")
-            return real_import(name, *args, **kwargs)
-        with patch("builtins.__import__", side_effect=guarded_import):
-            inventory = semantics.check_model_semantics(self.copy)
-        self.assertTrue(inventory)
-
-    def test_changed_dependencies_fail_closed(self):
-        cases = (
-            ("hardware/core.py", "self.cycle_count = 0", "self.cycle_count = 1"),
-            ("hardware/exu.py", "self._pending_completion_uop: Uop | None = None",
-             "self._pending_completion_uop: Uop | None = stale_uop"),
-            ("hardware/arch_state.py", "self.read_mrf_bf16(vs + 1)", "self.read_mrf_bf16(vs + 2)"),
-            ("hardware/ifu.py", "WORDS = 32768", "WORDS = 16384"),
-            ("hardware/stage_data.py", "self.valid = self._is_non_empty(data)", "self.valid = True"),
-            ("software/instruction.py", "self.pc = pc", "self.pc = pc + 1"),
-            ("software/program.py", "self.instructions = instructions", "self.instructions = instructions[1:]"),
-            ("configs/isa_definition.py", "_MASK32 = 0xFFFFFFFF", "_MASK32 = 0x7FFFFFFF"),
-            ("isa.py", "functional: bool = True", "functional: bool = False"),
-            ("isa_types.py", 'SCALAR = "ScalarExecutionUnit"', 'SCALAR = "LoadStoreUnit"'),
-            ("isa_patterns.py", 'Named(ScalarReg, "rs1")', 'Named(ScalarReg, "rs2")'),
-            ("hardware/sparse_memory.py", "_PAGE_BITS = 16", "_PAGE_BITS = 15"),
-        )
-        for relative, old, new in cases:
-            with self.subTest(relative=relative):
-                self.reject_mutation(relative, old, new)
-
-    def test_added_override_and_changed_import_binding_are_rejected(self):
-        self.reject_mutation("hardware/core.py", "from .ifu import InstructionFetch",
-                             "from .other_ifu import InstructionFetch")
-        self.reject_mutation("hardware/core.py", "class Core(Module):",
-                             "class Core(Module):\n"
-                             "    def _handle_runtime_error(self, stage, exc):\n        return True\n")
-        relative = "hardware/core.py"
-        path = self.copy / "npu_model" / relative
-        path.write_text(self.sources[relative] + "\nCore.tick = lambda self: None\n")
-        with self.assertRaises(UnsupportedModelTiming):
-            semantics.check_model_semantics(self.copy)
-
-    def test_selected_source_comment_and_docstring_changes_are_accepted(self):
-        baseline = semantics.check_model_semantics(self.copy)
-        path = self.copy / "npu_model" / "hardware/core.py"
-        tree = ast.parse(self.sources["hardware/core.py"])
-        owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Core")
-        self.assertIsInstance(owner.body[0], ast.Expr)
-        owner.body[0].value = ast.Constant(value="Updated explanatory documentation.")
-        path.write_text("# editorial comment\n" + ast.unparse(tree) + "\n")
-        self.assertEqual(semantics.check_model_semantics(self.copy), baseline)
 
 
 if __name__ == "__main__":

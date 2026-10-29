@@ -44,16 +44,21 @@ def _normalize_slot_capacity(tree):
     return slots
 
 
+def source_shape(source):
+    """Return the VPU source shape with reviewed timing parameters normalized."""
+    tree = ast.parse(source)
+    tree.body = [node for node in tree.body if not (
+        isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "VPU_OP_LATENCIES"
+                                           for target in node.targets))]
+    if any(isinstance(n, ast.ClassDef) and n.name == "VectorExecutionUnit" for n in tree.body):
+        _normalize_slot_capacity(tree)
+    return ast_digest(tree)
+
+
 def _check_source(module, *, latency_table=False):
     path = Path(inspect.getsourcefile(module))
-    tree = ast.parse(path.read_text())
-    if latency_table:
-        tree.body = [node for node in tree.body if not (
-            isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "VPU_OP_LATENCIES"
-                                               for target in node.targets))]
-        if any(isinstance(n, ast.ClassDef) and n.name == "VectorExecutionUnit" for n in tree.body):
-            _normalize_slot_capacity(tree)
-    digest = ast_digest(tree)
+    source = path.read_text()
+    digest = source_shape(source) if latency_table else ast_digest(ast.parse(source))
     if digest != SOURCE_SHAPES.get(path.name):
         raise UnsupportedModelTiming(f"unsupported VPU timing semantics in {path.name}")
 

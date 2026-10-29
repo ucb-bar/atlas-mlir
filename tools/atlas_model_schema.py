@@ -29,7 +29,8 @@ def reservation(last, *, first=0):
 
 
 _DIRECTORY = Path(__file__).resolve().parent
-GUARDS = json.loads((_DIRECTORY / "model-semantics.json").read_text())
+PIN_PATH = _DIRECTORY / "model-pins.json"
+GUARDS = json.loads(PIN_PATH.read_text())
 SOURCE_SHAPES = GUARDS["source_shapes"]
 VOCABULARY = json.loads((_DIRECTORY / "model-timing-vocabulary.json").read_text())
 VPU_BLOCKS = tuple(entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"])

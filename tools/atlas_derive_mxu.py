@@ -74,7 +74,7 @@ def _placeholder(name):
     return ast.Name(id="DERIVED_" + name, ctx=ast.Load())
 
 
-def _plan(source):
+def _normalize_source(source):
     tree = ast.parse(source)
     classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     if set(classes) != set(_CLASSES):
@@ -115,6 +115,17 @@ def _plan(source):
             raise UnsupportedModelTiming("unsupported MXU compute tracker depth (requires 1..64)")
         depth.value = ast.Constant(value=3 if engine == "mxu0" else 2)
     _assignment(tree, "MXU_OP_LATENCIES").value = _placeholder("execute_delay_table")
+    return tree, slots, firsts
+
+
+def source_shape(source):
+    """Return the MXU source shape using the timing planner's normalization."""
+    tree, _, _ = _normalize_source(source)
+    return _shape(tree.body)
+
+
+def _plan(source):
+    tree, slots, firsts = _normalize_source(source)
     if _shape(tree.body) != SOURCE_SHAPES["mxu.py"]:
         raise UnsupportedModelTiming("unsupported MXU control-flow semantics")
     plans = {}

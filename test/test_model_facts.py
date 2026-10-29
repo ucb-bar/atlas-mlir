@@ -201,12 +201,45 @@ class Regeneration(unittest.TestCase):
                                            dict(resource="xreg", operand="rs2")],
                                     writes=[dict(resource="xreg", operand="rd")]))
 
+    def test_source_pin_writer(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import atlas_model_facts as driver
+        from atlas_model_semantics import source_pins
+        baseline = source_pins(self.model)
+        baseline["model_revision"] = subprocess.check_output(
+            ["git", "-C", str(self.model), "rev-parse", "HEAD"], text=True).strip()
+        target = self.root / "model-pins.json"
+        target.write_text(json.dumps(baseline, sort_keys=True, indent=2) + "\n")
+        original = target.read_bytes()
+        with patch.object(driver, "PIN_PATH", target), patch.object(driver, "GUARDS", baseline):
+            output = StringIO()
+            with redirect_stdout(output):
+                driver.accept_source(self.model)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(output.getvalue(), "")
+            for group, files in (("files", baseline["files"]), ("source_shapes", baseline["source_shapes"])):
+                for name in files:
+                    relative = name if group == "files" else "hardware/" + name
+                    source = (self.model / "npu_model" / relative).read_text()
+                    with self.subTest(file=relative), self.mutation(
+                            relative, source, source + "\nFACTS_TEST_CHANGE = 1\n"):
+                        output = StringIO()
+                        with redirect_stdout(output):
+                            driver.accept_source(self.model)
+                        changed = json.loads(target.read_text())
+                        differences = [(kind, key) for kind in ("files", "source_shapes")
+                                       for key in baseline[kind] if baseline[kind][key] != changed[kind][key]]
+                        self.assertEqual(differences, [(group, name)])
+                        self.assertEqual(changed["model_revision"], baseline["model_revision"])
+                        self.assertEqual(output.getvalue(), "changed pin: " + name + "\n")
+
     def test_every_guarded_source_refuses(self):
-        files = json.loads((TOOLS / "model-semantics.json").read_text())["files"]
+        files = json.loads((TOOLS / "model-pins.json").read_text())["files"]
         for relative in files:
             source = (self.model / "npu_model" / relative).read_text()
             with self.subTest(file=relative), self.mutation(relative, source, source + "\nFACTS_TEST_CHANGE = 1\n"):
-                self.refuses("unsupported semantics: " + re.escape(relative) + ":module/class bindings")
+                self.refuses("unsupported semantics: " + re.escape(relative) + ": module contract changed")
 
     def test_timing_source_and_configuration_refusals(self):
         cases = (
@@ -219,7 +252,7 @@ class Regeneration(unittest.TestCase):
             ("hardware/dma.py", "self.cycle += 1", "self.cycle += 2", "DMA source semantics: dma.py"),
             ("hardware/memory_backend.py", "self._last_ready = 0.0", "self._last_ready = 1.0", "DMA source semantics"),
             ("configs/isa_definition.py", "class VADD_BF16(", "class MISSING_VADD_BF16(",
-             "isa_definition.py:(?:MISSING_)?VADD_BF16.exec"),
+             "isa_definition.py: module contract changed"),
             ("configs/hardware/default.py", "mrf_depth=32", "mrf_depth=16", "arch_state_config.mrf_depth"),
             ("hardware/config.py", "dma_beat_bytes: int = 32", "dma_beat_bytes: int = 16",
              "capability: dma_beat_bytes"),
