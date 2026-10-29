@@ -125,4 +125,3 @@ def derive_memory(cfg):
                 event = block["events"][key]
                 releases[block["name"]][key] = _reservation(event["last_age"], first=event["first_age"])
     return {block["name"]: deepcopy(block) for block in blocks}, releases
-

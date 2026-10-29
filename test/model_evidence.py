@@ -40,22 +40,6 @@ class NativeModelFixture:
         self.cfg, _ = configuration()
 
 
-class ModelSourceFixture(NativeModelFixture):
-    def setUp(self):
-        super().setUp()
-        from atlas_derive_source import read_source
-        from npu_model.isa import EXU
-        root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model"
-        self.sources = {name: read_source(root / "hardware" / name)
-                        for name, _, _ in self.source_shapes}
-        self.sources["isa_definition.py"] = read_source(root / "configs/isa_definition.py")
-        self.scalar = {name: item.__name__ for name, item in self.cfg.isa.operations.items() if item.exu == EXU.SCALAR}
-
-    def mutated(self, filename, old, new):
-        self.assertIn(old, self.sources[filename], "mutation must alter the selected model source")
-        return dict(self.sources, **{filename: self.sources[filename].replace(old, new)})
-
-
 def semantic_sources(model):
     """Read only reviewed relative source entries, checking paths before access."""
     from atlas_derive_source import read_source
