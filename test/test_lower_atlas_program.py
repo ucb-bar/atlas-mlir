@@ -135,17 +135,16 @@ class LowerAtlasProgramTest(unittest.TestCase):
             self.assertLessEqual(report["untimed_words"]["words"], 2048)
 
             # 32 BF16 tiles live across one edge exceed 31 register pairs. The
-            # spill stage recovers them; its code then exceeds the 2048-word
-            # program limit when timed.
+            # spill stage recovers them, and the compact timed schedule fits
+            # the instruction limit.
             source = Path(temp) / "wide.mlir"
             source.write_text(wide_return_block(32))
             spilled = Path(temp) / "wide"
             result = drive(source, spilled)
             self.assertIn('"atlas.virtual_save"', (spilled / "2-spilled.mlir").read_text())
             self.assertTrue(json.loads((spilled / "3-allocation.json").read_text())["fits"])
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("2048-word policy limit", result.stderr)
-            self.assertFalse((spilled / "4-timed.mlir").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertLessEqual(len((spilled / "5-words.hex").read_text().split()), 2048)
 
     def test_allocation_report_names_the_kind_that_does_not_fit(self) -> None:
         # Lowered without spilling, 32 BF16 tiles live across one edge cannot

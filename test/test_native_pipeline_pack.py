@@ -112,19 +112,24 @@ class NativePipelinePackTest(unittest.TestCase):
                                      tuple(range(source, source + 4)))
 
     def test_pack_rejects_corrupt_address_temporary_and_branch(self) -> None:
-        for case in ("address", "temporary", "branch"):
+        for case in ("address", "last-word-address", "temporary", "branch"):
             with self.subTest(case=case):
                 program = copy.deepcopy(self.program)
                 if case == "address":
                     row = next(row for row in program["instructions"]
                                if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw")
                     row["fields"]["offset"] += 4
+                elif case == "last-word-address":
+                    row = next(row for row in program["instructions"]
+                               if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw"
+                               and row["fields"]["offset"] == 12)
+                    row["fields"]["offset"] += 4
                 elif case == "temporary":
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_store")
                     row["fields"]["src"] = 17 if row["fields"]["src"] == 16 else 16
                 else:
                     row = next(row for row in program["instructions"] if row["operation"] == "atlas.branch")
-                    row["fields"]["offset_bytes"] = -56
+                    row["fields"]["offset_bytes"] += 2
                 with self.assertRaises(self.binding.NativeCompilationError):
                     self.check_pack(program)
 
